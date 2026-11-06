@@ -14,47 +14,73 @@ between commands:
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 
-## Automatic integration in Windows releases through 3.3.0
+## Automatic integration
 
-Kettle 4.0 and later do not publish Windows builds. This section records the
-automatic PowerShell behavior of releases through 3.3.0. The manual snippets
-below remain supported anywhere the named shell runs.
+`shell-integration = auto` is the default on macOS and Linux. Open a pane
+with bash, zsh or fish and Kettle loads its bundled hooks without editing your
+startup files. `off` disables injection; the older boolean values still work.
+This supplies OSC 7 working directories and OSC 133 prompt and command marks.
+Previous/next-prompt navigation keeps its existing bindings and behavior.
 
-`shell-integration = on` is the default. Automatic injection is implemented
-only when Windows Kettle launches `pwsh` or `powershell` as its default shell
-or as a bare explicit `command`. It adds:
+- Zsh reads checked, private startup files through a borrowed `ZDOTDIR`.
+  Each sources your corresponding startup file once; Kettle's hooks load after
+  your last startup file (`.zlogin` for login shells, `.zshrc` otherwise).
+  Your original `ZDOTDIR` (including unset or empty) is restored.
+  A system zshenv that overrides `ZDOTDIR` or disables startup files prevents
+  injection; use the manual snippet in that case.
+- Bash uses `--posix` with a private `ENV` startup file and `--login` for
+  login panes. A separate variable holds the private pathname so Bash cannot
+  expand literal `$` or command substitutions in directory names. An unavailable
+  startup file at launch leaves Bash untouched. The wrapper turns POSIX mode
+  off, preserves an inherited `BASHOPTS=inherit_errexit`, restores your `ENV`, then
+  sources `/etc/profile` and the first readable `.bash_profile`, `.bash_login`
+  or `.profile` for login shells. Nonlogin interactive panes source the first
+  readable `/etc/bash.bashrc` or `/etc/bash/bashrc`, then `.bashrc` or
+  `--rcfile`'s file (including a leading `~` or `~/`). Kettle does not source
+  `/etc/bashrc`; Fedora's personal `.bashrc` sources it. It honors `--noprofile`
+  and `--norc`, then loads Kettle's hooks. Explicit `--posix`, a set
+  `POSIXLY_CORRECT`, or `SHELLOPTS` containing `posix` leaves Bash untouched.
+  Login state and `.bash_logout` processing stay native. macOS system Bash
+  3.2.57 ignores this `ENV` route, so Kettle launches it untouched; use the
+  manual snippet below or a separately installed modern Bash for hooks.
+- Fish discovers a private `vendor_conf.d` file through `XDG_DATA_DIRS`.
+  That file removes only Kettle's entry from the current value, preserving
+  edits by earlier user snippets such as `conf.d/00-env.fish`. It clears
+  Kettle's exported helpers and loads hooks at the first prompt, after user
+  configuration. Earlier snippets run before this cleanup boundary.
 
-- **OSC 7** (current working directory) — so the tab/title tracks `cd` and new
-  tabs / splits inherit the directory.
-- **OSC 133** prompt marks (and **OSC 9;9**) — so prompt-jump (`Ctrl+Up` /
-  `Ctrl+Down`) and prompt-aware close-confirmation work.
+The files are private, checked for ownership, permissions and exact contents,
+and never added to your startup files. Zsh wrappers also load compiled-only
+`.zwc` startup files. Content-addressed variants used within 24 hours remain
+available to starting shells; cleanup retains up to four older variants.
+A bare `command = bash`, `zsh` or `fish` also works. Bash additionally accepts
+startup-only `-l`, `--login`, `--noprofile`, `--norc`, `--rcfile` and `--init-file`
+arguments. Scripts, other arguments and wrappers remain exact and need manual
+setup. Panes already open keep their existing hooks. If private files cannot
+be prepared safely, Kettle starts the shell without automatic hooks.
 
-Kettle launches that shell with an encoded copy of `kettle.ps1`. The user's
-PowerShell profile loads first; Kettle then wraps the resulting prompt, so
-Starship, oh-my-posh, and posh-git remain in place. No `$PROFILE` edit is
-required. `cmd.exe` is not injected because Kettle can read its changing
-process working directory directly.
+The old Windows PowerShell bootstrap remains available in source; Windows
+releases ended in 3.3.0. WSL shells need manual setup inside their distribution.
 
-Automatic injection does **not** currently cover:
+## Completed-command marks
 
-- native Linux or macOS bash, zsh, or fish;
-- a Linux shell launched through `command = wsl.exe ...`;
-- any explicit `command = ...` other than a bare `pwsh[.exe]` or
-  `powershell[.exe]`; or
-- any shell when `shell-integration = off`.
+Completed commands with an OSC 133 D exit status leave a tick along the right
+edge of the terminal, over the scrollbar track: a thin green tick for success
+(exit code 0), a thicker red tick for failure. Ticks remain visible when the
+scrollbar thumb is hidden. Screen readers describe each tick and its exit code
+in the selected UI language. `kettle ctl ui_geometry` reports the same tick
+rectangles and exit codes in each pane's `command_marks` array. They do not
+move the grid, input-method caret or selection coordinates.
 
-Those cases need the one-line install below. In particular, install the snippet
-inside the WSL distribution whose shell will emit the marks; changing the
-Windows PowerShell profile does not configure a Linux shell in WSL.
-
-See the **`shell-integration`** key in [CONFIG.md](CONFIG.md) (bool, default
-`on`) to toggle it.
+Unknown exit status and unmatched or duplicate completion events add no tick.
+Marks are limited to 2048 retained commands per pane, disappear when their rows
+leave scrollback, and stay hidden on the alternate screen. Column reflow clears
+outcomes whose original row positions can no longer be trusted.
 
 ## Enabling it manually in your shell
 
-Use this section for Unix shells, WSL shells, an explicit `command =`, or a
-deliberately disabled automatic hook. Default PowerShell users can normally
-skip it.
+Use this section for WSL shells, commands with arguments, or a deliberately
+disabled automatic hook. Automatic and manually sourced hooks are idempotent.
 
 ### One-liner (recommended)
 
@@ -89,7 +115,7 @@ The same injection idea serves one other purpose on macOS and Linux: with
 `agent-display-codex` on, the zsh or fish a new pane starts defines `codex` so
 Codex starts with Kettle's display server: zsh through a Kettle-owned
 `.zshenv` and a borrowed `ZDOTDIR` it puts back, fish through code it runs
-after your configuration (`fish -C`). It adds no prompt marks; those still need the snippet above. See
+after your configuration (`fish -C`). Automatic shell integration supplies prompt marks independently. See
 [AGENT.md](AGENT.md#kettle-defines-it-for-you).
 
 ## Completion list

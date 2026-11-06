@@ -26,6 +26,18 @@ would anywhere. Run `kettle` commands here; from another macOS terminal,
 use `~/Applications/kettle.app/Contents/MacOS/kettle` if `kettle` is not on
 your `PATH`.
 
+A single-tab window hides the tab strip by default. Creating another tab shows
+it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
+expose their tab titles, selected tab, Close buttons, New tab, and New tab menu
+to screen readers. The menu button beside `+` opens shell choices and shortcuts.
+
+If the shell or directly launched command fails, its pane stays open with
+"Process exited with code N". Press **Enter** or click **Restart** to run the
+same command with its original working directory and environment in that pane.
+Press **Escape**, click **Close**, or use the close-pane chord to close it.
+Successful processes close automatically. Set `exit-behavior = hold` to keep
+successful exits too, or `exit-behavior = close` to close every exit.
+
 ## 3. Change settings — no file editing required
 
 Press **`Ctrl + ,`** (or **right-click → Settings…**) to open the **Settings**
@@ -45,14 +57,19 @@ options not in the panel, the
 **Advanced** path opens the config file with your operating system's default app. Full reference:
 [SETTINGS.md](SETTINGS.md) and [CONFIG.md](CONFIG.md).
 
+Unknown config keys and invalid values show a dismissible notice inside the
+window at startup and reload. It names up to three filename:line locations and
+keys, with a count of additional issues. The affected settings use defaults;
+valid settings still apply. Run `kettle --check-config` to see every issue.
+
 ## 4. Splits, tabs, and getting around
 
 Kettle starts with these pane and tab keys:
 
 | Do this | Press |
 |---|---|
-| Split left/right | `Ctrl+Shift+E` |
-| Split top/bottom | `Ctrl+Shift+O` |
+| Split left/right | `Ctrl+Shift+E`, or `Cmd+D` on macOS |
+| Split top/bottom | `Ctrl+Shift+O`, or `Shift+Cmd+D` on macOS |
 | New tab | `Ctrl+Shift+T` |
 | Close pane | `Ctrl+Shift+W` |
 | Move focus between panes, Linux | `Alt + Arrow` |
@@ -89,6 +106,23 @@ macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
 every platform.
 
+Right-click a terminal to reach Copy, Paste and Select All first. A link adds
+Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
+Group and Appearance commands live in submenus. Click a category or press Right
+to enter it; Left or Escape returns to its parent. Hovering a category also
+opens it. Menus and the command palette show native shortcut symbols on macOS
+(for example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
+
+Pasting text that contains a newline or a control character other than tab
+asks for confirmation when the receiving program has not enabled bracketed
+paste. Cancel is selected initially. Choose Paste to send the original text,
+or Paste as one line to replace line breaks and other control characters with
+spaces (tabs stay tabs). A short preview escapes control characters so they
+are visible. Bracketed paste keeps multi-line text and strips embedded ESC
+bytes so pasted text cannot close the bracket early. Set `paste-protection =
+always` to confirm multi-line text even in editors, or `paste-protection = off`
+to disable confirmation. See [configuration](CONFIG.md).
+
 ## 5. Search screen and scrollback
 
 Press **`Ctrl+Shift+F`** to open the bottom search bar. Enter a Rust regular
@@ -100,10 +134,17 @@ budget shows **Pattern too complex**.
 - `F3` / `Shift+F3` always finds next / previous, and so do `Cmd+G` /
   `Shift+Cmd+G` (`Ctrl+G` / `Ctrl+Shift+G` on Linux).
 - **Wrap** controls whether stepping crosses the history boundary.
-- **Smart** ignores case until the pattern contains an uppercase character;
+- **Regex** switches between regular expressions and literal text. Click it or
+  press `Alt+R` on Linux and Windows, `Cmd+Alt+R` on macOS; regex starts on,
+  including the literal fallback for invalid patterns.
+- Click **Case** to cycle modes. **Smart** ignores case until the pattern contains an uppercase character;
   **Match** always matches case; **Ignore** never matches case.
 - **Invert** flips the default direction. `Escape` closes the bar while keeping
   the selected result anchored on screen.
+
+The query shows its current match and total, such as **3/122**, **No matches**,
+or **Counting…** until the count finishes. Capacity-limited searches show
+**Results limited**.
 
 The bar is a lane below the grid, not a dialog over it: while it is open you
 can still drag-select text, double-click words, open links, scroll, and
@@ -120,12 +161,19 @@ without it.
 The query editor follows Unicode grapheme boundaries for caret movement and
 deletion, so combining marks and emoji sequences are not split. Kettle
 remembers the last query for each pane within its current window. The status
-shows searching, match/boundary, invalid, too-complex, no-match, or **Results
-limited** rather than a global count. Results limited means a pathological
+shows boundary, invalid, too-complex, or **Results limited** feedback alongside
+the count. Results limited means a pathological
 soft-wrapped line, an output-interrupted navigation, or the nearby-highlight
-cap made ordering uncertain; Kettle will not claim a possibly wrong first,
+cap prevented an exact count or made ordering uncertain; Kettle will not claim a possibly wrong first,
 last, or miss. Ordinary work-budget pauses resume automatically. This keeps
 large or infinite scrollback responsive.
+
+When you scroll into history, click the **↓ 1,234 lines** pill at the pane's
+bottom-right to return to live output. The default history budget is 64 MB per
+pane with a 10,000-line cap. Settings shows **64 MB** under **Scrollback memory**;
+`scrollback-bytes` and `scrollback` let you change the two limits independently.
+Selection and non-current search highlights are strengthened for visibility in
+faint themes, and the current search result has a distinct underline.
 
 ## 6. If something looks wrong
 

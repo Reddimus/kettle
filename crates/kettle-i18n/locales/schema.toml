@@ -1434,7 +1434,7 @@ context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU k
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
 
 [messages.settings_heading]
-context = "crates/kettle-render/src/lib.rs settings_display_lines: panel title. category is a translated category name."
+context = "crates/kettle-ui/src/settings.rs: legacy formatted Settings heading. category is a translated category name."
 args = [{ name = "category", type = "str" }]
 
 [messages.settings_hint_category]
@@ -2194,3 +2194,382 @@ context = "crates/kettle-ui/src/app/menus.rs shell_menu_items: disabled loading 
 
 [messages.notify_body_reconnect_environment_unavailable]
 context = "crates/kettle-ui/src/app/remote.rs: notification body when reconnect refuses an unreadable client connection environment."
+
+[messages.settings_description_field_agent_previews]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_claude_code]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_codex]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_agent_previews_agy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_add_kettle_to_path]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_animation]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_image]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_opacity]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_background_type]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_bell]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_chrome_background]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_close_button_on_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_completion_overlay]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_copy_on_select]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_blink]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_blink_timeout]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_cursor_shape]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_detachable_tabs]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_focus]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_font_size]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_backend]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_device]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_force_software]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_gpu_power_preference]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_invert_search]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_language]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_mouse_hide_while_typing]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scroll_tabbar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollback_memory]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollbar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_scrollbar_width]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_search_case]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_search_wrap]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_show_titlebar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_bar]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_bar_position]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_tab_min_width]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_theme]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_update_check_interval]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_update_policy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_vim_menu_nav]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_window_blur]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_window_padding]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_close_pane]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_command_palette]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_copy]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_new_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_next_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_open_settings]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_paste]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_previous_tab]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_split_down]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_split_right]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_start_search]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_keybind_toggle_zoom]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_search_placeholder]
+context = "crates/kettle-ui/src/settings.rs: Settings search input placeholder and accessible name."
+
+[messages.settings_no_matches]
+context = "crates/kettle-ui/src/settings.rs: Settings search empty result."
+
+
+[messages.settings_a11y_search]
+context = "crates/kettle-ui/src/app/accessibility.rs: Settings search TextInput name, read without the screen."
+
+[messages.macos_menu_app]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar app title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_shell]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar shell title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_edit]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar edit title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_view]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar view title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_window]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar window title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_palette]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar palette title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_theme]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar theme title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_select_all]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar select all title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_find]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar find title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_clear]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar clear title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_increase]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font increase title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_decrease]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font decrease title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_font_reset]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar font reset title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_zoom_pane]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar zoom pane title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_fullscreen]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar fullscreen title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_next_tab]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar next tab title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.macos_menu_previous_tab]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title or command. Kettle is the product name; Shell names the shell menu."
+
+[messages.confirm_paste_heading]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.confirm_paste_body]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+args = [{ name = "preview", type = "str" }]
+[messages.confirm_paste_one_line]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_select_all]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_split]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_pane]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_tab]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_window]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_title]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_group]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_appearance]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+[messages.menu_category_commands]
+context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
+
+[messages.menu_category_close_confirmation]
+context = "Preferences submenu category for the close-confirmation policy choices."
+
+[messages.search_a11y_regex]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_regex_on]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_regex_off]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.search_counting]
+context = "Terminal search bar: regex toggle or placeholder while the exact match count is incomplete."
+
+[messages.scrollback_return]
+context = "Bottom-right pane button returning to live output. lines is a locale-grouped count of rows above the live bottom; count selects plural. Keep the downward arrow."
+args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
+
+[messages.scrollback_a11y]
+context = "Screen reader name of the pane's return-to-live button. lines is a grouped count of rows above the live bottom; count selects plural."
+args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
+
+[messages.command_mark_a11y_success]
+context = "crates/kettle-ui/src/app/accessibility.rs: description of a completed command tick in the scrollbar. code is its signed OSC 133 exit code."
+args = [{ name = "code", type = "str" }]
+
+[messages.command_mark_a11y_failure]
+context = "crates/kettle-ui/src/app/accessibility.rs: description of a completed command tick in the scrollbar. code is its signed OSC 133 exit code."
+args = [{ name = "code", type = "str" }]
+
+[messages.process_exited]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "code", type = "u64" }]
+
+[messages.process_exit_pending]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.process_restart]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.process_close]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.config_notice]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "entries", type = "str" }]
+
+[messages.config_notice_more]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "count", type = "u64" }]
+
+[messages.notice_dismiss]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.a11y_tab_list]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.a11y_tab_close]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_new_tab_menu]
+context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
+
+[messages.quick_terminal_toggle]
+context = "crates/kettle-ui: Command palette and macOS View menu action. Toggles the dedicated quick terminal."
+
+[messages.settings_category_quick_terminal]
+context = "crates/kettle-ui: Settings group for the dedicated hotkey window."
+
+[messages.quick_terminal_hotkey]
+context = "crates/kettle-ui: Settings key-capture field label."
+
+[messages.quick_terminal_position]
+context = "crates/kettle-ui: Settings screen edge choice label."
+
+[messages.quick_terminal_size]
+context = "crates/kettle-ui: Settings screen percentage label."
+
+[messages.quick_terminal_animation]
+context = "crates/kettle-ui: Settings slide animation toggle label."
+
+[messages.quick_terminal_autohide]
+context = "crates/kettle-ui: Settings auto-hide toggle label."
+
+[messages.quick_terminal_center]
+context = "crates/kettle-ui: Settings centered screen position choice."
+
+[messages.quick_terminal_hotkey_description]
+context = "crates/kettle-ui: Settings global hotkey description. Keep the CLI command verbatim."
+
+[messages.quick_terminal_position_description]
+context = "crates/kettle-ui: Settings position description."
+
+[messages.quick_terminal_size_description]
+context = "crates/kettle-ui: Settings size description."
+
+[messages.quick_terminal_animation_description]
+context = "crates/kettle-ui: Settings animation description."
+
+[messages.quick_terminal_autohide_description]
+context = "crates/kettle-ui: Settings autohide description."
+
+[messages.quick_terminal_hotkey_failed]
+context = "crates/kettle-ui: Notice when Carbon or X11 rejects global hotkey registration."
+
+[messages.settings_category_text_rendering]
+context = "crates/kettle-ui/src/settings.rs: Settings category for text rendering options."
+
+[messages.settings_field_grapheme_clustering]
+context = "crates/kettle-ui/src/settings.rs: Settings toggle for Unicode grapheme cells (DEC mode 2027). Applies only to new terminals."
+
+[messages.settings_description_field_grapheme_clustering]
+context = "crates/kettle-ui/src/settings.rs: One-line Settings description. Joining includes families, skin tones and flags. Applies only to new terminals. English budget 70 characters."
+
+[messages.settings_field_restore_session]
+context = "crates/kettle-ui/src/settings.rs: label of the three-choice session restore policy."
+
+[messages.settings_description_field_restore_session]
+context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Off session restore, including macOS system preferences."

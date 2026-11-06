@@ -300,6 +300,46 @@ mod tests {
                 .join("; ")
         );
     }
+    #[test]
+    fn tab_controls_and_shortcut_hints_meet_their_contrast_floors() {
+        let mut colors = Colors::default();
+        for name in Theme::list() {
+            let theme = Theme::by_name(name);
+            for strip in [
+                theme.background,
+                theme.palette[8],
+                Rgb::new(0, 0, 0),
+                Rgb::new(255, 255, 255),
+            ] {
+                for base in [strip, theme.background] {
+                    for hover in [false, true] {
+                        let background = if hover {
+                            color::over(base, theme.foreground, 0.06, false)
+                        } else {
+                            base
+                        };
+                        for glyph in [theme.foreground, theme.accent, theme.palette[8]] {
+                            assert!(
+                                color::contrast_ratio(colors.text(glyph, background), background)
+                                    >= 4.5,
+                                "{name}: tab control"
+                            );
+                        }
+                        for role in ["Cmd+N hint", "inactive tab title"] {
+                            assert!(
+                                color::contrast_ratio(
+                                    colors.muted(theme.foreground, background),
+                                    background
+                                ) >= TEXT_CONTRAST,
+                                "{name}: {role}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Inactive dimming keeps readable text at the floor but never makes
     /// text a program drew faintly clearer than it is in the active pane.
     #[test]

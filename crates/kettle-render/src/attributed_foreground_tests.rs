@@ -171,23 +171,13 @@ fn search_and_selection_foregrounds_ignore_underlying_dim_and_bold_attributes() 
     let base_fg = Rgb::new(200, 210, 220);
     let base_bg = Rgb::new(1, 2, 3);
 
-    for (name, highlight, expected) in [
-        (
-            "active search",
-            CellHighlight::Search(true),
-            cfg.search_foreground.expect("search foreground"),
-        ),
-        (
-            "inactive search",
-            CellHighlight::Search(false),
-            theme.selection_foreground,
-        ),
-        (
-            "selection",
-            CellHighlight::Selection,
-            theme.selection_foreground,
-        ),
+    for (name, highlight) in [
+        ("active search", CellHighlight::Search(true)),
+        ("inactive search", CellHighlight::Search(false)),
+        ("selection", CellHighlight::Selection),
     ] {
+        let expected =
+            resolved_cell_foreground(base_fg, base_bg, highlight, false, false, &cfg, &theme);
         for (dim, bold) in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(
                 resolved_cell_foreground(base_fg, base_bg, highlight, dim, bold, &cfg, &theme,),
@@ -267,4 +257,198 @@ fn minimum_contrast_cache_benchmark() {
         pairs.len(),
         cache.misses,
     );
+}
+
+#[test]
+fn automatic_highlight_text_is_readable_in_every_bundled_palette() {
+    let cfg = Config::default();
+    for name in Theme::list() {
+        let bundled = Theme::by_name(name);
+        // Exercise automatic foregrounds with every bundled palette, including
+        // themes that normally supply their own selection foreground.
+        let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        let theme = Theme::parse(&format!(
+            "background = {}\nforeground = {}\nselection-background = {}\npalette = 3={}\npalette = 4={}\npalette = 8={}\n",
+            hex(bundled.background),
+            hex(bundled.foreground),
+            hex(bundled.selection_background),
+            hex(bundled.palette[3]),
+            hex(bundled.palette[4]),
+            hex(bundled.palette[8]),
+        ));
+        for (label, fg, dim) in [
+            ("default foreground", theme.foreground, false),
+            ("dim palette", theme.palette[8], true),
+            ("underlined link", theme.palette[4], false),
+        ] {
+            for (kind, highlight) in [
+                ("selection", CellHighlight::Selection),
+                ("search match", CellHighlight::Search(false)),
+                ("current match", CellHighlight::Search(true)),
+            ] {
+                let (_, fill) = super::theme::highlight_colors_cached(
+                    highlight,
+                    &cfg,
+                    &theme,
+                    fg,
+                    theme.background,
+                    &mut MinimumContrastCache::default(),
+                );
+                let drawn = resolved_cell_foreground(
+                    fg,
+                    theme.background,
+                    highlight,
+                    dim,
+                    false,
+                    &cfg,
+                    &theme,
+                );
+                assert!(
+                    color::contrast_ratio(drawn, fill) >= 4.5,
+                    "{name}: {label} on {kind} has contrast {}",
+                    color::contrast_ratio(drawn, fill),
+                );
+                if label == "underlined link" {
+                    let mut quads = Vec::new();
+                    super::terminal::push_cell_decorations(
+                        &mut quads,
+                        (0.0, 0.0, 8.0, 16.0),
+                        0,
+                        alacritty_terminal::term::cell::Flags::UNDERLINE,
+                        drawn,
+                        drawn,
+                    );
+                    assert_eq!(quads.len(), 1);
+                    let [r, g, b, _] = quads[0].color;
+                    let underline = Rgb::new(
+                        (r * 255.0).round() as u8,
+                        (g * 255.0).round() as u8,
+                        (b * 255.0).round() as u8,
+                    );
+                    assert!(color::contrast_ratio(underline, fill) >= 4.5);
+                }
+                if color::contrast_ratio(fg, fill) >= 4.5 {
+                    assert_eq!(drawn, fg, "{name}: readable {label} on {kind}");
+                } else if let Some(preferred) = [theme.background, theme.foreground]
+                    .into_iter()
+                    .find(|candidate| color::contrast_ratio(*candidate, fill) >= 4.5)
+                {
+                    assert_eq!(drawn, preferred, "{name}: prefer theme colour on {kind}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn automatic_highlight_text_reaches_contrast_when_theme_neutrals_cannot() {
+    let theme = Theme::parse(
+        "background = #777777\nforeground = #777777\nselection-background = #777777\n",
+    );
+    let cfg = Config {
+        search_background: Some(theme.background),
+        ..Config::default()
+    };
+    for highlight in [
+        CellHighlight::Selection,
+        CellHighlight::Search(false),
+        CellHighlight::Search(true),
+    ] {
+        let (_, fill) = super::theme::highlight_colors_cached(
+            highlight,
+            &cfg,
+            &theme,
+            theme.foreground,
+            theme.background,
+            &mut MinimumContrastCache::default(),
+        );
+        assert!(color::contrast_ratio(theme.background, fill) < 4.5);
+        assert!(color::contrast_ratio(theme.foreground, fill) < 4.5);
+        let drawn = resolved_cell_foreground(
+            theme.foreground,
+            theme.background,
+            highlight,
+            false,
+            false,
+            &cfg,
+            &theme,
+        );
+        assert!(color::contrast_ratio(drawn, fill) >= 4.5);
+    }
+}
+
+#[test]
+fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
+    // A theme's own selection foreground is preferred, but an unreadable one
+    // (the shipped TokyoNight Night pairs pale text with a fill that must be
+    // strengthened to 3:1) gives way to a colour that reaches 4.5:1.
+    let theme = Theme::parse("selection-background = #ffffff\nselection-foreground = #eeeeee\n");
+    let cfg = Config {
+        search_background: Some(Rgb::new(255, 255, 255)),
+        search_foreground: Some(Rgb::new(240, 240, 240)),
+        ..Config::default()
+    };
+    for highlight in [CellHighlight::Selection, CellHighlight::Search(false)] {
+        let fg = resolved_cell_foreground(
+            theme.foreground,
+            theme.background,
+            highlight,
+            true,
+            true,
+            &cfg,
+            &theme,
+        );
+        assert_ne!(fg, theme.selection_foreground);
+        assert!(color::contrast_ratio(fg, Rgb::new(255, 255, 255)) >= 4.5);
+    }
+    let readable = Theme::parse("selection-background = #ffffff\nselection-foreground = #102030\n");
+    assert_eq!(
+        resolved_cell_foreground(
+            readable.foreground,
+            readable.background,
+            CellHighlight::Selection,
+            true,
+            true,
+            &cfg,
+            &readable
+        ),
+        readable.selection_foreground,
+        "a readable theme foreground is kept"
+    );
+    assert_eq!(
+        resolved_cell_foreground(
+            theme.foreground,
+            theme.background,
+            CellHighlight::Search(true),
+            true,
+            true,
+            &cfg,
+            &theme
+        ),
+        cfg.search_foreground.unwrap(),
+    );
+
+    for text in [
+        "selection-background = #ffffff\nselection-foreground = #eeeeee\ntheme = Dracula\n",
+        "theme = Dracula\nselection-background = #ffffff\nselection-foreground = #eeeeee\n",
+    ] {
+        let cfg = Config::parse_text(text);
+        for theme in [cfg.theme.clone(), cfg.theme_by_name("TokyoNight Day")] {
+            for highlight in [CellHighlight::Selection, CellHighlight::Search(false)] {
+                assert_eq!(
+                    resolved_cell_foreground(
+                        theme.foreground,
+                        theme.background,
+                        highlight,
+                        false,
+                        false,
+                        &cfg,
+                        &theme,
+                    ),
+                    Rgb::new(238, 238, 238),
+                    "config foreground must survive theme changes",
+                );
+            }
+        }
+    }
 }

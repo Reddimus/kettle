@@ -156,6 +156,34 @@ impl App {
         }
     }
 
+    pub(super) fn snapshot_session<'a>(
+        ws: &'a WindowState,
+        others: impl Iterator<Item = &'a WindowState>,
+        quick_window: Option<u64>,
+        focus_order: &VecDeque<u64>,
+    ) -> Option<crate::session::Session> {
+        // Include the checked-out window; the save budget prefers recently
+        // focused nonempty windows without restricting window creation.
+        let mut wins: Vec<(u64, crate::session::SWindow)> = Vec::new();
+        for window in std::iter::once(ws).chain(others) {
+            if quick_window != Some(window.seq) {
+                wins.push((window.seq, Self::snapshot_window(window)));
+            }
+        }
+        if wins.is_empty() {
+            return None;
+        }
+        let windows = session_windows_for_save(wins, focus_order);
+        // Mirror the first retained window for older readers.
+        let s = crate::session::Session {
+            tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
+            active: windows.first().map(|w| w.active).unwrap_or(0),
+            theme: None,
+            windows,
+        };
+        Some(s)
+    }
+
     pub(super) fn save_session(&self, ws: &WindowState) {
         if self.session_load_failed {
             return;
@@ -173,27 +201,14 @@ impl App {
         if target == SessionWriteTarget::Skip {
             return;
         }
-        // Include the checked-out window; the save budget prefers recently
-        // focused nonempty windows without restricting window creation.
-        let mut wins: Vec<(u64, crate::session::SWindow)> =
-            vec![(ws.seq, Self::snapshot_window(ws))];
-        for w in self.windows.values() {
-            wins.push((w.seq, Self::snapshot_window(w)));
-        }
-        let windows = session_windows_for_save(wins, &self.window_focus_order);
-        // Mirror the first retained window for older readers.
-        let mut s = crate::session::Session {
-            tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
-            active: windows.first().map(|w| w.active).unwrap_or(0),
-            theme: None,
-            windows,
+        let Some(s) = Self::snapshot_session(
+            ws,
+            self.windows.values(),
+            self.quick_terminal.model.window,
+            &self.window_focus_order,
+        ) else {
+            return;
         };
-        // Theme is config-governed (persisted to the config file via
-        // `persist_pref`), NOT stored in the session. A session-pinned theme
-        // would override the config/compile-time default on restore, so a
-        // default change (or a fresh-config user) would silently keep the old
-        // theme.
-        s.theme = None;
         // When launched with `--layout NAME`, save to the
         // named-layout file instead of the default session.json. Lets
         // the user maintain distinct workspaces ("dev", "ops", "docs")
@@ -564,7 +579,7 @@ pub(super) fn session_write_target(
 /// Is the default last-session (`session.json`) active for THIS launch?
 /// Drives BOTH the startup restore gate (whether to `load()`) and the
 /// `save_session` gate (whether to `save()` the default session). They MUST
-/// agree. If *load* is opt-in but *save* is not, a fresh, non-opted-in window
+/// agree. If loading is disabled but saving is enabled, a fresh window
 /// silently overwrites the saved layout that `--restore` exists to recover.
 /// Routing both through this one predicate keeps them symmetric.
 /// `--layout NAME` is independent (its own file, explicit intent) and never
@@ -575,8 +590,32 @@ pub(super) fn session_write_target(
 /// tabs, and saving would overwrite them (#575). Both wait until it exits.
 pub(super) fn should_restore_session(
     startup_restore: bool,
-    cfg_restore_session: bool,
+    cfg_restore_session: kettle_config::RestoreSession,
     another_build_running: bool,
 ) -> bool {
-    (startup_restore || cfg_restore_session) && !another_build_running
+    (startup_restore || restore_session_enabled(cfg_restore_session)) && !another_build_running
+}
+
+fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {
+    #[cfg(target_os = "macos")]
+    if policy == kettle_config::RestoreSession::Auto {
+        use objc2_foundation_03::{NSBundle, NSGlobalDomain, NSNumber, NSString, NSUserDefaults};
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str("NSQuitAlwaysKeepsWindows");
+        let read = |domain: &NSString| {
+            let values = defaults.persistentDomainForName(domain)?;
+            let value = values.objectForKey(&key)?;
+            value
+                .downcast_ref::<NSNumber>()
+                .map(|n| n.boolValue())
+                .or_else(|| value.downcast_ref::<NSString>().map(|s| s.boolValue()))
+        };
+        let app = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .and_then(|id| read(&id));
+        // SAFETY: Foundation exports this immutable domain name.
+        let global = read(unsafe { NSGlobalDomain });
+        return policy.resolve(true, app, global);
+    }
+    policy.resolve(false, None, None)
 }

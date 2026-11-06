@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(super) fn capture_global_hotkey(ws: &WindowState, key: &Key) -> crate::settings::HotkeyCapture {
+    crate::settings::capture_hotkey(to_kkey(key), to_mods(held_modifiers(ws)))
+}
+
 pub(super) fn begin_settings_text_edit(
     key: &'static str,
     cur: &str,
@@ -97,15 +101,10 @@ impl App {
         }
         if ws.context_menu.is_some() {
             let inside = self.context_menu_overlay(ws).is_some_and(|menu| {
-                rect_contains(
-                    (
-                        menu.anchor.0,
-                        menu.anchor.1,
-                        menu.panel_w_clamped,
-                        menu.panel_h_clamped,
-                    ),
-                    x,
-                    y,
+                super::menus::context_menu_contains_cursor(
+                    &menu,
+                    &self.context_menu_parent_overlays(ws),
+                    (x, y),
                 )
             });
             return Some((ModalKind::ContextMenu, inside));
@@ -145,13 +144,21 @@ impl App {
             .unwrap_or((800.0, 600.0));
         let inside = if matches!(kind, ModalKind::Settings | ModalKind::SettingsCapture) {
             self.settings_overlay_projection(ws).is_some_and(|set| {
-                let geometry =
-                    kettle_render::settings_panel_geometry(&set, cw, ch, surface.0, surface.1);
+                let layout = kettle_render::settings_layout(
+                    &set,
+                    (cw, self.overlay_text_line_height(ws)),
+                    surface,
+                    self.overlay_text_cell_width(ws),
+                );
                 rect_contains(
                     if kind == ModalKind::Settings {
-                        geometry.rect
+                        layout.rect
                     } else {
-                        geometry.focused_rect
+                        layout
+                            .rows
+                            .iter()
+                            .find(|row| row.index == set.focused_row)
+                            .map_or(layout.empty_rect, |row| row.rect)
                     },
                     x,
                     y,
@@ -160,7 +167,9 @@ impl App {
         } else {
             field_hit
                 || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-                    .and_then(|list| picker_context_menu(list, surface, (cw, ch)))
+                    .and_then(|list| {
+                        picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
+                    })
                     .is_some_and(|menu| {
                         rect_contains(
                             (
@@ -202,10 +211,30 @@ impl App {
             rect = kettle_render::settings_value_rect(
                 &set,
                 cw,
-                ch,
+                self.overlay_text_line_height(ws),
                 sw,
                 sh,
                 self.overlay_text_cell_width(ws),
+            );
+            String::new()
+        } else if ws
+            .settings_nav
+            .as_ref()
+            .is_some_and(|nav| nav.search_focused)
+        {
+            let set = self.settings_overlay_projection(ws)?;
+            let r = kettle_render::settings_layout(
+                &set,
+                (cw, self.overlay_text_line_height(ws)),
+                (sw, sh),
+                self.overlay_text_cell_width(ws),
+            )
+            .search_rect;
+            rect = (
+                r.0 + 6.0,
+                r.1 + 6.0,
+                (r.2 - 12.0).max(0.0),
+                (r.3 - 12.0).max(0.0),
             );
             String::new()
         } else if ws.layout_picker_input.is_some() {
@@ -220,7 +249,19 @@ impl App {
             rect = self.title_edit_rect(ws);
             kettle_render::title_edit_prefix(title_edit_label(state.scope, &self.ui_text))
         };
-        if ws.settings_text_edit.is_none() {
+        let picker = ws.palette_input.is_some()
+            || ws.theme_picker_input.is_some()
+            || ws.layout_picker_input.is_some()
+            || ws.ssh_input.is_some();
+        if picker {
+            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1)?.header;
+        }
+        if ws.settings_text_edit.is_none()
+            && !ws
+                .settings_nav
+                .as_ref()
+                .is_some_and(|nav| nav.search_focused)
+        {
             use kettle_i18n::Text as T;
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
                 &[
@@ -254,6 +295,7 @@ impl App {
         }
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
+            picker_header: picker,
             text,
             cursor_byte,
             selection,
@@ -271,22 +313,35 @@ impl App {
                 5
             },
         };
-        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        let cw = self.modal_field_cell_width(ws, &field);
+        let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
             &field.text,
             field.cursor_byte,
             editor.horizontal_scroll(),
-            (width / self.overlay_text_cell_width(ws)).floor().max(1.0) as usize,
+            (width / cw).floor().max(1.0) as usize,
         );
         Some(field)
+    }
+
+    fn modal_field_cell_width(
+        &self,
+        ws: &WindowState,
+        field: &kettle_render::TextFieldOverlay,
+    ) -> f32 {
+        kettle_render::text_field_cell_width(
+            field,
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        )
     }
 
     pub(super) fn sync_modal_editor_scroll(&self, ws: &mut WindowState) {
         let Some(field) = self.modal_text_projection(ws) else {
             return;
         };
-        let cw = self.overlay_text_cell_width(ws);
-        let width = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1].2;
+        let cw = self.modal_field_cell_width(ws, &field);
+        let width = kettle_render::text_field_rects(&field, cw)[1].2;
         if let Some(editor) = modal_editor_mut(ws) {
             editor.ensure_cursor_visible((width / cw).floor().max(1.0) as usize);
         }
@@ -301,8 +356,19 @@ impl App {
             return false;
         };
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let slot = kettle_render::text_field_rects(&field, self.overlay_text_cell_width(ws))[1];
-        if press && !rect_contains(slot, x, y) {
+        let slot =
+            kettle_render::text_field_rects(&field, self.modal_field_cell_width(ws, &field))[1];
+        if press
+            && !rect_contains(
+                if field.picker_header {
+                    field.rect
+                } else {
+                    slot
+                },
+                x,
+                y,
+            )
+        {
             return false;
         }
         if ws.ime_preedit.is_some() {
@@ -332,7 +398,7 @@ impl App {
         let layout = renderer.measure_text_field(&field);
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let (ex, ey, ew, eh) = layout.editor;
-        if press && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
+        if press && !field.picker_header && !(x >= ex && x < ex + ew && y >= ey && y < ey + eh) {
             return false;
         }
         let byte = crate::text_editor::nearest_stop_byte(&layout.stops, x).unwrap_or(0);
@@ -374,6 +440,13 @@ impl App {
             let changed = modal_editor(ws).is_some_and(|editor| editor.text() != before);
             if changed {
                 reset_modal_results(ws);
+                if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
+                    nav.reconcile(
+                        &crate::settings::categories(&self.gpu_choices),
+                        &self.cfg,
+                        &self.ui_text,
+                    );
+                }
             }
             ws.accessibility_pending = true;
             self.update_ime_cursor_area(ws);
@@ -475,8 +548,10 @@ impl App {
         };
         match button {
             ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
-            ConfirmButton::Confirm { .. } => {
-                let action = dialog.on_confirm.clone();
+            ConfirmButton::Confirm { .. } | ConfirmButton::PasteOneLine { .. } => {
+                let Some(action) = confirmation_button_action(dialog, index) else {
+                    return;
+                };
                 ws.confirm_dialog = None;
                 self.dispatch_confirm_action(ws, action);
             }
@@ -665,11 +740,17 @@ impl App {
             value_cols,
             active_category: cat,
             background_page: active.name == kettle_i18n::Text::SettingsCategoryBackground,
-            rows: active
-                .fields
+            search_query: nav.query.text().to_string(),
+            search_focused: nav.search_focused,
+            search_placeholder: tr
+                .text(kettle_i18n::Text::SettingsSearchPlaceholder)
+                .to_string(),
+            no_matches: tr.text(kettle_i18n::Text::SettingsNoMatches).to_string(),
+            rows: nav
+                .visible_fields(&cats, tr)
                 .iter()
-                .enumerate()
-                .map(|(i, f)| {
+                .map(|&(category, i)| {
+                    let f = &cats[category].fields[i];
                     // An open inline text edit for this field shows its
                     // editable buffer + a caret instead of the stored value.
                     let editing = ws
@@ -681,7 +762,7 @@ impl App {
                             .to_string()
                     } else if editing {
                         String::new()
-                    } else if i == fld && nav.capturing {
+                    } else if category == cat && i == fld && nav.capturing {
                         // Capture prompt on the focused keybind row.
                         tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
                     } else {
@@ -689,14 +770,35 @@ impl App {
                     };
                     kettle_render::SettingsRow {
                         label: tr.text(f.label).to_string(),
+                        description: tr.text(crate::settings::description(f)).to_string(),
+                        category,
+                        control: match f.kind {
+                            crate::settings::FieldKind::Toggle => {
+                                kettle_render::SettingsControl::Toggle(crate::settings::read_bool(
+                                    &self.cfg, f.key,
+                                ))
+                            }
+                            crate::settings::FieldKind::Choice { .. }
+                            | crate::settings::FieldKind::ChoiceOwned { .. } => {
+                                kettle_render::SettingsControl::Choice
+                            }
+                            crate::settings::FieldKind::Text { .. } => {
+                                kettle_render::SettingsControl::Text
+                            }
+                            _ => kettle_render::SettingsControl::Value,
+                        },
                         value,
                         disabled: crate::settings::field_disabled(&self.cfg, f.key)
                             || (f.key == "gpu" && self.gpu_discovery_pending),
                     }
                 })
                 .collect(),
-            focused_row: fld,
-            title: tr.settings_heading(tr.text(active.name)),
+            focused_row: nav
+                .visible_fields(&cats, tr)
+                .iter()
+                .position(|&identity| identity == (cat, fld))
+                .unwrap_or(0),
+            title: tr.text(active.name).to_string(),
             hints: settings_hints(tr, self.cfg.vim_menu_nav),
             footer_note: {
                 let graphics = active.name == kettle_i18n::Text::SettingsCategoryGraphics;
@@ -765,7 +867,7 @@ impl App {
         let Some(set) = self.settings_overlay_projection(ws) else {
             return false;
         };
-        let (cw, ch) = self.menu_cell(ws);
+        let (cw, _) = self.menu_cell(ws);
         let (sw, sh) = ws
             .renderer
             .as_ref()
@@ -775,13 +877,38 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         let (mx, my) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let hit = kettle_render::settings_hit_test_with_text_width(
+        let layout = kettle_render::settings_layout(
             &set,
-            (cw, ch),
+            (cw, self.overlay_text_line_height(ws)),
             (sw, sh),
-            (mx, my),
             self.overlay_text_cell_width(ws),
         );
+        let hit = layout.pointer_hit((mx, my), (!is_click).then_some(dir));
+        if ws
+            .settings_nav
+            .as_ref()
+            .is_some_and(|nav| nav.search_focused)
+            && !matches!(
+                hit,
+                kettle_render::SettingsHit::Search | kettle_render::SettingsHit::Inert
+            )
+        {
+            let window = ws.window.clone();
+            cancel_modal_pointer_composition(
+                ws,
+                |allowed| {
+                    if let Some(window) = &window {
+                        window.set_ime_allowed(allowed);
+                    }
+                },
+                || {
+                    #[cfg(target_os = "macos")]
+                    if let Some(window) = &window {
+                        discard_native_marked_text(window);
+                    }
+                },
+            );
+        }
         match hit {
             kettle_render::SettingsHit::Outside => {
                 if !is_click {
@@ -794,26 +921,30 @@ impl App {
                     return false;
                 }
             }
-            kettle_render::SettingsHit::Category(i) => {
-                if let Some(nav) = ws.settings_nav.as_mut() {
-                    let cats = crate::settings::categories(&self.gpu_choices);
-                    nav.category = i.min(cats.len().saturating_sub(1));
-                    // Clamp the focused field into the new category + cancel any
-                    // in-progress keybind capture.
-                    let fcount = cats[nav.category].fields.len().max(1);
-                    nav.field = nav.field.min(fcount - 1);
-                    nav.capturing = false;
+            hit
+            @ (kettle_render::SettingsHit::Search | kettle_render::SettingsHit::Category(_)) => {
+                if (is_click || matches!(hit, kettle_render::SettingsHit::Category(_)))
+                    && let Some(nav) = ws.settings_nav.as_mut()
+                {
+                    nav.apply_hit(
+                        &crate::settings::categories(&self.gpu_choices),
+                        &self.cfg,
+                        &self.ui_text,
+                        hit,
+                    );
                 }
             }
             kettle_render::SettingsHit::Field(f) => {
                 let cats = crate::settings::categories(&self.gpu_choices);
-                let cat = ws
-                    .settings_nav
-                    .as_ref()
-                    .map(|n| n.category.min(cats.len().saturating_sub(1)))
-                    .unwrap_or(0);
-                let fcount = cats[cat].fields.len();
-                if f < fcount {
+                let identity = ws.settings_nav.as_mut().and_then(|nav| {
+                    nav.apply_hit(
+                        &cats,
+                        &self.cfg,
+                        &self.ui_text,
+                        kettle_render::SettingsHit::Field(f),
+                    )
+                });
+                if let Some((cat, f)) = identity {
                     let key = cats[cat].fields[f].key;
                     // A dimmed/inapplicable row is a no-op (but consumes the click).
                     if !crate::settings::field_disabled(&self.cfg, key)
@@ -843,6 +974,8 @@ impl App {
                 }
             }
         }
+        ws.accessibility_pending = true;
+        self.update_ime_cursor_area(ws);
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -888,7 +1021,7 @@ impl App {
             ConfirmAction::ClosePane(_) => {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
-            ConfirmAction::RebindKeybind { .. } => return false,
+            ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => return false,
         };
         let consequence = self.ui_text.text(Text::ConfirmCloseConsequences);
         let body = if matches!(&on_confirm, ConfirmAction::ClosePane(_)) {
@@ -1026,6 +1159,16 @@ impl App {
                     w.request_redraw();
                 }
             }
+            ConfirmAction::Paste {
+                target,
+                text,
+                broadcast,
+                recipients,
+            } => {
+                if ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients {
+                    self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target));
+                }
+            }
             ConfirmAction::RebindKeybind {
                 trig,
                 act,
@@ -1113,6 +1256,7 @@ impl App {
                     }
                     self.confirm_scroll(ws, 0, true);
                 }
+                ConfirmKeyResult::Activate(index) => self.resolve_confirm_button(ws, index),
                 ConfirmKeyResult::Confirm => {
                     let index = state
                         .buttons
@@ -1619,6 +1763,25 @@ impl App {
         // to `None` via `to_kkey`, so we simply stay in capture until a real key
         // arrives. Any other chord is bound to the action live AND appended to
         // the config file so it survives restart.
+        if capturing && cats[cat].fields[fld].key == "quick-terminal-hotkey" {
+            use crate::settings::HotkeyCapture;
+            match capture_global_hotkey(ws, key) {
+                HotkeyCapture::Pending => return,
+                HotkeyCapture::Cancel => {}
+                HotkeyCapture::Value(trigger) => {
+                    let value =
+                        trigger.map_or_else(|| "none".to_string(), |trigger| trigger.label());
+                    if self.persist_pref("quick-terminal-hotkey", &value) {
+                        self.cfg.quick_terminal_hotkey = trigger;
+                        self.reconcile_quick_hotkey();
+                    }
+                }
+            }
+            if let Some(nav) = ws.settings_nav.as_mut() {
+                nav.capturing = false;
+            }
+            return;
+        }
         if capturing {
             if matches!(key, Key::Named(NamedKey::Escape)) {
                 if let Some(n) = ws.settings_nav.as_mut() {
@@ -1702,6 +1865,10 @@ impl App {
             return;
         }
 
+        if self.settings_search_key(ws, key, None) {
+            return;
+        }
+
         match key {
             Key::Named(NamedKey::Escape) => {
                 ws.settings_nav = None;
@@ -1715,6 +1882,9 @@ impl App {
                 fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, -1)
             }
             Key::Named(NamedKey::Tab) => {
+                if let Some(nav) = ws.settings_nav.as_mut() {
+                    nav.query = Default::default();
+                }
                 let n = cats.len();
                 cat = if ws.mods.shift_key() {
                     (cat + n - 1) % n
@@ -1785,6 +1955,54 @@ impl App {
             n.category = cat;
             n.field = fld;
         }
+    }
+
+    /// Search owns text only while focused; results use catalogue identities.
+    pub(super) fn settings_search_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        text: Option<&str>,
+    ) -> bool {
+        if ws.settings_text_edit.is_some() {
+            return false;
+        }
+        let Some(nav) = ws.settings_nav.as_mut() else {
+            return false;
+        };
+        let cats = crate::settings::categories(&self.gpu_choices);
+        match nav.search_key(
+            &cats,
+            &self.cfg,
+            &self.ui_text,
+            key,
+            ws.mods,
+            cfg!(target_os = "macos"),
+        ) {
+            crate::settings::SearchRoute::Pass => return false,
+            crate::settings::SearchRoute::Edit => {
+                if !self.modal_editor_key(ws, key)
+                    && let Some(text) = crate::modal_input::accept_text(text, ws.mods)
+                {
+                    crate::modal_input::push_text(
+                        &mut ws.settings_nav.as_mut().unwrap().query,
+                        text,
+                    );
+                }
+                ws.settings_nav
+                    .as_mut()
+                    .unwrap()
+                    .reconcile(&cats, &self.cfg, &self.ui_text);
+            }
+            crate::settings::SearchRoute::Handled => {
+                if matches!(key, Key::Named(NamedKey::Escape)) {
+                    end_modal_composition(ws);
+                }
+            }
+        }
+        ws.accessibility_pending = true;
+        self.update_ime_cursor_area(ws);
+        true
     }
 
     /// ←/→ (`dir = ±1`) or Space/Enter (`dir = 0`) on the focused settings
@@ -2359,6 +2577,8 @@ pub enum ConfirmKey {
 /// Outcome of a key press in the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKeyResult {
+    /// Activate exactly the focused button, including alternate paste actions.
+    Activate(usize),
     /// Update `focus_idx` to the new value + redraw.
     Move(usize),
     /// Dispatch `on_confirm` + close the modal.
@@ -2388,7 +2608,7 @@ pub(super) fn tab_close_scope(ws: &WindowState, idx: usize) -> (usize, usize) {
             ws.mux
                 .panes
                 .get(id)
-                .map(|p| !p.term.shell_idle())
+                .map(|p| !p.held && !p.term.shell_idle())
                 .unwrap_or(true)
         })
         .count();
@@ -2403,7 +2623,7 @@ pub(super) fn window_close_scope(ws: &WindowState) -> (usize, usize) {
         ws.mux
             .panes
             .values()
-            .filter(|p| !p.term.shell_idle())
+            .filter(|p| !p.held && !p.term.shell_idle())
             .count(),
     )
 }
@@ -2421,15 +2641,9 @@ pub(super) fn confirm_dialog_keypress(
     }
     match key {
         ConfirmKey::Escape => ConfirmKeyResult::Cancel,
-        // Enter activates the FOCUSED button, not always Confirm. The
-        // close-confirm dialogs open focused on `Cancel` (index 0, the safe
-        // default the renderer highlights), so firing the destructive action
-        // regardless of focus would contradict that highlight and risk data
-        // loss. Buttons are `[Cancel, Confirm]`, so only the last button
-        // confirms; any other focused button (Cancel) cancels.
         ConfirmKey::Enter => {
-            if current_focus + 1 == num_buttons {
-                ConfirmKeyResult::Confirm
+            if current_focus < num_buttons {
+                ConfirmKeyResult::Activate(current_focus)
             } else {
                 ConfirmKeyResult::Cancel
             }
@@ -2465,7 +2679,9 @@ pub(super) fn confirm_dialog_keypress(
 fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
     match button {
         ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
-        ConfirmButton::Confirm { label, .. } => label.as_str(),
+        ConfirmButton::Confirm { label, .. } | ConfirmButton::PasteOneLine { label } => {
+            label.as_str()
+        }
     }
 }
 
@@ -2593,6 +2809,13 @@ pub enum DropPanes {
 #[allow(clippy::enum_variant_names)] // close-family prefix is intentional
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    /// Consent applies only to the original pane or unchanged broadcast scope.
+    Paste {
+        target: Option<u64>,
+        text: String,
+        broadcast: crate::mux::BroadcastScope,
+        recipients: Vec<u64>,
+    },
     /// Close the entire window (every tab + every pane).
     ///
     /// `drop_panes` carries the requester's intent through the prompt, so
@@ -2625,15 +2848,20 @@ pub enum ConfirmAction {
     },
 }
 
-/// Which buttons a confirm modal shows. v1 is just
-/// the two-button [Cancel] / [Confirm] shape; future additions can
-/// add a third "Apply to all" or similar without rippling.
+/// Buttons in a confirmation. Close and rebind questions use Cancel/Confirm;
+/// paste questions also offer a one-line alternative.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
+    PasteOneLine {
+        label: String,
+    },
     /// Dismiss the modal without action. Always the safe default.
     Cancel,
     /// Dispatch the dialog's action using destructive or ordinary styling.
-    Confirm { label: String, destructive: bool },
+    Confirm {
+        label: String,
+        destructive: bool,
+    },
 }
 
 /// Live state for an open confirm dialog. `focus_idx`
@@ -2756,6 +2984,8 @@ pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::Text
         Some(&state.query)
     } else if let Some(state) = &ws.settings_text_edit {
         Some(&state.buf)
+    } else if let Some(nav) = ws.settings_nav.as_ref().filter(|nav| nav.search_focused) {
+        Some(&nav.query)
     } else if let Some((editor, _)) = &ws.layout_picker_input {
         Some(editor)
     } else if let Some((editor, _)) = &ws.ssh_input {
@@ -2777,6 +3007,8 @@ pub(super) fn modal_editor_mut(
         Some(&mut state.query)
     } else if let Some(state) = &mut ws.settings_text_edit {
         Some(&mut state.buf)
+    } else if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
+        Some(&mut nav.query)
     } else if let Some((editor, _)) = &mut ws.layout_picker_input {
         Some(editor)
     } else if let Some((editor, _)) = &mut ws.ssh_input {
@@ -2875,7 +3107,9 @@ pub(super) fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
         KeyModal::Palette => TextModal::Palette,
         KeyModal::ThemePicker => TextModal::ThemePicker,
         KeyModal::SettingsText => TextModal::SettingsText,
-        KeyModal::SettingsCapture | KeyModal::Settings => TextModal::Settings,
+        KeyModal::SettingsCapture | KeyModal::SettingsSearch | KeyModal::Settings => {
+            TextModal::Settings
+        }
         KeyModal::LayoutPicker => TextModal::LayoutPicker,
         KeyModal::Ssh => TextModal::Ssh,
         KeyModal::TitleEdit => TextModal::TitleEdit,
@@ -3016,5 +3250,24 @@ impl App {
             // list. Without it, clicks fall through to the terminal behind a
             // "Quit?" / "Close pane?" prompt.
             || ws.confirm_dialog.is_some()
+    }
+}
+
+pub(super) fn confirmation_button_action(
+    dialog: &ConfirmDialogState,
+    index: usize,
+) -> Option<ConfirmAction> {
+    let button = dialog.buttons.get(index)?;
+    match button {
+        ConfirmButton::Cancel => None,
+        ConfirmButton::Confirm { .. } => Some(dialog.on_confirm.clone()),
+        ConfirmButton::PasteOneLine { .. } => {
+            let mut action = dialog.on_confirm.clone();
+            let ConfirmAction::Paste { text, .. } = &mut action else {
+                return None;
+            };
+            *text = paste_as_one_line(text);
+            Some(action)
+        }
     }
 }

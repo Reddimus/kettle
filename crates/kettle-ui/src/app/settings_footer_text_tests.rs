@@ -26,6 +26,10 @@ fn hints_name_the_keys_and_translate_only_their_actions() {
 fn settings_accessibility_names_follow_the_ui_language() {
     let overlay = |categories: Vec<String>| kettle_render::Overlay {
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(),
+            search_focused: false,
+            search_placeholder: String::new(),
+            no_matches: String::new(),
             categories,
             label_cols: 10,
             value_cols: 10,
@@ -52,15 +56,23 @@ fn settings_accessibility_names_follow_the_ui_language() {
     };
     assert_eq!(
         labels(&overlay(vec!["Tabs".into()]), &EN),
-        ["Settings fields", "Settings, Tabs"]
+        ["Search settings", "Settings fields", "Settings, Tabs"]
     );
     assert_eq!(
         labels(&overlay(vec!["Pestañas".into()]), &ES),
-        ["Campos de configuración", "Configuración, Pestañas"]
+        [
+            "Buscar configuración",
+            "Campos de configuración",
+            "Configuración, Pestañas"
+        ]
     );
     assert_eq!(
         labels(&overlay(Vec::new()), &ES),
-        ["Campos de configuración", "Configuración"]
+        [
+            "Buscar configuración",
+            "Campos de configuración",
+            "Configuración"
+        ]
     );
 }
 

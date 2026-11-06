@@ -75,12 +75,14 @@ pub(crate) fn app_source() -> String {
         include_str!("app/menus.rs"),
         include_str!("app/modals.rs"),
         include_str!("app/notifications.rs"),
+        include_str!("app/native_menu.rs"),
         include_str!("app/output.rs"),
         include_str!("app/paste.rs"),
         include_str!("app/pickers.rs"),
         include_str!("app/pointer.rs"),
         include_str!("app/preview.rs"),
         include_str!("app/preview_model.rs"),
+        include_str!("app/quick_terminal.rs"),
         include_str!("app/recording.rs"),
         include_str!("app/redraw.rs"),
         include_str!("app/remote.rs"),
@@ -92,7 +94,9 @@ pub(crate) fn app_source() -> String {
         include_str!("app/startup.rs"),
         include_str!("app/system_opener.rs"),
         include_str!("app/title.rs"),
+        include_str!("app/titlebar.rs"),
         include_str!("app/update_toast.rs"),
+        include_str!("app/notices.rs"),
         include_str!("app/window_events.rs"),
         include_str!("app/windowing.rs"),
     ]
@@ -191,14 +195,18 @@ mod gpu_recovery;
 mod media;
 mod menus;
 mod modals;
+mod notices;
 mod paste;
 mod pointer;
 mod preview;
+mod quick_terminal;
 mod search;
 mod sessions;
 mod system_opener;
+mod titlebar;
 mod update_toast;
 mod windowing;
+use titlebar::*;
 
 #[cfg(test)]
 mod macos_chrome_policy_tests;
@@ -247,6 +255,7 @@ pub enum UserEvent {
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
+    ToggleQuickTerminal,
     /// Remote control: the remote-command file changed and
     /// the watcher needs the main thread to read + process new lines.
     /// One event per change (notify coalesces consecutive writes), so
@@ -304,6 +313,8 @@ pub enum UserEvent {
     /// exactly as `AccessibilityAction` is.
     #[cfg(target_os = "macos")]
     DockCommand(crate::macos_dock::DockCommand),
+    #[cfg(target_os = "macos")]
+    MenuCommand(kettle_config::Action),
     #[cfg(target_os = "macos")]
     DockReopen,
     #[cfg(target_os = "macos")]
@@ -418,6 +429,7 @@ pub struct App {
     /// this event-loop thread to confirm window creation before telling the
     /// secondary launcher it may exit.
     activation: Option<crate::activation_server::ActivationInbox>,
+    quick_terminal: crate::quick_terminal::Runtime,
     /// Privacy-safe event-loop phase tracker. A separate watchdog records a
     /// bounded incident when a callback stops making progress; it never
     /// captures terminal contents, command lines, or paths.
@@ -584,6 +596,8 @@ pub struct App {
     update_local_dismissals: crate::update_notice::LocalDismissals,
     /// This process dismissed its restart notice, until it exits.
     update_restart_dismissed: bool,
+    config_notice: Option<String>,
+    config_notice_last: Option<String>,
     update_toast: Option<crate::update_toast::Toast>,
     update_toast_receipts: Option<crate::update_toast::ReceiptWriter>,
     update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,
@@ -649,15 +663,28 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("resumed");
         // winit's English application menu is up by now; Kettle's, in the
-        // UI's language, takes its place once.
-        crate::macos_menu::install(&self.ui_text);
+        // configured language, takes its place and follows later reloads.
+        self.sync_macos_menu(None);
         let seq = self.focused_seq;
         let Some(mut ws) = self.windows.remove(&seq) else {
             return;
         };
+        let show_initial_quick = self.startup.quick_terminal && ws.window.is_none();
         self.resumed_inner(&mut ws, event_loop);
         self.sync_output_wake_gate(&ws);
         self.finish_window_dispatch(event_loop, seq, ws);
+        self.quick_terminal.wayland = self
+            .windows
+            .values()
+            .filter_map(|ws| ws.window.as_deref())
+            .any(window_is_wayland);
+        if self.quick_terminal.wayland && self.quick_terminal.initial_focus {
+            self.quick_terminal.previous = Default::default();
+        }
+        if show_initial_quick && !self.quick_terminal.model.visible && self.gpu.is_some() {
+            self.toggle_quick_terminal(event_loop);
+        }
+        self.reconcile_quick_hotkey();
         self.drain_activation_requests(event_loop);
         #[cfg(target_os = "linux")]
         {
@@ -731,6 +758,9 @@ impl ApplicationHandler<UserEvent> for App {
                         handle.request_redraw();
                     }
                 }
+            }
+            UserEvent::ToggleQuickTerminal => {
+                self.toggle_quick_terminal(el);
             }
             UserEvent::Activation => self.drain_activation_requests(el),
             #[cfg(target_os = "macos")]
@@ -1035,7 +1065,7 @@ impl ApplicationHandler<UserEvent> for App {
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
-        let mut earliest_deadline: Option<std::time::Instant> = None;
+        let mut earliest_deadline = self.quick_terminal_tick(now);
         // The poll covers every window, so one checkout is enough.
         let mut remote_poll_due = self.remote_poll_due.is_some_and(|due| due <= now);
         for seq in seqs {
@@ -1145,3 +1175,8 @@ mod lane_control_tests;
 #[cfg(test)]
 #[path = "app/modal_editor_tests.rs"]
 mod modal_editor_tests;
+
+mod native_menu;
+
+#[cfg(test)]
+mod quick_terminal_regression_tests;

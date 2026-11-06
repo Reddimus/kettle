@@ -163,3 +163,82 @@ mod tests {
         assert_eq!(two_x, 48.0);
     }
 }
+
+/// Command tick rectangle in physical pixels. This overlay never moves the
+/// terminal grid. Failure ticks are thicker as well as differently colored.
+pub fn command_tick_rect(
+    terminal: (f32, f32, f32, f32),
+    scale: f32,
+    width: f32,
+    origin: u64,
+    total: usize,
+    mark: crate::term::CommandMark,
+) -> Option<[f32; 4]> {
+    let (x, y, w, h) = terminal;
+    let row = mark.row.checked_sub(origin)?;
+    if total == 0 || row >= total as u64 || w <= 0.0 || h <= 0.0 || scale <= 0.0 {
+        return None;
+    }
+    let width = (width.clamp(2.0, 40.0) * scale).min(w);
+    let height = ((if mark.exit_code == 0 { 2.0 } else { 4.0 }) * scale).min(h);
+    let top = ((row as f32 + 0.5) / total as f32 * h - height / 2.0).clamp(0.0, h - height);
+    Some([(x + w - width - 2.0 * scale).max(x), y + top, width, height])
+}
+
+#[cfg(test)]
+mod command_tick_tests {
+    use super::*;
+    use crate::term::CommandMark;
+
+    #[test]
+    fn ticks_share_bounded_geometry_at_every_scale_and_history_origin() {
+        for scale in [1.0, 1.5, 2.0] {
+            let rect = (20.0, 40.0, 200.0 * scale, 100.0 * scale);
+            for (row, code) in [(500, 0), (599, 7)] {
+                let [x, y, w, h] = command_tick_rect(
+                    rect,
+                    scale,
+                    6.0,
+                    500,
+                    100,
+                    CommandMark {
+                        row,
+                        exit_code: code,
+                    },
+                )
+                .unwrap();
+                assert!(x >= rect.0 && x + w <= rect.0 + rect.2);
+                assert!(y >= rect.1 && y + h <= rect.1 + rect.3);
+                assert_eq!(h, if code == 0 { 2.0 * scale } else { 4.0 * scale });
+            }
+            assert!(
+                command_tick_rect(
+                    rect,
+                    scale,
+                    6.0,
+                    500,
+                    100,
+                    CommandMark {
+                        row: 499,
+                        exit_code: 0
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                command_tick_rect(
+                    rect,
+                    scale,
+                    6.0,
+                    500,
+                    100,
+                    CommandMark {
+                        row: 600,
+                        exit_code: 0
+                    }
+                )
+                .is_none()
+            );
+        }
+    }
+}

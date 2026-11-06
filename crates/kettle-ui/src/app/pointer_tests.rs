@@ -388,11 +388,18 @@ fn mouse_and_focus_reports_use_chronological_user_input() {
     assert!(!focus_sender.contains("with_completion_input_admission"));
 
     let terminal_replies = source
-        .split("TermEvent::PtyWrite(s) => {")
+        .split("fn pane_event_reply(")
         .nth(1)
-        .and_then(|body| body.split("TermEvent::").next())
-        .expect("terminal reply arm");
-    assert!(terminal_replies.contains("pane.queue_protocol_reply"));
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("terminal reply formatter");
+    assert!(terminal_replies.contains("TermEvent::PtyWrite(s) => Some(s)"));
+    let drain = source
+        .split("fn drain_pane_events(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("pane event drain");
+    assert!(drain.contains("reply_for_event(pane, ev)"));
+    assert!(drain.contains("pane.queue_protocol_reply(reply.as_bytes())"));
 }
 
 /// A press a program got keeps its pane: that button's drag and its one
@@ -500,7 +507,20 @@ fn clicks_share_the_fully_visible_hover_row_contract() {
         .expect("end of context-menu click resolver");
     let resolver = &src[start..end];
     assert!(
-        resolver.contains("let idx = self.menu_row_at_cursor(ws)?;"),
+        resolver.contains("context_menu_click_at(")
+            && src
+                .split("fn context_menu_click_at(")
+                .nth(1)
+                .unwrap()
+                .contains("context_menu_row_at(")
+            && src
+                .split("fn menu_row_at_cursor(")
+                .nth(1)
+                .unwrap()
+                .split("\n    }")
+                .next()
+                .unwrap()
+                .contains("context_menu_row_at("),
         "clicks must use the clipped-row helper exercised above"
     );
     assert!(
@@ -777,8 +797,8 @@ fn native_and_control_selection_motion_share_the_drag_threshold() {
         normalized_src
             .matches("self.install_confirm_dialog(")
             .count(),
-        2,
-        "every confirmation path (closing and keybind conflicts) must use the shared transition"
+        3,
+        "every confirmation path (closing, keybind conflicts, and pasting) must use the shared transition"
     );
     assert_eq!(
         normalized_src.matches("ws.confirm_dialog = Some(").count(),
@@ -1071,6 +1091,7 @@ fn a_hidden_tab_close_button_is_not_clickable() {
         idx: 0,
         rect: (0.0, 0.0, 100.0, 24.0),
         title_rect: (8.0, 0.0, 68.0, 24.0),
+        hint: None,
         close,
         title: String::new(),
         path: None,

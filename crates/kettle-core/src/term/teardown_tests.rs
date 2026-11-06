@@ -1365,6 +1365,13 @@ fn repeated_output_starts_are_one_command() {
         finished[0].duration
     );
     assert_eq!(pane.idle_command_generation(), Some(1));
+    assert_eq!(
+        pane.command_marks(),
+        vec![CommandMark {
+            row: 0,
+            exit_code: 7
+        }]
+    );
 }
 
 /// The pane's keyboard claims once `done` accepts them (see `pane_after`).

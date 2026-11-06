@@ -94,15 +94,16 @@ pub(crate) struct Cli {
 
     /// Print the OSC 133 shell-integration snippet for SHELL (one of
     /// `bash`, `zsh`, `fish`, `powershell` — also `pwsh` / `ps1`) and
-    /// exit. Append to your shell rc file to enable `Ctrl+Up` /
-    /// `Ctrl+Down` jump-to-prompt:
+    /// exit. New macOS/Linux Bash, Zsh and Fish panes load these hooks
+    /// automatically (`shell-integration = auto`). For manual setup, append
+    /// to your shell rc file to enable `Ctrl+Up` / `Ctrl+Down` jump-to-prompt:
     ///
     ///   kettle --shell-integration bash       >> ~/.bashrc
     ///   kettle --shell-integration zsh        >> ~/.zshrc
     ///   kettle --shell-integration fish       >> ~/.config/fish/config.fish
     ///   kettle --shell-integration powershell >> $PROFILE   # PS 5+ / PS 7+
     ///
-    /// Kettle starts the default Unix shell as a login shell. Bash reads the first
+    /// Default Unix shells use login startup. Bash reads the first
     /// readable `~/.bash_profile`, `~/.bash_login`, or `~/.profile`, not `~/.bashrc`
     /// automatically. If that active login startup file does not already source
     /// `~/.bashrc`, add this line to it (create `~/.bash_profile` only if none exists):
@@ -215,10 +216,10 @@ pub(crate) struct Cli {
     pub(crate) layout: Option<String>,
 
     /// Restore the previous session (tabs, splits, working dirs) for this
-    /// launch. kettle opens a FRESH window by default (a single pane in the
-    /// default cwd), like every mainstream terminal; pass `--restore` for a
-    /// one-shot "continue where I left off" without setting
-    /// `restore-session = true` in your config.
+    /// launch, regardless of the `restore-session` policy. The default `auto`
+    /// follows the macOS keep-windows setting and opens fresh on other platforms.
+    /// Set `restore-session = true` to enable restore on every launch, or
+    /// `restore-session = false` to open fresh unless this flag is passed.
     #[arg(long, verbatim_doc_comment)]
     pub(crate) restore: bool,
 
@@ -437,10 +438,12 @@ pub(crate) enum OnOffArg {
     Off,
 }
 
-/// Agent-first subcommands. Each is a self-contained non-GUI entry point that
-/// returns early from `main` before any winit/GPU work.
+/// CLI subcommands. QuickTerminal continues into GUI startup if no instance
+/// is running; other commands return before winit/GPU work.
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum Cmd {
+    /// Toggle the dedicated quick terminal in the running instance, or start Kettle.
+    QuickTerminal,
     #[command(name = "__media-preview-worker", hide = true)]
     MediaPreviewWorker,
     /// Run a command under a real PTY, headlessly, and stream its output to

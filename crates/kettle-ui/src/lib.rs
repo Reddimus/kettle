@@ -27,6 +27,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod agent_plugin;
+#[cfg(unix)]
+mod shell_integration;
 pub use agent_plugin::{ClaudeStatus, claude_status};
 /// Explicit native agy plugin staging.
 pub mod agy_plugin;
@@ -80,6 +82,7 @@ mod notifications;
 mod owned_dir;
 mod pane_partition;
 mod paste_image;
+mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;
 mod session;
@@ -364,6 +367,12 @@ pub struct Options {
     /// One-shot primary-election handle for bare-launch activation. The Kettle
     /// binary supplies this only when no earlier process accepted the launch.
     pub activation: Option<kettle_ctl::activation::PrimaryHandle>,
+    /// Start directly in the dedicated quick window after activation election.
+    pub quick_terminal: bool,
+    /// Desktop-issued Wayland activation capability for a cold quick launch.
+    pub quick_terminal_activation_token: Option<String>,
+    /// Explicit launcher options remain local; advertise only quick toggles.
+    pub activation_quick_only: bool,
     /// Run this argv in the first tab instead of the shell (`kettle -e …`).
     pub command: Option<Vec<String>>,
     /// Dropdown-parity: the bin crate's full version string (crate
@@ -427,7 +436,7 @@ pub struct Options {
     /// the PTY fds, so running shells are not preserved. Unix-only.
     pub tab_handoff_fd: Option<TabHandoff>,
     /// `--restore` — restore the previous session (tabs/splits/dirs)
-    /// for THIS launch, regardless of the `restore-session` config default
+    /// for THIS launch, regardless of the resolved `restore-session` policy
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,

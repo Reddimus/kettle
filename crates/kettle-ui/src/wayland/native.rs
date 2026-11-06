@@ -165,6 +165,21 @@ impl Bridge {
         let _ = self.connection.flush();
     }
 
+    /// A launcher supplies the compositor-issued capability over private activation IPC.
+    pub(crate) fn activate_external(&mut self, token: &str, target: &Window) -> bool {
+        if token.is_empty() || token.len() > 4096 || token.chars().any(char::is_control) {
+            return false;
+        }
+        let Some(manager) = self.state.activation.as_ref() else {
+            return false;
+        };
+        let Some(target) = surface(&self.connection, target) else {
+            return false;
+        };
+        manager.activate(token.to_string(), &target);
+        self.connection.flush().is_ok()
+    }
+
     pub(crate) fn activate(
         &mut self,
         from: u64,

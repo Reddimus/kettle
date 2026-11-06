@@ -2,6 +2,15 @@
 
 use super::*;
 
+pub(super) fn tab_bar_height(cell_height: f32, pos: TabBarPos) -> f32 {
+    let current = cell_height + 8.0;
+    if pos.is_vertical() {
+        current
+    } else {
+        current.max(cell_height + 12.0)
+    }
+}
+
 impl App {
     /// True when the cursor is over the status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
@@ -34,7 +43,12 @@ impl App {
     /// Combined chrome-band hit-test. True when the cursor is over the tab
     /// bar or the status bar, which belong in the "OS arrow cursor" group.
     pub(super) fn cursor_in_chrome_band(&self, ws: &WindowState) -> bool {
-        self.cursor_in_tab_bar(ws)
+        self.persistent_notices(ws).iter().any(|(_, toast)| {
+            toast
+                .geometry
+                .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                .is_some()
+        }) || self.cursor_in_tab_bar(ws)
             || self.cursor_in_status_bar(ws)
             || self.update_toast_projection(ws).is_some_and(|toast| {
                 toast
@@ -53,25 +67,14 @@ impl App {
     }
 
     pub(super) fn tab_bar_h(&self, ws: &WindowState) -> f32 {
-        let show = match self.cfg.tab_bar {
-            // Title-edit needs a real chrome strip so the input never covers
-            // terminal rows. Honor `off` during normal operation, but materialize
-            // the strip while the modal owns keyboard focus.
-            TabBarMode::Off => ws.editing_title.is_some(),
-            // A live dock preview MATERIALIZES the bar on a single-tab auto
-            // window. The strip appears under the hovering torn window so the
-            // drop target is visible before the drop (Chrome's always-on
-            // strip affordance, on demand).
-            TabBarMode::Auto => {
-                ws.mux.tabs.len() > 1 || ws.dock_preview.is_some() || ws.editing_title.is_some()
-            }
-            TabBarMode::Always => true,
-        };
-        if show {
-            Self::cell_size(ws).map_or(24.0, |(_, ch)| ch + 8.0)
-        } else {
-            0.0
-        }
+        let show = tab_strip_visible(
+            self.cfg.tab_bar,
+            ws.mux.tabs.len(),
+            ws.dock_preview.is_some(),
+            ws.editing_title.is_some(),
+            ws.macos_titlebar_tabs,
+        );
+        if show { self.tab_strip_height(ws) } else { 0.0 }
     }
 
     /// Status-bar height (0 when off, cell_h + 6 px when
@@ -104,6 +107,7 @@ impl App {
     pub(super) fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {
         let band = self.tab_band(ws, height);
         let sw = band.2;
+        let x0 = band.0;
         let y = band.1;
         let is_vertical = self.cfg.tab_bar_pos.is_vertical();
         // Left/Right strips route through a separate vertical-stacked path;
@@ -119,9 +123,11 @@ impl App {
             };
             let strip_x = match self.cfg.tab_bar_pos {
                 TabBarPos::Right => sw - strip_w,
-                _ => 0.0,
+                _ => x0,
             };
             return TabBar {
+                in_titlebar: ws.macos_titlebar_tabs,
+                recording_notice: String::new(),
                 height,
                 y,
                 segments: Vec::new(),
@@ -131,6 +137,7 @@ impl App {
                 hovered_new_tab_menu: false,
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
+                hovered_tab_idx: None,
                 drag_cursor_x: None,
                 drag_cursor_y: None,
                 // The title-edit modal owns the bar — no drag can be live.
@@ -142,6 +149,14 @@ impl App {
             };
         }
         let labels = ws.mux.tab_labels(&self.ui_text);
+        let recording_notice = if ws.macos_titlebar_tabs {
+            let raw = self.recorder.as_ref().is_some_and(|rec| rec.raw_input());
+            recording_window_title(String::new(), self.recording_status(), raw)
+                .trim()
+                .to_owned()
+        } else {
+            String::new()
+        };
         let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
         // each `height` wide. The strip must reserve the WHOLE
@@ -161,23 +176,43 @@ impl App {
         // Every consumer of segment geometry reads it from this bar, so the
         // drag-to-reorder handler and the click hit-test agree on where
         // segments end.
-        let strip = tab_segment_strip_width(sw, plus_w, arrow_w).max(plus_w);
+        let strip = if ws.macos_titlebar_tabs {
+            (sw - button_w).max(0.0)
+        } else {
+            tab_segment_strip_width(sw, plus_w, arrow_w)
+        };
+        let button_x = if ws.macos_titlebar_tabs {
+            (sw - button_w).max(0.0)
+        } else {
+            sw - button_w
+        };
         let (arrow_rect, plus_rect) =
-            split_new_tab_button((sw - button_w, y, button_w, height), arrow_w);
+            split_new_tab_button((x0 + button_x, y, button_w, height), arrow_w);
         // Tabs divide the strip evenly and fill the bar; once they would
         // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
         // view). See `tab_strip_layout`. Scroll arrows are `height`-wide squares.
         let active = ws.mux.active;
-        let layout = tab_strip_layout(
-            n,
-            active,
-            strip,
-            button_w,
-            height,
-            self.cfg.tab_min_width,
-            self.cfg.scroll_tabbar,
-        );
+        let layout = if ws.macos_titlebar_tabs {
+            titlebar_tab_layout(
+                n,
+                active,
+                (strip, button_w, x0),
+                height,
+                self.cfg.tab_min_width,
+                self.cfg.scroll_tabbar,
+            )
+        } else {
+            tab_strip_layout(
+                n,
+                active,
+                strip,
+                button_w,
+                height,
+                self.cfg.tab_min_width,
+                self.cfg.scroll_tabbar,
+            )
+        };
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -186,7 +221,12 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let x = layout.xs.get(i).copied().flatten().unwrap_or(PARKED_TAB);
+                let x = layout
+                    .xs
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map_or(PARKED_TAB, |x| x0 + x);
                 // Per-tab activity dot. Active tabs short-circuit to
                 // Normal (the focused-tab accent already signals "you are here").
                 let activity = ws
@@ -220,12 +260,47 @@ impl App {
                 let rect = (x, y, seg_w, height);
                 // A tab narrowed below its close button's width has no room
                 // for one: the button would reach past it onto the arrows.
-                let closable = self.cfg.close_button_on_tab && seg_w >= height;
-                let close = tab_close_rect(x + seg_w - height, y, height, closable);
+                let hovered = ws
+                    .native_pointer
+                    .is_some_and(|p| rect_contains(rect, p.x as f32, p.y as f32));
+                let mut full_label = kettle_config::template::fill(
+                    &self.cfg.tab_format,
+                    &[
+                        ("n", &(i + 1).to_string()),
+                        ("title", label.path.as_deref().unwrap_or(&label.text)),
+                    ],
+                );
+                if i == active && !recording_notice.is_empty() {
+                    full_label = format!("{recording_notice} {full_label}");
+                }
+                let hint = kettle_render::tab_shortcut_hint(i, cfg!(target_os = "macos"));
+                let cell_w = self.overlay_text_cell_width(ws);
+                let cell_w = if ws.macos_titlebar_tabs {
+                    cell_w
+                        * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws))
+                } else {
+                    cell_w
+                };
+                let show_controls = n > 1 || hovered;
+                let mut content = kettle_render::horizontal_tab_content_layout(
+                    rect,
+                    show_controls,
+                    self.cfg.close_button_on_tab,
+                    activity != RenderTabActivity::Normal,
+                    &full_label,
+                    hint.as_deref(),
+                    cell_w,
+                );
+                if ws.macos_titlebar_tabs && n == 1 {
+                    let window_width = sw + x0;
+                    content.title = centered_title_lane(content.title, window_width * 0.5);
+                }
+                let close = content.close;
                 TabSeg {
                     idx: i,
                     rect,
-                    title_rect: tab_title_rect(rect, close, closable),
+                    title_rect: content.title,
+                    hint: content.hint.zip(hint),
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -235,8 +310,18 @@ impl App {
                 }
             })
             .collect();
-        let to_btn = |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x, y, height, height));
+        let segments_hovered = segments
+            .iter()
+            .find(|s| {
+                ws.native_pointer
+                    .is_some_and(|p| rect_contains(s.rect, p.x as f32, p.y as f32))
+            })
+            .map(|s| s.idx);
+        let to_btn =
+            |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, height, height));
         TabBar {
+            in_titlebar: ws.macos_titlebar_tabs,
+            recording_notice,
             height,
             y,
             segments,
@@ -246,10 +331,9 @@ impl App {
             hovered_new_tab_menu: ws.hovered_new_tab_menu,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
-            // Hover-on-✕ chip: renderer paints a red highlight behind
-            // the close glyph; UI's `sync_cursor_icon` flips the OS
-            // cursor to Pointer at the same time.
+            // Close hover and tab hover share the physical pointer geometry.
             hovered_close_idx: ws.hovered_close_idx,
+            hovered_tab_idx: segments_hovered,
             // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
@@ -265,7 +349,7 @@ impl App {
             // anchored to the visible edge before or after the landing slot.
             insert_marker: ws.dock_preview.map(|idx| {
                 let x = horizontal_tab_insert_x(&layout, idx, strip);
-                (x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
+                (x0 + x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
             }),
             // Tear-off UX: the dock-highlight canvas.
             band,
@@ -284,7 +368,7 @@ impl App {
         let bar = self.tab_bar(ws);
         let row_h = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
         let content_y = self.area(ws).1;
-        title_edit_rect_for(
+        let rect = title_edit_rect_for(
             self.cfg.tab_bar_pos.is_vertical(),
             bar.y,
             bar.height,
@@ -292,7 +376,17 @@ impl App {
             sw,
             sh,
             row_h,
-        )
+        );
+        if let Some(band) = Self::macos_titlebar_band(ws) {
+            (
+                rect.0 + band.left,
+                rect.1,
+                (rect.2 - band.left).max(0.0),
+                rect.3,
+            )
+        } else {
+            rect
+        }
     }
 
     /// Tab-bar layout for `TabBarPos::Left` / `Right`. Stacks segments
@@ -350,6 +444,7 @@ impl App {
                     idx: i,
                     rect,
                     title_rect: tab_title_rect(rect, close, closable),
+                    hint: None,
                     // ✕ hit zone = the trailing-right square of the
                     // segment (same axis convention as horizontal).
                     close,
@@ -373,18 +468,23 @@ impl App {
                 (0.0, 0.0, 0.0, 0.0)
             }
         };
+        let (menu, plus) = split_new_tab_button(
+            (strip_x, plus_y, strip_w, height),
+            height.min(strip_w * 0.5),
+        );
         TabBar {
+            in_titlebar: false,
+            recording_notice: String::new(),
             height,
             y: strip_y,
             segments,
-            new_tab: (strip_x, plus_y, strip_w, height),
-            // No dropdown arrow on vertical bars — the bottom-of-
-            // strip full-width `+` has nowhere sensible for a left-side arrow.
-            new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+            new_tab: plus,
+            new_tab_menu: menu,
             hovered_new_tab: ws.hovered_new_tab,
-            hovered_new_tab_menu: false,
+            hovered_new_tab_menu: ws.hovered_new_tab_menu,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
+            hovered_tab_idx: None,
             // A vertical strip's ghost rides the cursor's y down a fixed
             // column, so the main-axis coordinate is `y` here and `x` on the
             // horizontal bar. Using `x` here would pin the ghost to the top of
@@ -626,6 +726,18 @@ pub(super) struct TabStripLayout {
     pub(super) arrow_right: Option<f32>,
 }
 
+impl TabStripLayout {
+    fn empty(n: usize) -> Self {
+        Self {
+            width: 0.0,
+            last_width: 0.0,
+            xs: vec![None; n.max(1)],
+            arrow_left: None,
+            arrow_right: None,
+        }
+    }
+}
+
 pub(super) fn tab_strip_layout(
     n: usize,
     active: usize,
@@ -636,6 +748,9 @@ pub(super) fn tab_strip_layout(
     scroll: bool,
 ) -> TabStripLayout {
     let n = n.max(1);
+    if strip < 2.0 {
+        return TabStripLayout::empty(n);
+    }
     let strip = strip.max(1.0);
     let min_w = min_w.max(1.0);
     let reserve = trailing_reserve.max(0.0);
@@ -993,4 +1108,61 @@ pub(super) fn tab_title_rect(
 /// menu, even on a bash-only Ubuntu.
 fn new_tab_dropdown_visible() -> bool {
     true
+}
+
+/// Leave a native window-drag lane at the end of the titlebar. A lone tab is
+/// centred on the window, with its controls outside the symmetric title lane.
+pub(super) fn titlebar_tab_layout(
+    n: usize,
+    active: usize,
+    space: (f32, f32, f32),
+    height: f32,
+    min: f32,
+    scroll: bool,
+) -> TabStripLayout {
+    let (strip, reserve, left) = space;
+    if strip < 2.0 {
+        return TabStripLayout::empty(n);
+    }
+    let mut layout = tab_strip_layout(n, active, strip, reserve, height, min, scroll);
+    let scale = height / 28.0;
+    let preferred = (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0));
+    if strip / n.max(1) as f32 >= preferred {
+        layout.width = preferred;
+        layout.last_width = preferred;
+        let first = if n == 1 {
+            ((strip + reserve - preferred - left) * 0.5).clamp(0.0, strip - preferred)
+        } else {
+            0.0
+        };
+        layout.xs = (0..n).map(|i| Some(first + i as f32 * preferred)).collect();
+        layout.arrow_left = None;
+        layout.arrow_right = None;
+    }
+    layout
+}
+
+pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
+    let half = (center - lane.0).min(lane.0 + lane.2 - center).max(0.0);
+    if half > 0.0 {
+        (center - half, lane.1, half * 2.0, lane.3)
+    } else {
+        lane
+    }
+}
+
+pub(super) fn tab_strip_visible(
+    mode: TabBarMode,
+    tabs: usize,
+    dock: bool,
+    edit: bool,
+    titlebar: bool,
+) -> bool {
+    titlebar
+        || edit
+        || match mode {
+            TabBarMode::Off => false,
+            TabBarMode::Auto => tabs > 1 || dock,
+            TabBarMode::Always => true,
+        }
 }

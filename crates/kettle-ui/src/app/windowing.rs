@@ -189,12 +189,7 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            // Keep AppKit's title, traffic lights, rounded mask and drag region.
-            // Native material stays below this caption; AppKit draws the
-            // opaque control strip in the selected light or dark appearance.
-            // Full-size content would instead put tabs and cells under the
-            // traffic lights, changing geometry and pointer hit-testing.
-            attrs = apply_macos_window_chrome(attrs, self.cfg.borderless);
+            attrs = apply_macos_window_chrome(attrs, &self.cfg);
         }
         // Terminator parity, terminatorlib/config.py:75 +
         // 78. `borderless` removes OS chrome; `always-on-top` keeps
@@ -360,7 +355,9 @@ impl App {
         // A tear-off window opens Normal (it must be visible at the drop
         // point); a fresh window honors the configured window-state except
         // Hidden (an invisible NewWindow helps nobody).
+        let is_quick = matches!(open, WindowOpen::Quick);
         let state = match (&open, self.cfg.window_state) {
+            (WindowOpen::Quick, _) => kettle_config::WindowState::Hidden,
             (WindowOpen::AdoptTab { .. }, _) | (WindowOpen::Restore(_), _) => {
                 kettle_config::WindowState::Normal
             }
@@ -374,14 +371,22 @@ impl App {
         // renderer takes the fonts over.
         let fonts =
             kettle_render::StartupFonts::load(&self.cfg, monitor.map_or(1.0, |m| m.scale) as f32);
+        let mut startup_titlebar_band = None;
         if matches!(open, WindowOpen::Fresh { .. })
             && matches!(state, kettle_config::WindowState::Normal)
             && pos.is_none()
             && size.is_none()
         {
             let mut probe = WindowState::new(0, Mux::new());
+            #[cfg(target_os = "macos")]
+            {
+                probe.macos_titlebar_tabs =
+                    macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
+            }
+            probe.startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
             probe.startup_cell = Some(fonts.cell);
             if let Some((width, height)) = self.startup_surface(&probe, monitor) {
+                startup_titlebar_band = Self::macos_titlebar_band(&probe);
                 attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
             }
         }
@@ -401,6 +406,9 @@ impl App {
         if let Some(s) = size {
             attrs = attrs.with_inner_size(s);
         }
+        if is_quick {
+            attrs = self.quick_window_attributes(attrs, event_loop);
+        }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -409,6 +417,10 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        if is_quick {
+            crate::quick_terminal::native::configure(&window);
+        }
+        self.correct_startup_titlebar_size(&window, startup_titlebar_band, monitor);
         let native_material =
             crate::native_material::NativeMaterial::install(&window, &self.cfg, self.proxy.clone());
         let size = window.inner_size();
@@ -460,6 +472,7 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        self.sync_macos_titlebar(&mut ws);
         ws.native_caption_drag = ws
             .window
             .as_deref()
@@ -482,8 +495,13 @@ impl App {
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
         let geometry = self.pty_geometry_for_grid(&ws, cols, rows);
+        let fresh_cwd = match &open {
+            WindowOpen::Fresh { cwd } => cwd.clone(),
+            _ => None,
+        };
         match open {
-            WindowOpen::Fresh { cwd } => {
+            WindowOpen::Fresh { .. } | WindowOpen::Quick => {
+                let cwd = fresh_cwd;
                 if let Err(e) = ws.mux.new_tab_with_geometry(
                     &self.cfg,
                     geometry,
@@ -563,7 +581,9 @@ impl App {
         if let (Some(bridge), Some(window)) = (self.wayland.as_mut(), ws.window.clone()) {
             bridge.attach_drag_carrier(ws.seq, window);
         }
-        self.start_window_frames(&mut ws);
+        if !is_quick {
+            self.start_window_frames(&mut ws);
+        }
         self.windows.insert(seq, ws);
         Ok(seq)
     }
@@ -720,6 +740,21 @@ impl App {
             .min(f64::from(size.height) - 24.0);
         let strip_w = f64::from(self.cfg.tab_bar_width).max(8.0);
         let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), bar_h as f32);
+        let in_seg_x = if ws.macos_titlebar_tabs {
+            let controls = 2.0 * bar_h as f32;
+            let strip = (destination_band.2 - controls).max(0.0);
+            let layout = titlebar_tab_layout(
+                1,
+                0,
+                (strip, controls, destination_band.0),
+                bar_h as f32,
+                self.cfg.tab_min_width,
+                self.cfg.scroll_tabbar,
+            );
+            f64::from(destination_band.0 + layout.xs[0].unwrap_or(0.0)) + in_seg_x
+        } else {
+            in_seg_x
+        };
         let grab = match self.cfg.tab_bar_pos {
             TabBarPos::Top => (ftc.0 + in_seg_x, ftc.1 + bar_h * 0.5),
             TabBarPos::Bottom => (
@@ -919,7 +954,7 @@ impl App {
         if matches!(self.cfg.tab_bar, TabBarMode::Off) {
             return None;
         }
-        let height = ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0);
+        let height = self.tab_strip_height(ws);
         Some(self.tab_band(ws, height))
     }
 
@@ -936,7 +971,7 @@ impl App {
             } else {
                 0.0
             };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
@@ -948,7 +983,8 @@ impl App {
                 0.0
             },
             bottom_status_height,
-        )
+        );
+        inset_titlebar_band(band, Self::macos_titlebar_band(ws))
     }
 
     fn tear_off_tab_band(&self, ws: &WindowState, surface: (u32, u32), height: f32) -> Rect {
@@ -957,7 +993,7 @@ impl App {
         } else {
             0.0
         };
-        tab_band_rect(
+        let band = tab_band_rect(
             surface,
             self.cfg.tab_bar_pos,
             height,
@@ -969,7 +1005,8 @@ impl App {
                 0.0
             },
             bottom_status,
-        )
+        );
+        inset_titlebar_band(band, Self::macos_titlebar_band(ws))
     }
 
     /// Insertion slot if the (approximated) screen
@@ -1002,7 +1039,7 @@ impl App {
         if dist_to_rect(cx, cy, band) > 0.0 {
             return None;
         }
-        let height = Self::cell_size(w).map_or(24.0, |(_, ch)| ch + 8.0);
+        let height = self.tab_strip_height(w);
         let bar = self.tab_bar_at_height(w, height);
         let vertical = self.cfg.tab_bar_pos.is_vertical();
         dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx })
@@ -1856,12 +1893,7 @@ impl App {
         self.note_focus_change(target, pre_focus);
         target.dock_preview = None;
         self.resize_all(target);
-        if let Some(w) = &target.window {
-            w.set_visible(true);
-            w.set_minimized(false);
-            w.focus_window();
-            w.request_redraw();
-        }
+        self.reveal_window(target);
         self.ctl_broadcast(
             "tab_moved",
             None,
@@ -1980,14 +2012,20 @@ pub(super) enum MacosTitlebarPolicy {
     /// Keep AppKit's geometry and controls on an opaque native surface whose
     /// light or dark appearance follows Kettle's theme hint.
     ThemeMatchedNative,
+    Tabs,
     /// Borderless windows have no native titlebar to configure.
     NotApplicable,
 }
 
 #[cfg(any(test, target_os = "macos"))]
-pub(super) fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
-    if borderless {
+pub(super) fn macos_titlebar_policy(cfg: &Config) -> MacosTitlebarPolicy {
+    if cfg.borderless {
         MacosTitlebarPolicy::NotApplicable
+    } else if cfg.macos_titlebar_style == kettle_config::MacosTitlebarStyle::Tabs
+        && cfg.tab_bar_pos == TabBarPos::Top
+        && cfg.tab_bar != TabBarMode::Off
+    {
+        MacosTitlebarPolicy::Tabs
     } else {
         MacosTitlebarPolicy::ThemeMatchedNative
     }
@@ -1996,14 +2034,18 @@ pub(super) fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
 #[cfg(target_os = "macos")]
 pub(super) fn apply_macos_window_chrome(
     attrs: winit::window::WindowAttributes,
-    borderless: bool,
+    cfg: &Config,
 ) -> winit::window::WindowAttributes {
     use winit::platform::macos::WindowAttributesExtMacOS as _;
 
-    match macos_titlebar_policy(borderless) {
+    match macos_titlebar_policy(cfg) {
         // Create the caption opaque from the first frame. The material effect
         // stays inside the content rect below it.
         MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false),
+        MacosTitlebarPolicy::Tabs => attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true),
         MacosTitlebarPolicy::NotApplicable => attrs.with_decorations(false),
     }
 }
@@ -2451,7 +2493,10 @@ pub(super) struct TornDrag {
 /// How a new in-process window starts life.
 pub(super) enum WindowOpen {
     /// A fresh window with one shell tab (`Action::NewWindow`).
-    Fresh { cwd: Option<String> },
+    Fresh {
+        cwd: Option<String>,
+    },
+    Quick,
     /// Adopt a tab detached from another window — the live tab move /
     /// tear-off. PTYs keep running; nothing respawns.
     AdoptTab {
@@ -2920,6 +2965,11 @@ impl App {
             return;
         }
         if take_window_close_request(&mut self.pending_window_closes, seq) {
+            if self.quick_terminal.model.window == Some(seq) {
+                self.quick_terminal.model = Default::default();
+                self.quick_terminal.slide = None;
+                self.quick_terminal.focus_check = None;
+            }
             self.close_update_toast_window(seq);
             // A dying window that is the torn window or the manual-follow
             // capture holder takes its drag with it. Abandon eagerly (clears
@@ -2949,10 +2999,14 @@ impl App {
                 self.focused_seq = next;
                 record_window_focus(&mut self.window_focus_order, next);
             }
+            self.sync_macos_menu(None);
             return;
         }
         let mut ws = ws;
         self.sync_pane_focus_reports(&mut ws);
+        if seq == self.focused_seq {
+            self.sync_macos_menu(Some(&ws));
+        }
         self.windows.insert(seq, ws);
         self.window_focus_order
             .retain(|seq| self.windows.contains_key(seq));
@@ -2966,16 +3020,20 @@ impl App {
         let target = self
             .windows
             .get(&self.focused_seq)
-            .or_else(|| self.windows.values().max_by_key(|window| window.seq));
-        if let Some(ws) = target
-            && let Some(window) = &ws.window
-        {
-            self.focused_seq = ws.seq;
-            record_window_focus(&mut self.window_focus_order, ws.seq);
-            window.set_visible(true);
-            window.set_minimized(false);
-            window.focus_window();
-            return true;
+            .or_else(|| self.windows.values().max_by_key(|window| window.seq))
+            .filter(|ws| ws.window.is_some())
+            .map(|ws| ws.seq);
+        if let Some(seq) = target {
+            if self.quick_terminal.model.window == Some(seq) && !self.quick_terminal.model.visible {
+                return self.toggle_quick_terminal(event_loop);
+            }
+            if let Some(mut ws) = self.windows.remove(&seq) {
+                self.reveal_window(&mut ws);
+                self.focused_seq = seq;
+                record_window_focus(&mut self.window_focus_order, seq);
+                self.finish_window_dispatch(event_loop, seq, ws);
+                return true;
+            }
         }
         self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
             .is_ok()
@@ -3007,7 +3065,11 @@ impl App {
                 continue;
             }
             let cwd = request.request.cwd().map(str::to_string);
-            let opened = if request.request.focuses_existing() {
+            let opened = if request.request.toggles_quick_terminal() {
+                self.quick_terminal.activation_token =
+                    request.request.activation_token().map(str::to_string);
+                self.toggle_quick_terminal(event_loop)
+            } else if request.request.focuses_existing() {
                 self.focus_or_open_window(event_loop, cwd)
             } else {
                 self.open_window(event_loop, WindowOpen::Fresh { cwd }, None, None)
@@ -3016,6 +3078,7 @@ impl App {
             if opened {
                 log::info!("bare-launch activation activated a window");
                 if !request.request.focuses_existing()
+                    && !request.request.toggles_quick_terminal()
                     && let Some(recorder) = self.recorder.as_mut()
                 {
                     recorder.record_marker("kettle:activation_window");

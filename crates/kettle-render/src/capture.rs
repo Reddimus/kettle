@@ -537,6 +537,7 @@ pub fn capture_png_with_annotation(
                     &mut grid_instances,
                     buf_ref,
                     origin,
+                    cw,
                     super::GlyphPositioning::Grid(cw),
                     default_color,
                     &mut grid_glyphs,
@@ -573,48 +574,56 @@ pub fn capture_png_with_annotation(
             let tr = Translator::default();
             let rows = vec![
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuCopy).into(),
                     separator: false,
                     enabled: false,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuPaste).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: String::new(),
                     separator: true,
                     enabled: false,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuSplitRight).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuSplitDown).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuClosePane).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: String::new(),
                     separator: true,
                     enabled: false,
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    matched_chars: None,
                     label: tr.text(Text::MenuNewTab).into(),
                     separator: false,
                     enabled: true,
@@ -635,6 +644,7 @@ pub fn capture_png_with_annotation(
                 panel_w_clamped: 0.0,
                 panel_h_clamped: 0.0,
                 a11y_label: None,
+                picker_header_height: 0.0,
             };
             menu_q.extend(menu_chrome_quads(
                 &menu,

@@ -108,6 +108,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
   rectangle scroll, while placements crossing a margin stay stationary.
   DECSTR, RIS, DECALN, DECCOLM and resizing restore full-width margins.
   DECRQSS reports the current horizontal margins.
+  SGR 53/55 set and clear an independent overline flag, retained on blank
+  cells and reported by DECRQSS. The engine exposes its pinned Unicode
+  Emoji_Presentation classifier so rendering and cell widths share a table.
   DECNKM (66) aliases the existing keypad state, including mode reports and
   save/restore. DECBKM (67) exposes negotiated Backarrow state to key encoders;
   RIS and DECSTR clear that negotiation. VT level 5 DECNCSM (95) preserves
@@ -175,6 +178,15 @@ date. Recheck that before upgrading a crate or dropping a patch.
     cursor's own row. Upstream sent all of them through CUP, which adds the
     top margin again under origin mode.
   - ED 1 with the cursor on the second row clears the first row too.
+  - ED 2 on a screen with no content and no history moves nothing into
+    history. Upstream's backward scan stopped on the top row instead of
+    above it and pushed that empty row, so a shell's startup `clear`
+    followed by a taller window pulled a blank line back above the prompt.
+    `grid/tests.rs` covers an empty screen, content, and existing history.
+  - `term::Config::grapheme_clustering` seeds DEC mode 2027 for a new
+    terminal and is the state RIS and DECSTR restore. Upstream has no such
+    option. A later `set_options` keeps each terminal's own seed, so a
+    host reload changes only terminals created afterwards.
 
   Upstream `master` still had all seven of these bugs on 2026-10-16.
   Three more from the 5.7.0 audit, not yet checked against upstream:
@@ -341,6 +353,7 @@ cosmic-text release that contains both commits.
   `GraphemeClustering`. CSI REP dispatches to `Handler::repeat_char`, whose
   default preserves legacy scalar repetition while Kettle can repeat a cell's
   complete retained cluster.
+  SGR 53 and 55 dispatch explicit Overline and CancelOverline attributes.
   XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
   split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,
   which the parser reads as `CSI > 0 m`. `Disable` covers `CSI > 4 ; 0 m`.

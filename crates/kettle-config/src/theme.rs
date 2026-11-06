@@ -16,6 +16,11 @@ pub struct Theme {
     pub cursor_text: Rgb,
     pub selection_background: Rgb,
     pub selection_foreground: Rgb,
+    /// Whether a valid selection foreground was supplied by the theme or config.
+    pub selection_foreground_explicit: bool,
+    /// Whether the user's config (not the theme) set the selection foreground.
+    /// A user's colour is drawn as given; a theme's must still be readable.
+    pub selection_foreground_user: bool,
     /// The theme's UI-chrome accent (focus border, active tab,
     /// status bar). Most themes don't declare one and default it to `palette[4]`
     /// (their ANSI blue, the conventional focus color) — including the shipped
@@ -56,6 +61,8 @@ impl Default for Theme {
             cursor_text: Rgb::new(0x1e, 0x1e, 0x2e),
             selection_background: Rgb::new(0x58, 0x5b, 0x70),
             selection_foreground: Rgb::new(0xcd, 0xd6, 0xf4),
+            selection_foreground_explicit: true,
+            selection_foreground_user: false,
             // Catppuccin Mocha signature mauve (its named brand accent).
             accent: Rgb::new(0xcb, 0xa6, 0xf7),
         }
@@ -126,7 +133,11 @@ impl Theme {
     /// Parse a theme from Ghostty-syntax text (`palette = N=#hex`, etc.).
     /// Unspecified fields keep the default (Catppuccin Mocha) value.
     pub fn parse(text: &str) -> Theme {
-        let mut t = Theme::default();
+        let mut t = Theme {
+            selection_foreground_explicit: false,
+            selection_foreground_user: false,
+            ..Theme::default()
+        };
         // Track whether the theme declared its own accent. Ghostty
         // theme files don't define one, so a theme that doesn't (every bundled
         // theme except our Catppuccin Mocha, which carries an `accent` line)
@@ -149,7 +160,12 @@ impl Theme {
                 "cursor-color" => set(&mut t.cursor, &e.value),
                 "cursor-text" => set(&mut t.cursor_text, &e.value),
                 "selection-background" => set(&mut t.selection_background, &e.value),
-                "selection-foreground" => set(&mut t.selection_foreground, &e.value),
+                "selection-foreground" => {
+                    if let Some(rgb) = Rgb::parse(e.value.trim()) {
+                        t.selection_foreground = rgb;
+                        t.selection_foreground_explicit = true;
+                    }
+                }
                 // kettle extension: the chrome accent (focus border / active tab
                 // / status bar). Catppuccin Mocha sets it to its signature mauve.
                 "accent" => {
@@ -368,6 +384,25 @@ fn set(slot: &mut Rgb, v: &str) {
 mod tests {
     use super::Theme;
     use crate::color::Rgb;
+
+    #[test]
+    fn selection_foreground_is_explicit_only_after_a_valid_value() {
+        for text in [
+            "",
+            "foreground = #112233\n",
+            "selection-foreground = invalid\n",
+        ] {
+            assert!(!Theme::parse(text).selection_foreground_explicit);
+        }
+        for text in [
+            "selection-foreground = #112233\n",
+            "selection-foreground = #112233\nselection-foreground = invalid\n",
+        ] {
+            let theme = Theme::parse(text);
+            assert!(theme.selection_foreground_explicit);
+            assert_eq!(theme.selection_foreground, Rgb::new(17, 34, 51));
+        }
+    }
 
     /// Mocha uses mauve; other themes default to ANSI blue unless overridden.
     #[test]

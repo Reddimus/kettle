@@ -397,6 +397,62 @@ pub(crate) enum CellHighlight {
     Search(bool),
 }
 
+/// Keep explicit foregrounds intact and resolve automatic text against the fill.
+#[cfg(test)]
+pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) -> (Rgb, Rgb) {
+    highlight_colors_cached(
+        CellHighlight::Selection,
+        &kettle_config::Config::default(),
+        theme,
+        theme.foreground,
+        background,
+        &mut MinimumContrastCache::default(),
+    )
+}
+
+pub(crate) fn highlight_colors_cached(
+    highlight: CellHighlight,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    foreground: Rgb,
+    background: Rgb,
+    cache: &mut MinimumContrastCache,
+) -> (Rgb, Rgb) {
+    let (explicit, bg) = match highlight {
+        CellHighlight::Search(true) => (
+            cfg.search_foreground,
+            cfg.search_background.unwrap_or(theme.palette[3]),
+        ),
+        _ => {
+            let bg = cache.resolve(theme.selection_background, background, 3.0);
+            (
+                theme
+                    .selection_foreground_user
+                    .then_some(theme.selection_foreground),
+                bg,
+            )
+        }
+    };
+    if let Some(fg) = explicit {
+        return (fg, bg);
+    }
+    // A theme's own selection foreground comes first but must stay readable on
+    // the (possibly strengthened) fill; then readable cell colours, then the
+    // theme's neutrals. Cache the comparisons: palette colours share this path.
+    let theme_choice = (!matches!(highlight, CellHighlight::Search(true))
+        && theme.selection_foreground_explicit)
+        .then_some(theme.selection_foreground);
+    for fg in theme_choice
+        .into_iter()
+        .chain([foreground, theme.background, theme.foreground])
+    {
+        if cache.resolve(fg, bg, 4.5) == fg {
+            return (fg, bg);
+        }
+    }
+    (cache.resolve(foreground, bg, 4.5), bg)
+}
+
 #[cfg(test)]
 pub(crate) fn resolved_cell_foreground(
     fg: Rgb,
@@ -407,34 +463,15 @@ pub(crate) fn resolved_cell_foreground(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
 ) -> Rgb {
-    use alacritty_terminal::vte::ansi::{Color as AnsiColor, Rgb as AnsiRgb};
-
-    let spec = |c: Rgb| {
-        AnsiColor::Spec(AnsiRgb {
-            r: c.r,
-            g: c.g,
-            b: c.b,
-        })
-    };
-    match highlight {
-        CellHighlight::Search(true) => attributed_foreground(
-            spec(cfg.search_foreground.unwrap_or(theme.background)),
-            cfg.search_background.unwrap_or(theme.palette[3]),
-            false,
-            false,
-            cfg,
-            theme,
-        ),
-        CellHighlight::Search(false) | CellHighlight::Selection => attributed_foreground(
-            spec(theme.selection_foreground),
-            theme.selection_background,
-            false,
-            false,
-            cfg,
-            theme,
-        ),
-        CellHighlight::None => attributed_foreground(spec(fg), bg, dim, bold, cfg, theme),
-    }
+    resolved_cell_foreground_cached(
+        fg,
+        bg,
+        highlight,
+        (dim, bold),
+        cfg,
+        theme,
+        &mut MinimumContrastCache::default(),
+    )
 }
 
 pub(crate) fn resolved_cell_foreground_cached(
@@ -448,17 +485,11 @@ pub(crate) fn resolved_cell_foreground_cached(
 ) -> Rgb {
     let (dim, _) = attributes;
     let (fg, bg, dim) = match highlight {
-        CellHighlight::Search(true) => (
-            cfg.search_foreground.unwrap_or(theme.background),
-            cfg.search_background.unwrap_or(theme.palette[3]),
-            false,
-        ),
-        CellHighlight::Search(false) | CellHighlight::Selection => (
-            theme.selection_foreground,
-            theme.selection_background,
-            false,
-        ),
         CellHighlight::None => (fg, bg, dim),
+        _ => {
+            let (fg, bg) = highlight_colors_cached(highlight, cfg, theme, fg, bg, cache);
+            (fg, bg, false)
+        }
     };
     let fg = transformed_foreground(fg, bg, dim);
     cache.resolve(fg, bg, cfg.minimum_contrast as f64)
@@ -580,4 +611,59 @@ pub(crate) fn desired_alpha_mode(
 
 pub(crate) fn gc(c: Rgb) -> GColor {
     GColor::rgb(c.r, c.g, c.b)
+}
+
+#[cfg(test)]
+mod selection_contrast_tests {
+    use super::*;
+
+    #[test]
+    fn inactive_search_fills_contrast_with_each_cell_background() {
+        let theme = kettle_config::Theme {
+            selection_foreground_explicit: false,
+            selection_foreground_user: false,
+            ..kettle_config::Theme::default()
+        };
+        let cfg = kettle_config::Config::default();
+        let mut cache = MinimumContrastCache::default();
+        for bg in [
+            Rgb::new(0, 0, 0),
+            Rgb::new(128, 128, 128),
+            Rgb::new(255, 255, 255),
+            theme.selection_background,
+        ] {
+            let (fg, fill) = highlight_colors_cached(
+                CellHighlight::Search(false),
+                &cfg,
+                &theme,
+                theme.foreground,
+                bg,
+                &mut cache,
+            );
+            assert!(color::contrast_ratio(fill, bg) >= 3.0);
+            assert!(color::contrast_ratio(fg, fill) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn faint_selection_is_visible_and_readable_and_strong_selection_is_unchanged() {
+        let mut theme = kettle_config::Theme {
+            background: Rgb::new(20, 20, 20),
+            selection_background: Rgb::new(24, 24, 24),
+            selection_foreground: Rgb::new(220, 220, 220),
+            selection_foreground_explicit: false,
+            selection_foreground_user: false,
+            ..kettle_config::Theme::default()
+        };
+        let (fg, bg) = selection_colors(&theme, theme.background);
+        assert!(color::contrast_ratio(bg, theme.background) >= 3.0);
+        assert!(color::contrast_ratio(fg, bg) >= 4.5);
+        theme.selection_background = Rgb::new(220, 220, 220);
+        theme.selection_foreground = Rgb::new(20, 20, 20);
+        theme.selection_foreground_explicit = true;
+        assert_eq!(
+            selection_colors(&theme, theme.background),
+            (theme.selection_foreground, theme.selection_background)
+        );
+    }
 }

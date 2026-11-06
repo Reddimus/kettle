@@ -89,6 +89,8 @@ pub enum FieldKind {
         step: i64,
         suffix: &'static str,
     },
+    /// A process-wide quick-terminal shortcut persisted as a config value.
+    Hotkey,
     /// A rebindable keybinding. `action` is the canonical
     /// `Action::from_name` token (e.g. `"split_right"`). The displayed value is
     /// the chord currently bound to that action (reverse-looked-up from
@@ -103,6 +105,28 @@ pub enum FieldKind {
     /// persisted on submit. The displayed value is the current string (or a
     /// placeholder when empty).
     Text { placeholder: Text },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HotkeyCapture {
+    Cancel,
+    Value(Option<kettle_config::keybinds::Trigger>),
+    Pending,
+}
+
+pub(crate) fn capture_hotkey(
+    key: Option<kettle_config::keybinds::Key>,
+    mods: kettle_config::keybinds::Mods,
+) -> HotkeyCapture {
+    use kettle_config::keybinds::{Key, Trigger};
+    match key {
+        Some(Key::Escape) if mods.is_empty() => HotkeyCapture::Cancel,
+        Some(Key::Backspace | Key::Delete) if mods.is_empty() => HotkeyCapture::Value(None),
+        Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(
+            kettle_config::normalize_quick_terminal_hotkey(Trigger::new(mods, key)),
+        )),
+        _ => HotkeyCapture::Pending,
+    }
 }
 
 /// One editable setting: a human label, the config key it persists to, and how
@@ -121,6 +145,80 @@ pub struct Category {
     pub fields: Vec<Field>,
 }
 
+/// Description keys stay independent of config tokens and translated labels.
+pub fn description(field: &Field) -> Text {
+    match field.label {
+        Text::QuickTerminalHotkey => Text::QuickTerminalHotkeyDescription,
+        Text::QuickTerminalPosition => Text::QuickTerminalPositionDescription,
+        Text::QuickTerminalSize => Text::QuickTerminalSizeDescription,
+        Text::QuickTerminalAnimation => Text::QuickTerminalAnimationDescription,
+        Text::QuickTerminalAutohide => Text::QuickTerminalAutohideDescription,
+        Text::SettingsFieldAgentPreviews => Text::SettingsDescriptionFieldAgentPreviews,
+        Text::SettingsFieldAgentPreviewsClaudeCode => {
+            Text::SettingsDescriptionFieldAgentPreviewsClaudeCode
+        }
+        Text::SettingsFieldAgentPreviewsCodex => Text::SettingsDescriptionFieldAgentPreviewsCodex,
+        Text::SettingsFieldAgentPreviewsAgy => Text::SettingsDescriptionFieldAgentPreviewsAgy,
+        Text::SettingsFieldAddKettleToPath => Text::SettingsDescriptionFieldAddKettleToPath,
+        Text::SettingsFieldBackgroundAnimation => Text::SettingsDescriptionFieldBackgroundAnimation,
+        Text::SettingsFieldBackgroundImage => Text::SettingsDescriptionFieldBackgroundImage,
+        Text::SettingsFieldBackgroundOpacity => Text::SettingsDescriptionFieldBackgroundOpacity,
+        Text::SettingsFieldBackgroundType => Text::SettingsDescriptionFieldBackgroundType,
+        Text::SettingsFieldBell => Text::SettingsDescriptionFieldBell,
+        Text::SettingsFieldChromeBackground => Text::SettingsDescriptionFieldChromeBackground,
+        Text::SettingsFieldCloseButtonOnTab => Text::SettingsDescriptionFieldCloseButtonOnTab,
+        Text::SettingsFieldCompletionOverlay => Text::SettingsDescriptionFieldCompletionOverlay,
+        Text::SettingsFieldCopyOnSelect => Text::SettingsDescriptionFieldCopyOnSelect,
+        Text::SettingsFieldCursorBlink => Text::SettingsDescriptionFieldCursorBlink,
+        Text::SettingsFieldCursorBlinkTimeout => Text::SettingsDescriptionFieldCursorBlinkTimeout,
+        Text::SettingsFieldCursorShape => Text::SettingsDescriptionFieldCursorShape,
+        Text::SettingsFieldDetachableTabs => Text::SettingsDescriptionFieldDetachableTabs,
+        Text::SettingsFieldFocus => Text::SettingsDescriptionFieldFocus,
+        Text::SettingsFieldGraphemeClustering => Text::SettingsDescriptionFieldGraphemeClustering,
+        Text::SettingsFieldFontSize => Text::SettingsDescriptionFieldFontSize,
+        Text::SettingsFieldGpuBackend => Text::SettingsDescriptionFieldGpuBackend,
+        Text::SettingsFieldGpuDevice => Text::SettingsDescriptionFieldGpuDevice,
+        Text::SettingsFieldGpuForceSoftware => Text::SettingsDescriptionFieldGpuForceSoftware,
+        Text::SettingsFieldGpuPowerPreference => Text::SettingsDescriptionFieldGpuPowerPreference,
+        Text::SettingsFieldInvertSearch => Text::SettingsDescriptionFieldInvertSearch,
+        Text::SettingsFieldLanguage => Text::SettingsDescriptionFieldLanguage,
+        Text::SettingsFieldMouseHideWhileTyping => {
+            Text::SettingsDescriptionFieldMouseHideWhileTyping
+        }
+        Text::SettingsFieldScrollTabbar => Text::SettingsDescriptionFieldScrollTabbar,
+        Text::SettingsFieldScrollbackLines => Text::SettingsDescriptionFieldScrollbackLines,
+        Text::SettingsFieldScrollbackMemory => Text::SettingsDescriptionFieldScrollbackMemory,
+        Text::SettingsFieldScrollbar => Text::SettingsDescriptionFieldScrollbar,
+        Text::SettingsFieldScrollbarWidth => Text::SettingsDescriptionFieldScrollbarWidth,
+        Text::SettingsFieldSearchCase => Text::SettingsDescriptionFieldSearchCase,
+        Text::SettingsFieldSearchWrap => Text::SettingsDescriptionFieldSearchWrap,
+        Text::SettingsFieldShowTitlebar => Text::SettingsDescriptionFieldShowTitlebar,
+        Text::SettingsFieldTabBar => Text::SettingsDescriptionFieldTabBar,
+        Text::SettingsFieldTabBarPosition => Text::SettingsDescriptionFieldTabBarPosition,
+        Text::SettingsFieldTabMinWidth => Text::SettingsDescriptionFieldTabMinWidth,
+        Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
+        Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
+        Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
+        Text::SettingsFieldUpdatePolicy => Text::SettingsDescriptionFieldUpdatePolicy,
+        Text::SettingsFieldVimMenuNav => Text::SettingsDescriptionFieldVimMenuNav,
+        Text::SettingsFieldWindowBlur => Text::SettingsDescriptionFieldWindowBlur,
+        Text::SettingsFieldWindowPadding => Text::SettingsDescriptionFieldWindowPadding,
+        Text::SettingsKeybindClosePane => Text::SettingsDescriptionKeybindClosePane,
+        Text::SettingsKeybindCommandPalette => Text::SettingsDescriptionKeybindCommandPalette,
+        Text::SettingsKeybindCopy => Text::SettingsDescriptionKeybindCopy,
+        Text::SettingsKeybindNewTab => Text::SettingsDescriptionKeybindNewTab,
+        Text::SettingsKeybindNextTab => Text::SettingsDescriptionKeybindNextTab,
+        Text::SettingsKeybindOpenSettings => Text::SettingsDescriptionKeybindOpenSettings,
+        Text::SettingsKeybindPaste => Text::SettingsDescriptionKeybindPaste,
+        Text::SettingsKeybindPreviousTab => Text::SettingsDescriptionKeybindPreviousTab,
+        Text::SettingsKeybindSplitDown => Text::SettingsDescriptionKeybindSplitDown,
+        Text::SettingsKeybindSplitRight => Text::SettingsDescriptionKeybindSplitRight,
+        Text::SettingsKeybindStartSearch => Text::SettingsDescriptionKeybindStartSearch,
+        Text::SettingsKeybindToggleZoom => Text::SettingsDescriptionKeybindToggleZoom,
+        _ => unreachable!("settings field lacks a description"),
+    }
+}
+
 /// Live navigation state while the settings overlay is open
 /// (`WindowState::settings_nav`). Indices into `categories()`; values are
 /// always read fresh from `Config`, so the overlay reflects external config
@@ -133,6 +231,248 @@ pub struct SettingsNav {
     /// user to press a chord to bind. The next non-modifier key press is
     /// captured as the new binding; Esc cancels.
     pub capturing: bool,
+    pub(crate) query: crate::text_editor::TextEditor,
+    pub search_focused: bool,
+}
+
+/// Fold Spanish precomposed and decomposed accents without changing stored text.
+fn search_fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .filter_map(|c| {
+            Some(match c {
+                'á' | 'à' | 'ä' | 'â' => 'a',
+                'é' | 'è' | 'ë' | 'ê' => 'e',
+                'í' | 'ì' | 'ï' | 'î' => 'i',
+                'ó' | 'ò' | 'ö' | 'ô' => 'o',
+                'ú' | 'ù' | 'ü' | 'û' => 'u',
+                'ñ' => 'n',
+                '\u{0300}'..='\u{036f}' => return None,
+                c => c,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchRoute {
+    Pass,
+    Handled,
+    Edit,
+}
+
+impl SettingsNav {
+    pub(crate) fn apply_hit(
+        &mut self,
+        cats: &[Category],
+        cfg: &Config,
+        tr: &Translator,
+        hit: kettle_render::SettingsHit,
+    ) -> Option<(usize, usize)> {
+        match hit {
+            kettle_render::SettingsHit::Search => {
+                self.search_focused = true;
+                self.capturing = false;
+            }
+            kettle_render::SettingsHit::Category(index) if index < cats.len() => {
+                self.query = Default::default();
+                self.search_focused = false;
+                self.category = index;
+                self.field = self.field.min(cats[index].fields.len().saturating_sub(1));
+                self.capturing = false;
+            }
+            kettle_render::SettingsHit::Field(index) => {
+                return self.focus_result(cats, cfg, tr, index);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub(crate) fn search_key(
+        &mut self,
+        cats: &[Category],
+        cfg: &Config,
+        tr: &Translator,
+        key: &winit::keyboard::Key,
+        mods: winit::keyboard::ModifiersState,
+        macos: bool,
+    ) -> SearchRoute {
+        use winit::keyboard::{Key, NamedKey};
+        if self.capturing {
+            return SearchRoute::Pass;
+        }
+        let shortcut = if macos {
+            mods.super_key()
+        } else {
+            mods.control_key()
+        };
+        let find = matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("f"))
+            && shortcut
+            && !mods.alt_key();
+        let slash = cfg.vim_menu_nav
+            && !self.search_focused
+            && !mods.intersects(
+                winit::keyboard::ModifiersState::CONTROL
+                    | winit::keyboard::ModifiersState::ALT
+                    | winit::keyboard::ModifiersState::SUPER,
+            )
+            && matches!(key, Key::Character(s) if s == "/");
+        if find || slash {
+            self.search_focused = true;
+            return SearchRoute::Handled;
+        }
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            if !self.query.is_empty() {
+                self.query = Default::default();
+                self.reconcile(cats, cfg, tr);
+                return SearchRoute::Handled;
+            }
+            return SearchRoute::Pass;
+        }
+        if self.search_focused {
+            if matches!(
+                key,
+                Key::Named(NamedKey::Enter | NamedKey::ArrowDown | NamedKey::Tab)
+            ) {
+                self.reconcile(cats, cfg, tr);
+                if !self.visible_fields(cats, tr).is_empty() {
+                    self.search_focused = false;
+                }
+                return SearchRoute::Handled;
+            }
+            return SearchRoute::Edit;
+        }
+        if self.query.is_empty() {
+            return SearchRoute::Pass;
+        }
+        let count = self.visible_fields(cats, tr).len();
+        if count == 0 {
+            return if matches!(key, Key::Named(NamedKey::Tab)) {
+                SearchRoute::Pass
+            } else {
+                SearchRoute::Handled
+            };
+        }
+        let delta = match key {
+            Key::Named(NamedKey::ArrowDown) => Some(1),
+            Key::Named(NamedKey::ArrowUp) => Some(-1),
+            Key::Character(s) if cfg.vim_menu_nav && !mods.alt_key() && !mods.super_key() => {
+                match (s.to_ascii_lowercase().as_str(), mods.control_key()) {
+                    ("j", false) => Some(1),
+                    ("k", false) => Some(-1),
+                    ("d", true) => Some((count / 2).max(1) as isize),
+                    ("u", true) => Some(-((count / 2).max(1) as isize)),
+                    ("g", false) => {
+                        let enabled: Vec<_> = self
+                            .visible_fields(cats, tr)
+                            .into_iter()
+                            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+                            .collect();
+                        if let Some(&(cat, field)) = if mods.shift_key() {
+                            enabled.last()
+                        } else {
+                            enabled.first()
+                        } {
+                            (self.category, self.field) = (cat, field);
+                        }
+                        return SearchRoute::Handled;
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(delta) = delta {
+            self.move_result(cats, cfg, tr, delta);
+            SearchRoute::Handled
+        } else {
+            SearchRoute::Pass
+        }
+    }
+
+    /// Stable catalogue identities, grouped in catalogue order during search.
+    pub fn visible_fields(&self, cats: &[Category], tr: &Translator) -> Vec<(usize, usize)> {
+        let query = search_fold(self.query.text());
+        cats.iter()
+            .enumerate()
+            .flat_map(|(cat, category)| {
+                let query = &query;
+                category
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(field, value)| {
+                        let matched = if query.is_empty() {
+                            cat == self.category
+                        } else {
+                            [
+                                tr.text(value.label),
+                                tr.text(description(value)),
+                                value.key,
+                                if value.key == "gpu" {
+                                    "gpu-device-id gpu-vendor-id gpu-name"
+                                } else {
+                                    ""
+                                },
+                            ]
+                            .iter()
+                            .any(|text| search_fold(text).contains(query))
+                        };
+                        matched.then_some((cat, field))
+                    })
+            })
+            .collect()
+    }
+
+    pub fn reconcile(&mut self, cats: &[Category], cfg: &Config, tr: &Translator) {
+        let fields = self.visible_fields(cats, tr);
+        if !fields.contains(&(self.category, self.field))
+            && let Some(&(category, field)) = fields
+                .iter()
+                .find(|&&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+                .or(fields.first())
+        {
+            self.category = category;
+            self.field = field;
+        }
+    }
+
+    /// Pointer row indices always refer to the visible projection, including search.
+    pub fn focus_result(
+        &mut self,
+        cats: &[Category],
+        cfg: &Config,
+        tr: &Translator,
+        index: usize,
+    ) -> Option<(usize, usize)> {
+        let (category, field) = *self.visible_fields(cats, tr).get(index)?;
+        if field_disabled(cfg, cats[category].fields[field].key) {
+            return None;
+        }
+        self.category = category;
+        self.field = field;
+        self.capturing = false;
+        self.search_focused = false;
+        Some((category, field))
+    }
+
+    pub fn move_result(&mut self, cats: &[Category], cfg: &Config, tr: &Translator, delta: isize) {
+        let fields: Vec<_> = self
+            .visible_fields(cats, tr)
+            .into_iter()
+            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+            .collect();
+        if fields.is_empty() {
+            return;
+        }
+        let current = fields
+            .iter()
+            .position(|pair| *pair == (self.category, self.field))
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(fields.len() as isize) as usize;
+        (self.category, self.field) = fields[next];
+    }
 }
 
 /// State for the inline text prompt opened by a [`FieldKind::Text`] row (the
@@ -299,6 +639,13 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 toggle(T::SettingsFieldShowTitlebar, "show-titlebar"),
             ],
         },
+        Category {
+            name: T::SettingsCategoryTextRendering,
+            fields: vec![toggle(
+                T::SettingsFieldGraphemeClustering,
+                "grapheme-clustering",
+            )],
+        },
         // The Background page. `starfield` is a zero-config animated
         // background; `image` takes a file path (edited inline here).
         // Sub-options below the type are dimmed and skipped when they don't
@@ -414,6 +761,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 toggle(
                     T::SettingsFieldMouseHideWhileTyping,
                     "mouse-hide-while-typing",
+                ),
+                choice(
+                    T::SettingsFieldRestoreSession,
+                    "restore-session",
+                    &["auto", "true", "false"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOn),
+                        Label::Text(T::SettingsValueOff),
+                    ],
                 ),
                 choice(
                     T::SettingsFieldUpdatePolicy,
@@ -568,6 +925,31 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 keybind(T::SettingsKeybindPaste, "paste"),
             ],
         },
+        Category {
+            name: T::SettingsCategoryQuickTerminal,
+            fields: vec![
+                Field {
+                    label: T::QuickTerminalHotkey,
+                    key: "quick-terminal-hotkey",
+                    kind: FieldKind::Hotkey,
+                },
+                choice(
+                    T::QuickTerminalPosition,
+                    "quick-terminal-position",
+                    &["top", "bottom", "left", "right", "center"],
+                    &[
+                        Label::Text(T::SettingsValueTop),
+                        Label::Text(T::SettingsValueBottom),
+                        Label::Text(T::SettingsValueLeft),
+                        Label::Text(T::SettingsValueRight),
+                        Label::Text(T::QuickTerminalCenter),
+                    ],
+                ),
+                number(T::QuickTerminalSize, "quick-terminal-size", 1, 100, 5, "%"),
+                toggle(T::QuickTerminalAnimation, "quick-terminal-animation"),
+                toggle(T::QuickTerminalAutohide, "quick-terminal-autohide"),
+            ],
+        },
     ]
 }
 
@@ -662,6 +1044,10 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 format_number(value, suffix)
             }
         }
+        FieldKind::Hotkey => cfg
+            .quick_terminal_hotkey
+            .map(|key| key.label())
+            .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
         FieldKind::Keybind { action } => {
             // The chord bound to this action in the effective keymap, chosen
             // as the palette and menus choose it; "Unbound" if none. The
@@ -790,7 +1176,7 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
         }
         // Keybinds don't change via ←/→: activating one enters capture mode in
         // the overlay handler, which binds the next chord directly. No-op here.
-        FieldKind::Keybind { .. } => String::new(),
+        FieldKind::Hotkey | FieldKind::Keybind { .. } => String::new(),
         // Text fields don't cycle: activating opens an inline prompt in the
         // overlay handler. No-op here.
         FieldKind::Text { .. } => String::new(),
@@ -800,7 +1186,7 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
 /// Is this field a rebindable keybinding? The overlay handler uses
 /// this to route Enter/Space into chord-capture instead of the value-cycle path.
 pub fn is_keybind(field: &Field) -> bool {
-    matches!(field.kind, FieldKind::Keybind { .. })
+    matches!(field.kind, FieldKind::Hotkey | FieldKind::Keybind { .. })
 }
 
 /// The canonical action token for a keybind field (for capture +
@@ -885,8 +1271,11 @@ pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i3
 
 // ---- Config readers (string-keyed; the one place catalogue keys meet Config).
 
-fn read_bool(cfg: &Config, key: &str) -> bool {
+pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
     match key {
+        "quick-terminal-animation" => cfg.quick_terminal_animation,
+        "quick-terminal-autohide" => cfg.quick_terminal_autohide,
+        "grapheme-clustering" => cfg.grapheme_clustering,
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
@@ -909,6 +1298,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
 
 fn read_choice(cfg: &Config, key: &str) -> String {
     match key {
+        "quick-terminal-position" => cfg.quick_terminal_position.token().to_string(),
         "language" => cfg.language.token().to_string(),
         "scrollbar" => match cfg.scrollbar {
             ScrollbarMode::Never => "never",
@@ -916,6 +1306,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             ScrollbarMode::Always => "always",
         }
         .to_string(),
+        "restore-session" => cfg.restore_session.token().to_string(),
         "update-policy" => match cfg.update_policy {
             UpdatePolicy::Off => "off",
             UpdatePolicy::Notify => "notify",
@@ -1040,6 +1431,7 @@ fn read_string(cfg: &Config, key: &str) -> String {
 
 fn read_number(cfg: &Config, key: &str) -> i64 {
     match key {
+        "quick-terminal-size" => i64::from(cfg.quick_terminal_size),
         "font-size" => cfg.font_size.round() as i64,
         // opacity is stored 0.0–1.0; the overlay edits it as a percent.
         "background-opacity" => (cfg.background_opacity * 100.0).round() as i64,
@@ -1101,6 +1493,115 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn restore_session_settings_has_three_choices() {
+        let field = categories(&[])
+            .into_iter()
+            .flat_map(|c| c.fields)
+            .find(|f| f.key == "restore-session")
+            .expect("restore session in Settings");
+        let FieldKind::Choice { values, .. } = &field.kind else {
+            panic!("restore is a choice")
+        };
+        assert_eq!(*values, &["auto", "true", "false"]);
+        for (value, next) in [("auto", "true"), ("true", "false"), ("false", "auto")] {
+            let cfg = Config::parse_text(&format!("restore-session = {value}"));
+            assert_eq!(read_choice(&cfg, field.key), value);
+            assert_eq!(next_value(&cfg, &field, 1), next);
+        }
+        assert_ne!(EN.text(description(&field)), ES.text(description(&field)));
+    }
+
+    #[test]
+    fn c08_grapheme_setting_round_trips_in_both_languages() {
+        let cats = categories(&[]);
+        let cat = cats
+            .iter()
+            .find(|cat| cat.fields.iter().any(|f| f.key == "grapheme-clustering"))
+            .expect("Text/Rendering group must expose grapheme clustering");
+        let field = cat
+            .fields
+            .iter()
+            .find(|f| f.key == "grapheme-clustering")
+            .unwrap();
+        assert_eq!(EN.text(cat.name), "Text / Rendering");
+        assert!(!ES.text(description(field)).is_empty());
+        assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        let cfg = Config::default();
+        assert!(read_bool(&cfg, field.key));
+        assert_eq!(next_value(&cfg, field, 1), "false");
+        let off = Config::parse_text("grapheme-clustering = false");
+        assert!(!read_bool(&off, field.key));
+        assert_eq!(next_value(&off, field, 1), "true");
+    }
+
+    #[test]
+    fn default_scrollback_memory_is_64_mb() {
+        let cfg = Config::default();
+        assert_eq!(cfg.scrollback, 10_000);
+        assert_eq!(cfg.scrollback_bytes, 64_000_000);
+        let cats = categories(&[]);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "scrollback-bytes")
+            .unwrap();
+        assert_eq!(read(&cfg, field, &EN), "64 MB");
+    }
+
+    #[test]
+    fn quick_terminal_settings_round_trip_and_capture_global_chords() {
+        use kettle_config::keybinds::{Key, Mods};
+        let cats = categories(&[]);
+        let group = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryQuickTerminal)
+            .unwrap();
+        assert_eq!(group.fields.len(), 5);
+        assert!(is_keybind(&group.fields[0]));
+        assert_eq!(
+            read(&Config::default(), &group.fields[0], &EN),
+            EN.text(Text::SettingsValueUnbound)
+        );
+        assert_eq!(read(&Config::default(), &group.fields[2], &EN), "40%");
+        let cfg = Config::parse_text(
+            "quick-terminal-hotkey = cmd+escape\nquick-terminal-position = center\nquick-terminal-size = 70",
+        );
+        assert_eq!(
+            read(&cfg, &group.fields[0], &EN),
+            cfg.quick_terminal_hotkey.unwrap().label()
+        );
+        assert_eq!(
+            read(&cfg, &group.fields[1], &ES),
+            ES.text(Text::QuickTerminalCenter)
+        );
+        assert_eq!(read(&cfg, &group.fields[2], &EN), "70%");
+        assert_eq!(next_value(&cfg, &group.fields[3], 0), "false");
+        assert_eq!(
+            capture_hotkey(Some(Key::Escape), Mods::empty()),
+            HotkeyCapture::Cancel
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::Delete), Mods::empty()),
+            HotkeyCapture::Value(None)
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::Char('x')), Mods::empty()),
+            HotkeyCapture::Pending
+        );
+        assert_eq!(capture_hotkey(None, Mods::CTRL), HotkeyCapture::Pending);
+        assert_eq!(
+            capture_hotkey(Some(Key::Escape), Mods::SUPER),
+            HotkeyCapture::Value(cfg.quick_terminal_hotkey)
+        );
+        assert!(
+            group
+                .fields
+                .iter()
+                .all(|field| EN.text(description(field)) != ES.text(description(field)))
+        );
+    }
 
     #[test]
     fn display_choices_use_sentence_case_without_changing_tokens() {
@@ -2053,6 +2554,301 @@ mod tests {
             };
             assert_eq!(read(&cfg, &field, &ES), label);
             assert_eq!(read_choice(&cfg, "theme"), identifier);
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use kettle_i18n::Language;
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
+    fn matches(query: &str, tr: &Translator) -> Vec<(usize, &'static str)> {
+        let cats = categories(&[]);
+        let nav = SettingsNav {
+            query: query.into(),
+            ..Default::default()
+        };
+        nav.visible_fields(&cats, tr)
+            .into_iter()
+            .map(|(c, f)| (c, cats[c].fields[f].key))
+            .collect()
+    }
+
+    #[test]
+    fn settings_search_matches_labels_descriptions_keys_and_spanish_accents() {
+        assert!(
+            matches("FONT SIZE", &EN)
+                .iter()
+                .any(|(_, key)| *key == "font-size")
+        );
+        assert_eq!(matches("idle seconds", &EN), [(0, "cursor-blink-timeout")]);
+        let graphics = categories(&[])
+            .iter()
+            .position(|cat| cat.name == Text::SettingsCategoryGraphics)
+            .unwrap();
+        assert_eq!(
+            matches("gpu-force-software", &EN),
+            [(graphics, "gpu-force-software")]
+        );
+        assert_eq!(matches("gpu-device-id", &EN), [(graphics, "gpu")]);
+        assert_eq!(matches("OPACIDAD", &ES), [(0, "background-opacity")]);
+        assert_eq!(matches("tamano de la fuente", &ES), [(0, "font-size")]);
+        assert_eq!(
+            matches("tamaño de la fuente", &ES),
+            matches("taman\u{303}o de la fuente", &ES)
+        );
+        assert!(matches("no-setting-could-match-this", &EN).is_empty());
+    }
+
+    #[test]
+    fn settings_search_groups_across_categories_in_catalogue_order() {
+        let results = matches("terminal", &EN);
+        assert!(results.iter().any(|(cat, _)| *cat == 0));
+        assert!(results.iter().any(|(cat, _)| *cat == 3));
+        assert!(results.windows(2).all(|w| w[0].0 <= w[1].0));
+        let cats = categories(&[]);
+        let nav = SettingsNav {
+            category: 4,
+            ..Default::default()
+        };
+        assert_eq!(nav.visible_fields(&cats, &EN).len(), cats[4].fields.len());
+        assert!(
+            nav.visible_fields(&cats, &EN)
+                .iter()
+                .all(|(cat, _)| *cat == 4)
+        );
+    }
+
+    #[test]
+    fn settings_search_keyboard_focus_results_and_two_escapes() {
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        for (macos, chord, other) in [
+            (true, Mods::SUPER, Mods::CONTROL),
+            (false, Mods::CONTROL, Mods::SUPER),
+        ] {
+            let mut nav = SettingsNav::default();
+            assert_eq!(
+                nav.search_key(&cats, &cfg, &EN, &Key::Character("f".into()), other, macos),
+                SearchRoute::Pass
+            );
+            assert_eq!(
+                nav.search_key(&cats, &cfg, &EN, &Key::Character("f".into()), chord, macos),
+                SearchRoute::Handled
+            );
+            assert!(nav.search_focused);
+            assert_eq!(
+                nav.search_key(
+                    &cats,
+                    &cfg,
+                    &EN,
+                    &Key::Character("j".into()),
+                    Mods::empty(),
+                    macos
+                ),
+                SearchRoute::Edit
+            );
+            nav.query = "terminal".into();
+            nav.reconcile(&cats, &cfg, &EN);
+            let first = (nav.category, nav.field);
+            assert_eq!(
+                nav.search_key(
+                    &cats,
+                    &cfg,
+                    &EN,
+                    &Key::Named(NamedKey::ArrowDown),
+                    Mods::empty(),
+                    macos
+                ),
+                SearchRoute::Handled
+            );
+            assert!(!nav.search_focused);
+            nav.search_key(
+                &cats,
+                &cfg,
+                &EN,
+                &Key::Named(NamedKey::ArrowDown),
+                Mods::empty(),
+                macos,
+            );
+            assert_ne!((nav.category, nav.field), first);
+            assert_eq!(
+                nav.search_key(
+                    &cats,
+                    &cfg,
+                    &EN,
+                    &Key::Named(NamedKey::Escape),
+                    Mods::empty(),
+                    macos
+                ),
+                SearchRoute::Handled
+            );
+            assert!(nav.query.is_empty());
+            assert_eq!(
+                nav.search_key(
+                    &cats,
+                    &cfg,
+                    &EN,
+                    &Key::Named(NamedKey::Escape),
+                    Mods::empty(),
+                    macos
+                ),
+                SearchRoute::Pass,
+                "the normal Settings handler closes on the second Escape"
+            );
+        }
+        let mut nav = SettingsNav::default();
+        nav.search_key(
+            &cats,
+            &cfg,
+            &EN,
+            &Key::Character("/".into()),
+            Mods::empty(),
+            false,
+        );
+        assert!(nav.search_focused);
+        nav.search_key(
+            &cats,
+            &cfg,
+            &EN,
+            &Key::Named(NamedKey::Enter),
+            Mods::empty(),
+            false,
+        );
+        assert!(!nav.search_focused);
+        nav.search_focused = false;
+        nav.search_key(
+            &cats,
+            &cfg,
+            &EN,
+            &Key::Character("/".into()),
+            Mods::SHIFT,
+            false,
+        );
+        assert!(
+            nav.search_focused,
+            "slash can require Shift on a keyboard layout"
+        );
+        nav.search_focused = false;
+        let cfg = Config {
+            vim_menu_nav: false,
+            ..cfg
+        };
+        assert_eq!(
+            nav.search_key(
+                &cats,
+                &cfg,
+                &EN,
+                &Key::Character("/".into()),
+                Mods::empty(),
+                false
+            ),
+            SearchRoute::Pass
+        );
+    }
+
+    #[test]
+    fn settings_hits_focus_search_categories_and_filtered_chips() {
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        let mut nav = SettingsNav::default();
+        nav.apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Search);
+        assert!(nav.search_focused);
+        nav.query = "gpu".into();
+        let fields = nav.visible_fields(&cats, &EN);
+        let index = fields
+            .iter()
+            .position(|&(c, f)| cats[c].fields[f].key == "gpu-backend")
+            .unwrap();
+        let target = nav
+            .apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Field(index))
+            .unwrap();
+        assert_eq!(cats[target.0].fields[target.1].key, "gpu-backend");
+        assert_eq!((nav.category, nav.field), target);
+        assert!(!nav.search_focused);
+        let background = cats
+            .iter()
+            .position(|cat| cat.name == Text::SettingsCategoryBackground)
+            .unwrap();
+        nav.apply_hit(
+            &cats,
+            &cfg,
+            &EN,
+            kettle_render::SettingsHit::Category(background),
+        );
+        assert_eq!(nav.category, background);
+        assert!(nav.query.is_empty());
+        let image = cats[background]
+            .fields
+            .iter()
+            .position(|f| f.key == "background-image")
+            .unwrap();
+        assert!(
+            nav.apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Field(image))
+                .is_none()
+        );
+        assert_ne!(nav.field, image, "disabled rows cannot take focus");
+    }
+
+    #[test]
+    fn settings_pointer_paging_updates_navigation_until_both_ends_are_reachable() {
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        for wheel in [false, true] {
+            let mut nav = SettingsNav::default();
+            let mut set = kettle_render::SettingsOverlay {
+                categories: cats.iter().map(|cat| EN.text(cat.name).into()).collect(),
+                ..Default::default()
+            };
+            for forward in [true, false] {
+                for _ in 0..cats.len() {
+                    set.active_category = nav.category;
+                    let layout =
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                    let arrow = if forward {
+                        layout.category_next
+                    } else {
+                        layout.category_previous
+                    };
+                    let Some((target, rect)) = arrow else {
+                        break;
+                    };
+                    let hit = layout.pointer_hit(
+                        (rect.0 + 1.0, rect.1 + 1.0),
+                        wheel.then_some(if forward { -1 } else { 1 }),
+                    );
+                    nav.apply_hit(&cats, &cfg, &EN, hit);
+                    assert_eq!(nav.category, target);
+                    assert!(nav.field < cats[target].fields.len());
+                    set.active_category = nav.category;
+                    assert!(
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0)
+                            .category_rects[target]
+                            .is_some()
+                    );
+                }
+                let layout = kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                let end = if forward { cats.len() - 1 } else { 0 };
+                assert!(layout.category_rects[end].is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn settings_every_field_has_short_english_and_spanish_descriptions() {
+        for cat in categories(&[]) {
+            for field in cat.fields {
+                let key = description(&field);
+                let en = EN.text(key);
+                let es = ES.text(key);
+                assert!(!en.is_empty() && !es.is_empty(), "{}", field.key);
+                assert!(en.chars().count() <= 70, "{}: {en}", field.key);
+                assert_ne!(en, es, "{}", field.key);
+            }
         }
     }
 }

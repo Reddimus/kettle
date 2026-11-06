@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a light native caption against its traffic-light cluster on macOS."""
+"""Check native and tab titlebars against their traffic-light cluster on macOS."""
 
 import argparse
 import importlib.util
@@ -42,6 +42,45 @@ def caption_ink(path, bounds, scale):
     return overlap, title
 
 
+def titlebar_geometry(geometry):
+    """Validate titlebar tabs using the same reported band as pointer and IME layout."""
+    bar = geometry.get("tab_bar", {})
+    if not bar.get("in_titlebar", False):
+        return
+    scale = geometry["scale_factor"]
+    band = bar["band"]
+    assert bar["y"] == band["y"] == 0, "titlebar strip must stay at the top"
+    assert bar["height"] == band["height"], "strip and titlebar band disagree"
+    assert band["height"] >= 20 * scale, "titlebar controls are too short"
+    if geometry.get("fullscreen"):
+        assert band["x"] == 0, "fullscreen must release the traffic-light inset"
+    else:
+        assert band["x"] > 0, "tabs must clear the traffic lights"
+    assert geometry["content"]["y"] >= band["height"], "terminal overlaps titlebar"
+    for control in ("new_tab", "new_tab_menu"):
+        rect = bar[control]
+        assert rect["width"] >= 20 * scale and rect["height"] >= 20 * scale, control
+    for tab in bar["segments"]:
+        rect = tab["rect"]
+        if rect["x"] < -1000:  # parked overflow tab
+            continue
+        assert rect["x"] >= band["x"], "tab overlaps traffic lights"
+        assert rect["height"] == band["height"], "tab escaped titlebar band"
+        close = tab["close"]
+        if close["width"]:
+            assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
+    if len(bar["segments"]) == 1:
+        tab = bar["segments"][0]
+        if not tab["hovered"]:
+            assert tab["hint"] is None, "idle single tab must hide its shortcut hint"
+            assert tab["close"]["width"] == tab["close"]["height"] == 0, (
+                "idle single tab must hide its close button"
+            )
+        title = tab["title_rect"]
+        assert abs(title["x"] + title["width"] / 2 - geometry["surface"]["width"] / 2) <= 1
+        assert bar["segments"][0]["label"].strip(), "single-tab title is missing"
+
+
 def capture(live, out, label, hover_caption=False):
     modal.focus(live)
     query = out / "native-window-info"
@@ -61,7 +100,9 @@ def capture(live, out, label, hover_caption=False):
         "screencapture", "-x", "-l", str(row["kCGWindowNumber"]), str(path)
     ], timeout=15)
     result.check_returncode()
-    scale = live.json_ctl("ui_geometry")["scale_factor"]
+    geometry = live.json_ctl("ui_geometry")
+    titlebar_geometry(geometry)
+    scale = geometry["scale_factor"]
     count, title = caption_ink(path, bounds, scale)
     metric = {"traffic_light_caption_ink": count, "title_ink": title,
               "scale_factor": scale, "native_window": row}
@@ -150,6 +191,7 @@ def native_fullscreen_roundtrip(live, out):
         trace["entered"] = stable_surface(
             live, lambda surface: surface != wanted, "native fullscreen did not settle",
         )
+        titlebar_geometry(live.json_ctl("ui_geometry"))
         fullscreen_restore(live, wanted)
     finally:
         for key, read in (("after", lambda: live.json_ctl("ui_geometry")),
@@ -185,7 +227,7 @@ def programmatic_fullscreen_roundtrip(live, out):
     return {"restored_surface": wanted, "toggle_count": 2}
 
 
-def check(kettle, out):
+def check(kettle, out, style="native"):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     query = out / "native-window-info"
     result = modal.live_ui.run([
@@ -197,8 +239,10 @@ def check(kettle, out):
     config.write_text(
         "agent-server = full\nrestore-session = false\nupdate-policy = off\n"
         "login-shell = false\nshell-integration = false\nshell = /bin/sh\n"
-        "window-title-format = Kettle caption fixture\ntab-format = {n}: demo\n"
-        "theme = Catppuccin Latte\nbackground-opacity = 0.86\nwindow-blur = true\n"
+        "window-title-format = Kettle caption fixture\ntab-format = Kettle caption fixture\n"
+        f"macos-titlebar-style = {style}\n"
+        + ("tab-bar = auto\n" if style == "tabs" else "tab-bar = always\n")
+        + "theme = Catppuccin Latte\nbackground-opacity = 0.86\nwindow-blur = true\n"
         "window-width = 72\nwindow-height = 24\ncursor-blink = false\n"
     )
     with modal.RecordedLive(kettle, config, out / "kettle.log") as live:
@@ -225,6 +269,7 @@ def check(kettle, out):
             live, lambda surface: surface["width"] > 0 and surface["height"] > 0,
             "startup fullscreen did not settle",
         )
+        titlebar_geometry(live.json_ctl("ui_geometry"))
         live.json_ctl("perform_action", {"action": "toggle_fullscreen"})
         wait_fullscreen(live, False)
         stable_surface(live, lambda current: current != surface,
@@ -248,8 +293,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kettle", required=True)
     parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--style", choices=("tabs", "native", "both"), default="both")
     args = parser.parse_args()
     if sys.platform != "darwin":
         raise SystemExit("native-titlebar smoke requires macOS")
     signal.signal(signal.SIGTERM, interrupted)
-    check(str(Path(args.kettle).resolve()), args.out_dir.resolve())
+    styles = ("tabs", "native") if args.style == "both" else (args.style,)
+    for style in styles:
+        check(str(Path(args.kettle).resolve()), args.out_dir.resolve() / style, style)

@@ -239,7 +239,26 @@ impl App {
             self.drain_events(ws);
         }
         self.process_pending_pane_restarts(ws);
+        let waiting_status = ws
+            .mux
+            .panes
+            .values()
+            .filter(|p| p.held && !p.held_child_reaped)
+            .count();
         let held_child_reap_pending = ws.mux.poll_held_child_statuses();
+        if waiting_status
+            != ws
+                .mux
+                .panes
+                .values()
+                .filter(|p| p.held && !p.held_child_reaped)
+                .count()
+        {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         // A log worker can fail after PTY output becomes silent. Its direct
         // event-loop wake reaches this poll even when output-generation gating
         // correctly decides there is no frame to paint.
@@ -955,10 +974,8 @@ impl App {
             let next = remaining.max(std::time::Duration::from_nanos(1));
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
-        // Search's deferred unlimited pass is deadline-driven and chunked.
-        // Wake exactly when the 500 ms typing debounce expires; while a chunk
-        // job remains, schedule the next event-loop turn without polling at a
-        // frame-rate forever (the job clears at a match or terminal edge).
+        // Count and navigation work each retain a wake after the typing pause.
+        // A nearby match can finish navigation while counting is still pending.
         if ws.search.open {
             // Repaint once when the bar should start saying `Searching…`.
             if let Some(at) = ws.search.searching_label_at() {
@@ -972,24 +989,14 @@ impl App {
                     window.request_redraw();
                 }
             }
-            if let Some(deadline) = ws.search.unlimited_retry_at {
-                let due = now >= deadline;
-                let next = if due {
-                    std::time::Duration::from_millis(1)
-                } else {
-                    deadline
-                        .saturating_duration_since(now)
-                        .max(std::time::Duration::from_millis(1))
-                };
+            if let Some(deadline) = search_work_deadline(&ws.search, now) {
+                let next = deadline
+                    .saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1));
                 wait = Some(wait.map_or(next, |current| current.min(next)));
-                if due && let Some(window) = &ws.window {
-                    window.request_redraw();
-                }
-            }
-            if search_background_ready(&ws.search, now) {
-                let next = std::time::Duration::from_millis(1);
-                wait = Some(wait.map_or(next, |current| current.min(next)));
-                if let Some(window) = &ws.window {
+                if now >= deadline
+                    && let Some(window) = &ws.window
+                {
                     window.request_redraw();
                 }
             }
@@ -1061,4 +1068,25 @@ pub(super) fn terminal_animation_tick(
         *next_tick = Some(now + std::time::Duration::from_millis(33));
     }
     (due, next_tick.map(|at| at.saturating_duration_since(now)))
+}
+
+/// The next search work turn, independent of animation and terminal output.
+pub(super) fn search_work_deadline(
+    search: &crate::search_input::SearchState,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    if !search.open {
+        return None;
+    }
+    let count_deadline = search
+        .count_scan
+        .as_ref()
+        .filter(|scan| !scan.complete)
+        .map(|_| search.typing_pause_until.unwrap_or(now));
+    search
+        .unlimited_retry_at
+        .into_iter()
+        .chain(count_deadline)
+        .chain(search_background_ready(search, now).then_some(now))
+        .min()
 }

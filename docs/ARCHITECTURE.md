@@ -296,11 +296,20 @@ layout and SSH pickers, the right-click menu with its Preferences submenu, the n
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
 title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
-macOS Dock menu and the macOS menu bar's application menu are on it. The
-application menu is Kettle's own (`macos_menu`): winit builds an English one
-as the app finishes launching, before the first `resumed`, and Kettle's
-replaces it there with the same rows, standard actions and key equivalents,
-so no chord that reaches the PTY changes. The Linux desktop entry carries its
+macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
+(`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
+Edit, View and Window menus, actions, separators, enabled state and live Cmd
+shortcut hints. AppKit installation replaces winit's startup menu on `resumed`
+and reconciles it after focused-window dispatch and config reload, registering
+Services and the Windows menu each time. Menu text follows the configured
+language on reload; other UI surfaces still require a restart. The root NSMenu
+only performs native application equivalents (unless the keymap owns them).
+Kettle equivalents are declined so the original event reaches winit's modal
+handlers, `resolve_keybind_action`, program-key yield rules and terminal writer,
+with its physical key, layout, repeat and release intact. Mouse menu choices
+send existing actions to the focused window through the event-loop proxy.
+Commands with no existing Kettle Action are omitted.
+The Linux desktop entry carries its
 Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,
@@ -1693,9 +1702,9 @@ restored titles instead of opening an empty editor.
 shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
 Prefix and hint text have separate clipped slots of at most 30% of the field
-each. A key hint that does not fit drops its middle segments, then its leading
-ones, before its last, so a narrow window still shows `Esc cancel`; only that
-segment alone is ever cut with an ellipsis. Settings computes the inline
+each outside pickers. Picker headers keep the complete right-aligned key hint
+only when it fits beside the query; otherwise they drop it. Other fields drop
+hint segments before truncating the final segment with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
 the suffix, and commits through the same editor. IME candidate placement shapes
@@ -1706,8 +1715,13 @@ committed text.
 
 Transient popups share one outside-press dispatch and consume the dismissing
 click: context menus, the command palette, theme/layout pickers, SSH, title
-editing and quick-select hints. A picker's input lane and results panel together
-count as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+editing and quick-select hints. The command palette and theme, layout and SSH
+pickers share one top-centred rounded card below the top chrome. Its query header
+and results use one geometry for paint, pointer input, control diagnostics,
+AccessKit bounds and the IME caret. Command labels accent the characters matched
+by the same fuzzy matcher used for ranking; English alias matches in Spanish
+have no accent unless the displayed label also matches. The whole card counts
+as inside. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep
@@ -1756,13 +1770,23 @@ report successful reply delivery after either bounded path loses a query.
 
 ## In-process multi-window
 
-On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
-shadow, and rounded window mask. Winit applies native blur to the window without
-adding frame subviews, which can disrupt AppKit's light caption. AppKit owns the
-opaque titlebar and follows Kettle's selected light or dark appearance. Kettle's
-background color backs the content during resize. Blur is enabled only when
-the renderer's creation-time surface is translucent. Reduce Transparency makes
-the window opaque again. Borderless windows retain their sharp-alpha fallback.
+On macOS, `macos-titlebar-style = tabs` creates decorated windows with a
+transparent titlebar, hidden native title and full-size content view. AppKit
+retains traffic lights, shadow and rounded window mask. The top strip owns the
+titlebar pixels, painting the same opaque chrome behind the controls and tabs.
+`app::titlebar` queries AppKit's titlebar height and traffic-light frames, with
+28 pt and 78 pt fallbacks, scaled to physical pixels. Fullscreen retains the
+top band without the traffic-light inset. One tab remains visible and centred
+as the title. Empty strip space starts a native window drag; a double-click
+uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs retain their separate
+reorder/tear-off/re-dock gestures.
+
+`native`, non-top tabs and disabled tabs keep the separate AppKit caption and
+content view below it. Borderless windows retain their sharp-alpha fallback.
+Config reload synchronizes the native style before laying out the content.
+Winit applies blur without frame subviews; Reduce Transparency makes the
+window opaque. Native material synchronization preserves the full-size style's
+transparent titlebar instead of restoring an opaque AppKit caption.
 
 Windows applies the same raised surface and a contrast-checked text color
 through DWM while requesting its system backdrop. Linux probes the live
@@ -1772,12 +1796,16 @@ and replacing pane-base pass. That floor is applied only to the swapchain
 render, so offscreen screenshots retain the configured alpha and config files
 are never rewritten.
 
-The content view is deliberately *not* full-size: tabs, terminal cells, pointer
-hit-testing, and ctl geometry all stay below the traffic lights without a
-platform-specific synthetic inset. Extending the renderer under the titlebar
-would require compensating every one of those coordinate systems for AppKit's
-content layout rect; no such hidden geometry shift is introduced for a cosmetic
-fix.
+The shared tab band supplies painting, pointer hit tests, accessibility, ctl
+geometry, IME placement, docking and tear-off placement. Content and status
+bands reserve its height once; the traffic-light inset restricts tab and dock
+geometry without shifting terminal columns. Tab text fits within the fixed
+band even at large terminal font zoom. Title-editor shaping, measurement,
+scrolling and pointer slots use the same band scale. Startup initializes this
+policy before exact-grid sizing or spawning a pane, using the display scale
+until native measurements exist. Recording notices travel separately from
+configurable title substitutions and take priority when fitting a label.
+The native style retains its previous content origin below AppKit's caption.
 
 The generated application icon uses the historical, font-independent `>_`
 mark on every platform. Dark appearance uses a TokyoNight blue system-masked
@@ -2166,7 +2194,10 @@ whole scrollback buffer:
   query. No search state is process-global. Navigation and visible highlights
   use separate `CompiledSearch` instances so alternating work slices cannot
   discard each other's saved offsets. Both receive the same scan token and
-  reset on query, output, or layout changes.
+  reset on query, output, or layout changes. The exact-count scan has an
+  independent scheduler deadline after the typing pause, even when nearby
+  navigation has already found a match. Ordinals compare complete grid spans
+  because combining marks can give distinct matches the same start cell.
   The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
   token combines pane output generation, query revision, and terminal layout.
   Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
@@ -2440,12 +2471,16 @@ continuation annotations. Cell flags use 32 bits with the legacy bit values
 unchanged; the cell still fits its existing 24-byte cap on 64-bit targets.
 Control snapshots retain their existing Boolean attribute fields.
 
-### Opt-in Unicode 18 grapheme cells
+### Unicode 18 grapheme cells
 
 DECSET/DECRST 2027 enables/disables extended-grapheme output; DECRQM reports
-its current state. It starts off, and RIS and DECSTR disable it. It is separate
-from saved cursor state. Changing the mode does not reinterpret existing cells.
-Legacy output keeps its per-codepoint layout.
+its current state. New terminals enable it by default. Set
+`grapheme-clustering = false` to start new terminals with scalar cells instead.
+RIS and DECSTR restore the configured default captured when the terminal was
+created. Config reloads affect only future terminals, preserving both the live
+mode and reset default of existing terminals. It is separate from saved cursor
+state. Changing the mode does not reinterpret existing cells. With the mode
+disabled, output keeps its per-codepoint layout.
 
 The engine uses generated Unicode 18 GCB, InCB and Extended_Pictographic tables,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
@@ -3232,8 +3267,14 @@ emits one pinned instance each, rasterized through cosmic-text's own `SwashCache
 into a private mask+color atlas. Without pane dimming, the fragment shader
 matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
-so antialiasing, gamma and theme colors are identical. Only the X position
-differs. This prevents glyph drift. Without pinning, a glyph whose advance
+so antialiasing, gamma and theme colors are identical. Ordinary glyphs differ
+only in X position. Emoji presentation fits its ink to the cell rectangle
+while preserving aspect ratio. All images in an emoji cluster share one fit
+of their combined ink bounds, preserving shaped combining-mark offsets;
+separate destination and atlas-source sizes scale the bitmaps without changing
+shaped advances or neighboring baselines.
+The block-cursor glyph uses the same fit. This prevents glyph drift. Without
+pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following
 glyph off the `col × cell_w` grid that the selection highlight, cursor and mouse
@@ -3253,11 +3294,18 @@ and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
 
-Inactive Legacy panes also use this glyph pipeline, retaining glyphon's
+Legacy panes containing emoji and inactive Legacy panes also use this glyph
+pipeline, retaining glyphon's
 continuous positions instead of pinning to cells. Glyphon's color shader does
 not accept a tint, so this route keeps bitmap dimming separate from the
 contrast floor applied to ordinary text. Focus and dimming settings participate
 in the glyph damage key, including when text colours stay at the contrast floor.
+Grapheme-mode rows use their explicit cluster positions in both renderer
+settings. Emoji ZWJ and skin-tone sequences require one visible raster image;
+unsupported compositions draw one replacement while grid text stays intact.
+Non-emoji ZWJ clusters retain all their shaped images.
+The sizing changes do not alter grid rectangles, so pointer hit testing,
+AccessKit, `ctl ui_geometry` and terminal IME placement retain the same cells.
 
 Every GPU upload goes through `upload.rs`, which holds the renderer's only
 `write_buffer` and `write_texture` calls. Each pipeline keeps an exact CPU copy
@@ -4382,11 +4430,15 @@ process. Labels, splits, new tabs, and ctl all use that one value. The
 session is **multi-window**: `Session` carries `windows: Vec<SWindow {
 tabs, active, geometry }>` and restore reopens *every* window at its
 (monitor-clamped) saved position. Replay on the next
-launch is **opt-in**: by default a new window opens fresh (a single pane
-in the default cwd, like every mainstream terminal), and the
-session is *saved* only in restore mode so a fresh window never clobbers
-a saved layout. Set `restore-session = true` (or pass `--restore` for a
-one-shot) to "continue where you left off":
+launch follows `restore-session = auto` by default. On macOS, `auto` reads
+`NSQuitAlwaysKeepsWindows` from the app's NSUserDefaults domain, then the global
+domain. A true value keeps windows; false corresponds to the checked "Close
+windows when quitting an application" box. If neither domain sets a value,
+windows are kept. On other platforms `auto` is false. `true` always enables
+restore and `false` always opens fresh; legacy boolean spellings still work.
+`--restore` enables restore for one launch and `--layout NAME` remains independent.
+The session is saved only in restore mode, so a fresh window never clobbers a
+saved layout. Privacy rules and crash recovery prompts do not change.
 
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
@@ -4415,8 +4467,8 @@ sequenceDiagram
     Mux->>FS: private staged sibling + file sync
     FS->>FS: atomic replace → session.json<br/>parent-directory sync
 
-    Note over App,FS: Next launch — restore is opt-in
-    App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
+    Note over App,FS: Next launch follows the resolved restore policy
+    App->>App: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
     App->>FS: read session.json
     FS-->>App: windows → tab trees + per-pane cwds
     App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)
@@ -4614,3 +4666,120 @@ DECRQM and private-mode save/restore recognize mode 5. DECSTR preserves it, as
 XTerm does; RIS restores normal video while retaining the other OSC resources.
 Mode changes fully damage the terminal without reinterpreting stored text,
 protection, grapheme payloads or retained images.
+
+### Settings layout
+
+`kettle-ui::settings` owns the field catalogue, descriptions, bounded search
+editor and stable category/field identities. Search projects matching fields
+in catalogue order; edits still use the original config key and persistence
+path. `kettle-render::settings_layout` owns the centered panel, responsive
+panes, visible rows, value chips, search field, grouped headings and pinned
+footer rectangles. Rendering, mouse hit tests, inline editing/IME, AccessKit
+bounds and `ctl ui_geometry` consume that layout with chrome font metrics,
+independent of terminal cell scaling. Diagnostics expose category, row, chip,
+label, description and search rectangles without the search query or values.
+
+Narrow category strips reserve overflow-arrow rectangles with target category
+indices. Pointer clicks and wheel notches resolve through `SettingsLayout`,
+then apply the same category transition in `SettingsNav`. Short panels reduce
+padding and omit the repeated title; the shortest panels place Search and the
+category strip side by side. Group headings are omitted when needed to retain
+a complete focused field. Picker geometry similarly reduces outer spacing to
+retain its header and one result. The renderer uses `visible_resize_overlay`
+for both size-chip text preparation and drawing, suppressing it under Settings
+or a picker card.
+
+### Paste consent and context-menu nesting
+
+Text paste consent is a `kettle-ui` confirmation action carrying bounded text,
+the original pane, and the broadcast scope and recipient set. Consent fails
+closed if that scope changes. Queued input behind a paste cannot pass through
+an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
+`input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
+Path pastes retain their stricter rejection of control characters in filenames.
+
+Context menus keep ancestor levels and their physical anchors while a submenu
+is open. The app supplies each panel to the renderer in stacking order and
+uses the same geometry for pointer input, AccessKit bounds and `ui_geometry`.
+Ancestor text is clipped under child panels. AccessKit nests the child Menu
+under the expanded parent MenuItem, with actions on visible ancestor rows.
+Menus have no editable text or IME caret; paste consent reuses the existing
+confirmation layout and IME ownership rules.
+
+### Automatic shell startup and command outcomes
+
+`kettle-ui::shell_integration` extends the core `shell_startup` launch additions
+with immutable files verified by `owned_dir`. It composes with agent startup,
+clears borrowed launch state at each shell's bootstrap, and loads the canonical
+bundled hooks. No startup files belonging to the user are changed.
+The per-file verification read limit is 64 KiB, covering the Fish integration.
+Startup variants are content-addressed. Under the install lock each launch
+refreshes the verified directory's mtime; cleanup preserves every variant used
+within 24 hours and up to four older variants. The recent variants take priority
+over the count limit because starting shells may still reference them.
+
+Automatic Bash uses `--posix` and `ENV`, with `--login` for actual login shells.
+Its startup file disables POSIX mode and `inherit_errexit`, restores the user's
+`ENV`, clears exported helpers, then sources the login profiles or interactive
+rcfile according to the invocation flags before loading hooks. User startup is
+sourced at top level so its declarations retain their normal scope. macOS system
+Bash 3.2.57 ignores this `ENV` route and reads normal startup even with `--posix`;
+Kettle leaves `/bin/bash` and `/usr/bin/bash` untouched there. Those shells retain
+login state and logout processing and can use manually installed hooks.
+Fish removes only Kettle's entry from the current `XDG_DATA_DIRS`, preserving
+changes from earlier user snippets. Zsh wrappers accept readable text or compiled
+`.zwc` startup files, as the core `.zshenv` wrapper does.
+
+The core reader stores bounded known command outcomes separately from prompt
+navigation, anchored to primary-grid document rows at command start. The UI
+captures outcomes into render snapshots. `scrollbar::command_tick_rect` owns
+the shared overlay geometry for rendering, AccessKit and control diagnostics.
+Terminal grid, hit tests and IME layout do not change.
+
+## Process exits and persistent chrome notices
+
+The UI applies exit policy only after ordered PTY EOF or the existing bounded
+Windows drain. A successful direct-child status closes `close-on-success`
+panes; failures and `hold` panes retain their grids and release the child handle.
+A late status is polled on the existing bounded held-child cadence.
+`ProcessLaunch` retains a clone of the actual spawn command builder in memory,
+including cwd, invocation name and environment. Held-pane restart replays it
+with the same pane ID and split placement; failed spawn preserves the old pane.
+The snapshot is never serialized or logged.
+
+Persistent exit banners and config diagnostics reuse the update-toast painter.
+Their overlay rectangles are projected once for paint, pointer hit testing,
+AccessKit and `ctl ui_geometry`; they do not reserve terminal rows or move IME
+coordinates. Config diagnostics retain tokenizer source lines and raw key names,
+exclude values, and cap the notice at three entries plus a remaining count.
+Tab accessibility uses the renderer's `TabBar` segments and control rectangles
+on either axis, with pane anchors to reject stale actions after tabs close.
+
+## Quick terminal
+
+`kettle-ui::quick_terminal` owns a pure visibility/focus-return model and screen
+geometry. `App` owns one optional quick-window sequence alongside its regular
+windows, so hiding preserves the same Mux and PTYs. The event-loop integration
+reuses window construction, renderer initialization, focus reports and frame
+scheduling. A 150 ms slide uses the shared system motion preference; no worker
+mutates window geometry. The quick workspace is excluded from normal saved
+sessions. The cold-launch quick-window identity is assigned when App is built,
+before Lua startup actions or session snapshots. Existing window activation
+paths update the same visibility/focus-return model. macOS screen selection,
+placement and animation use logical AppKit points, moving before resizing so
+mixed screen scales cannot reinterpret destination dimensions.
+
+`kettle quick-terminal` uses `kettle-ctl` activation with a validated
+`toggle_quick_terminal` action and the existing per-launch idempotency key,
+private endpoint, bounded queue and confirmation timeout. A lost reply cannot
+toggle twice. A bounded desktop-issued Wayland activation token travels only
+with a quick toggle and is consumed through the existing Wayland bridge; it is
+never logged. An expired or absent token cannot bypass compositor focus policy.
+A new primary starts directly in its quick window. Native hotkey
+registrations are scoped resources: Carbon handlers on the macOS main thread,
+and an X11 connection whose passive grabs end when the registration drops.
+Settings capture reads physical modifiers, including composing Option, and
+canonicalizes shifted US punctuation to base keys plus Shift before persistence
+and native registration.
+Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
+desktop shortcuts invoking the CLI.

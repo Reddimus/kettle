@@ -14,6 +14,8 @@ fn every_static_message_has_clean_text_in_both_languages() {
         // Model-drafted Spanish is a draft, but it is never left as English,
         // except for words Spanish shares.
         let cognate = [
+            Text::MacosMenuApp,
+            Text::MacosMenuShell,
             Text::SettingsGpuKindVirtual,
             Text::SettingsGpuKindSoftware,
             Text::MediaViewerKindVideo,
@@ -156,7 +158,21 @@ fn every_spanish_message_has_a_review_status() {
         .collect::<Vec<_>>();
     let expected = spanish
         .keys()
-        .filter(|key| key.starts_with("confirm_") || key.contains("a11y"))
+        .filter(|key| {
+            key.starts_with("confirm_")
+                || key.contains("a11y")
+                // These visible notice labels also name live regions and buttons.
+                || matches!(
+                    key.as_str(),
+                    "process_exited"
+                        | "process_exit_pending"
+                        | "process_restart"
+                        | "process_close"
+                        | "config_notice"
+                        | "config_notice_more"
+                        | "notice_dismiss"
+                )
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut sorted = listed.clone();
@@ -180,6 +196,8 @@ fn no_spanish_message_is_left_in_english() {
     let english: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let spanish: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
     let cognates = [
+        "macos_menu_app",
+        "macos_menu_shell",
         "settings_gpu_kind_software",
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
@@ -281,4 +299,24 @@ fn builtin_theme_names_are_display_only_translations() {
         assert_eq!(en.theme_name(name), name);
     }
     assert_eq!(es.theme_name("custom"), "custom");
+}
+
+#[test]
+fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
+    let en: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
+    let es: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
+    let review: toml::Table = include_str!("../locales/es.review.toml").parse().unwrap();
+    let mut descriptions = 0;
+    for (key, value) in &en {
+        if key.starts_with("settings_description_") {
+            descriptions += 1;
+            assert!(value.as_str().unwrap().chars().count() <= 70, "{key}");
+            assert_ne!(value, &es[key], "{key}");
+            assert_eq!(review["status"][key].as_str(), Some("draft"), "{key}");
+        }
+    }
+    assert_eq!(
+        descriptions, 58,
+        "every curated field and keybind has its own description"
+    );
 }

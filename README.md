@@ -10,9 +10,13 @@ Kettle is a GPU-accelerated terminal for macOS and Linux. It has tabs, splits,
 search, session restore and themes, and it shows the pictures, diagrams,
 documents and videos your coding agents make right in the chat.
 
+Use `kettle quick-terminal` for a persistent hotkey window; configure it in Settings → Quick terminal.
+
 ![Kettle on macOS with terminal output beside an SVG preview](docs/images/kettle-hero.png)
 
 Native macOS window, TokyoNight Night. [Capture notes](docs/images/README.md).
+On macOS, top tabs now share the titlebar; `macos-titlebar-style = native`
+restores the separate native caption.
 
 ## Install
 
@@ -43,8 +47,9 @@ update toast) or `update-policy = off` (no automatic network request).
 2. Split the window with `Ctrl+Shift+E` (side by side) or `Ctrl+Shift+O`
    (top and bottom).
 3. Open Settings with `Ctrl+,`.
-4. Optional: add [shell integration](docs/SHELL-INTEGRATION.md) for prompt
-   jumps and completion cards.
+4. Bash, Zsh and Fish get [shell integration](docs/SHELL-INTEGRATION.md)
+   automatically for prompt jumps, command results and completion cards.
+   macOS system Bash 3.2 needs the linked manual setup.
 
 Kettle reloads its `key = value` config when you save it.
 `kettle --write-default-config` creates one, `kettle --config-path` finds it
@@ -62,12 +67,16 @@ lists every setting.
 | Focus the pane in a direction, Linux | `Alt+Arrow` |
 | Focus the pane in a direction, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
 | Search | `Ctrl+Shift+F` |
+| Toggle regex while searching | `Alt+R` (Linux/Windows), `Cmd+Alt+R` (macOS) |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
 
-macOS also has `Cmd+T`, `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
-`kettle --list-keybinds` for the full map, and see
+macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
+below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
+`kettle --list-keybinds` for the full map. The macOS Shell, Edit, View and
+Window menus expose common actions and show their current Cmd shortcuts,
+including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.
 
 ## Agent previews

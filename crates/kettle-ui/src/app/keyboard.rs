@@ -617,6 +617,7 @@ pub(super) enum KeyModal {
     ThemePicker,
     SettingsText,
     SettingsCapture,
+    SettingsSearch,
     Settings,
     LayoutPicker,
     Ssh,
@@ -643,6 +644,12 @@ pub(super) fn top_modal(ws: &WindowState) -> Option<KeyModal> {
         KeyModal::SettingsText
     } else if settings_capture_active(ws) {
         KeyModal::SettingsCapture
+    } else if ws
+        .settings_nav
+        .as_ref()
+        .is_some_and(|nav| nav.search_focused)
+    {
+        KeyModal::SettingsSearch
     } else if ws.settings_nav.is_some() {
         KeyModal::Settings
     } else if ws.layout_picker_input.is_some() {
@@ -766,11 +773,15 @@ pub(super) fn settings_capture_active(ws: &WindowState) -> bool {
 /// as long as it is held, and leave it wherever the last repeat fell. Such a
 /// repeat is still consumed, so it never reaches the program.
 pub(super) fn toggles_once_per_press(action: &Action) -> bool {
+    if matches!(action, Action::ToggleSearchRegex) {
+        return true;
+    }
     matches!(
         action,
         Action::ToggleViMode
             | Action::ToggleZoom
             | Action::ScaledZoom
+            | Action::ToggleQuickTerminal
             | Action::ToggleFullscreen
             | Action::ToggleBroadcastAll
             | Action::ToggleBroadcastGroup
@@ -1248,6 +1259,7 @@ pub(super) fn to_kkey(key: &Key) -> Option<KKey> {
             // character " ", so without this the `ctrl+shift+space` vi-mode
             // default, and any `space` chord in a config, never matched.
             NamedKey::Space => KKey::Char(' '),
+            NamedKey::Escape => KKey::Escape,
             // Without these two the `cmd+backspace` default parses out of the
             // config and then never matches a real key press.
             NamedKey::Backspace => KKey::Backspace,
@@ -1584,7 +1596,8 @@ impl App {
         trigger: Trigger,
         action: &Action,
     ) -> bool {
-        self.adaptive_focus_chord_falls_through(ws, trigger, action)
+        (!ws.search.open && matches!(action, Action::ToggleSearchRegex))
+            || self.adaptive_focus_chord_falls_through(ws, trigger, action)
             || self.chord_goes_to_program(ws, trigger, action)
     }
 

@@ -1,3 +1,45 @@
+settings_field_restore_session = "Restaurar sesión"
+settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
+
+menu_category_close_confirmation = "Confirmación de cierre"
+confirm_paste_heading = "Confirmar pegado"
+confirm_paste_body = "Este pegado puede enviar comandos a la terminal. Vista previa: {preview}"
+confirm_paste_one_line = "Pegar en una sola línea"
+menu_select_all = "Seleccionar todo"
+menu_category_split = "Dividir"
+menu_category_pane = "Panel"
+menu_category_tab = "Pestaña"
+menu_category_window = "Ventana"
+menu_category_title = "Título"
+menu_category_group = "Grupo"
+menu_category_appearance = "Apariencia"
+menu_category_commands = "Comandos"
+
+process_exited = "El proceso terminó con el código {code}"
+process_exit_pending = "El proceso terminó; esperando el estado"
+process_restart = "Reiniciar (Enter)"
+process_close = "Cerrar (Esc)"
+config_notice = "Opciones de configuración ignoradas:\n{entries}"
+config_notice_more = "+{count} más"
+notice_dismiss = "Descartar"
+a11y_tab_list = "Pestañas"
+a11y_tab_close = "Cerrar {title}"
+a11y_new_tab_menu = "Menú de nueva pestaña"
+quick_terminal_toggle = "Mostrar u ocultar la terminal rápida"
+settings_category_quick_terminal = "Terminal rápida"
+quick_terminal_hotkey = "Atajo global"
+quick_terminal_position = "Posición"
+quick_terminal_size = "Tamaño"
+quick_terminal_animation = "Animación"
+quick_terminal_autohide = "Ocultar al cambiar de aplicación"
+quick_terminal_center = "Centro"
+quick_terminal_hotkey_description = "Presiona una combinación; Delete la borra. En Wayland y Windows, usa los atajos del escritorio."
+quick_terminal_position_description = "Anclar a este borde de la pantalla o centrar la ventana."
+quick_terminal_size_description = "Porcentaje de pantalla: altura arriba o abajo, ancho a los lados, ambos en el centro."
+quick_terminal_animation_description = "Deslizar al mostrar, salvo que el sistema tenga Reducir movimiento activado."
+quick_terminal_autohide_description = "Ocultar al enfocar otra aplicación; mantener pestañas y paneles en ejecución."
+quick_terminal_hotkey_failed = "No se pudo registrar el atajo de la terminal rápida. Puede estar en uso; elige otra combinación en Configuración."
+
 # Neutral Latin American Spanish. The owner designated an independent reviewer.
 # Rendered context and required second-pass acceptance remain pending for 5.0.
 
@@ -706,6 +748,117 @@ update_toast_installed = "Kettle {tag} está instalado"
 theme_builtin_dark = "Oscuro integrado"
 theme_builtin_light = "Claro integrado"
 
+# Settings descriptions and discovery.
+settings_description_field_agent_previews = "Permitir que los agentes envíen contenido sin leer ni escribir."
+settings_description_field_agent_previews_claude_code = "Agregar el plugin de vista previa a Claude Code en paneles nuevos."
+settings_description_field_agent_previews_codex = "Preparar vistas previas de Codex en shells de paneles nuevos."
+settings_description_field_agent_previews_agy = "Permitir que el plugin instalado de agy envíe contenido a la bandeja."
+settings_description_field_add_kettle_to_path = "Agregar Kettle al final de PATH en paneles nuevos si falta."
+settings_description_field_background_animation = "Elegir cuándo se reproducen los fondos animados."
+settings_description_field_background_image = "Elegir el archivo de imagen usado como fondo."
+settings_description_field_background_opacity = "Ajustar la opacidad del fondo de la ventana."
+settings_description_field_background_type = "Elegir un fondo sólido, transparente, de imagen o de estrellas."
+settings_description_field_bell = "Elegir cómo se notifican los avisos de la terminal."
+settings_description_field_chrome_background = "Elegir los colores de las barras sobre imágenes o estrellas."
+settings_description_field_close_button_on_tab = "Mostrar un botón para cerrar en cada pestaña."
+settings_description_field_completion_overlay = "Mostrar sugerencias de la shell en una capa de Kettle."
+settings_description_field_copy_on_select = "Copiar automáticamente el texto seleccionado al portapapeles."
+settings_description_field_cursor_blink = "Hacer parpadear el cursor de la terminal."
+settings_description_field_cursor_blink_timeout = "Detener el parpadeo tras segundos sin escribir; cero lo mantiene."
+settings_description_field_cursor_shape = "Elegir la forma del cursor de la terminal."
+settings_description_field_detachable_tabs = "Permitir arrastrar una pestaña a su propia ventana."
+settings_description_field_focus = "Elegir cómo recibe un panel el foco del teclado."
+settings_description_field_font_size = "Ajustar el tamaño de la fuente de la terminal en puntos."
+settings_description_field_gpu_backend = "Elegir la API gráfica que se usará al reiniciar."
+settings_description_field_gpu_device = "Fijar una GPU detectada para el próximo inicio."
+settings_description_field_gpu_force_software = "Usar renderizado por software al reiniciar."
+settings_description_field_gpu_power_preference = "Preferir ahorro de energía o rendimiento al elegir una GPU."
+settings_description_field_invert_search = "Invertir la dirección de Enter en la búsqueda de la terminal."
+settings_description_field_language = "Elegir el idioma de la interfaz; se aplica al reiniciar Kettle."
+settings_description_field_mouse_hide_while_typing = "Ocultar el puntero al escribir en la terminal."
+settings_description_field_scroll_tabbar = "Desplazar pestañas que no caben con flechas o la rueda del mouse."
+settings_description_field_scrollback_lines = "Limitar las líneas guardadas; cero conserva un historial ilimitado."
+settings_description_field_scrollback_memory = "Limitar la memoria del historial; cero elimina el límite en bytes."
+settings_description_field_scrollbar = "Elegir cuándo se ve la barra de desplazamiento de la terminal."
+settings_description_field_scrollbar_width = "Ajustar el ancho visible de la barra en píxeles lógicos."
+settings_description_field_search_case = "Elegir cómo trata la búsqueda las mayúsculas y minúsculas."
+settings_description_field_search_wrap = "Continuar la búsqueda tras la primera o la última coincidencia."
+settings_description_field_show_titlebar = "Mostrar la barra de título sobre cada panel de la terminal."
+settings_description_field_tab_bar = "Elegir cuándo se ve la barra de pestañas."
+settings_description_field_tab_bar_position = "Colocar la barra de pestañas encima o debajo de la terminal."
+settings_description_field_tab_min_width = "Ajustar el ancho mínimo de pestaña antes de desbordar la barra."
+settings_description_field_theme = "Elegir los colores de la terminal y verlos al instante."
+settings_description_field_update_check_interval = "Ajustar las horas entre búsquedas de actualizaciones."
+settings_description_field_update_policy = "Elegir si buscar o instalar actualizaciones automáticamente."
+settings_description_field_vim_menu_nav = "Usar hjkl y otras teclas de Vim en menús y capas."
+settings_description_field_window_blur = "Desenfocar detrás de ventanas translúcidas donde se admita."
+settings_description_field_window_padding = "Ajustar el margen interior horizontal y vertical de la ventana."
+settings_description_keybind_close_pane = "Cambiar el atajo que cierra el panel enfocado."
+settings_description_keybind_command_palette = "Cambiar el atajo que abre la paleta de comandos."
+settings_description_keybind_copy = "Cambiar el atajo que copia el texto seleccionado."
+settings_description_keybind_new_tab = "Cambiar el atajo que abre una pestaña nueva."
+settings_description_keybind_next_tab = "Cambiar el atajo que selecciona la pestaña siguiente."
+settings_description_keybind_open_settings = "Cambiar el atajo que abre la configuración."
+settings_description_keybind_paste = "Cambiar el atajo que pega desde el portapapeles."
+settings_description_keybind_previous_tab = "Cambiar el atajo que selecciona la pestaña anterior."
+settings_description_keybind_split_down = "Cambiar el atajo que divide debajo del panel enfocado."
+settings_description_keybind_split_right = "Cambiar el atajo que divide a la derecha del panel enfocado."
+settings_description_keybind_start_search = "Cambiar el atajo que abre la búsqueda de la terminal."
+settings_description_keybind_toggle_zoom = "Cambiar el atajo que amplía el panel enfocado."
+settings_a11y_search = "Buscar configuración"
+settings_search_placeholder = "Buscar configuración"
+settings_no_matches = "No hay opciones que coincidan"
+
+macos_menu_app = "Kettle"
+
+macos_menu_shell = "Shell"
+
+macos_menu_edit = "Editar"
+
+macos_menu_view = "Ver"
+
+macos_menu_window = "Ventana"
+
+macos_menu_palette = "Paleta de comandos…"
+
+macos_menu_theme = "Seleccionar tema…"
+
+macos_menu_select_all = "Seleccionar todo"
+
+macos_menu_find = "Buscar…"
+
+macos_menu_clear = "Borrar el historial de la terminal"
+
+macos_menu_font_increase = "Aumentar el tamaño de letra"
+
+macos_menu_font_decrease = "Reducir el tamaño de letra"
+
+macos_menu_font_reset = "Restablecer el tamaño de letra"
+
+macos_menu_zoom_pane = "Ampliar panel"
+
+macos_menu_fullscreen = "Entrar en pantalla completa"
+
+macos_menu_next_tab = "Pestaña siguiente"
+
+macos_menu_previous_tab = "Pestaña anterior"
+
+
+search_a11y_regex = "Usar expresiones regulares"
+search_regex_on = "Regex: Sí"
+search_regex_off = "Regex: No"
+search_counting = "Contando…"
+command_mark_a11y_success = "El comando se completó correctamente (código de salida {code})"
+
+command_mark_a11y_failure = "El comando falló (código de salida {code})"
+
+settings_category_text_rendering = "Texto / Renderizado"
+
+settings_field_grapheme_clustering = "Agrupación de grafemas"
+
+settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
+
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -725,3 +878,11 @@ other = "{count} callbacks `{event}` tardaron demasiado y no se volverán a llam
 [confirm_close_scope]
 one = "Se cerrará el panel."
 other = "Se cerrarán los {count} paneles."
+
+[scrollback_return]
+one = "↓ {lines} línea"
+other = "↓ {lines} líneas"
+
+[scrollback_a11y]
+one = "Volver a la salida en vivo ({lines} línea sobre el final)"
+other = "Volver a la salida en vivo ({lines} líneas sobre el final)"

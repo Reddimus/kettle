@@ -1,4 +1,112 @@
 #[test]
+fn horizontal_single_tab_controls_use_count_and_physical_hover() {
+    let source = include_str!("chrome.rs");
+    let horizontal = source
+        .split_once("fn tab_bar_at_height(")
+        .unwrap()
+        .1
+        .split_once("pub(super) fn title_edit_rect(")
+        .unwrap()
+        .0;
+    assert!(horizontal.contains("let show_controls = n > 1 || hovered;"));
+    assert!(horizontal.contains("rect,\n                    show_controls,"));
+    assert!(horizontal.contains("rect_contains(rect, p.x as f32, p.y as f32)"));
+}
+
+#[test]
+fn horizontal_single_tab_controls_match_hit_tests_and_accesskit() {
+    for in_titlebar in [false, true] {
+        for bottom in [false, true] {
+            for count in [1, 2] {
+                for hovered in [false, true] {
+                    for close_enabled in [false, true] {
+                        let mut bar = kettle_render::TabBar::hidden();
+                        bar.height = 28.0;
+                        bar.in_titlebar = in_titlebar;
+                        for idx in 0..count {
+                            let rect = (
+                                78.0 + idx as f32 * 320.0,
+                                if bottom { 572.0 } else { 0.0 },
+                                320.0,
+                                28.0,
+                            );
+                            let hint = kettle_render::tab_shortcut_hint(idx, true).unwrap();
+                            let content = kettle_render::horizontal_tab_content_layout(
+                                rect,
+                                count > 1 || hovered,
+                                close_enabled,
+                                false,
+                                "shell",
+                                Some(&hint),
+                                8.0,
+                            );
+                            bar.segments.push(kettle_render::TabSeg {
+                                idx,
+                                rect,
+                                title_rect: content.title,
+                                hint: content.hint.map(|r| (r, hint)),
+                                close: content.close,
+                                title: "shell".into(),
+                                path: None,
+                                active: idx == 0,
+                                activity: kettle_render::TabActivity::Normal,
+                            });
+                        }
+                        let nodes = super::tab_accessibility_projection(
+                            &bar,
+                            &[10, 20],
+                            false,
+                            &kettle_i18n::Translator::default(),
+                        );
+                        for seg in &bar.segments {
+                            let visible = count > 1 || hovered;
+                            assert_eq!(seg.hint.is_some(), visible);
+                            let closes = visible && close_enabled;
+                            assert_eq!(
+                                super::hovered_close_button(
+                                    &bar.segments,
+                                    seg.rect.0 + 306.0,
+                                    seg.rect.1 + 14.0,
+                                ),
+                                closes.then_some(seg.idx)
+                            );
+                            let close_id = super::accessibility_tab_id([10, 20][seg.idx], true);
+                            assert_eq!(nodes.iter().any(|(id, _)| *id == close_id), closes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let ctl = include_str!("ctl.rs");
+    for field in [
+        "\"close\": rect_json(seg.close)",
+        "\"hint\": seg.hint.as_ref()",
+        "\"hovered\": bar.hovered_tab_idx == Some(seg.idx)",
+    ] {
+        assert!(
+            ctl.contains(field),
+            "ui_geometry must report the shared tab state"
+        );
+    }
+}
+
+#[test]
+fn shortcut_hint_layout_uses_natural_chrome_text_advance() {
+    let src = include_str!("chrome.rs");
+    let horizontal = src
+        .split_once("fn tab_bar_at_height(")
+        .unwrap().1
+        .split_once("pub(super) fn title_edit_rect(")
+        .unwrap().0;
+    assert!(
+        horizontal.contains("let cell_w = self.overlay_text_cell_width(ws);"),
+        "Cmd+1 is shaped at natural font metrics, so its lane must use the chrome text advance"
+    );
+    assert!(!horizontal.contains("let cell_w = Self::cell_size(ws)"));
+}
+
+#[test]
 fn about_never_claims_current_without_a_verified_result() {
     // No record and no install facts: About says the status is unknown
     // rather than up to date.
@@ -208,6 +316,7 @@ fn hovered_close_button_finds_only_the_close_rect_hits() {
             idx: 0,
             rect: (0.0, 0.0, 100.0, 24.0),
             title_rect: (8.0, 0.0, 68.0, 24.0),
+            hint: None,
             close: (76.0, 0.0, 24.0, 24.0),
             title: "one".into(),
             path: None,
@@ -218,6 +327,7 @@ fn hovered_close_button_finds_only_the_close_rect_hits() {
             idx: 1,
             rect: (100.0, 0.0, 100.0, 24.0),
             title_rect: (108.0, 0.0, 68.0, 24.0),
+            hint: None,
             close: (176.0, 0.0, 24.0, 24.0),
             title: "two".into(),
             path: None,
@@ -254,6 +364,7 @@ fn a_vertical_tab_strip_reorders_by_the_axis_it_is_actually_stacked_on() {
             idx,
             rect,
             title_rect: super::tab_title_rect(rect, close, true),
+            hint: None,
             close,
             title: format!("tab-{idx}"),
             path: None,
@@ -461,7 +572,7 @@ fn the_side_tab_bar_places_rows_through_side_tab_rows() {
         .nth(1)
         .and_then(|rest| rest.split("\n    }\n").next())
         .expect("tab_bar body");
-    assert!(horizontal.contains("let closable = self.cfg.close_button_on_tab && seg_w >= height;"));
+    assert!(horizontal.contains("kettle_render::horizontal_tab_content_layout("));
 }
 
 /// A strip with less than `tab-min-width` between its scroll arrows still
@@ -666,4 +777,50 @@ fn vertical_tab_band_excludes_status_bands() {
         assert!(!super::rect_contains(top, top.0 + 10.0, 10.0));
         assert!(super::rect_contains(top, top.0 + 10.0, 30.0));
     }
+}
+
+#[test]
+fn horizontal_tab_height_is_shared_with_restore_content_and_status_bands() {
+    use super::*;
+    for cell_height in [12.0, 16.0, 32.0] {
+        for pos in [TabBarPos::Top, TabBarPos::Bottom, TabBarPos::Left, TabBarPos::Right] {
+            let expected = cell_height + if pos.is_vertical() { 8.0 } else { 12.0 };
+            let height = tab_bar_height(cell_height, pos);
+            assert_eq!(height, expected);
+            let bands = ContentBands::default().for_restore(TabBarMode::Auto, 2, cell_height, pos);
+            assert_eq!(bands.tab_bar_h, height);
+            if pos.is_vertical() { continue; }
+            let area = content_rect_for_with_strip((800, 600), bands, pos, StatusBarMode::Off, 180.0);
+            assert_eq!(area.3, 600.0 - height);
+            assert_eq!(area.1, if pos == TabBarPos::Top { height } else { 0.0 });
+            let band = tab_band_rect((800, 600), pos, height, 180.0, 0.0, 0.0, 22.0);
+            assert_eq!(band.3, height);
+            assert_eq!(band.1, if pos == TabBarPos::Top { 0.0 } else { 578.0 - height });
+            assert!(rect_contains(band, 20.0, band.1 + height - 0.5));
+            assert!(!rect_contains(band, 20.0, band.1 + height));
+        }
+    }
+}
+
+#[test]
+fn review_narrow_titlebar_strips_park_tabs_without_panicking() {
+    for strip in [0.0, 0.5, 1.0, 1.5] {
+        for scroll in [true, false] {
+            let layout = super::titlebar_tab_layout(2, 1, (strip, 56.0, 78.0), 28.0, 80.0, scroll);
+            assert!(layout.xs.iter().all(Option::is_none));
+            assert!(layout.arrow_left.is_none() && layout.arrow_right.is_none());
+            assert_eq!(layout.width, 0.0);
+        }
+    }
+}
+
+#[test]
+fn review_titlebar_preferred_width_preserves_configured_minimum() {
+    let layout = super::titlebar_tab_layout(2, 1, (666.0, 56.0, 78.0), 28.0, 600.0, true);
+    assert_eq!(layout.width, 600.0);
+    assert!(layout.arrow_left.is_some() && layout.arrow_right.is_some());
+    assert!(layout.xs[0].is_none());
+    assert!(layout.xs[1].is_some());
+    let fits = super::titlebar_tab_layout(2, 0, (1400.0, 56.0, 78.0), 28.0, 600.0, true);
+    assert!(fits.width >= 600.0 && fits.last_width >= 600.0);
 }

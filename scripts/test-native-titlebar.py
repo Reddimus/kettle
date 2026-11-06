@@ -133,5 +133,84 @@ class FullscreenTests(unittest.TestCase):
         self.assertEqual(window.actions, ["toggle_fullscreen", "toggle_fullscreen"])
 
 
+class TitlebarGeometryTests(unittest.TestCase):
+    def fixture(self, scale=1):
+        def rect(x, y, width, height):
+            return dict(x=x * scale, y=y * scale, width=width * scale, height=height * scale)
+        return {
+            "scale_factor": scale, "fullscreen": False,
+            "surface": {"width": 800 * scale, "height": 600 * scale},
+            "content": rect(0, 28, 800, 572),
+            "tab_bar": {"in_titlebar": True, "y": 0, "height": 28 * scale,
+                        "band": rect(78, 0, 722, 28),
+                        "new_tab": rect(772, 0, 28, 28),
+                        "new_tab_menu": rect(744, 0, 28, 28),
+                        "segments": [{"rect": rect(240, 0, 320, 28),
+                                      "title_rect": rect(300, 0, 200, 28),
+                                      "close": rect(560, 0, 0, 0),
+                                      "hint": None, "hovered": False,
+                                      "fitted_title": "",
+                                      "label": "Kettle caption fixture"}]},
+        }
+
+    def test_single_tab_rejects_idle_close_and_shortcut_hint(self):
+        for control in ("close", "hint"):
+            geometry = self.fixture()
+            tab = geometry["tab_bar"]["segments"][0]
+            tab["hovered"] = False
+            tab["close"] = dict(x=560, y=0, width=0, height=0)
+            tab["hint"] = None
+            if control == "close":
+                tab["close"].update(x=532, width=28, height=28)
+            else:
+                tab["hint"] = {"text": "Cmd+1", "rect": dict(x=492, y=0, width=40, height=28)}
+            with self.assertRaises(AssertionError):
+                checker.titlebar_geometry(geometry)
+
+    def test_single_tab_hover_and_two_tabs_allow_controls(self):
+        for scale in (1, 2):
+            for count in (1, 2):
+                geometry = self.fixture(scale)
+                tab = geometry["tab_bar"]["segments"][0]
+                tab["hovered"] = count == 1
+                tab["title_rect"].update(x=316 * scale, width=168 * scale)
+                tab["close"].update(x=532 * scale, width=28 * scale, height=28 * scale)
+                tab["hint"] = {"text": "Cmd+1", "rect": dict(
+                    x=492 * scale, y=0, width=40 * scale, height=28 * scale)}
+                if count == 2:
+                    def segment(x, index):
+                        return dict(tab, hovered=False,
+                                    rect=dict(x=x * scale, y=0, width=320 * scale, height=28 * scale),
+                                    title_rect=dict(x=(x + 8) * scale, y=0,
+                                                    width=228 * scale, height=28 * scale),
+                                    close=dict(x=(x + 292) * scale, y=0,
+                                               width=28 * scale, height=28 * scale),
+                                    hint={"text": f"Cmd+{index}", "rect": dict(
+                                        x=(x + 244) * scale, y=0, width=40 * scale, height=28 * scale)})
+                    geometry["tab_bar"]["segments"] = [segment(78, 1), segment(398, 2)]
+                checker.titlebar_geometry(geometry)
+
+    def test_titlebar_geometry_uses_scaled_band(self):
+        for scale in (1, 2):
+            geometry = self.fixture(scale)
+            checker.titlebar_geometry(geometry)
+            geometry["fullscreen"] = True
+            geometry["tab_bar"]["band"]["x"] = 0
+            checker.titlebar_geometry(geometry)
+
+    def test_titlebar_geometry_rejects_overlap_missing_title_and_small_controls(self):
+        for mutate in (
+            lambda g: g["content"].update(y=0),
+            lambda g: g["tab_bar"]["segments"][0]["rect"].update(x=0),
+            lambda g: g["tab_bar"]["segments"][0]["title_rect"].update(x=0),
+            lambda g: g["tab_bar"]["segments"][0].update(label=" "),
+            lambda g: g["tab_bar"]["new_tab"].update(width=16),
+        ):
+            geometry = self.fixture()
+            mutate(geometry)
+            with self.assertRaises(AssertionError):
+                checker.titlebar_geometry(geometry)
+
+
 if __name__ == "__main__":
     unittest.main()

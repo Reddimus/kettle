@@ -74,6 +74,30 @@ reply without its contents being kept, names past the 32nd in one XTGETTCAP
 request get no reply, and a request that CAN, SUB or another escape sequence
 cuts off before its ST gets none either.
 
+## Text decorations and emoji
+
+SGR 53 enables overline; SGR 55 clears it independently of underline and
+strikeout. SGR 0 clears all three. Overline draws a foreground-colored line
+at the top of each cell, including spaces, and follows conceal and inactive
+pane dimming. DECRQSS for `m` includes `53` while overline is active.
+
+Extended-grapheme cells are enabled by default. Applications can disable them
+with `CSI ? 2027 l` and re-enable them with `CSI ? 2027 h`. Joined emoji and skin-tone
+sequences in grapheme cells use one composed glyph spanning the cluster's
+grid width. If the fallback fonts cannot compose a sequence, Kettle draws
+one replacement glyph while retaining the original text for copying and
+search. Default emoji and VS16 presentation scale to fit the cell height
+without exceeding its width; VS15 keeps text presentation. Both `grid` and
+`legacy` renderers use this sizing, including beneath a block cursor.
+Set `grapheme-clustering = false` to start new terminals with mode 2027 off
+and the previous scalar cell widths. DECRQM reports the live mode; RIS and
+DECSTR restore the configured startup default. Reloading the config affects
+only terminals created afterwards.
+
+The advanced shaper already produces Arabic initial, medial and final
+joining forms through system fallback fonts, including when optional font
+ligatures are disabled. This does not add bidirectional terminal-grid layout.
+
 ## Terminal-rendered inline graphics
 
 Sixel, Kitty graphics, and iTerm2 OSC 1337 are terminal output protocols,

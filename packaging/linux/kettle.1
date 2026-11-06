@@ -208,7 +208,9 @@ Print the OSC 133 shell-integration snippet for
 .I SHELL
 (one of:
 .BR bash ", " zsh ", " fish ", " powershell ).
-Append to your rc file to enable jump-to-prompt
+New Bash, Zsh and Fish panes load these hooks automatically with
+.BR "shell-integration = auto" .
+For manual setup, append to your rc file to enable jump-to-prompt
 .RB ( "Ctrl+Up" " / " "Ctrl+Down" )
 inside kettle:
 .PP
@@ -335,7 +337,9 @@ panel work without configuration; see
 in the configuration reference.
 Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
-in the config.
+in the config. The default
+.B restore-session = auto
+follows the macOS keep-windows setting and opens fresh on other platforms.
 .TP
 .BI \-\-agent\-server \ MODE
 Enable kettle's agent control server for this launch, overriding the
@@ -462,11 +466,21 @@ Interactive convenience alias for
 .BR "kettle update" .
 .
 .SH SUBCOMMANDS
+.TP
+.B kettle quick-terminal
+Toggle the dedicated quick terminal in the running instance, or start Kettle.
+Its tabs and splits keep running while hidden. Configure position (top, bottom,
+left, right, center), screen percentage (default 40), animation, autohide, and
+hotkey in Settings or with quick-terminal-* config keys. macOS and X11 register
+the configured global hotkey; on Wayland and Windows bind this command in the
+desktop shortcut settings. System Reduce Motion disables the slide.
+.PP
 The bare
 .B kettle
 command (above) is the GUI launcher. These subcommands are the
-non-interactive / agent control surface; each returns before any window or GPU
-work. See
+non-interactive / agent control surface, apart from quick-terminal, which
+starts the GUI when no instance is running. Other subcommands return before
+any window or GPU work. See
 .B docs/AGENT.md
 for the full reference and threat model.
 .TP
@@ -1068,7 +1082,10 @@ in via
 .B restore-session = true
 or the
 .B \-\-restore
-flag (off by default \(em a new window opens fresh). Failures are logged
+flag. The default
+.B restore-session = auto
+opens fresh on Linux and follows the keep-windows setting on macOS.
+Failures are logged
 via
 .BR log::warn! .
 .TP

@@ -372,9 +372,7 @@ impl Renderer {
         let snap = pv.snap;
         let term_colors = &snap.colors;
         let cols = snap.columns;
-        // Cells inside the selection range get their fg swapped to
-        // `theme.selection_foreground` so dark-on-dark themes stay readable
-        // under the highlight.
+        // Highlight foregrounds resolve against the fill painted below them.
         let selection_range = snap.selection;
         // Snapshot cells + selection carry
         // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
@@ -386,6 +384,9 @@ impl Renderer {
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
         let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
+        let selection_bg =
+            self.minimum_contrast_cache
+                .resolve(theme.selection_background, default_bg, 3.0);
         let dim_bg = if term_colors.reverse_video() {
             default_bg
         } else {
@@ -518,6 +519,7 @@ impl Renderer {
         // so the prepare is skipped.
         let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
         let mut fallback_run = None;
+        let mut search_quads = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -612,9 +614,7 @@ impl Renderer {
                         },
                         clustered: flags.contains(Flags::GRAPHEME),
                         text_presentation,
-                        single_image: flags.contains(Flags::GRAPHEME | Flags::WIDE_CHAR)
-                            && !text_presentation
-                            && marks.contains(&'\u{200d}'),
+                        single_image: cluster_needs_single_image(flags, dc, marks),
                     },
                     family: text_family.clone(),
                 });
@@ -641,7 +641,19 @@ impl Renderer {
                         cfg.search_background.unwrap_or(theme.palette[3])
                     }
                     CellHighlight::Search(false) | CellHighlight::Selection => {
-                        theme.selection_background
+                        super::theme::highlight_colors_cached(
+                            highlight,
+                            cfg,
+                            theme,
+                            fg,
+                            if selected && search.is_none() {
+                                default_bg
+                            } else {
+                                bg
+                            },
+                            &mut self.minimum_contrast_cache,
+                        )
+                        .1
                     }
                     CellHighlight::None => theme.background,
                 };
@@ -659,7 +671,11 @@ impl Renderer {
             }
             fg = resolved_cell_foreground_cached(
                 fg,
-                bg,
+                if selected && search.is_none() {
+                    default_bg
+                } else {
+                    bg
+                },
                 highlight,
                 (flags.contains(Flags::DIM), bold),
                 cfg,
@@ -668,9 +684,11 @@ impl Renderer {
             );
             let cell_background = match highlight {
                 CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
-                CellHighlight::Search(false) | CellHighlight::Selection => {
-                    theme.selection_background
+                CellHighlight::Search(false) => {
+                    self.minimum_contrast_cache
+                        .resolve(theme.selection_background, bg, 3.0)
                 }
+                CellHighlight::Selection => selection_bg,
                 CellHighlight::None => bg,
             };
             if inactive > 0.0 {
@@ -717,6 +735,25 @@ impl Renderer {
                     cw,
                     ch,
                     bg,
+                    1.0,
+                ));
+            }
+            if let Some(active) = search {
+                let fill = super::theme::highlight_colors_cached(
+                    CellHighlight::Search(active),
+                    cfg,
+                    theme,
+                    fg,
+                    bg,
+                    &mut self.minimum_contrast_cache,
+                )
+                .1;
+                search_quads.push(rect(
+                    ox + col as f32 * cw,
+                    oy + vrow as f32 * ch,
+                    cw,
+                    ch,
+                    fill,
                     1.0,
                 ));
             }
@@ -821,11 +858,13 @@ impl Renderer {
                     oy + vrow as f32 * ch,
                     w as f32 * cw,
                     ch,
-                    theme.selection_background,
+                    selection_bg,
                     1.0,
                 ));
             }
         }
+
+        quads.extend(search_quads);
 
         // Cursor: hidden with the window unfocused, blink-aware otherwise.
         // Shape comes from the engine's live `RenderableContent.cursor.shape`
@@ -906,7 +945,13 @@ impl Renderer {
                         emoji_qualified: gmarks.contains(&'\u{FE0F}'),
                         attrs: gattrs,
                         color: gcolor,
-                        clip: pv.terminal,
+                        clip: if super::fonts::emoji_presentation(gch, gmarks) {
+                            let left = bx.max(pv.terminal.0);
+                            let right = (bx + cw * bcells).min(pv.terminal.0 + pv.terminal.2);
+                            (left, pv.terminal.1, (right - left).max(0.0), pv.terminal.3)
+                        } else {
+                            pv.terminal
+                        },
                     });
                 }
             }
@@ -1208,7 +1253,11 @@ impl Renderer {
         for (i, pv) in panes.iter().enumerate() {
             let inactive = pane_inactive_amount(pv, panes.len(), cfg);
             let graphemes = pv.snap.has_graphemes();
-            if cfg.text_renderer == TextRendererMode::Legacy && inactive == 0.0 && !graphemes {
+            if cfg.text_renderer == TextRendererMode::Legacy
+                && inactive == 0.0
+                && !graphemes
+                && !pv.snap.has_emoji()
+            {
                 continue;
             }
             let (rx, ry, rw, rh) = pv.terminal;
@@ -1236,6 +1285,7 @@ impl Renderer {
                 out,
                 buf,
                 (ox, oy),
+                cw,
                 if cfg.text_renderer == TextRendererMode::Grid {
                     GlyphPositioning::Grid(cw)
                 } else if graphemes {
@@ -1533,6 +1583,23 @@ pub(crate) fn push_cell_decorations(
     if flags.contains(Flags::STRIKEOUT) {
         quads.push(rect(x, y + ch * 0.5, cw, 1.0, fg, 1.0));
     }
+    if flags.contains(Flags::OVERLINE) {
+        quads.push(rect(x, y, cw, 1.0, fg, 1.0));
+    }
+}
+
+pub(crate) fn cluster_needs_single_image(flags: Flags, first: char, marks: &[char]) -> bool {
+    if !flags.contains(Flags::GRAPHEME)
+        || !marks
+            .iter()
+            .any(|c| *c == '\u{200d}' || matches!(c, '\u{1f3fb}'..='\u{1f3ff}'))
+    {
+        return false;
+    }
+    let text: String = std::iter::once(first)
+        .chain(marks.iter().copied())
+        .collect();
+    super::fonts::emoji_text(&text)
 }
 
 /// Draws one cell's underline segment(s), giving each `Flags::ALL_UNDERLINES`

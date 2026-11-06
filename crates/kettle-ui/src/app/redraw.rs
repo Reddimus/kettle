@@ -233,7 +233,10 @@ impl App {
         // Brighten the focused pane's scrollbar while the pointer is on the
         // gutter or the thumb is being dragged (overlay-scrollbar feel). The
         // scrolled-back case is decided per-pane in the renderer from the snapshot.
-        let scrollbar_active = ws.scrollbar_hover || ws.scrollbar_drag_offset.is_some();
+        let scrollbar_active = ws
+            .scrollbar_hover
+            .is_some_and(|pane| ws.mux.active_focus() == Some(pane))
+            || ws.scrollbar_drag_offset.is_some();
         // Cursor blink is the *intersection* of the user config and the
         // running app's wishes — programs flip it via DEC private mode 12
         // (`CSI ?12 h/l`), which the engine tracks per-pane on its
@@ -268,6 +271,7 @@ impl App {
                 [palette_picker, theme_picker, layout_picker, ssh_picker],
                 surface,
                 self.menu_cell(ws),
+                self.picker_top_chrome(ws),
             )
         });
         // Marshal the in-progress Edit-title state for
@@ -353,10 +357,17 @@ impl App {
                 card_hover,
                 window_focused,
                 scrollbar_active,
+                scrollbar_hovered_pane: ws.scrollbar_hover,
                 cursor_visible,
                 resize_overlay,
                 update_toast: self.update_toast_projection(ws),
+                notices: self
+                    .persistent_notices(ws)
+                    .into_iter()
+                    .map(|(_, toast)| toast)
+                    .collect(),
                 context_menu,
+                context_menu_parents: self.context_menu_parent_overlays(ws),
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
                 pane_drop_hint,
@@ -451,6 +462,21 @@ impl App {
                 horizontal_scroll: search_horizontal_scroll,
                 wrap: s.wrap,
                 case_mode: map_search_case_mode(s.case_mode),
+                regex: s.regex,
+                regex_shortcut: kettle_config::keybinds::ui_hint_label(
+                    &self.cfg.keybinds,
+                    &Action::ToggleSearchRegex,
+                ),
+                match_position: s
+                    .count_scan
+                    .as_ref()
+                    .map_or(0, |scan| scan.position(s.focused)),
+                match_total: s
+                    .count_scan
+                    .as_ref()
+                    .filter(|scan| scan.complete && !scan.limited)
+                    .map(|scan| scan.spans.len()),
+                match_limited: s.count_scan.as_ref().is_some_and(|scan| scan.limited),
                 invert: s.invert,
                 status: displayed_search_status(s, std::time::Instant::now()),
                 focused: s.focused_control,
@@ -479,10 +505,17 @@ impl App {
             card_hover,
             window_focused,
             scrollbar_active,
+            scrollbar_hovered_pane: ws.scrollbar_hover,
             cursor_visible,
             resize_overlay,
             update_toast: None,
+            notices: self
+                .persistent_notices(ws)
+                .into_iter()
+                .map(|(_, toast)| toast)
+                .collect(),
             context_menu,
+            context_menu_parents: self.context_menu_parent_overlays(ws),
             confirm_dialog,
             settings: settings_overlay,
             pane_drop_hint,
@@ -812,6 +845,7 @@ impl App {
                     true
                 };
                 if snapshot_ready {
+                    snaps[si].command_marks = p.term.command_marks();
                     let cwd = p.term.current_dir_or_native();
                     let mut title_parts = pane_title_parts(
                         &self.cfg.agent_badge,

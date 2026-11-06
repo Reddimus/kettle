@@ -109,9 +109,19 @@ pub(super) struct ContentBands {
 }
 
 impl ContentBands {
-    pub(super) fn for_restore(mut self, mode: TabBarMode, tabs: usize, cell_height: f32) -> Self {
+    pub(super) fn for_restore(
+        mut self,
+        mode: TabBarMode,
+        tabs: usize,
+        cell_height: f32,
+        pos: TabBarPos,
+    ) -> Self {
         if matches!(mode, TabBarMode::Auto) {
-            self.tab_bar_h = if tabs > 1 { cell_height + 8.0 } else { 0.0 };
+            self.tab_bar_h = if tabs > 1 {
+                tab_bar_height(cell_height, pos)
+            } else {
+                0.0
+            };
         }
         self
     }
@@ -342,9 +352,14 @@ impl App {
         // A restored tab has no lanes: each pane's terminal is its leaf less
         // its titlebar.
         let bands = self.content_bands(ws).for_restore(
-            self.cfg.tab_bar,
+            if ws.macos_titlebar_tabs {
+                TabBarMode::Always
+            } else {
+                self.cfg.tab_bar
+            },
             session.tabs.len(),
             Self::cell_size(ws).map_or(16.0, |(_, height)| height),
+            self.cfg.tab_bar_pos,
         );
         let area = self.area_with_bands(ws, bands);
         let style = self.layout_style(ws);

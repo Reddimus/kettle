@@ -385,3 +385,34 @@ fn narrow_pane_titles_fit_and_keep_the_bell() {
         }
     }
 }
+
+#[test]
+fn review_recording_notice_survives_custom_formats_and_title_fitting() {
+    let mut seg = super::TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 320.0, 28.0),
+        title_rect: (8.0, 0.0, 240.0, 28.0),
+        close: (0.0, 0.0, 0.0, 0.0),
+        hint: None,
+        title: "a very long terminal title".repeat(10),
+        path: None,
+        active: true,
+        activity: super::TabActivity::Normal,
+    };
+    for path in [None, Some("/a/very/long/path/".repeat(10))] {
+        seg.path = path;
+        for format in ["{n}", "literal", "{title}", "{title} {title}"] {
+            for notice in [
+                "[REC]",
+                "[REC RAW]",
+                "[REC ERROR]",
+                "[REC LIMIT]",
+                "[REC INCOMPLETE]",
+            ] {
+                let label = super::tab_segment_label(&seg, format, 8.0, notice);
+                assert!(label.contains(notice), "{format}: {label}");
+                assert!(display_width(&label) <= 30, "{label}");
+            }
+        }
+    }
+}

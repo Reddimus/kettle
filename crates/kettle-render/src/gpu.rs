@@ -663,8 +663,9 @@ impl Renderer {
             .collect();
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
-        let update_toast_buffers =
-            std::array::from_fn(|_| TextBuffer::new(&mut font_system, metrics));
+        let update_toast_buffers = (0..3)
+            .map(|_| TextBuffer::new(&mut font_system, metrics))
+            .collect();
         let mut completion_header_buffer = TextBuffer::new(&mut font_system, metrics);
         completion_header_buffer.set_wrap(Wrap::None);
         let mut completion_count_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -707,6 +708,7 @@ impl Renderer {
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let picker_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let confirmation_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
@@ -809,10 +811,11 @@ impl Renderer {
             scroll_left_text: String::new(),
             scroll_right_text: String::new(),
             status_bar_text: String::new(),
+            scrollback_buffers: Vec::new(),
             resize_overlay_buffer,
             resize_overlay_text: String::new(),
             update_toast_buffers,
-            update_toast_text: std::array::from_fn(|_| String::new()),
+            update_toast_text: vec![String::new(); 3],
             ime_buffer,
             ime_quads,
             ime_text_renderer,
@@ -820,15 +823,15 @@ impl Renderer {
             ime_text: String::new(),
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
+            tab_hint_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             context_menu_texts: Vec::new(),
+            context_menu_match_keys: Vec::new(),
             context_menu_hint_buffers: Vec::new(),
             context_menu_hint_texts: Vec::new(),
             settings_buffers: Vec::new(),
             settings_texts: Vec::new(),
-            settings_lines_source: None,
-            settings_lines_cache: Vec::new(),
             completion_buffers: Vec::new(),
             completion_texts: Vec::new(),
             completion_spans: Vec::new(),
@@ -868,7 +871,9 @@ impl Renderer {
             menu_text_renderer,
             rounded_surfaces,
             toast_surfaces,
+            picker_surfaces,
             transport_surface_count: 0,
+            settings_surface_count: 0,
             confirmation_text_renderer,
             confirmation_text,
             confirmation_labels_prepared: false,

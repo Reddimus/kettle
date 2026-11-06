@@ -424,9 +424,17 @@ mod tests {
             .split_once("command == crate::macos_dock::DockCommand::NewTab")
             .expect("New Tab restores the existing window")
             .1;
-        let visible = branch.find("w.set_visible(true);").unwrap();
-        let unminimized = branch.find("w.set_minimized(false);").unwrap();
-        let focused = branch.find("w.focus_window();").unwrap();
+        assert!(branch.contains("self.reveal_window(ws);"));
+        let reveal = source
+            .split_once("fn reveal_window(")
+            .unwrap()
+            .1
+            .split("fn toggle_window_visibility(")
+            .next()
+            .unwrap();
+        let visible = reveal.find("window.set_visible(true);").unwrap();
+        let unminimized = reveal.find("window.set_minimized(false);").unwrap();
+        let focused = reveal.find("window.focus_window();").unwrap();
         assert!(visible < unminimized && unminimized < focused);
     }
 

@@ -11,12 +11,17 @@ fn apply_pane_exit_action(
     }
     pane.exit_observed = true;
     match action {
-        kettle_config::ExitAction::Hold => {
+        kettle_config::ExitAction::Hold | kettle_config::ExitAction::CloseOnSuccess => {
             pane.held = true;
             // `try_wait` is now safe: the ordered PTY exit (or the bounded
             // fallback below) has finished consuming output. Cache the status
             // and release the Unix zombie while the held grid stays visible.
-            pane.held_child_reaped = pane.term.child_exit_code().is_some();
+            pane.exit_code = pane.term.child_exit_code();
+            pane.held_child_reaped = pane.exit_code.is_some();
+            pane.close_on_success = action == kettle_config::ExitAction::CloseOnSuccess;
+            if pane.close_on_success && pane.exit_code == Some(0) {
+                pane.closed = true;
+            }
         }
         kettle_config::ExitAction::Restart => {
             if !pending_restarts.contains(&pane_id) {
@@ -224,7 +229,276 @@ pub(super) fn output_generation_advanced(previous: Option<u64>, current: u64) ->
     previous.is_some_and(|previous| previous != current)
 }
 
+struct PaneEventBatch {
+    bell: bool,
+    bell_panes: Vec<u64>,
+    output_chunks: Vec<(u64, Vec<u8>)>,
+    command_finished_local: Vec<(u64, kettle_core::CommandFinished)>,
+    correlated_command_finished_local: Vec<(u64, kettle_core::CorrelatedCommandFinished)>,
+    protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)>,
+    pending_restarts_local: Vec<u64>,
+}
+
+fn drain_pane_events(
+    ws: &mut WindowState,
+    exit_action: kettle_config::ExitAction,
+    force_no_bell: bool,
+    mut reply_for_event: impl FnMut(&Pane, TermEvent) -> Option<String>,
+) -> PaneEventBatch {
+    let mut bell = false;
+    let mut entered_hold = false;
+    // Pane ids that rang the bell this drain
+    // pass — latched onto their containing tabs *after* the
+    // iter_mut() loop so we don't double-borrow mux.panes.
+    let mut bell_panes: Vec<u64> = Vec::new();
+    // Pane ids + raw-output chunks accumulated during this drain pass.
+    // Keep the PTY reader's bounded chunks intact instead of concatenating
+    // a whole backlog into a second potentially huge allocation.
+    let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
+    // Collect OSC-133 CommandFinished events per
+    // pane so the App is the SINGLE drainer — `drain_command_finished_events`
+    // is destructive, so the command-notify, the run_command correlator, and
+    // event subscribers must all be fed from one place, AFTER this pane loop.
+    let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
+    let mut correlated_command_finished_local = Vec::new();
+    // Protocol desktop notifications (OSC 9 / OSC 777) drained once per
+    // pass and dispatched after the pane loop so the UI owns all toasts.
+    let mut protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)> =
+        Vec::new();
+    // Pane ids whose shell exited with cfg.exit_action
+    // = Restart. Queued during the drain; appended to
+    // ws.pending_pane_restarts after the iteration so the
+    // post-drain handler can process them with a fresh borrow.
+    let mut pending_restarts_local: Vec<u64> = Vec::new();
+    for (&pane_id, pane) in ws.mux.panes.iter_mut() {
+        if !pane.held && pane.pty_input_failed() {
+            log::error!("closing pane {pane_id}: its PTY input transport failed");
+            pane.closed = true;
+            while pane.rx.try_recv().is_ok() {}
+            continue;
+        }
+        let was_held = pane.held;
+        // Read the exit latch before anything else: the reader sets it
+        // after the last of the PTY's output, so everything that output
+        // latched or queued is taken below, before exit policy applies.
+        // An exit latched after this read waits for the next drain.
+        let exited = pane.term.take_exited();
+        // Drain the optional output sidechannel before regular events.
+        if let Some(out_rx) = &pane.output_rx {
+            for chunk in output_chunks_ready(out_rx) {
+                output_chunks.push((pane_id, chunk));
+            }
+        }
+        // Bells are latched by the terminal, not queued with the events
+        // below. Terminator parity (terminatorlib/config.py:103
+        // `force_no_bell`): silence every bell flavor regardless of
+        // cfg.bell mode.
+        if pane.term.take_bell() && !force_no_bell {
+            bell = true;
+            bell_panes.push(pane_id);
+        }
+        // Titles and cursor-blink switches keep only their newest state.
+        // Clipboard operations are drained in their journal order below.
+        match pane.term.take_title() {
+            Some(kettle_core::TitleChange::Set(t)) => {
+                // Ignore the bogus full-exe-path title conhost/
+                // ConPTY injects at startup for a native Windows shell —
+                // keeping the "kettle" placeholder so the tab/window/pane
+                // label falls back to the working directory (the OSC 7/9;9
+                // cwd, else the natively-polled cwd) instead of showing an
+                // ugly `…\pwsh.exe` path. Only a still-placeholder pane is
+                // checked; ANY genuine OSC 2 title (incl. a later one from
+                // the shell's own prompt) is stored and permanently ends
+                // suppression, so a program-set title is never lost.
+                if pane.title_is_placeholder
+                    && suppress_startup_title(&t, &pane.argv, cfg!(windows))
+                {
+                    // keep the placeholder seed; do not store the exe path
+                } else {
+                    apply_shell_title(
+                        &mut pane.title,
+                        &mut pane.title_is_placeholder,
+                        &mut pane.title_origin,
+                        &mut pane.title_before_remote,
+                        Some(&t),
+                    );
+                }
+            }
+            Some(kettle_core::TitleChange::Reset) => {
+                apply_shell_title(
+                    &mut pane.title,
+                    &mut pane.title_is_placeholder,
+                    &mut pane.title_origin,
+                    &mut pane.title_before_remote,
+                    None,
+                );
+            }
+            None => {}
+        }
+        if pane.term.take_cursor_blinking_changed() {
+            // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
+            // redraw picks up the new state from
+            // `Terminal::cursor_blinking()`, but reset the blink
+            // phase now so *blink-on* starts visible and
+            // *blink-off* makes the cursor solid right away, not on
+            // whatever half-period we'd otherwise land in. It is
+            // program output, so it does not restart the blink
+            // timeout; only typing, focus, and settings do.
+            ws.blink_on = true;
+            ws.last_blink = std::time::Instant::now();
+        }
+        for ev in pane
+            .term
+            .take_clipboard_events()
+            .into_iter()
+            .chain(pane.rx.try_iter())
+        {
+            if let Some(reply) = reply_for_event(pane, ev)
+                && pane.queue_protocol_reply(reply.as_bytes()).is_failed()
+            {
+                if !pane.held {
+                    log::error!("closing pane {pane_id}: bounded PTY input queue failed");
+                    pane.closed = true;
+                }
+                break;
+            }
+        }
+        // Terminator parity (terminatorlib/config.py:118
+        // `exit_action`): when the shell exits, close the pane,
+        // restart the shell, or hold the dead shell visible so the
+        // user can read its final output and scrollback.
+        //
+        // Hold: don't mark closed; the pane shows its last output
+        // until the user closes it (Ctrl+Shift+W).
+        // Restart: mark closed and queue the pane id so this loop
+        // never double-borrows ws.mux; the post-drain handler
+        // respawns the same argv and cwd in a new tab.
+        // Close (default): mark closed.
+        //
+        // `exited` was read before this pane's latches and queue, so its
+        // final title, clipboard writes and replies were handled above.
+        // `Mux::reap` keys off this instead of polling the process, so a
+        // fast child cannot disappear before its final output or exit
+        // policy is applied.
+        if exited && !pane.closed {
+            apply_pane_exit_action(exit_action, pane_id, pane, &mut pending_restarts_local);
+        }
+        #[cfg(windows)]
+        if !pane.exit_observed
+            && let Some(child_exit_at) = pane.term.direct_child_exit_at()
+        {
+            let now = std::time::Instant::now();
+            let phase = match pane.pty_output_close_phase {
+                PtyOutputClosePhase::NotStarted => BoundedPtyExitPhase::NotStarted,
+                PtyOutputClosePhase::InProgress(started) => {
+                    BoundedPtyExitPhase::InProgress(now.saturating_duration_since(started))
+                }
+                PtyOutputClosePhase::Failed { retry_at } => BoundedPtyExitPhase::Failed {
+                    retry_in: retry_at.saturating_duration_since(now),
+                },
+            };
+            match bounded_pty_exit_action(now.saturating_duration_since(child_exit_at), phase) {
+                BoundedPtyExitAction::Wait => {}
+                BoundedPtyExitAction::BeginClose => {
+                    log::warn!(
+                        "PTY output stayed open after pane {pane_id}'s direct child exited; \
+                         starting bounded ConPTY close"
+                    );
+                    match pane.term.begin_pty_output_close() {
+                        Ok(_) => {
+                            pane.pty_output_close_phase =
+                                PtyOutputClosePhase::InProgress(std::time::Instant::now())
+                        }
+                        Err(error) => {
+                            log::error!("cannot close pane {pane_id}'s ConPTY output: {error}");
+                            pane.pty_output_close_phase = PtyOutputClosePhase::Failed {
+                                retry_at: std::time::Instant::now()
+                                    + std::time::Duration::from_secs(1),
+                            };
+                        }
+                    }
+                }
+                BoundedPtyExitAction::ApplyPolicy => {
+                    // Older ConPTY builds may park ClosePseudoConsole while
+                    // an inherited client remains attached. The close
+                    // worker is detached specifically for that platform
+                    // behavior; do not let it also park GUI exit policy.
+                    log::error!(
+                        "pane {pane_id}'s PTY did not finish within the bounded drain; final \
+                         output may be incomplete"
+                    );
+                    apply_pane_exit_action(exit_action, pane_id, pane, &mut pending_restarts_local);
+                }
+            }
+        }
+        if !pane.held && pane.pty_input_failed() {
+            log::error!("closing pane {pane_id}: its PTY input transport failed");
+            pane.closed = true;
+            while pane.rx.try_recv().is_ok() {}
+        }
+        entered_hold |= !was_held && pane.held && !pane.closed;
+        // Drain OSC 133 D (CommandEnd) events ONCE here and
+        // defer processing to after the pane loop, where the App can fan a
+        // single drain out to the command-notify, the run_command
+        // correlator, and event subscribers (each consumer would otherwise
+        // race for the destructive drain). Always drain (not gated on the
+        // notify threshold) so a pending run_command still resolves when
+        // notifications are off.
+        for ev in pane.term.drain_command_finished_events() {
+            command_finished_local.push((pane_id, ev));
+        }
+        for event in pane.term.drain_correlated_command_finished_events() {
+            correlated_command_finished_local.push((pane_id, event));
+        }
+        for ev in pane.term.drain_protocol_notifications() {
+            protocol_notifications_local.push((pane_id, ev));
+        }
+    }
+    if entered_hold {
+        // Hold changes window chrome without advancing the PTY output generation.
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+    PaneEventBatch {
+        bell,
+        bell_panes,
+        output_chunks,
+        command_finished_local,
+        correlated_command_finished_local,
+        protocol_notifications_local,
+        pending_restarts_local,
+    }
+}
+
 impl App {
+    fn pane_event_reply(&mut self, pane: &Pane, ev: TermEvent) -> Option<String> {
+        match ev {
+            TermEvent::PtyWrite(s) => Some(s),
+            event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
+                apply_osc52_event(self, event)
+            }
+            TermEvent::TextAreaSizeRequest(fmt) => {
+                // Use the exact pixel totals published through PtySize so
+                // fractional cell sizes do not accumulate rounding error.
+                let (pixel_width, pixel_height) = pane.term.pty_pixel_size();
+                Some(kettle_render::reply_for_text_area_size(
+                    pixel_width,
+                    pixel_height,
+                    &*fmt,
+                ))
+            }
+            TermEvent::ColorRequest(idx, fmt) => pane.term.term.lock().ok().and_then(|t| {
+                kettle_render::reply_for_query(idx, &self.cfg.theme, t.colors(), &*fmt)
+            }),
+            // Process status is advisory. Only the ordered PTY exit latch
+            // may apply policy after the final output has been drained.
+            TermEvent::ChildExit(_) => None,
+            _ => None,
+        }
+    }
+
     pub(super) fn waker(&self) -> kettle_core::Waker {
         let p = self.proxy.clone();
         let pending = self.wake_pending.clone();
@@ -266,277 +540,20 @@ impl App {
 
     pub(super) fn drain_events(&mut self, ws: &mut WindowState) {
         self.sync_session_log_failures(ws);
-        let mut bell = false;
-        // Pane ids that rang the bell this drain
-        // pass — latched onto their containing tabs *after* the
-        // iter_mut() loop so we don't double-borrow mux.panes.
-        let mut bell_panes: Vec<u64> = Vec::new();
-        // Pane ids + raw-output chunks accumulated during this drain pass.
-        // Keep the PTY reader's bounded chunks intact instead of concatenating
-        // a whole backlog into a second potentially huge allocation.
-        let mut output_chunks: Vec<(u64, Vec<u8>)> = Vec::new();
-        // Collect OSC-133 CommandFinished events per
-        // pane so the App is the SINGLE drainer — `drain_command_finished_events`
-        // is destructive, so the command-notify, the run_command correlator, and
-        // event subscribers must all be fed from one place, AFTER this pane loop.
-        let mut command_finished_local: Vec<(u64, kettle_core::CommandFinished)> = Vec::new();
-        let mut correlated_command_finished_local = Vec::new();
-        // Protocol desktop notifications (OSC 9 / OSC 777) drained once per
-        // pass and dispatched after the pane loop so the UI owns all toasts.
-        let mut protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)> =
-            Vec::new();
-        // Pane ids whose shell exited with cfg.exit_action
-        // = Restart. Queued during the drain; appended to
-        // ws.pending_pane_restarts after the iteration so the
-        // post-drain handler can process them with a fresh borrow.
-        let mut pending_restarts_local: Vec<u64> = Vec::new();
-        for (&pane_id, pane) in ws.mux.panes.iter_mut() {
-            if pane.pty_input_failed() {
-                log::error!("closing pane {pane_id}: its PTY input transport failed");
-                pane.closed = true;
-                while pane.rx.try_recv().is_ok() {}
-                continue;
-            }
-            // Read the exit latch before anything else: the reader sets it
-            // after the last of the PTY's output, so everything that output
-            // latched or queued is taken below, before exit policy applies.
-            // An exit latched after this read waits for the next drain.
-            let exited = pane.term.take_exited();
-            // Drain the optional output sidechannel before regular events.
-            if let Some(out_rx) = &pane.output_rx {
-                for chunk in output_chunks_ready(out_rx) {
-                    output_chunks.push((pane_id, chunk));
-                }
-            }
-            // Bells are latched by the terminal, not queued with the events
-            // below. Terminator parity (terminatorlib/config.py:103
-            // `force_no_bell`): silence every bell flavor regardless of
-            // cfg.bell mode.
-            if pane.term.take_bell() && !self.cfg.force_no_bell {
-                bell = true;
-                bell_panes.push(pane_id);
-            }
-            // Titles and cursor-blink switches keep only their newest state.
-            // Clipboard operations are drained in their journal order below.
-            match pane.term.take_title() {
-                Some(kettle_core::TitleChange::Set(t)) => {
-                    // Ignore the bogus full-exe-path title conhost/
-                    // ConPTY injects at startup for a native Windows shell —
-                    // keeping the "kettle" placeholder so the tab/window/pane
-                    // label falls back to the working directory (the OSC 7/9;9
-                    // cwd, else the natively-polled cwd) instead of showing an
-                    // ugly `…\pwsh.exe` path. Only a still-placeholder pane is
-                    // checked; ANY genuine OSC 2 title (incl. a later one from
-                    // the shell's own prompt) is stored and permanently ends
-                    // suppression, so a program-set title is never lost.
-                    if pane.title_is_placeholder
-                        && suppress_startup_title(&t, &pane.argv, cfg!(windows))
-                    {
-                        // keep the placeholder seed; do not store the exe path
-                    } else {
-                        apply_shell_title(
-                            &mut pane.title,
-                            &mut pane.title_is_placeholder,
-                            &mut pane.title_origin,
-                            &mut pane.title_before_remote,
-                            Some(&t),
-                        );
-                    }
-                }
-                Some(kettle_core::TitleChange::Reset) => {
-                    apply_shell_title(
-                        &mut pane.title,
-                        &mut pane.title_is_placeholder,
-                        &mut pane.title_origin,
-                        &mut pane.title_before_remote,
-                        None,
-                    );
-                }
-                None => {}
-            }
-            if pane.term.take_cursor_blinking_changed() {
-                // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
-                // redraw picks up the new state from
-                // `Terminal::cursor_blinking()`, but reset the blink
-                // phase now so *blink-on* starts visible and
-                // *blink-off* makes the cursor solid right away, not on
-                // whatever half-period we'd otherwise land in. It is
-                // program output, so it does not restart the blink
-                // timeout; only typing, focus, and settings do.
-                ws.blink_on = true;
-                ws.last_blink = std::time::Instant::now();
-            }
-            for ev in pane
-                .term
-                .take_clipboard_events()
-                .into_iter()
-                .chain(pane.rx.try_iter())
-            {
-                match ev {
-                    TermEvent::PtyWrite(s) => {
-                        if pane.queue_protocol_reply(s.as_bytes()).is_failed() {
-                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
-                            pane.closed = true;
-                            break;
-                        }
-                    }
-                    event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
-                        if let Some(reply) = apply_osc52_event(self, event)
-                            && pane.queue_protocol_reply(reply.as_bytes()).is_failed()
-                        {
-                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
-                            pane.closed = true;
-                            break;
-                        }
-                    }
-                    TermEvent::TextAreaSizeRequest(fmt) => {
-                        // CSI 14 t — text-area size in pixels. Sixel / kitty
-                        // graphics / iTerm2-OSC-1337 apps probe this to do
-                        // pixel-perfect image placements. Use the exact totals
-                        // already published through PtySize: at fractional DPI
-                        // a 9.6 px cell across 100 columns is 960 px, not the
-                        // 1000 px produced by multiplying a rounded 10 px cell.
-                        let (pixel_width, pixel_height) = pane.term.pty_pixel_size();
-                        let reply = kettle_render::reply_for_text_area_size(
-                            pixel_width,
-                            pixel_height,
-                            &*fmt,
-                        );
-                        if pane.queue_protocol_reply(reply.as_bytes()).is_failed() {
-                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
-                            pane.closed = true;
-                            break;
-                        }
-                    }
-                    TermEvent::ColorRequest(idx, fmt) => {
-                        // OSC 4 ; n ; ? / OSC 10 / 11 / 12 — resolve against
-                        // the active theme + any runtime overrides, then let
-                        // the engine-supplied formatter render the canonical
-                        // xparsecolor reply and write it back to the PTY. No
-                        // reply for out-of-range indices keeps the protocol
-                        // well-formed (apps that probe just see a timeout,
-                        // exactly as on terminals that don't support OSC).
-                        let reply = pane.term.term.lock().ok().and_then(|t| {
-                            kettle_render::reply_for_query(idx, &self.cfg.theme, t.colors(), &*fmt)
-                        });
-                        if let Some(s) = reply
-                            && pane.queue_protocol_reply(s.as_bytes()).is_failed()
-                        {
-                            log::error!("closing pane {pane_id}: bounded PTY input queue failed");
-                            pane.closed = true;
-                            break;
-                        }
-                    }
-                    TermEvent::ChildExit(_) => {
-                        // Process status is advisory, not a pane-lifecycle
-                        // boundary. alacritty_terminal can publish ChildExit
-                        // before its final PTY drain; only the exit latch
-                        // below may apply exit policy or make this pane
-                        // reapable.
-                    }
-                    _ => {}
-                }
-            }
-            // Terminator parity (terminatorlib/config.py:118
-            // `exit_action`): when the shell exits, close the pane,
-            // restart the shell, or hold the dead shell visible so the
-            // user can read its final output and scrollback.
-            //
-            // Hold: don't mark closed; the pane shows its last output
-            // until the user closes it (Ctrl+Shift+W).
-            // Restart: mark closed and queue the pane id so this loop
-            // never double-borrows ws.mux; the post-drain handler
-            // respawns the same argv and cwd in a new tab.
-            // Close (default): mark closed.
-            //
-            // `exited` was read before this pane's latches and queue, so its
-            // final title, clipboard writes and replies were handled above.
-            // `Mux::reap` keys off this instead of polling the process, so a
-            // fast child cannot disappear before its final output or exit
-            // policy is applied.
-            if exited && !pane.closed {
-                apply_pane_exit_action(
-                    self.cfg.exit_action,
-                    pane_id,
-                    pane,
-                    &mut pending_restarts_local,
-                );
-            }
-            #[cfg(windows)]
-            if !pane.exit_observed
-                && let Some(child_exit_at) = pane.term.direct_child_exit_at()
-            {
-                let now = std::time::Instant::now();
-                let phase = match pane.pty_output_close_phase {
-                    PtyOutputClosePhase::NotStarted => BoundedPtyExitPhase::NotStarted,
-                    PtyOutputClosePhase::InProgress(started) => {
-                        BoundedPtyExitPhase::InProgress(now.saturating_duration_since(started))
-                    }
-                    PtyOutputClosePhase::Failed { retry_at } => BoundedPtyExitPhase::Failed {
-                        retry_in: retry_at.saturating_duration_since(now),
-                    },
-                };
-                match bounded_pty_exit_action(now.saturating_duration_since(child_exit_at), phase) {
-                    BoundedPtyExitAction::Wait => {}
-                    BoundedPtyExitAction::BeginClose => {
-                        log::warn!(
-                            "PTY output stayed open after pane {pane_id}'s direct child exited; \
-                             starting bounded ConPTY close"
-                        );
-                        match pane.term.begin_pty_output_close() {
-                            Ok(_) => {
-                                pane.pty_output_close_phase =
-                                    PtyOutputClosePhase::InProgress(std::time::Instant::now())
-                            }
-                            Err(error) => {
-                                log::error!("cannot close pane {pane_id}'s ConPTY output: {error}");
-                                pane.pty_output_close_phase = PtyOutputClosePhase::Failed {
-                                    retry_at: std::time::Instant::now()
-                                        + std::time::Duration::from_secs(1),
-                                };
-                            }
-                        }
-                    }
-                    BoundedPtyExitAction::ApplyPolicy => {
-                        // Older ConPTY builds may park ClosePseudoConsole while
-                        // an inherited client remains attached. The close
-                        // worker is detached specifically for that platform
-                        // behavior; do not let it also park GUI exit policy.
-                        log::error!(
-                            "pane {pane_id}'s PTY did not finish within the bounded drain; final \
-                             output may be incomplete"
-                        );
-                        apply_pane_exit_action(
-                            self.cfg.exit_action,
-                            pane_id,
-                            pane,
-                            &mut pending_restarts_local,
-                        );
-                    }
-                }
-            }
-            if pane.pty_input_failed() {
-                log::error!("closing pane {pane_id}: its PTY input transport failed");
-                pane.closed = true;
-                while pane.rx.try_recv().is_ok() {}
-            }
-            // Drain OSC 133 D (CommandEnd) events ONCE here and
-            // defer processing to after the pane loop, where the App can fan a
-            // single drain out to the command-notify, the run_command
-            // correlator, and event subscribers (each consumer would otherwise
-            // race for the destructive drain). Always drain (not gated on the
-            // notify threshold) so a pending run_command still resolves when
-            // notifications are off.
-            for ev in pane.term.drain_command_finished_events() {
-                command_finished_local.push((pane_id, ev));
-            }
-            for event in pane.term.drain_correlated_command_finished_events() {
-                correlated_command_finished_local.push((pane_id, event));
-            }
-            for ev in pane.term.drain_protocol_notifications() {
-                protocol_notifications_local.push((pane_id, ev));
-            }
-        }
+        let PaneEventBatch {
+            bell,
+            bell_panes,
+            output_chunks,
+            command_finished_local,
+            correlated_command_finished_local,
+            protocol_notifications_local,
+            pending_restarts_local,
+        } = drain_pane_events(
+            ws,
+            self.cfg.exit_action,
+            self.cfg.force_no_bell,
+            |pane, ev| self.pane_event_reply(pane, ev),
+        );
         if bell {
             if self.cfg.bell.visual() {
                 // Only the pane that rang flashes; a sibling split's bell
@@ -730,6 +747,7 @@ impl App {
             UserEvent::CardsTipClaimed(_)
             | UserEvent::GpusDetected(_)
             | UserEvent::ShellsDetected
+            | UserEvent::ToggleQuickTerminal
             | UserEvent::Activation
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }
@@ -903,20 +921,381 @@ impl App {
                 // Another process may have installed, dismissed or failed.
                 self.request_update_facts(true);
             }
+            #[cfg(target_os = "macos")]
+            UserEvent::MenuCommand(action) => {
+                self.handle_action(ws, action, _el);
+            }
             // Every Dock row maps onto an action kettle already has, so this
             // reuses the keybind path wholesale — including NewWindow's
             // fall-back to a new tab when a window cannot be created.
             #[cfg(target_os = "macos")]
             UserEvent::DockCommand(command) => {
-                if command == crate::macos_dock::DockCommand::NewTab
-                    && let Some(w) = &ws.window
-                {
-                    w.set_visible(true);
-                    w.set_minimized(false);
-                    w.focus_window();
+                if command == crate::macos_dock::DockCommand::NewTab {
+                    self.reveal_window(ws);
                 }
                 self.handle_action(ws, command.action(), _el);
             }
         }
     }
+}
+
+#[cfg(all(test, unix))]
+mod exit_behavior_tests {
+    use super::*;
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY fixture timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn held_window(policy: kettle_config::ExitAction) -> (WindowState, u64) {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf failure; exit 7".into(),
+            ],
+            None,
+        )
+        .unwrap();
+        let id = mux.active_focus().unwrap();
+        let mut ws = WindowState::new(1, mux);
+        wait_until(|| {
+            drain_pane_events(&mut ws, policy, false, |_, _| None);
+            ws.mux.panes[&id].held
+        });
+        (ws, id)
+    }
+
+    #[test]
+    fn held_pane_survives_late_input_failure_through_event_drain() {
+        for policy in [
+            kettle_config::ExitAction::Hold,
+            kettle_config::ExitAction::CloseOnSuccess,
+        ] {
+            for key_release in [false, true] {
+                let (mut ws, id) = held_window(policy);
+                let output = ws.mux.panes[&id].term.screen_text(0).unwrap().text;
+                let pane = ws.mux.panes.get_mut(&id).unwrap();
+                pane.disconnect_pty_input_for_test();
+                let result = if key_release {
+                    use alacritty_terminal::vte::ansi::{Handler, KeyboardModes};
+                    pane.term
+                        .term
+                        .lock()
+                        .unwrap()
+                        .push_keyboard_mode(KeyboardModes::REPORT_EVENT_TYPES);
+                    pane.feed_key_release(
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA),
+                        Arc::from(&b"\x1b[97;1:3u"[..]),
+                    )
+                } else {
+                    pane.queue_protocol_reply(b"late-reply")
+                };
+                assert!(result.is_failed());
+                assert!(pane.pty_input_failed());
+                drain_pane_events(&mut ws, policy, false, |_, _| None);
+                assert!(
+                    !ws.mux.panes[&id].closed,
+                    "held pane closed after late input failure"
+                );
+                assert!(!ws.mux.reap().layout_changed);
+                assert_eq!(ws.mux.panes[&id].term.screen_text(0).unwrap().text, output);
+            }
+        }
+    }
+
+    #[test]
+    fn held_pane_survives_reply_failure_during_event_drain() {
+        for policy in [
+            kettle_config::ExitAction::Hold,
+            kettle_config::ExitAction::CloseOnSuccess,
+        ] {
+            let (mut ws, id) = held_window(policy);
+            let output = ws.mux.panes[&id].term.screen_text(0).unwrap().text;
+            let pane = ws.mux.panes.get_mut(&id).unwrap();
+            pane.disconnect_pty_input_for_test();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            pane.rx = rx;
+            tx.send(TermEvent::PtyWrite("late-reply".into())).unwrap();
+            assert!(!pane.pty_input_failed());
+            drain_pane_events(&mut ws, policy, false, |_, event| match event {
+                TermEvent::PtyWrite(reply) => Some(reply),
+                _ => None,
+            });
+            assert!(ws.mux.panes[&id].pty_input_failed());
+            assert!(!ws.mux.panes[&id].closed);
+            assert!(!ws.mux.reap().layout_changed);
+            assert_eq!(ws.mux.panes[&id].term.screen_text(0).unwrap().text, output);
+        }
+    }
+
+    #[test]
+    fn quiet_exit_publishes_held_banner_without_new_output() {
+        for policy in [
+            kettle_config::ExitAction::Hold,
+            kettle_config::ExitAction::CloseOnSuccess,
+        ] {
+            let cfg = Config {
+                shell_integration: false,
+                login_shell: false,
+                ..Config::default()
+            };
+            let mut mux = Mux::new();
+            mux.new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "stty -echo; printf failure; read line; exit 7".into(),
+                ],
+                None,
+            )
+            .unwrap();
+            let id = mux.active_focus().unwrap();
+            let mut ws = WindowState::new(1, mux);
+            wait_until(|| {
+                ws.mux.panes[&id]
+                    .term
+                    .screen_text(0)
+                    .unwrap()
+                    .text
+                    .contains("failure")
+            });
+            wait_until(|| ws.mux.panes[&id].term.output_generation() != 0);
+            let generation = ws.mux.panes[&id].term.output_generation();
+            ws.seen_output_gen.insert(id, generation);
+            ws.accessibility_pending = false;
+            assert!(ws.mux.panes[&id].feed_input(b"\n").is_queued());
+            // Reap status first to cover EOF arriving with status already available.
+            wait_until(|| ws.mux.panes[&id].term.child_exited());
+            wait_until(|| {
+                drain_pane_events(&mut ws, policy, false, |_, _| None);
+                ws.mux.panes[&id].held
+            });
+            assert_eq!(ws.mux.panes[&id].exit_code, Some(7));
+            assert_eq!(ws.mux.panes[&id].term.output_generation(), generation);
+            assert!(!window_has_new_output(&ws));
+            assert!(
+                ws.accessibility_pending,
+                "quiet hold must publish the banner and controls"
+            );
+            // Once published, another drain must settle rather than invalidate forever.
+            ws.accessibility_pending = false;
+            drain_pane_events(&mut ws, policy, false, |_, _| None);
+            assert!(!ws.accessibility_pending);
+        }
+    }
+
+    #[test]
+    fn held_restart_preserves_completion_capability_after_reload() {
+        use kettle_config::CompletionOverlayMode::{Auto, Off};
+        for (original, reloaded) in [(Auto, Off), (Off, Auto)] {
+            let cfg = Config {
+                completion_overlay: original,
+                shell_integration: false,
+                login_shell: false,
+                ..Config::default()
+            };
+            let mut mux = Mux::new();
+            let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+            mux.new_tab_with_geometry(
+                &cfg,
+                geometry,
+                Arc::new(|| {}),
+                &[
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf 'completion=%s' \"$KETTLE_COMPLETION_OVERLAY\"; exit 7".into(),
+                ],
+                None,
+            )
+            .unwrap();
+            let id = mux.active_focus().unwrap();
+            wait_until(|| mux.panes[&id].term.take_exited());
+            let output = mux.panes[&id].term.screen_text(0).unwrap().text;
+            let capability = mux.panes[&id].completion_overlay;
+            assert_eq!(capability, original == Auto);
+            assert!(output.contains(if capability {
+                "completion=1"
+            } else {
+                "completion=0"
+            }));
+            apply_pane_exit_action(
+                kettle_config::ExitAction::Hold,
+                id,
+                mux.panes.get_mut(&id).unwrap(),
+                &mut Vec::new(),
+            );
+            wait_until(|| !mux.poll_held_child_statuses());
+            let changed = Config {
+                completion_overlay: reloaded,
+                ..cfg
+            };
+            assert!(
+                mux.restart_held(id, &changed, geometry, Arc::new(|| {}))
+                    .unwrap()
+            );
+            wait_until(|| mux.panes[&id].term.take_exited());
+            assert_eq!(
+                mux.panes[&id].term.screen_text(0).unwrap().text,
+                output,
+                "replayed shell still owns its original completion handlers"
+            );
+            assert_eq!(
+                mux.panes[&id].completion_overlay, capability,
+                "UI must match the replayed shell capability"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_exit_policy_preserves_failure_output_and_restarts_original_launch_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        for (policy, code, held) in [
+            (kettle_config::ExitAction::CloseOnSuccess, 0, false),
+            (kettle_config::ExitAction::CloseOnSuccess, 7, true),
+            (kettle_config::ExitAction::Hold, 0, true),
+            (kettle_config::ExitAction::Hold, 9, true),
+            (kettle_config::ExitAction::Close, 9, false),
+        ] {
+            let cfg = Config {
+                env: vec![("KETTLE_EXIT_FIXTURE".into(), "original".into())],
+                shell_integration: false,
+                login_shell: false,
+                ..Config::default()
+            };
+            let argv = vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "printf 'value=%s\\ncwd=%s\\n' \"$KETTLE_EXIT_FIXTURE\" \"$PWD\"; exit {code}"
+                ),
+            ];
+            let mut mux = Mux::new();
+            let geometry = PtyGeometry::from_cell_size(120, 24, 8, 16);
+            mux.new_tab_with_geometry(&cfg, geometry, Arc::new(|| {}), &argv, root.path().to_str())
+                .expect("PTY fixture");
+            let id = mux.active_focus().unwrap();
+            let wait = |pane: &Pane| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !pane.term.take_exited() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "ordered PTY exit timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            wait(&mux.panes[&id]);
+            let mut pending = Vec::new();
+            apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while mux.poll_held_child_statuses() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(!mux.panes[&id].closed, held);
+            assert!(pending.is_empty());
+            if held {
+                assert_eq!(mux.panes[&id].exit_code, Some(code));
+                let original = mux.panes[&id].term.screen_text(0).unwrap().text;
+                assert!(original.contains("value=original"), "{original}");
+                assert!(
+                    original.contains(&format!(
+                        "cwd={}",
+                        root.path().canonicalize().unwrap().display()
+                    )),
+                    "{original}"
+                );
+                assert!(!mux.reap().layout_changed);
+                let changed = Config {
+                    env: vec![("KETTLE_EXIT_FIXTURE".into(), "changed".into())],
+                    shell: Some("/no/such/program".into()),
+                    ..Config::default()
+                };
+                assert!(
+                    mux.restart_held(id, &changed, geometry, Arc::new(|| {}))
+                        .unwrap()
+                );
+                assert_eq!(mux.active_focus(), Some(id));
+                assert_eq!(mux.tabs.len(), 1);
+                assert!(!mux.panes[&id].held);
+                wait(&mux.panes[&id]);
+                let restarted = mux.panes[&id].term.screen_text(0).unwrap().text;
+                assert_eq!(
+                    restarted, original,
+                    "restart must preserve command, cwd and environment"
+                );
+                apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+                apply_pane_exit_action(policy, id, mux.panes.get_mut(&id).unwrap(), &mut pending);
+                assert!(pending.is_empty(), "duplicate exit is idempotent");
+            } else {
+                assert!(mux.reap().mux_empty);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn a_failed_held_pane_restart_retains_output_and_pane_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("once");
+    std::fs::write(&script, "#!/bin/sh\nprintf 'final-output\\n'\nexit 3\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cfg = Config::default();
+    let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(
+        &cfg,
+        geometry,
+        Arc::new(|| {}),
+        &[script.to_string_lossy().into_owned()],
+        root.path().to_str(),
+    )
+    .unwrap();
+    let id = mux.active_focus().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !mux.panes[&id].term.take_exited() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    apply_pane_exit_action(
+        kettle_config::ExitAction::Hold,
+        id,
+        mux.panes.get_mut(&id).unwrap(),
+        &mut Vec::new(),
+    );
+    while mux.poll_held_child_statuses() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let output = mux.panes[&id].term.screen_text(0).unwrap().text;
+    std::fs::remove_file(script).unwrap();
+    assert!(
+        mux.restart_held(id, &cfg, geometry, Arc::new(|| {}))
+            .is_err()
+    );
+    assert_eq!(mux.active_focus(), Some(id));
+    assert!(mux.panes[&id].held);
+    assert_eq!(mux.panes[&id].term.screen_text(0).unwrap().text, output);
 }

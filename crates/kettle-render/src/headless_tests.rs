@@ -1503,12 +1503,19 @@ fn confirmation_preserves_settings_below_opaque_panel() {
         overlay.confirm_dialog.as_ref().unwrap(),
     );
     overlay.settings = Some(SettingsOverlay {
+        search_query: String::new(),
+        search_focused: false,
+        search_placeholder: String::new(),
+        no_matches: String::new(),
         categories: vec!["Keys".into()],
         label_cols: 20,
         value_cols: 20,
         active_category: 0,
         background_page: false,
         rows: vec![SettingsRow {
+            description: String::new(),
+            category: 0,
+            control: Default::default(),
             label: "A conflicting key binding".into(),
             value: "Ctrl+W".into(),
             disabled: false,
@@ -3514,7 +3521,64 @@ fn disabled_wallpaper_discards_late_worker_frames() {
 }
 
 #[test]
-fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
+fn horizontal_translucent_active_surface_matches_terminal_pixels() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 160) else {
+        eprintln!("TAB_SURFACE_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.background_opacity = 0.86;
+    cfg.close_button_on_tab = false;
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    for name in ["TokyoNight Night", "TokyoNight Day"] {
+        cfg.theme = kettle_config::Theme::by_name(name);
+        for pos in [
+            kettle_config::TabBarPos::Top,
+            kettle_config::TabBarPos::Bottom,
+        ] {
+            cfg.tab_bar_pos = pos;
+            for in_titlebar in [false, true] {
+                let y = if pos == kettle_config::TabBarPos::Bottom {
+                    132.0
+                } else {
+                    0.0
+                };
+                let mut tabs = TabBar::hidden();
+                tabs.y = y;
+                tabs.height = 28.0;
+                tabs.in_titlebar = in_titlebar;
+                tabs.band = (0.0, y, 400.0, 28.0);
+                tabs.segments.push(TabSeg {
+                    idx: 0,
+                    rect: (78.0, y, 160.0, 28.0),
+                    title_rect: (86.0, y, 100.0, 28.0),
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: String::new(),
+                    path: None,
+                    active: true,
+                    activity: TabActivity::Normal,
+                });
+                let mut terminal = pane(&snap, 400, 160);
+                terminal.rect = (0.0, if y == 0.0 { 28.0 } else { 0.0 }, 400.0, 132.0);
+                terminal.terminal = terminal.rect;
+                let shot =
+                    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+                let background = shot.get_pixel(300, 80);
+                assert_eq!(background[3], (0.86_f32 * 255.0).round() as u8);
+                assert_eq!(
+                    shot.get_pixel(158, y as u32 + 14),
+                    background,
+                    "{name}, {pos:?}, titlebar={in_titlebar}: tab and terminal RGBA must match"
+                );
+            }
+        }
+    }
+    eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+}
+
+#[test]
+fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
         eprintln!("no GPU adapter on this host; skipped");
@@ -3529,6 +3593,7 @@ fn regression_active_close_glyph_contrasts_with_its_painted_chip() {
         idx: 0,
         rect: (0.0, 0.0, 200.0, 40.0),
         title_rect: (0.0, 0.0, 150.0, 40.0),
+        hint: None,
         close: (150.0, 0.0, 40.0, 40.0),
         title: "Tab".into(),
         path: None,
@@ -4035,6 +4100,82 @@ fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() 
         );
     }
     eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+}
+
+#[test]
+fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("EMOJI_SIZING_GPU_SKIP: no adapter");
+        return;
+    };
+    // Both glyphs are in the bundled font. Restrict the font database so
+    // portable pixel coverage cannot accidentally depend on an OS emoji face.
+    renderer.font_system =
+        FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
+    load_bundled_font(&mut renderer.font_system, kettle_config::font::REGULAR);
+    renderer.text_symbol_family = None;
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        cfg.text_renderer = mode;
+        for clustered in [false, true] {
+            for emoji in ["\u{26a1}", "\u{a9}\u{fe0f}"] {
+                let input = format!(
+                    "\x1b[?2027{}{}X\x1b[?25l",
+                    if clustered { 'h' } else { 'l' },
+                    emoji
+                );
+                let snap = snapshot_of(20, 4, input.as_bytes());
+                let _image = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 180)],
+                    &focused(false),
+                );
+                let glyph = &renderer.glyph_instances[0];
+                let columns = if clustered || emoji.starts_with('\u{26a1}') {
+                    2
+                } else {
+                    1
+                };
+                let expected = super::fonts::fit_emoji(
+                    (
+                        cfg.padding_x,
+                        cfg.padding_y,
+                        columns as f32 * renderer.cell_w,
+                        renderer.cell_h,
+                    ),
+                    (glyph.uv_size[0], glyph.uv_size[1]),
+                );
+                assert!(
+                    (glyph.pos[0] - expected.0).abs() < 0.01,
+                    "{mode:?} {clustered} {emoji:?}"
+                );
+                assert!((glyph.pos[1] - expected.1).abs() < 0.01);
+                assert!((glyph.size[0] - expected.2).abs() < 0.01);
+                assert!((glyph.size[1] - expected.3).abs() < 0.01);
+                assert_eq!(snap.cells.iter().find(|c| c.c == 'X').unwrap().col, columns);
+                let baseline = renderer.pane_buffers[0]
+                    .layout_runs()
+                    .next()
+                    .unwrap()
+                    .line_y;
+                let _cached = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 180)],
+                    &focused(false),
+                );
+                assert_eq!(
+                    renderer.pane_buffers[0]
+                        .layout_runs()
+                        .next()
+                        .unwrap()
+                        .line_y,
+                    baseline
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -4815,4 +4956,107 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
     );
     overlay.update_toast = None;
     assert_eq!(baseline, capture(&mut renderer, &cfg, &panes, &overlay));
+}
+
+#[test]
+fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 72.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 800, 240, 1.0, false).unwrap()
+    else {
+        eprintln!("titlebar editor paint/measurement check skipped: no GPU adapter");
+        return;
+    };
+    let field = TextFieldOverlay {
+        picker_header: false,
+        text: "Rename".into(),
+        cursor_byte: 3,
+        selection: Some((0, 3)),
+        horizontal_scroll: 0,
+        rect: (78.0, 0.0, 722.0, 28.0),
+        prefix: "Title: ".into(),
+        hint: "(Enter apply Esc cancel)".into(),
+        accent_palette: 3,
+    };
+    let overlay = Overlay {
+        text_field: Some(field.clone()),
+        ..focused(true)
+    };
+    let snap = snapshot_of(20, 2, b"");
+    capture(&mut renderer, &cfg, &[pane(&snap, 800, 240)], &overlay);
+    // The segment pool keeps unused buffers at default metrics; only the
+    // prefix, input and hint segments this field painted are fitted.
+    let painted: Vec<_> = renderer
+        .search_segment_buffers
+        .iter()
+        .filter(|buffer| buffer.lines.iter().any(|line| !line.text().is_empty()))
+        .collect();
+    assert_eq!(painted.len(), 3, "prefix, input and hint segments");
+    for buffer in painted {
+        assert!(buffer.metrics().font_size <= 28.0);
+        assert_eq!(buffer.metrics().line_height, 28.0);
+        assert_eq!(buffer.layout_runs().count(), 1);
+    }
+    let measured = renderer.measure_text_field(&field);
+    let cw = text_field_cell_width(
+        &field,
+        renderer.overlay_text_cell_width(),
+        renderer.overlay_text_line_height(),
+    );
+    assert_eq!(measured.editor, text_field_rects(&field, cw)[1]);
+    let painted = text_field::prepare_text_field(
+        &mut renderer.font_system,
+        &mut renderer.search_segment_buffers[1],
+        &field,
+        cw / tab_text_scale(28.0, renderer.metrics.line_height),
+        renderer.metrics,
+        &renderer.font_family,
+    );
+    assert_eq!(measured, painted);
+}
+
+#[test]
+fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 400, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("strip control glyph check skipped: no GPU adapter");
+        return;
+    };
+    let snap = snapshot_of(20, 2, b"");
+    for in_titlebar in [false, true] {
+        let mut tabs = TabBar::hidden();
+        tabs.height = 32.0;
+        tabs.in_titlebar = in_titlebar;
+        tabs.band = (0.0, 0.0, 400.0, 32.0);
+        tabs.new_tab_menu = (336.0, 0.0, 32.0, 32.0);
+        tabs.new_tab = (368.0, 0.0, 32.0, 32.0);
+        tabs.segments.push(TabSeg {
+            idx: 0,
+            rect: (78.0, 0.0, 160.0, 32.0),
+            title_rect: (86.0, 0.0, 100.0, 32.0),
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: "shell".into(),
+            path: None,
+            active: true,
+            activity: TabActivity::Normal,
+        });
+        let mut terminal = pane(&snap, 400, 160);
+        terminal.rect = (0.0, 32.0, 400.0, 128.0);
+        terminal.terminal = terminal.rect;
+        capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+        let text = renderer.tab_close_buffer.metrics().font_size;
+        for size in [
+            renderer.tabbar_buffer.metrics().font_size,
+            renderer.new_tab_arrow_buffer.metrics().font_size,
+        ] {
+            assert!(
+                size > text * 1.3,
+                "titlebar={in_titlebar}: control glyph {size} vs tab text {text}"
+            );
+        }
+    }
 }

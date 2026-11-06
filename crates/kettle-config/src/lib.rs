@@ -45,7 +45,7 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
-pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+pub const DEFAULT_SCROLLBACK_BYTES: usize = 64_000_000;
 /// Mirrors `kettle_core::record::MIN_RECORD_BYTES`. kettle-config and
 /// kettle-core are siblings, so the value is duplicated; kettle-core floors the
 /// live policy regardless, and its
@@ -400,6 +400,26 @@ impl KeybindYield {
     }
 }
 
+/// Confirmation policy for terminal text pastes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PasteProtection {
+    #[default]
+    Auto,
+    Always,
+    Off,
+}
+
+impl PasteProtection {
+    /// Whether this payload needs consent for a receiving terminal mode.
+    pub fn confirms(self, text: &str, bracketed: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Always => text.contains(['\n', '\r']),
+            Self::Auto => !bracketed && text.bytes().any(|b| b < 0x20 && b != b'\t'),
+        }
+    }
+}
+
 /// Policy for pasting OS file references — a file copied in the file manager
 /// (`CF_HDROP` on Windows, `text/uri-list` elsewhere) — into the focused pane
 /// as a shell-quoted path. `On` (default) pastes the path(s); `Off` ignores a
@@ -476,6 +496,14 @@ impl RecordMode {
     pub fn enabled(self) -> bool {
         matches!(self, RecordMode::On)
     }
+}
+
+/// macOS window chrome. Ignored on other platforms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MacosTitlebarStyle {
+    #[default]
+    Tabs,
+    Native,
 }
 
 /// When the tab bar is shown.
@@ -647,6 +675,61 @@ pub enum WindowState {
     Hidden,
 }
 
+/// Screen edge used by the dedicated quick terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickTerminalPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
+impl QuickTerminalPosition {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            "center" => Self::Center,
+            _ => return None,
+        })
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Center => "center",
+        }
+    }
+}
+
+/// A global chord must include a modifier and round-trip through Settings.
+pub fn parse_quick_terminal_hotkey(value: &str) -> Option<keybinds::Trigger> {
+    let trigger = keybinds::parse_trigger(value)?;
+    (!trigger.mods.is_empty()).then(|| normalize_quick_terminal_hotkey(trigger))
+}
+
+/// Canonical chord passed to native global-shortcut registration.
+pub fn normalize_quick_terminal_hotkey(mut trigger: keybinds::Trigger) -> keybinds::Trigger {
+    use keybinds::{Key, Mods};
+    if let Key::Char(symbol) = trigger.key
+        && let Some(base) = "~!@#$%^&*()_+{}|:\"<>?"
+            .chars()
+            .zip("`1234567890-=[]\\;',./".chars())
+            .find_map(|(shifted, base)| (symbol == shifted).then_some(base))
+    {
+        trigger.key = Key::Char(base);
+        trigger.mods |= Mods::SHIFT;
+    }
+    trigger
+}
+
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.
 /// Default is `Auto`: let wgpu / the platform pick the adapter unless the user
 /// pins a specific GPU. This is the least surprising cross-platform policy:
@@ -736,8 +819,10 @@ pub enum BroadcastDefault {
 /// `exit_action`): what to do when the shell process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExitAction {
-    /// Close the pane (kettle default + Terminator default).
+    /// Close successful processes; retain failed processes for inspection.
     #[default]
+    CloseOnSuccess,
+    /// Close the pane (the legacy Terminator default).
     Close,
     /// Re-spawn the shell. Useful for long-running session windows.
     Restart,
@@ -1115,6 +1200,44 @@ pub enum ScrollbarMode {
     Always,
 }
 
+/// Policy for loading and saving the default last session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreSession {
+    /// Follow macOS window persistence; open fresh on other platforms.
+    Auto,
+    Always,
+    Never,
+}
+
+impl RestoreSession {
+    fn parse(value: &str) -> Option<Self> {
+        if value.trim().eq_ignore_ascii_case("auto") {
+            Some(Self::Auto)
+        } else {
+            parse_bool(value).map(|on| if on { Self::Always } else { Self::Never })
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "true",
+            Self::Never => "false",
+        }
+    }
+
+    /// Resolve without accessing OS state. App preferences override global
+    /// preferences, including an explicit false. macOS keeps windows when
+    /// neither domain defines NSQuitAlwaysKeepsWindows.
+    pub fn resolve(self, macos: bool, app: Option<bool>, global: Option<bool>) -> bool {
+        match self {
+            Self::Auto => macos && app.or(global).unwrap_or(true),
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
 /// Stable-channel update behavior for official installer-owned builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdatePolicy {
@@ -1255,6 +1378,10 @@ impl ThemeOverrides {
                 *slot = color;
             }
         }
+        if self.selection_foreground.is_some() {
+            theme.selection_foreground_explicit = true;
+            theme.selection_foreground_user = true;
+        }
     }
 }
 
@@ -1305,6 +1432,8 @@ pub struct Config {
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
+    /// Confirm unsafe or multi-line terminal pastes (default: auto).
+    pub paste_protection: PasteProtection,
     /// Paste a clipboard BITMAP (screenshot) as a temporary-PNG path.
     pub paste_images: PasteImages,
     /// Show a short-lived thumbnail receipt after the initiating pane queues a
@@ -1344,6 +1473,7 @@ pub struct Config {
     pub record_max_directory_bytes: Option<u64>,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
+    pub macos_titlebar_style: MacosTitlebarStyle,
     /// Status-bar mode. See [`StatusBarMode`].
     pub status_bar: StatusBarMode,
     /// Terminator parity (terminatorlib/config.py:75
@@ -1446,17 +1576,11 @@ pub struct Config {
     /// ~/.bash_profile, ...). The default shell always starts as a login
     /// shell. Default false matches Terminator.
     pub login_shell: bool,
-    /// Auto-load kettle's shell integration into the DEFAULT shell kettle
-    /// launches, so the shell reports its working directory (OSC 7) + prompt
-    /// marks (OSC 133) with zero `$PROFILE` setup. This is what makes the tab
-    /// track `cd` for a stock PowerShell (whose `Set-Location` does NOT update
-    /// the OS process cwd, so it cannot be read from outside the process).
-    /// Injects for pwsh/powershell via `-NoExit -Command` and a short bootstrap
-    /// that decodes the embedded `kettle.ps1` (the user's `$PROFILE` still loads
-    /// first; kettle only wraps the resulting prompt). cmd.exe needs no
-    /// injection (its process cwd tracks `cd`, read by the native poll).
-    /// Default `true`; `shell-integration = off` launches the shell untouched
-    /// (rely on a manually-sourced `$PROFILE` integration).
+    /// Auto-load the bundled integration into default or bare explicit bash,
+    /// zsh and fish shells on Unix, and PowerShell on Windows. User startup
+    /// runs before the hooks. `auto` (default) enables injection; `off` disables
+    /// it. Legacy boolean values remain accepted. Commands with arguments and
+    /// wrappers are left alone. See docs/SHELL-INTEGRATION.md.
     pub shell_integration: bool,
     /// Terminator parity (terminatorlib/config.py:118
     /// `exit_action`): what to do when the shell process exits.
@@ -1529,6 +1653,11 @@ pub struct Config {
     /// `hide_on_lose_focus`): hide window when it loses focus.
     /// Quake-style behavior. winit hint; partial OS support.
     pub hide_on_lose_focus: bool,
+    pub quick_terminal_position: QuickTerminalPosition,
+    pub quick_terminal_size: u8,
+    pub quick_terminal_hotkey: Option<keybinds::Trigger>,
+    pub quick_terminal_animation: bool,
+    pub quick_terminal_autohide: bool,
     /// Terminator parity (terminatorlib/config.py:78
     /// `sticky`): show window on every workspace (X11 only;
     /// no-op on Wayland and most other platforms).
@@ -1938,13 +2067,10 @@ pub struct Config {
     /// hours (default 24 = daily). Floored at 1 to avoid hammering the feed.
     /// `update-policy = off` disables checking entirely regardless of this.
     pub update_check_interval_hours: u32,
-    /// Restore the previous session's tabs/splits/working-dirs on
-    /// launch. OFF by default — like every mainstream terminal (GNOME Terminal,
-    /// Windows Terminal, kitty, Alacritty, WezTerm, iTerm2), a new window/instance
-    /// opens FRESH (a single pane in the default cwd). Opt in with
-    /// `restore-session = true` (or the `--restore` flag) to continue where you
-    /// left off. The session is always SAVED so opt-in restore has state to load.
-    pub restore_session: bool,
+    /// Restore the previous session's windows, tabs, splits and working dirs.
+    /// Auto follows macOS window persistence and is false elsewhere. The
+    /// resolved policy gates both loading and saving the default session.
+    pub restore_session: RestoreSession,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -1965,6 +2091,9 @@ pub struct Config {
     /// `,│`|:\"' ()[]{}<>\t`). Set to e.g. ` "'` to make `/` part of a
     /// word so URLs/paths are picked up whole.
     pub word_delimiters: String,
+    /// Initial DEC mode 2027 for new terminals; resets restore this default.
+    /// Reloading does not change existing terminals.
+    pub grapheme_clustering: bool,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -2019,6 +2148,55 @@ pub struct LoadedConfig {
     pub config: Config,
     pub unknown_keys: Vec<String>,
     pub malformed_values: Vec<String>,
+}
+
+/// A source location for a setting ignored by the config loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDiagnostic {
+    pub line: usize,
+    pub key: String,
+}
+
+impl LoadedConfig {
+    /// Diagnostics contain key names only, never values such as environment secrets.
+    pub fn diagnostics(&self) -> Vec<ConfigDiagnostic> {
+        let mut result = Vec::new();
+        let unknown: std::collections::HashSet<_> = self.unknown_keys.iter().collect();
+        let malformed: std::collections::HashSet<_> = self.malformed_values.iter().collect();
+        for entry in parse::parse(&self.text) {
+            let invalid = format!("{} = {:?}", entry.raw_key, entry.value);
+            if unknown.contains(&entry.raw_key) || malformed.contains(&invalid) {
+                result.push(ConfigDiagnostic {
+                    line: entry.line,
+                    key: entry.raw_key,
+                });
+            }
+        }
+        for (index, raw) in self
+            .text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&self.text)
+            .lines()
+            .enumerate()
+        {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') || parse::section_header(line).is_some() {
+                continue;
+            }
+            if line.contains('\0') || !line.contains('=') {
+                let key = line.split_once('=').map_or_else(
+                    || line.split_whitespace().next().unwrap_or(line),
+                    |(key, _)| key.trim(),
+                );
+                result.push(ConfigDiagnostic {
+                    line: index + 1,
+                    key: key.to_owned(),
+                });
+            }
+        }
+        result.sort_by_key(|diagnostic| diagnostic.line);
+        result
+    }
 }
 
 /// Provenance of the config path selected for a read.
@@ -2951,6 +3129,7 @@ impl Default for Config {
             modify_other_keys: ModifyOtherKeysMode::Auto,
             keybind_yield: KeybindYield::Auto,
             paste_files: PasteFiles::On,
+            paste_protection: PasteProtection::Auto,
             paste_images: PasteImages::On,
             paste_image_preview: true,
             paste_video_preview: true,
@@ -2962,8 +3141,9 @@ impl Default for Config {
             record_max_bytes: None,
             record_max_files: None,
             record_max_directory_bytes: None,
-            tab_bar: TabBarMode::Always,
+            tab_bar: TabBarMode::Auto,
             tab_bar_pos: TabBarPos::Top,
+            macos_titlebar_style: MacosTitlebarStyle::Tabs,
             status_bar: StatusBarMode::Off,
             borderless: false,
             always_on_top: false,
@@ -2984,7 +3164,7 @@ impl Default for Config {
             env: Vec::new(),
             login_shell: false,
             shell_integration: true,
-            exit_action: ExitAction::Close,
+            exit_action: ExitAction::CloseOnSuccess,
             agent_server: AgentServer::Off,
             agent_display: false,
             agent_display_claude_code: false,
@@ -3000,6 +3180,11 @@ impl Default for Config {
             scroll_tabbar: true,
             tab_min_width: 120.0,
             hide_on_lose_focus: false,
+            quick_terminal_position: QuickTerminalPosition::Top,
+            quick_terminal_size: 40,
+            quick_terminal_hotkey: None,
+            quick_terminal_animation: true,
+            quick_terminal_autohide: true,
             sticky: false,
             hide_from_taskbar: false,
             backspace_binding: BackspaceBinding::AsciiDel,
@@ -3074,7 +3259,7 @@ impl Default for Config {
             minimum_contrast: 0.0,
             window_title_format: DEFAULT_WINDOW_TITLE_FORMAT.to_string(),
             agent_badge: "[agent] ".to_string(),
-            tab_format: "{n}: {title}".to_string(),
+            tab_format: "{title}".to_string(),
             scrollbar: ScrollbarMode::Auto,
             scrollbar_width: 6.0,
             resize_overlay: ResizeOverlayMode::AfterFirst,
@@ -3095,11 +3280,12 @@ impl Default for Config {
             copy_on_select: true,
             update_policy: UpdatePolicy::Auto,
             update_check_interval_hours: 24,
-            restore_session: false, // fresh-by-default; opt in to restore
+            restore_session: RestoreSession::Auto,
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
             word_delimiters: String::new(),
+            grapheme_clustering: true,
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: None, // derive from theme.background
@@ -3577,6 +3763,8 @@ impl Config {
     /// it silently keep the default. Kept in lockstep with `parse_collect` by
     /// `bool_and_enum_typos_are_all_flagged`.
     const BOOL_KEYS: &'static [&'static str] = &[
+        "grapheme-clustering",
+        "grapheme_clustering",
         "allow-bold",
         "allow_bold",
         "always-on-top",
@@ -3629,6 +3817,8 @@ impl Config {
         "geometry-hinting",
         "geometry_hinting",
         "hide-from-taskbar",
+        "quick-terminal-animation",
+        "quick-terminal-autohide",
         "hide-on-lose-focus",
         "hide_from_taskbar",
         "hide_on_lose_focus",
@@ -3693,8 +3883,6 @@ impl Config {
         "agent_display_codex",
         "agent-display-agy",
         "agent_display_agy",
-        "restore-session",
-        "restore_session",
         "urgent-bell",
         "urgent_bell",
         "use-custom-command",
@@ -3775,6 +3963,9 @@ impl Config {
                 // the clamp range, or `--check-config` would pass a value the
                 // runtime changes. The runtime still clamps; the warning just
                 // makes the change visible.
+                "quick-terminal-position" => QuickTerminalPosition::parse(v).is_some(),
+                "quick-terminal-size" => v.parse::<u8>().is_ok_and(|n| (1..=100).contains(&n)),
+                "quick-terminal-hotkey" => v == "none" || parse_quick_terminal_hotkey(v).is_some(),
                 "font-size" => v.parse::<f32>().is_ok_and(|n| (5.0..=72.0).contains(&n)),
                 "font" => parse_font_description(v)
                     .is_some_and(|(_, size)| size.is_none_or(|n| (5.0..=72.0).contains(&n))),
@@ -3968,6 +4159,7 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "off" | "false" | "none" | "top" | "bottom" | "true" | "on"
                 ),
+                "exit-behavior" => matches!(v.to_ascii_lowercase().as_str(), "close" | "close-on-success" | "hold"),
                 "exit-action" | "exit_action" => {
                     matches!(v.to_ascii_lowercase().as_str(), "close" | "restart" | "hold")
                 }
@@ -4097,6 +4289,7 @@ impl Config {
                 "keybind-yield" | "keybind_yield" => {
                     matches!(v.to_ascii_lowercase().as_str(), "auto" | "off")
                 }
+                "paste-protection" => matches!(v.to_ascii_lowercase().as_str(), "auto" | "always" | "off"),
                 "paste-files" | "paste-images" | "paste-image" => {
                     parse_paste_policy(v).is_some()
                 }
@@ -4119,6 +4312,9 @@ impl Config {
                 // recognizes. `BOOL_KEYS` lists both spellings of many keys,
                 // but the tokenizer yields only the hyphenated form, so compare
                 // each entry in that folded spelling.
+                "restore-session" | "restore_session" => RestoreSession::parse(v).is_some(),
+                "shell-integration" | "shell_integration" =>
+                    v.eq_ignore_ascii_case("auto") || parse_bool(v).is_some(),
                 k if Self::BOOL_KEYS
                     .iter()
                     .any(|listed| listed.replace('_', "-") == k) =>
@@ -4164,6 +4360,9 @@ impl Config {
                         "smart" | "auto" | "always" | "sensitive" | "never" | "insensitive"
                     ) || parse_bool(v).is_some()
                 }
+                "macos-titlebar-style" => matches!(
+                    v.to_ascii_lowercase().as_str(), "tabs" | "native"
+                ),
                 "tab-bar" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "off" | "none" | "false" | "auto" | "always"
@@ -4364,6 +4563,7 @@ impl Config {
         // canonical key vs Terminator-spelled alias.
         let mut explicit_canonical_bell = false;
         let entries = parse::parse(text);
+        let has_exit_behavior = entries.iter().any(|entry| entry.key == "exit-behavior");
         // A canonical policy wins regardless of line order. This matters for
         // migrated configs that still carry the legacy boolean below it.
         let has_update_policy = entries
@@ -4687,6 +4887,13 @@ impl Config {
                         _ => KeybindYield::Auto,
                     }
                 }
+                "paste-protection" => {
+                    cfg.paste_protection = match e.value.to_ascii_lowercase().as_str() {
+                        "always" => PasteProtection::Always,
+                        "off" => PasteProtection::Off,
+                        _ => PasteProtection::Auto,
+                    };
+                }
                 "paste-files" => {
                     cfg.paste_files = if parse_paste_policy(&e.value) == Some(false) {
                         PasteFiles::Off
@@ -4764,11 +4971,17 @@ impl Config {
                         cfg.record_max_directory_bytes = Some(n as u64);
                     }
                 }
+                "macos-titlebar-style" => {
+                    cfg.macos_titlebar_style = match e.value.to_ascii_lowercase().as_str() {
+                        "native" => MacosTitlebarStyle::Native,
+                        _ => MacosTitlebarStyle::Tabs,
+                    };
+                }
                 "tab-bar" => {
                     cfg.tab_bar = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "none" | "false" => TabBarMode::Off,
-                        "auto" => TabBarMode::Auto,
-                        _ => TabBarMode::Always,
+                        "always" => TabBarMode::Always,
+                        _ => TabBarMode::Auto,
                     }
                 }
                 "tab-bar-position" | "tab-position" | "tab_position" => {
@@ -4804,6 +5017,11 @@ impl Config {
                     // Terminator parity.
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.always_on_top = b;
+                    }
+                }
+                "grapheme-clustering" | "grapheme_clustering" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.grapheme_clustering = b;
                     }
                 }
                 "allow-bold" | "allow_bold" => {
@@ -4907,11 +5125,23 @@ impl Config {
                     }
                 }
                 "shell-integration" | "shell_integration" => {
-                    if let Some(b) = parse_bool(&e.value) {
+                    if e.value.eq_ignore_ascii_case("auto") {
+                        cfg.shell_integration = true;
+                    } else if let Some(b) = parse_bool(&e.value) {
                         cfg.shell_integration = b;
                     }
                 }
+                "exit-behavior" => {
+                    cfg.exit_action = match e.value.to_ascii_lowercase().as_str() {
+                        "close" => ExitAction::Close,
+                        "hold" => ExitAction::Hold,
+                        _ => ExitAction::CloseOnSuccess,
+                    };
+                }
                 "exit-action" | "exit_action" => {
+                    if has_exit_behavior {
+                        continue;
+                    }
                     cfg.exit_action = match e.value.to_ascii_lowercase().as_str() {
                         "restart" => ExitAction::Restart,
                         "hold" => ExitAction::Hold,
@@ -4965,6 +5195,29 @@ impl Config {
                         && v.is_finite()
                     {
                         cfg.tab_min_width = v.clamp(40.0, 600.0);
+                    }
+                }
+                "quick-terminal-position" => {
+                    if let Some(position) = QuickTerminalPosition::parse(&e.value) {
+                        cfg.quick_terminal_position = position;
+                    }
+                }
+                "quick-terminal-size" => {
+                    if let Ok(size) = e.value.parse::<u8>() {
+                        cfg.quick_terminal_size = size.clamp(1, 100);
+                    }
+                }
+                "quick-terminal-hotkey" => {
+                    cfg.quick_terminal_hotkey = parse_quick_terminal_hotkey(&e.value);
+                }
+                "quick-terminal-animation" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.quick_terminal_animation = value;
+                    }
+                }
+                "quick-terminal-autohide" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.quick_terminal_autohide = value;
                     }
                 }
                 "hide-on-lose-focus" | "hide_on_lose_focus" => {
@@ -5626,11 +5879,9 @@ impl Config {
                         _ => {}
                     }
                 }
-                // Opt IN to restoring the last session on launch
-                // (off by default — fresh windows, mainstream behavior).
                 "restore-session" | "restore_session" => {
-                    if let Some(b) = parse_bool(&e.value) {
-                        cfg.restore_session = b;
+                    if let Some(policy) = RestoreSession::parse(&e.value) {
+                        cfg.restore_session = policy;
                     }
                 }
                 "scroll-on-keystroke" | "scroll-on-input" => {
@@ -6675,20 +6926,72 @@ cell-height = 1.2\n";
         }
     }
 
-    /// Session restore is OPT-IN (fresh windows by default, like
-    /// mainstream terminals). Pin the default + that the bool key parses both
-    /// spellings, so a regression to always-restore is caught.
     #[test]
-    fn restore_session_defaults_off_and_parses() {
-        assert!(
-            !Config::default().restore_session,
-            "session restore must be OFF by default (fresh windows)"
-        );
-        assert!(Config::parse_text("restore-session = true\n").restore_session);
-        assert!(Config::parse_text("restore_session = true\n").restore_session);
-        assert!(!Config::parse_text("restore-session = false\n").restore_session);
-        // It is in BOOL_KEYS so `--check-config` validates it.
-        assert!(Config::BOOL_KEYS.contains(&"restore-session"));
+    fn restore_session_macos_defaults_decision() {
+        for (app, global, expected) in [
+            (None, None, true),
+            (Some(true), None, true),
+            (Some(false), None, false),
+            (None, Some(true), true),
+            (None, Some(false), false),
+            (Some(true), Some(false), true),
+            (Some(false), Some(true), false),
+            (Some(true), Some(true), true),
+            (Some(false), Some(false), false),
+        ] {
+            assert_eq!(
+                RestoreSession::Auto.resolve(true, app, global),
+                expected,
+                "{app:?} {global:?}"
+            );
+            assert!(RestoreSession::Always.resolve(true, app, global));
+            assert!(!RestoreSession::Never.resolve(true, app, global));
+        }
+    }
+
+    #[test]
+    fn restore_session_auto_is_false_off_macos() {
+        for app in [None, Some(false), Some(true)] {
+            for global in [None, Some(false), Some(true)] {
+                assert!(!RestoreSession::Auto.resolve(false, app, global));
+                assert!(RestoreSession::Always.resolve(false, app, global));
+                assert!(!RestoreSession::Never.resolve(false, app, global));
+            }
+        }
+    }
+
+    #[test]
+    fn restore_session_parses_auto_and_legacy_booleans() {
+        assert_eq!(format!("{:?}", Config::default().restore_session), "Auto");
+        for key in ["restore-session", "restore_session"] {
+            for (value, expected) in [
+                ("auto", "Auto"),
+                ("AUTO", "Auto"),
+                ("true", "Always"),
+                ("yes", "Always"),
+                ("on", "Always"),
+                ("1", "Always"),
+                ("enabled", "Always"),
+                ("enable", "Always"),
+                ("y", "Always"),
+                ("false", "Never"),
+                ("no", "Never"),
+                ("off", "Never"),
+                ("0", "Never"),
+                ("disabled", "Never"),
+                ("disable", "Never"),
+                ("n", "Never"),
+            ] {
+                let text = format!("{key} = {value}\n");
+                assert!(Config::detect_malformed_values(&text).is_empty(), "{text}");
+                assert_eq!(
+                    format!("{:?}", Config::parse_text(&text).restore_session),
+                    expected,
+                    "{text}"
+                );
+            }
+        }
+        assert!(!Config::detect_malformed_values("restore-session = maybe").is_empty());
     }
 
     /// Ghostty parity: `resize-overlay` defaults to `after-first`,
@@ -7264,7 +7567,7 @@ cell-height = 1.2\n";
     #[test]
     fn tab_format_default_and_parse() {
         let d = Config::default();
-        assert_eq!(d.tab_format, "{n}: {title}");
+        assert_eq!(d.tab_format, "{title}");
         let c = Config::parse_text("tab-format = [{n}] {title}");
         assert_eq!(c.tab_format, "[{n}] {title}");
         let c2 = Config::parse_text("tab-title-format = {title}");
@@ -7479,6 +7782,39 @@ cell-height = 1.2\n";
         );
         let (_, unknown) = Config::parse_collect("modify-other-keys = off\n");
         assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn paste_protection_policy_and_config() {
+        assert_eq!(Config::default().paste_protection, PasteProtection::Auto);
+        for (token, expected) in [
+            ("auto", PasteProtection::Auto),
+            ("always", PasteProtection::Always),
+            ("off", PasteProtection::Off),
+        ] {
+            let line = format!("paste-protection = {token}");
+            assert_eq!(Config::parse_text(&line).paste_protection, expected);
+            assert!(Config::detect_malformed_values(&line).is_empty());
+        }
+        assert!(!Config::detect_malformed_values("paste-protection = sometimes").is_empty());
+        assert_eq!(
+            Config::parse_text("paste-protection = sometimes").paste_protection,
+            PasteProtection::Auto
+        );
+        for byte in 0..32u8 {
+            let text = format!("a{}b", byte as char);
+            assert_eq!(PasteProtection::Auto.confirms(&text, false), byte != b'\t');
+            assert!(!PasteProtection::Auto.confirms(&text, true));
+            assert!(!PasteProtection::Off.confirms(&text, false));
+            assert_eq!(
+                PasteProtection::Always.confirms(&text, true),
+                matches!(byte, b'\n' | b'\r')
+            );
+        }
+        for text in ["", "hello", "ñ\t界", "a\u{7f}b"] {
+            assert!(!PasteProtection::Auto.confirms(text, false));
+        }
+        assert!(PasteProtection::Always.confirms("a\r\nb", true));
     }
 
     #[test]
@@ -7718,7 +8054,7 @@ cell-height = 1.2\n";
     #[test]
     fn tab_bar_config() {
         let d = Config::default();
-        assert_eq!(d.tab_bar, TabBarMode::Always);
+        assert_eq!(d.tab_bar, TabBarMode::Auto);
         assert_eq!(d.tab_bar_pos, TabBarPos::Top);
         assert_eq!(
             Config::parse_text("tab-bar = auto").tab_bar,
@@ -7729,6 +8065,25 @@ cell-height = 1.2\n";
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
         );
+    }
+
+    #[test]
+    fn macos_titlebar_style_parses_and_validates() {
+        assert_eq!(
+            Config::default().macos_titlebar_style,
+            MacosTitlebarStyle::Tabs
+        );
+        for (value, style) in [
+            ("tabs", MacosTitlebarStyle::Tabs),
+            ("native", MacosTitlebarStyle::Native),
+        ] {
+            let text = format!("macos-titlebar-style = {value}");
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(cfg.macos_titlebar_style, style);
+        }
+        assert!(!Config::detect_malformed_values("macos-titlebar-style = wrong").is_empty());
     }
 
     #[test]
@@ -7836,6 +8191,22 @@ cell-height = 1.2\n";
         assert!(Config::parse_text("link_single_click = true").link_single_click);
         assert!(Config::parse_text("clear-select-on-copy = true").clear_select_on_copy);
         assert!(Config::parse_text("clear_select_on_copy = true").clear_select_on_copy);
+    }
+
+    #[test]
+    fn c08_grapheme_clustering_config_defaults_aliases_and_validation() {
+        assert!(Config::default().grapheme_clustering);
+        assert!(Config::parse_text("").grapheme_clustering);
+        for key in ["grapheme-clustering", "grapheme_clustering"] {
+            for value in [true, false] {
+                let (cfg, unknown) = Config::parse_collect(&format!("{key} = {value}"));
+                assert!(unknown.is_empty(), "{unknown:?}");
+                assert_eq!(cfg.grapheme_clustering, value);
+            }
+            let text = format!("{key} = treu");
+            assert!(Config::parse_text(&text).grapheme_clustering);
+            assert!(!Config::detect_malformed_values(&text).is_empty());
+        }
     }
 
     #[test]
@@ -8327,12 +8698,21 @@ cell-height = 1.2\n";
         // Drift guard.
         let d = Config::default();
         assert!(!d.login_shell);
-        assert_eq!(d.exit_action, ExitAction::Close);
+        assert_eq!(d.exit_action, ExitAction::CloseOnSuccess);
         assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
         assert!(Config::parse_text("login-shell = true").login_shell);
         assert!(Config::parse_text("login_shell = true").login_shell);
-        // shell-integration is a bool, default on.
+        // The boolean field retains legacy spellings and adds auto.
         assert!(Config::default().shell_integration);
+        assert!(Config::parse_text("shell-integration = auto").shell_integration);
+        assert!(
+            Config::parse_text("shell-integration = off\nshell-integration = auto")
+                .shell_integration
+        );
+        assert!(Config::parse_text("shell_integration = AUTO").shell_integration);
+        assert!(Config::detect_malformed_values("shell-integration = auto").is_empty());
+        assert!(Config::detect_malformed_values("shell_integration = AUTO").is_empty());
+        assert!(!Config::detect_malformed_values("shell-integration = maybe").is_empty());
         assert!(!Config::parse_text("shell-integration = off").shell_integration);
         assert!(!Config::parse_text("shell-integration = false").shell_integration);
         assert!(Config::parse_text("shell_integration = on").shell_integration);
@@ -13364,5 +13744,128 @@ font-size = 15
         assert_eq!(cfg.window_title_format, "a'b");
         let mismatched = Config::parse_text("window-title-format = \"unterminated\n");
         assert_eq!(mismatched.window_title_format, "\"unterminated");
+    }
+}
+
+#[cfg(test)]
+mod chrome_state_tests {
+    use super::*;
+
+    #[test]
+    fn exit_behavior_defaults_alias_validation_and_precedence() {
+        assert_eq!(Config::default().exit_action, ExitAction::CloseOnSuccess);
+        for (value, expected) in [
+            ("close", ExitAction::Close),
+            ("close-on-success", ExitAction::CloseOnSuccess),
+            ("hold", ExitAction::Hold),
+        ] {
+            let text = format!("exit_behavior = {value}\nexit-action = restart\n");
+            let (config, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(config.exit_action, expected);
+            assert_eq!(
+                Config::parse_text(&format!("exit-action = restart\nexit-behavior = {value}"))
+                    .exit_action,
+                expected
+            );
+        }
+        assert!(!Config::detect_malformed_values("exit-behavior = linger").is_empty());
+        assert_eq!(
+            Config::parse_text("exit-behavior = linger").exit_action,
+            ExitAction::CloseOnSuccess
+        );
+        assert_eq!(
+            Config::parse_text("tab-bar = always").tab_bar,
+            TabBarMode::Always
+        );
+    }
+
+    #[test]
+    fn diagnostics_keep_source_lines_and_key_spelling_without_values() {
+        let text = "\u{feff}# fixture\n[global_config]\nFONT_SIZE = wrong\ntypo_key = private-value\nfont-size = 15\n[profiles]\n[[other]]\nignored = value\n[[default]]\ncursor-style = beem\n".to_string();
+        let (config, unknown_keys) = Config::parse_collect(&text);
+        let malformed_values = Config::detect_malformed_values(&text);
+        let loaded = LoadedConfig {
+            text,
+            config,
+            unknown_keys,
+            malformed_values,
+        };
+        assert_eq!(
+            loaded.diagnostics(),
+            vec![
+                ConfigDiagnostic {
+                    line: 3,
+                    key: "FONT_SIZE".into()
+                },
+                ConfigDiagnostic {
+                    line: 4,
+                    key: "typo_key".into()
+                },
+                ConfigDiagnostic {
+                    line: 10,
+                    key: "cursor-style".into()
+                },
+            ]
+        );
+        assert_eq!(loaded.config.font_size, 15.0);
+    }
+}
+
+#[cfg(test)]
+mod quick_terminal_tests {
+    use super::*;
+    #[test]
+    fn defaults_and_all_quick_terminal_settings_parse() {
+        let d = Config::default();
+        assert_eq!(d.quick_terminal_position, QuickTerminalPosition::Top);
+        assert_eq!(d.quick_terminal_size, 40);
+        assert!(d.quick_terminal_hotkey.is_none());
+        assert!(d.quick_terminal_animation && d.quick_terminal_autohide);
+        for position in ["top", "bottom", "left", "right", "center"] {
+            let text = format!(
+                "quick-terminal-position = {position}\nquick-terminal-size = 63\nquick-terminal-hotkey = cmd+escape\nquick-terminal-animation = false\nquick-terminal-autohide = false\n"
+            );
+            let c = Config::parse_text(&text);
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert!(Config::parse_collect(&text).1.is_empty());
+            assert_eq!(c.quick_terminal_position.token(), position);
+            assert_eq!(c.quick_terminal_size, 63);
+            assert_eq!(
+                c.quick_terminal_hotkey.unwrap().label(),
+                keybinds::parse_trigger("cmd+escape").unwrap().label()
+            );
+            assert!(!c.quick_terminal_animation);
+            assert!(!c.quick_terminal_autohide);
+        }
+        assert!(
+            Config::parse_text("quick-terminal-hotkey = ctrl+grave")
+                .quick_terminal_hotkey
+                .is_some()
+        );
+        assert!(
+            Config::parse_text("quick-terminal-hotkey = none")
+                .quick_terminal_hotkey
+                .is_none()
+        );
+        assert_eq!(
+            Config::parse_text("quick-terminal-size = 0").quick_terminal_size,
+            1
+        );
+        for text in [
+            "quick-terminal-size = 101",
+            "quick-terminal-size = -1",
+            "quick-terminal-position = middle",
+            "quick-terminal-hotkey = grave",
+            "quick-terminal-hotkey = ctrl+typo",
+            "quick-terminal-animation = maybe",
+        ] {
+            assert!(!Config::detect_malformed_values(text).is_empty(), "{text}");
+        }
+        assert_eq!(
+            Action::from_name("toggle_quick_terminal"),
+            Some(Action::ToggleQuickTerminal)
+        );
     }
 }

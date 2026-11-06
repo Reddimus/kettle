@@ -32,30 +32,39 @@ fn a_rejected_session_preflight_stashes_the_file() {
 }
 
 #[test]
-fn decorated_windows_use_theme_matched_native_chrome() {
+fn macos_titlebar_styles_and_fallbacks() {
+    use kettle_config::{Config, MacosTitlebarStyle, TabBarMode, TabBarPos};
+    let mut cfg = Config::default();
+    assert_eq!(macos_titlebar_policy(&cfg), MacosTitlebarPolicy::Tabs);
+    cfg.tab_bar = TabBarMode::Auto;
+    assert_eq!(macos_titlebar_policy(&cfg), MacosTitlebarPolicy::Tabs);
+    cfg.tab_bar = TabBarMode::Off;
     assert_eq!(
-        macos_titlebar_policy(false),
+        macos_titlebar_policy(&cfg),
         MacosTitlebarPolicy::ThemeMatchedNative
     );
-    let src = production_source();
-    assert!(
-        src.contains(
-            "MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false)"
-        ),
-        "decorated macOS windows must start with an opaque caption"
-    );
-    assert!(
-        !src.contains("with_titlebar_transparent(true)"),
-        "a transparent creation hint can expose the desktop before native material syncs"
-    );
-}
-
-#[test]
-fn borderless_windows_do_not_configure_a_native_titlebar() {
+    cfg.tab_bar = TabBarMode::Always;
+    for pos in [TabBarPos::Bottom, TabBarPos::Left, TabBarPos::Right] {
+        cfg.tab_bar_pos = pos;
+        assert_eq!(
+            macos_titlebar_policy(&cfg),
+            MacosTitlebarPolicy::ThemeMatchedNative
+        );
+    }
+    cfg.tab_bar_pos = TabBarPos::Top;
+    cfg.macos_titlebar_style = MacosTitlebarStyle::Native;
     assert_eq!(
-        macos_titlebar_policy(true),
-        MacosTitlebarPolicy::NotApplicable
+        macos_titlebar_policy(&cfg),
+        MacosTitlebarPolicy::ThemeMatchedNative
     );
+    for style in [MacosTitlebarStyle::Tabs, MacosTitlebarStyle::Native] {
+        cfg.macos_titlebar_style = style;
+        cfg.borderless = true;
+        assert_eq!(
+            macos_titlebar_policy(&cfg),
+            MacosTitlebarPolicy::NotApplicable
+        );
+    }
 }
 
 #[test]
@@ -116,12 +125,35 @@ fn production_wires_the_native_material_without_an_icon_override() {
 fn production_chrome_helper_keeps_native_geometry() {
     use super::apply_macos_window_chrome;
 
-    let decorated = apply_macos_window_chrome(winit::window::Window::default_attributes(), false);
+    let cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
+    let decorated = apply_macos_window_chrome(winit::window::Window::default_attributes(), &cfg);
     let debug = format!("{decorated:?}");
     assert!(decorated.decorations);
     assert!(debug.contains("titlebar_transparent: false"), "{debug}");
     assert!(debug.contains("fullsize_content_view: false"), "{debug}");
-
-    let borderless = apply_macos_window_chrome(winit::window::Window::default_attributes(), true);
+    assert!(debug.contains("title_hidden: false"), "{debug}");
+    let tabs = apply_macos_window_chrome(
+        winit::window::Window::default_attributes(),
+        &Default::default(),
+    );
+    let debug = format!("{tabs:?}");
+    assert!(tabs.decorations);
+    for flag in [
+        "titlebar_transparent: true",
+        "fullsize_content_view: true",
+        "title_hidden: true",
+    ] {
+        assert!(debug.contains(flag), "{debug}");
+    }
+    let borderless = apply_macos_window_chrome(
+        winit::window::Window::default_attributes(),
+        &kettle_config::Config {
+            borderless: true,
+            ..Default::default()
+        },
+    );
     assert!(!borderless.decorations);
 }

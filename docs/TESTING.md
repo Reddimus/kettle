@@ -73,6 +73,27 @@ require a GPU adapter and report a skip when none is available. Run
 to see those skips, then run the same command without the filter for both full
 crate suites.
 
+The renderer's `horizontal_translucent_active_surface` tests check that active
+horizontal tabs use the terminal background colour and composed alpha. Quad
+coverage checks the rounded chrome hole, opaque band at alpha 1, accent line,
+top and bottom bars, dark and light themes, and fractional display scaling.
+The headless pixel test compares tab and terminal RGBA at opacity 0.86 for
+titlebar and ordinary strips; it prints `TAB_SURFACE_GPU_SKIP` without an
+adapter. Run
+`cargo test -j 2 --locked --offline -p kettle-render horizontal_translucent_active_surface -- --nocapture`,
+then the full `kettle-render` and `kettle-ui` suites.
+
+The horizontal tab regressions cover a single tab at rest and on hover,
+multiple tabs, optional hints when space is tight, and the shared close geometry
+used by painting, hit tests and AccessKit. Run
+`cargo test -j 2 --locked --offline -p kettle-render -p kettle-ui horizontal_single_tab_controls`
+and `cargo test -j 2 --locked --offline -p kettle-render tab_controls_and_shortcut_hints`
+for the visibility and bundled-theme contrast checks. The native titlebar
+checker consumes `ui_geometry`'s per-tab `hovered`, `hint` and `close` fields;
+`python3 scripts/test-native-titlebar.py` checks its scaled fixtures without a
+live window. Full-size control metrics and contrast wiring have portable source
+guards; these do not replace native titlebar screenshots.
+
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery
@@ -782,6 +803,30 @@ When diagnosing a replay failure, compare the raw output with the projected
 grid first. Then check scroll offset, resize/reflow, and selection endpoints.
 Avoid replacing exact expected text with a loose substring merely to get green.
 
+## UI states
+
+`just ui-states` captures Kettle's own UI states as PNGs: the default window,
+the command palette (empty, with a query, with no match), Settings, Search
+(matches and no match), three tabs, splits and the theme picker. Each state
+starts a fresh Kettle with a private HOME and XDG directories and
+`record = false`, reaches the state through `kettle ctl` (actions and UI
+keys), and captures it with `kettle ctl screenshot`, which renders the
+window's own frame without the desktop or other windows. Add
+`--languages en,es`, `--themes dark,light` and `--sizes default,narrow` for
+the full matrix; files are named `state.language.theme.size.png` under
+`target/ui-states`.
+
+`--compare DIR` checks each capture against the PNG of the same name in
+`DIR`: a pixel differs when a channel moves by more than
+`--channel-tolerance` (24), and a state fails when more than `--max-changed`
+percent (0.5) of its pixels differ or its size changed. A missing baseline is
+reported, never created. A change to a baseline belongs in the pull request
+that changes the UI, with the before and after images in its description.
+
+CI runs the English and Spanish matrix on Linux under Xvfb with software
+rendering and uploads the images as the `ui-states-*` artifact; when
+`tests/ui-states/linux` exists, it compares against those baselines.
+
 ## Diagram gate
 
 `just mermaid-check` runs [scripts/check-mermaid.py](../scripts/check-mermaid.py)
@@ -1069,7 +1114,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Live renderer | `just live-render-smoke` | Grid cursor blink changes only a cursor-sized region | Linux/macOS |
 | Agent TUI | `just agent-tui-smoke` | Shell, installed clients, tmux, and clean/configured Neovim states; optional clients can skip | Linux/macOS |
 | Agent CLI | `just agent-cli-smoke` | Mandatory PTY/JSON/MCP probes plus available client version/help checks; no composer attachment proof | Linux/macOS; required in macOS CI |
-| Native titlebar | `just native-titlebar-smoke` | Light caption, traffic-light separation, resize, native fullscreen and restoration | macOS |
+| Native titlebar | `just native-titlebar-smoke` | Both titlebar styles: traffic-light separation, single-tab centring, geometry, resize, native fullscreen and restoration | macOS |
 | Modal shortcuts | `just modal-shortcuts-smoke` | Command chords do not act as ordinary modal letters | macOS |
 | Interaction | `just interaction-smoke --isolated-clipboard` | Multiline input, wheel, selection/copy, tabs, context-menu split, and screenshots | Linux/macOS |
 | Selection autoscroll | `just selection-autoscroll-smoke` | Held selection scrolls at both vertical pane edges; native pointer on macOS, control path on Linux | Linux/macOS |
@@ -1553,13 +1598,17 @@ indicators, which `unicode-width` makes one column wide. Grapheme clusters
 score low, 0.7% for emoji ZWJ sequences, 50% for VS16, 0% for VS15, and 84%
 across 85 languages, chiefly Indic conjuncts. Kettle measures each codepoint
 separately in that release, so a cluster takes the sum of its codepoints'
-widths. This remains the default layout; applications can now opt into Unicode
-18 extended-grapheme cells with DECSET 2027.
+widths. New terminals now default to Unicode 18 extended-grapheme cells (mode 2027);
+`grapheme-clustering = false` restores scalar layout. These historical scores
+do not measure the new default.
 
 `just grapheme-tables-check` reproduces the generated tables from the pinned,
 licensed inputs without network access. Patched-engine tests run all 853
 Unicode 18 boundary vectors and a million-scalar stream with finite context.
-Core `grapheme_` tests cover mode/query/reset/save semantics, UTF-8 splits,
+UI `c08_` regressions cover default emoji clusters, the config opt-out,
+DECRST/DECSET/DECRQM, RIS/DECSTR for both defaults, Settings translations and
+reload isolation through real pane creation. Core `grapheme_` tests cover
+portable mode/query/reset/save semantics, UTF-8 splits,
 regional indicators, modifiers, Indic conjuncts, zero-width prefixes, storage
 limits, late VS16, VS15 width retention, margins, insertion, REP, overwrite,
 copying, search and reflow. Renderer tests exercise shaping metadata and row
@@ -1567,6 +1616,31 @@ keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
 not establish pixel coverage.
+
+`kettle-render`'s `emoji_shaping_tests` use only the bundled JetBrains Mono
+Nerd Font for default-emoji/VS16 raster measurements, VS15 exclusion,
+aspect-ratio fitting and single-image fallback. A separate host-font test
+checks supported ZWJ and skin-tone compositions; it reports `EMOJI_FONT_SKIP`
+when a host lacks coverage. Portable glyph-emission tests check one shared
+scale and preserved shaped offsets for lightning plus a combining acute in
+both renderer settings and both 2027 modes, without a GPU. A portable Indic
+ZWJ classification test excludes non-emoji from the single-image rule; a
+host-font test also verifies the two-image Devanagari Sangam MN conjunct,
+reporting `INDIC_FONT_SKIP` when that face is unavailable.
+Arabic joining is checked against the isolated
+form, with distinct initial, medial and final glyph IDs, cell metadata and
+optional ligatures both on and off. The bundled fonts lack Arabic, so that
+test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
+`emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
+glyph instances using the bundled font in both renderers and both 2027 modes;
+it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
+
+Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
+DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and
+renderer tests cover attribute dispatch and top-of-cell quads, including
+conceal and coexistence with underline/strikeout. The esctest expectation
+file has no SGR 53 exception to remove. Live conformance and rendering remain
+separate acceptance checks.
 
 The generator round-trip check runs with implicit text encodings treated as
 errors on every platform. It generates into a temporary directory, compares
@@ -2735,3 +2809,168 @@ Keep credentials and raw account transcripts out of evidence; retain only the
 matching tool receipt fields, card geometry, screenshot, source revision, and
 owned-process cleanup result. Native ownership tests must see the host's real
 UIDs; a user namespace that reports `/` as UID 65534 is not a valid substitute.
+
+### Settings window regression coverage
+
+`kettle-render` settings tests check proportional panel sizing, sidebar versus
+single-pane placement at 1280x820, 800x600 and 560x600, nonoverlapping slots,
+focused-row scrolling, pinned notes, category/search/chip hits and editor
+rectangles. English, Spanish and pseudo-localized text must fit their clipped
+slots. `kettle-ui` settings tests check label/description/config-key search,
+Spanish accent folding, catalogue grouping, focus routing and disabled rows;
+AccessKit tests cover row descriptions and the search text input. Every field
+must have a short description in both catalogues, and `kettle-i18n` checks
+schema and Spanish draft status coverage. These pure tests do not establish
+live rendering or native screen-reader acceptance.
+
+Pointer regression tests walk reachable categories from the initial selection,
+and apply overflow-arrow clicks and wheel paging through `SettingsNav` in both
+directions. Short-window tests cover the focused Settings editor and a picker
+header plus its selected result at 120 pixels, including 24- and 46-pixel top
+chrome for pickers. Accessibility action tests focus Search during chord
+capture and then type into the query. Resize-chip tests cover Settings, all
+four pickers, and a picker card without a query projection. The translated
+layout test includes the pseudo-locale only with debug assertions, so its
+English and Spanish cases also compile and run in release mode.
+
+Run these checks offline with the local Cargo cache:
+
+```sh
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --lib settings_
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --lib short_
+cargo test -j 2 --locked --offline -p kettle-ui --lib accessibility_search_focus_cancels_capture
+cargo test -j 2 --locked --offline -p kettle-render --release settings_slots_fit_english_spanish_and_measured_pseudo_text
+cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
+```
+
+### macOS menu bar regression coverage
+
+`cargo test -p kettle-ui macos_menu` runs the pure menu model on every platform:
+English and Spanish structure, translated titles and separators, action mapping,
+Cmd-only hints following remaps and unbinds, and focused-window availability.
+`cargo test -p kettle-ui menu_paste_availability` exercises writable local and
+cross-window broadcast recipients, read-only focus, and group exclusions using
+the same recipient selection as paste delivery.
+Source guards check that AppKit only performs native application and Services equivalents,
+leaving Kettle shortcuts on the original keyboard dispatch and terminal-writer
+path, and that resume, focus/selection dispatch and config reload reconcile the
+menu while retaining Services and Windows registration.
+`cargo test -p kettle-ui --test macos_menu_native` runs the production menu subclass
+on the process main thread on macOS. It dispatches synthetic AppKit key events
+to native commands and a nested, registered Services menu, checks disabled
+Services items, and verifies that enabled and disabled Kettle equivalents are
+declined. It uses a process-local Services fixture without installing a Quick
+Action; other platforms report this test as skipped. The harness-free executable
+also honors a test-name substring filter.
+Existing keyboard tests exercise program-ownership yielding and terminal
+encoding. These checks do not establish physical keyboard delivery or live
+Quick Action invocation; an unlocked macOS session is needed for mouse,
+keyboard, System Settings Services shortcuts and window list acceptance.
+
+menu while retaining Services and Windows registration. Existing keyboard tests
+exercise program-ownership yielding and terminal encoding. These checks do not
+establish live AppKit menu interaction; native CI must compile the AppKit layer,
+and an unlocked macOS session is needed for mouse, keyboard, Services and window
+list acceptance.
+
+### Paste protection and compact context menus
+
+`cargo test -p kettle-config paste_protection` exercises every C0 byte and the
+three config policies; `cargo test -p kettle-ui paste` checks paste preview,
+flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+`cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
+shared geometry, panel flipping and clipping ancestor text under submenus.
+Native acceptance still needs clipboard, PRIMARY and PuTTY-style text paste,
+mixed bracketed/raw broadcast recipients, each of the three dialog buttons,
+and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.
+Check VoiceOver/AccessKit nesting, resize/DPI changes, and `kettle ctl
+ui_geometry` parent-panel bounds against the painted panels. No headless unit
+test substitutes for that rendering and assistive-technology pass.
+
+### First-launch shell integration
+
+`cargo test -p kettle-ui shell_integration` exercises the checked private
+startup files with native modern Bash, Zsh and Fish when installed.
+It checks competing startup variants, compiled-only Zsh startup, earlier Fish
+`conf.d/00-env.fish` changes, and one-time loading before child shells. The Bash
+`ENV` tests check login state, logout processing, profile selection, suppression
+flags, custom rcfiles, restored `ENV`, disabled POSIX/`inherit_errexit` modes and
+startup declaration scope. On macOS, native system Bash 3.2 tests verify the
+untouched fallback with both default and explicit login launches; a separately
+installed modern Bash exercises automatic injection. Missing native interpreters
+are reported as skips. `owned_dir::tests::recent_variants_` checks the 24-hour
+mtime boundary, reuse refresh and the four-expired-variant cap.
+`cargo test -p kettle-core automatic_tests` checks launch construction and the
+macOS fallback without a PTY. Command outcome tests cover duplicate and
+unknown statuses, bounded retention and shared DPI-aware scrollbar rectangles;
+`repeated_output_starts_are_one_command` checks the reader's actual OSC path.
+Accessibility tests check English/Spanish exit-code descriptions against that
+geometry. Native UI/GPU acceptance still requires rendered ticks on each OS;
+headless source and geometry checks do not establish visual acceptance.
+
+Chrome state regression coverage includes the auto tab default, exit-policy
+status matrix, replay of original launch environment and cwd in the same pane,
+source-located config diagnostics and notice limits, persistent-notice hit
+geometry, and tab-list titles, selection and controls on both strip axes.
+These unit and PTY tests do not establish live rendering or screen-reader
+acceptance; native UI checks remain required on each platform.
+
+## Quick terminal
+
+Portable tests cover all five positions at multiple screen sizes and offsets,
+percentage bounds, the show/hide/autohide/focus-return model, animation endpoints,
+config defaults and diagnostics, Settings reads and capture routing, CLI parsing
+and activation serialization, including bounded Wayland desktop tokens. Activation transport tests resend a toggle with
+its original launch ID and verify that it is applied only once. Pure key-mapping
+tests cover the documented Carbon and X11 chords.
+
+```sh
+cargo test --locked --offline -p kettle-config -p kettle-ctl -p kettle-i18n -p kettle-ui -p kettle
+cargo clippy --locked --offline -p kettle-config -p kettle-ctl -p kettle-i18n -p kettle-ui -p kettle --all-targets -- -D warnings
+cargo clippy --locked --offline --target aarch64-apple-darwin -p kettle-ui --all-targets -- -D warnings
+cargo clippy --locked --offline --target x86_64-unknown-linux-gnu -p kettle-ui --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Native macOS and X11 CI must compile their registration backends. With a live
+desktop, verify repeated CLI/global/menu/palette toggles create one quick window,
+focus returns on explicit hide, switching apps autohides without stealing focus,
+tabs and splits keep their processes while hidden, monitor selection and all
+five geometries work across mixed-DPI displays, and Reduce Motion disables the
+slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
+desktop shortcuts. A GUI-free test run does not establish these native behaviors.
+
+### Quick-terminal review regressions
+
+The `review_quick_` tests exercise cold-launch identity with a Lua startup
+`split_right`, real PTY splits and the production session snapshot/write path;
+reopen after hide, repeated focus and autohide; move-before-resize placement
+with a simulated 1x-to-2x scale change and animation disabled; physical Option
+capture independent of terminal modifier filtering; and Settings capture,
+config round trips and Carbon/X11 key mapping for shifted US punctuation.
+Source guards bind these seams to App construction, session saving and the
+existing reveal routes. They do not run a native event loop or register a live
+global shortcut. The placement test runs portably, with logical-coordinate
+assertions on macOS and physical-coordinate assertions on other platforms.
+
+### Titlebar regression coverage
+
+The `review_` tests in `kettle-ui` and `kettle-render` cover strips below two
+pixels, configured tab minimum widths, startup policy ordering, and the exact
+40-row startup surface at 1x and 2x scale. Recording-label tests use numeric,
+literal-only, repeated-title and path formats, including raw-input and failure
+notices. Bundled-font tests check 72-point title-editor input, hints, caret and
+pointer slots; the offscreen renderer also compares painting with measurement.
+Run them offline with `cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render -p kettle-config --no-fail-fast review_`.
+These checks do not replace native window sizing or live title-editor checks.
+
+The `measured_startup_titlebar_` tests cover the hidden-window correction from
+an estimated 28-point band to AppKit's measured 32-point band, unchanged and
+smaller bands, either explicit grid axis, and default monitor fitting at 1x and
+2x. A source guard requires both window constructors to correct once before
+renderer sizing and the first reveal. Run them offline with
+`cargo test -j 2 --locked --offline -p kettle-ui measured_startup_titlebar_`.
+The live macOS check is
+`launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
+it requires an unlocked desktop and cannot run in the sandbox.

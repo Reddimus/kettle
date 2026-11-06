@@ -66,6 +66,7 @@ impl App {
                     ws.dpi_resize_surface_suspended = true;
                     return;
                 }
+                self.sync_macos_titlebar(ws);
                 // AppKit can briefly restore its stale standard frame. Wait
                 // for the window-local restore before reflowing terminal grids.
                 if ws
@@ -240,8 +241,9 @@ impl App {
                 }
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
-                ws.scrollbar_hover = false;
+                ws.scrollbar_hover = None;
                 ws.hovered_close_idx = None;
+                ws.hovered_tab_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
                 ws.search.hovered_control = None;
@@ -463,13 +465,13 @@ impl App {
                     }
                     return;
                 }
-                // Overlay-scrollbar hover-brighten. Update the focused
-                // pane's hover flag and repaint only on the enter/leave edge so it
+                // Overlay-scrollbar hover-brighten. Update the hovered
+                // pane's identity and repaint only on the enter/leave edge so it
                 // costs nothing while the pointer is elsewhere.
                 {
                     let area = self.area(ws);
                     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let hover = self.scrollbar_zone_contains(ws, area, px, py);
+                    let hover = self.scrollbar_pane_at(ws, area, px, py);
                     if hover != ws.scrollbar_hover {
                         ws.scrollbar_hover = hover;
                         if let Some(w) = &ws.window {
@@ -520,6 +522,9 @@ impl App {
                 // isn't a modal here.
                 // A press of any button is the pointer's: focus is no longer
                 // on a card.
+                if ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -679,7 +684,9 @@ impl App {
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 // A preview lane owns every press over it, so the terminal
                 // beside it never gets one.
-                if self.press_update_toast(ws, px, py, bcode) {
+                if self.press_persistent_notice(ws, px, py, bcode)
+                    || self.press_update_toast(ws, px, py, bcode)
+                {
                     return;
                 }
                 if self.press_preview_lane(ws, px, py, bcode) {
@@ -687,6 +694,9 @@ impl App {
                 }
                 // An inline card takes a primary press before anything else
                 // in the window does; its release opens the card's item.
+                if self.press_scrollback_pill(ws, px, py, bcode) {
+                    return;
+                }
                 if self.press_card(ws, px, py, bcode) {
                     return;
                 }
@@ -696,6 +706,9 @@ impl App {
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
+                if bcode == 0 && self.press_titlebar_space(ws, &bar, px, py) {
+                    return;
+                }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
                     if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
                         // The `▾` dropdown — open the shell chooser
@@ -1299,6 +1312,14 @@ impl App {
                     self.focused_seq = ws.seq;
                     record_window_focus(&mut self.window_focus_order, ws.seq);
                 }
+                if self.quick_terminal.model.visible {
+                    if f {
+                        self.quick_terminal.focus_check = None;
+                    } else {
+                        self.quick_terminal.focus_check =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(40));
+                    }
+                }
                 if !f {
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
@@ -1360,7 +1381,7 @@ impl App {
                     ws.search.pressed_control = None;
                     self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
-                    ws.scrollbar_hover = false;
+                    ws.scrollbar_hover = None;
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;
@@ -1395,6 +1416,7 @@ impl App {
                 // or whatever global hotkey the user
                 // bound. Honors only on focus-LOSS (f == false).
                 if !f
+                    && Some(ws.seq) != self.quick_terminal.model.window
                     && self.cfg.hide_on_lose_focus
                     && let Some(w) = &ws.window
                 {
@@ -1448,6 +1470,9 @@ impl App {
                     winit::event::Ime::Commit(_) => true,
                     _ => false,
                 };
+                if typing && ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if typing && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1495,6 +1520,9 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } => {
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.
+                if event.state == ElementState::Pressed && ws.tab_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                }
                 if event.state == ElementState::Pressed && ws.card_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1503,7 +1531,13 @@ impl App {
                     &event.logical_key,
                     ws.mods,
                 );
-                let ui_owns_key = toast_owns_key
+                let held_key = (!self.any_modal_open(ws)
+                    && ws.preview_focus.is_none()
+                    && ws.ime_preedit.is_none())
+                .then(|| notices::held_pane_key(ws, &event.logical_key))
+                .flatten();
+                let ui_owns_key = held_key.is_some()
+                    || toast_owns_key
                     || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
@@ -1550,6 +1584,11 @@ impl App {
                 }
                 if event.state == ElementState::Released {
                     self.write_terminal_key_event(ws, &event, false);
+                    return;
+                }
+                if let Some((pane, restart)) = held_key {
+                    ws.closing_keys.insert(event.physical_key);
+                    self.activate_persistent_notice(ws, Some(pane), restart);
                     return;
                 }
                 if !toast_owns_key && self.update_toast_focus.take().is_some() {
@@ -1848,6 +1887,17 @@ impl App {
                     // captured, or refused with a notification, once per repeat.
                     let inert = if settings_capture_active(ws) {
                         event.repeat
+                    } else if ws
+                        .settings_nav
+                        .as_ref()
+                        .is_some_and(|nav| nav.search_focused)
+                    {
+                        modal_repeat_is_inert(
+                            ModalRepeat::Palette,
+                            event.repeat,
+                            &event.logical_key,
+                            ws.mods.control_key(),
+                        )
                     } else {
                         // Only a repeat needs the focused row's kind.
                         let steps = event.repeat && self.settings_row_steps(ws);
@@ -1859,7 +1909,18 @@ impl App {
                         )
                     };
                     if !inert {
-                        self.settings_key(ws, &event.logical_key, event_loop);
+                        let handled = self.settings_search_key(ws, &event.logical_key, text);
+                        if handled
+                            && matches!(
+                                event.logical_key,
+                                Key::Named(NamedKey::Escape | NamedKey::Enter)
+                            )
+                        {
+                            ws.closing_keys.insert(event.physical_key);
+                        }
+                        if !handled {
+                            self.settings_key(ws, &event.logical_key, event_loop);
+                        }
                     }
                     remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {

@@ -17,7 +17,7 @@ Never edit the generated Rust in `target/`; it is rebuilt from the TOML.
 ## What is translated
 
 All Kettle-owned GUI text: Settings, the command palette and pickers, menus,
-the macOS menu bar's application menu and the Dock menu, prompts and
+the macOS menu bar and the Dock menu, prompts and
 confirmations, the search bar, paste receipts, banners, desktop
 notifications and accessibility names. The Linux desktop entry
 (`packaging/linux/kettle.desktop`) carries Spanish `GenericName`, `Comment`
@@ -153,7 +153,8 @@ An unsupported or malformed OS locale selects English.
 
 The `language` config key (`auto`, `en`, `es`; Settings → Behavior →
 Language) is read at startup. `auto` follows the OS locale: a Spanish locale of
-any region selects Spanish. A change applies when Kettle restarts.
+any region selects Spanish. Menu-bar text follows a change on config reload; other UI text changes when
+Kettle restarts.
 
 ## Checking a translation
 

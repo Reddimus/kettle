@@ -291,10 +291,12 @@ impl App {
         {
             log::warn!("Lua config path synchronization failed: {error:#}");
         }
+        let mut diagnostics = None;
         let (mut new, malformed) = match path {
             Some(path) => match read_config_for_reload(&path, self.config_trust) {
                 Ok(None) => (Config::default(), Vec::new()),
                 Ok(Some(loaded)) => {
+                    diagnostics = Some((path.clone(), loaded.diagnostics()));
                     if !loaded.unknown_keys.is_empty() {
                         log::warn!(
                             "{}: unrecognized config keys: {}",
@@ -319,6 +321,12 @@ impl App {
             },
             None => (Config::default(), Vec::new()),
         };
+        if let Some((path, entries)) = diagnostics {
+            self.set_config_notice(&path, &entries);
+        } else {
+            self.config_notice = None;
+            self.config_notice_last = None;
+        }
         // Surface malformed values (typos the parser silently ignores, e.g.
         // `cursor-style = beem`) on live reload. `--check-config` already
         // catches these at the CLI, but a live edit otherwise reverted with no
@@ -365,6 +373,8 @@ impl App {
         new.resolve_theme_mode(self.os_theme_dark);
         self.last_schedule_decision = None;
         self.cfg = new;
+        self.reconcile_quick_hotkey();
+        self.sync_macos_menu(None);
         self.reconcile_agent_display();
         self.reconcile_claude_plugin();
         self.reconcile_codex_shell();
@@ -429,6 +439,7 @@ impl App {
         if font_size_changed {
             ws.scaled_zoom_prev_font_size = None;
         }
+        self.sync_macos_titlebar(ws);
         self.resize_all(ws);
         let direction_changed = sync_reloaded_search_preferences(
             &mut ws.search,

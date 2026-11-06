@@ -8242,7 +8242,7 @@ def wait_for_search_no_match(
         if (
             isinstance(search, dict)
             and search.get("has_match") is False
-            and search.get("status") == "No match"
+            and search.get("status") == "No matches"
         ):
             return last_geometry, last_screen
         time.sleep(0.05)
@@ -15244,6 +15244,7 @@ def run_search_history(kettle: str, root: Path) -> Path:
             "next",
             "wrap",
             "case",
+            "regex",
             "invert",
             "close",
         }

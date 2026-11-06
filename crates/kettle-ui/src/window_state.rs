@@ -834,6 +834,7 @@ pub(crate) struct WindowState {
     /// renderer exists, so the first pane can start while the GPU
     /// initializes. The renderer's own metrics win once it exists.
     pub(crate) startup_cell: Option<(f32, f32)>,
+    pub(crate) startup_scale: f32,
     pub(crate) startup_surface: Option<(u32, u32)>,
     /// The fonts `startup_cell` was measured with, until the renderer takes
     /// them over.
@@ -844,6 +845,8 @@ pub(crate) struct WindowState {
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
     pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
+    pub(crate) macos_titlebar_tabs: bool,
+    pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -971,11 +974,11 @@ pub(crate) struct WindowState {
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
-    /// The pointer is hovering the focused pane's scrollbar gutter.
+    /// The pane whose scrollbar gutter is under the pointer.
     /// Drives the overlay scrollbar's bright (vs dim-at-rest) opacity with no
     /// fade timer, so it costs zero idle wakeups — just a single repaint on the
     /// hover-enter / hover-leave transition.
-    pub(crate) scrollbar_hover: bool,
+    pub(crate) scrollbar_hover: Option<u64>,
     /// In-progress mouse drag of a split divider. `Some`
     /// while the left button is held after a press landed on a divider seam;
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
@@ -1055,6 +1058,8 @@ pub(crate) struct WindowState {
     /// The card instance assistive technology moved focus to, until a key
     /// press returns it to the pane.
     pub(crate) card_focus: Option<u64>,
+    /// A tab focused by assistive technology, until ordinary input resumes.
+    pub(crate) tab_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1153,6 +1158,7 @@ pub(crate) struct WindowState {
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
+    pub(crate) hovered_tab_idx: Option<usize>,
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
     /// actually changes; `tab_bar()` forwards it to the renderer.
@@ -1488,6 +1494,7 @@ impl WindowState {
             seq,
             renderer: None,
             startup_cell: None,
+            startup_scale: 1.0,
             startup_surface: None,
             startup_fonts: None,
             pre_launch: None,
@@ -1495,6 +1502,8 @@ impl WindowState {
             window: None,
             native_fullscreen: None,
             native_caption_drag: None,
+            macos_titlebar_tabs: false,
+            titlebar_click: None,
             native_material: None,
             accessibility: None,
             accessibility_key: None,
@@ -1541,7 +1550,7 @@ impl WindowState {
             selection_drag_origin: None,
             selection_button: None,
             scrollbar_drag_offset: None,
-            scrollbar_hover: false,
+            scrollbar_hover: None,
             dragging_split: None,
             links_scan_key: None,
             held_buttons: crate::held_buttons::HeldButtons::default(),
@@ -1564,6 +1573,7 @@ impl WindowState {
             card_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
+            tab_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,
@@ -1587,6 +1597,7 @@ impl WindowState {
             pane_drag: None,
             dock_preview: None,
             hovered_close_idx: None,
+            hovered_tab_idx: None,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
             context_menu_a11y_label: None,

@@ -1,267 +1,241 @@
-//! macOS menu bar: Kettle's application menu in the UI's language.
+//! The portable menu-bar model and its macOS installation.
 //!
-//! winit builds an English application menu as the app finishes launching
-//! (About, Services, Hide, Hide Others, Show All, Quit), before the first
-//! `resumed`, so that an app can replace it. This replaces it with the same
-//! rows, the same standard actions and the same key equivalents, so no chord
-//! that reaches the PTY changes, titled in the language Kettle runs in, and
-//! naming the product the same whether Kettle runs from its bundle or from
-//! the bare executable. Kettle's own commands live in its palette and
-//! context menus, not the menu bar.
-//!
-//! Cross-platform on purpose, with the `cfg` inside `imp`, as in
-//! `macos_dock`.
+//! Kettle key equivalents are display hints. The root NSMenu declines them,
+//! leaving the original event to winit, including modal handling, keybind
+//! resolution, program-ownership yielding and press/release tracking. Only
+//! mouse selections send actions through the event-loop proxy.
 
-/// The standard action a row of the application menu sends.
+#[cfg(any(target_os = "macos", test))]
+use kettle_config::keybinds::{Action, Bindings, Key, Mods, Trigger, hint_label};
+#[cfg(any(target_os = "macos", test))]
+use kettle_i18n::{Text as T, Translator};
+
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AppAction {
-    /// `orderFrontStandardAboutPanel:`
+pub(crate) enum NativeAction {
     About,
-    /// `hide:`
     Hide,
-    /// `hideOtherApplications:`
     HideOthers,
-    /// `unhideAllApplications:`
     ShowAll,
-    /// `terminate:`
     Quit,
 }
 
-/// One row of the application menu, top to bottom.
 #[cfg(any(target_os = "macos", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AppMenuRow {
-    /// A row that sends `action`, with `key` as its Command key equivalent
-    /// (none when empty), Option joining Command when `option`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Command {
+    Kettle(Action),
+    Native(NativeAction),
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Row {
     Item {
         title: &'static str,
-        action: AppAction,
-        key: &'static str,
-        option: bool,
+        command: Command,
+        shortcut: Option<Trigger>,
+        shortcut_label: Option<String>,
+        enabled: bool,
     },
-    /// The Services submenu, which macOS fills.
     Services(&'static str),
     Separator,
 }
 
-/// The application menu, in the UI's language: winit's rows, actions and
-/// key equivalents.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn app_menu_model(tr: &kettle_i18n::Translator) -> [AppMenuRow; 8] {
-    use AppMenuRow::{Item, Separator, Services};
-    use kettle_i18n::Text as T;
-    let item = |title, action, key, option| Item {
-        title: tr.text(title),
-        action,
-        key,
-        option,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Menu {
+    title: &'static str,
+    rows: Vec<Row>,
+    windows: bool,
+}
+
+/// Facts from the focused window; no AppKit, window or terminal handles.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Context {
+    pub window: bool,
+    pub pane: bool,
+    pub tabs: usize,
+    pub panes: usize,
+    pub zoomed: bool,
+    pub clipboard: bool,
+    pub selection: bool,
+    pub smart_copy: bool,
+    pub writable: bool,
+    pub renderer: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Context {
+    pub(crate) fn enables(self, action: &Action) -> bool {
+        if !self.window {
+            return false;
+        }
+        match action {
+            Action::Copy => self.pane && self.clipboard && (!self.smart_copy || self.selection),
+            Action::Paste => self.pane && self.clipboard && self.writable,
+            Action::NextTab | Action::PrevTab => self.tabs > 1,
+            Action::ToggleZoom => self.zoomed || self.panes > 1,
+            Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
+                self.renderer
+            }
+            Action::SelectAll
+            | Action::ClearHistory
+            | Action::ClosePane
+            | Action::SplitRight
+            | Action::SplitDown
+            | Action::StartSearch => self.pane,
+            _ => true,
+        }
+    }
+}
+
+/// Use the same ranking and formatting as every other shortcut hint, but
+/// consider only Command chords. A shorter Ctrl chord must not hide a Cmd one.
+#[cfg(any(target_os = "macos", test))]
+fn command_shortcut(bindings: &Bindings, action: &Action) -> Option<(Trigger, String)> {
+    let label = hint_label(bindings, action)?;
+    let trigger = bindings.keys().find(|trigger| trigger.label() == label)?;
+    Some((*trigger, label))
+}
+
+/// Pure, platform-independent menu construction. Native app commands retain
+/// their standard equivalents unless the live keymap owns that chord.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context) -> Vec<Menu> {
+    use Row::{Separator as Sep, Services};
+    let command_bindings: Bindings = bindings
+        .iter()
+        .filter(|(trigger, _)| trigger.mods.contains(Mods::SUPER))
+        .map(|(trigger, action)| (*trigger, action.clone()))
+        .collect();
+    let item = |text, action: Action| {
+        let shortcut = command_shortcut(&command_bindings, &action);
+        Row::Item {
+            title: tr.text(text),
+            enabled: context.enables(&action),
+            command: Command::Kettle(action),
+            shortcut: shortcut.as_ref().map(|(trigger, _)| *trigger),
+            shortcut_label: shortcut.map(|(_, label)| label),
+        }
     };
-    [
-        item(T::MacosMenuAbout, AppAction::About, "", false),
-        Separator,
-        Services(tr.text(T::MacosMenuServices)),
-        item(T::MacosMenuHide, AppAction::Hide, "h", false),
-        item(T::MacosMenuHideOthers, AppAction::HideOthers, "h", true),
-        item(T::MacosMenuShowAll, AppAction::ShowAll, "", false),
-        Separator,
-        item(T::MacosMenuQuit, AppAction::Quit, "q", false),
+    let native = |text, action, chord: Option<Trigger>| {
+        let shortcut = chord.filter(|trigger| !bindings.contains_key(trigger));
+        Row::Item {
+            title: tr.text(text),
+            command: Command::Native(action),
+            shortcut,
+            shortcut_label: shortcut.map(|trigger| trigger.label()),
+            enabled: true,
+        }
+    };
+    let chord = |key, mods| Some(Trigger::new(mods | Mods::SUPER, Key::Char(key)));
+    let menu = |text, rows, windows| Menu {
+        title: tr.text(text),
+        rows,
+        windows,
+    };
+    vec![
+        menu(
+            T::MacosMenuApp,
+            vec![
+                native(T::MacosMenuAbout, NativeAction::About, None),
+                Sep,
+                item(T::MenuSettings, Action::OpenSettings),
+                Sep,
+                Services(tr.text(T::MacosMenuServices)),
+                Sep,
+                native(
+                    T::MacosMenuHide,
+                    NativeAction::Hide,
+                    chord('h', Mods::empty()),
+                ),
+                native(
+                    T::MacosMenuHideOthers,
+                    NativeAction::HideOthers,
+                    chord('h', Mods::ALT),
+                ),
+                native(T::MacosMenuShowAll, NativeAction::ShowAll, None),
+                Sep,
+                native(
+                    T::MacosMenuQuit,
+                    NativeAction::Quit,
+                    chord('q', Mods::empty()),
+                ),
+            ],
+            false,
+        ),
+        menu(
+            T::MacosMenuShell,
+            vec![
+                item(T::MenuNewWindow, Action::NewWindow),
+                item(T::MenuNewTab, Action::NewTab),
+                Sep,
+                item(T::MenuSplitRight, Action::SplitRight),
+                item(T::MenuSplitDown, Action::SplitDown),
+                Sep,
+                item(T::MenuClosePane, Action::ClosePane),
+                item(T::MenuCloseTab, Action::CloseTab),
+                item(T::MenuCloseWindow, Action::CloseWindow),
+            ],
+            false,
+        ),
+        menu(
+            T::MacosMenuEdit,
+            vec![
+                item(T::MenuCopy, Action::Copy),
+                item(T::MenuPaste, Action::Paste),
+                item(T::MacosMenuSelectAll, Action::SelectAll),
+                Sep,
+                item(T::MacosMenuFind, Action::StartSearch),
+                Sep,
+                item(T::MacosMenuClear, Action::ClearHistory),
+            ],
+            false,
+        ),
+        menu(
+            T::MacosMenuView,
+            vec![
+                item(T::MacosMenuPalette, Action::CommandPalette),
+                item(T::MacosMenuTheme, Action::OpenThemePicker),
+                Sep,
+                item(T::MacosMenuFontIncrease, Action::IncreaseFontSize),
+                item(T::MacosMenuFontDecrease, Action::DecreaseFontSize),
+                item(T::MacosMenuFontReset, Action::ResetFontSize),
+                Sep,
+                item(T::MacosMenuZoomPane, Action::ToggleZoom),
+                item(T::MacosMenuFullscreen, Action::ToggleFullscreen),
+                item(T::QuickTerminalToggle, Action::ToggleQuickTerminal),
+            ],
+            false,
+        ),
+        // No Minimize, Zoom Window or Bring All to Front Action exists.
+        menu(
+            T::MacosMenuWindow,
+            vec![
+                item(T::MacosMenuNextTab, Action::NextTab),
+                item(T::MacosMenuPreviousTab, Action::PrevTab),
+            ],
+            true,
+        ),
     ]
 }
 
-/// Replace winit's application menu with Kettle's, once, from the first
-/// `resumed`. A no-op off macOS.
-pub(crate) fn install(tr: &kettle_i18n::Translator) {
-    imp::install(tr);
-}
-
 #[cfg(target_os = "macos")]
-mod imp {
-    use std::cell::Cell;
+#[path = "macos_menu/native.rs"]
+mod imp;
 
-    use objc2::runtime::Sel;
-    use objc2::sel;
-    use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
-    use objc2_foundation::{MainThreadMarker, NSString};
-
-    use super::{AppAction, AppMenuRow, app_menu_model};
-
-    thread_local! {
-        static INSTALLED: Cell<bool> = const { Cell::new(false) };
-    }
-
-    fn selector_for(action: AppAction) -> Sel {
-        match action {
-            AppAction::About => sel!(orderFrontStandardAboutPanel:),
-            AppAction::Hide => sel!(hide:),
-            AppAction::HideOthers => sel!(hideOtherApplications:),
-            AppAction::ShowAll => sel!(unhideAllApplications:),
-            AppAction::Quit => sel!(terminate:),
-        }
-    }
-
-    pub(super) fn install(tr: &kettle_i18n::Translator) {
-        if INSTALLED.with(|installed| installed.replace(true)) {
-            return;
-        }
-        let Some(mtm) = MainThreadMarker::new() else {
-            log::warn!("menu bar: install called off the main thread");
-            return;
-        };
-        let app = NSApplication::sharedApplication(mtm);
-        let menubar = NSMenu::new(mtm);
-        let app_item = NSMenuItem::new(mtm);
-        menubar.addItem(&app_item);
-        let app_menu = NSMenu::new(mtm);
-        let mut services = None;
-        for row in app_menu_model(tr) {
-            match row {
-                AppMenuRow::Separator => app_menu.addItem(&NSMenuItem::separatorItem(mtm)),
-                AppMenuRow::Services(title) => {
-                    // SAFETY: a plain title, no action and no key
-                    // equivalent; macOS fills the submenu it is given.
-                    let item = unsafe {
-                        NSMenuItem::initWithTitle_action_keyEquivalent(
-                            mtm.alloc(),
-                            &NSString::from_str(title),
-                            None,
-                            &NSString::from_str(""),
-                        )
-                    };
-                    let submenu = NSMenu::new(mtm);
-                    item.setSubmenu(Some(&submenu));
-                    app_menu.addItem(&item);
-                    services = Some(submenu);
-                }
-                AppMenuRow::Item {
-                    title,
-                    action,
-                    key,
-                    option,
-                } => {
-                    // SAFETY: each selector is a standard NSApplication
-                    // action the responder chain answers, as winit's own
-                    // menu sends.
-                    let item = unsafe {
-                        NSMenuItem::initWithTitle_action_keyEquivalent(
-                            mtm.alloc(),
-                            &NSString::from_str(title),
-                            Some(selector_for(action)),
-                            &NSString::from_str(key),
-                        )
-                    };
-                    if option {
-                        item.setKeyEquivalentModifierMask(
-                            NSEventModifierFlags::NSEventModifierFlagOption
-                                | NSEventModifierFlags::NSEventModifierFlagCommand,
-                        );
-                    }
-                    app_menu.addItem(&item);
-                }
-            }
-        }
-        app_item.setSubmenu(Some(&app_menu));
-        if let Some(services) = &services {
-            // SAFETY: the services menu is a live NSMenu this process owns.
-            unsafe { app.setServicesMenu(Some(services)) };
-        }
-        app.setMainMenu(Some(&menubar));
-        log::debug!("menu bar: installed in the UI's language");
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod imp {
-    /// No menu bar outside macOS: Kettle's menus there are its own.
-    pub(super) fn install(_tr: &kettle_i18n::Translator) {}
+/// Reconcile the model; installation is confined to the AppKit main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync(
+    proxy: &winit::event_loop::EventLoopProxy<crate::app::UserEvent>,
+    cfg: &kettle_config::Config,
+    context: Context,
+) {
+    let tr = Translator::new(cfg.language.resolve(kettle_i18n::os_locale));
+    imp::sync(proxy, menu_model(&tr, &cfg.keybinds, context));
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{AppAction, AppMenuRow, app_menu_model};
-    use kettle_i18n::{Language, Translator};
-
-    const EN: Translator = Translator::new(Language::En);
-    const ES: Translator = Translator::new(Language::Es);
-
-    /// The application menu keeps winit's rows, actions and key
-    /// equivalents, so no chord changes, and names them in the UI's
-    /// language, the product named the same however Kettle was launched.
-    #[test]
-    fn the_app_menu_keeps_winit_s_rows_in_the_ui_s_language() {
-        let shape = |tr: &Translator| {
-            app_menu_model(tr)
-                .map(|row| match row {
-                    AppMenuRow::Item {
-                        action,
-                        key,
-                        option,
-                        ..
-                    } => Some((action, key, option)),
-                    AppMenuRow::Services(_) | AppMenuRow::Separator => None,
-                })
-                .to_vec()
-        };
-        let expected = vec![
-            Some((AppAction::About, "", false)),
-            None,
-            None,
-            Some((AppAction::Hide, "h", false)),
-            Some((AppAction::HideOthers, "h", true)),
-            Some((AppAction::ShowAll, "", false)),
-            None,
-            Some((AppAction::Quit, "q", false)),
-        ];
-        assert_eq!(shape(&EN), expected);
-        assert_eq!(shape(&ES), expected);
-        let titles = |tr: &Translator| {
-            app_menu_model(tr)
-                .iter()
-                .filter_map(|row| match row {
-                    AppMenuRow::Item { title, .. } | AppMenuRow::Services(title) => Some(*title),
-                    AppMenuRow::Separator => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            titles(&EN),
-            [
-                "About Kettle",
-                "Services",
-                "Hide Kettle",
-                "Hide Others",
-                "Show All",
-                "Quit Kettle"
-            ]
-        );
-        let spanish = titles(&ES);
-        assert_eq!(spanish.len(), 6);
-        for (english, spanish) in titles(&EN).iter().zip(&spanish) {
-            assert_ne!(english, spanish, "untranslated");
-        }
-        assert!(
-            spanish
-                .iter()
-                .filter(|title| title.contains("Kettle"))
-                .count()
-                == 3
-        );
-    }
-
-    /// The first `resumed`, after winit's menu is up, installs Kettle's,
-    /// unconditionally, the platform split inside `imp`.
-    #[test]
-    fn resumed_installs_the_app_menu() {
-        let source = kettle_test_support::production_source(&crate::app::app_source());
-        let needle = "crate::macos_menu::install(&self.ui_text);";
-        assert_eq!(source.matches(needle).count(), 1);
-        let resumed = source
-            .split("fn resumed(&mut self, event_loop: &ActiveEventLoop) {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n    fn ").next())
-            .expect("resumed");
-        assert!(resumed.contains(needle));
-        let at = source.find(needle).expect("install call site");
-        assert!(!source[at.saturating_sub(240)..at].contains("#[cfg("));
-    }
-}
+#[path = "macos_menu/tests.rs"]
+mod tests;

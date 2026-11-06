@@ -346,12 +346,12 @@ fn confirm_dialog_keypress_walks_state_machine() {
     // button so Enter on the safe default doesn't fire the destructive action.
     assert_eq!(
         confirm_dialog_keypress(0, 2, ConfirmKey::Enter),
-        ConfirmKeyResult::Cancel,
+        ConfirmKeyResult::Activate(0),
         "Enter on the highlighted Cancel button must cancel, not confirm"
     );
     assert_eq!(
         confirm_dialog_keypress(1, 2, ConfirmKey::Enter),
-        ConfirmKeyResult::Confirm,
+        ConfirmKeyResult::Activate(1),
         "Enter on the Confirm button confirms"
     );
     // Tab cycles forward with wrap.
@@ -690,5 +690,23 @@ fn failed_settings_saves_do_not_claim_session_application_or_discard_text() {
             .next()
             .unwrap()
             .contains("return;")
+    );
+}
+
+#[test]
+fn paste_confirmation_enter_activates_each_of_three_buttons() {
+    for index in 0..3 {
+        assert_eq!(
+            super::confirm_dialog_keypress(index, 3, super::ConfirmKey::Enter),
+            super::ConfirmKeyResult::Activate(index)
+        );
+    }
+    assert_eq!(
+        super::confirm_dialog_keypress(2, 3, super::ConfirmKey::Tab),
+        super::ConfirmKeyResult::Move(0)
+    );
+    assert_eq!(
+        super::confirm_dialog_keypress(0, 3, super::ConfirmKey::ShiftTab),
+        super::ConfirmKeyResult::Move(2)
     );
 }

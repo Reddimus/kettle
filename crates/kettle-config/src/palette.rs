@@ -96,6 +96,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteIncreaseFontSize, IncreaseFontSize),
         (T::PaletteDecreaseFontSize, DecreaseFontSize),
         (T::PaletteResetFontSize, ResetFontSize),
+        (T::QuickTerminalToggle, ToggleQuickTerminal),
         (T::PaletteToggleFullscreen, ToggleFullscreen),
         (T::PaletteToggleBroadcastAll, ToggleBroadcastAll),
         (T::PaletteToggleBroadcastGroup, ToggleBroadcastGroup),
@@ -199,6 +200,12 @@ impl PaletteLabel {
     }
 }
 
+/// Matched scalar positions in the displayed label. An English alias may rank
+/// a translated entry even when its displayed label has no matching positions.
+pub fn matched_char_positions(query: &str, label: &str) -> Option<Vec<usize>> {
+    fuzzy::matched_char_positions(query, label)
+}
+
 /// [`rank`] over rows that may carry run-time labels.
 pub fn rank_entries(
     query: &str,
@@ -226,6 +233,25 @@ pub fn rank_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matched_positions_follow_fuzzy_unicode_and_spanish_labels() {
+        for (query, label, expected) in [
+            ("spt", "Split tab", Some(vec![0, 1, 4])),
+            ("AÑO", "Mi año", Some(vec![3, 4, 5])),
+            ("ct", "Cerrar pestaña", Some(vec![0, 10])),
+            ("İ", "İstanbul", Some(vec![0])),
+            ("界a", "世界a", Some(vec![1, 2])),
+            ("", "Cambiar tema", Some(vec![])),
+            ("xyz", "Cambiar tema", None),
+        ] {
+            assert_eq!(matched_char_positions(query, label), expected);
+            assert_eq!(
+                matched_char_positions(query, label).is_some(),
+                fuzzy::score(query, label).is_some()
+            );
+        }
+    }
 
     #[test]
     fn palette_includes_every_user_facing_action() {
@@ -374,6 +400,7 @@ mod tests {
             ToggleBroadcastGroup,
             ToggleBroadcastWindow,
             ToggleBroadcastOff,
+            ToggleQuickTerminal,
             ToggleFullscreen,
             Reset,
             ClearHistory,
@@ -530,10 +557,12 @@ mod tests {
                 | DecreaseFontSize
                 | ResetFontSize
                 | StartSearch
+                | ToggleSearchRegex
                 | ToggleBroadcastAll
                 | ToggleBroadcastGroup
                 | ToggleBroadcastWindow
                 | ToggleBroadcastOff
+                | ToggleQuickTerminal
                 | ToggleFullscreen
                 | Reset
                 | ClearHistory

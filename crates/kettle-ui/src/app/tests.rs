@@ -78,15 +78,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-fn title_test_config() -> kettle_config::Config {
+pub(super) fn title_test_config() -> kettle_config::Config {
     kettle_config::Config {
+        restore_session: kettle_config::RestoreSession::Never,
         shell_integration: false,
         login_shell: false,
         ..kettle_config::Config::default()
     }
 }
 
-fn title_test_argv() -> Vec<String> {
+pub(super) fn title_test_argv() -> Vec<String> {
     #[cfg(unix)]
     {
         vec!["/bin/cat".to_string()]
@@ -273,6 +274,7 @@ fn parked_strip(vertical: bool) -> Vec<kettle_render::TabSeg> {
                 idx,
                 rect,
                 title_rect: rect,
+                hint: None,
                 close: (0.0, 0.0, 0.0, 0.0),
                 title: format!("tab-{idx}"),
                 path: None,
@@ -370,6 +372,7 @@ include!("media_tests.rs");
 include!("menus_tests.rs");
 include!("modals_tests.rs");
 include!("notifications_tests.rs");
+include!("native_menu_tests.rs");
 include!("output_tests.rs");
 include!("paste_tests.rs");
 include!("pickers_tests.rs");

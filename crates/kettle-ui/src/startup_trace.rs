@@ -561,7 +561,7 @@ mod tests {
         // A window that starts hidden ends its trace in resumed_inner.
         let hidden_gate = at(
             resumed,
-            "if !should_reveal_after_renderer_init(self.cfg.window_state) {",
+            "if !should_reveal_after_renderer_init(initial_window_state) {",
         );
         let order = [
             at(resumed, &needle(Phase::Resumed)),

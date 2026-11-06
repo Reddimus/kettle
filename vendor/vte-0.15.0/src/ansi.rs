@@ -1478,6 +1478,8 @@ pub enum Attr {
     Hidden,
     /// Strikeout text.
     Strike,
+    /// Overlined text.
+    Overline,
     /// Cancel bold.
     CancelBold,
     /// Cancel bold and dim.
@@ -1494,6 +1496,8 @@ pub enum Attr {
     CancelHidden,
     /// Cancel strikeout.
     CancelStrike,
+    /// Cancel overline.
+    CancelOverline,
     /// Set indexed foreground color.
     Foreground(Color),
     /// Set indexed background color.
@@ -2356,6 +2360,8 @@ fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIte
             [27] => Some(Attr::CancelReverse),
             [28] => Some(Attr::CancelHidden),
             [29] => Some(Attr::CancelStrike),
+            [53] => Some(Attr::Overline),
+            [55] => Some(Attr::CancelOverline),
             [30] => Some(Attr::Foreground(Color::Named(NamedColor::Black))),
             [31] => Some(Attr::Foreground(Color::Named(NamedColor::Red))),
             [32] => Some(Attr::Foreground(Color::Named(NamedColor::Green))),
@@ -2788,6 +2794,20 @@ mod tests {
         parser.advance(&mut handler, BYTES);
 
         assert_eq!(handler.attr, Some(Attr::Bold));
+    }
+
+    #[test]
+    fn parse_overline_attributes() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+        for (bytes, expected) in [
+            (&b"\x1b[53m"[..], Attr::Overline),
+            (&b"\x1b[55m"[..], Attr::CancelOverline),
+            (&b"\x1b[m"[..], Attr::Reset),
+        ] {
+            parser.advance(&mut handler, bytes);
+            assert_eq!(handler.attr.take(), Some(expected));
+        }
     }
 
     #[test]

@@ -59,7 +59,6 @@ pub(super) fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(
 
 const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
 const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
-const STARTUP_GEOMETRY_TAB_BAR_H: f64 = 24.0;
 const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// The grid a fresh window aims for when the config sets no size, and the
 /// value a half-specified `window-width`/`window-height` fills its other axis
@@ -67,7 +66,7 @@ const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
 /// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
 /// default font) left every fresh window too narrow for the tools Kettle
-/// targets. 160x45 baseline cells are 1296x760 logical px with the default
+/// targets. 160x45 baseline cells are 1296x764 logical px with the default
 /// chrome: about 152x41 real cells at the 14 px font on a 1080p monitor.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
 pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
@@ -98,9 +97,21 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
     let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
     let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
 
-    if matches!(cfg.tab_bar, TabBarMode::Always) {
+    let titlebar_tabs = cfg!(target_os = "macos")
+        && !cfg.borderless
+        && cfg.macos_titlebar_style == kettle_config::MacosTitlebarStyle::Tabs
+        && cfg.tab_bar_pos == TabBarPos::Top
+        && cfg.tab_bar != TabBarMode::Off;
+    if titlebar_tabs {
+        height += 28.0;
+    } else if matches!(cfg.tab_bar, TabBarMode::Always) {
         match cfg.tab_bar_pos {
-            TabBarPos::Top | TabBarPos::Bottom => height += STARTUP_GEOMETRY_TAB_BAR_H,
+            TabBarPos::Top | TabBarPos::Bottom => {
+                height += f64::from(tab_bar_height(
+                    STARTUP_GEOMETRY_CELL_H as f32,
+                    cfg.tab_bar_pos,
+                ))
+            }
             TabBarPos::Left | TabBarPos::Right => {
                 width += f64::from(cfg.tab_bar_width.clamp(40.0, 600.0));
             }
@@ -305,6 +316,19 @@ impl App {
         // Enumerate the system fonts while the event loop starts (AppKit's
         // launch, on macOS) instead of after it.
         let mut font_preload = crate::font_preload::FontPreload::start();
+        // Only a quick-terminal launch returns focus to the app it came from.
+        // Reading that app talks to the display server (an X11 connection on
+        // Linux, which can start Xwayland on demand), so no other launch pays
+        // for it; under Wayland the compositor owns focus return.
+        let quick_previous = if startup.quick_terminal
+            && !(cfg!(all(unix, not(target_os = "macos")))
+                && std::env::var_os("WAYLAND_DISPLAY").is_some())
+        {
+            crate::quick_terminal::native::PreviousApp::capture()
+        } else {
+            Default::default()
+        };
+        let initial_quick_focus = startup.quick_terminal;
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
@@ -323,7 +347,11 @@ impl App {
             .unwrap_or_default();
         let another_build_running = other_builds.running();
         let activation = startup.activation.take().and_then(|primary| {
-            match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
+            match crate::activation_server::ActivationInbox::start(
+                primary,
+                proxy.clone(),
+                startup.activation_quick_only,
+            ) {
                 Ok(inbox) => Some(inbox),
                 Err(error) => {
                     log::warn!("bare-launch activation server unavailable: {error}");
@@ -456,11 +484,13 @@ impl App {
         // field below can both use it; inside the struct init, a bare `cfg.…`
         // would hit the `cfg!()` macro instead.
         let initial_path = startup.config.clone().or_else(Config::default_path);
+        let mut config_diagnostics = None;
         let mut initial_cfg = match initial_path.as_deref().filter(|path| path.exists()) {
             Some(path) => match prepare_config_directory(path, startup.config_trust)
                 .and_then(|()| Config::read_from_with_trust(path, startup.config_trust))
             {
                 Ok(loaded) => {
+                    config_diagnostics = Some((path.to_path_buf(), loaded.diagnostics()));
                     if !loaded.unknown_keys.is_empty() {
                         log::warn!(
                             "{}: unrecognized config keys: {}",
@@ -692,6 +722,12 @@ impl App {
         };
         let mut windows = std::collections::BTreeMap::new();
         let mut initial_window = WindowState::new(1, mux);
+        #[cfg(target_os = "macos")]
+        {
+            // The quick terminal is borderless; it never hosts titlebar tabs.
+            initial_window.macos_titlebar_tabs = !startup.quick_terminal
+                && macos_titlebar_policy(&initial_cfg) == MacosTitlebarPolicy::Tabs;
+        }
         initial_window.cursor_exit_log = crate::cursor_exit_log::CursorExitLog::from_env(1);
         windows.insert(1, initial_window);
         let remote_proxy = proxy.clone();
@@ -756,6 +792,13 @@ impl App {
             agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
             proxy,
             activation,
+            quick_terminal: crate::quick_terminal::Runtime {
+                model: crate::quick_terminal::Model::for_startup(startup.quick_terminal, 1),
+                previous: quick_previous,
+                initial_focus: initial_quick_focus,
+                activation_token: startup.quick_terminal_activation_token.take(),
+                ..Default::default()
+            },
             runtime_tracker,
             wake_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config_reload_pending,
@@ -828,6 +871,8 @@ impl App {
             update_facts: crate::update_notice::UpdateFacts::default(),
             update_local_dismissals: crate::update_notice::LocalDismissals::default(),
             update_restart_dismissed: false,
+            config_notice: None,
+            config_notice_last: None,
             update_toast: None,
             update_toast_receipts: None,
             update_toast_claiming: None,
@@ -844,6 +889,9 @@ impl App {
             torn_drag: None,
             last_session_sweep: None,
         };
+        if let Some((path, diagnostics)) = config_diagnostics {
+            app.set_config_notice(&path, &diagnostics);
+        }
         app.runtime_tracker.set_window_count(app.windows.len());
         // Before the first pane, which may start Claude Code or Codex.
         app.reconcile_claude_plugin();
@@ -898,48 +946,16 @@ impl App {
         monitor: Option<StartupMonitor>,
     ) -> Option<(u32, u32)> {
         let cell = Self::cell_size(ws)?;
-        let scale = monitor.map_or(1.0, |m| m.scale);
-        let (default_w, default_h) = startup_inner_size(&self.cfg, monitor);
-        let physical = |logical: f64| (logical * scale).round().max(1.0) as u32;
-        let cols = self.cfg.window_width.map(|cols| {
-            cols.clamp(
-                kettle_config::WINDOW_WIDTH_MIN,
-                kettle_config::WINDOW_WIDTH_MAX,
-            )
-        });
-        let rows = self.cfg.window_height.map(|rows| {
-            rows.clamp(
-                kettle_config::WINDOW_HEIGHT_MIN,
-                kettle_config::WINDOW_HEIGHT_MAX,
-            )
-        });
-        let (exact_w, exact_h) = surface_for_grid(
-            (
-                cols.unwrap_or(STARTUP_DEFAULT_COLS) as usize,
-                rows.unwrap_or(STARTUP_DEFAULT_ROWS) as usize,
-            ),
+        Some(startup_surface_for(
+            &self.cfg,
             cell,
-            (self.cfg.padding_x, self.cfg.padding_y),
             self.content_bands(ws),
-            self.cfg.tab_bar_pos,
-            self.cfg.status_bar,
-            self.cfg.tab_bar_width,
-        );
-        Some((
-            if cols.is_some() {
-                exact_w
-            } else {
-                physical(default_w)
-            },
-            if rows.is_some() {
-                exact_h
-            } else {
-                physical(default_h)
-            },
+            monitor,
         ))
     }
 
     fn prepare_startup_fonts(&mut self, ws: &mut WindowState, startup_scale: f32) {
+        ws.startup_scale = startup_scale;
         let fonts = match ws.startup_fonts.take() {
             Some(fonts) if fonts.matches(&self.cfg, startup_scale) => fonts,
             Some(fonts) => fonts.remeasure(&self.cfg, startup_scale),
@@ -1035,12 +1051,17 @@ impl App {
         if ws.window.is_some() {
             return;
         }
+        let initial_window_state = if self.startup.quick_terminal {
+            kettle_config::WindowState::Hidden
+        } else {
+            self.cfg.window_state
+        };
         crate::startup_trace::mark(crate::startup_trace::Phase::Resumed);
         // Explicit command/cwd launches never restore a saved workspace.
         // Preserve the fields until the existing consumed-once spawn path
         // below, but decide and preflight the restore before native resources
         // are allocated.
-        let has_launch_override = self.launch_override;
+        let has_launch_override = self.launch_override || self.startup.quick_terminal;
         // A launch override means the named layout is not loaded, so it must
         // not be written back either — otherwise the flag that names a layout
         // is the same flag that destroys it.
@@ -1110,7 +1131,7 @@ impl App {
         // fresh normal or hidden window knows its size before it exists.
         let early_start = restore_plan.is_none()
             && matches!(
-                self.cfg.window_state,
+                initial_window_state,
                 kettle_config::WindowState::Normal | kettle_config::WindowState::Hidden
             );
         let startup_surface = if ws.pre_launch.is_some() {
@@ -1121,6 +1142,7 @@ impl App {
             None
         };
         ws.startup_surface = startup_surface;
+        let startup_titlebar_band = startup_surface.and_then(|_| Self::macos_titlebar_band(ws));
         // The pane starts before the window only when the window will open at
         // this scale and size: on the monitor the cell was measured for, which
         // a configured position could change, and within it, where the OS
@@ -1147,9 +1169,9 @@ impl App {
         // Create the window hidden while renderer init runs on the event-loop
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
-        ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
+        ws.window_shown = !should_reveal_after_renderer_init(initial_window_state);
         ws.startup_window = true;
-        let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
+        let mut attrs = self.window_attributes(initial_window_state, monitor);
         if let Some((width, height)) = startup_surface {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
         }
@@ -1162,6 +1184,9 @@ impl App {
             if let Some((x, y)) = surface.position {
                 attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
             }
+        }
+        if self.startup.quick_terminal {
+            attrs = self.quick_window_attributes(attrs, event_loop);
         }
         // Startup is measured, not guessed: the window is created HIDDEN and
         // revealed at the first paint, so everything between here and that
@@ -1179,6 +1204,11 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        if self.startup.quick_terminal {
+            crate::quick_terminal::native::configure(&window);
+        }
+        self.correct_startup_titlebar_size(&window, startup_titlebar_band, monitor);
+
         ws.native_fullscreen = Some(crate::native_fullscreen::NativeFullscreen::install(
             &window,
             ws.seq,
@@ -1225,7 +1255,7 @@ impl App {
         if let Some(h) = window_hwnd(&window) {
             set_window_background_brush(h, self.cfg.theme.background);
         }
-        let early_reveal = should_reveal_after_renderer_init(self.cfg.window_state)
+        let early_reveal = should_reveal_after_renderer_init(initial_window_state)
             && background_is_dark_enough_to_reveal_early(self.cfg.theme.background);
         if early_reveal {
             window.set_visible(true);
@@ -1489,7 +1519,7 @@ impl App {
         // retains the exact head message and about_to_wait drives retries.
         let _ = self.poll_pending_lua_commands(ws, event_loop, std::time::Instant::now());
         if should_reveal_before_first_surface_frame(
-            self.cfg.window_state,
+            initial_window_state,
             ws.window_shown,
             cfg!(target_os = "macos"),
         ) {
@@ -1507,7 +1537,7 @@ impl App {
         // A window that starts hidden presents nothing until it is shown, so
         // its startup trace ends here, without a first frame. Any other
         // window's trace is printed by the first frame it presents.
-        if !should_reveal_after_renderer_init(self.cfg.window_state) {
+        if !should_reveal_after_renderer_init(initial_window_state) {
             crate::startup_trace::flush();
         }
         // The first frame is scheduled. The signed-feed worker skips the first
@@ -1530,4 +1560,83 @@ impl App {
             let _ = proxy.send_event(UserEvent::ShellsDetected);
         }));
     }
+}
+
+pub(super) fn startup_surface_for(
+    cfg: &Config,
+    cell: (f32, f32),
+    bands: ContentBands,
+    monitor: Option<StartupMonitor>,
+) -> (u32, u32) {
+    let scale = monitor.map_or(1.0, |m| m.scale);
+    let (default_w, default_h) = startup_inner_size(cfg, monitor);
+    let physical = |logical: f64| (logical * scale).round().max(1.0) as u32;
+    let cols = cfg.window_width.map(|cols| {
+        cols.clamp(
+            kettle_config::WINDOW_WIDTH_MIN,
+            kettle_config::WINDOW_WIDTH_MAX,
+        )
+    });
+    let rows = cfg.window_height.map(|rows| {
+        rows.clamp(
+            kettle_config::WINDOW_HEIGHT_MIN,
+            kettle_config::WINDOW_HEIGHT_MAX,
+        )
+    });
+    let (exact_w, exact_h) = surface_for_grid(
+        (
+            cols.unwrap_or(STARTUP_DEFAULT_COLS) as usize,
+            rows.unwrap_or(STARTUP_DEFAULT_ROWS) as usize,
+        ),
+        cell,
+        (cfg.padding_x, cfg.padding_y),
+        bands,
+        cfg.tab_bar_pos,
+        cfg.status_bar,
+        cfg.tab_bar_width,
+    );
+    (
+        if cols.is_some() {
+            exact_w
+        } else {
+            physical(default_w)
+        },
+        if rows.is_some() {
+            exact_h
+        } else {
+            physical(default_h)
+        },
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn startup_surface_with_measured_titlebar(
+    cfg: &Config,
+    surface: (u32, u32),
+    estimated: f32,
+    measured: f32,
+    monitor: Option<StartupMonitor>,
+) -> (u32, u32) {
+    let delta = f64::from(measured - estimated);
+    if delta == 0.0 {
+        return surface;
+    }
+    let height = if cfg.window_width.is_some() || cfg.window_height.is_some() {
+        f64::from(surface.1) + delta
+    } else {
+        // Correct the default target before fitting it, so a monitor-capped
+        // window neither grows beyond the cap nor shrinks for a smaller band.
+        let scale = monitor.map_or(1.0, |m| m.scale);
+        let (_, unfitted_height) = startup_inner_size(cfg, None);
+        let height = (unfitted_height * scale).round() + delta;
+        monitor.map_or(height, |m| {
+            height.min(
+                (m.logical.1 * STARTUP_MONITOR_HEIGHT_FRACTION)
+                    .floor()
+                    .max(1.0)
+                    * scale,
+            )
+        })
+    };
+    (surface.0, height.round().max(1.0) as u32)
 }

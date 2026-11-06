@@ -59,6 +59,11 @@ pub fn grapheme_base_offset(text: &str) -> usize {
     grapheme::base_offset(text)
 }
 
+/// Unicode Emoji_Presentation property from the engine's pinned tables.
+pub fn emoji_presentation(c: char) -> bool {
+    grapheme::emoji_presentation(c)
+}
+
 /// Max size of the window title stack.
 const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
@@ -639,6 +644,9 @@ pub struct Config {
     /// The input owner implements KAM and SRM keyboard semantics.
     pub keyboard_input_modes: bool,
 
+    /// Initial DEC mode 2027 and its RIS/DECSTR default. Only seeds new terminals.
+    pub grapheme_clustering: bool,
+
     /// Whether to enable kitty keyboard protocol.
     pub kitty_keyboard: bool,
 
@@ -666,6 +674,7 @@ impl Default for Config {
             default_cursor_style: Default::default(),
             vi_mode_cursor_style: Default::default(),
             keyboard_input_modes: false,
+            grapheme_clustering: false,
             kitty_keyboard: Default::default(),
             unnegotiated_modified_enter: true,
             osc52: Default::default(),
@@ -756,7 +765,7 @@ impl<T> Term<T> {
             extended_reverse_wrap: false,
             morefix: None,
             no_clear_column: false,
-            grapheme_clustering: false,
+            grapheme_clustering: config.grapheme_clustering,
             grapheme_state: Default::default(),
             grapheme_anchor: None,
             grapheme_template: Cell::default(),
@@ -890,10 +899,13 @@ impl<T> Term<T> {
         self.set_options_inner(options, true);
     }
 
-    fn set_options_inner(&mut self, options: Config, preserve_history: bool)
+    fn set_options_inner(&mut self, mut options: Config, preserve_history: bool)
     where
         T: EventListener,
     {
+        // The host may reload other options without changing this terminal's
+        // configured reset default or a mode selected by its application.
+        options.grapheme_clustering = self.config.grapheme_clustering;
         let old_config = mem::replace(&mut self.config, options);
         if !self.config.keyboard_input_modes {
             self.keyboard_locked = false;
@@ -3476,7 +3488,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.extended_reverse_wrap = false;
         self.morefix = None;
         self.no_clear_column = false;
-        self.grapheme_clustering = false;
+        self.grapheme_clustering = self.config.grapheme_clustering;
         self.stop_grapheme();
         self.last_grapheme.clear();
         self.grapheme_template = Cell::default();
@@ -3534,7 +3546,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.extended_reverse_wrap = false;
         self.morefix = None;
         self.no_clear_column = false;
-        self.grapheme_clustering = false;
+        self.grapheme_clustering = self.config.grapheme_clustering;
         self.stop_grapheme();
         self.last_grapheme.clear();
         self.grapheme_template = Cell::default();
@@ -3650,6 +3662,8 @@ impl<T: EventListener> Handler for Term<T> {
             Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
             Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
             Attr::CancelStrike => cursor.template.flags.remove(Flags::STRIKEOUT),
+            Attr::Overline => cursor.template.flags.insert(Flags::OVERLINE),
+            Attr::CancelOverline => cursor.template.flags.remove(Flags::OVERLINE),
         }
     }
 
@@ -4209,6 +4223,7 @@ fn sgr_report(cell: &Cell) -> String {
         (Flags::INVERSE, "7"),
         (Flags::HIDDEN, "8"),
         (Flags::STRIKEOUT, "9"),
+        (Flags::OVERLINE, "53"),
     ] {
         if flags.contains(flag) {
             parts.push(sgr.to_owned());

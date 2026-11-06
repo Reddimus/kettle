@@ -986,6 +986,12 @@ impl App {
         let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);
         let cell_h = target.renderer.as_ref().map(|r| r.cell_h).unwrap_or(16.0);
         let bar = self.tab_bar(target);
+        let tab_cell_w = if bar.in_titlebar {
+            self.overlay_text_cell_width(target)
+                * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(target))
+        } else {
+            cell_w
+        };
         let segments: Vec<serde_json::Value> = bar
             .segments
             .iter()
@@ -996,16 +1002,28 @@ impl App {
                     seg.idx,
                     &self.cfg.tab_format,
                     seg.title_rect.2,
-                    cell_w,
+                    tab_cell_w,
+                );
+                // The text the strip paints: tab-format applied around the
+                // fitted title, plus the active tab's recording notice. A
+                // literal-only format has no fitted title but still a label.
+                let label = kettle_render::tab_segment_label(
+                    seg,
+                    &self.cfg.tab_format,
+                    tab_cell_w,
+                    &bar.recording_notice,
                 );
                 serde_json::json!({
                     "index": seg.idx,
                     "title": seg.title,
                     "path": seg.path.as_deref(),
                     "fitted_title": fitted_title,
+                    "label": label,
                     "active": seg.active,
+                    "hovered": bar.hovered_tab_idx == Some(seg.idx),
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
+                    "hint": seg.hint.as_ref().map(|(rect, text)| serde_json::json!({"rect": rect_json(*rect), "text": text})),
                     "close": rect_json(seg.close),
                 })
             })
@@ -1046,6 +1064,13 @@ impl App {
             .unwrap_or_default();
         // Each pane's preview lane, by pane: where it is and how it shows.
         // Geometry only; never a path, title or pixel.
+        let scrollback_pills: Vec<_> = pane_layout
+            .iter()
+            .filter_map(|(pane, partition)| {
+                let pill = self.scrollback_pill_for(target, *pane, partition.terminal)?;
+                Some(serde_json::json!({"pane": pane, "rect": rect_json(pill.rect)}))
+            })
+            .collect();
         let preview_lanes: Vec<serde_json::Value> = pane_layout
             .iter()
             .filter_map(|(id, partition)| {
@@ -1166,17 +1191,33 @@ impl App {
                         "label": label,
                         "separator": separator,
                         "dispatchable": item_is_dispatchable(item),
+                        "submenu": matches!(item, ContextMenuItem::Submenu { .. }),
                         "rect": rect_json((ax, row_y, panel_w, h)),
                     });
                     row_y += h;
                     row
                 })
                 .collect();
+            let parents: Vec<_> = self.context_menu_parent_overlays(target).iter().enumerate().map(|(depth, panel)| {
+                let natural_h: f32 = panel.rows.iter().map(|row| if row.separator { sep_h } else { row_h }).sum();
+                let (inset, content_h) = kettle_render::menu::scroll_content(natural_h, panel.panel_h_clamped, row_h);
+                let mut y = panel.anchor.1 + inset;
+                let mut rows = Vec::new();
+                for (index, row) in panel.rows.iter().enumerate().skip(panel.scroll_offset) {
+                    let height = if row.separator { sep_h } else { row_h };
+                    if y + height > panel.anchor.1 + inset + content_h { break; }
+                    rows.push(serde_json::json!({"index": index, "label": row.label, "separator": row.separator, "rect": rect_json((panel.anchor.0, y, panel.panel_w_clamped, height))}));
+                    y += height;
+                }
+                serde_json::json!({"depth": depth, "rect": rect_json(panel.rows_rect()), "highlight": panel.highlight, "rows": rows})
+            }).collect();
             Some(serde_json::json!({
                 "anchor": {"x": ax, "y": ay},
                 "rect": rect_json((ax, ay, panel_w, panel_h)),
                 "highlight": menu.highlight,
                 "scroll_offset": menu.scroll_offset,
+                "depth": menu.drill_stack.len(),
+                "parents": parents,
                 "rows": rows,
             }))
         });
@@ -1215,6 +1256,7 @@ impl App {
                         kettle_render::SearchControl::Next => "next",
                         kettle_render::SearchControl::Wrap => "wrap",
                         kettle_render::SearchControl::Case => "case",
+                        kettle_render::SearchControl::Regex => "regex",
                         kettle_render::SearchControl::Invert => "invert",
                         kettle_render::SearchControl::Close => "close",
                     },
@@ -1230,12 +1272,15 @@ impl App {
                 "rect": rect_json(geometry.rect),
                 "reserved_height": geometry.reserved_height,
                 "rows": geometry.rows,
+                "count_rect": rect_json(geometry.count),
+                "count": target.search.count_label(&english),
                 "status": effective_search_status(&target.search).label(&english),
                 "has_match": target.search.focused.is_some(),
                 "match_rects": active_search_match_rects,
                 "visible_truncated": target.search.visible_truncated,
                 "wrap": target.search.wrap,
                 "case": map_search_case_mode(target.search.case_mode).label(&english),
+                "regex": target.search.regex,
                 "invert": target.search.invert,
                 "status_rect": rect_json(geometry.status),
                 "controls": controls,
@@ -1282,22 +1327,25 @@ impl App {
             })
             .cloned();
         let diagnostic_overlay = self.overlay(target, false);
+        let picker = picker_diagnostic_geometry(&diagnostic_overlay);
         let settings = diagnostic_overlay.settings.as_ref().map(|settings| {
-            let geometry = kettle_render::settings_panel_geometry(
-                settings,
-                cell_w,
-                cell_h,
-                surface.0 as f32,
-                surface.1 as f32,
-            );
+            let layout = kettle_render::settings_layout(settings, (cell_w, self.overlay_text_line_height(target)),
+                (surface.0 as f32, surface.1 as f32), self.overlay_text_cell_width(target));
+            let focused = layout.rows.iter().find(|row| row.index == settings.focused_row).map_or(layout.empty_rect, |row| row.rect);
             serde_json::json!({
-                "rect": rect_json(geometry.rect),
-                "focused_rect": rect_json(geometry.focused_rect),
+                "rect": rect_json(layout.rect),
+                "focused_rect": rect_json(focused),
+                "sidebar_rect": layout.sidebar_rect.map(rect_json),
+                "content_rect": rect_json(layout.content_rect),
+                "search_rect": rect_json(layout.search_rect),
+                "search_focused": settings.search_focused,
+                "categories": layout.category_rects.iter().map(|r| r.map(rect_json)).collect::<Vec<_>>(),
+                "rows": layout.rows.iter().map(|row| serde_json::json!({"index": row.index, "rect": rect_json(row.rect), "chip_rect": rect_json(row.chip_rect), "label_rect": rect_json(row.label_rect), "description_rect": rect_json(row.description_rect)})).collect::<Vec<_>>(),
                 "focused_row": settings.focused_row,
                 "row_count": settings.rows.len(),
                 "active_category": settings.active_category,
-                "first_line": geometry.first_line,
-                "visible_lines": geometry.visible_lines,
+                "first_line": layout.first_row,
+                "visible_lines": layout.rows.len(),
             })
         });
         let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
@@ -1420,6 +1468,10 @@ impl App {
                 "facts": crate::update_notice::fact_rows(&self.update_facts, &self.ui_text),
             })
         });
+        let notices = self.persistent_notices(target).into_iter().map(|(pane, toast)| serde_json::json!({
+            "pane": pane, "message": toast.message, "rect": rect_json(toast.geometry.rect),
+            "restart": rect_json(toast.geometry.details), "close": rect_json(toast.geometry.close),
+        })).collect::<Vec<_>>();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1453,6 +1505,21 @@ impl App {
                         "id": id,
                         "rect": rect_json(partition.leaf),
                         "terminal": rect_json(partition.terminal),
+                        "command_marks": target.mux.panes.get(id).map(|pane| {
+                            use kettle_core::Dimensions as _;
+                            let marks = pane.term.command_marks();
+                            let Ok(term) = pane.term.term.lock() else { return Vec::new(); };
+                            let origin = term.grid().history_origin();
+                            let total = term.grid().history_size() + term.grid().screen_lines();
+                            let scale = target.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+                            marks.into_iter().filter_map(|mark| {
+                                let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
+                                    partition.terminal, scale, self.cfg.scrollbar_width, origin, total, mark,
+                                )?;
+                                Some(serde_json::json!({"row": mark.row, "exit_code": mark.exit_code,
+                                    "rect": rect_json((x, y, w, h))}))
+                            }).collect::<Vec<_>>()
+                        }).unwrap_or_default(),
                         "focused": target.mux.active_focus() == Some(*id),
                     }))
                     .collect::<Vec<_>>(),
@@ -1550,10 +1617,18 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["notices"] = notices.into();
+        geometry["picker"] = picker.into();
+        geometry["text_field"] = diagnostic_overlay
+            .text_field
+            .as_ref()
+            .map(|field| serde_json::json!({"rect": rect_json(field.rect)}))
+            .into();
         geometry["confirmation"] = serde_json::json!(confirmation);
         if let serde_json::Value::Object(fields) = &mut geometry {
             if let Some(serde_json::Value::Object(tab_bar)) = fields.get_mut("tab_bar") {
                 tab_bar.insert("update_chip".into(), serde_json::Value::Null);
+                tab_bar.insert("in_titlebar".into(), bar.in_titlebar.into());
             }
             // The update notice in its own field, so live smokes can check its
             // state independently of toast visibility.
@@ -1583,6 +1658,10 @@ impl App {
             fields.insert(
                 "inline_cards".into(),
                 serde_json::Value::Array(inline_cards),
+            );
+            fields.insert(
+                "scrollback_pills".into(),
+                serde_json::Value::Array(scrollback_pills),
             );
             fields.insert(
                 "preview_lanes".into(),
@@ -1691,12 +1770,10 @@ impl App {
         // event trails the native focus state, a smoke can hide the exact
         // window it is trying to raise. This control-only action never hides.
         if name == "focus_window" {
-            let Some(window) = ws.window.as_ref() else {
+            if ws.window.is_none() {
                 return Response::err(req.id, ec::INTERNAL, "target window is unavailable");
-            };
-            window.set_visible(true);
-            window.focus_window();
-            window.request_redraw();
+            }
+            self.reveal_window(ws);
             return Response::ok(
                 req.id,
                 serde_json::json!({
@@ -1905,6 +1982,7 @@ impl App {
                 Key::Character(text) if !mods.control_key() => Some(text.as_str()),
                 _ => None,
             };
+            let modal_owner = top_modal(ws);
             match modal {
                 TextModal::Confirm => {
                     self.confirm_dialog_key(ws, key, event_loop);
@@ -1916,7 +1994,11 @@ impl App {
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
                 TextModal::ThemePicker => self.theme_picker_key(ws, key, text),
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
-                TextModal::Settings => self.settings_key(ws, key, event_loop),
+                TextModal::Settings => {
+                    if !self.settings_search_key(ws, key, text) {
+                        self.settings_key(ws, key, event_loop);
+                    }
+                }
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
@@ -1926,6 +2008,9 @@ impl App {
                     }
                 }
                 TextModal::Preview => self.preview_focus_key(ws, key, false),
+            }
+            if top_modal(ws) != modal_owner && open_text_modal(ws) == Some(modal) {
+                end_modal_composition(ws);
             }
             applied += 1;
             // Stop as soon as the modal this batch addressed is gone (Esc,
@@ -2332,10 +2417,15 @@ impl App {
         if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
-        if self.press_update_toast(ws, px, py, bcode) {
+        if self.press_persistent_notice(ws, px, py, bcode)
+            || self.press_update_toast(ws, px, py, bcode)
+        {
             return true;
         }
         if self.press_preview_lane(ws, px, py, bcode) {
+            return true;
+        }
+        if self.press_scrollback_pill(ws, px, py, bcode) {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {
@@ -3674,4 +3764,23 @@ pub(super) fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, 
             "pane input transport failed; the pane is being closed",
         )),
     }
+}
+
+/// Geometry diagnostics omit query contents and command labels.
+pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json::Value> {
+    let menu = overlay
+        .context_menu
+        .as_ref()
+        .filter(|menu| menu.picker_header_height > 0.0)?;
+    let rect_json = |(x, y, w, h): kettle_render::Rect4| serde_json::json!({"x": x, "y": y, "width": w, "height": h});
+    Some(serde_json::json!({
+        "rect": rect_json(menu.card_rect()),
+        "rows_rect": rect_json(menu.rows_rect()),
+        "rows": menu.rows.iter().enumerate().filter_map(|(index, row)| {
+            menu.visible_row_rect(index).map(|rect| serde_json::json!({
+                "index": index, "rect": rect_json(rect), "enabled": row.enabled,
+                "selected": index == menu.highlight,
+            }))
+        }).collect::<Vec<_>>(),
+    }))
 }

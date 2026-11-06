@@ -283,3 +283,21 @@ pub fn fit_pane_titlebar_title(
     };
     format!("  {title_prefix}{fitted_title}{bell_part}")
 }
+
+/// Fit and format a tab label, including the native caption's recording notice.
+pub fn tab_segment_label(seg: &crate::TabSeg, format: &str, cw: f32, notice: &str) -> String {
+    let avail = (seg.title_rect.2.max(0.0) / cw.max(1.0)) as usize;
+    let notice = if seg.active { notice } else { "" };
+    let prefix = if notice.is_empty() {
+        String::new()
+    } else {
+        format!("{notice} ")
+    };
+    let width = (seg.title_rect.2 - display_width(&prefix) as f32 * cw).max(0.0);
+    let title = fit_tab_segment_title(&seg.title, seg.path.as_deref(), seg.idx, format, width, cw);
+    let body = kettle_config::template::fill(
+        format,
+        &[("n", &(seg.idx + 1).to_string()), ("title", &title)],
+    );
+    fit_single_line_label(&format!("{prefix}{body}"), avail)
+}

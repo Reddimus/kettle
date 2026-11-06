@@ -28,6 +28,7 @@ pub enum Key {
     Tab,
     /// Edit keys. They let a config bind `Cmd+Backspace`, which macOS uses
     /// for delete-to-line-start.
+    Escape,
     Backspace,
     Delete,
     F(u8),
@@ -103,11 +104,37 @@ impl Trigger {
             Key::End => "End".into(),
             Key::Enter => "Enter".into(),
             Key::Tab => "Tab".into(),
+            Key::Escape => "Escape".into(),
             Key::Backspace => "Backspace".into(),
             Key::Delete => "Delete".into(),
             Key::F(n) => format!("F{n}"),
         });
         parts.join("+")
+    }
+
+    /// Platform notation for GUI shortcuts. Configuration and CLI spelling stay stable.
+    pub fn ui_label(&self, macos: bool) -> String {
+        if !macos {
+            return self.label();
+        }
+        let mut label = String::new();
+        for (modifier, symbol) in [
+            (Mods::CTRL, "⌃"),
+            (Mods::ALT, "⌥"),
+            (Mods::SHIFT, "⇧"),
+            (Mods::SUPER, "⌘"),
+        ] {
+            if self.mods.contains(modifier) {
+                label.push_str(symbol);
+            }
+        }
+        let key = Trigger {
+            mods: Mods::empty(),
+            key: self.key,
+        }
+        .label();
+        label.push_str(&key);
+        label
     }
 }
 
@@ -221,17 +248,31 @@ pub fn action_label(a: &Action) -> String {
 /// its US-shifted twin `Ctrl+Shift+!`), then the shortest label, then
 /// lexicographic. `None` when the action is unbound.
 pub fn hint_label(bindings: &Bindings, action: &Action) -> Option<String> {
+    hint_label_for_platform(bindings, action, false)
+}
+
+/// Native modifier notation for context-menu and palette hints.
+pub fn ui_hint_label(bindings: &Bindings, action: &Action) -> Option<String> {
+    hint_label_for_platform(bindings, action, cfg!(target_os = "macos"))
+}
+
+pub fn hint_label_for_platform(
+    bindings: &Bindings,
+    action: &Action,
+    macos: bool,
+) -> Option<String> {
     bindings
         .iter()
         .filter(|(_, a)| *a == action)
-        .map(|(t, _)| t.label())
-        .min_by_key(|l| {
+        .map(|(t, _)| (t, t.label()))
+        .min_by_key(|(_, l)| {
             let alnum = l
                 .rsplit('+')
                 .next()
                 .is_some_and(|k| k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()));
             (!alnum, l.len(), l.clone())
         })
+        .map(|(trigger, _)| trigger.ui_label(macos))
 }
 
 /// Human-readable lines for the default keymap, sorted by trigger label —
@@ -446,6 +487,7 @@ pub enum Action {
     DecreaseFontSize,
     ResetFontSize,
     StartSearch,
+    ToggleSearchRegex,
     ToggleBroadcastAll,
     ToggleBroadcastOff,
     /// Toggle broadcast to the focused pane's named group. When the focused
@@ -458,6 +500,7 @@ pub enum Action {
     /// from the misnamed `ToggleBroadcastAll` which is
     /// actually per-tab.
     ToggleBroadcastWindow,
+    ToggleQuickTerminal,
     ToggleFullscreen,
     /// Full terminal reset (RIS, `\e c`) of the focused pane's terminal.
     /// Nothing is sent to the program running in it.
@@ -825,6 +868,7 @@ pub fn action_names() -> Vec<&'static str> {
         "zoom_out",
         "reset_font_size",
         "zoom_normal",
+        "toggle_search_regex",
         "start_search",
         "search",
         "broadcast_all",
@@ -845,6 +889,7 @@ pub fn action_names() -> Vec<&'static str> {
         "broadcast-window",
         "toggle_broadcast_window",
         "toggle-broadcast-window",
+        "toggle_quick_terminal",
         "toggle_fullscreen",
         "full_screen",
         "reset",
@@ -1163,6 +1208,7 @@ impl Action {
             "decrease_font_size" | "zoom_out" => DecreaseFontSize,
             "reset_font_size" | "zoom_normal" => ResetFontSize,
             "start_search" | "search" => StartSearch,
+            "toggle_search_regex" => ToggleSearchRegex,
             // Terminator's `broadcast_all` is `set_groupsend('all')`
             // (terminal.py:2193-2195), which reaches EVERY terminal, not just
             // the current tab's. `ToggleBroadcastAll` turns on the
@@ -1198,6 +1244,7 @@ impl Action {
             "group_tab_toggle" => ToggleGroupTab,
             "group_win_toggle" => ToggleGroupWindow,
 
+            "toggle_quick_terminal" => ToggleQuickTerminal,
             "toggle_fullscreen" | "full_screen" => ToggleFullscreen,
             "reset" => Reset,
             "clear_history" | "clear_scrollback" | "clear_buffer" => ClearHistory,
@@ -1341,6 +1388,7 @@ fn parse_key(s: &str) -> Option<Key> {
         "end" => Key::End,
         "enter" | "return" => Key::Enter,
         "tab" => Key::Tab,
+        "escape" | "esc" => Key::Escape,
         "backspace" | "bs" => Key::Backspace,
         "delete" | "del" => Key::Delete,
         "plus" => Key::Char('+'),
@@ -1601,6 +1649,11 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Char('c'), Copy);
     bind(cs, Char('v'), Paste);
     bind(cs, Char('f'), StartSearch);
+    // Ctrl+Alt with printable text is Windows AltGr composition.
+    #[cfg(not(target_os = "macos"))]
+    bind(a, Char('r'), ToggleSearchRegex);
+    #[cfg(target_os = "macos")]
+    bind(Mods::SUPER | a, Char('r'), ToggleSearchRegex);
     // Font-size zoom: every variant of "Ctrl + the plus/minus area" maps
     // to the same action. The `+` glyph on a US layout *is* `Shift+=` —
     // winit reports the chord as `mods = Ctrl+Shift, key = '+'`, which
@@ -1666,12 +1719,15 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         bind(su, Char('v'), Paste);
         bind(su, Char('t'), NewTab);
         bind(su, Char('n'), NewWindow);
-        // Apple Terminal semantics, not kettle's portable ones: Cmd+W is Close
-        // Tab and Shift+Cmd+D is Close Split Pane. Binding Cmd+W to ClosePane
+        // Cmd+W is Close Tab, as in Apple Terminal. Binding it to ClosePane
         // would silently close only the focused split of a split tab, which is
-        // not what the standard close chord means on this platform.
+        // not what the standard close chord means on this platform; panes close
+        // with the portable Ctrl+Shift+W.
         bind(su, Char('w'), CloseTab);
-        bind(sus, Char('d'), ClosePane);
+        // Cmd+D splits beside and Shift+Cmd+D splits below: the chords iTerm2,
+        // Ghostty and Warp share, so a split is where macOS users reach first.
+        bind(su, Char('d'), SplitRight);
+        bind(sus, Char('d'), SplitDown);
         bind(su, Char('f'), StartSearch);
         // Cmd+K clears the scrollback in Apple Terminal and iTerm2; the command
         // palette keeps its portable Ctrl+Shift+K and gains Shift+Cmd+P, the
@@ -1845,8 +1901,26 @@ mod tests {
         production
     }
 
-    /// The copied and selected diagram previews parse by either spelling
-    /// and claim no default shortcut.
+    #[test]
+    fn review_regression_search_regex_has_a_composition_safe_default() {
+        assert_eq!(
+            Action::from_name("toggle_search_regex"),
+            Some(Action::ToggleSearchRegex)
+        );
+        let bindings = defaults();
+        assert_eq!(
+            bindings.get(&Trigger {
+                mods: if cfg!(target_os = "macos") {
+                    Mods::SUPER | Mods::ALT
+                } else {
+                    Mods::ALT
+                },
+                key: Key::Char('r')
+            }),
+            Some(&Action::ToggleSearchRegex)
+        );
+    }
+
     #[test]
     fn diagram_previews_and_agent_setup_parse_without_a_default_shortcut() {
         for (names, action) in [
@@ -2101,7 +2175,8 @@ mod tests {
                 (su, Key::Char('t'), NewTab),
                 (su, Key::Char('n'), NewWindow),
                 (su, Key::Char('w'), CloseTab),
-                (sus, Key::Char('d'), ClosePane),
+                (su, Key::Char('d'), SplitRight),
+                (sus, Key::Char('d'), SplitDown),
                 (su, Key::Char('f'), StartSearch),
                 (su, Key::Char('k'), ClearHistory),
                 (sus, Key::Char('p'), CommandPalette),
@@ -2483,6 +2558,28 @@ mod tests {
 
     /// Dropdown parity: `hint_label` reverse-lookup — prefers the
     /// alphanumeric spelling of a chord and follows user rebinds.
+    #[test]
+    fn gui_shortcuts_use_platform_notation_and_live_bindings() {
+        for (raw, expected) in [
+            ("cmd+v=paste", "⌘V"),
+            ("shift+cmd+d=split_down", "⇧⌘D"),
+            ("ctrl+shift+a=select_all", "⌃⇧A"),
+            ("ctrl+alt+shift+cmd+x=copy", "⌃⌥⇧⌘X"),
+        ] {
+            let mut bindings = Bindings::new();
+            apply_keybind(&mut bindings, raw);
+            let (trigger, action) = bindings.iter().next().unwrap();
+            assert_eq!(
+                hint_label_for_platform(&bindings, action, true).as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                hint_label_for_platform(&bindings, action, false).as_deref(),
+                Some(trigger.label().as_str())
+            );
+        }
+    }
+
     #[test]
     fn hint_label_prefers_alphanumeric_trigger_and_follows_rebinds() {
         let d = defaults();

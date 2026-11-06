@@ -1,3 +1,45 @@
+settings_field_restore_session = "Restore session"
+settings_description_field_restore_session = "Automatic follows macOS window settings; off on other platforms."
+
+menu_category_close_confirmation = "Close confirmation"
+confirm_paste_heading = "Confirm paste"
+confirm_paste_body = "This paste may send commands to the terminal. Preview: {preview}"
+confirm_paste_one_line = "Paste as one line"
+menu_select_all = "Select All"
+menu_category_split = "Split"
+menu_category_pane = "Pane"
+menu_category_tab = "Tab"
+menu_category_window = "Window"
+menu_category_title = "Title"
+menu_category_group = "Group"
+menu_category_appearance = "Appearance"
+menu_category_commands = "Commands"
+
+process_exited = "Process exited with code {code}"
+process_exit_pending = "Process exited; waiting for status"
+process_restart = "Restart (Enter)"
+process_close = "Close (Esc)"
+config_notice = "Config settings ignored:\n{entries}"
+config_notice_more = "+{count} more"
+notice_dismiss = "Dismiss"
+a11y_tab_list = "Tabs"
+a11y_tab_close = "Close {title}"
+a11y_new_tab_menu = "New tab menu"
+quick_terminal_toggle = "Toggle quick terminal"
+settings_category_quick_terminal = "Quick terminal"
+quick_terminal_hotkey = "Global hotkey"
+quick_terminal_position = "Position"
+quick_terminal_size = "Size"
+quick_terminal_animation = "Animation"
+quick_terminal_autohide = "Hide when switching apps"
+quick_terminal_center = "Center"
+quick_terminal_hotkey_description = "Press a chord; Delete clears. Wayland/Windows: use desktop shortcuts."
+quick_terminal_position_description = "Anchor on this screen edge, or center the window."
+quick_terminal_size_description = "Screen percent: height at top/bottom, width at sides, both at center."
+quick_terminal_animation_description = "Slide into view unless the system has Reduce Motion enabled."
+quick_terminal_autohide_description = "Hide when another app gains focus; keep tabs and splits running."
+quick_terminal_hotkey_failed = "Could not register the quick terminal hotkey. It may already be in use; choose another chord in Settings."
+
 # English reference text. Every key in schema.toml, nothing else.
 
 screenshot_dimensions_too_large = "Screenshot dimensions exceed the GPU texture limit; reduce window padding or font size."
@@ -513,7 +555,7 @@ search_status_end = "End reached"
 search_status_invalid = "Invalid pattern"
 search_status_limited = "Results limited"
 search_status_match = "Match"
-search_status_no_match = "No match"
+search_status_no_match = "No matches"
 search_status_searching = "Searching…"
 search_status_start = "Start reached"
 search_status_too_complex = "Pattern too complex"
@@ -705,6 +747,117 @@ update_toast_installed = "Kettle {tag} is installed"
 theme_builtin_dark = "Builtin Dark"
 theme_builtin_light = "Builtin Light"
 
+# Settings descriptions and discovery.
+settings_description_field_agent_previews = "Let agents send media to Kettle without reading or typing."
+settings_description_field_agent_previews_claude_code = "Add the preview plugin to Claude Code in new panes."
+settings_description_field_agent_previews_codex = "Set up Codex previews in shells started in new panes."
+settings_description_field_agent_previews_agy = "Enable the installed agy plugin to send media to the shelf."
+settings_description_field_add_kettle_to_path = "Append Kettle to PATH in new panes if it is missing."
+settings_description_field_background_animation = "Choose when animated backgrounds play."
+settings_description_field_background_image = "Choose the image file used by the image background."
+settings_description_field_background_opacity = "Set how opaque the window background is."
+settings_description_field_background_type = "Choose a solid, transparent, image or starfield background."
+settings_description_field_bell = "Choose how terminal bell events notify you."
+settings_description_field_chrome_background = "Choose the bar colors over an image or starfield background."
+settings_description_field_close_button_on_tab = "Show a close button on each tab."
+settings_description_field_completion_overlay = "Show shell completion suggestions in a Kettle overlay."
+settings_description_field_copy_on_select = "Copy selected terminal text to the clipboard automatically."
+settings_description_field_cursor_blink = "Blink the terminal cursor."
+settings_description_field_cursor_blink_timeout = "Stop blinking after idle seconds; zero keeps blinking."
+settings_description_field_cursor_shape = "Choose the terminal cursor shape."
+settings_description_field_detachable_tabs = "Allow dragging a tab into its own window."
+settings_description_field_focus = "Choose how a pane receives keyboard focus."
+settings_description_field_font_size = "Set the terminal font size in points."
+settings_description_field_gpu_backend = "Choose the graphics API used on the next launch."
+settings_description_field_gpu_device = "Pin a detected GPU for the next launch."
+settings_description_field_gpu_force_software = "Use software rendering on the next launch."
+settings_description_field_gpu_power_preference = "Prefer power savings or performance when choosing a GPU."
+settings_description_field_invert_search = "Reverse the default Enter direction in terminal search."
+settings_description_field_language = "Choose the interface language; applies after restarting Kettle."
+settings_description_field_mouse_hide_while_typing = "Hide the mouse pointer while typing in the terminal."
+settings_description_field_scroll_tabbar = "Scroll overflowing tabs with arrows or the mouse wheel."
+settings_description_field_scrollback_lines = "Limit saved terminal lines; zero keeps unlimited history."
+settings_description_field_scrollback_memory = "Limit scrollback memory; zero removes the byte limit."
+settings_description_field_scrollbar = "Choose when the terminal scrollbar is visible."
+settings_description_field_scrollbar_width = "Set the visible scrollbar width in logical pixels."
+settings_description_field_search_case = "Choose how terminal search handles uppercase and lowercase."
+settings_description_field_search_wrap = "Continue terminal search past the first or last match."
+settings_description_field_show_titlebar = "Show the titlebar above each terminal pane."
+settings_description_field_tab_bar = "Choose when the tab bar is visible."
+settings_description_field_tab_bar_position = "Place the tab bar above or below the terminal."
+settings_description_field_tab_min_width = "Set the minimum tab width before the bar overflows."
+settings_description_field_theme = "Choose terminal colors and preview them immediately."
+settings_description_field_update_check_interval = "Set the hours between background update checks."
+settings_description_field_update_policy = "Choose whether to check for or install updates automatically."
+settings_description_field_vim_menu_nav = "Use hjkl and other Vim keys in menus and overlays."
+settings_description_field_window_blur = "Blur behind translucent windows where supported."
+settings_description_field_window_padding = "Set the horizontal and vertical inner window padding."
+settings_description_keybind_close_pane = "Rebind the shortcut that closes the focused pane."
+settings_description_keybind_command_palette = "Rebind the shortcut that opens the command palette."
+settings_description_keybind_copy = "Rebind the shortcut that copies selected text."
+settings_description_keybind_new_tab = "Rebind the shortcut that opens a new tab."
+settings_description_keybind_next_tab = "Rebind the shortcut that selects the next tab."
+settings_description_keybind_open_settings = "Rebind the shortcut that opens Settings."
+settings_description_keybind_paste = "Rebind the shortcut that pastes from the clipboard."
+settings_description_keybind_previous_tab = "Rebind the shortcut that selects the previous tab."
+settings_description_keybind_split_down = "Rebind the shortcut that splits a pane below the focused pane."
+settings_description_keybind_split_right = "Rebind the shortcut that splits a pane beside the focused pane."
+settings_description_keybind_start_search = "Rebind the shortcut that opens terminal search."
+settings_description_keybind_toggle_zoom = "Rebind the shortcut that zooms the focused pane."
+settings_a11y_search = "Search settings"
+settings_search_placeholder = "Search settings"
+settings_no_matches = "No settings match"
+
+macos_menu_app = "Kettle"
+
+macos_menu_shell = "Shell"
+
+macos_menu_edit = "Edit"
+
+macos_menu_view = "View"
+
+macos_menu_window = "Window"
+
+macos_menu_palette = "Command Palette…"
+
+macos_menu_theme = "Select Theme…"
+
+macos_menu_select_all = "Select All"
+
+macos_menu_find = "Find…"
+
+macos_menu_clear = "Clear Scrollback"
+
+macos_menu_font_increase = "Increase Font Size"
+
+macos_menu_font_decrease = "Decrease Font Size"
+
+macos_menu_font_reset = "Reset Font Size"
+
+macos_menu_zoom_pane = "Zoom Pane"
+
+macos_menu_fullscreen = "Enter Full Screen"
+
+macos_menu_next_tab = "Next Tab"
+
+macos_menu_previous_tab = "Previous Tab"
+
+
+search_a11y_regex = "Use regular expressions"
+search_regex_on = "Regex: On"
+search_regex_off = "Regex: Off"
+search_counting = "Counting…"
+command_mark_a11y_success = "Command succeeded (exit code {code})"
+
+command_mark_a11y_failure = "Command failed (exit code {code})"
+
+settings_category_text_rendering = "Text / Rendering"
+
+settings_field_grapheme_clustering = "Grapheme clustering"
+
+settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
+
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"
@@ -724,3 +877,11 @@ other = "{count} `{event}` callbacks ran too long and will not be called again. 
 [confirm_close_scope]
 one = "The pane will close."
 other = "All {count} panes will close."
+
+[scrollback_return]
+one = "↓ {lines} line"
+other = "↓ {lines} lines"
+
+[scrollback_a11y]
+one = "Return to live output ({lines} line above bottom)"
+other = "Return to live output ({lines} lines above bottom)"

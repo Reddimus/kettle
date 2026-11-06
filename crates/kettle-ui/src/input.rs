@@ -1267,6 +1267,9 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
         }
     }
     if bracketed {
+        // No ESC from the clipboard may reach the bracketed body, including
+        // sequences other than the two markers removed above.
+        safe.retain(|byte| *byte != 0x1b);
         // Preserve `\n` line endings; only normalize CRLF->LF for consistency.
         let mut v = Vec::with_capacity(safe.len() + 12);
         v.extend_from_slice(b"\x1b[200~");
@@ -2169,6 +2172,16 @@ mod tests {
             "bracketed body must not contain CR: {}",
             String::from_utf8_lossy(&q)
         );
+    }
+
+    #[test]
+    fn bracketed_paste_neutralizes_every_escape_byte() {
+        let text = "a\x1b[31mb\x1b]52;c;secret\x07\x1b\x1b[201~c";
+        let payload = paste_payload(text, true);
+        assert_eq!(payload.iter().filter(|byte| **byte == 0x1b).count(), 2);
+        assert_eq!(&payload[..6], b"\x1b[200~");
+        assert_eq!(&payload[payload.len() - 6..], b"\x1b[201~");
+        assert_eq!(paste_payload("a\x1bb", false), b"a\x1bb");
     }
 
     #[test]

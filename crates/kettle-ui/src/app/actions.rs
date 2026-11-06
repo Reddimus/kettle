@@ -447,7 +447,7 @@ impl App {
                 let busy = usize::from(
                     ws.mux
                         .focused()
-                        .map(|p| !p.term.shell_idle())
+                        .map(|p| !p.held && !p.term.shell_idle())
                         .unwrap_or(true),
                 );
                 // Name the pane now — by the time the prompt is answered,
@@ -648,6 +648,11 @@ impl App {
                 // so a later zoom-out keeps this new chosen size instead of
                 // reverting to the old one.
                 ws.scaled_zoom_prev_font_size = None;
+            }
+            Action::ToggleSearchRegex => {
+                if ws.search.open {
+                    self.activate_search_control(ws, kettle_render::SearchControl::Regex);
+                }
             }
             Action::StartSearch => {
                 self.open_search(ws);
@@ -868,6 +873,11 @@ impl App {
             // two actions keeps the state in step.
             Action::ScaledZoom => {
                 self.toggle_zoom_with_scale(ws, Some(1.5));
+            }
+            Action::ToggleQuickTerminal => {
+                // A dispatch temporarily checks its source window out of the map.
+                // Queue the global operation until the epilogue returns it.
+                let _ = self.proxy.send_event(UserEvent::ToggleQuickTerminal);
             }
             Action::ToggleFullscreen => {
                 if let Some(w) = &ws.window {
@@ -1727,18 +1737,7 @@ impl App {
             //   visible + focused → hide
             //   visible + !focused → focus (don't hide)
             Action::ToggleWindowVisibility => {
-                if let Some(w) = &ws.window {
-                    let visible = w.is_visible().unwrap_or(true);
-                    let focused = w.has_focus();
-                    if !visible {
-                        w.set_visible(true);
-                        w.focus_window();
-                    } else if focused {
-                        w.set_visible(false);
-                    } else {
-                        w.focus_window();
-                    }
-                }
+                self.toggle_window_visibility(ws);
             }
             // Terminator parity (`detachable_tabs`): move the active tab into a
             // new window.

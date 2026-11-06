@@ -2,6 +2,8 @@
 //! driven by a dedicated reader thread.
 
 mod command_correlation;
+mod command_marks;
+pub use command_marks::CommandMark;
 mod local_echo;
 pub use command_correlation::CommandCorrelationCapability;
 pub use local_echo::LocalEcho;
@@ -1181,13 +1183,29 @@ pub struct PtyGeometry {
 }
 
 /// Overrides needed when reproducing an existing direct client launch.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct LaunchOverrides<'a> {
+    /// An exact in-memory launch to replay after a held process exits.
+    pub replay: Option<&'a ProcessLaunch>,
     /// Unix invocation name, independent of the executable path.
     pub argv0: Option<&'a str>,
     /// Variables absent from the original client, removed after pane env.
     pub remove_env: &'a [String],
 }
+
+impl std::fmt::Debug for LaunchOverrides<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchOverrides")
+            .field("replay", &self.replay.is_some())
+            .field("argv0", &self.argv0)
+            .field("remove_env", &self.remove_env)
+            .finish()
+    }
+}
+
+/// Private command, cwd and environment snapshot. Never persisted or logged.
+#[derive(Clone)]
+pub struct ProcessLaunch(CommandBuilder);
 
 /// Runtime capabilities that influence terminal protocol replies.
 ///
@@ -1202,6 +1220,8 @@ pub struct TerminalCapabilities {
     /// Forward clipboard reads to an owner that enforces the live policy.
     pub osc52_read: bool,
     pub unnegotiated_modified_enter: bool,
+    /// Initial DEC mode 2027, also restored by RIS and DECSTR.
+    pub grapheme_clustering: bool,
     /// Spawn the command inside an OS-owned descendant containment boundary.
     /// Currently meaningful for headless automation on Windows.
     pub contain_process_tree: bool,
@@ -1222,6 +1242,7 @@ impl Default for TerminalCapabilities {
             osc52_copy: true,
             osc52_read: false,
             unnegotiated_modified_enter: true,
+            grapheme_clustering: true,
             contain_process_tree: false,
             observe_child_exit: false,
             color_scheme_dark: None,
@@ -3445,6 +3466,7 @@ impl ConPtyCloseState {
 }
 
 pub struct Terminal {
+    pub launch: ProcessLaunch,
     pub term: SharedTerm,
     term_config: TermConfig,
     scrollback_line_limit: usize,
@@ -3526,6 +3548,7 @@ pub struct Terminal {
     /// `pop_front`, not a `Vec::drain(0..1)` that shifts all ~2048 elements on
     /// every prompt once full — this is the hot reader-thread path.
     prompts: Arc<Mutex<std::collections::VecDeque<u64>>>,
+    command_marks: Arc<Mutex<command_marks::CommandMarks>>,
     prompt_seen: Arc<AtomicBool>,
     /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
@@ -4915,8 +4938,8 @@ mod default_pane_shell_tests {
 /// first, then kettle's hook wraps the resulting prompt.
 /// cmd.exe is left untouched — its process cwd already tracks `cd` (read by the
 /// native poll). `inject = false` (config `shell-integration = off`) reproduces
-/// the bare [`default_prog`]. Unix-shell rc-hook injection is a follow-up; on
-/// non-Windows this currently defers to [`default_prog`].
+/// the bare [`default_prog`]. Unix startup additions are applied later, after
+/// the configured environment, through [`crate::shell_startup`].
 fn default_prog_with_integration(inject: bool) -> CommandBuilder {
     #[cfg(windows)]
     if inject
@@ -5671,70 +5694,78 @@ impl Terminal {
         let startup_geometry =
             crate::startup_geometry::Trace::start(pair.master.as_raw_fd(), recording_start_ns);
 
-        let mut cmd = pane_command(argv, login_shell, shell_integration);
-        #[cfg(windows)]
-        overlay_windows_parent_env(&mut cmd, std::env::vars_os());
-        cmd.set_process_tree_containment(capabilities.contain_process_tree);
-        // Apply user pane env before terminal identity env so `term` /
-        // `colorterm` stay authoritative for those protocol-critical values.
-        for (name, value) in extra_env {
-            cmd.env(name, value);
-        }
-        #[cfg(unix)]
-        if let Some(argv0) = launch.argv0 {
-            cmd.set_argv0(argv0);
-        }
-        for name in launch.remove_env {
-            cmd.env_remove(name);
-        }
-        // Honor cfg.term + cfg.colorterm (empty preserves
-        // kettle's default).
-        cmd.env(
-            "TERM",
-            if term_env.is_empty() {
-                "xterm-256color"
-            } else {
-                term_env
-            },
-        );
-        cmd.env(
-            "COLORTERM",
-            if colorterm_env.is_empty() {
-                "truecolor"
-            } else {
-                colorterm_env
-            },
-        );
-        cmd.env("TERM_PROGRAM", "kettle");
-        // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
-        // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
-        // `:checkhealth provider`, fish's prompt themers, and various
-        // diagnostic tools key off the pair when probing whether they're
-        // running under a known modern terminal. Kettle's own crate
-        // version is the obvious answer — populated from Cargo at build
-        // time so a bumped `kettle/Cargo.toml` flows through with no
-        // separate version string to keep in sync.
-        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // Env vars set on the child's *Windows* process do NOT cross into a
-        // WSL distro unless listed in `WSLENV`. Without this, `COLORTERM` is
-        // silently dropped at the WSL boundary, so a program inside WSL that
-        // detects truecolor from `$COLORTERM` falls back to 256-color with
-        // washed-out, mis-mapped colors. Append the pane and terminal-identity
-        // env vars set above to WSLENV with the `/u` flag ("pass Windows→WSL
-        // only"), preserving any the user already set. When the child isn't
-        // `wsl.exe`, WSLENV is just an extra, ignored env var.
-        cmd.env(
-            "WSLENV",
-            child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
-        );
-        // After the environment, which decides the shell the PTY runs and
-        // holds the `ZDOTDIR` zsh would have read.
-        let explicit = match argv {
-            [program] => Some(program.as_str()),
-            _ => None,
+        let cmd = if let Some(replay) = launch.replay {
+            let mut command = replay.0.clone();
+            command.set_require_cwd(true);
+            command
+        } else {
+            let mut cmd = pane_command(argv, login_shell, shell_integration);
+            #[cfg(windows)]
+            overlay_windows_parent_env(&mut cmd, std::env::vars_os());
+            cmd.set_process_tree_containment(capabilities.contain_process_tree);
+            // Apply user pane env before terminal identity env so `term` /
+            // `colorterm` stay authoritative for those protocol-critical values.
+            for (name, value) in extra_env {
+                cmd.env(name, value);
+            }
+            #[cfg(unix)]
+            if let Some(argv0) = launch.argv0 {
+                cmd.set_argv0(argv0);
+            }
+            for name in launch.remove_env {
+                cmd.env_remove(name);
+            }
+            // Honor cfg.term + cfg.colorterm (empty preserves
+            // kettle's default).
+            cmd.env(
+                "TERM",
+                if term_env.is_empty() {
+                    "xterm-256color"
+                } else {
+                    term_env
+                },
+            );
+            cmd.env(
+                "COLORTERM",
+                if colorterm_env.is_empty() {
+                    "truecolor"
+                } else {
+                    colorterm_env
+                },
+            );
+            cmd.env("TERM_PROGRAM", "kettle");
+            // `TERM_PROGRAM_VERSION` is the de-facto pair to `TERM_PROGRAM`
+            // (iTerm2 / kitty / WezTerm / Ghostty all set it). Neovim's
+            // `:checkhealth provider`, fish's prompt themers, and various
+            // diagnostic tools key off the pair when probing whether they're
+            // running under a known modern terminal. Kettle's own crate
+            // version is the obvious answer — populated from Cargo at build
+            // time so a bumped `kettle/Cargo.toml` flows through with no
+            // separate version string to keep in sync.
+            cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+            // Env vars set on the child's *Windows* process do NOT cross into a
+            // WSL distro unless listed in `WSLENV`. Without this, `COLORTERM` is
+            // silently dropped at the WSL boundary, so a program inside WSL that
+            // detects truecolor from `$COLORTERM` falls back to 256-color with
+            // washed-out, mis-mapped colors. Append the pane and terminal-identity
+            // env vars set above to WSLENV with the `/u` flag ("pass Windows→WSL
+            // only"), preserving any the user already set. When the child isn't
+            // `wsl.exe`, WSLENV is just an extra, ignored env var.
+            cmd.env(
+                "WSLENV",
+                child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
+            );
+            // After the environment, which decides the shell the PTY runs and
+            // holds the `ZDOTDIR` zsh would have read.
+            let explicit = match argv {
+                [program] => Some(program.as_str()),
+                _ => None,
+            };
+            apply_working_directory(&mut cmd, cwd, cwd_policy);
+            crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
+            cmd
         };
-        apply_working_directory(&mut cmd, cwd, cwd_policy);
-        crate::shell_startup::apply(&mut cmd, explicit, shell_startup);
+        let process_launch = ProcessLaunch(cmd.clone());
         #[cfg(unix)]
         let reader_poll_fd = pair
             .master
@@ -5770,6 +5801,7 @@ impl Terminal {
         let history_limit = effective_scrollback_lines(scrollback, scrollback_bytes, cols, rows);
         let mut tconf = TermConfig {
             keyboard_input_modes: capabilities.keyboard_input_modes,
+            grapheme_clustering: capabilities.grapheme_clustering,
             // Live OSC 52 permissions are enforced by the UI at journal drain.
             osc52: if capabilities.osc52_read {
                 alacritty_terminal::term::Osc52::CopyPaste
@@ -5810,6 +5842,7 @@ impl Terminal {
         let graphics_reflow_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let prompts: Arc<Mutex<std::collections::VecDeque<u64>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let command_marks = Arc::new(Mutex::new(command_marks::CommandMarks::default()));
         let prompt_seen = Arc::new(AtomicBool::new(false));
         // Terminator parity (`command_notify.py`):
         // per-pane OSC 133 OutputStart timestamp + completed-command
@@ -5909,6 +5942,7 @@ impl Terminal {
             let graphics_gate = graphics_gate.clone();
             let graphics_reflow_generation = graphics_reflow_generation.clone();
             let prompts = prompts.clone();
+            let command_marks = command_marks.clone();
             let prompt_seen = prompt_seen.clone();
             let output_started_at = output_started_at.clone();
             let command_generation = command_generation.clone();
@@ -6735,6 +6769,9 @@ impl Terminal {
                                             );
                                         }
                                         Chunk::Prompt(kind @ (PromptKind::PromptStart | PromptKind::IntegratedPromptStart(_) | PromptKind::CorrelationDisabledPromptStart)) => {
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.cancel_pending();
+                                            }
                                             command_shell.announce(kind);
                                             let prompt_row = if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
@@ -6805,6 +6842,13 @@ impl Terminal {
                                                 *t = Some(std::time::Instant::now());
                                                 command_shell.command_started();
                                             }
+                                            if let Ok(t) = term.lock()
+                                                && !t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+                                                && let Ok(prompts) = prompts.lock()
+                                                && let Ok(mut marks) = command_marks.lock()
+                                            {
+                                                marks.begin(prompts.back().copied());
+                                            }
                                             // `shell_idle` needs a REAL OutputStart source.
                                             // Prompt marks alone never authorize a
                                             // close-confirm skip, or an A/B/D-only
@@ -6834,6 +6878,9 @@ impl Terminal {
                                                     &mut deferred_graphics, &proxy,
                                                 );
                                             }
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.end(code);
+                                            }
                                             let started = output_started_at.lock().ok().and_then(|mut t| t.take());
                                             if let Some(started) = started
                                                 && let Ok(mut q) = command_finished.lock() {
@@ -6859,6 +6906,9 @@ impl Terminal {
                                         // close-confirm skip never applies. B is not a
                                         // command end, so no CommandFinished is pushed.
                                         Chunk::Prompt(PromptKind::CommandStart) => {
+                                            if let Ok(mut marks) = command_marks.lock() {
+                                                marks.cancel_pending();
+                                            }
                                             if let Ok(mut completion) = completion_cell.lock() {
                                                 hide_completion_view_slot(&mut completion);
                                             }
@@ -7075,6 +7125,7 @@ impl Terminal {
             graphics_gate,
             graphics_reflow_generation,
             prompts,
+            command_marks,
             prompt_seen,
             output_started_at,
             command_generation,
@@ -7088,6 +7139,7 @@ impl Terminal {
             osc_cwd_seen: osc_cwd_seen_for_struct,
             progress: progress_cell,
             argv: argv.to_vec(),
+            launch: process_launch,
             default_shell_program,
             session_log: session_log_for_struct,
             log_strip_ansi: log_strip_ansi_for_struct,
@@ -7838,6 +7890,28 @@ impl Terminal {
             .unwrap_or_default()
     }
 
+    /// Known completed-command outcomes. Alternate screens never show shell marks.
+    pub fn command_marks(&self) -> Vec<CommandMark> {
+        let Ok(term) = self.term.lock() else {
+            return Vec::new();
+        };
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return Vec::new();
+        }
+        let grid = term.grid();
+        let origin = grid.history_origin();
+        let end = origin
+            .saturating_add(grid.history_size() as u64)
+            .saturating_add(grid.screen_lines() as u64);
+        self.command_marks
+            .lock()
+            .map(|mut marks| marks.retained(origin, end))
+            .unwrap_or_default()
+    }
+
     /// Visible row span occupied by the active prompt and command line.
     ///
     /// Completion UI uses the OSC 133 prompt start rather than guessing from
@@ -8399,6 +8473,9 @@ impl Terminal {
             prune(&self.images, oldest_abs);
         }
         if columns_reflowed {
+            if let Ok(mut marks) = self.command_marks.lock() {
+                marks.clear();
+            }
             clear_reflowed_regular_placements(
                 &self.images,
                 &self.relatives,

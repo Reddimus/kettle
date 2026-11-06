@@ -35,7 +35,11 @@ fn startup_plan_truth_table() {
                             ..Default::default()
                         };
                         let cfg = kettle_config::Config {
-                            restore_session: restore_bits & 16 != 0,
+                            restore_session: if restore_bits & 16 != 0 {
+                                kettle_config::RestoreSession::Always
+                            } else {
+                                kettle_config::RestoreSession::Never
+                            },
                             window_state: state,
                             window_position_x: (position & 1 != 0).then_some(10),
                             window_position_y: (position & 2 != 0).then_some(10),
@@ -152,7 +156,7 @@ fn resumed_preserves_the_launch_override_and_pre_launch_pane() {
         .split_once("\n    }\n")
         .unwrap()
         .0;
-    assert!(body.contains("let has_launch_override = self.launch_override;"));
+    assert!(body.contains("let has_launch_override = self.launch_override || self.startup.quick_terminal;"));
     assert!(!body.contains("self.startup.command.is_some()"));
     assert!(!body.contains("self.startup.cwd.is_some()"));
     assert!(body.contains("ws.pre_launch.is_some() || has_launch_override"));
@@ -371,14 +375,15 @@ fn startup_keeps_the_remote_spool_while_another_build_runs() {
 #[test]
 fn startup_geometry_cells_convert_to_inner_size() {
     let mut cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         window_width: Some(120),
         window_height: Some(40),
         ..Default::default()
     };
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((976, 680)),
-        "120x40 cells + default padding + default top tab bar"
+        Some((976, 656)),
+        "120x40 cells + default padding; the auto tab bar is hidden"
     );
 
     cfg.tab_bar = kettle_config::TabBarMode::Auto;
@@ -402,7 +407,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((1296, 542)),
+        Some((1296, 546)),
         "missing width comes from the 160-column default grid"
     );
     cfg.window_height = None;
@@ -413,25 +418,47 @@ fn startup_geometry_cells_convert_to_inner_size() {
     );
 }
 
+#[test]
+fn startup_titlebar_tabs_reserve_the_single_tab_band() {
+    let mut cfg = kettle_config::Config {
+        window_width: Some(120), window_height: Some(40),
+        tab_bar: kettle_config::TabBarMode::Auto,
+        status_bar: kettle_config::StatusBarMode::Bottom,
+        ..Default::default()
+    };
+    assert_eq!(startup_inner_size_px(&cfg), Some((976,
+        if cfg!(target_os = "macos") { 706 } else { 678 })));
+    cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Native;
+    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+    cfg.borderless = true;
+    cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Tabs;
+    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+}
+
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1296x760 logical px with the default chrome), fitted to 90 % x
-/// 85 % of the monitor. The numbers below are the ones the docs quote.
+/// grid (1296x736 logical px with a native titlebar and the single-tab strip
+/// hidden), fitted to 90 % x 85 % of the monitor. The numbers below are the
+/// ones the docs quote; the macOS titlebar-tabs band is covered by
+/// `startup_titlebar_tabs_reserve_the_single_tab_band`.
 #[test]
 fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     use super::{
         STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, StartupMonitor, default_startup_inner_size,
         startup_inner_size,
     };
-    let cfg = kettle_config::Config::default();
+    let cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
         default_startup_inner_size(&cfg, None),
-        (1296.0, 760.0),
-        "160x45 cells + 8 px padding + the default top tab bar, no monitor known"
+        (1296.0, 736.0),
+        "160x45 cells + 8 px padding with the single-tab strip hidden, no monitor known"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
-        (1296.0, 760.0),
+        (1296.0, 736.0),
         "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
     );
     assert_eq!(
@@ -441,7 +468,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
-        (1296.0, 760.0),
+        (1296.0, 736.0),
         "an ultrawide gets the same terminal-sized window, not a monitor fraction"
     );
     assert_eq!(
@@ -454,10 +481,11 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     let explicit = kettle_config::Config {
         window_width: Some(400),
         window_height: Some(200),
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
-    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3240.0));
+    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3216.0));
     assert_eq!(
         startup_inner_size(&cfg, tiny),
         (576.0, 408.0),
@@ -516,7 +544,7 @@ fn window_constructors_size_through_the_shared_startup_rule() {
     assert!(
         src.contains(
             "let monitor = startup_monitor(event_loop);\n        let mut attrs = self.window_attributes(state, monitor);"
-        ) && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
+        ) && src.contains("self.window_attributes(initial_window_state, monitor)"),
         "both constructors must pass the startup monitor"
     );
     assert_eq!(
@@ -847,4 +875,260 @@ fn fatal_startup_failures_are_returned_after_event_loop_exit() {
             .unwrap()
             .contains("app.startup_error.take()")
     );
+}
+
+#[test]
+fn review_startup_titlebar_policy_precedes_exact_grid_and_spawn() {
+    let startup = include_str!("startup.rs");
+    let initial = startup
+        .find("let mut initial_window = WindowState::new(1, mux);")
+        .unwrap();
+    let inserted = startup[initial..]
+        .find("windows.insert(1, initial_window);")
+        .unwrap();
+    assert!(
+        startup[initial..initial + inserted].contains("macos_titlebar_tabs"),
+        "initialize the first window's policy before pre-launch sizing and spawning"
+    );
+    let windowing = include_str!("windowing.rs");
+    let probe = windowing
+        .find("let mut probe = WindowState::new(0, Mux::new());")
+        .unwrap();
+    let measured = windowing[probe..]
+        .find("self.startup_surface(&probe, monitor)")
+        .unwrap();
+    assert!(
+        windowing[probe..probe + measured].contains("macos_titlebar_tabs"),
+        "initialize the additional window probe before exact-grid sizing"
+    );
+}
+
+#[test]
+fn review_exact_startup_surface_retains_forty_rows_with_titlebar_tabs() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
+        startup_surface_for,
+    };
+    let cfg = kettle_config::Config {
+        window_width: Some(100),
+        window_height: Some(40),
+        ..Default::default()
+    };
+    for scale in [1.0, 2.0] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.macos_titlebar_tabs = true;
+        ws.startup_scale = scale;
+        let band = App::macos_titlebar_band(&ws).unwrap();
+        assert_eq!(band.height, 28.0 * scale);
+        let bands = ContentBands {
+            tab_bar_h: band.height,
+            ..Default::default()
+        };
+        // Deliberately use measured-cell-like fractional sizes, not the 8x16 baseline.
+        let cell = (9.25 * scale, 18.5 * scale);
+        let monitor = Some(StartupMonitor::from_physical(
+            (1920.0 * scale) as u32,
+            (1080.0 * scale) as u32,
+            scale as f64,
+        ));
+        let surface = startup_surface_for(&cfg, cell, bands, monitor);
+        let area = content_rect_for_with_strip(
+            surface,
+            bands,
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        assert_eq!(
+            grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y)),
+            (100, 40)
+        );
+        let old_surface = startup_surface_for(&cfg, cell, ContentBands::default(), monitor);
+        let old_area = content_rect_for_with_strip(
+            old_surface,
+            bands,
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        assert!(
+            grid_dims_px(
+                (old_area.2, old_area.3),
+                cell,
+                (cfg.padding_x, cfg.padding_y)
+            )
+            .1 < 40
+        );
+    }
+}
+
+#[test]
+fn only_quick_terminal_launches_read_the_previous_app_at_startup() {
+    // Capturing the previous app opens a display-server connection (X11 on
+    // Linux). An ordinary launch must not make it.
+    let src = production_source();
+    let startup = src.split("let quick_previous =").nth(1).unwrap();
+    let capture = startup.find("PreviousApp::capture()").unwrap();
+    assert!(
+        startup[..capture].contains("if startup.quick_terminal"),
+        "startup reads the previous app for every launch"
+    );
+}
+
+#[test]
+fn measured_startup_titlebar_correction_precedes_size_read_and_reveal() {
+    for (source, name) in [
+        (include_str!("startup.rs"), "resumed_inner"),
+        (include_str!("windowing.rs"), "open_window"),
+    ] {
+        let body = finding_body(source, name);
+        let created = body.find("event_loop.create_window(attrs)").unwrap();
+        let correction = body
+            .find("self.correct_startup_titlebar_size(")
+            .expect("correct the measured titlebar while the new window is hidden");
+        let size = body.find("let size = window.inner_size();").unwrap();
+        let reveal = body.find("set_visible(true)").unwrap();
+        assert!(created < correction && correction < size && correction < reveal);
+        assert_eq!(
+            body.matches("self.correct_startup_titlebar_size(").count(),
+            1
+        );
+    }
+    let helper = finding_body(include_str!("titlebar.rs"), "correct_startup_titlebar_size");
+    let measured = helper.find("native::measure(window)").unwrap();
+    let corrected = helper
+        .find("startup_surface_with_measured_titlebar(")
+        .unwrap();
+    let requested = helper.find("request_inner_size(").unwrap();
+    assert!(measured < corrected && corrected < requested);
+    assert_eq!(helper.matches("request_inner_size(").count(), 1);
+}
+
+#[test]
+fn measured_startup_titlebar_explicit_grid_keeps_content_and_width() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
+        startup_surface_for, startup_surface_with_measured_titlebar,
+    };
+    use kettle_config::Config;
+    for scale in [1.0, 2.0] {
+        // A small monitor must not clamp an explicitly requested grid.
+        let monitor = Some(StartupMonitor::from_display_points(640, 480, scale));
+        let cell = (9.25 * scale as f32, 18.5 * scale as f32);
+        for (width, height) in [(Some(80), Some(25)), (Some(80), None), (None, Some(25))] {
+            let cfg = Config {
+                window_width: width,
+                window_height: height,
+                ..Default::default()
+            };
+            for (estimated, measured) in [(28.0, 32.0), (32.0, 28.0), (32.0, 32.0)] {
+                let estimated = estimated * scale as f32;
+                let measured = measured * scale as f32;
+                let bands = ContentBands {
+                    tab_bar_h: estimated,
+                    ..Default::default()
+                };
+                let before = startup_surface_for(&cfg, cell, bands, monitor);
+                let after = startup_surface_with_measured_titlebar(
+                    &cfg, before, estimated, measured, monitor,
+                );
+                assert_eq!(after.0, before.0);
+                assert_eq!(
+                    after.1 as i64 - before.1 as i64,
+                    (measured - estimated) as i64
+                );
+                let area = |surface, tab_bar_h| {
+                    content_rect_for_with_strip(
+                        surface,
+                        ContentBands { tab_bar_h, ..bands },
+                        cfg.tab_bar_pos,
+                        cfg.status_bar,
+                        cfg.tab_bar_width,
+                    )
+                };
+                let old_area = area(before, estimated);
+                let new_area = area(after, measured);
+                if width == Some(80) && height == Some(25) && measured > estimated {
+                    let short = area(before, measured);
+                    assert_eq!(
+                        grid_dims_px((short.2, short.3), cell, (cfg.padding_x, cfg.padding_y)),
+                        (80, 24),
+                        "the uncorrected AppKit band reproduces the reported lost row"
+                    );
+                }
+                assert_eq!((new_area.2, new_area.3), (old_area.2, old_area.3));
+                let grid = grid_dims_px(
+                    (new_area.2, new_area.3),
+                    cell,
+                    (cfg.padding_x, cfg.padding_y),
+                );
+                if let Some(width) = width {
+                    assert_eq!(grid.0, width as usize);
+                }
+                if let Some(height) = height {
+                    assert_eq!(grid.1, height as usize);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn measured_startup_titlebar_default_grid_corrects_band_before_monitor_fit() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, startup_surface_for,
+        startup_surface_with_measured_titlebar,
+    };
+    use kettle_config::Config;
+    let cfg = Config::default();
+    for scale in [1.0, 2.0] {
+        let cell = (9.25 * scale as f32, 18.5 * scale as f32);
+        for monitor in [
+            None,
+            Some(StartupMonitor::from_display_points(1920, 1080, scale)),
+            Some(StartupMonitor::from_display_points(640, 480, scale)),
+        ] {
+            // Without a monitor, startup_surface_for uses scale 1.
+            let actual_scale = monitor.map_or(1.0, |m| m.scale) as f32;
+            let estimated = 28.0 * actual_scale;
+            for measured in [28.0, 32.0, 24.0] {
+                let measured = measured * actual_scale;
+                let bands = ContentBands {
+                    tab_bar_h: estimated,
+                    ..Default::default()
+                };
+                let before = startup_surface_for(&cfg, cell, bands, monitor);
+                let after = startup_surface_with_measured_titlebar(
+                    &cfg, before, estimated, measured, monitor,
+                );
+                assert_eq!(after.0, before.0);
+                if monitor.is_some_and(|m| m.logical.1 == 480.0) {
+                    assert_eq!(
+                        after, before,
+                        "the monitor cap still wins in both directions"
+                    );
+                    assert_eq!(after.1, (408.0 * actual_scale) as u32);
+                } else {
+                    assert_eq!(
+                        after.1 as i64 - before.1 as i64,
+                        (measured - estimated) as i64
+                    );
+                    let content_height = |surface, tab_bar_h| {
+                        content_rect_for_with_strip(
+                            surface,
+                            ContentBands { tab_bar_h, ..bands },
+                            cfg.tab_bar_pos,
+                            cfg.status_bar,
+                            cfg.tab_bar_width,
+                        )
+                        .3
+                    };
+                    assert_eq!(
+                        content_height(after, measured),
+                        content_height(before, estimated)
+                    );
+                }
+            }
+        }
+    }
 }

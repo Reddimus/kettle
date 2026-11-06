@@ -254,6 +254,7 @@ fn the_picker_reads_out_its_name_and_each_rows_appearance() {
                 [None, Some(list), None, None],
                 (800.0, 600.0),
                 (8.0, 16.0),
+                0.0,
             ),
             ..kettle_render::Overlay::default()
         };
@@ -324,7 +325,7 @@ fn builtin_theme_picker_localizes_labels_and_keeps_selection_identifiers() {
 #[test]
 fn picker_scroll_strips_leave_the_selected_row_fully_visible() {
     let list = theme_picker_list("", 20, "Builtin Dark", &EN);
-    let menu = super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0)).unwrap();
+    let menu = super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0).unwrap();
     let (_, content_h) = kettle_render::menu::scroll_content(
         menu.rows.len() as f32 * 28.0,
         menu.panel_h_clamped,
@@ -412,6 +413,7 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
             open_picker_list(ws, &cfg, &ES, None).unwrap(),
             surface,
             cell,
+            0.0,
         )
         .unwrap()
     };
@@ -577,10 +579,13 @@ fn picker_result_presses_select_the_visible_row() {
                 open_picker_list(ws, &cfg, &ES, None).unwrap(),
                 (800.0, 600.0),
                 (8.0, 16.0),
+                0.0,
             )
             .unwrap()
         };
         let menu = project(&ws);
+        assert_eq!(menu.anchor, (176.0, 78.0));
+        assert_eq!(menu.picker_header_height, 30.0);
         let row_h = 16.0 + kettle_render::menu::ROW_PAD;
         let (inset, _) = kettle_render::menu::scroll_content(
             menu.rows.len() as f32 * row_h,

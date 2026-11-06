@@ -809,8 +809,7 @@ fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         .expect("ctl perform-action body");
     assert!(
         action.contains("name == \"focus_window\"")
-            && action.contains("window.set_visible(true);")
-            && action.contains("window.focus_window();"),
+            && action.contains("self.reveal_window(ws);"),
         "live UI automation needs an idempotent focus action that never hides its target"
     );
     assert!(
@@ -1383,4 +1382,178 @@ fn bounded_clipboard_extra_byte_rejects_instead_of_truncating() {
         clipboard_paste_result(Ok("x".repeat((4 << 20) + 1))),
         Err(kettle_i18n::Text::NotifyBodyClipboardLimitExceeded)
     );
+}
+
+#[test]
+fn paste_preview_is_short_and_cannot_interpret_controls() {
+    assert_eq!(
+        super::paste_preview("echo hola\n\x1b[201~"),
+        "echo hola\\n\\u{1b}[201~"
+    );
+    assert_eq!(super::paste_preview("español 界"), "español 界");
+    let preview = super::paste_preview(&"x".repeat(LOCAL_PREVIEW_TEST_LEN));
+    assert_eq!(preview.chars().count(), 161);
+    assert!(preview.ends_with('…'));
+    let controls = super::paste_preview(&"\x1b".repeat(1000));
+    assert!(controls.chars().count() <= 161);
+    assert!(!super::paste_preview("safe\u{202e}evil").contains('\u{202e}'));
+}
+const LOCAL_PREVIEW_TEST_LEN: usize = 1000;
+
+#[test]
+fn paste_as_one_line_removes_execution_controls_and_keeps_tabs() {
+    assert_eq!(
+        super::paste_as_one_line("a\r\nb\nc\rd\x03\x1b\0\te"),
+        "a b c d   \te"
+    );
+    assert_eq!(super::paste_as_one_line("café 界"), "café 界");
+    for byte in 0..32u8 {
+        let text = super::paste_as_one_line(&(byte as char).to_string());
+        assert_eq!(text.as_bytes(), if byte == b'\t' { b"\t" } else { b" " });
+    }
+}
+
+#[test]
+fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
+    let source = include_str!("paste.rs");
+    let submit = source
+        .split("fn paste_text_to(")
+        .nth(1)
+        .unwrap()
+        .split("fn confirm_text_paste(")
+        .next()
+        .unwrap();
+    assert!(
+        submit.find("local_paste_within_limit").unwrap()
+            < submit.find("confirm_text_paste").unwrap()
+    );
+    assert!(
+        submit.find("confirm_text_paste").unwrap() < submit.find("deliver_text_paste").unwrap()
+    );
+    let confirmation = source
+        .split("fn confirm_text_paste(")
+        .nth(1)
+        .unwrap()
+        .split("fn deliver_text_paste(")
+        .next()
+        .unwrap();
+    assert!(
+        confirmation
+            .contains("text_paste_needs_confirmation(self.cfg.paste_protection, text, modes)")
+    );
+    assert!(submit.contains("let modes = self.text_paste_modes(ws, target)"));
+    assert!(submit.contains("confirm_text_paste(ws, target, text, &modes)"));
+    assert!(submit.contains("deliver_text_paste(ws, target, text, &modes)"));
+    let dispatch = include_str!("modals.rs");
+    assert!(
+        dispatch.contains(
+            "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
+        )
+    );
+    assert!(dispatch.contains(
+        "self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target))"
+    ));
+}
+
+#[test]
+fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let dialog =
+            super::text_paste_confirmation(Some(7), "one\ntwo", BroadcastScope::Off, vec![], tr);
+        assert_eq!(dialog.focus_idx, 0);
+        assert_eq!(dialog.buttons.len(), 3);
+        assert!(super::confirmation_button_action(&dialog, 0).is_none());
+        assert!(super::confirmation_button_action(&dialog, 3).is_none());
+        for (index, expected) in [(1, "one\ntwo"), (2, "one two")] {
+            let super::ConfirmAction::Paste {
+                target,
+                text,
+                broadcast,
+                recipients,
+            } = super::confirmation_button_action(&dialog, index).unwrap()
+            else {
+                panic!("paste action");
+            };
+            assert_eq!(target, Some(7));
+            assert_eq!(text, expected);
+            assert_eq!(broadcast, BroadcastScope::Off);
+            assert!(recipients.is_empty());
+        }
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        for surface in [(800.0, 600.0), (240.0, 320.0)] {
+            let layout =
+                kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+            for (index, &(x, y, w, h)) in layout.buttons.iter().enumerate() {
+                if w > 0.0 && h > 0.0 {
+                    assert_eq!(
+                        super::confirm_dialog_button_hit(&layout, x + w / 2.0, y + h / 2.0),
+                        Some(index)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn paste_mode_change_preserves_the_checked_payload() {
+    use super::paste::{paste_text_into_target, text_paste_modes, text_paste_needs_confirmation};
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+
+    for scope in [
+        BroadcastScope::Off,
+        BroadcastScope::Tab,
+        BroadcastScope::Group("race".into()),
+    ] {
+        let (mut mux, ids) = title_test_tab_mux(1);
+        let target = ids[0];
+        mux.broadcast = scope.clone();
+        mux.panes.get_mut(&target).unwrap().group_name = Some("race".into());
+        let captured = mux.panes.get_mut(&target).unwrap().capture_input_for_test();
+        let mode = PrivateMode::Named(NamedPrivateMode::BracketedPaste);
+        mux.panes[&target]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .set_private_mode(mode);
+        let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+        let text = "echo first\necho second";
+        assert!(!text_paste_needs_confirmation(
+            kettle_config::PasteProtection::Auto,
+            text,
+            &modes
+        ));
+        // Deterministically schedule the PTY's disable after the decision and before encoding.
+        mux.panes[&target]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .unset_private_mode(mode);
+        if scope == BroadcastScope::Off {
+            assert_eq!(
+                paste_text_into_target(&mut mux, Some(target), text, &modes),
+                Some(PaneInputResult::Queued)
+            );
+        } else {
+            assert!(mux.broadcast_paste_delivery(text, None, &modes).accepted);
+        }
+        let local = captured();
+        if matches!(scope, BroadcastScope::Group(_)) {
+            // A named group uses the same snapshot in a foreign window.
+            assert!(
+                mux.broadcast_paste_foreign_delivery(&scope, text, None, &modes)
+                    .accepted
+            );
+            assert_eq!(captured(), local);
+        }
+        mux.kill_children();
+        assert_eq!(
+            local,
+            [b"\x1b[200~echo first\necho second\x1b[201~".to_vec()],
+            "{scope:?}"
+        );
+    }
 }

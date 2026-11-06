@@ -118,7 +118,7 @@ fn toast_text_and_focus_ring_are_readable_in_every_bundled_theme() {
 fn toast_uses_chrome_metrics_with_scaled_terminal_cells() {
     let paint = super::production_source();
     let shape = paint
-        .split("if let Some(toast) = &overlay.update_toast {")
+        .split("let toast_count =")
         .nth(1)
         .unwrap()
         .split("// Context-menu row labels")
@@ -281,4 +281,32 @@ fn toast_shaped_layout_covers_localized_narrow_and_large_font_notices() {
     .unwrap();
     assert_eq!(g.message.3, 32.0);
     assert!(g.rect.3 <= 56.0, "two rows should keep inline controls");
+}
+
+#[test]
+fn persistent_notices_keep_both_click_targets_inside_the_owning_pane() {
+    for cell in [(8.0, 16.0), (14.0, 28.0), (24.0, 48.0)] {
+        for rect in [
+            (0.0, 0.0, 800.0, 600.0),
+            (231.0, 94.0, 200.0, 120.0),
+            (0.0, 0.0, 70.0, 32.0),
+        ] {
+            let geometry = super::persistent_notice_geometry(rect, cell, 2, 15, 11).unwrap();
+            for control in [geometry.message, geometry.details, geometry.close] {
+                assert!(control.0 >= rect.0 && control.1 >= rect.1);
+                assert!(control.0 + control.2 <= rect.0 + rect.2 + 0.01);
+                assert!(control.1 + control.3 <= rect.1 + rect.3 + 0.01);
+            }
+            assert!(geometry.details.0 + geometry.details.2 <= geometry.close.0);
+            for (control, hit) in [
+                (geometry.details, super::UpdateToastHit::Details),
+                (geometry.close, super::UpdateToastHit::Close),
+            ] {
+                assert_eq!(
+                    geometry.hit_test(control.0 + control.2 * 0.5, control.1 + control.3 * 0.5),
+                    Some(hit)
+                );
+            }
+        }
+    }
 }

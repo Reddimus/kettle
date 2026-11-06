@@ -58,9 +58,10 @@ impl App {
         // not delay the PTY reader.
         if ws.search.compiled_revision != Some(ws.search.revision) {
             let query = ws.search.query().to_string();
-            match kettle_core::CompiledSearch::compile(
+            match kettle_core::CompiledSearch::compile_mode(
                 &query,
                 map_case_sensitivity(ws.search.case_mode),
+                ws.search.regex,
             ) {
                 Ok(compiled) => {
                     ws.search.set_compiled(compiled);
@@ -113,6 +114,47 @@ impl App {
         let current_token =
             kettle_core::SearchScanToken::capture(&term, ws.search.revision, output_generation);
         ws.search.set_scan_token(current_token);
+
+        if ws
+            .search
+            .count_scan
+            .as_ref()
+            .is_none_or(|scan| scan.token != current_token)
+        {
+            let mut compiled = ws
+                .search
+                .compiled
+                .as_ref()
+                .expect("compiled search checked")
+                .clone();
+            compiled.clear_progress();
+            compiled.set_scan_token(current_token);
+            ws.search.count_scan = Some(kettle_core::search::SearchCountScan::new(
+                compiled,
+                current_token,
+                kettle_core::SearchPoint::new(top_line, 0),
+            ));
+        }
+        if ws
+            .search
+            .typing_pause_until
+            .is_none_or(|until| now >= until)
+        {
+            ws.search
+                .count_scan
+                .as_mut()
+                .expect("count initialized")
+                .advance(&term);
+            if ws
+                .search
+                .count_scan
+                .as_ref()
+                .is_some_and(|scan| !scan.complete)
+                && let Some(window) = &ws.window
+            {
+                window.request_redraw();
+            }
+        }
 
         // Reflow invalidates grid coordinates and restarts from the viewport. Plain PTY output is
         // different: retain a chunked job and advance its token so a process that prints every
@@ -896,14 +938,17 @@ impl App {
             query: remembered,
             wrap: self.cfg.search_wrap,
             case_mode: self.cfg.search_case_sensitive,
+            regex: true,
             invert: self.cfg.invert_search,
             focused_control: kettle_render::SearchControl::Editor,
         };
+        let reopened = carried.is_none();
         ws.search = fresh_search_state(
             pane_id,
             carried.unwrap_or(defaults),
             display_offset,
             std::time::Instant::now(),
+            reopened,
         );
         self.resize_all(ws);
         // Reserving the responsive Search lane can shrink the terminal by several rows. In a
@@ -941,6 +986,7 @@ impl App {
             query: ws.search.query().to_string(),
             wrap: ws.search.wrap,
             case_mode: ws.search.case_mode,
+            regex: ws.search.regex,
             invert: ws.search.invert,
             focused_control: ws.search.focused_control,
         };
@@ -1421,9 +1467,10 @@ impl App {
             return;
         }
         if ws.search.compiled_revision != Some(ws.search.revision) {
-            match kettle_core::CompiledSearch::compile(
+            match kettle_core::CompiledSearch::compile_mode(
                 &query,
                 map_case_sensitivity(ws.search.case_mode),
+                ws.search.regex,
             ) {
                 Ok(compiled) => {
                     ws.search.set_compiled(compiled);
@@ -1585,6 +1632,13 @@ impl App {
                 // The match set changes, so search again, from the match or
                 // viewport the user is looking at rather than from where Search
                 // opened.
+                Self::anchor_search_to_viewport(ws);
+                let anchor = ws.search.anchor;
+                ws.search.note_edit(std::time::Instant::now());
+                ws.search.anchor = anchor;
+            }
+            kettle_render::SearchControl::Regex => {
+                ws.search.regex = !ws.search.regex;
                 Self::anchor_search_to_viewport(ws);
                 let anchor = ws.search.anchor;
                 ws.search.note_edit(std::time::Instant::now());
@@ -2252,6 +2306,7 @@ pub(super) struct SearchCarryOver {
     pub(super) query: String,
     pub(super) wrap: bool,
     pub(super) case_mode: kettle_config::SearchCaseSensitivity,
+    pub(super) regex: bool,
     pub(super) invert: bool,
     pub(super) focused_control: kettle_render::SearchControl,
 }
@@ -2264,12 +2319,16 @@ pub(super) fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> O
 
 /// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
 /// query starts searching immediately; the anchor is derived by the caller
-/// once the lane's resize has settled.
+/// once the lane's resize has settled. A `reopened` bar selects its remembered
+/// query, as a browser's or editor's find field does, so typing replaces it
+/// while Enter and the arrows search with it; a bar that follows focus to
+/// another pane keeps the caret where the user left it.
 pub(super) fn fresh_search_state(
     pane_id: u64,
     carried: SearchCarryOver,
     display_offset: usize,
     now: std::time::Instant,
+    reopened: bool,
 ) -> crate::search_input::SearchState {
     let mut search = crate::search_input::SearchState {
         open: true,
@@ -2280,6 +2339,7 @@ pub(super) fn fresh_search_state(
         ),
         wrap: carried.wrap,
         case_mode: carried.case_mode,
+        regex: carried.regex,
         invert: carried.invert,
         focused_control: carried.focused_control,
         anchor: None,
@@ -2288,6 +2348,9 @@ pub(super) fn fresh_search_state(
     };
     if !search.query().is_empty() {
         search.note_edit(now);
+        if reopened {
+            search.editor.select_all();
+        }
     }
     search
 }

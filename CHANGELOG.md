@@ -6,6 +6,106 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
+  `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
+  dedicated window in from a screen edge. Its tabs and splits persist while
+  hidden; it returns focus when toggled away, hides when another app is
+  focused, respects Reduce Motion, and has its own Settings group.
+- Failed commands keep their pane and final output with an exit-code banner.
+  Restart with Enter or its button; close with Escape, the Close button, or
+  the close-pane shortcut. `exit-behavior` also supports closing or holding
+  every exit, and restart keeps the original command, directory and
+  environment.
+- Config typos and invalid values show a dismissible in-window notice with
+  the file, line and key at startup and reload, while Kettle keeps running.
+- Screen readers can select and close tabs and activate New tab and the New
+  tab menu in horizontal and vertical tab strips.
+- Bash, Zsh and Fish panes now load shell integration on first launch, without
+  editing startup files. Set `shell-integration = off` to disable it.
+- Completed commands leave success or failure ticks by the scrollbar, with
+  their exit codes available to screen readers.
+- `paste-protection` (`auto` by default) asks before a paste that contains
+  a newline or control characters when the program has not turned on
+  bracketed paste, with Paste, Paste as one line and Cancel; `always`
+  confirms every multi-line paste and `off` never asks. In bracketed mode,
+  escape bytes in pasted text are neutralized so the paste cannot end it
+  early.
+- SGR 53 overline (and SGR 55 to clear it) is drawn like underline at the
+  top of the cell.
+- On macOS, a complete menu bar: Kettle (with Settings…), Shell, Edit, View
+  and Window menus list every common action with the shortcut it is bound to
+  in your config, in English and Spanish, and macOS lists Kettle's windows in
+  the Window menu. Shortcuts chosen from the keyboard still go through
+  Kettle's own key handling, so a program that owns the keyboard keeps its
+  chords.
+
+### Changed
+
+- `restore-session` now defaults to `auto`: on macOS it follows "Close windows
+  when quitting an application" and restores when unchecked. Other platforms
+  still open fresh. `true`, `false` and legacy boolean spellings remain valid,
+  and Settings offers all three choices.
+
+- Automatic selection and search text colours meet 4.5:1 contrast against
+  their highlight, including dim text and underlined links, while preserving
+  readable cell colours and explicit highlight foregrounds.
+- Horizontal tab strips draw larger + and ▾ controls and use at least 4.5:1
+  contrast for control glyphs, shortcut hints and inactive titles. A single tab hides
+  its shortcut hint and close button until hovered, including in the macOS
+  titlebar; both controls return with multiple tabs.
+- Joined emoji, skin tones, flags and VS16 emoji now share grapheme cells by
+  default. Set `grapheme-clustering = false` in config or turn off Grapheme
+  clustering in Settings > Text / Rendering for the previous scalar layout
+  in new terminals. Applications can still toggle mode 2027; terminal resets
+  restore each terminal's configured startup default.
+- On macOS, top tabs share the titlebar by default, with a centred title for a
+  single tab, native window dragging, and the system double-click action on
+  empty strip space. `macos-titlebar-style = native` restores the separate
+  caption; bottom, side and hidden tabs and borderless windows keep their
+  previous chrome. Tab controls have at least 20 pt hit targets and 4.5:1
+  glyph contrast.
+- The tab strip appears only with more than one tab by default. Set
+  `tab-bar = always` to keep it in a single-tab window.
+- Search shows the current match and total (3/122) next to the query, has a
+  Regex toggle beside Case (Case cycles on click), and draws other matches
+  with stronger contrast.
+- Selection and search highlights keep at least 3:1 contrast against the
+  background on every theme.
+- A pane scrolled into history shows a ↓ N lines button that returns to the
+  live bottom, and the scrollbar's hover target is wider.
+- `scrollback-bytes` defaults to 64 MB, so the default 10,000-line history
+  fits at common window widths.
+- The context menu puts the actions for what you clicked first (Copy, Paste,
+  Select All, and Open or Copy Link on a link) and groups pane, tab, title
+  and appearance commands into submenus, so it no longer scrolls. On macOS,
+  menus and the command palette write shortcuts as ⌘V, ⇧⌘D and ⌃⇧A.
+- With grapheme clusters on (mode 2027), emoji ZWJ sequences and emoji with
+  skin-tone modifiers draw as one glyph across the cluster's width, and emoji
+  presentation fills the cell height like other emoji.
+- The tab strip draws the active tab as a raised surface in the terminal's
+  background with an accent edge, inactive tabs as muted labels without a
+  fill, close buttons only on the active and hovered tabs, activity as a dot
+  before the title, and on macOS each tab's `Cmd+N` shortcut when it fits.
+  The default `tab-format` is now `{title}`; set `tab-format = {n}: {title}`
+  for the previous numbered labels.
+- Settings opens as a centred two-pane window: categories in a sidebar,
+  a search field that finds settings by name, description or config key,
+  a one-line description under every setting, and values drawn as controls
+  (On/Off pills, ‹ choice ›). Narrow windows fall back to a single pane.
+- The command palette and the theme, layout and SSH pickers open as one
+  centred card near the top of the window, with the query field above its
+  results, and command labels highlight the characters that match the query.
+- On macOS, `Cmd+D` splits beside and `Shift+Cmd+D` splits below, as in
+  iTerm2, Ghostty and Warp. `Shift+Cmd+D` no longer closes a pane; panes
+  close with `Ctrl+Shift+W`, and `keybind = cmd+shift+d=close_pane` restores
+  the old chord.
+- Reopening Search selects the remembered query, so typing replaces it
+  instead of appending to it.
+- A tab with a single pane no longer draws a frame around it; pane borders
+  appear once a tab is split, and while broadcast input is on.
+
 ### Security
 
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
@@ -24,6 +124,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Programming ligatures and URLs draw every character again in grapheme
+  mode: `//`, `->`, `!=` and `===` no longer lose their left half.
+- A new window whose shell clears the screen at startup no longer gains a
+  blank line above the prompt when the window grows.
 - Arch and Homebrew packages ship the renderer license texts from the
   release archive under `share/doc/kettle`, and the manual page describes
   the macOS self-update path and its Homebrew refusal.

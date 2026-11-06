@@ -1,5 +1,14 @@
 # macOS appearance gate
 
+The unreleased default macOS chrome uses tabs in the titlebar. Historical native
+caption captures below cover `macos-titlebar-style = native`. Acceptance for the
+new default must check both styles: light/dark and custom chrome backgrounds,
+traffic-light clearance, a centred one-tab title with `tab-bar = auto`, resize,
+fullscreen, empty-space dragging and the system double-click preference,
+then tab reorder, tear-off and re-dock. No live acceptance for the new style is
+recorded here yet.
+
+
 [`RELEASING.md`](RELEASING.md#macos-appearance-gate) requires a native run
 before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records

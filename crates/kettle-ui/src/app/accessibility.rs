@@ -2,6 +2,42 @@
 
 use super::*;
 
+pub(super) fn focus_settings_search_accessibility(
+    ws: &mut WindowState,
+    request: &ActionRequest,
+) -> bool {
+    if ws.confirm_dialog.is_none()
+        && ws.context_menu.is_none()
+        && ws.palette_input.is_none()
+        && ws.theme_picker_input.is_none()
+        && ws.settings_text_edit.is_none()
+        && ws.settings_nav.is_some()
+        && [
+            accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1),
+            accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
+        ]
+        .contains(&request.target_node)
+        && matches!(
+            request.action,
+            AccessibilityAction::Focus
+                | AccessibilityAction::Click
+                | AccessibilityAction::SetValue
+                | AccessibilityAction::ReplaceSelectedText
+                | AccessibilityAction::SetTextSelection
+        )
+    {
+        if !ws.settings_nav.as_ref().unwrap().search_focused {
+            end_modal_composition(ws);
+        }
+        let nav = ws.settings_nav.as_mut().unwrap();
+        nav.search_focused = true;
+        nav.capturing = false;
+        true
+    } else {
+        false
+    }
+}
+
 impl App {
     /// The cards on screen that assistive technology can reach, in paint
     /// order: each placement's instance, where it is, and the shelf item it
@@ -132,6 +168,25 @@ impl App {
         let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
         let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
+        if !self.pointer_modal_open(ws) {
+            let anchors: Vec<_> = (0..ws.mux.tabs.len())
+                .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+                .collect();
+            let tabs = tab_accessibility_projection(
+                &self.tab_bar(ws),
+                &anchors,
+                self.cfg.tab_bar_pos.is_vertical(),
+                &self.ui_text,
+            );
+            if !tabs.is_empty() {
+                children.push(ACCESSIBILITY_TAB_LIST_ID);
+                nodes.extend(tabs);
+            }
+            for (pane, toast) in self.persistent_notices(ws) {
+                children.push(persistent_notice_id(pane, 0));
+                nodes.extend(persistent_notice_nodes(pane, &toast));
+            }
+        }
         ws.accessibility_text_rows
             .borrow_mut()
             .retain(|pane, _| ws.mux.panes.contains_key(pane));
@@ -180,6 +235,21 @@ impl App {
             );
             let mut pane_children: Vec<_> = text_nodes.iter().map(|(id, _)| *id).collect();
             nodes.extend(text_nodes);
+            if let Some(pill) = self.scrollback_pill_for(ws, pane_id, (x, y, width, height)) {
+                let id = accessibility_scrollback_id(pane_id);
+                let mut button = Node::new(Role::Button);
+                button.set_label(pill.accessible_label);
+                let (x, y, w, h) = pill.rect;
+                button.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+                button.add_action(AccessibilityAction::Click);
+                pane_children.push(id);
+                nodes.push((id, button));
+            }
             for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
                 let id = accessibility_card_id(*instance);
                 pane_children.push(id);
@@ -192,6 +262,30 @@ impl App {
                         &self.ui_text,
                     ),
                 ));
+            }
+            let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+            if let Ok(term) = pane.term.term.lock() {
+                use kettle_core::Dimensions as _;
+                let origin = term.grid().history_origin();
+                let total = term.grid().history_size() + term.grid().screen_lines();
+                drop(term);
+                for mark in pane.term.command_marks() {
+                    if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
+                        partition.terminal,
+                        scale,
+                        self.cfg.scrollbar_width,
+                        origin,
+                        total,
+                        mark,
+                    ) {
+                        let id = next_terminal_accessibility_row_id();
+                        pane_children.push(id);
+                        nodes.push((
+                            id,
+                            command_mark_accessibility_node(mark, rect, &self.ui_text),
+                        ));
+                    }
+                }
             }
             node.set_children(pane_children);
             if pane.read_only {
@@ -424,9 +518,9 @@ impl App {
                 search_children.push(id);
                 let mut node = Node::new(match control {
                     kettle_render::SearchControl::Editor => Role::SearchInput,
-                    kettle_render::SearchControl::Wrap | kettle_render::SearchControl::Invert => {
-                        Role::CheckBox
-                    }
+                    kettle_render::SearchControl::Wrap
+                    | kettle_render::SearchControl::Regex
+                    | kettle_render::SearchControl::Invert => Role::CheckBox,
                     _ => Role::Button,
                 });
                 node.set_label(control.accessible_label(&self.ui_text));
@@ -467,6 +561,7 @@ impl App {
                         nodes.push((ACCESSIBILITY_SEARCH_TEXT_ID, text_node));
                     }
                     kettle_render::SearchControl::Wrap => node.set_toggled(ws.search.wrap.into()),
+                    kettle_render::SearchControl::Regex => node.set_toggled(ws.search.regex.into()),
                     kettle_render::SearchControl::Case => {
                         node.set_value(
                             map_search_case_mode(ws.search.case_mode).label(&self.ui_text),
@@ -479,9 +574,25 @@ impl App {
                 }
                 nodes.push((id, node));
             }
+            search_children.push(ACCESSIBILITY_SEARCH_COUNT_ID);
+            let mut count = Node::new(Role::Status);
+            count.set_label(ws.search.count_label(&self.ui_text));
+            count.set_live(accesskit::Live::Polite);
+            count.set_bounds(bounds(geometry.count));
+            nodes.push((ACCESSIBILITY_SEARCH_COUNT_ID, count));
             search_children.push(ACCESSIBILITY_SEARCH_STATUS_ID);
             let mut status = Node::new(Role::Status);
-            status.set_label(effective_search_status(&ws.search).label(&self.ui_text));
+            let state = effective_search_status(&ws.search);
+            status.set_label(
+                if matches!(
+                    state,
+                    kettle_render::SearchStatus::Match | kettle_render::SearchStatus::NoMatch
+                ) {
+                    ""
+                } else {
+                    state.label(&self.ui_text)
+                },
+            );
             status.set_live(accesskit::Live::Polite);
             status.set_bounds(bounds(geometry.status));
             nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
@@ -530,8 +641,9 @@ impl App {
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
         if let Some(receipt) = overlay.media_paste_receipt.as_ref()
-            && let Some(geometry) = kettle_render::notification_geometry(
+            && let Some(geometry) = kettle_render::notification_geometry_with_notices(
                 overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                &overlay.notices,
                 Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -597,7 +709,7 @@ impl App {
                 })
             })
             .unwrap_or((800.0, 600.0));
-        let modal = modal_accessibility_projection(
+        let mut modal = modal_accessibility_projection(
             overlay,
             surface,
             (
@@ -609,6 +721,13 @@ impl App {
                 .map_or(1.0, |window| window.scale_factor() as f32),
             &self.ui_text,
         );
+        nest_context_menu_accessibility(&mut modal, ws, overlay, self.menu_cell(ws).1);
+        if ws.context_menu.is_some()
+            && let Some(menu) = overlay.context_menu.as_ref()
+        {
+            let (_, ch) = self.menu_cell(ws);
+            bound_context_menu_accessibility(&mut modal, menu, ch, 2);
+        }
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
@@ -626,6 +745,10 @@ impl App {
         }
         nodes.push((ACCESSIBILITY_ROOT_ID, root));
         let focus = modal_focus
+            .or_else(|| {
+                ws.tab_focus
+                    .filter(|target| nodes.iter().any(|(id, _)| id == target))
+            })
             .or(self
                 .update_toast_focus
                 .filter(|_| overlay.update_toast.is_some()))
@@ -668,6 +791,7 @@ impl App {
             .map(|open| (open.pane, open.control))
             .hash(&mut hasher);
         ws.card_focus.hash(&mut hasher);
+        ws.tab_focus.hash(&mut hasher);
         for (instance, card, item) in self.accessible_cards(ws) {
             instance.hash(&mut hasher);
             card.rect.map(f32::to_bits).hash(&mut hasher);
@@ -679,12 +803,28 @@ impl App {
             size.height.hash(&mut hasher);
             window.scale_factor().to_bits().hash(&mut hasher);
         }
+        for (pane, partition) in self.pane_layout(ws, self.area(ws)) {
+            if let Some(pill) = self.scrollback_pill_for(ws, pane, partition.terminal) {
+                pane.hash(&mut hasher);
+                pill.label.hash(&mut hasher);
+                [pill.rect.0, pill.rect.1, pill.rect.2, pill.rect.3]
+                    .map(f32::to_bits)
+                    .hash(&mut hasher);
+            }
+        }
         ws.search.open.hash(&mut hasher);
         if ws.search.open {
             ws.search.query().hash(&mut hasher);
             ws.search.editor.cursor().hash(&mut hasher);
             ws.search.editor.selection().hash(&mut hasher);
             ws.search.wrap.hash(&mut hasher);
+            ws.search.regex.hash(&mut hasher);
+            ws.search.focused.hash(&mut hasher);
+            if let Some(scan) = &ws.search.count_scan {
+                scan.spans.len().hash(&mut hasher);
+                scan.complete.hash(&mut hasher);
+                scan.limited.hash(&mut hasher);
+            }
             map_search_case_mode(ws.search.case_mode)
                 .label(&self.ui_text)
                 .hash(&mut hasher);
@@ -717,10 +857,40 @@ impl App {
             settings.footer_note.hash(&mut hasher);
             settings.active_category.hash(&mut hasher);
             settings.focused_row.hash(&mut hasher);
+            settings.search_query.hash(&mut hasher);
+            settings.search_focused.hash(&mut hasher);
             for row in &settings.rows {
                 row.label.hash(&mut hasher);
                 row.value.hash(&mut hasher);
+                row.description.hash(&mut hasher);
+                row.category.hash(&mut hasher);
                 row.disabled.hash(&mut hasher);
+            }
+        }
+        if let Some(menu) = &ws.context_menu {
+            for parent in &menu.drill_stack {
+                parent.highlight.hash(&mut hasher);
+                if let Some(ContextMenuItem::Submenu { label, .. }) =
+                    parent.items.get(parent.highlight)
+                {
+                    label.hash(&mut hasher);
+                }
+            }
+        }
+        for parent in &overlay.context_menu_parents {
+            for component in [
+                parent.anchor.0,
+                parent.anchor.1,
+                parent.panel_w_clamped,
+                parent.panel_h_clamped,
+            ] {
+                component.to_bits().hash(&mut hasher);
+            }
+            parent.scroll_offset.hash(&mut hasher);
+            for row in &parent.rows {
+                row.label.hash(&mut hasher);
+                row.hint.hash(&mut hasher);
+                row.enabled.hash(&mut hasher);
             }
         }
         overlay.context_menu.is_some().hash(&mut hasher);
@@ -778,6 +948,38 @@ impl App {
                 }
             }
         }
+        self.cfg.tab_bar_pos.is_vertical().hash(&mut hasher);
+        let anchors: Vec<_> = (0..ws.mux.tabs.len())
+            .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+            .collect();
+        for (id, node) in tab_accessibility_projection(
+            &self.tab_bar(ws),
+            &anchors,
+            self.cfg.tab_bar_pos.is_vertical(),
+            &self.ui_text,
+        ) {
+            id.hash(&mut hasher);
+            node.label().hash(&mut hasher);
+            node.is_selected().hash(&mut hasher);
+            if let Some(rect) = node.bounds() {
+                for value in [rect.x0, rect.y0, rect.x1, rect.y1] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        for (pane, toast) in self.persistent_notices(ws) {
+            pane.hash(&mut hasher);
+            toast.message.hash(&mut hasher);
+            for rect in [
+                toast.geometry.rect,
+                toast.geometry.details,
+                toast.geometry.close,
+            ] {
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
@@ -822,8 +1024,9 @@ impl App {
             }
             receipt.remote.hash(&mut hasher);
             receipt.expanded.hash(&mut hasher);
-            if let Some(geometry) = kettle_render::notification_geometry(
+            if let Some(geometry) = kettle_render::notification_geometry_with_notices(
                 overlay.update_toast.as_ref().map(|toast| toast.geometry),
+                &overlay.notices,
                 Some(receipt),
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -967,6 +1170,13 @@ impl App {
         }
         if modal_editor(ws).is_some_and(|editor| editor.text() != before) {
             reset_modal_results(ws);
+            if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
+                nav.reconcile(
+                    &crate::settings::categories(&self.gpu_choices),
+                    &self.cfg,
+                    &self.ui_text,
+                );
+            }
         }
         ws.accessibility_pending = true;
         self.update_ime_cursor_area(ws);
@@ -1009,7 +1219,106 @@ impl App {
             }
             return;
         }
+        ws.tab_focus = None;
+        if !self.pointer_modal_open(ws) {
+            for (pane, _) in self.persistent_notices(ws) {
+                for part in [1, 2] {
+                    if request.target_node == persistent_notice_id(pane, part)
+                        && request.action == AccessibilityAction::Click
+                    {
+                        self.activate_persistent_notice(ws, pane, part == 1);
+                        return;
+                    }
+                }
+            }
+            let bar = self.tab_bar(ws);
+            let anchors: Vec<_> = (0..ws.mux.tabs.len())
+                .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
+                .collect();
+            let projected = tab_accessibility_projection(
+                &bar,
+                &anchors,
+                self.cfg.tab_bar_pos.is_vertical(),
+                &self.ui_text,
+            );
+            if projected.iter().any(|(id, node)| {
+                *id == request.target_node && node.supports_action(request.action)
+            }) {
+                if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
+                    self.handle_action(ws, Action::NewTab, event_loop);
+                } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
+                    let (x, y, _, h) = bar.new_tab_menu;
+                    self.open_new_tab_menu(ws, x, y + h);
+                } else if let Some((index, close)) =
+                    anchors.iter().enumerate().find_map(|(i, anchor)| {
+                        if request.target_node == accessibility_tab_id(*anchor, false) {
+                            Some((i, false))
+                        } else if request.target_node == accessibility_tab_id(*anchor, true) {
+                            Some((i, true))
+                        } else {
+                            None
+                        }
+                    })
+                {
+                    if close {
+                        let (panes, busy) = tab_close_scope(ws, index);
+                        let anchors = ws.mux.tab_anchor_panes(index);
+                        if !self.confirm_close(
+                            ws,
+                            panes,
+                            busy,
+                            ConfirmAction::CloseTabHolding(anchors),
+                        ) {
+                            let pre = self.focus_key(ws);
+                            if ws.mux.close_tab_at(index) {
+                                self.save_session(ws);
+                                self.request_window_close(ws.seq);
+                            }
+                            self.fire_tab_close_event(ws, index);
+                            self.note_focus_change(ws, pre);
+                        }
+                    } else {
+                        let pre = self.focus_key(ws);
+                        ws.mux.active = index;
+                        ws.mux.touch_active_tab_seen();
+                        self.note_focus_change(ws, pre);
+                        ws.tab_focus = Some(request.target_node);
+                    }
+                }
+                self.resize_all(ws);
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+        }
         if accessibility_confirm_button_index(request.target_node).is_some() {
+            return;
+        }
+        if let Some((depth, index)) = accessibility_parent_menu_item(request.target_node, ws) {
+            if !matches!(
+                request.action,
+                AccessibilityAction::Focus | AccessibilityAction::Click
+            ) {
+                return;
+            }
+            if request.action == AccessibilityAction::Click {
+                self.dispatch_context_menu_click(
+                    ws,
+                    ContextMenuClick::ParentRow { depth, index },
+                    event_loop,
+                );
+            } else if let Some(menu) = ws.context_menu.as_mut() {
+                while menu.drill_stack.len() > depth {
+                    menu.leave_submenu();
+                }
+                self.set_context_menu_highlight(ws, index);
+            }
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
             return;
         }
         if let Some(index) = accessibility_context_menu_item_index(request.target_node, ws) {
@@ -1061,6 +1370,21 @@ impl App {
             return;
         }
         self.update_toast_focus = None;
+        if let Some((pane, _)) =
+            self.pane_layout(ws, self.area(ws))
+                .into_iter()
+                .find(|(pane, partition)| {
+                    accessibility_scrollback_id(*pane) == request.target_node
+                        && self
+                            .scrollback_pill_for(ws, *pane, partition.terminal)
+                            .is_some()
+                })
+        {
+            if request.action == AccessibilityAction::Click {
+                Self::return_pane_to_live(ws, pane);
+            }
+            return;
+        }
         if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_ID {
             if request.action == AccessibilityAction::Click {
                 let openable = self
@@ -1136,6 +1460,19 @@ impl App {
                 if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
+            }
+            return;
+        }
+        if focus_settings_search_accessibility(ws, &request)
+            && matches!(
+                request.action,
+                AccessibilityAction::Focus | AccessibilityAction::Click
+            )
+        {
+            ws.accessibility_pending = true;
+            self.update_ime_cursor_area(ws);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
             return;
         }
@@ -1265,6 +1602,7 @@ const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
+const ACCESSIBILITY_SEARCH_COUNT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 18);
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 pub(super) const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId =
     NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
@@ -1406,44 +1744,15 @@ fn accessibility_search_control_id(control: kettle_render::SearchControl) -> Nod
         kettle_render::SearchControl::Case => 5,
         kettle_render::SearchControl::Invert => 6,
         kettle_render::SearchControl::Close => 7,
+        kettle_render::SearchControl::Regex => 8,
     };
     NodeId(ACCESSIBILITY_SEARCH_ID_MASK | offset)
 }
 
 fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::SearchControl> {
-    match id.0 {
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Editor).0 =>
-        {
-            Some(kettle_render::SearchControl::Editor)
-        }
-        value
-            if value
-                == accessibility_search_control_id(kettle_render::SearchControl::Previous).0 =>
-        {
-            Some(kettle_render::SearchControl::Previous)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Next).0 => {
-            Some(kettle_render::SearchControl::Next)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Wrap).0 => {
-            Some(kettle_render::SearchControl::Wrap)
-        }
-        value if value == accessibility_search_control_id(kettle_render::SearchControl::Case).0 => {
-            Some(kettle_render::SearchControl::Case)
-        }
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Invert).0 =>
-        {
-            Some(kettle_render::SearchControl::Invert)
-        }
-        value
-            if value == accessibility_search_control_id(kettle_render::SearchControl::Close).0 =>
-        {
-            Some(kettle_render::SearchControl::Close)
-        }
-        _ => None,
-    }
+    kettle_render::SearchControl::ALL
+        .into_iter()
+        .find(|control| accessibility_search_control_id(*control) == id)
 }
 
 /// What a screen reader hears for a preview lane: its name, with the item's
@@ -1630,6 +1939,8 @@ pub(super) const MODAL_KIND_SSH: u64 = 7;
 pub(super) const MODAL_KIND_TITLE: u64 = 8;
 pub(super) const MODAL_KIND_THEMES: u64 = 10;
 pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
+pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
+const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
 /// Text runs take kinds of their own, above every modal kind, so no row index
 /// can reach them.
 const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
@@ -1649,6 +1960,12 @@ pub(super) fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
         Some(MODAL_KIND_THEMES)
     } else if ws.settings_text_edit.is_some() {
         Some(MODAL_KIND_SETTINGS)
+    } else if ws
+        .settings_nav
+        .as_ref()
+        .is_some_and(|nav| nav.search_focused)
+    {
+        Some(MODAL_KIND_SETTINGS_SEARCH)
     } else if ws.layout_picker_input.is_some() {
         Some(MODAL_KIND_LAYOUTS)
     } else if ws.ssh_input.is_some() {
@@ -1738,7 +2055,13 @@ fn push_picker_accessibility(
     let container_id = accessibility_modal_id(kind, 0);
     let input_id = accessibility_modal_id(kind, 1);
     let list_id = accessibility_modal_id(kind, 2);
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+    };
     let mut input = Node::new(Role::TextInput);
+    if let Some(field) = field {
+        input.set_bounds(bounds(field.rect));
+    }
     input.set_label(label);
     input.set_value(query);
     push_text_input_run(
@@ -1760,6 +2083,11 @@ fn push_picker_accessibility(
             let id = accessibility_modal_id(kind, index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
+            if let Some(rect) = menu.visible_row_rect(index) {
+                option.set_bounds(bounds(rect));
+            } else {
+                option.set_hidden();
+            }
             // The painted hint, such as a shortcut or a theme's appearance.
             if !row.hint.is_empty() {
                 option.set_description(row.hint.clone());
@@ -1776,6 +2104,9 @@ fn push_picker_accessibility(
         }
     }
     let mut list = Node::new(Role::ListBox);
+    if let Some(menu) = menu {
+        list.set_bounds(bounds(menu.rows_rect()));
+    }
     list.set_label(tr.picker_a11y_results(label));
     list.set_children(list_children);
     projection.nodes.push((list_id, list));
@@ -1783,7 +2114,7 @@ fn push_picker_accessibility(
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);
     dialog.set_children([input_id, list_id]);
-    dialog.set_bounds(full_bounds);
+    dialog.set_bounds(menu.map_or(full_bounds, |menu| bounds(menu.card_rect())));
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
     if projection.focus.is_none() {
@@ -1938,9 +2269,43 @@ pub(super) fn modal_accessibility_projection(
     if let Some(settings) = overlay.settings.as_ref() {
         let container_id = accessibility_modal_id(5, 0);
         let list_id = accessibility_modal_id(5, 1);
+        let layout = kettle_render::settings_layout(settings, metrics, surface, metrics.0);
+        let bounds = |r: kettle_render::Rect4| {
+            accesskit::Rect::new(
+                r.0 as f64,
+                r.1 as f64,
+                (r.0 + r.2) as f64,
+                (r.1 + r.3) as f64,
+            )
+        };
+        let search_id = accessibility_modal_id(MODAL_KIND_SETTINGS_SEARCH, 1);
+        let mut search = Node::new(Role::TextInput);
+        search.set_label(tr.text(kettle_i18n::Text::SettingsA11ySearch));
+        search.set_value(settings.search_query.clone());
+        search.set_bounds(bounds(layout.search_rect));
+        search.add_action(AccessibilityAction::Focus);
+        search.add_action(AccessibilityAction::SetValue);
+        search.add_action(AccessibilityAction::ReplaceSelectedText);
+        let field = if settings.search_focused {
+            overlay.text_field.as_ref()
+        } else {
+            None
+        };
+        push_text_input_run(
+            &mut projection.nodes,
+            &mut search,
+            accessibility_modal_text_run_id(MODAL_KIND_SETTINGS_SEARCH),
+            &settings.search_query,
+            field,
+        );
+        projection.nodes.push((search_id, search));
+        if settings.search_focused && projection.focus.is_none() {
+            projection.focus = Some(search_id);
+        }
         let mut children = Vec::with_capacity(settings.rows.len());
         for (index, row) in settings.rows.iter().enumerate() {
             if index == settings.focused_row
+                && !settings.search_focused
                 && !picker_open
                 && overlay.edit_title.is_none()
                 && let Some(field) = overlay.text_field.as_ref()
@@ -1949,6 +2314,7 @@ pub(super) fn modal_accessibility_projection(
                 let mut input = Node::new(Role::TextInput);
                 input.set_label(row.label.clone());
                 input.set_value(field.text.clone());
+                input.set_description(row.description.clone());
                 let (x, y, width, height) = field.rect;
                 input.set_bounds(accesskit::Rect::new(
                     x as f64,
@@ -1986,7 +2352,20 @@ pub(super) fn modal_accessibility_projection(
             // description, which Orca speaks after the name. Windows reads
             // the value itself.
             #[cfg(all(unix, not(target_os = "macos")))]
-            node.set_description(row.value.clone());
+            node.set_description(if row.description.is_empty() {
+                row.value.clone()
+            } else {
+                format!("{}. {}", row.value, row.description)
+            });
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            if !row.description.is_empty() {
+                node.set_description(row.description.clone());
+            }
+            if let Some(geometry) = layout.rows.iter().find(|r| r.index == index) {
+                node.set_bounds(bounds(geometry.rect));
+            } else {
+                node.set_hidden();
+            }
             if row.disabled {
                 node.set_disabled();
             }
@@ -1996,15 +2375,48 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut list = Node::new(Role::ListBox);
         list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
-        list.set_children(children.clone());
+        if settings.search_query.is_empty() {
+            list.set_children(children.clone());
+        } else if settings.rows.is_empty() {
+            let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
+            let mut empty = Node::new(Role::Label);
+            empty.set_label(tr.text(kettle_i18n::Text::SettingsNoMatches));
+            empty.set_bounds(bounds(layout.empty_rect));
+            projection.nodes.push((id, empty));
+            list.set_children([id]);
+        } else {
+            let mut groups = Vec::new();
+            for (category, name) in settings.categories.iter().enumerate() {
+                let members: Vec<_> = settings
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.category == category)
+                    .map(|(i, _)| children[i])
+                    .collect();
+                if members.is_empty() {
+                    continue;
+                }
+                let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, category + 1);
+                let mut group = Node::new(Role::Group);
+                group.set_label(name.clone());
+                group.set_children(members);
+                if let Some((_, rect)) = layout.groups.iter().find(|(c, _)| *c == category) {
+                    group.set_bounds(bounds(*rect));
+                }
+                projection.nodes.push((id, group));
+                groups.push(id);
+            }
+            list.set_children(groups);
+        }
         projection.nodes.push((list_id, list));
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label(match settings.categories.get(settings.active_category) {
             Some(category) => tr.settings_a11y_dialog(category),
             None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
         });
-        dialog.set_children([list_id]);
-        dialog.set_bounds(full_bounds);
+        dialog.set_children([search_id, list_id]);
+        dialog.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, dialog));
         if projection.focus.is_none() {
@@ -2131,4 +2543,405 @@ pub(super) fn media_receipt_accessibility_label(
         label.push_str(tr.text(kettle_i18n::Text::ReceiptA11yRemote));
     }
     label
+}
+
+/// Preserve the drill-in path as actual menu/menu-item ancestry for assistive technology.
+pub(super) fn nest_context_menu_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    ws: &WindowState,
+    overlay: &Overlay,
+    cell_h: f32,
+) {
+    let Some(menu) = &ws.context_menu else {
+        return;
+    };
+    let current_id = accessibility_modal_id(2, 0);
+    if !projection.nodes.iter().any(|(id, _)| *id == current_id) {
+        return;
+    }
+    for (index, item) in menu.items.iter().enumerate() {
+        if matches!(item, ContextMenuItem::Submenu { .. })
+            && let Some((_, node)) = projection
+                .nodes
+                .iter_mut()
+                .find(|(id, _)| *id == accessibility_modal_id(2, index + 1))
+        {
+            node.set_has_popup(accesskit::HasPopup::Menu);
+            node.set_expanded(false);
+        }
+    }
+    let mut child = current_id;
+    for (depth, (parent, panel)) in menu
+        .drill_stack
+        .iter()
+        .zip(&overlay.context_menu_parents)
+        .enumerate()
+        .rev()
+    {
+        let kind = 40 + depth as u64;
+        let mut children = Vec::new();
+        for (index, row) in panel.rows.iter().enumerate() {
+            if row.separator {
+                continue;
+            }
+            let id = accessibility_modal_id(kind, index + 1);
+            let mut item = Node::new(Role::MenuItem);
+            item.set_label(row.label.clone());
+            if !row.hint.is_empty() {
+                item.set_description(row.hint.clone());
+            }
+            if row.enabled {
+                item.add_action(AccessibilityAction::Focus);
+                item.add_action(AccessibilityAction::Click);
+            } else {
+                item.set_disabled();
+            }
+            if matches!(
+                parent.items.get(index),
+                Some(ContextMenuItem::Submenu { .. })
+            ) {
+                item.set_has_popup(accesskit::HasPopup::Menu);
+                item.set_expanded(index == parent.highlight);
+                if index == parent.highlight {
+                    item.set_children(vec![child]);
+                }
+            }
+            children.push(id);
+            projection.nodes.push((id, item));
+        }
+        let menu_id = accessibility_modal_id(kind, 0);
+        let mut parent_menu = Node::new(Role::Menu);
+        parent_menu.set_children(children);
+        projection.nodes.push((menu_id, parent_menu));
+        bound_context_menu_accessibility(projection, panel, cell_h, kind);
+        child = menu_id;
+    }
+    if child != current_id {
+        for root in &mut projection.roots {
+            if *root == current_id {
+                *root = child;
+            }
+        }
+    }
+}
+
+fn bound_context_menu_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    menu: &ContextMenu,
+    cell_h: f32,
+    kind: u64,
+) {
+    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let natural_h: f32 = menu
+        .rows
+        .iter()
+        .map(|row| {
+            if row.separator {
+                kettle_render::menu::SEP_H
+            } else {
+                row_h
+            }
+        })
+        .sum();
+    let (inset, content_h) =
+        kettle_render::menu::scroll_content(natural_h, menu.panel_h_clamped, row_h);
+    let mut y = menu.anchor.1 + inset;
+    for (index, row) in menu.rows.iter().enumerate().skip(menu.scroll_offset) {
+        let h = if row.separator {
+            kettle_render::menu::SEP_H
+        } else {
+            row_h
+        };
+        if let Some((_, node)) = projection
+            .nodes
+            .iter_mut()
+            .find(|(id, _)| *id == accessibility_modal_id(kind, index + 1))
+        {
+            if y + h <= menu.anchor.1 + inset + content_h {
+                node.set_bounds(accesskit::Rect::new(
+                    menu.anchor.0 as f64,
+                    y as f64,
+                    (menu.anchor.0 + menu.panel_w_clamped) as f64,
+                    (y + h) as f64,
+                ));
+            } else {
+                node.set_hidden();
+            }
+        }
+        y += h;
+    }
+    for index in 0..menu.scroll_offset {
+        if let Some((_, node)) = projection
+            .nodes
+            .iter_mut()
+            .find(|(id, _)| *id == accessibility_modal_id(kind, index + 1))
+        {
+            node.set_hidden();
+        }
+    }
+    if let Some((_, node)) = projection
+        .nodes
+        .iter_mut()
+        .find(|(id, _)| *id == accessibility_modal_id(kind, 0))
+    {
+        node.set_bounds(accesskit::Rect::new(
+            menu.anchor.0 as f64,
+            menu.anchor.1 as f64,
+            (menu.anchor.0 + menu.panel_w_clamped) as f64,
+            (menu.anchor.1 + menu.panel_h_clamped) as f64,
+        ));
+    }
+}
+
+pub(super) fn accessibility_parent_menu_item(
+    id: NodeId,
+    ws: &WindowState,
+) -> Option<(usize, usize)> {
+    if ws.confirm_dialog.is_some() {
+        return None;
+    }
+    let menu = ws.context_menu.as_ref()?;
+    for (depth, parent) in menu.drill_stack.iter().enumerate() {
+        let first = accessibility_modal_id(40 + depth as u64, 1).0;
+        if let Some(index) = id.0.checked_sub(first).filter(|index| *index < 65535)
+            && parent
+                .items
+                .get(index as usize)
+                .is_some_and(item_is_dispatchable)
+        {
+            return Some((depth, index as usize));
+        }
+    }
+    None
+}
+
+fn accessibility_scrollback_id(pane: u64) -> NodeId {
+    NodeId((1 << 52) | pane)
+}
+
+pub(super) fn command_mark_accessibility_node(
+    mark: kettle_core::term::CommandMark,
+    rect: [f32; 4],
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Comment);
+    let code = mark.exit_code.to_string();
+    let description = if mark.exit_code == 0 {
+        tr.command_mark_a11y_success(&code)
+    } else {
+        tr.command_mark_a11y_failure(&code)
+    };
+    node.set_label(description.clone());
+    node.set_description(description);
+    node.set_bounds(accesskit::Rect::new(
+        rect[0] as f64,
+        rect[1] as f64,
+        (rect[0] + rect[2]) as f64,
+        (rect[1] + rect[3]) as f64,
+    ));
+    node
+}
+
+const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
+const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
+const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+
+pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
+    NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))
+}
+
+fn accessibility_rect(rect: Rect) -> accesskit::Rect {
+    accesskit::Rect::new(
+        rect.0 as f64,
+        rect.1 as f64,
+        (rect.0 + rect.2) as f64,
+        (rect.1 + rect.3) as f64,
+    )
+}
+
+pub(super) fn tab_accessibility_projection(
+    bar: &TabBar,
+    anchors: &[u64],
+    vertical: bool,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(NodeId, Node)> {
+    if bar.height <= 0.0 {
+        return Vec::new();
+    }
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
+    for seg in &bar.segments {
+        let Some(anchor) = anchors.get(seg.idx).copied() else {
+            continue;
+        };
+        let id = accessibility_tab_id(anchor, false);
+        let mut tab = Node::new(Role::Tab);
+        tab.set_label(seg.title.clone());
+        tab.set_selected(seg.active);
+        tab.add_action(AccessibilityAction::Click);
+        tab.add_action(AccessibilityAction::Focus);
+        if tab_shown(seg) {
+            tab.set_bounds(accessibility_rect(seg.rect));
+            if seg.close.2 > 0.0 && seg.close.3 > 0.0 {
+                let close_id = accessibility_tab_id(anchor, true);
+                let mut close = Node::new(Role::Button);
+                close.set_label(tr.a11y_tab_close(&seg.title));
+                close.add_action(AccessibilityAction::Click);
+                close.set_bounds(accessibility_rect(seg.close));
+                tab.set_children(vec![close_id]);
+                nodes.push((close_id, close));
+            }
+        }
+        nodes.push((id, tab));
+        children.push(id);
+    }
+    for (id, rect, label) in [
+        (
+            ACCESSIBILITY_TAB_NEW_ID,
+            bar.new_tab,
+            tr.text(kettle_i18n::Text::PaletteNewTab),
+        ),
+        (
+            ACCESSIBILITY_TAB_MENU_ID,
+            bar.new_tab_menu,
+            tr.text(kettle_i18n::Text::A11yNewTabMenu),
+        ),
+    ] {
+        if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {
+            let mut button = Node::new(Role::Button);
+            button.set_label(label);
+            button.add_action(AccessibilityAction::Click);
+            button.set_bounds(accessibility_rect(rect));
+            nodes.push((id, button));
+            children.push(id);
+        }
+    }
+    let mut list = Node::new(Role::TabList);
+    list.set_orientation(if vertical {
+        accesskit::Orientation::Vertical
+    } else {
+        accesskit::Orientation::Horizontal
+    });
+    list.set_label(tr.text(kettle_i18n::Text::A11yTabList));
+    list.set_children(children);
+    nodes.push((ACCESSIBILITY_TAB_LIST_ID, list));
+    nodes
+}
+
+pub(super) fn persistent_notice_id(pane: Option<u64>, part: u64) -> NodeId {
+    NodeId((1 << 53) | (pane.map_or(0, |id| id + 1) * 4) | part)
+}
+
+pub(super) fn persistent_notice_nodes(
+    pane: Option<u64>,
+    toast: &kettle_render::UpdateToastOverlay,
+) -> Vec<(NodeId, Node)> {
+    let mut status = Node::new(Role::Status);
+    status.set_label(toast.message.clone());
+    status.set_live(accesskit::Live::Polite);
+    status.set_bounds(accessibility_rect(toast.geometry.rect));
+    let mut nodes = Vec::new();
+    let mut children = Vec::new();
+    for (part, rect, label) in [
+        (1, toast.geometry.details, &toast.details),
+        (2, toast.geometry.close, &toast.close),
+    ] {
+        if label.is_empty() {
+            continue;
+        }
+        let id = persistent_notice_id(pane, part);
+        let mut button = Node::new(Role::Button);
+        button.set_label(label.clone());
+        button.set_bounds(accessibility_rect(rect));
+        button.add_action(AccessibilityAction::Click);
+        children.push(id);
+        nodes.push((id, button));
+    }
+    status.set_children(children);
+    nodes.push((persistent_notice_id(pane, 0), status));
+    nodes
+}
+
+#[cfg(test)]
+mod context_menu_nesting_tests {
+    use super::*;
+
+    fn panel(label: &str, anchor: (f32, f32)) -> ContextMenu {
+        ContextMenu {
+            picker_header_height: 0.0,
+            anchor,
+            rows: vec![ContextMenuRow {
+                matched_chars: None,
+                label: label.into(),
+                separator: false,
+                enabled: true,
+                hint: String::new(),
+            }],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: 200.0,
+            panel_h_clamped: 28.0,
+            a11y_label: None,
+        }
+    }
+
+    #[test]
+    fn context_menu_accessibility_nests_visible_parent_and_child_menus() {
+        let leaf = ContextMenuItem::Item {
+            label: "Right",
+            action: Action::SplitRight,
+            enabled: true,
+        };
+        let mut ws = WindowState::new(1, Mux::new());
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (240.0, 60.0),
+            anchor_scale: 1.0,
+            items: vec![leaf.clone()],
+            highlight: 0,
+            drill_stack: vec![ContextMenuLevel {
+                anchor: (40.0, 60.0),
+                anchor_scale: 1.0,
+                items: vec![ContextMenuItem::Submenu {
+                    label: "Split".into(),
+                    items: vec![leaf],
+                }],
+                highlight: 0,
+                scroll_offset: 0,
+            }],
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        let overlay = Overlay {
+            context_menu: Some(panel("Right", (240.0, 60.0))),
+            context_menu_parents: vec![panel("Split ▸", (40.0, 60.0))],
+            ..Overlay::default()
+        };
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let mut projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        let parent_id = accessibility_modal_id(40, 0);
+        let item_id = accessibility_modal_id(40, 1);
+        assert_eq!(projection.roots, vec![parent_id]);
+        let parent_item = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == item_id)
+            .unwrap()
+            .1;
+        assert_eq!(parent_item.has_popup(), Some(accesskit::HasPopup::Menu));
+        assert_eq!(parent_item.is_expanded(), Some(true));
+        assert_eq!(parent_item.children(), &[accessibility_modal_id(2, 0)]);
+        assert_eq!(
+            parent_item.bounds(),
+            Some(accesskit::Rect::new(40.0, 60.0, 240.0, 88.0))
+        );
+        assert_eq!(accessibility_parent_menu_item(item_id, &ws), Some((0, 0)));
+        assert_eq!(
+            accessibility_parent_menu_item(accessibility_modal_id(40, 2), &ws),
+            None
+        );
+        assert_eq!(projection.focus, Some(accessibility_modal_id(2, 1)));
+    }
 }

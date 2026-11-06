@@ -184,6 +184,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         context_menu: Some(kettle_render::ContextMenu {
             anchor: (0.0, 0.0),
             a11y_label: None,
+            picker_header_height: 0.0,
             rows: [
                 ("Copy", false, true),
                 ("", true, false),
@@ -193,6 +194,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
             .into_iter()
             .map(
                 |(label, separator, enabled)| kettle_render::ContextMenuRow {
+                    matched_chars: None,
                     label: label.into(),
                     separator,
                     enabled,
@@ -277,11 +279,16 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         .and_then(|rest| rest.split("fn ctl_perform_action(").next())
         .expect("ui_geometry body");
     for needle in [
-        "kettle_render::settings_panel_geometry",
+        "kettle_render::settings_layout",
+        "\"search_rect\":",
+        "\"chip_rect\":",
+        "\"description_rect\":",
         "\"first_line\":",
         "\"visible_lines\":",
         "\"focused_rect\":",
         "\"accessibility\": accessibility",
+        "geometry[\"picker\"] = picker",
+        "geometry[\"text_field\"] = diagnostic_overlay",
         "\"render_uploads\": target.renderer.as_ref().map(",
         "\"frames_presented\": u.frames_presented",
         "\"buffer_writes\": u.buffer_writes",
@@ -630,6 +637,7 @@ fn confirmation_accessibility_excludes_the_retained_settings_subtree() {
     let overlay = kettle_render::Overlay {
         confirm_dialog: Some(confirmation_test_overlay()),
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Keybinds".into()],
             label_cols: 20,
             value_cols: 20,
@@ -721,6 +729,7 @@ fn accessibility_reactivation_invalidates_published_tree() {
 #[test]
 fn modal_text_inputs_expose_their_text_and_selection() {
     let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
+        picker_header: false,
         text: text.into(),
         cursor_byte,
         selection,
@@ -798,6 +807,7 @@ fn modal_text_inputs_expose_their_text_and_selection() {
 fn settings_rows_carry_their_values_for_every_screen_reader() {
     let overlay = kettle_render::Overlay {
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Appearance".into()],
             label_cols: 20,
             value_cols: 20,
@@ -806,6 +816,7 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
             rows: [("Theme", "Builtin Dark"), ("Font size", "14"), ("Background image", "")]
                 .into_iter()
                 .map(|(label, value)| kettle_render::SettingsRow {
+            description: String::new(), category: 0, control: Default::default(),
                     label: label.into(),
                     value: value.into(),
                     disabled: false,
@@ -881,7 +892,7 @@ fn accessibility_key_tracks_the_modal_text_caret_and_selection() {
 #[test]
 fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
     use super::{
-        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SETTINGS, MODAL_KIND_SSH, MODAL_KIND_THEMES,
+        MODAL_KIND_LAYOUTS, MODAL_KIND_PALETTE, MODAL_KIND_SETTINGS, MODAL_KIND_SETTINGS_SEARCH, MODAL_KIND_SSH, MODAL_KIND_THEMES,
         MODAL_KIND_TITLE, accessibility_confirm_button_index, accessibility_modal_id,
         accessibility_modal_text_run_id,
     };
@@ -892,6 +903,7 @@ fn modal_text_runs_cannot_collide_with_rows_or_decode_as_buttons() {
         MODAL_KIND_TITLE,
         MODAL_KIND_THEMES,
         MODAL_KIND_SETTINGS,
+        MODAL_KIND_SETTINGS_SEARCH,
     ];
     let runs: Vec<_> = kinds.iter().map(|&kind| accessibility_modal_text_run_id(kind)).collect();
     for (index, run) in runs.iter().enumerate() {
@@ -947,12 +959,14 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
     });
     let overlay = kettle_render::Overlay {
         settings: Some(kettle_render::SettingsOverlay {
+            search_query: String::new(), search_focused: false, search_placeholder: String::new(), no_matches: String::new(),
             categories: vec!["Background".into()],
             active_category: 0,
             label_cols: 20,
             value_cols: 20,
             background_page: true,
             rows: vec![kettle_render::SettingsRow {
+            description: String::new(), category: 0, control: Default::default(),
                 label: "Background image".into(),
                 value: String::new(),
                 disabled: false,
@@ -963,6 +977,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
             footer_note: None,
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false,
             text: "/tmp/image.png".into(),
             cursor_byte: 4,
             selection: Some((4, 14)),
@@ -979,7 +994,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
     let (id, input) = projection
         .nodes
         .iter()
-        .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+        .find(|(_, node)| node.role() == accesskit::Role::TextInput && node.label() == Some("Background image"))
         .expect("Settings inline edit must expose a TextInput");
     assert_eq!(projection.focus, Some(*id));
     assert_eq!(input.value(), Some("/tmp/image.png"));
@@ -1116,6 +1131,7 @@ fn accessible_editor_characters_follow_graphemes() {
     let overlay = kettle_render::Overlay {
         palette_query: Some(text.into()),
         text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false,
             text: text.into(),
             cursor_byte: 3,
             selection: Some((3, 14)),
@@ -1167,4 +1183,309 @@ fn accessibility_editor_runs_keep_oversized_graphemes_atomic() {
     editor.move_right(false, false);
     editor.move_right(false, false);
     assert_eq!(editor.cursor(), 402);
+}
+
+#[test]
+fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
+    let menu = picker_context_menu(
+        layout_picker_list(
+            "",
+            20,
+            &(0..30)
+                .map(|index| format!("layout-{index}"))
+                .collect::<Vec<_>>(),
+            &EN_TEXT,
+        ),
+        (640.0, 820.0),
+        (8.0, 16.0),
+        46.0,
+    )
+    .unwrap();
+    let card_rect = menu.card_rect();
+    let header = (card_rect.0, card_rect.1, card_rect.2, 30.0);
+    let overlay = kettle_render::Overlay {
+        layout_picker_query: Some(String::new()),
+        text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: true,
+            rect: header,
+            text: String::new(),
+            cursor_byte: 0,
+            selection: None,
+            prefix: String::new(),
+            hint: String::new(),
+            horizontal_scroll: 0,
+            accent_palette: 0,
+        }),
+        context_menu: Some(menu),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (640.0, 820.0), (8.0, 24.0), 1.0, &EN_TEXT);
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+    };
+    let input = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+        .unwrap();
+    assert_eq!(input.1.bounds(), Some(bounds(header)));
+    let menu = overlay.context_menu.as_ref().unwrap();
+    for (index, _) in menu.rows.iter().enumerate() {
+        let node = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| {
+                *id == super::accessibility_modal_id(super::MODAL_KIND_LAYOUTS, index + 3)
+            })
+            .unwrap()
+            .1;
+        assert_eq!(
+            node.bounds(),
+            menu.visible_row_rect(index).map(bounds)
+        );
+        assert_eq!(
+            node.is_hidden(),
+            menu.visible_row_rect(index).is_none()
+        );
+    }
+    let dialog = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+        .unwrap();
+    assert_eq!(dialog.1.bounds(), Some(bounds(card_rect)));
+}
+
+#[test]
+fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.settings_nav = Some(crate::settings::SettingsNav { search_focused: true, query: "font".into(), ..Default::default() });
+    assert_eq!(super::accessibility_modal_input_kind(&ws), Some(super::MODAL_KIND_SETTINGS_SEARCH));
+    let settings = kettle_render::SettingsOverlay {
+        categories: vec!["Appearance".into()], search_query: "font".into(), search_focused: true,
+        rows: vec![kettle_render::SettingsRow { label: "Font size".into(), value: "14 pt".into(),
+            description: "Set the terminal font size in points.".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let layout = kettle_render::settings_layout(&settings, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let overlay = kettle_render::Overlay {
+        settings: Some(settings),
+        text_field: Some(kettle_render::TextFieldOverlay {
+            picker_header: false, text: "font".into(), cursor_byte: 4,
+            selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
+            horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let search_id = super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1);
+    assert_eq!(projection.focus, Some(search_id));
+    let search = &projection.nodes.iter().find(|(id, _)| *id == search_id).unwrap().1;
+    assert_eq!(search.role(), accesskit::Role::TextInput);
+    assert_eq!(search.label(), Some("Search settings")); assert_eq!(search.value(), Some("font"));
+    let r = layout.search_rect;
+    assert_eq!(search.bounds(), Some(accesskit::Rect::new(r.0 as f64, r.1 as f64, (r.0 + r.2) as f64, (r.1 + r.3) as f64)));
+    for action in [accesskit::Action::Focus, accesskit::Action::SetValue, accesskit::Action::ReplaceSelectedText, accesskit::Action::SetTextSelection] {
+        assert!(search.supports_action(action));
+    }
+    assert!(search.text_selection().is_some());
+    let row = &projection.nodes.iter().find(|(_, node)| node.role() == accesskit::Role::ListBoxOption).unwrap().1;
+    assert!(row.label().unwrap().contains("Font size")); assert_eq!(row.value(), Some("14 pt"));
+    assert!(row.description().unwrap().contains("Set the terminal font size in points."));
+    let r = layout.rows[0].rect;
+    assert_eq!(row.bounds(), Some(accesskit::Rect::new(r.0 as f64, r.1 as f64, (r.0 + r.2) as f64, (r.1 + r.3) as f64)));
+}
+
+#[test]
+fn accessibility_search_focus_cancels_capture_and_routes_typing_to_query() {
+    use accesskit::{Action, ActionRequest};
+    use winit::keyboard::{Key, ModifiersState};
+    for action in [
+        Action::Focus,
+        Action::Click,
+        Action::SetValue,
+        Action::ReplaceSelectedText,
+        Action::SetTextSelection,
+    ] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            capturing: true,
+            ..Default::default()
+        });
+        let request = ActionRequest {
+            action,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: super::accessibility_modal_id(super::MODAL_KIND_SETTINGS_SEARCH, 1),
+            data: None,
+        };
+        assert!(super::accessibility::focus_settings_search_accessibility(
+            &mut ws, &request
+        ));
+        let nav = ws.settings_nav.as_mut().unwrap();
+        assert!(nav.search_focused);
+        assert!(
+            !nav.capturing,
+            "search focus must cancel chord capture for {action:?}"
+        );
+        assert_eq!(
+            nav.search_key(
+                &crate::settings::categories(&[]),
+                &Default::default(),
+                &EN_TEXT,
+                &Key::Character("f".into()),
+                ModifiersState::empty(),
+                false
+            ),
+            crate::settings::SearchRoute::Edit
+        );
+        assert!(!super::modals::edit_modal_text(
+            &mut ws,
+            &Key::Character("f".into()),
+            || None,
+            |_| false
+        ));
+        let text = crate::modal_input::accept_text(Some("f"), ws.mods).unwrap();
+        assert!(crate::modal_input::push_text(
+            super::modals::modal_editor_mut(&mut ws).unwrap(),
+            text
+        ));
+        assert_eq!(ws.settings_nav.as_ref().unwrap().query.text(), "f");
+    }
+}
+
+#[test]
+fn completed_command_ticks_describe_status_and_exit_code_in_both_languages() {
+    use super::accessibility::command_mark_accessibility_node;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        for code in [0, 7, -1] {
+            let mark = kettle_core::term::CommandMark { row: 10, exit_code: code };
+            let rect = kettle_core::scrollbar::command_tick_rect((0.0, 0.0, 300.0, 200.0), 2.0, 6.0, 0, 100, mark).unwrap();
+            let node = command_mark_accessibility_node(mark, rect, &tr);
+            assert!(node.description().unwrap().contains(&code.to_string()));
+            let expected = if code == 0 { tr.command_mark_a11y_success(&code.to_string()) }
+                else { tr.command_mark_a11y_failure(&code.to_string()) };
+            assert_eq!(node.description(), Some(expected.as_str()));
+            assert_eq!(node.bounds().unwrap(), accesskit::Rect::new(rect[0] as f64, rect[1] as f64, (rect[0] + rect[2]) as f64, (rect[1] + rect[3]) as f64));
+        }
+    }
+}
+
+#[test]
+fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
+    for vertical in [false, true] {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 28.0;
+        bar.new_tab = if vertical {
+            (0.0, 56.0, 120.0, 28.0)
+        } else {
+            (240.0, 0.0, 28.0, 28.0)
+        };
+        bar.new_tab_menu = if vertical {
+            (120.0, 56.0, 28.0, 28.0)
+        } else {
+            (268.0, 0.0, 28.0, 28.0)
+        };
+        for index in 0..2 {
+            let rect = if vertical {
+                (0.0, index as f32 * 28.0, 148.0, 28.0)
+            } else {
+                (index as f32 * 120.0, 0.0, 120.0, 28.0)
+            };
+            bar.segments.push(kettle_render::TabSeg {
+                idx: index,
+                rect,
+                title_rect: rect,
+                hint: None,
+                close: (rect.0 + rect.2 - 28.0, rect.1, 28.0, 28.0),
+                title: format!("shell {index}"),
+                path: None,
+                active: index == 1,
+                activity: kettle_render::TabActivity::Normal,
+            });
+        }
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let nodes = super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr);
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|(_, node)| node.role() == accesskit::Role::TabList)
+                    .count(),
+                1
+            );
+            let tabs: Vec<_> = nodes
+                .iter()
+                .filter(|(_, node)| node.role() == accesskit::Role::Tab)
+                .collect();
+            assert_eq!(tabs.len(), 2);
+            assert_eq!(tabs[0].1.label(), Some("shell 0"));
+            assert!(!tabs[0].1.is_selected().unwrap());
+            assert!(tabs[1].1.is_selected().unwrap());
+            assert!(tabs[0].1.supports_action(accesskit::Action::Click));
+            let close = nodes
+                .iter()
+                .find(|(id, _)| *id == super::accessibility_tab_id(10, true))
+                .unwrap();
+            assert_eq!(close.1.label(), Some(tr.a11y_tab_close("shell 0").as_str()));
+            assert_eq!(close.1.bounds().unwrap().y0, bar.segments[0].close.1 as f64);
+            for text in [
+                tr.text(kettle_i18n::Text::PaletteNewTab),
+                tr.text(kettle_i18n::Text::A11yNewTabMenu),
+            ] {
+                assert!(nodes.iter().any(|(_, node)| node.label() == Some(text)
+                    && node.supports_action(accesskit::Action::Click)));
+            }
+            bar.height = 0.0;
+            assert!(super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr).is_empty());
+            bar.height = 28.0;
+        }
+    }
+}
+
+#[test]
+fn persistent_notice_accessibility_matches_both_control_rectangles() {
+    let geometry = kettle_render::persistent_notice_geometry(
+        (41.0, 70.0, 500.0, 300.0),
+        (8.0, 16.0),
+        2,
+        15,
+        11,
+    )
+    .unwrap();
+    let toast = kettle_render::UpdateToastOverlay {
+        geometry,
+        message: EN_TEXT.process_exited(7),
+        details: EN_TEXT.text(kettle_i18n::Text::ProcessRestart).into(),
+        close: EN_TEXT.text(kettle_i18n::Text::ProcessClose).into(),
+        opacity: 1.0,
+        focused: None,
+    };
+    let nodes = super::persistent_notice_nodes(Some(10), &toast);
+    assert_eq!(nodes.len(), 3);
+    let status = nodes
+        .iter()
+        .find(|(_, n)| n.role() == accesskit::Role::Status)
+        .unwrap();
+    assert_eq!(status.1.label(), Some("Process exited with code 7"));
+    for (part, rect) in [(1, geometry.details), (2, geometry.close)] {
+        let (_, button) = nodes
+            .iter()
+            .find(|(id, _)| *id == super::persistent_notice_id(Some(10), part))
+            .unwrap();
+        assert!(button.supports_action(accesskit::Action::Click));
+        let bounds = button.bounds().unwrap();
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (
+                rect.0 as f64,
+                rect.1 as f64,
+                (rect.0 + rect.2) as f64,
+                (rect.1 + rect.3) as f64
+            )
+        );
+    }
+    assert_ne!(
+        super::persistent_notice_id(Some(10), 1),
+        super::persistent_notice_id(None, 1)
+    );
 }
