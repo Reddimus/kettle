@@ -87,7 +87,14 @@ sequences in grapheme cells use one composed glyph spanning the cluster's
 grid width. If the fallback fonts cannot compose a sequence, Kettle draws
 one replacement glyph while retaining the original text for copying and
 search. Default emoji and VS16 presentation scale to fit the cell height
-without exceeding its width; VS15 keeps text presentation. Both `grid` and
+without exceeding its width; VS15 selects text presentation and narrows a default
+emoji with a registered text variation sequence to one cell. Indic spacing marks
+and conjuncts, and Thai/Lao spacing vowels, occupy two cells per cluster. A
+skin-tone modifier after a space or other non-emoji base starts its own
+two-cell cluster; attached emoji modifiers keep the emoji cluster together.
+Clusters that widen at the right margin wrap as a whole with autowrap on;
+with autowrap off, a cluster already placed there stays clipped to one cell.
+Both `grid` and
 `legacy` renderers use this sizing, including beneath a block cursor.
 Set `grapheme-clustering = false` to start new terminals with mode 2027 off
 and the previous scalar cell widths. DECRQM reports the live mode; RIS and

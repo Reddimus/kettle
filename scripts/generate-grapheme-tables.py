@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,17 @@ def records(name):
         fields = [part.strip() for part in body.split(";")]
         bounds = fields[0].split("..")
         yield int(bounds[0], 16), int(bounds[-1], 16), fields[1:]
+
+
+def spacing_marks():
+    # Every mark that can join under GB9/GB9a is in this pinned GCB input;
+    # its UCD comments retain General_Category, including Mc with GCB=Extend.
+    for line in (DATA / "GraphemeBreakProperty.txt").read_text(encoding="utf-8").splitlines():
+        body, _, comment = line.partition("#")
+        if not re.match(r"\s*Mc\b", comment):
+            continue
+        bounds = body.split(";", 1)[0].strip().split("..")
+        yield int(bounds[0], 16), int(bounds[-1], 16), ""
 
 
 def table(name, kind, values):
@@ -72,6 +84,12 @@ def generate():
         for a, b, p in records("emoji-data.txt")
         if p[0] == "Emoji_Presentation"
     ]
+    modifier_bases = [
+        (a, b, "")
+        for a, b, p in records("emoji-data.txt")
+        if p[0] == "Emoji_Modifier_Base"
+    ]
+    variation = [(a, b, "") for a, b, _ in records("emoji-variation-bases.txt")]
     incb = [
         (a, b, "InCb::" + p[1])
         for a, b, p in records("DerivedCoreProperties.txt")
@@ -83,6 +101,9 @@ def generate():
     result += table("GCB", "(u32, u32, Gcb)", gcb) + "\n"
     result += table("EXTENDED_PICTOGRAPHIC", "(u32, u32)", ep) + "\n"
     result += table("EMOJI_PRESENTATION", "(u32, u32)", presentation) + "\n"
+    result += table("EMOJI_MODIFIER_BASE", "(u32, u32)", modifier_bases) + "\n"
+    result += table("EMOJI_VARIATION_BASE", "(u32, u32)", variation) + "\n"
+    result += table("SPACING_MARK", "(u32, u32)", list(spacing_marks())) + "\n"
     result += table("INCB", "(u32, u32, InCb)", incb)
     return result
 

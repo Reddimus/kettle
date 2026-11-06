@@ -208,10 +208,6 @@ impl Cell {
         extra.zerowidth.push(character);
     }
 
-    pub(crate) fn replace_last_zerowidth(&mut self, character: char) {
-        self.replace_zerowidth_tail(&[character]);
-    }
-
     pub(crate) fn replace_zerowidth_tail(&mut self, tail: &[char]) {
         if let Some(extra) = self.extra.as_mut()
             && extra.zerowidth.len() >= tail.len()

@@ -63,15 +63,87 @@ pub(super) fn emoji_presentation(c: char) -> bool {
         .is_some_and(|range| range.0 <= cp)
 }
 
-pub(super) fn emoji_variation(c: char) -> bool {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if c.width() != Some(1) {
-        return false;
+fn property(c: char, ranges: &[(u32, u32)]) -> bool {
+    let cp = c as u32;
+    let i = ranges.partition_point(|range| range.1 < cp);
+    ranges.get(i).is_some_and(|range| range.0 <= cp)
+}
+
+pub(super) fn emoji_modifier(c: char) -> bool {
+    matches!(c, '\u{1f3fb}'..='\u{1f3ff}')
+}
+
+/// Width of a single stored cluster; prefixes without a spacing base use one cell.
+pub(super) fn cluster_width(codepoints: &[char]) -> usize {
+    let mut state = GraphemeWidth::default();
+    for &c in codepoints {
+        state.advance(c);
     }
-    let mut bytes = [0; 7];
-    let len = c.encode_utf8(&mut bytes).len();
-    bytes[len..len + 3].copy_from_slice("\u{fe0f}".as_bytes());
-    std::str::from_utf8(&bytes[..len + 3]).is_ok_and(|text| text.width() == 2)
+    state.cells.max(1)
+}
+
+/// Width context survives scalars discarded at the cell's storage limit.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GraphemeWidth {
+    cells: usize,
+    base: Option<char>,
+    previous: Option<char>,
+    previous_measured: bool,
+    sinhala_linker: bool,
+}
+
+impl GraphemeWidth {
+    pub(super) fn joins_sinhala(&self, c: char) -> bool {
+        // Sinhala rakaransaya uses al-lakuna + ZWJ + consonant, but Sinhala
+        // consonants are excluded from the UCD's InCB=Consonant property.
+        self.sinhala_linker
+            && self.previous == Some('\u{200d}')
+            && matches!(c, '\u{d9a}'..='\u{db1}' | '\u{db3}'..='\u{dbb}' | '\u{dbd}' | '\u{dc0}'..='\u{dc6}')
+    }
+
+    pub(super) fn advance(&mut self, c: char) -> usize {
+        use unicode_width::UnicodeWidthChar;
+
+        self.sinhala_linker =
+            c == '\u{dca}' || (self.sinhala_linker && matches!(gcb(c), Gcb::Extend | Gcb::Zwj));
+        let width = if emoji_presentation(c) {
+            2
+        } else {
+            c.width().unwrap_or(0)
+        };
+        let measured = width > 0 && gcb(c) != Gcb::Prepend;
+        if c == '\u{fe0e}'
+            && self.previous_measured
+            && self.previous.is_some_and(|base| {
+                emoji_presentation(base) && property(base, tables::EMOJI_VARIATION_BASE)
+            })
+        {
+            self.cells = self.cells.saturating_sub(1);
+        } else if (c == '\u{fe0f}'
+            && self
+                .base
+                .is_some_and(|base| property(base, tables::EMOJI_VARIATION_BASE)))
+            || (self.base.is_some() && property(c, tables::SPACING_MARK))
+        {
+            self.cells = 2;
+        } else if measured {
+            // GB11 emoji chains keep the first emoji's width. Other positive
+            // widths add, including Indic consonants after a virama and Thai/Lao Lo marks.
+            let joined_emoji = self.previous == Some('\u{200d}')
+                && self.base.is_some_and(pictographic)
+                && pictographic(c);
+            if !joined_emoji {
+                self.cells = (self.cells + width).min(2);
+            }
+            self.base.get_or_insert(c);
+            self.previous_measured = !joined_emoji;
+            self.previous = Some(c);
+            return self.cells;
+        }
+        self.previous = Some(c);
+        self.previous_measured = false;
+        self.cells
+    }
 }
 
 pub(super) fn base_offset(text: &str) -> usize {
@@ -96,9 +168,14 @@ pub(super) struct GraphemeState {
     pictographic_extend: bool,
     pictographic_zwj: bool,
     indic_linker: bool,
+    modifier_base_extend: bool,
 }
 
 impl GraphemeState {
+    pub(super) fn accepts_modifier(&self) -> bool {
+        self.pictographic_extend || self.modifier_base_extend
+    }
+
     /// Consume a scalar and report whether it begins a new extended grapheme.
     pub(super) fn advance(&mut self, next: char) -> bool {
         let after = gcb(next);
@@ -126,6 +203,8 @@ impl GraphemeState {
         self.pictographic_zwj = after == Gcb::Zwj && self.pictographic_extend;
         self.pictographic_extend =
             next_pictographic || (after == Gcb::Extend && self.pictographic_extend);
+        self.modifier_base_extend = property(next, tables::EMOJI_MODIFIER_BASE)
+            || (after == Gcb::Extend && self.modifier_base_extend);
         self.indic_linker = match next_incb {
             InCb::Linker => true,
             InCb::Extend => self.indic_linker,
@@ -138,6 +217,40 @@ impl GraphemeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_width_matches_script_and_presentation_rules() {
+        for (text, expected) in [
+            ("\u{915}\u{93e}", 2),
+            ("\u{b95}\u{bbe}", 2),
+            ("\u{c95}\u{cbe}", 2),
+            ("\u{d9a}\u{dca}\u{200d}\u{dbb}\u{dcf}", 2),
+            ("\u{915}\u{94d}\u{915}", 2),
+            ("\u{915}\u{94d}\u{915}\u{93e}", 2),
+            ("\u{915}\u{94d}\u{924}\u{941}\u{902}", 2),
+            ("\u{e01}\u{e33}", 2),
+            ("\u{e81}\u{eb3}", 2),
+            ("\u{231a}\u{fe0e}", 1),
+            ("\u{1f21a}\u{fe0e}", 1),
+            ("\u{1f3fb}", 2),
+            ("\u{1f44d}\u{1f3fb}", 2),
+            ("\u{2764}\u{fe0f}", 2),
+            ("\u{1f469}\u{200d}\u{1f4bb}", 2),
+            ("\u{2764}\u{200d}\u{1f525}", 1),
+            ("\u{2764}\u{fe0f}\u{200d}\u{1f525}", 2),
+            ("\u{1f1fa}\u{1f1f8}", 2),
+            ("\u{94d}\u{915}", 1),
+            ("\u{600}A", 1),
+            ("\u{1100}\u{1161}\u{11a8}", 2),
+            ("e\u{301}", 1),
+        ] {
+            assert_eq!(
+                cluster_width(&text.chars().collect::<Vec<_>>()),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
 
     #[test]
     fn official_unicode18_boundaries() {

@@ -30,6 +30,13 @@
       "file": "LICENSE.txt",
       "url": "https://www.unicode.org/license.txt",
       "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+    },
+    {
+      "file": "emoji-variation-bases.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/emoji/emoji-variation-sequences.txt",
+      "sha256": "8a24fd866049c8a3587bb06be353693b8badd40e83b125d1537ff939c2ff1d53",
+      "normalization": "371 unique sequence bases, extracted offline from unicode-width 0.2.3 src/gen/tables.rs EMOJI_PRESENTATION_LEAVES",
+      "extracted_from_sha256": "c1bf9694c5547a979b820505f0ffd637b71f2e0c3f2b341419c06e575dae9744"
     }
   ]
 }

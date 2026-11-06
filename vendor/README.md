@@ -221,7 +221,7 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Private mode 1048 saves the cursor as DECSC does when set and restores
     it as DECRC does when reset, sharing their saved state. Upstream ignored
     the mode.
-- Kettle's opt-in DEC mode 2027 stores bounded Unicode 18 extended graphemes
+- Kettle's DEC mode 2027 (on by default in Kettle) stores bounded Unicode 18 extended graphemes
   with their leading cell and recorded width. Its streaming boundary context
   is independent of retained scalars; official property inputs, 853 boundary
   vectors, hashes and the Unicode-3.0 license are retained under
@@ -232,6 +232,25 @@ date. Recheck that before upgrading a crate or dropping a patch.
   unchanged. The exact
   `unicode-width = "=0.2.3"` constraint aligns product, vendor-validation
   and fuzz width data at Unicode 18. These are local additions to the pinned package.
+  - Cluster widths share a pure calculator and bounded streaming accumulator:
+    Mc spacing marks, Indic conjuncts and positive-width joined scalars reserve
+    up to two cells; VS15 narrows registered default-emoji text variants, and
+    unattached skin-tone modifiers start their own two-cell clusters. Emoji
+    ZWJ sequences, regional pairs and scalar mode retain their width rules.
+    Late widening/shrinking reuses cell flags and spacers, respects autowrap,
+    insertion and DECSLRM, and never fabricates VS16 for script text.
+  - `scripts/generate-grapheme-tables.py` additionally generates joining Mc
+    ranges from General_Category in the pinned GraphemeBreakProperty comments,
+    Emoji_Modifier_Base from `emoji-data.txt`, and variation bases from
+    `tests/unicode18/emoji-variation-bases.txt`. The latter is a compact offline
+    extraction of all 371 bases of Unicode 18 `emoji-variation-sequences.txt`,
+    using the locally cached `unicode-width` 0.2.3 generated
+    `src/gen/tables.rs::EMOJI_PRESENTATION_LEAVES`; `sources.json` records the
+    extraction and source hash. Regeneration uses only checked-in data.
+  - Sinhala al-lakuna + ZWJ + consonant continuations are a terminal tailoring
+    alongside unattached-modifier boundaries. The pinned Unicode 18 InCB table
+    does not classify Sinhala consonants as Consonant; the raw UAX state and
+    its 853-vector test remain unchanged.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since

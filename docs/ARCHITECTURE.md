@@ -2482,7 +2482,8 @@ mode and reset default of existing terminals. It is separate from saved cursor
 state. Changing the mode does not reinterpret existing cells. With the mode
 disabled, output keeps its per-codepoint layout.
 
-The engine uses generated Unicode 18 GCB, InCB and Extended_Pictographic tables,
+The engine uses generated Unicode 18 GCB, InCB, Extended_Pictographic,
+Emoji_Modifier_Base, emoji-variation base and joining General_Category=Mc tables,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
 state survives PTY splits independently of retained text. The product, vendor
 validation and fuzz graphs all pin Unicode 18 width tables in `unicode-width` 0.2.3;
@@ -2493,12 +2494,30 @@ A cluster occupies its leading cell and its recorded wide spacer, with at most
 30 trailing scalars in the existing cell extra storage. Beyond that cap, the
 latest variation selector, ZWJ and its following spacing scalar, or first
 spacing scalar replace the final retained slots; other excess scalars are
-dropped while boundary state still advances.
-The first scalar's attributes apply to the whole cell. A late VS16 widens once,
-wrapping the complete cluster when needed and inserting only the additional
-spacer in insertion mode. At a nonwrapping right edge, it stays clipped rather
-than creating an orphan wide cell. VS15 changes presentation without shrinking
-an already-wide cluster. Cursor/grid edits and ignored Unicode controls end
+dropped while boundary and width state still advance. The pure cluster-width
+calculator and streaming input share the same finite width accumulator. A
+General_Category=Mc mark after a measured base makes the cluster two cells;
+other positive-width scalars add their widths, capped at two, including Indic
+consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
+keep the first emoji's width, and regional-indicator pairs remain two cells.
+VS16 widens registered emoji sequences. An immediately following VS15 narrows
+a default emoji only if it has a registered text variation sequence.
+
+An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
+the boundary context. Emoji modifier bases and Extended_Pictographic bases
+retain their attached modifiers. One additional terminal tailoring joins a
+Sinhala al-lakuna + ZWJ + Sinhala consonant continuation (including
+rakaransaya): the pinned UCD excludes Sinhala consonants from InCB=Consonant.
+The unmodified UAX boundary state still passes the official vectors.
+
+The first scalar's attributes apply to the whole cell. A changed width
+repaints the anchor and its spacer, wrapping the complete cluster when needed
+and inserting only the additional spacer in insertion mode. At a nonwrapping
+right edge, an already-placed narrow cluster stays clipped with its actual
+text, without a synthetic selector or an orphan wide cell. Narrowing clears
+the spacer, backs up the cursor, cancels pending wrap and removes only the
+extra inserted cell in insertion mode. DECSLRM bounds all these operations.
+Cursor/grid edits and ignored Unicode controls end
 the append context; REP repeats
 the complete retained cluster and leaves its final cell open to combining input.
 

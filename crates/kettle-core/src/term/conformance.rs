@@ -2573,7 +2573,7 @@ fn grapheme_sequences_survive_every_utf8_split_and_keep_one_leading_cell() {
     for (text, width) in [
         ("\u{1f1fa}\u{1f1f8}", 2),
         ("\u{1f44d}\u{1f3fb}", 2),
-        ("\u{915}\u{94d}\u{937}", 1),
+        ("\u{915}\u{94d}\u{937}", 2),
         ("\u{94d}\u{915}", 1),
         ("\u{600}A", 1),
         ("\u{1100}\u{1161}\u{11a8}", 2),
@@ -3124,5 +3124,53 @@ fn c08_grapheme_startup_and_reset_defaults_are_per_terminal() {
             feed(&mut term, &mut parser, b"\x1b[?2027$p");
             assert_eq!(drain_pty(&rx), expected);
         }
+    }
+}
+
+#[test]
+fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() {
+    for (cluster, width) in [
+        ("\u{915}\u{93e}", 2),
+        ("\u{915}\u{94d}\u{915}", 2),
+        ("\u{e01}\u{e33}", 2),
+        ("\u{e81}\u{eb3}", 2),
+        ("\u{231a}\u{fe0e}", 1),
+    ] {
+        let (mut term, mut parser) = harness(12, 3);
+        feed(
+            &mut term,
+            &mut parser,
+            format!("\x1b[?2027hA{cluster}BCDE").as_bytes(),
+        );
+        let following = width + 1;
+        assert_eq!(term.grid()[Line(0)][Column(following)].c, 'B');
+        let matches = crate::search::search(&term, "B");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].start_col, following);
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(1)),
+            Side::Left,
+        );
+        selection.update(Point::new(Line(0), Column(width)), Side::Right);
+        term.selection = Some(selection);
+        assert_eq!(term.selection_to_string().as_deref(), Some(cluster));
+        term.selection = None;
+        feed(&mut term, &mut parser, b"\x1b[?2027l");
+        term.resize(TermSize {
+            columns: 4,
+            screen_lines: 3,
+        });
+        term.resize(TermSize {
+            columns: 12,
+            screen_lines: 3,
+        });
+        let matches = crate::search::search(&term, cluster);
+        assert_eq!(matches.len(), 1);
+        let cell = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col)];
+        assert_eq!(cell.flags.contains(Flags::WIDE_CHAR), width == 2);
+        assert!(cell.flags.contains(Flags::GRAPHEME));
+        let next = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col + width)];
+        assert_eq!(next.c, 'B');
     }
 }

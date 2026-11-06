@@ -124,6 +124,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
+  spacing vowels now reserve two cells, VS15 text variants of default emoji
+  narrow to one, and standalone skin-tone modifiers occupy their own two
+  cells. Cursor movement, wrapping and insertion follow the corrected widths.
+
 - Programming ligatures and URLs draw every character again in grapheme
   mode: `//`, `->`, `!=` and `===` no longer lose their left half.
 - A new window whose shell clears the screen at startup no longer gains a

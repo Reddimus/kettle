@@ -1610,8 +1610,14 @@ DECRST/DECSET/DECRQM, RIS/DECSTR for both defaults, Settings translations and
 reload isolation through real pane creation. Core `grapheme_` tests cover
 portable mode/query/reset/save semantics, UTF-8 splits,
 regional indicators, modifiers, Indic conjuncts, zero-width prefixes, storage
-limits, late VS16, VS15 width retention, margins, insertion, REP, overwrite,
-copying, search and reflow. Renderer tests exercise shaping metadata and row
+limits, late VS16, VS15 narrowing, margins, insertion, REP, overwrite,
+copying, search and reflow. The vendored `grapheme_width_tests` additionally
+check Mc marks (including GCB=Extend), Indic conjuncts, the Sinhala ZWJ
+tailoring, Thai/Lao spacing vowels, standalone modifiers, VS15 spacer cleanup,
+and scalar-mode preservation. Their edge, DECSLRM, autowrap and insertion
+matrices check cursor columns and cell flags; UTF-8 split and storage-cap
+cases check streaming state. Core regressions check resized cluster columns
+through copying, search and reflow. Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
@@ -1685,17 +1691,18 @@ counts, including its cached language results, rather than independent samples.
 | Wide codepoints | 44,568 | 99.94% | 99.99% |
 | Language sequences, 118 language entries | 25,043 | 94.35% | 79.17% |
 
-These scores compare with the tool's width model, not solely with mode 2027.
-VS15 deliberately retains the allocated width, as the proposal requires. The
-modifier probes attach to the preceding cell in mode 2027, so their measured
-advance is zero. All 3,651 directly measured language mismatches in that mode
-are one cell versus the tool's expected two; another 1,565 failures inherit
-those results from a language sharing the sequence. This reflects first-cell
-cluster width, including spacing marks and Indic conjuncts. Narrow-codepoint
-differences include zero-width prefixes and marks, soft hyphen, and two Khmer
-width choices; the five remaining wide-codepoint differences are the same
-modifiers. The full YAML retains each mismatch. Do not describe these tables as
-complete Unicode rendering conformance or hide them by changing expected widths.
+These scores compare with the tool's width model, not solely with mode 2027,
+and predate the cluster-width corrections. In that run VS15 retained its
+allocated width and standalone modifiers attached to the preceding cell,
+measuring zero advance. All 3,651 directly measured language mismatches in
+that mode were one cell versus the tool's expected two; another 1,565 failures
+inherited those results from a language sharing the sequence. The current
+width rules address those spacing-mark/conjunct, VS15 and modifier cases;
+portable regressions do not establish new ucs-detect percentages. Narrow-codepoint
+differences included zero-width prefixes and marks, soft hyphen, and two Khmer
+width choices; the five remaining wide-codepoint differences were the same
+modifiers. The full YAML retains each mismatch. Rerun the live suite before
+claiming updated scores or complete Unicode rendering conformance.
 
 
 ## Manual / interactive checks

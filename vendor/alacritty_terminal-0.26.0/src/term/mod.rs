@@ -36,6 +36,8 @@ pub mod search;
 #[cfg(test)]
 mod column_tests;
 #[cfg(test)]
+mod grapheme_width_tests;
+#[cfg(test)]
 mod rectangle_tests;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -405,6 +407,7 @@ pub struct Term<T> {
     no_clear_column: bool,
     grapheme_clustering: bool,
     grapheme_state: grapheme::GraphemeState,
+    grapheme_width: grapheme::GraphemeWidth,
     grapheme_anchor: Option<GraphemeAnchor>,
     grapheme_template: Cell,
     last_grapheme: Vec<char>,
@@ -709,6 +712,7 @@ pub enum Osc52 {
 impl<T> Term<T> {
     fn stop_grapheme(&mut self) {
         self.grapheme_state = Default::default();
+        self.grapheme_width = Default::default();
         self.grapheme_anchor = None;
     }
 
@@ -767,6 +771,7 @@ impl<T> Term<T> {
             no_clear_column: false,
             grapheme_clustering: config.grapheme_clustering,
             grapheme_state: Default::default(),
+            grapheme_width: Default::default(),
             grapheme_anchor: None,
             grapheme_template: Cell::default(),
             last_grapheme: Vec::new(),
@@ -2252,13 +2257,21 @@ impl<T: EventListener> Term<T> {
             self.stop_grapheme();
         }
         let mut state = self.grapheme_state;
-        let boundary = state.advance(c);
+        // UAX #29 classifies modifiers as Extend even after a space. A
+        // terminal must give an unattached modifier its own two-cell base.
+        if grapheme::emoji_modifier(c) && !state.accepts_modifier() {
+            state = Default::default();
+        }
+        let boundary = state.advance(c) && !self.grapheme_width.joins_sinhala(c);
+        let mut width_state = self.grapheme_width;
         if boundary || self.grapheme_anchor.is_none() {
+            width_state = Default::default();
+            let cluster_width = width_state.advance(c);
             self.last_grapheme.clear();
             self.last_grapheme.push(c);
             self.grapheme_template = self.grid.cursor.template.clone();
-            if width > 0 {
-                self.print_grapheme(width);
+            if cluster_width > 0 {
+                self.print_grapheme(grapheme::cluster_width(&self.last_grapheme));
             } else {
                 self.grapheme_anchor = Some(GraphemeAnchor {
                     point: self.grid.cursor.point,
@@ -2270,6 +2283,7 @@ impl<T: EventListener> Term<T> {
             }
         } else {
             let anchor = self.grapheme_anchor.unwrap();
+            let cluster_width = width_state.advance(c);
             let full = self.last_grapheme.len() > cell::MAX_ZEROWIDTH_PER_CELL;
             let retained_tail = if !full {
                 self.last_grapheme.push(c);
@@ -2280,6 +2294,7 @@ impl<T: EventListener> Term<T> {
                 self.last_grapheme[len - 1] = c;
                 2
             } else if matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
+                || cluster_width != anchor.width
                 || (!anchor.has_cell && width > 0)
             {
                 // Preserve layout/presentation inside the existing storage cap.
@@ -2289,18 +2304,8 @@ impl<T: EventListener> Term<T> {
                 0
             };
             let retained = retained_tail > 0;
-            if retained && anchor.has_cell {
-                if c == '\u{fe0f}'
-                    && anchor.width == 1
-                    && self
-                        .last_grapheme
-                        .iter()
-                        .copied()
-                        .find(|&c| grapheme::is_base(c))
-                        .is_some_and(grapheme::emoji_variation)
-                {
-                    self.widen_grapheme(anchor);
-                } else {
+            if anchor.has_cell {
+                if retained {
                     if full {
                         let start = self.last_grapheme.len() - retained_tail;
                         self.grid[anchor.point]
@@ -2313,31 +2318,24 @@ impl<T: EventListener> Term<T> {
                         anchor.point.column,
                     ));
                 }
-            } else if retained && width > 0 {
-                self.print_grapheme(width);
+                if cluster_width > anchor.width {
+                    self.widen_grapheme(anchor);
+                } else if cluster_width < anchor.width {
+                    self.narrow_grapheme(anchor);
+                }
+            } else if retained && cluster_width > 0 {
+                self.print_grapheme(cluster_width);
             }
         }
         self.grapheme_state = state;
+        self.grapheme_width = width_state;
     }
 
     fn widen_grapheme(&mut self, anchor: GraphemeAnchor) {
         let fits = anchor.point.column + 1 < self.input_right_edge();
         if !fits && !self.mode.contains(TermMode::LINE_WRAP) {
-            // There is no second cell with autowrap disabled. Retain the
-            // selector without creating a wide cell missing its spacer.
-            let cell = &mut self.grid[anchor.point];
-            if cell
-                .zerowidth()
-                .is_some_and(|marks| marks.len() == cell::MAX_ZEROWIDTH_PER_CELL)
-            {
-                cell.replace_last_zerowidth('\u{fe0f}');
-            } else {
-                cell.push_zerowidth('\u{fe0f}');
-            }
-            self.damage.damage_point(Point::new(
-                anchor.point.line.0 as usize,
-                anchor.point.column,
-            ));
+            // The retained text is already updated. Keep the narrow cell when
+            // there is no room for its spacer, for emoji and script clusters alike.
             return;
         }
         self.grid.cursor.point = anchor.point;
@@ -2353,6 +2351,27 @@ impl<T: EventListener> Term<T> {
         }
         self.print_grapheme(2);
         self.mode.set(TermMode::INSERT, insert);
+    }
+
+    fn narrow_grapheme(&mut self, anchor: GraphemeAnchor) {
+        let insert = self.mode.contains(TermMode::INSERT);
+        self.mode.remove(TermMode::INSERT);
+        self.grid.cursor.point = anchor.point;
+        self.grid.cursor.input_needs_wrap = false;
+        // Rewriting the wide anchor clears its associated spacer as well.
+        self.print_grapheme(1);
+        let new_anchor = self.grapheme_anchor;
+        if insert {
+            // Undo only the extra cell reserved by the original wide insertion.
+            self.delete_chars(1);
+        }
+        self.grapheme_anchor = new_anchor;
+        self.mode.set(TermMode::INSERT, insert);
+        self.damage.damage_line(
+            anchor.point.line.0 as usize,
+            anchor.point.column.0,
+            anchor.point.column.0 + 1,
+        );
     }
 }
 
