@@ -422,10 +422,21 @@ impl PasteProtection {
     pub fn confirms(self, text: &str, bracketed: bool) -> bool {
         match self {
             Self::Off => false,
-            Self::Always => text.contains(['\n', '\r']),
-            Self::Auto => !bracketed && text.chars().any(|c| c.is_control() && c != '\t'),
+            Self::Always => text.contains(['\n', '\r']) || ends_bracketed_paste_early(text),
+            Self::Auto => {
+                (!bracketed && text.chars().any(|c| c.is_control() && c != '\t'))
+                    || ends_bracketed_paste_early(text)
+            }
         }
     }
+}
+
+/// Whether `text` carries a bracketed-paste end marker, `ESC [ 201 ~` or its
+/// C1 form: a paste that would close bracketed mode early and send the rest as
+/// typed input. Kettle removes the marker in every mode; asking first tells the
+/// user the text was crafted to do that.
+fn ends_bracketed_paste_early(text: &str) -> bool {
+    text.contains("\x1b[201~") || text.contains("\u{9b}201~")
 }
 
 /// Policy for pasting OS file references — a file copied in the file manager
@@ -8011,6 +8022,14 @@ cell-height = 1.2\n";
             assert!(!PasteProtection::Auto.confirms(text, false));
         }
         assert!(PasteProtection::Always.confirms("a\r\nb", true));
+        // A bracketed-paste end marker asks even where bracketed paste is on:
+        // the text was made to escape it.
+        for text in ["printf x\x1b[201~; echo injected", "x\u{9b}201~y"] {
+            assert!(PasteProtection::Auto.confirms(text, true));
+            assert!(PasteProtection::Always.confirms(text, true));
+            assert!(!PasteProtection::Off.confirms(text, true));
+        }
+        assert!(!PasteProtection::Auto.confirms("\x1b[200~", true));
     }
 
     #[test]

@@ -122,7 +122,8 @@ that hides its cursor keeps it hidden.
 
 Use the Paste shortcut (Cmd+V on macOS, Ctrl+Shift+V on Linux). With
 `paste-protection = auto`, Kettle asks before text containing line breaks or
-control characters reaches any writable recipient without bracketed paste.
+control characters reaches any writable recipient without bracketed paste,
+and before text that tries to end bracketed paste early (`ESC [201~`).
 `always` asks for every multiline paste, including bracketed paste; `off`
 disables confirmation. The dialog reports the line count, escape sequences
 and other controls, and previews up to three lines with controls drawn visibly

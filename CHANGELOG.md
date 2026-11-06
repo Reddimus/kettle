@@ -160,6 +160,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
+  even where bracketed paste is on, as such text was made to escape it. Kettle
+  still removes the marker whichever choice is made.
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
