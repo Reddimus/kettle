@@ -103,6 +103,14 @@ process_restart = "draft"
 process_close = "draft"
 config_notice = "draft"
 config_notice_more = "draft"
+config_notice_open = "draft"
+config_notice_unknown = "draft"
+config_notice_suggestion = "draft"
+config_notice_invalid = "draft"
+config_notice_number = "draft"
+config_notice_boolean = "draft"
+config_notice_malformed = "draft"
+config_notice_missing_equals = "draft"
 notice_dismiss = "draft"
 a11y_tab_list = "draft"
 a11y_tab_close = "draft"
@@ -947,6 +955,14 @@ keys = [
     "process_close",
     "config_notice",
     "config_notice_more",
+    "config_notice_open",
+    "config_notice_unknown",
+    "config_notice_suggestion",
+    "config_notice_invalid",
+    "config_notice_number",
+    "config_notice_boolean",
+    "config_notice_malformed",
+    "config_notice_missing_equals",
     "notice_dismiss",
     "a11y_tab_list",
     "a11y_tab_close",

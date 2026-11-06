@@ -982,12 +982,21 @@ GPU device labels resolve ID-only and name-only pins against detected adapters;
 **Update check interval** displays hours as **24 h**. The panel also displays
 `13 pt`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).
 
-Unknown keys and invalid values at startup and reload also appear in a dismissible
-in-window notice. It names the config filename, source line, and key for up to
-three settings, followed by `+N more`. Values are omitted, including environment
-values. Ignored settings use their defaults; valid settings still apply. Dismissing
-a notice keeps it hidden until the diagnostics change. Use `kettle --check-config`
-for the complete diagnostics.
+Unknown keys, invalid values and malformed lines at startup and reload also
+appear in a dismissible in-window notice. It names the config filename, source
+line and key for up to three settings, followed by `+N more`. Each line explains
+the problem: unknown settings can suggest a nearby known key or alias, invalid
+values show the expected type or range when available (for example, `font-size`
+expects a number from 5 to 72), and malformed lines identify a missing `=`.
+Values are omitted, including environment values. Filenames and keys have
+control characters removed and are limited to 64 characters each.
+
+**Open Config** opens the file named by the notice with the operating system's
+default app, using the same mechanism as **Advanced…**. While the notice is
+visible, Enter opens the file and Escape dismisses it; both buttons are also
+available to screen readers. The terminal grid and IME cursor do not move.
+Valid settings still apply. Dismissing a notice keeps it hidden until the
+diagnostics change. Use `kettle --check-config` for the complete diagnostics.
 
 ### Tab-strip appearance and controls
 

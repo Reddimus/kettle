@@ -1238,9 +1238,10 @@ impl App {
         }
         ws.tab_focus = None;
         if !self.pointer_modal_open(ws) {
-            for (pane, _) in self.persistent_notices(ws) {
-                for part in [1, 2] {
-                    if request.target_node == persistent_notice_id(pane, part)
+            for (pane, toast) in self.persistent_notices(ws) {
+                for (part, label) in [(1, &toast.details), (2, &toast.close)] {
+                    if !label.is_empty()
+                        && request.target_node == persistent_notice_id(pane, part)
                         && request.action == AccessibilityAction::Click
                     {
                         self.activate_persistent_notice(ws, pane, part == 1);

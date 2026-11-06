@@ -600,6 +600,7 @@ pub struct App {
     update_restart_dismissed: bool,
     config_notice: Option<String>,
     config_notice_last: Option<String>,
+    config_notice_path: Option<std::path::PathBuf>,
     update_toast: Option<crate::update_toast::Toast>,
     update_toast_receipts: Option<crate::update_toast::ReceiptWriter>,
     update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,

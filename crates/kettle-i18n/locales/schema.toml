@@ -2735,3 +2735,29 @@ context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessib
 
 [messages.picker_theme_for_dark_appearance]
 context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update dark-theme. Keep short; prefix is clipped separately from query."
+
+[messages.config_notice_open]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_unknown]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_suggestion]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+args = [{ name = "key", type = "str" }]
+
+[messages.config_notice_invalid]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_number]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+args = [{ name = "min", type = "str" }, { name = "max", type = "str" }]
+
+[messages.config_notice_boolean]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_malformed]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_missing_equals]
+context = "crates/kettle-ui/src/app/notices.rs: diagnostic for a line with no equals sign. Never includes a value."

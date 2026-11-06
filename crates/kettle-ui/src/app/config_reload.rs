@@ -368,6 +368,7 @@ impl App {
         } else {
             self.config_notice = None;
             self.config_notice_last = None;
+            self.config_notice_path = None;
         }
         // Surface malformed values (typos the parser silently ignores, e.g.
         // `cursor-style = beem`) on live reload. `--check-config` already
@@ -378,9 +379,9 @@ impl App {
             fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleConfigValuesIgnored),
-                &self
-                    .ui_text
-                    .notify_body_config_values_ignored(&malformed.join("\n")),
+                &self.ui_text.notify_body_config_values_ignored(
+                    self.config_notice_last.as_deref().unwrap_or_default(),
+                ),
             );
         }
         self.config_malformed_last = malformed;

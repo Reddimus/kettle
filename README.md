@@ -54,7 +54,10 @@ update toast) or `update-policy = off` (no automatic network request).
 Kettle reloads its `key = value` config when you save it.
 `kettle --write-default-config` creates one, `kettle --config-path` finds it
 and `kettle --check-config` validates it. [Configuration](docs/CONFIG.md)
-lists every setting.
+lists every setting. Config problems appear in a translated notice with source
+lines, reasons and spelling suggestions, without showing values. Choose
+**Open Config** (or press Enter while the notice is visible) to edit that file;
+Escape dismisses the notice.
 
 ## Common keys
 

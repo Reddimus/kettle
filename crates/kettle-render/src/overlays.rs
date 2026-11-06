@@ -398,6 +398,21 @@ pub struct UpdateToastOverlay {
     pub focused: Option<usize>,
 }
 
+impl UpdateToastOverlay {
+    /// Empty labels have no painted surface or hit target, even if a caller
+    /// supplied geometry for them.
+    pub fn control_geometry(&self) -> UpdateToastGeometry {
+        let mut geometry = self.geometry;
+        if self.details.is_empty() {
+            geometry.details.2 = 0.0;
+        }
+        if self.close.is_empty() {
+            geometry.close.2 = 0.0;
+        }
+        geometry
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UpdateToastGeometry {
     pub rect: Rect4,
@@ -1731,8 +1746,16 @@ pub fn persistent_notice_geometry(
     let button_h = cell.1.min(height * 0.5);
     let controls_y = y + height - pad - button_h;
     let available = (w - 3.0 * pad).max(0.0);
-    let close_w = (close_cells as f32 * cell.0 + 2.0 * pad).min(available * 0.5);
-    let action_w = (action_cells as f32 * cell.0 + 2.0 * pad).min(available - close_w);
+    let close_w = if close_cells == 0 {
+        0.0
+    } else {
+        (close_cells as f32 * cell.0 + 2.0 * pad).min(available * 0.5)
+    };
+    let action_w = if action_cells == 0 {
+        0.0
+    } else {
+        (action_cells as f32 * cell.0 + 2.0 * pad).min(available - close_w)
+    };
     Some(UpdateToastGeometry {
         rect: (x, y, w, height),
         message: (

@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Config error notices explain ignored settings, suggest nearby setting names,
+  and show expected types or ranges without exposing values. Open Config opens
+  the affected file, with keyboard and screen-reader access. Clipboard notices
+  no longer show an empty button.
+
 - Quieter tab strips follow the terminal background, with readable separators
   and visibly dimmed inactive windows. Larger, separated New Tab and options
   buttons show translated tooltips and shortcut hints, stay reachable in narrow

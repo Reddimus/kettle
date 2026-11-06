@@ -2157,6 +2157,90 @@ pub struct LoadedConfig {
 pub struct ConfigDiagnostic {
     pub line: usize,
     pub key: String,
+    pub kind: ConfigDiagnosticKind,
+}
+
+/// Value-free reasons suitable for localized UI diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigDiagnosticKind {
+    UnknownKey { suggestion: Option<&'static str> },
+    InvalidValue { expected: Option<ConfigValueForm> },
+    MalformedLine { missing_equals: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigValueForm {
+    NumberRange {
+        min: &'static str,
+        max: &'static str,
+    },
+    Boolean,
+}
+
+include!(concat!(env!("OUT_DIR"), "/config_keys.rs"));
+
+fn suggested_config_key(key: &str) -> Option<&'static str> {
+    // Bound work independently of the file-size cap. All registered keys are ASCII.
+    if !key.is_ascii() || key.len() > 64 {
+        return None;
+    }
+    let key = key.to_ascii_lowercase().replace('_', "-");
+    let limit = if key.len() < 5 { 1 } else { 2 };
+    CONFIG_KEYS
+        .iter()
+        .filter_map(|&candidate| {
+            if key.len().abs_diff(candidate.len()) > limit {
+                return None;
+            }
+            let mut row: Vec<_> = (0..=candidate.len()).collect();
+            for (i, a) in key.bytes().enumerate() {
+                let mut diagonal = row[0];
+                row[0] = i + 1;
+                for (j, b) in candidate.bytes().enumerate() {
+                    let previous = row[j + 1];
+                    row[j + 1] = (row[j] + 1)
+                        .min(previous + 1)
+                        .min(diagonal + usize::from(a != b));
+                    diagonal = previous;
+                }
+                if row.iter().all(|&distance| distance > limit) {
+                    return None;
+                }
+            }
+            let distance = row[candidate.len()];
+            (distance > 0 && distance <= limit).then_some((distance, candidate))
+        })
+        .min()
+        .map(|(_, candidate)| candidate)
+}
+
+fn config_value_form(key: &str) -> Option<ConfigValueForm> {
+    let range = match key {
+        "font-size" => ("5", "72"),
+        "quick-terminal-size" => ("1", "100"),
+        "background-opacity" | "background-darkness" | "bell-flash-intensity" => ("0", "1"),
+        "unfocused-split-opacity" => ("0.1", "1"),
+        "scroll-multiplier" | "mouse-scroll-multiplier" => ("0.1", "50"),
+        "scrollbar-width" => ("2", "40"),
+        "tab-min-width" | "tab-bar-width" => ("40", "600"),
+        "minimum-contrast" => ("0", "21"),
+        "cursor-blink-interval" => ("50", "5000"),
+        "cursor-blink-timeout" => ("0", "3600"),
+        "tab-silence-threshold-ms" | "tab-silence-threshold" => ("1000", "600000"),
+        "command-notify-threshold-ms" | "command-notify-threshold" => ("0", "86400000"),
+        "handle-size" => ("-1", "50"),
+        _ if Config::BOOL_KEYS
+            .iter()
+            .any(|listed| listed.replace('_', "-") == key) =>
+        {
+            return Some(ConfigValueForm::Boolean);
+        }
+        _ => return None,
+    };
+    Some(ConfigValueForm::NumberRange {
+        min: range.0,
+        max: range.1,
+    })
 }
 
 impl LoadedConfig {
@@ -2170,6 +2254,19 @@ impl LoadedConfig {
             if unknown.contains(&entry.raw_key) || malformed.contains(&invalid) {
                 result.push(ConfigDiagnostic {
                     line: entry.line,
+                    kind: if malformed.contains(&invalid) {
+                        ConfigDiagnosticKind::InvalidValue {
+                            expected: if entry.in_keybindings {
+                                None
+                            } else {
+                                config_value_form(&entry.key)
+                            },
+                        }
+                    } else {
+                        ConfigDiagnosticKind::UnknownKey {
+                            suggestion: suggested_config_key(&entry.key),
+                        }
+                    },
                     key: entry.raw_key,
                 });
             }
@@ -2193,6 +2290,9 @@ impl LoadedConfig {
                 result.push(ConfigDiagnostic {
                     line: index + 1,
                     key: key.to_owned(),
+                    kind: ConfigDiagnosticKind::MalformedLine {
+                        missing_equals: !line.contains('='),
+                    },
                 });
             }
         }
@@ -13911,6 +14011,156 @@ mod chrome_state_tests {
     }
 
     #[test]
+    fn diagnostic_kinds_suggestions_and_secret_redaction() {
+        let secret = "FAKE_SECRET_do_not_display";
+        let text = format!(
+            "font-size = {secret}\nfont-sise = {secret}\nnot-a-key = {secret}\nfont-size {secret}\nfont-size = 900\ncursor-blink = {secret}\nfont-family = {secret}\nfont-size = {secret}\nenv = {secret}\nfont-size = {secret}\0\n"
+        );
+        let (config, unknown_keys) = Config::parse_collect(&text);
+        let loaded = LoadedConfig {
+            malformed_values: Config::detect_malformed_values(&text),
+            text,
+            config,
+            unknown_keys,
+        };
+        let entries = loaded.diagnostics();
+        assert_eq!(
+            entries.iter().map(|e| e.line).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 8, 9, 10]
+        );
+        assert_eq!(
+            entries[0].kind,
+            ConfigDiagnosticKind::InvalidValue {
+                expected: Some(ConfigValueForm::NumberRange {
+                    min: "5",
+                    max: "72"
+                }),
+            }
+        );
+        assert_eq!(
+            entries[1].kind,
+            ConfigDiagnosticKind::UnknownKey {
+                suggestion: Some("font-size")
+            }
+        );
+        assert_eq!(
+            entries[2].kind,
+            ConfigDiagnosticKind::UnknownKey { suggestion: None }
+        );
+        assert_eq!(
+            entries[3].kind,
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: true
+            }
+        );
+        assert_eq!(entries[4].kind, entries[0].kind);
+        assert_eq!(
+            entries[5].kind,
+            ConfigDiagnosticKind::InvalidValue {
+                expected: Some(ConfigValueForm::Boolean)
+            }
+        );
+        assert_eq!(
+            entries[7].kind,
+            ConfigDiagnosticKind::InvalidValue { expected: None }
+        );
+        assert_eq!(
+            entries[8].kind,
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: false
+            }
+        );
+        let debug = format!("{entries:?}");
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("900"));
+        assert_eq!(suggested_config_key("CURSOR_SHAP"), Some("cursor-shape"));
+        assert_eq!(
+            suggested_config_key("scrollback-limt"),
+            Some("scrollback-limit")
+        );
+        assert_eq!(suggested_config_key("font-szie"), Some("font-size"));
+        assert_eq!(suggested_config_key("font-size"), None);
+        assert_eq!(suggested_config_key(&"x".repeat(10000)), None);
+        assert_eq!(suggested_config_key("é"), None);
+    }
+
+    #[test]
+    fn suggestion_registry_contains_parser_keys_and_aliases_only() {
+        assert!(CONFIG_KEYS.contains(&"font-size"));
+        assert!(CONFIG_KEYS.contains(&"cursor-shape"));
+        assert!(CONFIG_KEYS.contains(&"osc52-notify"));
+        for key in CONFIG_KEYS {
+            let (_, unknown) = Config::parse_collect(&format!("{key} ="));
+            assert!(unknown.is_empty(), "{key}");
+        }
+        for group in KEY_ALIASES {
+            for alias in *group {
+                assert!(CONFIG_KEYS.contains(alias), "{alias}");
+            }
+        }
+        for key in Config::BOOL_KEYS {
+            assert!(
+                CONFIG_KEYS.contains(&key.replace('_', "-").as_str()),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_expected_ranges_agree_with_the_validator() {
+        for key in CONFIG_KEYS {
+            let Some(form) = config_value_form(key) else {
+                continue;
+            };
+            match form {
+                ConfigValueForm::NumberRange { min, max } => {
+                    for value in [min.to_string(), max.to_string()] {
+                        assert!(
+                            Config::detect_malformed_values(&format!("{key} = {value}")).is_empty(),
+                            "{key} = {value}"
+                        );
+                    }
+                    for value in [
+                        min.parse::<f64>().unwrap() - 1.0,
+                        max.parse::<f64>().unwrap() + 1.0,
+                    ] {
+                        assert!(
+                            !Config::detect_malformed_values(&format!("{key} = {value}"))
+                                .is_empty(),
+                            "{key} = {value}"
+                        );
+                    }
+                }
+                ConfigValueForm::Boolean => {
+                    assert!(
+                        Config::detect_malformed_values(&format!("{key} = true")).is_empty(),
+                        "{key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keybinding_diagnostics_do_not_describe_actions_as_setting_values() {
+        let text = "[keybindings]\nfull-screen = FAKE_SECRET_do_not_display\n".to_owned();
+        let loaded = LoadedConfig {
+            config: Config::parse_text(&text),
+            unknown_keys: Config::parse_collect(&text).1,
+            malformed_values: Config::detect_malformed_values(&text),
+            text,
+        };
+        assert_eq!(
+            loaded.diagnostics(),
+            [ConfigDiagnostic {
+                line: 2,
+                key: "full-screen".into(),
+                kind: ConfigDiagnosticKind::InvalidValue { expected: None },
+            }]
+        );
+    }
+
+    #[test]
     fn diagnostics_keep_source_lines_and_key_spelling_without_values() {
         let text = "\u{feff}# fixture\n[global_config]\nFONT_SIZE = wrong\ntypo_key = private-value\nfont-size = 15\n[profiles]\n[[other]]\nignored = value\n[[default]]\ncursor-style = beem\n".to_string();
         let (config, unknown_keys) = Config::parse_collect(&text);
@@ -13926,15 +14176,23 @@ mod chrome_state_tests {
             vec![
                 ConfigDiagnostic {
                     line: 3,
-                    key: "FONT_SIZE".into()
+                    key: "FONT_SIZE".into(),
+                    kind: ConfigDiagnosticKind::InvalidValue {
+                        expected: Some(ConfigValueForm::NumberRange {
+                            min: "5",
+                            max: "72"
+                        })
+                    },
                 },
                 ConfigDiagnostic {
                     line: 4,
-                    key: "typo_key".into()
+                    key: "typo_key".into(),
+                    kind: ConfigDiagnosticKind::UnknownKey { suggestion: None },
                 },
                 ConfigDiagnostic {
                     line: 10,
-                    key: "cursor-style".into()
+                    key: "cursor-style".into(),
+                    kind: ConfigDiagnosticKind::InvalidValue { expected: None },
                 },
             ]
         );

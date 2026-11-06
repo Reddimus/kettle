@@ -161,6 +161,7 @@ fn every_spanish_message_has_a_review_status() {
         .filter(|key| {
             key.starts_with("confirm_")
                 || key.contains("a11y")
+                || key.starts_with("config_notice")
                 // These visible notice labels also name live regions and buttons.
                 || matches!(
                     key.as_str(),
@@ -175,8 +176,6 @@ fn every_spanish_message_has_a_review_status() {
                         | "process_exit_pending"
                         | "process_restart"
                         | "process_close"
-                        | "config_notice"
-                        | "config_notice_more"
                         | "notice_dismiss"
                         | "osc52_copied"
                         | "osc52_denied_read"

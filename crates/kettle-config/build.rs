@@ -13,6 +13,47 @@ include!("src/theme_filter.rs");
 
 fn main() {
     let manifest = env::var("CARGO_MANIFEST_DIR").unwrap();
+    // The parser's literal match patterns are the key registry, including
+    // aliases. Generate suggestions from those patterns, never from values.
+    let source_path = Path::new(&manifest).join("src/lib.rs");
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    let source = include_str!("src/lib.rs");
+    let arms = source
+        .split_once("for e in entries {\n            match e.key.as_str() {")
+        .expect("config key match")
+        .1
+        .split_once("_ => unknown.push(e.raw_key.clone()),")
+        .expect("config key fallback")
+        .0;
+    let mut keys = std::collections::BTreeSet::new();
+    for line in arms.lines() {
+        let Some(pattern) = line.strip_prefix("                ") else {
+            continue;
+        };
+        if !pattern.starts_with(['"', '|']) {
+            continue;
+        }
+        let pattern = pattern.split_once("=>").map_or(pattern, |(p, _)| p);
+        for key in pattern.split('"').skip(1).step_by(2) {
+            assert!(
+                key.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'-'
+                    || b == b'_')
+            );
+            keys.insert(key.replace('_', "-"));
+        }
+    }
+    assert!(keys.len() > 200, "config key registry unexpectedly small");
+    let out_dir = env::var("OUT_DIR").unwrap();
+    fs::write(
+        Path::new(&out_dir).join("config_keys.rs"),
+        format!(
+            "const CONFIG_KEYS: &[&str] = &{:?};\n",
+            keys.into_iter().collect::<Vec<_>>()
+        ),
+    )
+    .unwrap();
     let themes_dir = Path::new(&manifest).join("../../assets/themes");
     println!("cargo:rerun-if-changed={}", themes_dir.display());
 

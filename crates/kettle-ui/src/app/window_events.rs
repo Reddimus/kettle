@@ -1554,12 +1554,26 @@ impl App {
                     &event.logical_key,
                     ws.mods,
                 );
-                let held_key = (!self.any_modal_open(ws)
+                let config_key = notices::config_notice_key(
+                    self.config_notice.is_some()
+                        && !self.any_modal_open(ws)
+                        && ws.preview_focus.is_none()
+                        && ws.ime_preedit.is_none()
+                        && self
+                            .persistent_notices(ws)
+                            .iter()
+                            .any(|(pane, _)| pane.is_none()),
+                    &event.logical_key,
+                    ws.mods,
+                );
+                let held_key = (config_key.is_none()
+                    && !self.any_modal_open(ws)
                     && ws.preview_focus.is_none()
                     && ws.ime_preedit.is_none())
                 .then(|| notices::held_pane_key(ws, &event.logical_key))
                 .flatten();
-                let ui_owns_key = held_key.is_some()
+                let ui_owns_key = config_key.is_some()
+                    || held_key.is_some()
                     || toast_owns_key
                     || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
@@ -1607,6 +1621,11 @@ impl App {
                 }
                 if event.state == ElementState::Released {
                     self.write_terminal_key_event(ws, &event, false);
+                    return;
+                }
+                if let Some(primary) = config_key {
+                    ws.closing_keys.insert(event.physical_key);
+                    self.activate_persistent_notice(ws, None, primary);
                     return;
                 }
                 if let Some((pane, restart)) = held_key {

@@ -3264,17 +3264,12 @@ impl Renderer {
             .chain(&overlay.notices)
             .enumerate()
         {
-            let geometry = toast.geometry;
+            let geometry = toast.control_geometry();
             let text_line_height = self.overlay_text_line_height();
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let accent = self.ui_accent(cfg, theme);
             let palette = update_toast::palette(theme, accent, &mut self.chrome_colors);
-            toast_surfaces.extend(update_toast::surfaces(
-                geometry,
-                &palette,
-                alpha,
-                toast.focused,
-            ));
+            toast_surfaces.extend(update_toast::surfaces(toast, &palette));
 
             for (i, area) in [geometry.message, geometry.details, geometry.close]
                 .into_iter()

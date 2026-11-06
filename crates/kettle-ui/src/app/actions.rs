@@ -312,6 +312,29 @@ impl App {
         }
     }
 
+    pub(super) fn open_config_file(&self, path: Option<std::path::PathBuf>) {
+        if let Some(path) = path {
+            let tr = self.ui_text;
+            system_opener::open(path.clone(), move |e| {
+                log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
+                fire_notify(
+                    tr.text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                    tr.text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
+                );
+            });
+        } else {
+            log::warn!(
+                "Action::EditConfig: no config path resolved \
+                 (set $XDG_CONFIG_HOME or pass --config)"
+            );
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyConfigNoPath),
+            );
+        }
+    }
+
     pub(super) fn handle_action(
         &mut self,
         ws: &mut WindowState,
@@ -760,30 +783,11 @@ impl App {
             // with `--config` pointing at a missing path, or no profile
             // resolved), it falls back to `Config::default_path()`.
             Action::EditConfig => {
-                let path = self
-                    .config_path
-                    .clone()
-                    .or_else(kettle_config::Config::default_path);
-                if let Some(path) = path {
-                    let tr = self.ui_text;
-                    system_opener::open(path.clone(), move |e| {
-                        log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
-                        fire_notify(
-                            tr.text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
-                            tr.text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
-                        );
-                    });
-                } else {
-                    log::warn!(
-                        "Action::EditConfig: no config path resolved \
-                         (set $XDG_CONFIG_HOME or pass --config)"
-                    );
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
-                        self.ui_text.text(kettle_i18n::Text::NotifyBodyConfigNoPath),
-                    );
-                }
+                self.open_config_file(
+                    self.config_path
+                        .clone()
+                        .or_else(kettle_config::Config::default_path),
+                );
             }
             // Preferences submenu toggles. Each dispatch updates `self.cfg` so
             // the change applies now, and writes `key = value` back to the

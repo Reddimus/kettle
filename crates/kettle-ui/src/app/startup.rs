@@ -865,6 +865,7 @@ impl App {
             update_restart_dismissed: false,
             config_notice: None,
             config_notice_last: None,
+            config_notice_path: None,
             update_toast: None,
             update_toast_receipts: None,
             update_toast_claiming: None,
