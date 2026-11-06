@@ -738,6 +738,17 @@ impl App {
             .focused_terminal(ws, self.area(ws))
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
+        let has_hintable_link = !ws.links.is_empty()
+            || self.collect_hints(ws, false).iter().any(|target| {
+                matches!(
+                    target.what,
+                    HintWhat::Text {
+                        kind: kettle_core::hints::Kind::Url | kettle_core::hints::Kind::Path,
+                        ..
+                    }
+                )
+            });
+        append_link_hints_menu_item(&mut items, in_focused_pane && has_hintable_link, tr);
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.extend(link_menu_rows(&url, links_pane(ws), tr));
         }
@@ -967,6 +978,9 @@ impl App {
                     kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, action)
                         .unwrap_or_default()
                 }
+                // The submenu sign sits in the hint column, right-aligned
+                // like a native menu's.
+                ContextMenuItem::Submenu { .. } => SUBMENU_SIGN.to_string(),
                 ContextMenuItem::NewTabShell { .. } => {
                     let h = if shell_ordinal < 9 {
                         kettle_config::keybinds::ui_hint_label(
@@ -993,12 +1007,43 @@ impl App {
         shells: &[kettle_core::term::ShellChoice],
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
+        Self::new_tab_menu_with_profiles(shells, &kettle_config::Config::list_profiles(), tr)
+    }
+
+    pub(super) fn new_tab_menu_with_profiles(
+        shells: &[kettle_core::term::ShellChoice],
+        profiles: &[String],
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
         use kettle_i18n::Text as T;
         let mut items: Vec<ContextMenuItem> = shells
             .iter()
             .cloned()
             .map(|(label, argv)| ContextMenuItem::NewTabShell { label, argv })
             .collect();
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Submenu {
+            label: tr.text(T::MenuNewTabProfile).to_string(),
+            items: profile_launch_entries(profiles, tr)
+                .into_iter()
+                .map(|(label, action)| ContextMenuItem::DynamicItem {
+                    label: label.shown(tr).to_string(),
+                    action,
+                    enabled: true,
+                })
+                .collect(),
+        });
+        for (label, action) in [
+            (T::MenuSaveLayout, Action::SaveLayout),
+            (T::MenuOpenLayout, Action::OpenLayoutPicker),
+            (T::PaletteOpenSsh, Action::OpenSsh),
+        ] {
+            items.push(ContextMenuItem::Item {
+                label: tr.text(label),
+                action,
+                enabled: true,
+            });
+        }
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Item {
             label: tr.text(T::MenuSettings),
@@ -1617,11 +1662,11 @@ impl App {
                     },
                     ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
                         matched_chars: None,
-                        // Append "▸" to signal "this row opens a submenu".
-                        label: format!("{label} ▸"),
+                        // `hint` is "▸": this row opens a submenu.
+                        label: label.clone(),
                         separator: false,
                         enabled: true,
-                        hint: String::new(),
+                        hint,
                     },
                     // ProfileChoice rows only live inside a Submenu, so they
                     // reach menu.items (and this arm) after a drill-in swaps the
@@ -2221,6 +2266,10 @@ pub(super) enum ContextMenuClick {
     },
 }
 
+/// The hint of a row that opens a submenu. Screen readers get the row's
+/// popup state instead of this sign.
+pub(super) const SUBMENU_SIGN: &str = "▸";
+
 /// One entry in the right-click context menu. `Separator` rows render
 /// as a thin divider in the menu and are skipped during keyboard nav
 /// and click dispatch; `Item` rows carry the action to fire.
@@ -2432,7 +2481,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
         ContextMenuItem::LuaItem { label, .. } => (label, "", false),
         ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::ReconnectItem { label, .. } => (label, "", false),
-        ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
+        ContextMenuItem::Submenu { label, .. } => (label, "", true),
         ContextMenuItem::ProfileChoice { label, .. }
         | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
@@ -2720,7 +2769,15 @@ pub(super) fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuIte
             item => Some(item),
         })
         .filter(|it| {
-            !matches!(
+            // Copy stays, greyed, while nothing is selected: the menu then
+            // shows where copying lives, as native menus do.
+            matches!(
+                it,
+                ContextMenuItem::Item {
+                    action: Action::Copy,
+                    ..
+                }
+            ) || !matches!(
                 it,
                 ContextMenuItem::Item { enabled: false, .. }
                     | ContextMenuItem::DynamicItem { enabled: false, .. }
@@ -3052,7 +3109,7 @@ pub(super) fn grouped_terminal_menu(
             | ContextMenuItem::Preview { .. } => None,
             ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
                 match action {
-                    Action::Copy | Action::Paste | Action::SelectAll => None,
+                    Action::Copy | Action::Paste | Action::SelectAll | Action::HintMode => None,
                     Action::SplitAuto
                     | Action::SplitRight
                     | Action::SplitLeft
@@ -3098,6 +3155,15 @@ pub(super) fn grouped_terminal_menu(
         } => 3,
         _ => 4,
     });
+    // A divider between the rows about the link under the pointer and the
+    // terminal's own clipboard rows.
+    if let Some(first_after_links) = primary
+        .iter()
+        .position(|item| !matches!(item, ContextMenuItem::UrlItem { .. }))
+        .filter(|&at| at > 0)
+    {
+        primary.insert(first_after_links, ContextMenuItem::Separator);
+    }
     primary.push(ContextMenuItem::Separator);
     for (label, items) in [
         T::MenuCategorySplit,
@@ -3345,4 +3411,18 @@ fn context_menu_row_at(
             .map(|item| matches!(item, ContextMenuItem::Separator)),
     )
     .map(|index| index + start)
+}
+
+pub(super) fn append_link_hints_menu_item(
+    items: &mut Vec<ContextMenuItem>,
+    has_links: bool,
+    tr: kettle_i18n::Translator,
+) {
+    if has_links {
+        items.push(ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::PaletteHintMode),
+            action: Action::HintMode,
+            enabled: true,
+        });
+    }
 }

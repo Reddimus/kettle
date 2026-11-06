@@ -161,16 +161,25 @@ fn every_spanish_message_has_a_review_status() {
         .filter(|key| {
             key.starts_with("confirm_")
                 || key.contains("a11y")
+                || key.starts_with("config_notice")
                 // These visible notice labels also name live regions and buttons.
                 || matches!(
                     key.as_str(),
-                    "process_exited"
+                    "hint_legend"
+                        | "hint_legend_plain"
+                        | "link_open_click"
+                        | "link_open_command_click"
+                        | "link_open_control_click"
+                        | "picker_theme_for_light_appearance"
+                        | "picker_theme_for_dark_appearance"
+                        | "process_exited"
                         | "process_exit_pending"
                         | "process_restart"
                         | "process_close"
-                        | "config_notice"
-                        | "config_notice_more"
                         | "notice_dismiss"
+                        | "osc52_copied"
+                        | "osc52_denied_read"
+                        | "osc52_denied_write"
                 )
         })
         .cloned()
@@ -316,7 +325,7 @@ fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
         }
     }
     assert_eq!(
-        descriptions, 58,
+        descriptions, 63,
         "every curated field and keybind has its own description"
     );
 }

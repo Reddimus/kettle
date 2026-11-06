@@ -96,8 +96,9 @@ unicode-segmentation.workspace = true
 # ttf-parser route stays out of the graph and the aarch64 cross-build stays
 # free of C font libs (the crossfont variant needs
 # FreeType). Trade-off: the CSD bar renders buttons but no title text. The
-# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title, and
-# kettle's own tab bar labels the window content. Do NOT switch this to
+# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title. Kettle
+# draws its own header with linux-titlebar-style=tabs on Mutter-based desktops
+# (window created undecorated); native retains this titleless fallback. Do NOT switch this to
 # `wayland-csd-adwaita` (ab_glyph); the `winit_wayland_csd_stays_notitle`
 # drift guard in src/app/tests.rs pins it.
 winit = { version = "0.30.13", default-features = false, features = [
@@ -197,8 +198,8 @@ objc2-06 = { package = "objc2", version = "0.6" }
 # titlebar background with Kettle's palette. The application icon is compiled
 # into the bundle by Xcode's asset pipeline, so runtime AppKit icon mutation is
 # deliberately not enabled here.
-objc2-app-kit = { version = "0.2", features = ["libc", "block2", "NSAccessibility", "NSApplication", "NSColor", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSScreen", "NSTextInputContext", "NSView", "NSWindow", "NSWorkspace"] }
-objc2-foundation = { version = "0.2", features = ["block2", "NSDictionary", "NSNotification", "NSOperation", "NSString", "NSThread", "NSUserDefaults", "NSValue"] }
+objc2-app-kit = { version = "0.2", features = ["libc", "block2", "NSAccessibility", "NSApplication", "NSAppearance", "NSColor", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSScreen", "NSTextInputContext", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.2", features = ["block2", "NSDictionary", "NSDistributedNotificationCenter", "NSNotification", "NSOperation", "NSString", "NSThread", "NSUserDefaults", "NSValue"] }
 objc2-core-foundation-03 = { package = "objc2-core-foundation", version = "0.3.2" }
 objc2-core-graphics-03 = { package = "objc2-core-graphics", version = "0.3.2" }
 objc2-foundation-03 = { package = "objc2-foundation", version = "0.3.2" }

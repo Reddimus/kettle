@@ -299,7 +299,7 @@ update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
 Edit, View and Window menus, actions, separators, enabled state and live Cmd
-shortcut hints. AppKit installation replaces winit's startup menu on `resumed`
+shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. Menu text follows the configured
 language on reload; other UI surfaces still require a restart. The root NSMenu
@@ -476,6 +476,47 @@ fixtures and includes the tests split out of its original body, preserving their
 `app::tests` names and shared scope. Existing standalone test modules keep their
 names too. Guards that read the App's source use `app_source()`, which joins
 app.rs and all production modules, or include the specific owning module.
+
+### Clipboard backends
+
+`kettle-ui::clipboard` selects its text backend from the window's raw display
+handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
+(`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
+A compositor reports the selection to one data device per client (Mutter sends
+it only to the first one created), and the bridge already owns that device for
+drag and drop, so the clipboard shares it instead of binding a second device
+that would never hear of a selection. The bridge records the current offer, its
+preferred text type and the latest input serial while it dispatches on the UI
+thread. Reads run on the clipboard worker: they send `receive` for the recorded
+offer and read the pipe; Wayland proxies are safe to use from that thread. A
+selection Kettle owns is answered from memory, because its `send` event is
+dispatched on the UI thread that is waiting for the read. Writes create a data
+source on the bridge queue, authorized by the latest input serial; `send`
+requests are answered by a short-lived writer thread that gives up after five
+seconds. Clipboard availability refreshes OSC 52's DA1 capability for panes
+that already exist.
+
+CLIPBOARD and PRIMARY stay separate for OSC 52. Automatic selection copy sets
+both; middle-click retains its PRIMARY-first text behavior. All text paths,
+including modal fields, search, links and preview-source copy, share the same
+native worker. Its queue allows one running operation and one waiting operation;
+a full queue refuses immediately. Stores wait for the native queue's
+acknowledgment, so a stalled compositor cannot accumulate unbounded pending
+text; an expired store is refused before it changes a selection. Blocking Wayland loads run off the UI thread,
+with the same two-second absolute deadline used for arboard reads. Each request
+owns its reply channel, so a timed-out result cannot answer a later request.
+The Wayland read caps bytes while it reads the selection pipe and checks the
+deadline before every read; invalid UTF-8 is replaced after the cap. Local paste keeps its 4 MiB cap and OSC 52 its 1 MiB cap (with the
+existing extra-byte acquisition allowance); policy, ordered journal, marker
+scrubbing, bracketed paste and paste protection stay in their existing layers.
+
+Images and file lists remain on arboard. This build enables its image support
+but not its optional Wayland data-control backend, so those formats require X11
+or XWayland on Linux. With only native Wayland text available, bitmap paste
+logs that it is unavailable and falls through to text without materializing a
+file. Preview image copies also retain their arboard worker. Native Wayland
+text requires focus and PRIMARY requires the compositor's primary-selection
+protocol; no data-control extension is required.
 
 ### Private clipboard images and video receipts
 
@@ -1781,6 +1822,23 @@ as the title. Empty strip space starts a native window drag; a double-click
 uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs retain their separate
 reorder/tear-off/re-dock gestures.
 
+Solid tab/status chrome derives from `theme.background` (24% darker for dark
+backgrounds, 6% for light ones); wallpaper modes still resolve through
+`chrome-background`. Horizontal inactive separators and rounded hover/pressed
+fills derive from strip and foreground with a 1.5:1 floor. Window focus from
+`Overlay::window_focused` dims tab text and controls with a 3:1 floor (4.5:1
+when focused), and replaces the active accent with a neutral line. The existing
+focus-event redraw and retained text-area damage keys repaint both transitions.
+`app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
+square (growing with the band height), a 4 pt
+inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
+is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
+clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
+band height. Tooltips use translated action names and the live keymap shortcut,
+with shaped natural chrome metrics and window-clamped placement. Shortcut-hint
+lanes and shaping both use natural chrome advance, independent of terminal
+`cell-width`, including fixed-height macOS titlebar fitting.
+
 `native`, non-top tabs and disabled tabs keep the separate AppKit caption and
 content view below it. Borderless windows retain their sharp-alpha fallback.
 Config reload synchronizes the native style before laying out the content.
@@ -2482,7 +2540,8 @@ mode and reset default of existing terminals. It is separate from saved cursor
 state. Changing the mode does not reinterpret existing cells. With the mode
 disabled, output keeps its per-codepoint layout.
 
-The engine uses generated Unicode 18 GCB, InCB and Extended_Pictographic tables,
+The engine uses generated Unicode 18 GCB, InCB, Extended_Pictographic,
+Emoji_Modifier_Base, emoji-variation base and joining General_Category=Mc tables,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
 state survives PTY splits independently of retained text. The product, vendor
 validation and fuzz graphs all pin Unicode 18 width tables in `unicode-width` 0.2.3;
@@ -2493,12 +2552,30 @@ A cluster occupies its leading cell and its recorded wide spacer, with at most
 30 trailing scalars in the existing cell extra storage. Beyond that cap, the
 latest variation selector, ZWJ and its following spacing scalar, or first
 spacing scalar replace the final retained slots; other excess scalars are
-dropped while boundary state still advances.
-The first scalar's attributes apply to the whole cell. A late VS16 widens once,
-wrapping the complete cluster when needed and inserting only the additional
-spacer in insertion mode. At a nonwrapping right edge, it stays clipped rather
-than creating an orphan wide cell. VS15 changes presentation without shrinking
-an already-wide cluster. Cursor/grid edits and ignored Unicode controls end
+dropped while boundary and width state still advance. The pure cluster-width
+calculator and streaming input share the same finite width accumulator. A
+General_Category=Mc mark after a measured base makes the cluster two cells;
+other positive-width scalars add their widths, capped at two, including Indic
+consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
+keep the first emoji's width, and regional-indicator pairs remain two cells.
+VS16 widens registered emoji sequences. An immediately following VS15 narrows
+a default emoji only if it has a registered text variation sequence.
+
+An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
+the boundary context. Emoji modifier bases and Extended_Pictographic bases
+retain their attached modifiers. One additional terminal tailoring joins a
+Sinhala al-lakuna + ZWJ + Sinhala consonant continuation (including
+rakaransaya): the pinned UCD excludes Sinhala consonants from InCB=Consonant.
+The unmodified UAX boundary state still passes the official vectors.
+
+The first scalar's attributes apply to the whole cell. A changed width
+repaints the anchor and its spacer, wrapping the complete cluster when needed
+and inserting only the additional spacer in insertion mode. At a nonwrapping
+right edge, an already-placed narrow cluster stays clipped with its actual
+text, without a synthetic selector or an orphan wide cell. Narrowing clears
+the spacer, backs up the cursor, cancels pending wrap and removes only the
+extra inserted cell in insertion mode. DECSLRM bounds all these operations.
+Cursor/grid edits and ignored Unicode controls end
 the append context; REP repeats
 the complete retained cluster and leaves its final cell open to combining input.
 
@@ -3423,6 +3500,19 @@ passes are cheap no-ops while idle (empty/unchanged buffers). The
 glyphon batches glyphs by atlas, not by renderer, so each pass reuses
 already-cached glyphs (the cursor glyph is part of the visible pane
 text, so its bitmap is already resident).
+
+Terminal highlight ink resolves after ANSI, hyperlink and dim attributes,
+against the opaque fill actually painted. Readable user ink precedes readable
+cell ink; automatic fallback chooses the highest contrast of the theme's
+selection foreground and neutrals plus white and black. Per-frame colour caches
+include this decision and inactive selection fills. Highlight fills in dimmed
+splits and highlight decorations use the post-dimmer decoration pass, with
+fills before underlines and strikeouts. Unfocused cursors use steady quads
+outside the focused cursor's blink range; `unchanged` solid cursors recolour
+their pane glyph directly. Only the focused blinking block uses the separate
+cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay
+in the terminal engine; Kettle's bounded copy helper applies the same policy
+to manual copy, copy on selection and vi yank.
 
 ### Cursor patch
 
@@ -4434,11 +4524,22 @@ launch follows `restore-session = auto` by default. On macOS, `auto` reads
 `NSQuitAlwaysKeepsWindows` from the app's NSUserDefaults domain, then the global
 domain. A true value keeps windows; false corresponds to the checked "Close
 windows when quitting an application" box. If neither domain sets a value,
-windows are kept. On other platforms `auto` is false. `true` always enables
+windows are kept. On Linux `auto` restores (no system setting exists; GNOME's
+Ptyxis restores by default); on Windows it is false. `true` always enables
 restore and `false` always opens fresh; legacy boolean spellings still work.
 `--restore` enables restore for one launch and `--layout NAME` remains independent.
 The session is saved only in restore mode, so a fresh window never clobbers a
 saved layout. Privacy rules and crash recovery prompts do not change.
+
+Save Layout reuses the title editor's single-line field and all of its layout,
+IME, hit-test, control-geometry and accessibility projections. It captures the
+same multi-window snapshot as automatic saving, excluding the quick terminal,
+and uses the named-layout writer with strict filename validation and visible
+failure feedback. It does not change the current automatic save destination.
+Profile launches use separate processes because configuration is application-wide.
+The dropdown, native Shell submenu and palette share profile launch entries from
+`Config::list_profiles`; the palette captures names on open so row activation
+and geometry use the same list throughout that interaction.
 
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
@@ -4696,7 +4797,20 @@ the original pane, and the broadcast scope and recipient set. Consent fails
 closed if that scope changes. Queued input behind a paste cannot pass through
 an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
 `input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
+`paste_safety` scans Unicode code points in linear time for the summary and
+control-removing alternative. It removes whole escape/control strings, retaining
+TAB/CR/LF even within malformed strings. Preview work is capped at 160 visible
+characters and three lines. The fourth action uses the same confirmation layout
+for painting, pointer input, AccessKit and `ui_geometry`; it adds no IME caret.
 Path pastes retain their stricter rejection of control characters in filenames.
+
+OSC 52 operations remain ordered in the terminal clipboard journal. The UI
+records successful platform clipboard writes in per-pane notice state, with a
+five-second successful-copy interval and separate lifetime read/write denial
+latches. The pane's dismissible notice uses the persistent notice painter and
+its shared word wrapper, geometry, hit tests and polite AccessKit status. Held
+process banners take precedence. Notice content contains counts and policy text,
+never clipboard contents, and never moves terminal or IME geometry.
 
 Context menus keep ancestor levels and their physical anchors while a submenu
 is open. The app supplies each panel to the renderer in stacking order and
@@ -4783,3 +4897,92 @@ canonicalizes shifted US punctuation to base keys plus Shift before persistence
 and native registration.
 Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
 desktop shortcuts invoking the CLI.
+
+
+Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
+focused terminal rectangle. `link_status_layout` shares destination elision and
+avoidance bounds across painting, AccessKit and `ui_geometry`; hint chips share
+`hint_label_rect`. The legend wraps and moves clear of bottom-row chips when
+space permits. All are passive overlays, so they reserve no terminal cells and
+do not change pointer grid mapping or terminal IME placement. A hover records
+`LinksScanKey` at native pointer movement and becomes invalid on viewport or
+focus changes. Typing, wheel input, pointer exit and focus events explicitly
+dismiss it. Modifier presses preserve it so the advertised opening gesture
+remains visible. Hint actions and their legend share `hint_action`; OSC 8
+captions use the URI rather than their displayed text.
+
+## Disposable session content
+
+`kettle-core::restore` snapshots the primary grid (including its history while
+an alternate screen is active), generating printable text and SGR from cells.
+The raw PTY stream is never persisted for this feature. Hyperlinks and other
+controls cannot enter the snapshot. Validated UTF-8 cell boundaries and each
+cell's grapheme mode preserve widths even across DEC 2027 changes; replay
+generates its own mode controls, then restores the new shell's configured mode.
+Rows, encoded bytes and pane/window counts
+are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
+sidecar next to the session layout through `kettle-state` private durable writes.
+The digest prevents applying an old sidecar to a changed layout; it is not an
+authentication mechanism. Content remains untrusted and is validated again on
+load. The existing coalescing session writer serializes layout, content and
+output-disable cleanup; an interrupted pair safely loses content rather than
+applying it to another layout.
+
+Restore consumes content in window, tab and DFS leaf order. Each terminal
+parses validated content and a localized divider before its PTY reader or child
+starts, then resets attributes for the fresh shell. Restored rows therefore use
+the normal grid, scrollback, search, selection, accessibility, control geometry
+and IME paths. No chrome or terminal rectangle changes. A successful startup
+restore removes its sidecar; later session saves capture the current grid again.
+
+System appearance is observed independently of a window's rendered palette.
+Linux appearance and reduced motion share a bounded XDG Settings worker
+transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
+owner changes invalidate state, and retries and shutdown stay off the UI thread.
+macOS observes system appearance separately because forcing NSWindow appearance
+to match the palette suppresses winit's window appearance notifications.
+Both sources enter the existing theme synchronization and all-window redraw
+path; colour-scheme reports use the resulting palette's lightness.
+
+### Linux Wayland header bar
+
+`linux-titlebar-style = tabs` reuses the macOS titlebar strip when Wayland
+negotiates client decorations, with a fixed 46 logical pixel height. The
+shared `WindowState::macos_titlebar_tabs` flag retains its historical name;
+`linux_titlebar` identifies windows that also need Kettle window controls.
+Top tabs, their dropdown and new-tab button share the header with reserved
+button lanes (three right-side buttons by default). `TabBar::window_controls`
+carries the same physical rectangles, localized names and hover/press state
+to painting, pointer routing, AccessKit and
+`kettle ctl ui_geometry`. Terminal layout, status/search bands, title editing
+and IME candidate positioning continue to use the shared content area. Startup
+size correction adds the header before renderer creation, preserving explicit
+grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
+28-point targets, rounded `chrome::tab_detail` hover/pressed fills and
+`Colors::tab_text` unfocused dimming, like the current New Tab controls. Glyphs
+retain 4.5:1 contrast when focused and 3:1 when dimmed. Outer corners remain
+square.
+
+Stock winit cannot report whether the compositor granted server-side
+decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`
+names GNOME or another Mutter-based desktop (which offer no server frame), the
+window is created without decorations and Kettle draws the header; elsewhere
+winit keeps negotiating the compositor's frame, and X11 keeps the window
+manager's. Once the window exists, its display handle confirms Wayland, and
+reloads keep `is_decorated()` equal to "Kettle does not own the header". Without
+a tiled-state query, maximized and fullscreen windows drop the resize band. No
+text renderer or font dependency is added.
+
+Empty-space primary presses call `drag_window`; a second nearby press within
+400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
+presses are consumed. The 6 logical pixel inner resize band takes priority over
+header input and uses `drag_resize_window`, except when maximized, tiled,
+fullscreen or non-resizable. Native window controls activate on release over
+the originally pressed control. Close follows the native `CloseRequested`
+confirmation policy; AccessKit exposes the same actions. Synthetic control
+input can activate buttons but does not impersonate a compositor drag serial.
+The shared `portal_settings.rs` watcher also reads GNOME button-layout beside
+reduced-motion and color-scheme, with bounded parsing and live updates.
+Left/right lanes, order and omissions
+share the control geometry. Missing or invalid settings use the default right
+minimize, maximize/restore, close order.

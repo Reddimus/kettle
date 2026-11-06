@@ -19,7 +19,7 @@ pub struct Theme {
     /// Whether a valid selection foreground was supplied by the theme or config.
     pub selection_foreground_explicit: bool,
     /// Whether the user's config (not the theme) set the selection foreground.
-    /// A user's colour is drawn as given; a theme's must still be readable.
+    /// A readable user's colour takes precedence over cell and theme ink.
     pub selection_foreground_user: bool,
     /// The theme's UI-chrome accent (focus border, active tab,
     /// status bar). Most themes don't declare one and default it to `palette[4]`

@@ -27,12 +27,14 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod agent_plugin;
+mod appearance;
 #[cfg(unix)]
 mod shell_integration;
 pub use agent_plugin::{ClaudeStatus, claude_status};
 /// Explicit native agy plugin staging.
 pub mod agy_plugin;
 mod app;
+mod clipboard;
 pub mod codex_shell;
 mod held_buttons;
 #[cfg(all(test, unix))]
@@ -45,6 +47,7 @@ pub mod startup_trace;
 // Per-window state container. `App` keeps only process-global state;
 // everything tied to one OS window lives here.
 mod window_accent;
+mod window_buttons;
 mod window_state;
 // The cursor blink's timeline, shared by the GPU scheduler and the macOS
 // Core Animation layer that can take the blink over.
@@ -64,6 +67,7 @@ mod lua;
 mod lua_pattern;
 #[cfg(target_os = "macos")]
 mod macos_display;
+mod paste_safety;
 // The Core Animation layer that blinks the cursor on macOS. Never exists
 // elsewhere.
 mod macos_cursor_layer;
@@ -82,10 +86,13 @@ mod notifications;
 mod owned_dir;
 mod pane_partition;
 mod paste_image;
+#[cfg(target_os = "linux")]
+mod portal_settings;
 mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;
 mod session;
+mod session_content;
 mod settings;
 mod text_editor;
 // In-app release checker. It notifies of a newer release, or installs one under

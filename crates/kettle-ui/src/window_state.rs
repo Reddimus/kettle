@@ -845,7 +845,11 @@ pub(crate) struct WindowState {
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
     pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
+    // Shared titlebar-strip mode; the name predates Linux CSD support.
     pub(crate) macos_titlebar_tabs: bool,
+    pub(crate) linux_titlebar: bool,
+    pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
+    pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
@@ -987,6 +991,7 @@ pub(crate) struct WindowState {
     /// app.rs (`scan_links` re-scans only on output, resize, scroll, focus or
     /// cwd).
     pub(crate) links_scan_key: Option<LinksScanKey>,
+    pub(crate) link_hover_key: Option<LinksScanKey>,
     /// The buttons whose press a pane's program received, each with that
     /// pane, until its one release goes there too.
     pub(crate) held_buttons: crate::held_buttons::HeldButtons,
@@ -1001,6 +1006,8 @@ pub(crate) struct WindowState {
     /// over the fuzzy-ranked configured-host list; a query with no match still
     /// connects to the typed target on Enter.
     pub(crate) ssh_input: Option<(crate::text_editor::TextEditor, usize)>,
+    /// Profile names captured when opening the palette; all projections use this list.
+    pub(crate) palette_profiles: Vec<String>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
@@ -1162,6 +1169,8 @@ pub(crate) struct WindowState {
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
     /// actually changes; `tab_bar()` forwards it to the renderer.
+    pub(crate) pressed_new_tab: bool,
+    pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
     /// The pointer is over the tab bar's update chip.
@@ -1503,6 +1512,9 @@ impl WindowState {
             native_fullscreen: None,
             native_caption_drag: None,
             macos_titlebar_tabs: false,
+            linux_titlebar: false,
+            pressed_window_control: None,
+            hovered_window_control: None,
             titlebar_click: None,
             native_material: None,
             accessibility: None,
@@ -1553,11 +1565,13 @@ impl WindowState {
             scrollbar_hover: None,
             dragging_split: None,
             links_scan_key: None,
+            link_hover_key: None,
             held_buttons: crate::held_buttons::HeldButtons::default(),
             last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
+            palette_profiles: Vec::new(),
             settings_nav: None,
             settings_text_edit: None,
             settings_restart_pending: false,
@@ -1598,6 +1612,8 @@ impl WindowState {
             dock_preview: None,
             hovered_close_idx: None,
             hovered_tab_idx: None,
+            pressed_new_tab: false,
+            pressed_new_tab_menu: false,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
             context_menu_a11y_label: None,

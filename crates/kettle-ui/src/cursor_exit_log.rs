@@ -271,7 +271,7 @@ impl CursorExitLog {
     }
 }
 
-fn is_modifier(logical: &Key, physical: PhysicalKey) -> bool {
+pub(crate) fn is_modifier(logical: &Key, physical: PhysicalKey) -> bool {
     matches!(
         logical,
         Key::Named(

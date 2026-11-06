@@ -61,3 +61,49 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
         }
     }
 }
+
+/// A switch's label starts after the knob when it is off (the knob sits at
+/// the left) and at the chip's inset when on (the knob is at the right), and
+/// it fits beside the knob in both languages' longest words.
+#[test]
+fn switch_labels_clear_the_knob() {
+    use super::{SettingsControl, SettingsTextKind};
+    let row = |value: &str, on: bool| SettingsRow {
+        label: "Cursor blink".into(),
+        value: value.into(),
+        control: SettingsControl::Toggle(on),
+        ..Default::default()
+    };
+    let cases = [
+        ("On", true),
+        ("Off", false),
+        ("Desactivado", true),
+        ("Desactivado", false),
+    ];
+    let set = SettingsOverlay {
+        categories: vec!["Appearance".into()],
+        rows: cases.iter().map(|(text, on)| row(text, *on)).collect(),
+        ..Default::default()
+    };
+    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let items = super::settings::settings_text_items(&set, &layout, 8.0);
+    for (index, (text, on)) in cases.into_iter().enumerate() {
+        let chip = layout.rows[index].chip_rect;
+        let knob = super::settings::settings_toggle_knob(chip.3);
+        let value = items
+            .iter()
+            .find(|item| item.kind == SettingsTextKind::Value(index))
+            .unwrap()
+            .rect;
+        let (start, room_end) = if on {
+            (chip.0 + 4.0, chip.0 + chip.2 - knob - 3.0)
+        } else {
+            (chip.0 + 4.0 + knob + 2.0, chip.0 + chip.2)
+        };
+        assert_eq!(value.0, start, "{text} {on}");
+        assert!(
+            value.0 + text.len() as f32 * 8.0 <= room_end,
+            "{text} {on}: {value:?} in {chip:?}"
+        );
+    }
+}

@@ -17,6 +17,8 @@ mod fonts;
 mod geometry;
 mod gpu;
 mod labels;
+mod link_status;
+pub use link_status::{PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout};
 mod overlays;
 mod screenshot;
 mod scrollback;
@@ -110,9 +112,11 @@ pub use overlays::{
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
     MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
     TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    format_media_size, media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    notification_geometry_with_notices, persistent_notice_geometry, tab_drag, theme_picker_prefix,
-    title_edit_prefix, update_toast_geometry,
+    WindowControl, WindowControlButton, format_media_size, hint_label_rect,
+    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
+    notification_geometry_with_notices, persistent_notice_geometry,
+    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
+    toast_text_rows, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -156,15 +160,15 @@ pub use settings::{
     SettingsRow, SettingsRowGeometry, settings_hit_test, settings_hit_test_with_text_width,
     settings_layout, settings_panel_geometry, settings_value_rect,
 };
-use settings::{SettingsTextKind, settings_text_items};
+use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
 };
 #[cfg(test)]
 use terminal::{
-    ShapedRow, cursor_focus_gate, ime_cursor_shape, push_cell_decorations, push_underline_quads,
-    run_attrs, search_highlight_at,
+    ShapedRow, ime_cursor_shape, push_cell_decorations, push_underline_quads, run_attrs,
+    search_highlight_at,
 };
 use theme::{
     CellHighlight, CompletionPalette, MinimumContrastCache, background_has_wallpaper,
@@ -349,6 +353,9 @@ pub struct Renderer {
     /// when this system has one. `None` leaves such cells on the platform
     /// fallback cascade.
     text_symbol_family: Option<&'static str>,
+    /// The colour-emoji face to request for a grapheme carrying U+FE0F, when
+    /// this system has one.
+    emoji_family: Option<&'static str>,
     grapheme_text_cache: fonts::GraphemeTextCache,
     swash: SwashCache,
     atlas: TextAtlas,
@@ -529,6 +536,7 @@ pub struct Renderer {
     tab_buffers: Vec<TextBuffer>,
     tab_hint_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
+    pane_status_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
     /// across openings to amortize allocation; trimmed when the row
     /// count shrinks for a smaller menu.
@@ -578,6 +586,8 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
+    tab_tooltip_buffer: TextBuffer,
+    tab_tooltip_text: String,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -862,12 +872,14 @@ impl Renderer {
         // Terminator parity, per-pane-titlebar: hoisted alongside
         // buffer allocation so the titlebar text-setting block below
         // can reference it. Same condition as the titlebar quad
-        // render (see `pick_titlebar_bg`; cfg.show_titlebar && >1 pane).
-        let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
-            ch + 6.0
-        } else {
-            0.0
-        };
+        // render (see `pick_titlebar_bg`): the layout gave a pane a titlebar,
+        // as it does in a split and for a zoomed pane of one.
+        let pane_titlebar_h: f32 =
+            if cfg.show_titlebar && panes.iter().any(|p| p.titlebar.is_some()) {
+                ch + 6.0
+            } else {
+                0.0
+            };
         // The chrome-label caches below compare TEXT only, which is sound while
         // the font family is stable, so invalidate them all once when it
         // changes (config reload with a new `font-family`).
@@ -1013,21 +1025,30 @@ impl Renderer {
                 buf.set_metrics(metrics);
                 buf.set_size(Some(rw), Some(titlebar_h));
                 // `Buffer::set_text` re-shapes unconditionally, so gate it on
-                // text change and a steady title costs nothing.
-                if self.pane_titlebar_texts[i] != label {
+                // text change and a steady title costs nothing. The focused
+                // pane's title is bold as well as tinted, a cue that does not
+                // rest on colour alone; a NUL, which no title holds, marks it
+                // in the key so a focus change reshapes.
+                let key = if pv.focused {
+                    format!("\u{0}{label}")
+                } else {
+                    label.clone()
+                };
+                if self.pane_titlebar_texts[i] != key {
                     // Use Advanced shaping, like every other chrome buffer. The
                     // title is shell-controlled OSC 0/2 text (agents such as
                     // Claude Code lead with a status glyph) and the label can
                     // carry the 🔔 bell. Basic skips cosmic-text's platform
                     // font fallback (Segoe UI Emoji/Symbol, Noto), so any
                     // glyph outside the bundled Nerd Font would render as tofu.
-                    buf.set_text(
-                        &label,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    self.pane_titlebar_texts[i] = label;
+                    let attrs = Attrs::new().family(Family::Name(&family));
+                    let attrs = if pv.focused {
+                        attrs.weight(Weight::BOLD)
+                    } else {
+                        attrs
+                    };
+                    buf.set_text(&label, &attrs, Shaping::Advanced, None);
+                    self.pane_titlebar_texts[i] = key;
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
@@ -1227,9 +1248,8 @@ impl Renderer {
         }
 
         // The opaque fill color for the window chrome strips (tab bar, status
-        // bar, new-tab button). It differs from the theme's `palette[8]` only
-        // when a wallpaper is in use AND `chrome-background` asks for it. See
-        // `resolve_chrome_bg`.
+        // bar, new-tab button). Solid strips derive from the terminal background;
+        // wallpaper strips follow `chrome-background`.
         let chrome_strip_bg = resolve_chrome_bg(cfg, theme, bg_frame_avg);
 
         // Status-bar background. The text is uploaded alongside
@@ -1260,7 +1280,9 @@ impl Renderer {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
-            let tab_accent = if tabbar.broadcast {
+            let tab_accent = if !overlay.window_focused {
+                chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
+            } else if tabbar.broadcast {
                 theme.palette[3]
             } else {
                 self.ui_accent(cfg, theme)
@@ -1414,7 +1436,11 @@ impl Renderer {
             // `+` button.
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
-            let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
+            let (bx, bw) = if mw > 0.0 {
+                (mx, nx + nw - mx)
+            } else {
+                (nx, nw)
+            };
             quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
             let accent = if tabbar.broadcast {
                 theme.palette[3]
@@ -1438,12 +1464,20 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                let hover = color::over(chrome_strip_bg, theme.foreground, 0.06, false);
-                for (bounds, hovered) in [
-                    (tabbar.new_tab_menu, tabbar.hovered_new_tab_menu),
-                    (tabbar.new_tab, tabbar.hovered_new_tab),
+                for (bounds, hovered, pressed) in [
+                    (
+                        tabbar.new_tab_menu,
+                        tabbar.hovered_new_tab_menu,
+                        tabbar.pressed_new_tab_menu,
+                    ),
+                    (
+                        tabbar.new_tab,
+                        tabbar.hovered_new_tab,
+                        tabbar.pressed_new_tab,
+                    ),
                 ] {
                     if hovered {
+                        let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
@@ -1779,6 +1813,7 @@ impl Renderer {
                 } else {
                     &[]
                 },
+                if pv.focused { &overlay.links } else { &[] },
                 &mut quads,
                 &mut decorations,
                 &mut pane_bases,
@@ -1846,26 +1881,6 @@ impl Renderer {
                 }
             }
 
-            // Hyperlink underlines, focused pane only (brighter on hover).
-            for ln in &overlay.links {
-                if !pv.focused {
-                    break;
-                }
-                let col = if ln.hover {
-                    theme.palette[6]
-                } else {
-                    theme.palette[4]
-                };
-                quads.push(rect(
-                    grid_origin.0 + ln.col as f32 * cw,
-                    grid_origin.1 + ln.row as f32 * ch + ch - 1.5,
-                    ln.width as f32 * cw,
-                    1.5,
-                    col,
-                    1.0,
-                ));
-            }
-
             // Search coordinates belong to the pane captured when the lane
             // opened, even if focus changes through automation or pane reap.
             if pane_has_search {
@@ -1873,10 +1888,22 @@ impl Renderer {
                 // Underline the current match as well, so even identical theme fills
                 // leave the current result distinct from the other matches.
                 for hl in overlay.highlights.iter().filter(|hl| hl.active) {
-                    let fill = cfg.search_background.unwrap_or(theme.palette[3]);
-                    let ink = color::with_min_contrast(theme.foreground, fill, 3.0);
+                    let ink = theme::highlight_colors_cached(
+                        CellHighlight::Search(true),
+                        cfg,
+                        theme,
+                        theme.foreground,
+                        theme.background,
+                        &mut self.minimum_contrast_cache,
+                    )
+                    .0;
                     let height = (2.0 * self.scale).min(ch);
-                    quads.push(rect(
+                    let target = if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 {
+                        &mut decorations
+                    } else {
+                        &mut quads
+                    };
+                    target.push(rect(
                         grid_origin.0 + hl.col as f32 * cw,
                         grid_origin.1 + (hl.row + 1) as f32 * ch - height,
                         hl.width as f32 * cw,
@@ -1885,18 +1912,20 @@ impl Renderer {
                         1.0,
                     ));
                 }
+            }
+            if pv.focused {
                 // Quick-select hint label chips, with the menus on top of
                 // everything, inline cards included: a card's label sits on
                 // its poster and provenance tab. Hint mode closes any menu
                 // first, so nothing else is up there. A chip is cut to its
                 // pane, as its label is, so one at the last column never
                 // covers the next pane.
-                for hint in &overlay.hint_labels {
-                    let n = hint.label.chars().count().max(1) as f32;
-                    let left = grid_origin.0 + hint.col as f32 * cw;
-                    let top = grid_origin.1 + hint.row as f32 * ch;
-                    let (x0, y0) = (left.max(rx), top.max(ry));
-                    let (x1, y1) = ((left + n * cw).min(rx + rw), (top + ch).min(ry + rh));
+                for (index, hint) in overlay.hint_labels.iter().enumerate() {
+                    let (x0, y0, w, h) =
+                        overlay.hint_bounds.get(index).copied().unwrap_or_else(|| {
+                            hint_label_rect(hint, pv.terminal, (cw, ch), (pad_x, pad_y))
+                        });
+                    let (x1, y1) = (x0 + w, y0 + h);
                     if x1 > x0 && y1 > y0 {
                         menu_q.push(rect(
                             x0,
@@ -2395,7 +2424,7 @@ impl Renderer {
                 tab_metrics.line_height,
             )
         } else {
-            (metrics, cw, ch)
+            (metrics, self.overlay_text_cell_width(), ch)
         };
         // `+` and `▾` are small shapes at text size; draw them larger so the
         // strip's controls read as controls, capped to the strip height.
@@ -2647,6 +2676,34 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
+            self.tab_tooltip_buffer.set_metrics(tab_metrics);
+            self.tab_tooltip_buffer
+                .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
+            if self.tab_tooltip_text != *text {
+                self.tab_tooltip_buffer.set_text(
+                    text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.tab_tooltip_text.clone_from(text);
+            }
+            self.tab_tooltip_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            let width = self
+                .tab_tooltip_buffer
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0, f32::max);
+            let lines = self.tab_tooltip_buffer.layout_runs().count().max(1) as f32;
+            tab_strip::tooltip_rect(
+                tab_strip::tooltip_anchor(tabbar),
+                (sw, sh),
+                (width, tab_ch * lines),
+                self.scale,
+            )
+        });
         let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
         while self.update_toast_buffers.len() < toast_count * 3 {
             self.update_toast_buffers
@@ -3089,6 +3146,40 @@ impl Renderer {
                 .shape(font_system, metrics, &family, lane, &geometry, glyph_width);
         }
 
+        self.pane_status_buffers
+            .truncate(overlay.pane_statuses.len());
+        while self.pane_status_buffers.len() < overlay.pane_statuses.len() {
+            self.pane_status_buffers
+                .push(TextBuffer::new(&mut self.font_system, metrics));
+        }
+        for (status, buffer) in overlay
+            .pane_statuses
+            .iter()
+            .zip(&mut self.pane_status_buffers)
+        {
+            buffer.set_metrics(metrics);
+            buffer.set_size(Some((status.rect.2 - 12.0).max(0.0)), Some(status.rect.3));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_text(
+                &status.text,
+                &Attrs::new().family(Family::Name(&family)),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
+            menu_q.insert(
+                0,
+                rect(
+                    status.rect.0,
+                    status.rect.1,
+                    status.rect.2,
+                    status.rect.3,
+                    theme.background,
+                    1.0,
+                ),
+            );
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -3194,17 +3285,12 @@ impl Renderer {
             .chain(&overlay.notices)
             .enumerate()
         {
-            let geometry = toast.geometry;
+            let geometry = toast.control_geometry();
             let text_line_height = self.overlay_text_line_height();
             let alpha = toast.opacity.clamp(0.0, 1.0);
             let accent = self.ui_accent(cfg, theme);
             let palette = update_toast::palette(theme, accent, &mut self.chrome_colors);
-            toast_surfaces.extend(update_toast::surfaces(
-                geometry,
-                &palette,
-                alpha,
-                toast.focused,
-            ));
+            toast_surfaces.extend(update_toast::surfaces(toast, &palette));
 
             for (i, area) in [geometry.message, geometry.details, geometry.close]
                 .into_iter()
@@ -3275,6 +3361,37 @@ impl Renderer {
                     bottom: (y + h) as i32,
                 },
                 default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                custom_glyphs: &[],
+            });
+        }
+        if let Some(bounds) = tab_tooltip {
+            let fill = theme.background;
+            let edge = chrome::tab_detail(fill, theme.foreground, false);
+            tab_strip::rounded_fill(
+                &mut menu_q,
+                bounds,
+                5.0 * self.scale,
+                (true, true),
+                (edge, 1.0),
+                None,
+            );
+            let (x, y, w, h) = bounds;
+            tab_strip::rounded_fill(
+                &mut menu_q,
+                (x + 1.0, y + 1.0, w - 2.0, h - 2.0),
+                4.0 * self.scale,
+                (true, true),
+                (fill, 1.0),
+                None,
+            );
+            let ink = self.chrome_colors.text(theme.foreground, fill);
+            menu_areas.push(TextArea {
+                buffer: &self.tab_tooltip_buffer,
+                left: x + 8.0 * self.scale,
+                top: y + 4.0 * self.scale,
+                scale: 1.0,
+                bounds: text_bounds_for_rect(bounds),
+                default_color: gc(ink),
                 custom_glyphs: &[],
             });
         }
@@ -3932,7 +4049,7 @@ impl Renderer {
                 let tab_background = if s.active {
                     default_bg
                 } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
-                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
+                    chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
                 } else {
                     chrome_strip_bg
                 };
@@ -3941,6 +4058,9 @@ impl Renderer {
                 } else {
                     self.chrome_colors.muted(fg, tab_background)
                 };
+                let title_fg =
+                    self.chrome_colors
+                        .tab_text(title_fg, tab_background, overlay.window_focused);
                 let (centered_left, label_top) = tab_strip::tab_label_origin(
                     s.title_rect,
                     &self.tab_texts[bi],
@@ -3962,6 +4082,11 @@ impl Renderer {
                 });
                 if let Some((hint_rect, _)) = &s.hint {
                     let hint_fg = self.chrome_colors.muted(fg, tab_background);
+                    let hint_fg = self.chrome_colors.tab_text(
+                        hint_fg,
+                        tab_background,
+                        overlay.window_focused,
+                    );
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,
@@ -4049,7 +4174,9 @@ impl Renderer {
                     };
                     (self.chrome_colors.muted(fg, background), background)
                 };
-                let close_fg = self.chrome_colors.text(close_fg, close_background);
+                let close_fg =
+                    self.chrome_colors
+                        .tab_text(close_fg, close_background, overlay.window_focused);
                 let (close_left, close_top) =
                     centered_text_origin((cx, cy, ccw, cch), (tab_cw, tab_ch));
                 areas.push(TextArea {
@@ -4073,9 +4200,9 @@ impl Renderer {
             } else {
                 fg
             };
-            let toolbar_background = |colors: &mut chrome::Colors, hovered| {
+            let toolbar_background = |colors: &mut chrome::Colors, hovered, pressed| {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
-                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
+                    chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed)
                 } else if hovered {
                     colors.surface(
                         chrome_strip_bg,
@@ -4087,8 +4214,14 @@ impl Renderer {
                     chrome_strip_bg
                 }
             };
-            let background = toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab);
-            let plus_fg = self.chrome_colors.text(plus_fg, background);
+            let background = toolbar_background(
+                &mut self.chrome_colors,
+                tabbar.hovered_new_tab,
+                tabbar.pressed_new_tab,
+            );
+            let plus_fg = self
+                .chrome_colors
+                .tab_text(plus_fg, background, overlay.window_focused);
             let plus_w = self
                 .tabbar_buffer
                 .layout_runs()
@@ -4129,9 +4262,14 @@ impl Renderer {
                 } else {
                     fg
                 };
-                let background =
-                    toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab_menu);
-                let arrow_fg = self.chrome_colors.text(arrow_fg, background);
+                let background = toolbar_background(
+                    &mut self.chrome_colors,
+                    tabbar.hovered_new_tab_menu,
+                    tabbar.pressed_new_tab_menu,
+                );
+                let arrow_fg =
+                    self.chrome_colors
+                        .tab_text(arrow_fg, background, overlay.window_focused);
                 let arrow_w = self
                     .new_tab_arrow_buffer
                     .layout_runs()
@@ -4179,7 +4317,11 @@ impl Renderer {
                     top,
                     scale: 1.0,
                     bounds,
-                    default_color: gc(self.chrome_colors.icon(fg, chrome_strip_bg)),
+                    default_color: gc(self.chrome_colors.tab_text(
+                        fg,
+                        chrome_strip_bg,
+                        overlay.window_focused,
+                    )),
                     custom_glyphs: &[],
                 });
             }
@@ -4214,6 +4356,30 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
+        for (status, buffer) in overlay.pane_statuses.iter().zip(&self.pane_status_buffers) {
+            menu_areas.push(TextArea {
+                buffer,
+                left: status.rect.0 + 6.0,
+                top: status.rect.1,
+                scale: 1.0,
+                bounds: text_bounds_for_rect(status.rect),
+                default_color: gc(theme.foreground),
+                custom_glyphs: &[],
+            });
+        }
+
+        for bounds in &overlay.hint_bounds {
+            overlays::exclude_menu_text(&mut menu_areas, *bounds);
+        }
+        tab_strip::window_control_quads(
+            &mut quads,
+            tabbar,
+            theme.foreground,
+            chrome_strip_bg,
+            self.scale,
+            overlay.window_focused,
+            &mut self.chrome_colors,
+        );
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {
@@ -4378,6 +4544,15 @@ impl Renderer {
                 self.config.format.is_srgb(),
             );
             let rail = self.chrome_colors.icon(acc, selected);
+            // Ink on a switched-on toggle: whichever theme end stands out more
+            // against the accent, for its knob and its label.
+            let on_ink = if color::contrast_ratio(theme.foreground, acc)
+                >= color::contrast_ratio(theme.background, acc)
+            {
+                theme.foreground
+            } else {
+                theme.background
+            };
             let rgba = |c: Rgb, a| {
                 [
                     c.r as f32 / 255.0,
@@ -4457,11 +4632,20 @@ impl Renderer {
                         4.0
                     },
                 );
+                // A switch's knob: at the right end when on, the left when
+                // off, so the state reads without the label or the colour.
+                if matches!(data.control, SettingsControl::Toggle(_)) {
+                    let (x, y, w, h) = row.chip_rect;
+                    let d = settings_toggle_knob(h);
+                    let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
+                    let fill = if on { on_ink } else { border };
+                    shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
+                }
             }
             let items = settings_text_items(set, &layout, self.overlay_text_cell_width());
             for (i, item) in items.iter().enumerate() {
                 let mut background = theme.background;
-                let foreground = theme.foreground;
+                let mut foreground = theme.foreground;
                 let mut muted = matches!(
                     item.kind,
                     SettingsTextKind::Muted | SettingsTextKind::Description(_)
@@ -4478,6 +4662,7 @@ impl Renderer {
                         if item.kind == SettingsTextKind::Value(index) {
                             if row.control == SettingsControl::Toggle(true) && !row.disabled {
                                 background = acc;
+                                foreground = on_ink;
                             }
                         } else if index == set.focused_row && !set.search_focused {
                             background = selected;
@@ -4774,6 +4959,7 @@ impl Renderer {
             self.status_bar_text.hash(&mut h);
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
+            tabbar.tooltip.hash(&mut h);
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
@@ -4782,6 +4968,9 @@ impl Renderer {
             }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
+            for status in &overlay.pane_statuses {
+                status.text.hash(&mut h);
+            }
             prepared_text_areas_damage_key(&areas).hash(&mut h);
             prepared_text_areas_damage_key(&ime_areas).hash(&mut h);
             // Completion buffers are retained while the card is static. Hash

@@ -191,6 +191,17 @@ impl App {
         {
             attrs = apply_macos_window_chrome(attrs, &self.cfg);
         }
+        #[cfg(target_os = "linux")]
+        if linux_titlebar_policy(&self.cfg)
+            && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty())
+            && desktop_lacks_server_decorations(
+                std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            )
+        {
+            // Kettle draws the header bar; `sync_macos_titlebar` confirms
+            // the window really is on Wayland once it exists.
+            attrs = attrs.with_decorations(false);
+        }
         // Terminator parity, terminatorlib/config.py:75 +
         // 78. `borderless` removes OS chrome; `always-on-top` keeps
         // the window above other windows. Best-effort per OS; failure
@@ -386,7 +397,12 @@ impl App {
             probe.startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
             probe.startup_cell = Some(fonts.cell);
             if let Some((width, height)) = self.startup_surface(&probe, monitor) {
-                startup_titlebar_band = Self::macos_titlebar_band(&probe);
+                startup_titlebar_band = Self::macos_titlebar_band(&probe).or_else(|| {
+                    cfg!(target_os = "linux").then_some(TitlebarBand {
+                        height: self.tab_bar_h(&probe),
+                        left: 0.0,
+                    })
+                });
                 attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
             }
         }
@@ -537,9 +553,20 @@ impl App {
                 // Route through the LATCHED waker constructor. A hand-rolled
                 // closure bypasses the wakeup-dedup latch, so restored panes
                 // would bring back the one-wakeup-per-read flood it eliminates.
+                let content = self.restore_content.pop_front().unwrap_or_default();
+                let divider = self
+                    .ui_text
+                    .restored_content_divider(&crate::wall_clock::local_date_time());
                 let mk = || self.waker();
                 let geometries = self.restore_geometries(&ws, &sess);
-                let outcome = ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk);
+                let outcome = ws.mux.restore_geometry_with_content(
+                    &sess,
+                    &self.cfg,
+                    &geometries,
+                    &mk,
+                    &content,
+                    &divider,
+                );
                 if !outcome.restored_any {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
@@ -1041,6 +1068,9 @@ impl App {
         }
         let height = self.tab_strip_height(w);
         let bar = self.tab_bar_at_height(w, height);
+        if window_control_at(&bar, cx, cy).is_some() {
+            return None;
+        }
         let vertical = self.cfg.tab_bar_pos.is_vertical();
         dock_insertion_tab(&bar.segments, vertical, if vertical { cy } else { cx })
     }

@@ -312,6 +312,29 @@ impl App {
         }
     }
 
+    pub(super) fn open_config_file(&self, path: Option<std::path::PathBuf>) {
+        if let Some(path) = path {
+            let tr = self.ui_text;
+            system_opener::open(path.clone(), move |e| {
+                log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
+                fire_notify(
+                    tr.text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                    tr.text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
+                );
+            });
+        } else {
+            log::warn!(
+                "Action::EditConfig: no config path resolved \
+                 (set $XDG_CONFIG_HOME or pass --config)"
+            );
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyConfigNoPath),
+            );
+        }
+    }
+
     pub(super) fn handle_action(
         &mut self,
         ws: &mut WindowState,
@@ -584,13 +607,25 @@ impl App {
                 //     want Ctrl+Shift+C to consistently mean "the
                 //     clipboard now reflects the current selection
                 //     (empty or not)" without smart heuristics.
-                let selection_text = ws.mux.focused().and_then(|p| {
-                    p.term
-                        .term
-                        .lock()
-                        .ok()
-                        .and_then(|t| t.selection_to_string())
-                });
+                let selection_text = ws
+                    .mux
+                    .focused()
+                    .and_then(|p| p.term.term.lock().ok())
+                    .map(|t| {
+                        kettle_core::selection_text_for_copy(
+                            &t,
+                            16 * 1024 * 1024,
+                            self.cfg.copy_trim_whitespace,
+                        )
+                    })
+                    .transpose();
+                let selection_text = match selection_text {
+                    Ok(text) => text.flatten(),
+                    Err(_) => {
+                        log::warn!("copy: selection exceeds the 16 MiB limit");
+                        return;
+                    }
+                };
                 let payload = match copy_clipboard_decision(selection_text, self.cfg.smart_copy) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -748,30 +783,11 @@ impl App {
             // with `--config` pointing at a missing path, or no profile
             // resolved), it falls back to `Config::default_path()`.
             Action::EditConfig => {
-                let path = self
-                    .config_path
-                    .clone()
-                    .or_else(kettle_config::Config::default_path);
-                if let Some(path) = path {
-                    let tr = self.ui_text;
-                    system_opener::open(path.clone(), move |e| {
-                        log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
-                        fire_notify(
-                            tr.text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
-                            tr.text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
-                        );
-                    });
-                } else {
-                    log::warn!(
-                        "Action::EditConfig: no config path resolved \
-                         (set $XDG_CONFIG_HOME or pass --config)"
-                    );
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
-                        self.ui_text.text(kettle_i18n::Text::NotifyBodyConfigNoPath),
-                    );
-                }
+                self.open_config_file(
+                    self.config_path
+                        .clone()
+                        .or_else(kettle_config::Config::default_path),
+                );
             }
             // Preferences submenu toggles. Each dispatch updates `self.cfg` so
             // the change applies now, and writes `key = value` back to the
@@ -1030,6 +1046,7 @@ impl App {
             }
             Action::CommandPalette => {
                 self.close_all_modals(ws);
+                ws.palette_profiles = kettle_config::Config::list_profiles();
                 ws.palette_input = Some((Default::default(), 0));
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
@@ -1052,9 +1069,78 @@ impl App {
                 ws.settings_restart_pending = false;
                 ws.settings_nav = Some(crate::settings::SettingsNav::default());
             }
-            // Terminator parity (layoutlauncher.py): open the runtime layout
-            // picker. With no saved layouts the modal still opens, with a hint
-            // to save one with `kettle --layout NAME`.
+            Action::SaveLayout => {
+                self.close_all_modals(ws);
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::SaveLayout,
+                    GroupBulkScope::Single,
+                    "",
+                );
+                ws.pending_resize = true;
+            }
+            Action::LaunchProfile(name) => {
+                let tr = self.ui_text;
+                // Config and renderer state are application-wide. Isolate profile launches.
+                if kettle_config::Config::list_profiles().contains(&name) {
+                    let exe = std::env::current_exe().unwrap_or_else(|_| "kettle".into());
+                    if let Err(error) = std::thread::Builder::new()
+                        .name("kettle-profile".into())
+                        .spawn(move || {
+                            if let Err(error) = std::process::Command::new(exe)
+                                .arg(format!("--profile={name}"))
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .and_then(|mut child| child.wait())
+                            {
+                                log::warn!("profile launch failed: {error}");
+                                fire_notify(
+                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                                );
+                            }
+                        })
+                    {
+                        log::warn!("profile reaper failed to start: {error}");
+                        fire_notify(
+                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                        );
+                    }
+                } else {
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                    );
+                }
+            }
+            Action::OpenProfilesDirectory => {
+                let path = kettle_config::Config::default_path()
+                    .and_then(|p| p.parent().map(|d| d.join("profiles")));
+                let tr = self.ui_text;
+                if let Some(path) = path {
+                    if kettle_state::create_private_dirs(&path).is_ok() {
+                        system_opener::open(path, move |_| {
+                            fire_notify(
+                                tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                                tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                            )
+                        });
+                    } else {
+                        fire_notify(
+                            tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                            tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                        );
+                    }
+                } else {
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                        tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                    );
+                }
+            }
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();

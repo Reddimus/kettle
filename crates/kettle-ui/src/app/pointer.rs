@@ -366,14 +366,22 @@ impl App {
         let target = ws.selecting_pane.or_else(|| ws.mux.active_focus());
         let sel = target
             .and_then(|id| ws.mux.panes.get(&id))
-            .and_then(|p| {
-                p.term
-                    .term
-                    .lock()
-                    .ok()
-                    .and_then(|t| t.selection_to_string())
+            .and_then(|p| p.term.term.lock().ok())
+            .map(|t| {
+                kettle_core::selection_text_for_copy(
+                    &t,
+                    16 * 1024 * 1024,
+                    self.cfg.copy_trim_whitespace,
+                )
             })
-            .filter(|s| !s.is_empty());
+            .transpose();
+        let sel = match sel {
+            Ok(text) => text.flatten().filter(|s| !s.is_empty()),
+            Err(_) => {
+                log::warn!("selection copy: selection exceeds the 16 MiB limit");
+                return;
+            }
+        };
         let sel = match copy_clipboard_decision(sel, true) {
             Ok(selection) => selection,
             Err(error) => {
@@ -382,19 +390,10 @@ impl App {
             }
         };
         if let (Some(s), Some(cb)) = (sel, self.clipboard.as_mut()) {
-            // On Linux also write the X11 PRIMARY selection that `paste_primary`
-            // reads, so the select→middle-click-paste loop works. No PRIMARY on
-            // Wayland/macOS/Windows; those keep clipboard-only.
+            // Linux selections also own PRIMARY for middle-click paste.
             #[cfg(target_os = "linux")]
-            {
-                use arboard::{LinuxClipboardKind, SetExtLinux};
-                if let Err(e) = cb
-                    .set()
-                    .clipboard(LinuxClipboardKind::Primary)
-                    .text(s.clone())
-                {
-                    log::warn!("clipboard set PRIMARY failed (selection copy): {e}");
-                }
+            if let Err(e) = cb.set_selection(true, s.clone()) {
+                log::warn!("clipboard set PRIMARY failed (selection copy): {e}");
             }
             // Log clipboard failures so a broken clipboard is diagnosable,
             // matching the vi-mode yank path.
@@ -458,16 +457,19 @@ impl App {
         if ws.search.open {
             ws.search.editor.clear_selection();
         }
-        if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area, 0)
-        {
+        // Pointer gestures read the keys physically held: on macOS Option
+        // selects a rectangle (Terminal.app, Ghostty) whether or not
+        // `macos-option-as-alt` makes it Meta for typing.
+        let held = super::keyboard::held_modifiers(ws);
+        if held.shift_key() && !held.alt_key() && self.extend_selection_to_cursor(ws, area, 0) {
             return;
         }
         let cell = self.cursor_cell(ws);
         let clicks = cell.map(|(r, c)| Self::click_count(ws, r, c)).unwrap_or(1);
-        let kind = selection_kind(clicks, ws.mods.alt_key());
+        let kind = selection_kind(clicks, held.alt_key());
         let mut smart_selected = false;
         if clicks == 2
-            && !ws.mods.alt_key()
+            && !held.alt_key()
             && let Some((row, col)) = cell
             && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
             && self.apply_smart_selection(ws, area, row, start, end)
@@ -1672,6 +1674,14 @@ impl App {
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let control_hover = window_control_at(&bar, cursor_x, cursor_y);
+        if control_hover != ws.hovered_window_control {
+            ws.hovered_window_control = control_hover;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+
         let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
         ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
         ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
@@ -1735,7 +1745,11 @@ impl App {
                     kettle_render::UpdateToastHit::Body => CursorIcon::Default,
                 })
             });
-        let want = drag_icon
+        let outer_resize = self.linux_resize_at(ws, cursor_x, cursor_y);
+        let want = outer_resize
+            .map(linux_resize_cursor)
+            .or(control_hover.map(|_| CursorIcon::Pointer))
+            .or(drag_icon)
             .or(toast_hover)
             .or(close_hover)
             .or(new_tab_hover_icon)
@@ -1756,15 +1770,17 @@ impl App {
             .or_else(|| self.lane_cursor_icon(ws))
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
-                let want_pointer = (ws.mods.control_key() || ws.mods.super_key())
-                    && self.link_at_cursor(ws).is_some();
+                let want_pointer = self.hovered_link_at_cursor(ws).is_some();
                 if want_pointer {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::Text
                 }
             });
-        let want = if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+        let want = if outer_resize.is_none()
+            && ws.preview_overlay.is_some()
+            && !self.non_search_modal_open(ws)
+        {
             self.lane_cursor_icon(ws).unwrap_or(CursorIcon::Default)
         } else {
             want
@@ -1825,6 +1841,21 @@ impl App {
     fn cursor_cell(&self, ws: &WindowState) -> Option<(usize, usize)> {
         let rect = self.focused_terminal(ws, self.area(ws))?;
         Some(self.cursor_cell_in_rect(ws, rect))
+    }
+
+    pub(super) fn hovered_link_at_cursor<'a>(
+        &self,
+        ws: &'a WindowState,
+    ) -> Option<&'a kettle_core::Link> {
+        if self.pointer_modal_open(ws) {
+            return None;
+        }
+        link_under_native_pointer(
+            ws,
+            self.focused_terminal(ws, self.area(ws))?,
+            Self::cell_size(ws).unwrap_or((8.0, 16.0)),
+            (self.cfg.padding_x, self.cfg.padding_y),
+        )
     }
 
     pub(super) fn link_at_cursor<'a>(&self, ws: &'a WindowState) -> Option<&'a kettle_core::Link> {

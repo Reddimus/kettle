@@ -422,21 +422,9 @@ pub(super) fn link_gate(uri: &str, origin: Option<PathOrigin>) -> LinkGate {
     }
 }
 
-/// The name a prompt or notification shows for a file link: its file name,
-/// or the link itself when it names none. The text is untrusted, so
-/// characters that reorder or hide text (bidirectional controls, zero-width
-/// and other format characters) show as `\u{FFFD}`, and a name wider than
-/// `max_cols` columns keeps its start and end around an ellipsis, so the
-/// warning beside it stays readable.
-pub(super) fn link_display_name(uri: &str, max_cols: usize) -> String {
-    use unicode_width::UnicodeWidthChar as _;
-    let name = kettle_core::links::local_file_path(uri)
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| uri.to_string());
-    let shown = name
+/// Sanitize terminal-supplied destinations for single-line UI and speech.
+pub(super) fn link_status_target(target: &str) -> String {
+    target
         .chars()
         .map(|c| {
             let format = matches!(
@@ -456,7 +444,24 @@ pub(super) fn link_display_name(uri: &str, max_cols: usize) -> String {
                 c
             }
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// The name a prompt or notification shows for a file link: its file name,
+/// or the link itself when it names none. The text is untrusted, so
+/// characters that reorder or hide text (bidirectional controls, zero-width
+/// and other format characters) show as `\u{FFFD}`, and a name wider than
+/// `max_cols` columns keeps its start and end around an ellipsis, so the
+/// warning beside it stays readable.
+pub(super) fn link_display_name(uri: &str, max_cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar as _;
+    let name = kettle_core::links::local_file_path(uri)
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| uri.to_string());
+    let shown = link_status_target(&name).chars().collect::<Vec<_>>();
     let width = |chars: &[char]| chars.iter().map(|c| c.width().unwrap_or(0)).sum::<usize>();
     if width(&shown) <= max_cols {
         return shown.into_iter().collect();
@@ -1150,4 +1155,68 @@ pub(super) fn cached_link_at_cell(
     ws.links
         .iter()
         .find(|link| link.row == row && col >= link.start_col && col <= link.end_col)
+}
+
+/// A hover belongs to the exact viewport under the last pointer motion.
+/// Scrolling, reflow, output and focus changes cannot retarget it silently.
+pub(super) fn link_hover_is_current(ws: &WindowState) -> bool {
+    ws.window_focused
+        && ws.native_pointer.is_some()
+        && ws.link_hover_key.as_ref() == Some(&current_links_scan_key(ws))
+}
+
+pub(super) fn link_open_gesture(
+    tr: &kettle_i18n::Translator,
+    single: bool,
+    macos: bool,
+) -> &'static str {
+    use kettle_i18n::Text as T;
+    tr.text(if single {
+        T::LinkOpenClick
+    } else if macos {
+        T::LinkOpenCommandClick
+    } else {
+        T::LinkOpenControlClick
+    })
+}
+
+pub(super) fn dismiss_link_hover(ws: &mut WindowState) {
+    if ws.link_hover_key.take().is_some()
+        && let Some(window) = &ws.window
+    {
+        window.request_redraw();
+    }
+}
+
+pub(super) fn key_dismisses_link_hover(
+    state: ElementState,
+    logical: &Key,
+    physical: PhysicalKey,
+) -> bool {
+    state == ElementState::Pressed && !crate::cursor_exit_log::is_modifier(logical, physical)
+}
+
+/// Automation's cursor can differ from the physical pointer. Hover always
+/// follows the physical pointer and excludes the terminal's padding.
+pub(super) fn link_under_native_pointer(
+    ws: &WindowState,
+    pane: Rect,
+    cell: (f32, f32),
+    padding: (f32, f32),
+) -> Option<&kettle_core::Link> {
+    if !link_hover_is_current(ws) {
+        return None;
+    }
+    let pointer = ws.native_pointer?;
+    let (x, y) = (pointer.x as f32, pointer.y as f32);
+    if !rect_contains(pane, x, y) {
+        return None;
+    }
+    let origin = kettle_render::pane_grid_origin(pane, padding);
+    if x < origin.0 || y < origin.1 {
+        return None;
+    }
+    let col = ((x - origin.0) / cell.0).floor() as usize;
+    let row = ((y - origin.1) / cell.1).floor() as usize;
+    cached_link_at_cell(ws, row, col)
 }

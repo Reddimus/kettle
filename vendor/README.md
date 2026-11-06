@@ -30,7 +30,15 @@ date. Recheck that before upgrading a crate or dropping a patch.
   README's four relative links are rewritten as absolute links to upstream's
   `v0.16.1` tag so that they resolve here. That tag ships
   `alacritty_terminal` 0.25.1; 0.26.0 shipped with `v0.17.0`.
-- Local changes: keyboard-mode stack overflow evicts the oldest keyboard mode,
+- Local changes: selection copying exposes a padding policy based on printed
+  (`DRAWN`) cells, retaining typed spaces for both stream and block selections.
+  The original engine extraction API retains its behavior. Host cursor-default
+  edits apply live while no-op reloads preserve application cursor styles.
+
+- Local changes: a read-only `primary_grid` accessor lets bounded session
+  content snapshots read primary text/history while the alternate screen is
+  active, without switching screens or mutating selection/cursor state.
+  Keyboard-mode stack overflow evicts the oldest keyboard mode,
   not an unrelated title-stack entry; active keyboard flags are tracked per
   screen so direct flag changes are queryable, survive screen switches, and
   remain synchronized with the active stack entry. The grid also exposes a
@@ -221,7 +229,7 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Private mode 1048 saves the cursor as DECSC does when set and restores
     it as DECRC does when reset, sharing their saved state. Upstream ignored
     the mode.
-- Kettle's opt-in DEC mode 2027 stores bounded Unicode 18 extended graphemes
+- Kettle's DEC mode 2027 (on by default in Kettle) stores bounded Unicode 18 extended graphemes
   with their leading cell and recorded width. Its streaming boundary context
   is independent of retained scalars; official property inputs, 853 boundary
   vectors, hashes and the Unicode-3.0 license are retained under
@@ -232,6 +240,37 @@ date. Recheck that before upgrading a crate or dropping a patch.
   unchanged. The exact
   `unicode-width = "=0.2.3"` constraint aligns product, vendor-validation
   and fuzz width data at Unicode 18. These are local additions to the pinned package.
+  - Cluster widths share a pure calculator and bounded streaming accumulator:
+    Mc spacing marks, Indic conjuncts and positive-width joined scalars reserve
+    up to two cells; VS15 narrows registered default-emoji text variants, and
+    unattached skin-tone modifiers start their own two-cell clusters. Emoji
+    ZWJ sequences, regional pairs and scalar mode retain their width rules.
+    Late widening/shrinking reuses cell flags and spacers, respects autowrap,
+    insertion and DECSLRM, and never fabricates VS16 for script text.
+  - `scripts/generate-grapheme-tables.py` additionally generates joining Mc
+    ranges from General_Category in the pinned GraphemeBreakProperty comments,
+    Emoji_Modifier_Base from `emoji-data.txt`, and variation bases from
+    `tests/unicode18/emoji-variation-bases.txt`. The latter is a compact offline
+    extraction of all 371 bases of Unicode 18 `emoji-variation-sequences.txt`,
+    using the locally cached `unicode-width` 0.2.3 generated
+    `src/gen/tables.rs::EMOJI_PRESENTATION_LEAVES`; `sources.json` records the
+    extraction and source hash. Regeneration uses only checked-in data.
+  - Printable ASCII that begins its own cluster (anything but a Prepend
+    before it) takes a shortcut that sets the state, width and anchor the full
+    path would, without the property tables; a test checks the two agree for
+    every printable ASCII scalar after a range of preceding text. Printing a
+    cluster no longer clones its retained scalars.
+  - `Term::input_ascii` writes a run of printable ASCII straight into the
+    cursor's row up to the right edge, leaving the cells, cursor and grapheme
+    state the per-character path would. A pending wrap, insert mode, a
+    non-ASCII charset, a wide cell in the way or a Prepend before the run
+    sends the next character down the per-character path. A differential
+    test compares the two over random escapes, margins, wide and combining
+    text, with and without clustering.
+  - Sinhala al-lakuna + ZWJ + consonant continuations are a terminal tailoring
+    alongside unattached-modifier boundaries. The pinned Unicode 18 InCB table
+    does not classify Sinhala consonants as Consonant; the raw UAX state and
+    its 853-vector test remain unchanged.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -353,6 +392,10 @@ cosmic-text release that contains both commits.
   `GraphemeClustering`. CSI REP dispatches to `Handler::repeat_char`, whose
   default preserves legacy scalar repetition while Kettle can repeat a cell's
   complete retained cluster.
+  Ground-state text goes out in runs: `Perform::print_ascii` receives each
+  run of printable ASCII (`0x20..=0x7e`) and `Handler::input_ascii` takes it
+  from the ANSI performer. Both default to the old character-at-a-time
+  `print`/`input`, so other performers and handlers see no change.
   SGR 53 and 55 dispatch explicit Overline and CancelOverline attributes.
   XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
   split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,

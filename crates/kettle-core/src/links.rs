@@ -22,6 +22,8 @@ pub struct Link {
     /// Shared by the segments of one link: a URL wrapped across rows is one
     /// link with a segment per row, and hovering any of them lights them all.
     pub group: usize,
+    /// Explicit OSC 8 link rather than detected terminal text.
+    pub explicit: bool,
 }
 
 fn url_re() -> &'static Regex {
@@ -89,6 +91,7 @@ fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
             && rest.starts_with(':')
             && before.is_none_or(|c| !"\"'`*".contains(c));
         (!matched.is_empty()
+            && crate::hints::has_link_path_context(matched)
             && !after_host
             && crate::hints::path_may_start_after(before)
             && (grep_separator || crate::hints::match_has_end(before, rest))
@@ -158,14 +161,33 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 if h.uri().len() > MAX_URL_BYTES {
                     continue;
                 }
+                let continuation = row > 0 && start == 0 && {
+                    let previous = &grid[Point::new(Line(lines[row - 1]), Column(cols - 1))];
+                    previous
+                        .flags
+                        .contains(alacritty_terminal::term::cell::Flags::WRAPLINE)
+                        && previous.hyperlink().as_ref() == Some(&h)
+                };
+                let previous_group = continuation
+                    .then(|| out.last())
+                    .flatten()
+                    .filter(|link| {
+                        link.row + 1 == row && link.end_col + 1 == cols && link.uri == h.uri()
+                    })
+                    .map(|link| link.group);
+                let link_group = previous_group.unwrap_or_else(|| {
+                    let next = group;
+                    group += 1;
+                    next
+                });
                 out.push(Link {
                     row,
                     start_col: start,
                     end_col: end,
                     uri: h.uri().to_string(),
-                    group,
+                    group: link_group,
+                    explicit: true,
                 });
-                group += 1;
             } else {
                 c += 1;
             }
@@ -222,6 +244,7 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                         end_col: e,
                         uri: uri.clone(),
                         group,
+                        explicit: false,
                     });
                 }
                 group += 1;
@@ -1381,6 +1404,63 @@ mod tests {
             "file:///tmp/x.pdf#page=2",
         ] {
             assert!(is_safe_url(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn osc8_and_detected_links_keep_their_source_and_counters_stay_plain() {
+        let term = term_fed(100, 1, b"\x1b]8;;https://explicit.test\x1b\\caption\x1b]8;;\x1b\\ https://detected.test 158/158 N/N 1/2 a/b");
+        let links = links_with_cwd(&term, Some("/tmp"));
+        assert_eq!(links.len(), 2);
+        assert!(links[0].explicit);
+        assert_eq!(links[0].uri, "https://explicit.test");
+        assert!(!links[1].explicit);
+        assert_eq!(links[1].uri, "https://detected.test");
+    }
+
+    #[test]
+    fn wrapped_osc8_segments_share_a_hover_group_but_hard_breaks_do_not() {
+        let term = term_fed(
+            8,
+            3,
+            b"\x1b]8;;https://x.test\x1b\\abcdefghijklmnop\x1b]8;;\x1b\\",
+        );
+        let links = links(&term);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].group, links[1].group);
+        let term = term_fed(
+            8,
+            3,
+            b"\x1b]8;;https://x.test\x1b\\abcd\r\nefgh\x1b]8;;\x1b\\",
+        );
+        let links = super::links(&term);
+        assert_eq!(links.len(), 2);
+        assert_ne!(links[0].group, links[1].group);
+    }
+
+    #[test]
+    fn path_candidates_need_path_context() {
+        for text in [
+            "158/158",
+            "1/2",
+            "N/N",
+            "a/b",
+            "1.2/3.4",
+            "read/write",
+            "and/or",
+            "Save/restore",
+            "ICH/DCH",
+        ] {
+            assert_eq!(path_candidates(text).count(), 0, "{text}");
+        }
+        for text in [
+            "src/main.rs",
+            "./build.sh",
+            "~/project",
+            "/usr/bin/env",
+            "crates/a/b.rs:12:4",
+        ] {
+            assert_eq!(path_candidates(text).count(), 1, "{text}");
         }
     }
 

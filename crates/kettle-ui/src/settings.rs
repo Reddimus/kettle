@@ -15,7 +15,9 @@
 
 use std::borrow::Cow;
 
-use kettle_config::{BellMode, Config, CursorStyle, FocusMode, ScrollbarMode, UpdatePolicy};
+use kettle_config::{
+    BellMode, Config, CursorStyle, CursorUnfocusedStyle, FocusMode, ScrollbarMode, UpdatePolicy,
+};
 use kettle_i18n::{Text, Translator};
 
 /// What a choice shows: catalogue text, or a proper name (a theme, a GPU, a
@@ -166,6 +168,10 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldChromeBackground => Text::SettingsDescriptionFieldChromeBackground,
         Text::SettingsFieldCloseButtonOnTab => Text::SettingsDescriptionFieldCloseButtonOnTab,
         Text::SettingsFieldCompletionOverlay => Text::SettingsDescriptionFieldCompletionOverlay,
+        Text::SettingsFieldCopyTrimWhitespace => Text::SettingsDescriptionFieldCopyTrimWhitespace,
+        Text::SettingsFieldCursorUnfocusedStyle => {
+            Text::SettingsDescriptionFieldCursorUnfocusedStyle
+        }
         Text::SettingsFieldCopyOnSelect => Text::SettingsDescriptionFieldCopyOnSelect,
         Text::SettingsFieldCursorBlink => Text::SettingsDescriptionFieldCursorBlink,
         Text::SettingsFieldCursorBlinkTimeout => Text::SettingsDescriptionFieldCursorBlinkTimeout,
@@ -195,8 +201,15 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldTabBarPosition => Text::SettingsDescriptionFieldTabBarPosition,
         Text::SettingsFieldTabMinWidth => Text::SettingsDescriptionFieldTabMinWidth,
         Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
+        Text::SettingsFieldAppearance => Text::SettingsDescriptionFieldAppearance,
         Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
         Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
+        Text::SettingsFieldRestoreScrollbackLines => {
+            Text::SettingsDescriptionRestoreScrollbackLines
+        }
+        Text::SettingsFieldRestoreScrollbackRemote => {
+            Text::SettingsDescriptionRestoreScrollbackRemote
+        }
         Text::SettingsFieldUpdatePolicy => Text::SettingsDescriptionFieldUpdatePolicy,
         Text::SettingsFieldVimMenuNav => Text::SettingsDescriptionFieldVimMenuNav,
         Text::SettingsFieldWindowBlur => Text::SettingsDescriptionFieldWindowBlur,
@@ -581,6 +594,17 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 // full 500+ bundle stays reachable via the right-click Theme
                 // submenu / NextTheme / the `theme =` config line. Theme names
                 // are proper names, shown verbatim.
+                choice(
+                    T::SettingsFieldAppearance,
+                    "theme-mode",
+                    &["auto", "light", "dark", "explicit"],
+                    &[
+                        Label::Text(T::SettingsValueFollowSystem),
+                        Label::Text(T::SettingsValueLightAppearance),
+                        Label::Text(T::SettingsValueDarkAppearance),
+                        Label::Text(T::SettingsValueFixedTheme),
+                    ],
+                ),
                 Field {
                     label: T::SettingsFieldTheme,
                     key: "theme",
@@ -621,6 +645,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                         Label::Text(T::SettingsValueBlock),
                         Label::Text(T::SettingsValueBar),
                         Label::Text(T::SettingsValueUnderline),
+                    ],
+                ),
+                choice(
+                    T::SettingsFieldCursorUnfocusedStyle,
+                    "cursor-unfocused-style",
+                    &["hollow", "hidden", "unchanged"],
+                    &[
+                        Label::Text(T::SettingsValueHollowCursor),
+                        Label::Text(T::SettingsValueHiddenCursor),
+                        Label::Text(T::SettingsValueUnchangedCursor),
                     ],
                 ),
                 toggle(T::SettingsFieldCursorBlink, "cursor-blink"),
@@ -756,19 +790,10 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "MB",
                 ),
                 toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
+                toggle(T::SettingsFieldCopyTrimWhitespace, "copy-trim-whitespace"),
                 toggle(
                     T::SettingsFieldMouseHideWhileTyping,
                     "mouse-hide-while-typing",
-                ),
-                choice(
-                    T::SettingsFieldRestoreSession,
-                    "restore-session",
-                    &["auto", "true", "false"],
-                    &[
-                        Label::Text(T::SettingsValueAutomatic),
-                        Label::Text(T::SettingsValueOn),
-                        Label::Text(T::SettingsValueOff),
-                    ],
                 ),
                 choice(
                     T::SettingsFieldUpdatePolicy,
@@ -921,6 +946,33 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 keybind(T::SettingsKeybindToggleZoom, "toggle_zoom"),
                 keybind(T::SettingsKeybindCopy, "copy"),
                 keybind(T::SettingsKeybindPaste, "paste"),
+            ],
+        },
+        Category {
+            name: T::SettingsCategorySessions,
+            fields: vec![
+                choice(
+                    T::SettingsFieldRestoreSession,
+                    "restore-session",
+                    &["auto", "true", "false"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOn),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
+                number(
+                    T::SettingsFieldRestoreScrollbackLines,
+                    "restore-scrollback-lines",
+                    0,
+                    10_000,
+                    100,
+                    "",
+                ),
+                toggle(
+                    T::SettingsFieldRestoreScrollbackRemote,
+                    "restore-scrollback-remote",
+                ),
             ],
         },
         Category {
@@ -1181,6 +1233,42 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
     }
 }
 
+/// The value `field` has in a config that does not set it, in the token
+/// [`next_value`] writes; `None` for rows a reset does not cover: the theme
+/// (its picker and light/dark following own it), the GPU pin, shortcuts and
+/// free text.
+pub fn default_value(field: &Field) -> Option<String> {
+    let defaults = Config::default();
+    match &field.kind {
+        FieldKind::Toggle => Some(read_bool(&defaults, field.key).to_string()),
+        FieldKind::Choice { .. } if field.key == "theme" => None,
+        FieldKind::Choice { .. } => Some(read_choice(&defaults, field.key)),
+        FieldKind::Number { suffix, .. } => Some(write_number(
+            field.key,
+            read_number(&defaults, field.key),
+            suffix,
+        )),
+        FieldKind::ChoiceOwned { .. }
+        | FieldKind::Hotkey
+        | FieldKind::Keybind { .. }
+        | FieldKind::Text { .. } => None,
+    }
+}
+
+/// Whether `field` already holds its [`default_value`] in `cfg`.
+pub fn holds_default(cfg: &Config, field: &Field) -> bool {
+    match &field.kind {
+        FieldKind::Toggle => read_bool(cfg, field.key) == read_bool(&Config::default(), field.key),
+        FieldKind::Choice { .. } => {
+            read_choice(cfg, field.key) == read_choice(&Config::default(), field.key)
+        }
+        FieldKind::Number { .. } => {
+            read_number(cfg, field.key) == read_number(&Config::default(), field.key)
+        }
+        _ => true,
+    }
+}
+
 /// Is this field a rebindable keybinding? The overlay handler uses
 /// this to route Enter/Space into chord-capture instead of the value-cycle path.
 pub fn is_keybind(field: &Field) -> bool {
@@ -1277,7 +1365,9 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
+        "restore-scrollback-remote" => cfg.restore_scrollback_remote,
         "copy-on-select" => cfg.copy_on_select,
+        "copy-trim-whitespace" => cfg.copy_trim_whitespace,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
         "gpu-force-software" => cfg.gpu_force_software,
@@ -1320,6 +1410,12 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         .to_string(),
         // Keyed on the canonical `cursor-style` (not the `cursor-shape` alias)
         // to match the catalogue field + CONFIG.md.
+        "cursor-unfocused-style" => match cfg.cursor_unfocused_style {
+            CursorUnfocusedStyle::Hollow => "hollow",
+            CursorUnfocusedStyle::Hidden => "hidden",
+            CursorUnfocusedStyle::Unchanged => "unchanged",
+        }
+        .to_string(),
         "cursor-style" => match cfg.cursor_style {
             CursorStyle::Block => "block",
             CursorStyle::Bar => "beam",
@@ -1373,6 +1469,13 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
+        "theme-mode" => match cfg.theme_mode {
+            kettle_config::ThemeMode::Auto => "auto",
+            kettle_config::ThemeMode::Light => "light",
+            kettle_config::ThemeMode::Dark => "dark",
+            kettle_config::ThemeMode::Explicit => "explicit",
+        }
+        .to_string(),
         // Graphics.
         "gpu-power-preference" => match cfg.gpu_power_preference {
             kettle_config::GpuPowerPreference::Low => "low",
@@ -1429,6 +1532,7 @@ fn read_string(cfg: &Config, key: &str) -> String {
 
 fn read_number(cfg: &Config, key: &str) -> i64 {
     match key {
+        "restore-scrollback-lines" => cfg.restore_scrollback_lines as i64,
         "quick-terminal-size" => i64::from(cfg.quick_terminal_size),
         "font-size" => cfg.font_size.round() as i64,
         // opacity is stored 0.0–1.0; the overlay edits it as a percent.
@@ -1462,6 +1566,7 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
         "font-size" => value.clamp(5, 72),
         "background-opacity" => value.clamp(0, 100),
         "window-padding-x" => value.max(0),
+        "restore-scrollback-lines" => value.clamp(0, 10_000),
         "scrollback" => value.clamp(0, kettle_config::INFINITE_SCROLLBACK as i64),
         "scrollback-bytes" => {
             value.clamp(0, (kettle_config::MAX_SCROLLBACK_BYTES / 1_000_000) as i64)
@@ -1491,6 +1596,39 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn cursor_and_copy_settings_round_trip_and_explain_selection_gestures() {
+        let cats = categories(&[]);
+        for key in [
+            "cursor-style",
+            "cursor-blink",
+            "cursor-unfocused-style",
+            "copy-trim-whitespace",
+        ] {
+            let field = cats
+                .iter()
+                .flat_map(|c| &c.fields)
+                .find(|f| f.key == key)
+                .unwrap();
+            let cfg = Config::default();
+            let value = next_value(&cfg, field, 1);
+            let edited = Config::parse_text(&format!("{key} = {value}"));
+            assert!(Config::detect_malformed_values(&format!("{key} = {value}")).is_empty());
+            assert_ne!(read(&cfg, field, &EN), read(&edited, field, &EN));
+            assert_ne!(EN.text(field.label), ES.text(field.label));
+            assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        }
+        let field = cats
+            .iter()
+            .flat_map(|c| &c.fields)
+            .find(|f| f.key == "copy-on-select")
+            .unwrap();
+        for tr in [EN, ES] {
+            let help = tr.text(description(field));
+            assert!(help.contains("Option/Alt") && help.contains("Shift"));
+        }
+    }
 
     #[test]
     fn restore_session_settings_has_three_choices() {
@@ -1532,6 +1670,41 @@ mod tests {
         let off = Config::parse_text("grapheme-clustering = false");
         assert!(!read_bool(&off, field.key));
         assert_eq!(next_value(&off, field, 1), "true");
+    }
+
+    /// Every row a reset covers writes a token the config accepts, and that
+    /// token reads back as the default: after an edit the row is no longer at
+    /// its default, and writing the default value brings it back.
+    #[test]
+    fn reset_writes_each_rows_default_back() {
+        for field in categories(&[]).iter().flat_map(|c| &c.fields) {
+            let Some(default) = default_value(field) else {
+                continue;
+            };
+            let line = format!("{} = {default}", field.key);
+            assert!(Config::detect_malformed_values(&line).is_empty(), "{line}");
+            let restored = Config::parse_text(&line);
+            assert!(holds_default(&restored, field), "{line}");
+            assert_eq!(
+                read(&restored, field, &EN),
+                read(&Config::default(), field, &EN),
+                "{line}"
+            );
+            let edited = Config::parse_text(&format!(
+                "{} = {}",
+                field.key,
+                next_value(&Config::default(), field, 1)
+            ));
+            if read(&edited, field, &EN) != read(&Config::default(), field, &EN) {
+                assert!(!holds_default(&edited, field), "{}", field.key);
+            }
+        }
+        let theme = categories(&[])
+            .into_iter()
+            .flat_map(|c| c.fields)
+            .find(|f| f.key == "theme")
+            .unwrap();
+        assert_eq!(default_value(&theme), None);
     }
 
     #[test]
@@ -1620,7 +1793,8 @@ mod tests {
                             label.chars().next().is_some_and(char::is_uppercase),
                             "{label}"
                         );
-                        if *token == "auto" && field.key != "update-policy" {
+                        if *token == "auto" && !matches!(field.key, "update-policy" | "theme-mode")
+                        {
                             assert!(label.starts_with("Automatic"), "{}: {label}", field.key);
                         }
                     }
@@ -2331,14 +2505,11 @@ mod tests {
         assert_eq!(openers, ["theme"]);
     }
 
-    /// Pseudo-locale layout check: in English, Spanish and the pseudo-locale
-    /// (text about 38% longer), the panel's columns and its category tabs fit
-    /// the 144 columns a default window has on a 1366 px laptop, so no label
-    /// or value is cut there.
+    /// Rows fit the default window; category paging keeps every active
+    /// category visible and pointer-accessible in all supported languages.
     #[cfg(debug_assertions)]
     #[test]
     fn the_panel_fits_a_default_window_in_every_language() {
-        use unicode_width::UnicodeWidthStr as _;
         let cats = categories(&[]);
         let cfg = Config::default();
         for tr in [
@@ -2348,18 +2519,25 @@ mod tests {
         ] {
             let (label_cols, value_cols) = column_widths(&cfg, &cats, &tr);
             let columns = 2 + label_cols + 2 + value_cols;
-            let tabs = cats
-                .iter()
-                .map(|category| tr.text(category.name))
-                .collect::<Vec<_>>()
-                .join("  ")
-                .width();
             assert!(
                 columns <= 144,
                 "{:?}: rows need {columns} columns",
                 tr.language()
             );
-            assert!(tabs <= 144, "{:?}: tabs need {tabs} columns", tr.language());
+            for active in 0..cats.len() {
+                let set = kettle_render::SettingsOverlay {
+                    categories: cats.iter().map(|cat| tr.text(cat.name).into()).collect(),
+                    active_category: active,
+                    ..Default::default()
+                };
+                let layout =
+                    kettle_render::settings_layout(&set, (8.0, 16.0), (1152.0, 720.0), 8.0);
+                let rect = layout.category_rects[active].expect("selected category stays visible");
+                assert_eq!(
+                    layout.pointer_hit((rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0), None),
+                    kettle_render::SettingsHit::Category(active)
+                );
+            }
         }
     }
 
@@ -2847,6 +3025,63 @@ mod search_tests {
                 assert!(en.chars().count() <= 70, "{}: {en}", field.key);
                 assert_ne!(en, es, "{}", field.key);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod restore_scrollback_tests {
+    use super::*;
+
+    #[test]
+    fn sessions_fields_read_and_edit_output_policy() {
+        let tr = Translator::new(kettle_i18n::Language::Es);
+        let categories = categories(&[]);
+        let sessions = categories
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategorySessions)
+            .unwrap();
+        let cfg =
+            Config::parse_text("restore-scrollback-lines = 4321\nrestore-scrollback-remote = true");
+        let lines = sessions
+            .fields
+            .iter()
+            .find(|f| f.key == "restore-scrollback-lines")
+            .unwrap();
+        assert_eq!(read(&cfg, lines, &tr), "4321");
+        assert_eq!(write_number(lines.key, -1, ""), "0");
+        assert_eq!(write_number(lines.key, 20_000, ""), "10000");
+        let remote = sessions
+            .fields
+            .iter()
+            .find(|f| f.key == "restore-scrollback-remote")
+            .unwrap();
+        assert_eq!(read(&cfg, remote, &tr), tr.text(Text::SettingsValueOn));
+        assert_eq!(sessions.fields.len(), 3);
+    }
+
+    #[test]
+    fn appearance_choices_round_trip_modes_and_localize() {
+        let categories = categories(&[]);
+        let field = categories
+            .iter()
+            .flat_map(|category| &category.fields)
+            .find(|field| field.key == "theme-mode")
+            .unwrap();
+        for (mode, next, label) in [
+            (kettle_config::ThemeMode::Auto, "light", "Follow system"),
+            (kettle_config::ThemeMode::Light, "dark", "Light"),
+            (kettle_config::ThemeMode::Dark, "explicit", "Dark"),
+            (kettle_config::ThemeMode::Explicit, "auto", "Fixed theme"),
+        ] {
+            let cfg = Config {
+                theme_mode: mode,
+                ..Config::default()
+            };
+            assert_eq!(read(&cfg, field, &Translator::default()), label);
+            assert_eq!(next_value(&cfg, field, 1), next);
+            let spanish = Translator::new(kettle_i18n::Language::Es);
+            assert_ne!(read(&cfg, field, &spanish), label);
         }
     }
 }

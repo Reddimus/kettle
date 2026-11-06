@@ -8,15 +8,15 @@ const ES: Translator = Translator::new(Language::Es);
 fn hints_name_the_keys_and_translate_only_their_actions() {
     assert_eq!(
         settings_hints(&EN, true),
-        "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close"
+        "↑↓/jk field    ←→/hl change    g/G ends    Del reset    Tab category    Esc close"
     );
     assert_eq!(
         settings_hints(&EN, false),
-        "↑↓ field    ←→ change    Tab category    Esc close"
+        "↑↓ field    ←→ change    Del reset    Tab category    Esc close"
     );
     assert_eq!(
         settings_hints(&ES, false),
-        "↑↓ campo    ←→ cambiar    Tab categoría    Esc cerrar"
+        "↑↓ campo    ←→ cambiar    Del restablecer    Tab categoría    Esc cerrar"
     );
 }
 

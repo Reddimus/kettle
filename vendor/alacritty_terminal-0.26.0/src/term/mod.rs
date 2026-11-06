@@ -36,6 +36,10 @@ pub mod search;
 #[cfg(test)]
 mod column_tests;
 #[cfg(test)]
+mod ascii_run_tests;
+#[cfg(test)]
+mod grapheme_width_tests;
+#[cfg(test)]
 mod rectangle_tests;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -342,7 +346,7 @@ impl TermDamageState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GraphemeAnchor {
     point: Point,
     after: Point,
@@ -405,9 +409,13 @@ pub struct Term<T> {
     no_clear_column: bool,
     grapheme_clustering: bool,
     grapheme_state: grapheme::GraphemeState,
+    grapheme_width: grapheme::GraphemeWidth,
     grapheme_anchor: Option<GraphemeAnchor>,
     grapheme_template: Cell,
     last_grapheme: Vec<char>,
+    /// Tests turn the run writer off to compare it with the per-character path.
+    #[cfg(test)]
+    ascii_runs: bool,
     attribute_extent: u8,
     saved_private_modes: Vec<(u16, Option<bool>)>,
 
@@ -709,6 +717,7 @@ pub enum Osc52 {
 impl<T> Term<T> {
     fn stop_grapheme(&mut self) {
         self.grapheme_state = Default::default();
+        self.grapheme_width = Default::default();
         self.grapheme_anchor = None;
     }
 
@@ -767,9 +776,12 @@ impl<T> Term<T> {
             no_clear_column: false,
             grapheme_clustering: config.grapheme_clustering,
             grapheme_state: Default::default(),
+            grapheme_width: Default::default(),
             grapheme_anchor: None,
             grapheme_template: Cell::default(),
             last_grapheme: Vec::new(),
+            #[cfg(test)]
+            ascii_runs: true,
             attribute_extent: 0,
             saved_private_modes: Vec::new(),
             event_proxy,
@@ -952,8 +964,26 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
+    /// Apply an edited host default without disturbing application styles on no-op reloads.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        if self.config.default_cursor_style != style {
+            self.config.default_cursor_style = style;
+            self.cursor_style = Some(style);
+            self.mark_fully_damaged();
+        }
+    }
+
     /// Convert the active selection to a String.
     pub fn selection_to_string(&self) -> Option<String> {
+        self.selection_to_string_mode(None)
+    }
+
+    /// Copy a selection, retaining printed spaces and optionally omitting undrawn padding.
+    pub fn selection_to_string_with_trim(&self, trim_padding: bool) -> Option<String> {
+        self.selection_to_string_mode(Some(trim_padding))
+    }
+
+    fn selection_to_string_mode(&self, trim_padding: Option<bool>) -> Option<String> {
         let selection_range = self.selection.as_ref().and_then(|s| s.to_range(self))?;
         let SelectionRange { start, end, .. } = selection_range;
 
@@ -965,24 +995,40 @@ impl<T> Term<T> {
                 ..
             }) => {
                 for line in (start.line.0..end.line.0).map(Line::from) {
-                    res += self
-                        .line_to_string(line, start.column..end.column, start.column.0 != 0)
-                        .trim_end();
+                    let text = self.line_to_string_mode(
+                        line,
+                        start.column..end.column,
+                        start.column.0 != 0,
+                        trim_padding,
+                    );
+                    res += if trim_padding.is_none() {
+                        text.trim_end()
+                    } else {
+                        text.trim_end_matches('\n')
+                    };
                     res += "\n";
                 }
 
-                res += self
-                    .line_to_string(end.line, start.column..end.column, true)
-                    .trim_end();
+                let text = self.line_to_string_mode(
+                    end.line,
+                    start.column..end.column,
+                    true,
+                    trim_padding,
+                );
+                res += if trim_padding.is_none() {
+                    text.trim_end()
+                } else {
+                    text.trim_end_matches('\n')
+                };
             }
             Some(Selection {
                 ty: SelectionType::Lines,
                 ..
             }) => {
-                res = self.bounds_to_string(start, end) + "\n";
+                res = self.bounds_to_string_mode(start, end, trim_padding) + "\n";
             }
             _ => {
-                res = self.bounds_to_string(start, end);
+                res = self.bounds_to_string_mode(start, end, trim_padding);
             }
         }
 
@@ -991,6 +1037,15 @@ impl<T> Term<T> {
 
     /// Convert range between two points to a String.
     pub fn bounds_to_string(&self, start: Point, end: Point) -> String {
+        self.bounds_to_string_mode(start, end, None)
+    }
+
+    fn bounds_to_string_mode(
+        &self,
+        start: Point,
+        end: Point,
+        trim_padding: Option<bool>,
+    ) -> String {
         let mut res = String::new();
 
         for line in (start.line.0..=end.line.0).map(Line::from) {
@@ -1005,23 +1060,36 @@ impl<T> Term<T> {
                 self.last_column()
             };
 
-            res += &self.line_to_string(line, start_col..end_col, line == end.line);
+            res +=
+                &self.line_to_string_mode(line, start_col..end_col, line == end.line, trim_padding);
         }
 
         res.strip_suffix('\n').map(str::to_owned).unwrap_or(res)
     }
 
     /// Convert a single line in the grid to a String.
-    fn line_to_string(
+    fn line_to_string_mode(
         &self,
         line: Line,
         mut cols: Range<Column>,
         include_wrapped_wide: bool,
+        trim_padding: Option<bool>,
     ) -> String {
         let mut text = String::new();
 
         let grid_line = &self.grid[line];
-        let line_length = cmp::min(grid_line.line_length(), cols.end + 1);
+        let occupied = match trim_padding {
+            None => grid_line.line_length(),
+            Some(false) => Column(self.columns()),
+            Some(true) => {
+                let printed = grid_line[..]
+                    .iter()
+                    .rposition(|cell| cell.flags.contains(Flags::DRAWN))
+                    .map_or(Column(0), |column| Column(column + 1));
+                cmp::max(grid_line.line_length(), printed)
+            }
+        };
+        let line_length = cmp::min(occupied, cols.end + 1);
 
         // Include wide char when trailing spacer is selected.
         if grid_line[cols.start]
@@ -1097,6 +1165,15 @@ impl<T> Term<T> {
         T: EventListener,
     {
         RenderableContent::new(self)
+    }
+
+    /// Primary screen, including history, even while an alternate screen is active.
+    pub fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            &self.inactive_grid
+        } else {
+            &self.grid
+        }
     }
 
     /// Access to the raw grid data structure.
@@ -2222,7 +2299,9 @@ impl<T: EventListener> Term<T> {
     }
 
     fn print_grapheme(&mut self, width: usize) {
-        let text = self.last_grapheme.clone();
+        // Borrowed out and back rather than cloned: `input_char` never reads
+        // the retained text, and this runs once per cluster.
+        let text = mem::take(&mut self.last_grapheme);
         let template = mem::replace(
             &mut self.grid.cursor.template,
             self.grapheme_template.clone(),
@@ -2243,6 +2322,100 @@ impl<T: EventListener> Term<T> {
                 has_cell: true,
             }
         });
+        self.last_grapheme = text;
+    }
+
+    /// Printable ASCII that begins its own cluster, the common case of
+    /// terminal output: the state, width and anchor the full path in
+    /// `input_grapheme` would leave, without its table lookups. The grapheme
+    /// tests check the two agree for every printable ASCII scalar.
+    fn input_ascii_grapheme(&mut self, c: char) {
+        self.grapheme_state = grapheme::GraphemeState::after_ascii();
+        self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+        self.last_grapheme.clear();
+        self.last_grapheme.push(c);
+        self.grapheme_template = self.grid.cursor.template.clone();
+        let point = self.input_char(c, 1);
+        self.grapheme_anchor = point.map(|point| {
+            self.grid[point].flags.insert(Flags::GRAPHEME);
+            GraphemeAnchor {
+                point,
+                after: self.grid.cursor.point,
+                pending_wrap: self.grid.cursor.input_needs_wrap,
+                width: 1,
+                has_cell: true,
+            }
+        });
+    }
+
+    /// Write the start of `run`, printable ASCII, straight into the cursor's
+    /// row: the cells, cursor and grapheme state `input` leaves one character
+    /// at a time. Returns how many bytes it took; 0 when the next character
+    /// needs the full path: a pending wrap, insert mode, a non-ASCII charset,
+    /// a wide cell in the way, or a Prepend it would join.
+    fn write_ascii_run(&mut self, run: &[u8]) -> usize {
+        #[cfg(test)]
+        if !self.ascii_runs {
+            return 0;
+        }
+        let start = self.grid.cursor.point;
+        if run.is_empty()
+            || self.grid.cursor.input_needs_wrap
+            || self.mode.contains(TermMode::INSERT)
+            || self.grid.cursor.charsets[self.active_charset] != StandardCharset::Ascii
+            || (self.grapheme_clustering && !self.grapheme_state.ascii_breaks())
+        {
+            return 0;
+        }
+        let right = self.input_right_edge().0;
+        if start.column.0 >= right {
+            return 0;
+        }
+        let taken = run.len().min(right - start.column.0);
+        let template = &self.grid.cursor.template;
+        let (fg, bg, extra) = (template.fg, template.bg, template.extra.clone());
+        let mut flags = template.flags | Flags::DRAWN;
+        if self.grapheme_clustering {
+            flags |= Flags::GRAPHEME;
+        }
+        let row = &mut self.grid[start.line];
+        let cells = &mut row[start.column..start.column + taken];
+        if cells
+            .iter()
+            .any(|cell| cell.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER))
+        {
+            return 0;
+        }
+        for (cell, &byte) in cells.iter_mut().zip(run) {
+            cell.c = byte as char;
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.flags = flags;
+            cell.extra.clone_from(&extra);
+        }
+        let last = Point::new(start.line, start.column + (taken - 1));
+        if start.column.0 + taken < right {
+            self.grid.cursor.point.column = start.column + taken;
+        } else {
+            self.grid.cursor.point.column = last.column;
+            self.grid.cursor.input_needs_wrap = true;
+        }
+        if self.grapheme_clustering {
+            let c = run[taken - 1] as char;
+            self.grapheme_state = grapheme::GraphemeState::after_ascii();
+            self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+            self.last_grapheme.clear();
+            self.last_grapheme.push(c);
+            self.grapheme_template = self.grid.cursor.template.clone();
+            self.grapheme_anchor = Some(GraphemeAnchor {
+                point: last,
+                after: self.grid.cursor.point,
+                pending_wrap: self.grid.cursor.input_needs_wrap,
+                width: 1,
+                has_cell: true,
+            });
+        }
+        taken
     }
 
     fn input_grapheme(&mut self, c: char, width: usize) {
@@ -2251,14 +2424,26 @@ impl<T: EventListener> Term<T> {
         }) {
             self.stop_grapheme();
         }
+        if matches!(c, ' '..='~') && self.grapheme_state.ascii_breaks() {
+            self.input_ascii_grapheme(c);
+            return;
+        }
         let mut state = self.grapheme_state;
-        let boundary = state.advance(c);
+        // UAX #29 classifies modifiers as Extend even after a space. A
+        // terminal must give an unattached modifier its own two-cell base.
+        if grapheme::emoji_modifier(c) && !state.accepts_modifier() {
+            state = Default::default();
+        }
+        let boundary = state.advance(c) && !self.grapheme_width.joins_sinhala(c);
+        let mut width_state = self.grapheme_width;
         if boundary || self.grapheme_anchor.is_none() {
+            width_state = Default::default();
+            let cluster_width = width_state.advance(c);
             self.last_grapheme.clear();
             self.last_grapheme.push(c);
             self.grapheme_template = self.grid.cursor.template.clone();
-            if width > 0 {
-                self.print_grapheme(width);
+            if cluster_width > 0 {
+                self.print_grapheme(grapheme::cluster_width(&self.last_grapheme));
             } else {
                 self.grapheme_anchor = Some(GraphemeAnchor {
                     point: self.grid.cursor.point,
@@ -2270,6 +2455,7 @@ impl<T: EventListener> Term<T> {
             }
         } else {
             let anchor = self.grapheme_anchor.unwrap();
+            let cluster_width = width_state.advance(c);
             let full = self.last_grapheme.len() > cell::MAX_ZEROWIDTH_PER_CELL;
             let retained_tail = if !full {
                 self.last_grapheme.push(c);
@@ -2280,6 +2466,7 @@ impl<T: EventListener> Term<T> {
                 self.last_grapheme[len - 1] = c;
                 2
             } else if matches!(c, '\u{fe0e}' | '\u{fe0f}' | '\u{200d}')
+                || cluster_width != anchor.width
                 || (!anchor.has_cell && width > 0)
             {
                 // Preserve layout/presentation inside the existing storage cap.
@@ -2289,18 +2476,8 @@ impl<T: EventListener> Term<T> {
                 0
             };
             let retained = retained_tail > 0;
-            if retained && anchor.has_cell {
-                if c == '\u{fe0f}'
-                    && anchor.width == 1
-                    && self
-                        .last_grapheme
-                        .iter()
-                        .copied()
-                        .find(|&c| grapheme::is_base(c))
-                        .is_some_and(grapheme::emoji_variation)
-                {
-                    self.widen_grapheme(anchor);
-                } else {
+            if anchor.has_cell {
+                if retained {
                     if full {
                         let start = self.last_grapheme.len() - retained_tail;
                         self.grid[anchor.point]
@@ -2313,31 +2490,24 @@ impl<T: EventListener> Term<T> {
                         anchor.point.column,
                     ));
                 }
-            } else if retained && width > 0 {
-                self.print_grapheme(width);
+                if cluster_width > anchor.width {
+                    self.widen_grapheme(anchor);
+                } else if cluster_width < anchor.width {
+                    self.narrow_grapheme(anchor);
+                }
+            } else if retained && cluster_width > 0 {
+                self.print_grapheme(cluster_width);
             }
         }
         self.grapheme_state = state;
+        self.grapheme_width = width_state;
     }
 
     fn widen_grapheme(&mut self, anchor: GraphemeAnchor) {
         let fits = anchor.point.column + 1 < self.input_right_edge();
         if !fits && !self.mode.contains(TermMode::LINE_WRAP) {
-            // There is no second cell with autowrap disabled. Retain the
-            // selector without creating a wide cell missing its spacer.
-            let cell = &mut self.grid[anchor.point];
-            if cell
-                .zerowidth()
-                .is_some_and(|marks| marks.len() == cell::MAX_ZEROWIDTH_PER_CELL)
-            {
-                cell.replace_last_zerowidth('\u{fe0f}');
-            } else {
-                cell.push_zerowidth('\u{fe0f}');
-            }
-            self.damage.damage_point(Point::new(
-                anchor.point.line.0 as usize,
-                anchor.point.column,
-            ));
+            // The retained text is already updated. Keep the narrow cell when
+            // there is no room for its spacer, for emoji and script clusters alike.
             return;
         }
         self.grid.cursor.point = anchor.point;
@@ -2354,6 +2524,27 @@ impl<T: EventListener> Term<T> {
         self.print_grapheme(2);
         self.mode.set(TermMode::INSERT, insert);
     }
+
+    fn narrow_grapheme(&mut self, anchor: GraphemeAnchor) {
+        let insert = self.mode.contains(TermMode::INSERT);
+        self.mode.remove(TermMode::INSERT);
+        self.grid.cursor.point = anchor.point;
+        self.grid.cursor.input_needs_wrap = false;
+        // Rewriting the wide anchor clears its associated spacer as well.
+        self.print_grapheme(1);
+        let new_anchor = self.grapheme_anchor;
+        if insert {
+            // Undo only the extra cell reserved by the original wide insertion.
+            self.delete_chars(1);
+        }
+        self.grapheme_anchor = new_anchor;
+        self.mode.set(TermMode::INSERT, insert);
+        self.damage.damage_line(
+            anchor.point.line.0 as usize,
+            anchor.point.column.0,
+            anchor.point.column.0 + 1,
+        );
+    }
 }
 
 impl<T: EventListener> Handler for Term<T> {
@@ -2367,9 +2558,30 @@ impl<T: EventListener> Handler for Term<T> {
         self.record_graphics_event(GraphicsEvent::SyncMarker { id });
     }
 
+    /// A run of printable ASCII: written a row at a time where it can be,
+    /// otherwise one character at a time.
+    fn input_ascii(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            let taken = self.write_ascii_run(&bytes[at..]);
+            if taken > 0 {
+                at += taken;
+            } else {
+                self.input(bytes[at] as char);
+                at += 1;
+            }
+        }
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
+        if self.grapheme_clustering && matches!(c, ' '..='~') {
+            // Printable ASCII is one cell and never emoji-presented.
+            self.input_grapheme(c, 1);
+            return;
+        }
         let Some(mut width) = c.width() else {
             if self.grapheme_clustering {
                 self.stop_grapheme();

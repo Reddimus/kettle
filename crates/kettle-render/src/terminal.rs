@@ -97,11 +97,56 @@ pub struct LinkRect {
     pub row: usize,
     pub width: usize,
     pub hover: bool,
+    pub explicit: bool,
 }
 
-#[inline]
-pub(crate) fn cursor_focus_gate(window_focused: bool, terminal_requests_cursor: bool) -> bool {
-    window_focused && terminal_requests_cursor
+/// Detected links rest as a dim thin line; OSC 8 rests dotted. Hover wins
+/// over either source and uses the accent at full opacity.
+pub(crate) fn link_decoration(link: &LinkRect) -> (bool, f32, f32) {
+    if link.hover {
+        (false, 1.5, 1.0)
+    } else {
+        (link.explicit, 1.0, 0.55)
+    }
+}
+
+#[cfg(test)]
+mod link_decoration_tests {
+    use super::*;
+    #[test]
+    fn detected_explicit_and_hovered_links_have_distinct_decorations() {
+        let mut link = LinkRect {
+            col: 0,
+            row: 0,
+            width: 8,
+            hover: false,
+            explicit: false,
+        };
+        assert_eq!(link_decoration(&link), (false, 1.0, 0.55));
+        link.explicit = true;
+        assert_eq!(link_decoration(&link), (true, 1.0, 0.55));
+        link.hover = true;
+        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        link.explicit = false;
+        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+    }
+}
+
+pub(crate) fn unfocused_cursor_shape(
+    shape: alacritty_terminal::vte::ansi::CursorShape,
+    focused: bool,
+    style: kettle_config::CursorUnfocusedStyle,
+) -> alacritty_terminal::vte::ansi::CursorShape {
+    use alacritty_terminal::vte::ansi::CursorShape;
+    use kettle_config::CursorUnfocusedStyle;
+    if focused || shape == CursorShape::Hidden {
+        return shape;
+    }
+    match style {
+        CursorUnfocusedStyle::Hollow => CursorShape::HollowBlock,
+        CursorUnfocusedStyle::Hidden => CursorShape::Hidden,
+        CursorUnfocusedStyle::Unchanged => shape,
+    }
 }
 
 pub(crate) fn ime_cursor_shape(
@@ -297,6 +342,7 @@ impl Renderer {
         window_focused: bool,
         composing: bool,
         search_highlights: &[HighlightRect],
+        links: &[LinkRect],
         quads: &mut Vec<QuadInstance>,
         decorations: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
@@ -320,6 +366,7 @@ impl Renderer {
             window_focused,
             composing,
             search_highlights,
+            links,
             quads,
             decorations,
             pane_bases,
@@ -347,6 +394,7 @@ impl Renderer {
         window_focused: bool,
         composing: bool,
         search_highlights: &[HighlightRect],
+        links: &[LinkRect],
         quads: &mut Vec<QuadInstance>,
         decorations: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
@@ -384,9 +432,14 @@ impl Renderer {
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
         let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
-        let selection_bg =
-            self.minimum_contrast_cache
-                .resolve(theme.selection_background, default_bg, 3.0);
+        let selection_bg = super::theme::selection_fill(
+            theme,
+            default_bg,
+            window_focused,
+            &mut self.minimum_contrast_cache,
+        );
+        let mut links: Vec<_> = links.iter().collect();
+        links.sort_unstable_by_key(|link| (link.row, link.col));
         let dim_bg = if term_colors.reverse_video() {
             default_bg
         } else {
@@ -473,14 +526,13 @@ impl Renderer {
         } else {
             shape
         };
+        let cursor_focused = window_focused && pv.focused;
+        let shape = unfocused_cursor_shape(shape, cursor_focused, cfg.cursor_unfocused_style);
         let cvrow = cp.line.0 + display_off;
         // Built in its on phase whatever the blink phase: the off phase skips
         // the cursor's quads at draw time (`cursor_quad_range`), so a blink
         // changes no uploaded instance and no prepared text.
-        let base_draw_cursor = cursor_focus_gate(
-            window_focused,
-            shape != EShape::Hidden && (0..screen_rows).contains(&cvrow) && pv.focused,
-        );
+        let base_draw_cursor = shape != EShape::Hidden && (0..screen_rows).contains(&cvrow);
         // Codex's native-Windows cursor compatibility shim applies to the
         // application's writing cursor, never to the user-controlled vi
         // cursor.
@@ -496,7 +548,7 @@ impl Renderer {
                 )
             };
         let recolor_cursor_cell: Option<(i32, usize)> = {
-            if draw_cursor && !snap.vi_mode && window_focused && shape == EShape::Block {
+            if draw_cursor && !snap.vi_mode && shape == EShape::Block {
                 Some((cp.line.0, cp.column.0))
             } else {
                 None
@@ -520,6 +572,7 @@ impl Renderer {
         let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
         let mut fallback_run = None;
         let mut search_quads = Vec::new();
+        let mut highlight_decorations = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -629,6 +682,7 @@ impl Renderer {
                 search_highlight_at(search_highlights, &mut search_highlight_cursor, vrow, col);
             let highlight = match search {
                 Some(active) => CellHighlight::Search(active),
+                None if selected && !window_focused => CellHighlight::InactiveSelection,
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
@@ -640,7 +694,9 @@ impl Renderer {
                     CellHighlight::Search(true) => {
                         cfg.search_background.unwrap_or(theme.palette[3])
                     }
-                    CellHighlight::Search(false) | CellHighlight::Selection => {
+                    CellHighlight::Search(false)
+                    | CellHighlight::Selection
+                    | CellHighlight::InactiveSelection => {
                         super::theme::highlight_colors_cached(
                             highlight,
                             cfg,
@@ -688,10 +744,10 @@ impl Renderer {
                     self.minimum_contrast_cache
                         .resolve(theme.selection_background, bg, 3.0)
                 }
-                CellHighlight::Selection => selection_bg,
+                CellHighlight::Selection | CellHighlight::InactiveSelection => selection_bg,
                 CellHighlight::None => bg,
             };
-            if inactive > 0.0 {
+            if inactive > 0.0 && matches!(highlight, CellHighlight::None) {
                 fg = self.chrome_colors.inactive(
                     fg,
                     cell_background,
@@ -724,8 +780,18 @@ impl Renderer {
                     })
                 {
                     attrs = attrs.family(Family::Name(symbol_family));
+                } else if let Some(emoji_family) = self
+                    .emoji_family
+                    .filter(|_| !text_presentation && super::fonts::emoji_presentation(dc, marks))
+                {
+                    // The same choice as the pane's span for this cell.
+                    attrs = attrs.family(Family::Name(emoji_family));
                 }
-                cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
+                if cursor_focused {
+                    cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
+                } else {
+                    fg = cursor_fg;
+                }
             }
 
             if bg != default_bg {
@@ -777,16 +843,34 @@ impl Renderer {
                 .underline_color
                 .map(|c| {
                     let line = color::resolve(c, theme, term_colors);
-                    self.chrome_colors.inactive(
-                        line,
-                        cell_background,
-                        dim_bg,
-                        inactive,
-                        self.config.format.is_srgb(),
-                    )
+                    if matches!(highlight, CellHighlight::None) {
+                        self.chrome_colors.inactive(
+                            line,
+                            cell_background,
+                            dim_bg,
+                            inactive,
+                            self.config.format.is_srgb(),
+                        )
+                    } else {
+                        resolved_cell_foreground_cached(
+                            line,
+                            if selected && search.is_none() {
+                                default_bg
+                            } else {
+                                bg
+                            },
+                            highlight,
+                            (false, false),
+                            cfg,
+                            theme,
+                            &mut self.minimum_contrast_cache,
+                        )
+                    }
                 })
                 .unwrap_or(fg);
-            let decoration_quads = if inactive > 0.0 {
+            let decoration_quads = if !matches!(highlight, CellHighlight::None) {
+                &mut highlight_decorations
+            } else if inactive > 0.0 {
                 &mut *decorations
             } else {
                 &mut *quads
@@ -799,6 +883,67 @@ impl Renderer {
                 fg,
                 line_color,
             );
+            // Resolve link decoration ink before painting it over a highlight.
+            let link_index =
+                links.partition_point(|link| (link.row as i32, link.col) <= (vrow, col));
+            if let Some(link) = link_index.checked_sub(1).map(|index| links[index])
+                && link.row as i32 == vrow
+                && col < link.col.saturating_add(link.width)
+            {
+                // Detected links rest thin and dim, OSC 8 links rest dotted, and
+                // the hovered link is a solid accent line (`link_decoration`).
+                let (dotted, thickness, rest_alpha) = link_decoration(link);
+                let ink = if link.hover {
+                    self.ui_accent(cfg, theme)
+                } else {
+                    theme.palette[4]
+                };
+                let ink = if matches!(highlight, CellHighlight::None) {
+                    ink
+                } else {
+                    resolved_cell_foreground_cached(
+                        ink,
+                        if selected && search.is_none() {
+                            default_bg
+                        } else {
+                            bg
+                        },
+                        highlight,
+                        (false, false),
+                        cfg,
+                        theme,
+                        &mut self.minimum_contrast_cache,
+                    )
+                };
+                let target = if matches!(highlight, CellHighlight::None) {
+                    &mut *quads
+                } else {
+                    &mut highlight_decorations
+                };
+                // Over a highlight the line keeps full strength and the full
+                // 1.5 px weight: its ink was resolved against the fill above,
+                // and a thinner line would blend into it.
+                let (thickness, alpha) = if matches!(highlight, CellHighlight::None) {
+                    (thickness, rest_alpha)
+                } else {
+                    (thickness.max(1.5), 1.0)
+                };
+                let cell_x = ox + col as f32 * cw;
+                let y = oy + (vrow + 1) as f32 * ch - thickness;
+                if dotted {
+                    // Dots keep one phase across the link's cells.
+                    let step = (3.0 * self.scale).max(1.0);
+                    let link_x = ox + link.col as f32 * cw;
+                    let mut x = link_x + ((cell_x - link_x) / step).ceil() * step;
+                    while x < cell_x + cw {
+                        let width = self.scale.min(cell_x + cw - x);
+                        target.push(rect(x, y, width, thickness, ink, alpha));
+                        x += step;
+                    }
+                } else {
+                    target.push(rect(cell_x, y, cw, thickness, ink, alpha));
+                }
+            }
             // Combining (zero-width) marks layered on this cell — a decomposed
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
             // Append them right after the base char so the shaper composes the
@@ -853,7 +998,12 @@ impl Renderer {
                     sel.is_block,
                 );
                 let w = (c1 + 1).saturating_sub(c0).max(1);
-                quads.push(rect(
+                let target = if inactive > 0.0 {
+                    &mut *decorations
+                } else {
+                    &mut *quads
+                };
+                target.push(rect(
                     ox + c0 as f32 * cw,
                     oy + vrow as f32 * ch,
                     w as f32 * cw,
@@ -864,9 +1014,14 @@ impl Renderer {
             }
         }
 
-        quads.extend(search_quads);
+        if inactive > 0.0 {
+            decorations.extend(search_quads);
+        } else {
+            quads.extend(search_quads);
+        }
+        decorations.extend(highlight_decorations);
 
-        // Cursor: hidden with the window unfocused, blink-aware otherwise.
+        // The focused cursor blinks; inactive outlines remain steady.
         // Shape comes from the engine's live `RenderableContent.cursor.shape`
         // which DECSCUSR (`CSI Ps SP q`) updates per-pane — vim/neovim/fish
         // use this to flip between block/underline/beam for normal/insert/
@@ -904,12 +1059,14 @@ impl Renderer {
             );
             let cursor_quads = if on_card_fallback {
                 card_cursors
+            } else if !cursor_focused {
+                decorations
             } else {
                 quads
             };
             let cursor_start = cursor_quads.len() as u32;
-            // HollowBlock comes from vi mode. DECSCUSR selects block, beam
-            // or underline. Window focus gates drawing without changing DEC state.
+            // Vi mode and inactive panes can use HollowBlock. DECSCUSR selects
+            // block, beam or underline; focus never changes the engine's state.
             if shape == EShape::HollowBlock {
                 cursor_quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
                 cursor_quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
@@ -957,7 +1114,7 @@ impl Renderer {
             }
             // vi mode's cursor never blinks, so only an application cursor
             // gets a range the off phase can skip.
-            if !snap.vi_mode {
+            if !snap.vi_mode && cursor_focused {
                 let range = Some(cursor_start..cursor_quads.len() as u32);
                 if on_card_fallback {
                     self.card_cursor_quad_range = range;
@@ -991,6 +1148,7 @@ impl Renderer {
         let ff = font_features(cfg);
         // Copied out before the `&mut self` borrows below.
         let text_symbol_family = self.text_symbol_family;
+        let emoji_family = self.emoji_family;
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
@@ -1116,6 +1274,26 @@ impl Renderer {
                         at += len;
                     }
                 }
+                // And the colour-emoji face for a grapheme presented as emoji:
+                // one carrying U+FE0F, or a default-emoji base without U+FE0E.
+                // Text faces have many emoji-capable symbols (U+2764, U+263A,
+                // keycap digits), and on Linux a monochrome symbol face can
+                // precede the colour one in the cascade even for U+1F600. The
+                // span covers the whole grapheme, so a keycap or ZWJ sequence
+                // is shaped in one face.
+                if let Some(emoji_family) = emoji_family
+                    && !text.is_ascii()
+                {
+                    use unicode_segmentation::UnicodeSegmentation;
+                    for (offset, grapheme) in text.grapheme_indices(true) {
+                        if !grapheme.is_ascii() && super::fonts::emoji_text(grapheme) {
+                            let emoji_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
+                                .family(Family::Name(emoji_family));
+                            attrs_list
+                                .add_span(s + offset..s + offset + grapheme.len(), &emoji_attrs);
+                        }
+                    }
+                }
             }
             apply_cell_positions(
                 &mut attrs_list,
@@ -1152,7 +1330,8 @@ impl Renderer {
         if replaced {
             buf.shape_until_scroll(&mut self.font_system, false);
         }
-        if recolor_cursor_cell.is_some()
+        if cursor_focused
+            && recolor_cursor_cell.is_some()
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()
             && let Some(line) = usize::try_from(cvrow)
                 .ok()
@@ -1202,6 +1381,7 @@ impl Renderer {
             }
         }
         if draw_cursor
+            && cursor_focused
             && matches!(shape, EShape::Block)
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()
             && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)

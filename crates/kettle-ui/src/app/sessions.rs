@@ -184,7 +184,26 @@ impl App {
         Some(s)
     }
 
+    pub(super) fn clear_disabled_content(&self) {
+        if self.other_builds.running() {
+            return;
+        }
+        let disabled = self.cfg.restore_scrollback_lines == 0
+            || (self.startup.layout.is_none()
+                && !should_restore_session(self.startup.restore, self.cfg.restore_session, false));
+        if disabled {
+            let path = match self.startup.layout.as_deref() {
+                Some(name) => crate::session::Session::path_for_layout(name),
+                None => crate::session::Session::path(),
+            };
+            if let Some(path) = path {
+                self.session_writer.remove_content(path);
+            }
+        }
+    }
+
     pub(super) fn save_session(&self, ws: &WindowState) {
+        self.clear_disabled_content();
         if self.session_load_failed {
             return;
         }
@@ -222,7 +241,35 @@ impl App {
             SessionWriteTarget::DefaultSession => None,
             _ => return,
         };
-        self.session_writer.submit(s, layout);
+        let content = if self.cfg.restore_scrollback_lines > 0 {
+            let mut windows: Vec<_> = std::iter::once(ws)
+                .chain(self.windows.values())
+                .filter(|w| {
+                    self.quick_terminal.model.window != Some(w.seq) && !w.mux.tabs.is_empty()
+                })
+                .collect();
+            windows.sort_by_key(|w| {
+                (
+                    self.window_focus_order
+                        .iter()
+                        .position(|seq| *seq == w.seq)
+                        .unwrap_or(usize::MAX),
+                    w.seq,
+                )
+            });
+            windows.truncate(crate::session::MAX_RESTORE_WINDOWS);
+            let mut budget = crate::session_content::TEXT_BUDGET;
+            Some(crate::session_content::ContentSnapshot::new(
+                &s,
+                windows
+                    .iter()
+                    .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
+                    .collect(),
+            ))
+        } else {
+            None
+        };
+        self.session_writer.submit_content(s, layout, content);
     }
 
     /// Move a session aside when it loaded but could not be restored.
@@ -274,7 +321,7 @@ impl App {
         // work it out afterwards: `session_write_target` routes on things this
         // function never sees, and a one-shot tab handoff has no durable file
         // by the time anyone asks.
-        if let Some(path) = self.startup.tab_handoff.as_deref() {
+        let session = if let Some(path) = self.startup.tab_handoff.as_deref() {
             // Deliberately not recorded: `load_tab_handoff` deletes the file as
             // it reads, so there is nothing left to keep.
             crate::session::Session::load_tab_handoff(path)
@@ -299,8 +346,23 @@ impl App {
             self.restore_identity = Some(identity);
             Some(session)
         } else {
+            if !self.other_builds.running()
+                && let Some(path) = crate::session::Session::path()
+            {
+                crate::session_content::remove(&path);
+            }
             None
+        };
+        if let Some(path) = self.restore_source.as_deref() {
+            if self.cfg.restore_scrollback_lines == 0 {
+                crate::session_content::remove(path);
+            } else if let Some(session) = session.as_ref()
+                && let Some(content) = crate::session_content::load(path, session)
+            {
+                self.restore_content = content.windows.into();
+            }
         }
+        session
     }
 }
 
@@ -616,6 +678,12 @@ fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {
         // SAFETY: Foundation exports this immutable domain name.
         let global = read(unsafe { NSGlobalDomain });
         return policy.resolve(true, app, global);
+    }
+    // Linux has no system setting for this. Kettle keeps the session, as
+    // Ptyxis, GNOME's terminal, does by default.
+    #[cfg(target_os = "linux")]
+    if policy == kettle_config::RestoreSession::Auto {
+        return policy.resolve(true, None, None);
     }
     policy.resolve(false, None, None)
 }

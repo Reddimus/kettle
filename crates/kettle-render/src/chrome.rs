@@ -42,6 +42,15 @@ impl Colors {
         self.resolve(fg, bg, TEXT_CONTRAST)
     }
 
+    /// Window deactivation fades chrome without losing readable titles.
+    pub(crate) fn tab_text(&mut self, fg: Rgb, bg: Rgb, focused: bool) -> Rgb {
+        if focused {
+            self.text(fg, bg)
+        } else {
+            self.resolve(color::over(fg, bg, 0.5, false), bg, 3.0)
+        }
+    }
+
     pub(crate) fn muted(&mut self, fg: Rgb, bg: Rgb) -> Rgb {
         let key = (
             MinimumContrastCache::color_key(fg),
@@ -138,6 +147,15 @@ impl Colors {
         }
         self.cache.resolve(fg, bg, minimum)
     }
+}
+
+/// Neutral chrome details must remain visible independently of ANSI colours.
+pub(crate) fn tab_detail(strip: Rgb, foreground: Rgb, pressed: bool) -> Rgb {
+    color::with_min_contrast(
+        color::over(strip, foreground, if pressed { 0.18 } else { 0.10 }, false),
+        strip,
+        if pressed { 1.8 } else { 1.5 },
+    )
 }
 
 #[cfg(test)]
@@ -483,6 +501,47 @@ mod review_regression_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tab_chrome_tests {
+    use super::*;
+
+    #[test]
+    fn solid_chrome_is_quiet_and_details_and_dimmed_text_keep_contrast() {
+        for theme in [
+            kettle_config::Theme::default(),
+            kettle_config::Theme::by_name("Builtin Light"),
+        ] {
+            let cfg = kettle_config::Config::default();
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            assert!(color::relative_luminance(strip) < color::relative_luminance(theme.background));
+            assert_ne!(strip, theme.palette[8]);
+            let mut colors = Colors::default();
+            for pressed in [false, true] {
+                let detail = tab_detail(strip, theme.foreground, pressed);
+                assert!(color::contrast_ratio(detail, strip) >= 1.5);
+                for background in [strip, detail, theme.background] {
+                    let focused = colors.tab_text(theme.foreground, background, true);
+                    let dimmed = colors.tab_text(focused, background, false);
+                    assert!(color::contrast_ratio(focused, background) >= 4.5);
+                    assert!(color::contrast_ratio(dimmed, background) >= 3.0);
+                    assert!(
+                        color::contrast_ratio(dimmed, background)
+                            < color::contrast_ratio(focused, background)
+                    );
+                }
+            }
+            // ANSI bright black can change without tinting any solid chrome role.
+            let mut custom = theme.clone();
+            custom.palette[8] = Rgb::new(255, 0, 0);
+            assert_eq!(crate::resolve_chrome_bg(&cfg, &custom, None), strip);
+            assert_eq!(
+                tab_detail(strip, custom.foreground, false),
+                tab_detail(strip, theme.foreground, false)
+            );
         }
     }
 }

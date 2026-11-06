@@ -89,12 +89,16 @@ through, tinted by `background-darkness`.
 
 ### Chrome color over a wallpaper — `chrome-background`
 
+Without a wallpaper, tab and status strips use a darker version of the theme
+background, independent of `chrome-background`. The active tab keeps the
+terminal's background and transparency. Wallpaper modes keep the choices below.
+
 The chrome strips are opaque over the wallpaper; `chrome-background` picks what
 color:
 
 | Value | Result |
 |---|---|
-| `theme` *(default)* | the theme's chrome color — matches the no-wallpaper look |
+| `theme` *(default)* | the theme's ANSI bright-black chrome color (`palette[8]`) |
 | `auto` | the wallpaper's average color, automatically nudged dark/light enough to keep the tab text readable — "inspired by" the background |
 | `black` / `white` | a fixed neutral panel |
 

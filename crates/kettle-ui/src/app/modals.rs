@@ -217,7 +217,7 @@ impl App {
         let prefix = if ws.palette_input.is_some() {
             "  \u{2318} ".to_string()
         } else if ws.theme_picker_input.is_some() {
-            kettle_render::theme_picker_prefix(&self.ui_text)
+            theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
             rect = kettle_render::settings_value_rect(
@@ -560,7 +560,9 @@ impl App {
         };
         match button {
             ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
-            ConfirmButton::Confirm { .. } | ConfirmButton::PasteOneLine { .. } => {
+            ConfirmButton::Confirm { .. }
+            | ConfirmButton::PasteOneLine { .. }
+            | ConfirmButton::PasteWithoutControls { .. } => {
                 let Some(action) = confirmation_button_action(dialog, index) else {
                     return;
                 };
@@ -697,21 +699,51 @@ impl App {
                 base.line.0
             })
             .collect();
-        let mut found = hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards);
+        let links =
+            kettle_core::links::links_with_cwd(&t, p.term.current_dir_or_native().as_deref());
+        let spans = hint_spans_with_links(hints::detect_rows(g, &lines, cols), &links);
+        let ends: std::collections::HashMap<_, _> = spans
+            .iter()
+            .map(|span| ((span.row, span.start), span.end))
+            .collect();
+        let mut found = hint_targets_with_cards(spans, &cards);
         // Quick select for previews labels only what a lane can show.
         if preview {
             found.retain(|(_, _, what)| hint_previews(what));
         }
+        found.sort_by_key(|(row, col, _)| (std::cmp::Reverse(*row), *col));
         let labels = hints::labels(found.len(), hints::ALPHABET);
+        let mut occupied = std::collections::HashSet::new();
         found
             .into_iter()
             .zip(labels)
-            .map(|((row, col, what), label)| HintTarget {
-                row,
-                col,
-                label,
-                pane,
-                what,
+            .map(|((row, col, what), label)| {
+                let end = ends.get(&(row, col)).copied().unwrap_or(col);
+                let label_col = if matches!(what, HintWhat::Card(_)) {
+                    col
+                } else {
+                    hint_label_column(col, end, label.len(), cols, |column| {
+                        let cell = &g[Point::new(Line(lines[row]), Column(column))];
+                        cell.c == ' '
+                            && !occupied.contains(&(row, column))
+                            && !cards.iter().any(|((top, left), (bottom, right), _)| {
+                                (*top..=*bottom).contains(&row)
+                                    && (*left..=*right).contains(&column)
+                            })
+                            && cell.hyperlink().is_none()
+                            && !cell.flags.contains(kettle_core::Flags::WIDE_CHAR_SPACER)
+                    })
+                };
+                for column in label_col..label_col.saturating_add(label.len()).min(cols) {
+                    occupied.insert((row, column));
+                }
+                HintTarget {
+                    row,
+                    col: label_col,
+                    label,
+                    pane,
+                    what,
+                }
             })
             .collect()
     }
@@ -1237,8 +1269,8 @@ impl App {
             } else {
                 ConfirmKey::Tab
             }),
-            Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
-            Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(ConfirmKey::Left),
+            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(ConfirmKey::Right),
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && !ws.mods.control_key()
@@ -1450,11 +1482,21 @@ impl App {
                 }
             }
             'y' => {
-                let yanked = owner
-                    .visual
-                    .then(|| term.selection_to_string())
-                    .flatten()
-                    .unwrap_or_default();
+                let yanked = if owner.visual {
+                    match kettle_core::selection_text_for_copy(
+                        &term,
+                        16 * 1024 * 1024,
+                        self.cfg.copy_trim_whitespace,
+                    ) {
+                        Ok(text) => text.unwrap_or_default(),
+                        Err(_) => {
+                            log::warn!("vi-mode yank: selection exceeds the 16 MiB limit");
+                            return;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
                 drop(term);
                 let yanked = match kettle_core::scrub_card_markers(yanked) {
                     Ok(text) => text,
@@ -1619,7 +1661,11 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(self.update_notice().as_ref(), &self.ui_text);
+        let cmds = palette_entries(
+            self.update_notice().as_ref(),
+            &self.ui_text,
+            &ws.palette_profiles,
+        );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
         };
@@ -1919,6 +1965,9 @@ impl App {
                 };
                 self.settings_adjust(ws, &cats, cat, fld, dir);
             }
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                self.settings_reset(ws, &cats, cat, fld);
+            }
             // `vim-menu-nav`: j/k mirror ↓/↑, h/l mirror ←/→, g/G jump to the
             // first/last field, Ctrl+d / Ctrl+u move half a page. Chord-capture
             // mode (handled before this match) already consumed the key, so
@@ -2067,10 +2116,54 @@ impl App {
         // Scope the cfg borrow so reload_config (&mut self) is free.
         let (key_str, new_val) = {
             (
-                field.key,
+                if field.key == "theme" {
+                    self.theme_pick_key()
+                } else {
+                    field.key
+                },
                 crate::settings::next_value(&self.cfg, field, dir),
             )
         };
+        self.settings_store(ws, key_str, new_val);
+    }
+
+    /// Reset the focused Settings row to the value a config that does not set
+    /// it would give, through the same write and reload as a change.
+    pub(super) fn settings_reset(
+        &mut self,
+        ws: &mut WindowState,
+        cats: &[crate::settings::Category],
+        cat: usize,
+        fld: usize,
+    ) {
+        let field = &cats[cat].fields[fld];
+        if crate::settings::field_disabled(&self.cfg, field.key)
+            || crate::settings::holds_default(&self.cfg, field)
+        {
+            return;
+        }
+        if let Some(value) = crate::settings::default_value(field) {
+            self.settings_store(ws, field.key, value);
+        }
+    }
+
+    /// Persist `new_val` for `key_str` from Settings, with the companion keys
+    /// and restart notes some settings need, then reload.
+    fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
+        // Freezing the active palette must survive a reload, including a config
+        // that still has a different fixed theme from before system following.
+        if key_str == "theme-mode"
+            && new_val == "explicit"
+            && !self.persist_pref("theme", &self.cfg.theme_name)
+        {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
+            );
+            return;
+        }
         // The GPU device picker is one row but persists THREE keys
         // (vendor/device/name). "auto" clears the pin; "<vendor>:<device>:<name>"
         // sets it. GPU changes apply on the NEXT launch (the wgpu device/surface
@@ -2451,13 +2544,19 @@ impl App {
     /// theme the picker opened on.
     pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
         ws.theme_preview = None;
+        let key = self.theme_pick_key();
+        match key {
+            "light-theme" => self.cfg.light_theme = name.to_string(),
+            "dark-theme" => self.cfg.dark_theme = name.to_string(),
+            _ => {}
+        }
         self.set_runtime_theme_name(ws, name);
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time
         // default on restore, so neither a default change nor a fresh-config
         // user would see the new theme. Notify if the write fails so the pick
         // isn't silently lost on the next launch.
-        if !self.persist_pref("theme", name) {
+        if !self.persist_pref(key, name) {
             fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
@@ -2692,9 +2791,9 @@ pub(super) fn confirm_dialog_keypress(
 fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
     match button {
         ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
-        ConfirmButton::Confirm { label, .. } | ConfirmButton::PasteOneLine { label } => {
-            label.as_str()
-        }
+        ConfirmButton::Confirm { label, .. }
+        | ConfirmButton::PasteOneLine { label }
+        | ConfirmButton::PasteWithoutControls { label } => label.as_str(),
     }
 }
 
@@ -2862,9 +2961,12 @@ pub enum ConfirmAction {
 }
 
 /// Buttons in a confirmation. Close and rebind questions use Cancel/Confirm;
-/// paste questions also offer a one-line alternative.
+/// paste questions also offer one-line and control-removing alternatives.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
+    PasteWithoutControls {
+        label: String,
+    },
     PasteOneLine {
         label: String,
     },
@@ -3274,12 +3376,16 @@ pub(super) fn confirmation_button_action(
     match button {
         ConfirmButton::Cancel => None,
         ConfirmButton::Confirm { .. } => Some(dialog.on_confirm.clone()),
-        ConfirmButton::PasteOneLine { .. } => {
+        ConfirmButton::PasteOneLine { .. } | ConfirmButton::PasteWithoutControls { .. } => {
             let mut action = dialog.on_confirm.clone();
             let ConfirmAction::Paste { text, .. } = &mut action else {
                 return None;
             };
-            *text = paste_as_one_line(text);
+            *text = if matches!(button, ConfirmButton::PasteWithoutControls { .. }) {
+                crate::paste_safety::without_controls(text)
+            } else {
+                paste_as_one_line(text)
+            };
             Some(action)
         }
     }

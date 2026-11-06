@@ -222,6 +222,7 @@ impl App {
                 self.update_dock_target(cursor, torn_hwnd, None);
             }
             WindowEvent::CursorLeft { .. } => {
+                dismiss_link_hover(ws);
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {
                     dialog.armed_press = None;
                 }
@@ -244,8 +245,12 @@ impl App {
                 ws.scrollbar_hover = None;
                 ws.hovered_close_idx = None;
                 ws.hovered_tab_idx = None;
+                ws.pressed_new_tab = false;
+                ws.pressed_new_tab_menu = false;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                ws.hovered_window_control = None;
+                ws.pressed_window_control = None;
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -267,6 +272,7 @@ impl App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                ws.link_hover_key = Some(current_links_scan_key(ws));
                 ws.cursor = position;
                 ws.native_pointer = Some(position);
                 ws.selection_autoscroll_edge = 0;
@@ -603,6 +609,17 @@ impl App {
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
                 // reopen/relocate the menu.
+                if let Some(edge) = self.linux_resize_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+                {
+                    if bcode == 0
+                        && let Some(window) = &ws.window
+                    {
+                        let _ = window.drag_resize_window(edge);
+                    }
+                    ws.titlebar_click = None;
+                    return;
+                }
+
                 if bcode == 0 && self.modal_text_pointer(ws, true) {
                     return;
                 }
@@ -706,7 +723,9 @@ impl App {
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
-                if bcode == 0 && self.press_titlebar_space(ws, &bar, px, py) {
+                if self.press_linux_chrome(ws, &bar, px, py, bcode)
+                    || bcode == 0 && self.press_titlebar_space(ws, &bar, px, py)
+                {
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -714,9 +733,11 @@ impl App {
                         // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
+                        ws.pressed_new_tab_menu = true;
                         let (ax, ay, _, ah) = bar.new_tab_menu;
                         self.open_new_tab_menu(ws, ax, ay + ah);
                     } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
+                        ws.pressed_new_tab = true;
                         let area = self.area(ws);
                         let (cols, rows) = self.grid_of(ws, area);
                         let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -993,6 +1014,28 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+                    ws.pressed_new_tab = false;
+                    ws.pressed_new_tab_menu = false;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+                if button == MouseButton::Left
+                    && let Some(action) = ws.pressed_window_control.take()
+                {
+                    let bar = self.tab_bar(ws);
+                    if window_control_at(&bar, ws.cursor.x as f32, ws.cursor.y as f32)
+                        == Some(action)
+                    {
+                        self.activate_window_control(ws, action, event_loop);
+                    }
+                    ws.held_buttons.end_own(0);
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Release report for the side buttons, so a tracking app sees
                 // the matching button-up after the press. Only a press the
                 // app saw gets one: a press that a context menu, a modal or
@@ -1218,6 +1261,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                dismiss_link_hover(ws);
                 ws.resume_native_pointer();
                 // A gesture ending (macOS momentum scroll, and any backend that
                 // reports phases) drops leftover sub-detent residue so a partial
@@ -1292,6 +1336,7 @@ impl App {
                 }
             }
             WindowEvent::Focused(f) => {
+                dismiss_link_hover(ws);
                 ws.window_focused = f;
                 ws.os_focus_known = true;
                 if f {
@@ -1321,10 +1366,15 @@ impl App {
                     }
                 }
                 if !f {
+                    ws.pressed_window_control = None;
+                    ws.hovered_window_control = None;
+                    ws.titlebar_click = None;
+                    ws.pressed_new_tab = false;
+                    ws.pressed_new_tab_menu = false;
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
-                    // An unfocused window draws no cursor, and the Metal layer
-                    // beneath already shows the off phase.
+                    // Retire the blink layer so the next frame paints the steady
+                    // unfocused cursor and inactive selection.
                     Self::hide_cursor_layer(ws);
                     // Its release may never come here.
                     ws.lane_drag = None;
@@ -1470,6 +1520,9 @@ impl App {
                     winit::event::Ime::Commit(_) => true,
                     _ => false,
                 };
+                if typing {
+                    dismiss_link_hover(ws);
+                }
                 if typing && ws.tab_focus.take().is_some() {
                     ws.accessibility_pending = true;
                 }
@@ -1518,6 +1571,9 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
+                    dismiss_link_hover(ws);
+                }
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.
                 if event.state == ElementState::Pressed && ws.tab_focus.take().is_some() {
@@ -1531,12 +1587,26 @@ impl App {
                     &event.logical_key,
                     ws.mods,
                 );
-                let held_key = (!self.any_modal_open(ws)
+                let config_key = notices::config_notice_key(
+                    self.config_notice.is_some()
+                        && !self.any_modal_open(ws)
+                        && ws.preview_focus.is_none()
+                        && ws.ime_preedit.is_none()
+                        && self
+                            .persistent_notices(ws)
+                            .iter()
+                            .any(|(pane, _)| pane.is_none()),
+                    &event.logical_key,
+                    ws.mods,
+                );
+                let held_key = (config_key.is_none()
+                    && !self.any_modal_open(ws)
                     && ws.preview_focus.is_none()
                     && ws.ime_preedit.is_none())
                 .then(|| notices::held_pane_key(ws, &event.logical_key))
                 .flatten();
-                let ui_owns_key = held_key.is_some()
+                let ui_owns_key = config_key.is_some()
+                    || held_key.is_some()
                     || toast_owns_key
                     || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
@@ -1584,6 +1654,11 @@ impl App {
                 }
                 if event.state == ElementState::Released {
                     self.write_terminal_key_event(ws, &event, false);
+                    return;
+                }
+                if let Some(primary) = config_key {
+                    ws.closing_keys.insert(event.physical_key);
+                    self.activate_persistent_notice(ws, None, primary);
                     return;
                 }
                 if let Some((pane, restart)) = held_key {

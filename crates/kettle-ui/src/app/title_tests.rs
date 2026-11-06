@@ -1000,3 +1000,30 @@ fn composed_window_title_sanitizes_osc_reported_cwd() {
         assert!(title.contains("safe evil"));
     }
 }
+
+#[test]
+fn a_zoomed_pane_says_how_many_panes_it_hides_and_how_to_restore_them() {
+    use kettle_i18n::{Language, Translator};
+    let en = Translator::new(Language::En);
+    let es = Translator::new(Language::Es);
+    assert_eq!(
+        super::pane_zoom_badge(&en, 1, Some("Ctrl+Shift+X")),
+        "⤢ Zoomed · 1 pane hidden · Ctrl+Shift+X restores  "
+    );
+    assert_eq!(
+        super::pane_zoom_badge(&en, 2, Some("⌘⇧↩")),
+        "⤢ Zoomed · 2 panes hidden · ⌘⇧↩ restores  "
+    );
+    assert_eq!(
+        super::pane_zoom_badge(&en, 3, None),
+        "⤢ Zoomed · 3 panes hidden  "
+    );
+    assert_eq!(
+        super::pane_zoom_badge(&en, 3, Some("")),
+        super::pane_zoom_badge(&en, 3, None)
+    );
+    assert_eq!(
+        super::pane_zoom_badge(&es, 2, Some("Ctrl+Shift+X")),
+        "⤢ Ampliado · 2 paneles ocultos · Ctrl+Shift+X restaura  "
+    );
+}

@@ -1051,7 +1051,7 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the theme picker dialog."
 
 [messages.picker_create_layout_hint]
-context = "crates/kettle-ui/src/app.rs: command shown when no layouts exist. Keep kettle --layout unchanged; NAME is the name of the workspace to create and use."
+context = "crates/kettle-ui/src/app.rs: hint shown when no layouts exist: directs the user to Save Layout in the new-tab menu."
 
 [messages.picker_hint_cancel]
 context = "crates/kettle-ui/src/app.rs: key hint after Esc: close the picker or the title editor. Lowercase, one or two words."
@@ -2428,7 +2428,7 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.confirm_paste_body]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
-args = [{ name = "preview", type = "str" }]
+args = [{ name = "lines", type = "str" }, { name = "escapes", type = "str" }, { name = "controls", type = "str" }, { name = "preview", type = "str" }]
 [messages.confirm_paste_one_line]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.menu_select_all]
@@ -2573,3 +2573,219 @@ context = "crates/kettle-ui/src/settings.rs: label of the three-choice session r
 
 [messages.settings_description_field_restore_session]
 context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Off session restore, including macOS system preferences."
+
+[messages.tab_new_options]
+context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
+
+[messages.menu_new_tab_profile]
+context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu; profiles launch in a separate window/process."
+
+[messages.menu_no_profiles]
+context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."
+
+[messages.palette_launch_profile]
+context = "crates/kettle-ui/src/app/pickers.rs: Palette entry launching a profile in a separate process; name is a config filename stem."
+args = [{ name = "name", type = "str" }]
+
+[messages.menu_save_layout]
+context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/src/palette.rs: Open a single-line prompt for a named window arrangement."
+
+[messages.menu_open_layout]
+context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/src/palette.rs: Open the named-layout picker."
+
+[messages.edit_layout_name]
+context = "crates/kettle-ui/src/app/title.rs: Single-line layout save prompt label."
+
+[messages.notify_layout_failed]
+context = "crates/kettle-ui/src/app/title.rs: Layout save failure notification title."
+
+[messages.notify_layout_failed_body]
+context = "crates/kettle-ui/src/app/title.rs: Layout save failure: invalid ASCII filename or write error."
+
+[messages.notify_profiles_failed]
+context = "crates/kettle-ui/src/app/actions.rs: Failure opening or creating the profiles directory."
+
+[messages.notify_profiles_failed_body]
+context = "crates/kettle-ui/src/app/actions.rs: Profiles directory resolution, creation or OS opening failed."
+
+[messages.notify_profile_launch_failed]
+context = "crates/kettle-ui/src/app/actions.rs: Profile process launch failure notification."
+
+[messages.notify_profile_launch_failed_body]
+context = "crates/kettle-ui/src/app/actions.rs: The selected profile disappeared or process/reaper creation failed."
+
+[messages.settings_field_cursor_unfocused_style]
+context = "crates/kettle-ui/src/settings.rs: Settings row: cursor appearance in inactive windows and split panes."
+
+[messages.settings_description_field_cursor_unfocused_style]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."
+
+[messages.settings_value_hollow_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: an outlined block."
+
+[messages.settings_value_hidden_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: do not draw it."
+
+[messages.settings_value_unchanged_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: retain the terminal-selected shape."
+
+[messages.settings_field_copy_trim_whitespace]
+context = "crates/kettle-ui/src/settings.rs: Settings row: exclude undrawn trailing cells from clipboard text."
+
+[messages.settings_description_field_copy_trim_whitespace]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."
+
+[messages.confirm_paste_without_controls]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.osc52_denied_read]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.osc52_denied_write]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.confirm_paste_lines]
+context = "crates/kettle-ui/src/app/paste.rs: line-count fragment in the paste warning. CRLF counts once; a trailing line break starts an empty final line."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste_escapes]
+context = "crates/kettle-ui/src/app/paste.rs: number of escape/control sequences, including C1 CSI and OSC; used in the paste warning summary."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste_controls]
+context = "crates/kettle-ui/src/app/paste.rs: C0 except TAB/CR/LF, DEL and C1 code points outside escape sequences; used in the paste warning summary."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.osc52_copied]
+context = "crates/kettle-ui/src/app/clipboard.rs: per-pane notice after a program successfully sets the clipboard. count is Unicode code points after internal markers and excess bytes are removed. No clipboard text is shown."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.link_open_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status, link-single-click enabled."
+
+[messages.link_open_command_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
+
+[messages.link_open_control_click]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on Linux/Windows, modifier click required."
+
+[messages.hint_action_open_url]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for a URL, typed label without Shift."
+
+[messages.hint_action_open_path]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend alternate action for a resolvable local path."
+
+[messages.hint_action_copy]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for a copied target, including remote paths."
+
+[messages.hint_action_preview]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for inline cards or preview link mode."
+
+[messages.hint_legend]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions; plain and alternate list the actual actions offered by the visible targets."
+args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
+
+[messages.hint_legend_plain]
+context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
+args = [{ name = "plain", type = "str" }]
+
+[messages.settings_category_sessions]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Settings category for saved workspace and terminal output."
+
+[messages.settings_field_restore_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions numeric row: maximum primary screen and scrollback rows saved per pane."
+
+[messages.settings_field_restore_scrollback_remote]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions toggle: opt in to saving output of remote/SSH panes."
+
+[messages.settings_description_restore_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions description. Applies only when session restore is enabled."
+
+[messages.settings_description_restore_scrollback_remote]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions description: remote output can contain sensitive server data."
+
+[messages.restored_content_divider]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Terminal history divider before the new shell prompt. date_time is local YYYY-MM-DD HH:MM:SS."
+args = [{ name = "date_time", type = "str" }]
+
+[messages.settings_field_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance policy row, mapped to theme-mode."
+
+[messages.settings_description_field_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance policy help."
+
+[messages.settings_value_follow_system]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: follow OS light/dark preference."
+
+[messages.settings_value_light_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use light-theme."
+
+[messages.settings_value_dark_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use dark-theme."
+
+[messages.settings_value_fixed_theme]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use theme."
+
+[messages.picker_theme_for_light_appearance]
+context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update light-theme. Keep short; prefix is clipped separately from query."
+
+[messages.picker_theme_for_dark_appearance]
+context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update dark-theme. Keep short; prefix is clipped separately from query."
+
+[messages.config_notice_open]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_unknown]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_suggestion]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+args = [{ name = "key", type = "str" }]
+
+[messages.config_notice_invalid]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_number]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+args = [{ name = "min", type = "str" }, { name = "max", type = "str" }]
+
+[messages.config_notice_boolean]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_malformed]
+context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
+
+[messages.config_notice_missing_equals]
+context = "crates/kettle-ui/src/app/notices.rs: diagnostic for a line with no equals sign. Never includes a value."
+
+[messages.a11y_window_minimize]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_maximize]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_restore]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_close]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.pane_zoomed]
+context = "crates/kettle-ui/src/app/redraw.rs pane_zoom_badge: start of a zoomed pane's titlebar, before its title. count is how many other panes of the tab the zoom hides; shortcut is the live Toggle Zoom key, such as Ctrl+Shift+X, which shows them again. Keep the ⤢ sign and the two trailing spaces that separate the title."
+args = [{ name = "count", type = "u64" }, { name = "shortcut", type = "str" }]
+plural = "count"
+
+[messages.pane_zoomed_unbound]
+context = "crates/kettle-ui/src/app/redraw.rs pane_zoom_badge: the same badge when no key is bound to Toggle Zoom. count is how many panes the zoom hides. Keep the ⤢ sign and the two trailing spaces."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.scrollback_a11y_position]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of a pane's vertical scroll bar; its value is the position in the terminal's scrollback history."
+
+[messages.settings_hint_reset]
+context = "crates/kettle-ui/src/app/settings_text.rs settings_hints: Settings footer, after the Del key: puts the focused setting back to its default."

@@ -284,7 +284,8 @@ fn every_way_to_open_a_card_goes_through_one_door() {
             .contains("HintWhat::Card(nonce) => { self.open_card(ws, h.pane, *nonce); return; }")
     );
     let hints = body("collect_hints");
-    assert!(hints.contains("hint_targets_with_cards(hints::detect_rows(g, &lines, cols), &cards)"));
+    assert!(hints.contains("hint_spans_with_links(hints::detect_rows(g, &lines, cols), &links)"));
+    assert!(hints.contains("hint_targets_with_cards(spans, &cards)"));
     // Cards come from the same grid as the text, under the same lock.
     assert!(hints.contains("snap.capture_with_card_marks(&t, true);"));
     assert!(hints.contains(".inline_cards .placements(&snap)"));

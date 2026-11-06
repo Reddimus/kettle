@@ -8,6 +8,54 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Screen readers find each pane's place in its scrollback as a vertical scroll
+  bar, and can move it a line at a time or straight to a line.
+
+- A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
+  the key that restores them, in English and Spanish.
+
+- Config error notices explain ignored settings, suggest nearby setting names,
+  and show expected types or ranges without exposing values. Open Config opens
+  the affected file, with keyboard and screen-reader access. Clipboard notices
+  no longer show an empty button.
+
+- GNOME/Wayland windows now show their title in a Kettle header, even with one
+  tab, with minimize/maximize/close buttons, tooltips and screen-reader actions.
+  Drag empty header space to move, double-click to maximize, right-click for
+  the window menu, or drag an edge to resize. KDE server frames and X11 frames
+  stay native; `linux-titlebar-style = native` restores the previous header.
+
+- Quieter tab strips follow the terminal background, with readable separators
+  and visibly dimmed inactive windows. Larger, separated New Tab and options
+  buttons show translated tooltips and shortcut hints, stay reachable in narrow
+  windows, and no longer clip tab shortcuts with narrow terminal cells.
+
+- Discover profiles, save and open named layouts, and launch SSH from the new-tab
+  menu, macOS Shell menu and command palette. Profiles open separate windows;
+  empty lists explain how to create a profile or save a layout.
+
+- Risky paste confirmations now explain line and control counts, preview controls
+  visibly, and offer Paste Without Controls while keeping line breaks. Cancel
+  remains the default, with keyboard and screen-reader access to every choice.
+  Program clipboard copies show a per-pane notice (disable with
+  `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
+  once per pane. The README now documents paste choices and accessibility.
+
+- Links now highlight under the pointer and show their destination and opening
+  gesture in a status pill. Quick-select hints include on-screen help, shorter
+  labels that use nearby blank space, and entries in the Edit and terminal
+  menus. Progress counters such as `158/158` no longer look like file links.
+
+- Session restore now brings back recent terminal output with its colors and
+  text styling, followed by a dated divider and a fresh shell prompt. Sessions
+  settings control how much output survives; private storage is bounded to
+  8 MiB, and remote output requires opting in.
+
+- Follow the system light/dark appearance by default with TokyoNight Day/Night,
+  including live Linux portal changes. Existing fixed-theme configs keep their
+  look. Settings adds an Appearance choice; theme picks customize the active
+  side while following the system. macOS material matches the active palette.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while
@@ -42,6 +90,37 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   chords.
 
 ### Changed
+
+- Settings switches show a knob (right when on, left when off) with a label
+  chosen for contrast against the accent. Delete or Backspace resets the
+  highlighted setting to its default, and the footer says so.
+
+- The focused pane's title is bold as well as highlighted, so focus does not
+  rest on colour alone.
+
+- On Linux, `restore-session = auto` (the default) now reopens the previous
+  session, as Ptyxis, GNOME's terminal, does. Set `restore-session = false` to
+  open fresh windows as before.
+
+- Large output is processed faster: plain ASCII skips the grapheme tables, and
+  the session-log stripper keeps only its state while no log is open.
+
+- Quick-select labels that do not fit in the blank space before a match go in
+  the blank space after it instead of covering the match's first letters.
+
+- The terminal's right-click menu shows Copy greyed out until something is
+  selected, puts a divider between a link's actions and the clipboard's, and
+  right-aligns submenu arrows.
+
+- Selected and search-highlighted text, links and decorations stay readable;
+  inactive windows use a subdued selection and a steady hollow cursor. Settings
+  can hide or retain the unfocused cursor shape, and cursor shape/blink edits
+  now apply to running panes.
+- `copy-trim-whitespace` (on by default) drops trailing whitespace at each
+  copied line's end, for blocks as well as stream selections; `false` copies
+  the selection exactly as displayed, including block widths.
+  README and Settings now explain Option/Alt block selection and Shift-click
+  extension.
 
 - `restore-session` now defaults to `auto`: on macOS it follows "Close windows
   when quitting an application" and restores when unchecked. Other platforms
@@ -108,6 +187,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
+  even where bracketed paste is on, as such text was made to escape it. Kettle
+  still removes the marker whichever choice is made.
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
@@ -123,6 +205,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- A failed process's exit banner sits along the bottom of its pane instead of
+  covering the first lines, where a short session's output and its error are.
+
+- Emoji draw in colour: those written with U+FE0F, such as ❤️, ☺️ and keycaps,
+  and on Linux default-emoji characters such as 😀 and ⌚, which a monochrome
+  symbol font could claim first.
+
+- Copy and paste of text work in Wayland sessions without XWayland, including
+  GNOME, OSC 52 copies included. Middle-click PRIMARY and image or file paste
+  still use XWayland where it is available.
+
+- With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
+  spacing vowels now reserve two cells, VS15 text variants of default emoji
+  narrow to one, and standalone skin-tone modifiers occupy their own two
+  cells. Cursor movement, wrapping and insertion follow the corrected widths.
 
 - Programming ligatures and URLs draw every character again in grapheme
   mode: `//`, `->`, `!=` and `===` no longer lose their left half.

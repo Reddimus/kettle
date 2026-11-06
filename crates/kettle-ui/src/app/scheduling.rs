@@ -223,6 +223,7 @@ impl App {
         ws: &mut WindowState,
         event_loop: &ActiveEventLoop,
     ) -> Option<std::time::Instant> {
+        self.poll_system_appearance(ws);
         if take_window_lifecycle_wakes(ws) {
             self.drain_events(ws);
         }

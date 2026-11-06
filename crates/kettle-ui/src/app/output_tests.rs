@@ -350,7 +350,8 @@ fn process_status_cannot_reap_a_pane_before_the_ordered_pty_exit() {
     let taken = drain.find("pane.term.take_title()");
     let queue = drain.find(".take_clipboard_events()");
     assert!(
-        drain.contains(".chain(pane.rx.try_iter())"),
+        drain.contains("let event_rx = pane.rx.clone();")
+            && drain.contains(".chain(event_rx.try_iter())"),
         "drain both clipboard and reply queues before applying exit policy"
     );
     let applied = drain.find("if exited && !pane.closed {");

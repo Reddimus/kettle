@@ -736,13 +736,12 @@ impl App {
     pub(super) fn clipboard_file_paste_paths(&mut self) -> Option<Vec<std::path::PathBuf>> {
         self.clipboard
             .as_mut()?
-            .get()
             .file_list()
             .ok()
             .filter(|paths| !paths.is_empty())
     }
 
-    /// Paste selected X11 text, falling back to the full clipboard pipeline
+    /// Paste selected Linux PRIMARY text, falling back to the full clipboard pipeline
     /// when PRIMARY is empty or unavailable. Other platforms have one clipboard.
     pub(super) fn paste_primary(&mut self, ws: &mut WindowState) {
         #[cfg(target_os = "linux")]
@@ -1673,18 +1672,32 @@ pub(super) fn clipboard_paste_result(
 pub(super) fn paste_preview(text: &str) -> String {
     let mut preview = String::new();
     let mut used = 0;
-    for c in text.chars() {
-        let escaped = if c.is_control() || super::title::is_bidi_format_char(c) {
-            c.escape_default().collect::<String>()
-        } else {
-            c.to_string()
+    let mut lines = 1;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let visible = match c {
+            '\r' | '\n' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                lines += 1;
+                "\n".to_string()
+            }
+            '\x1b' => "\u{241b}".to_string(),
+            '\x07' => "\u{2407}".to_string(),
+            '\x7f' => "^?".to_string(),
+            c if c <= '\x1f' => format!("^{}", char::from(c as u8 + 64)),
+            c if c.is_control() || super::title::is_bidi_format_char(c) => {
+                c.escape_default().collect::<String>()
+            }
+            c => c.to_string(),
         };
-        let width = escaped.chars().count();
-        if used + width > 160 {
+        let width = visible.chars().count();
+        if used + width > 160 || lines > 3 {
             preview.push('…');
             break;
         }
-        preview.push_str(&escaped);
+        preview.push_str(&visible);
         used += width;
     }
     preview
@@ -1711,19 +1724,31 @@ pub(super) fn text_paste_confirmation(
     tr: kettle_i18n::Translator,
 ) -> ConfirmDialogState {
     use kettle_i18n::Text as T;
+    let found = crate::paste_safety::analyse(text);
+    let mut buttons = vec![
+        ConfirmButton::Cancel,
+        ConfirmButton::Confirm {
+            label: tr.text(T::MenuPaste).to_string(),
+            destructive: false,
+        },
+        ConfirmButton::PasteOneLine {
+            label: tr.text(T::ConfirmPasteOneLine).to_string(),
+        },
+    ];
+    if found.escapes + found.controls > 0 {
+        buttons.push(ConfirmButton::PasteWithoutControls {
+            label: tr.text(T::ConfirmPasteWithoutControls).to_string(),
+        });
+    }
     ConfirmDialogState {
         heading: tr.text(T::ConfirmPasteHeading).to_string(),
-        body: tr.confirm_paste_body(&paste_preview(text)),
-        buttons: vec![
-            ConfirmButton::Cancel,
-            ConfirmButton::Confirm {
-                label: tr.text(T::MenuPaste).to_string(),
-                destructive: false,
-            },
-            ConfirmButton::PasteOneLine {
-                label: tr.text(T::ConfirmPasteOneLine).to_string(),
-            },
-        ],
+        body: tr.confirm_paste_body(
+            &tr.confirm_paste_lines(found.lines),
+            &tr.confirm_paste_escapes(found.escapes),
+            &tr.confirm_paste_controls(found.controls),
+            &paste_preview(text),
+        ),
+        buttons,
         focus_idx: 0,
         on_confirm: ConfirmAction::Paste {
             target,

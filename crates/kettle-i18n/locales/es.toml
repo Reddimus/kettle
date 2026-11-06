@@ -1,9 +1,32 @@
+settings_field_cursor_unfocused_style = "Cursor sin foco"
+settings_description_field_cursor_unfocused_style = "Mostrar un contorno, ocultar o mantener la forma activa del cursor."
+settings_value_hollow_cursor = "Hueco"
+settings_value_hidden_cursor = "Oculto"
+settings_value_unchanged_cursor = "Sin cambios"
+settings_field_copy_trim_whitespace = "Recortar espacios finales al copiar"
+settings_description_field_copy_trim_whitespace = "Quitar los espacios al final de cada línea copiada."
+
+settings_category_sessions = "Sesiones"
+settings_field_restore_scrollback_lines = "Líneas de salida restauradas"
+settings_field_restore_scrollback_remote = "Guardar salida remota"
+settings_description_restore_scrollback_lines = "Restaurar salida al reiniciar; privada, hasta 8 MiB. 0 desactiva."
+settings_description_restore_scrollback_remote = "Desactivado por defecto para no guardar la salida remota en disco."
+restored_content_divider = "Restaurado · {date_time}"
+
+settings_field_appearance = "Apariencia"
+settings_description_field_appearance = "Seguir la apariencia del sistema, usar clara u oscura, o mantener un tema fijo."
+settings_value_follow_system = "Seguir el sistema"
+settings_value_light_appearance = "Clara"
+settings_value_dark_appearance = "Oscura"
+settings_value_fixed_theme = "Tema fijo"
+picker_theme_for_light_appearance = "tema claro:"
+picker_theme_for_dark_appearance = "tema oscuro:"
 settings_field_restore_session = "Restaurar sesión"
-settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
+settings_description_field_restore_session = "Automático: ajustes de macOS; restaura en Linux; no en Windows."
 
 menu_category_close_confirmation = "Confirmación de cierre"
 confirm_paste_heading = "Confirmar pegado"
-confirm_paste_body = "Este pegado puede enviar comandos a la terminal. Vista previa: {preview}"
+confirm_paste_body = "Este pegado puede enviar comandos a la terminal. {lines}; {escapes}, {controls}.\nVista previa:\n{preview}"
 confirm_paste_one_line = "Pegar en una sola línea"
 menu_select_all = "Seleccionar todo"
 menu_category_split = "Dividir"
@@ -21,6 +44,14 @@ process_restart = "Reiniciar (Enter)"
 process_close = "Cerrar (Esc)"
 config_notice = "Opciones de configuración ignoradas:\n{entries}"
 config_notice_more = "+{count} más"
+config_notice_open = "Abrir configuración"
+config_notice_unknown = "opción desconocida"
+config_notice_suggestion = "opción desconocida — ¿quisiste decir {key}?"
+config_notice_invalid = "valor no válido"
+config_notice_number = "requiere un número de {min} a {max}"
+config_notice_boolean = "requiere un booleano (true o false)"
+config_notice_malformed = "línea con formato incorrecto"
+config_notice_missing_equals = "línea con formato incorrecto (falta '=')"
 notice_dismiss = "Descartar"
 a11y_tab_list = "Pestañas"
 a11y_tab_close = "Cerrar {title}"
@@ -501,7 +532,7 @@ picker_a11y_palette = "Paleta de comandos"
 picker_a11y_results = "{label}: resultados"
 picker_a11y_ssh = "Lanzador SSH"
 picker_a11y_themes = "Selector de temas"
-picker_create_layout_hint = "kettle --layout NOMBRE"
+picker_create_layout_hint = "Usar Guardar diseño… en el menú de nueva pestaña"
 picker_hint_cancel = "cancelar"
 picker_hint_complete = "completar"
 picker_hint_connect = "conectar"
@@ -633,6 +664,7 @@ settings_hint_change = "cambiar"
 settings_hint_close = "cerrar"
 settings_hint_ends = "extremos"
 settings_hint_field = "campo"
+settings_hint_reset = "restablecer"
 settings_keybind_close_pane = "Cerrar panel"
 settings_keybind_command_palette = "Paleta de comandos"
 settings_keybind_copy = "Copiar"
@@ -762,7 +794,7 @@ settings_description_field_bell = "Elegir cómo se notifican los avisos de la te
 settings_description_field_chrome_background = "Elegir los colores de las barras sobre imágenes o estrellas."
 settings_description_field_close_button_on_tab = "Mostrar un botón para cerrar en cada pestaña."
 settings_description_field_completion_overlay = "Mostrar sugerencias de la shell en una capa de Kettle."
-settings_description_field_copy_on_select = "Copiar automáticamente el texto seleccionado al portapapeles."
+settings_description_field_copy_on_select = "Option/Alt y arrastrar: bloque. Shift y clic: extender. Copiar al soltar."
 settings_description_field_cursor_blink = "Hacer parpadear el cursor de la terminal."
 settings_description_field_cursor_blink_timeout = "Detener el parpadeo tras segundos sin escribir; cero lo mantiene."
 settings_description_field_cursor_shape = "Elegir la forma del cursor de la terminal."
@@ -859,6 +891,55 @@ settings_field_grapheme_clustering = "Agrupación de grafemas"
 settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
 
 
+tab_new_options = "Opciones de nueva pestaña"
+
+menu_new_tab_profile = "Nueva pestaña con perfil"
+
+menu_no_profiles = "Aún no hay perfiles — Crear perfil…"
+
+palette_launch_profile = "Nueva ventana con el perfil: {name}"
+
+menu_save_layout = "Guardar diseño…"
+
+menu_open_layout = "Abrir diseño…"
+
+edit_layout_name = "Nombre del diseño"
+
+notify_layout_failed = "No se guardó el diseño"
+
+notify_layout_failed_body = "Usar un nombre de 1 a 128 letras, dígitos, puntos, guiones bajos o guiones. Comprobar que se pueda escribir en el directorio de diseños."
+
+notify_profiles_failed = "No se abrió el directorio de perfiles"
+
+notify_profiles_failed_body = "Comprobar que el directorio de configuración esté disponible y permita escribir, y que el administrador de archivos pueda abrir carpetas."
+
+notify_profile_launch_failed = "No se abrió el perfil"
+
+notify_profile_launch_failed_body = "Es posible que se haya eliminado el perfil o que Kettle no haya podido iniciar otro proceso."
+
+confirm_paste_without_controls = "Pegar sin caracteres de control"
+osc52_denied_read = "La política osc52 bloqueó la lectura del portapapeles por un programa. Las lecturas requieren osc52 = paste o both."
+osc52_denied_write = "La política osc52 bloqueó la copia al portapapeles por un programa. Las copias requieren osc52 = copy o both."
+
+link_open_click = "Hacer clic para abrir"
+link_open_command_click = "⌘-clic para abrir"
+link_open_control_click = "Ctrl+clic para abrir"
+hint_action_open_url = "abrir URL"
+hint_action_open_path = "abrir ruta local"
+hint_action_copy = "copiar texto"
+hint_action_preview = "ver vista previa"
+hint_legend = "Etiqueta: {plain} · Shift+etiqueta: {alternate} · Esc para cancelar"
+hint_legend_plain = "Etiqueta: {plain} · Esc para cancelar"
+
+a11y_window_minimize = "Minimizar ventana"
+a11y_window_maximize = "Maximizar ventana"
+a11y_window_restore = "Restaurar ventana"
+a11y_window_close = "Cerrar ventana"
+
+
+
+scrollback_a11y_position = "Historial de desplazamiento"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -886,3 +967,27 @@ other = "↓ {lines} líneas"
 [scrollback_a11y]
 one = "Volver a la salida en vivo ({lines} línea sobre el final)"
 other = "Volver a la salida en vivo ({lines} líneas sobre el final)"
+
+[confirm_paste_lines]
+one = "{count} línea"
+other = "{count} líneas"
+
+[confirm_paste_escapes]
+one = "{count} secuencia de escape"
+other = "{count} secuencias de escape"
+
+[confirm_paste_controls]
+one = "{count} carácter de control adicional"
+other = "{count} caracteres de control adicionales"
+
+[osc52_copied]
+one = "Un programa copió {count} carácter al portapapeles"
+other = "Un programa copió {count} caracteres al portapapeles"
+
+[pane_zoomed]
+one = "⤢ Ampliado · {count} panel oculto · {shortcut} restaura  "
+other = "⤢ Ampliado · {count} paneles ocultos · {shortcut} restaura  "
+
+[pane_zoomed_unbound]
+one = "⤢ Ampliado · {count} panel oculto  "
+other = "⤢ Ampliado · {count} paneles ocultos  "

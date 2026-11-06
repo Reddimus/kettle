@@ -76,17 +76,46 @@ pub(super) fn picker_hint(
 
 const PICKER_MAX_VISIBLE_ROWS: usize = 8;
 
-/// The palette's rows: every command, then, while an update notice is
-/// active, its release notes and Dismiss.
+/// Profile discovery is shared with `--list-profiles`; names remain config data.
+pub(crate) fn profile_launch_entries(
+    names: &[String],
+    tr: &kettle_i18n::Translator,
+) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
+    use kettle_config::palette::PaletteLabel;
+    if names.is_empty() {
+        return vec![(
+            PaletteLabel::Text(kettle_i18n::Text::MenuNoProfiles),
+            Action::OpenProfilesDirectory,
+        )];
+    }
+    let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    names
+        .iter()
+        .map(|name| {
+            (
+                PaletteLabel::Dynamic {
+                    shown: tr.palette_launch_profile(name),
+                    english: en.palette_launch_profile(name),
+                },
+                Action::LaunchProfile(name.clone()),
+            )
+        })
+        .collect()
+}
+
+/// Commands and the profiles captured when the palette opened, followed by
+/// release notes and Dismiss while an update notice is active.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
+    profiles: &[String],
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
     let mut entries: Vec<_> = kettle_config::palette::commands()
         .into_iter()
         .map(|(label, action)| (PaletteLabel::Text(label), action))
         .collect();
+    entries.extend(profile_launch_entries(profiles, tr));
     if let Some(notice) = notice {
         let english = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         entries.push((
@@ -110,8 +139,9 @@ pub(super) fn command_picker_list(
     bindings: &Bindings,
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
+    profiles: &[String],
 ) -> PickerList {
-    let commands = palette_entries(notice, tr);
+    let commands = palette_entries(notice, tr, profiles);
     let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
     let rows = ranked
         .iter()
@@ -239,6 +269,16 @@ pub(super) fn theme_picker_matches(
     ranked.into_iter().map(|(_, _, _, theme)| theme).collect()
 }
 
+pub(super) fn theme_picker_appearance_prefix(key: &str, tr: &kettle_i18n::Translator) -> String {
+    use kettle_i18n::Text;
+    let label = match key {
+        "light-theme" => Text::PickerThemeForLightAppearance,
+        "dark-theme" => Text::PickerThemeForDarkAppearance,
+        _ => return kettle_render::theme_picker_prefix(tr),
+    };
+    format!("  ◐ {} ", tr.text(label))
+}
+
 /// The theme picker's rows. The theme it opened on is ticked, and each row
 /// says whether it is dark or light.
 pub(super) fn theme_picker_list(
@@ -357,6 +397,13 @@ pub(super) fn theme_preview_change(
             .as_ref()
             .filter(|(name, _)| name != live_name)
             .cloned(),
+    }
+}
+
+/// Escape from a picker must restore the new system side after a live appearance change.
+pub(super) fn rebase_theme_preview(ws: &mut WindowState, baseline: &ThemeState) {
+    if ws.theme_preview.is_some() {
+        ws.theme_preview = Some(baseline.clone());
     }
 }
 
@@ -569,6 +616,7 @@ pub(super) fn open_picker_list(
             &cfg.keybinds,
             tr,
             notice,
+            &ws.palette_profiles,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(

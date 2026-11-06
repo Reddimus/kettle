@@ -1,4 +1,4 @@
-//! macOS titlebar measurements and gestures. All layout values are physical pixels.
+//! Shared titlebar measurements and gestures. All layout values are physical pixels.
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +22,7 @@ pub(super) fn titlebar_band_metrics(
         height: height
             .filter(|h| h.is_finite() && (20.0..=128.0).contains(h))
             .unwrap_or(28.0)
+            .max(28.0)
             * scale,
         left: if fullscreen {
             0.0
@@ -43,6 +44,7 @@ pub(super) fn inset_titlebar_band(band: Rect, titlebar: Option<TitlebarBand>) ->
 
 pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
     rect_contains(bar.band, x, y)
+        && window_control_at(bar, x, y).is_none()
         && !bar.segments.iter().any(|s| rect_contains(s.rect, x, y))
         && ![
             bar.new_tab,
@@ -62,26 +64,42 @@ impl App {
         estimated: Option<TitlebarBand>,
         monitor: Option<StartupMonitor>,
     ) {
+        let size = window.inner_size();
         #[cfg(target_os = "macos")]
-        if let Some(estimated) = estimated {
+        let corrected = estimated.map(|estimated| {
             let measured = native::measure(window);
-            let size = window.inner_size();
-            let corrected = startup_surface_with_measured_titlebar(
+            startup_surface_with_measured_titlebar(
                 &self.cfg,
                 (size.width, size.height),
                 estimated.height,
                 measured.height,
                 monitor,
-            );
-            if corrected != (size.width, size.height) {
-                // On macOS this applies synchronously, before renderer sizing
-                // or any reveal; the queued resize event must not reapply it.
-                let _ = window
-                    .request_inner_size(winit::dpi::PhysicalSize::new(corrected.0, corrected.1));
-            }
+            )
+        });
+        #[cfg(target_os = "linux")]
+        let corrected = estimated
+            .filter(|_| linux_custom_titlebar(&self.cfg, window))
+            .map(|estimated| {
+                linux_startup_surface_with_header(
+                    &self.cfg,
+                    (size.width, size.height),
+                    estimated.height,
+                    window.scale_factor() as f32,
+                    monitor,
+                )
+            });
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let corrected: Option<(u32, u32)> = {
+            let _ = (estimated, monitor);
+            None
+        };
+        if let Some(corrected) = corrected
+            && corrected != (size.width, size.height)
+        {
+            // AppKit and Wayland update winit's size before renderer creation.
+            let _ =
+                window.request_inner_size(winit::dpi::PhysicalSize::new(corrected.0, corrected.1));
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (window, estimated, monitor);
     }
 
     pub(super) fn sync_macos_titlebar(&self, ws: &mut WindowState) {
@@ -92,7 +110,19 @@ impl App {
             native::set_tabs(window, tabs);
             ws.macos_titlebar_tabs = tabs;
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if let Some(window) = &ws.window {
+            let custom = linux_custom_titlebar(&self.cfg, window);
+            // Kettle's header replaces winit's frame; any other case keeps
+            // winit's or the compositor's frame, including X11 sessions that
+            // inherited WAYLAND_DISPLAY and config reloads either way.
+            if !self.cfg.borderless && window.is_decorated() == custom {
+                window.set_decorations(!custom);
+            }
+            ws.linux_titlebar = custom;
+            ws.macos_titlebar_tabs = custom;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = ws;
     }
 
@@ -104,6 +134,12 @@ impl App {
             .window
             .as_ref()
             .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+        if ws.linux_titlebar {
+            return Some(TitlebarBand {
+                height: LINUX_HEADER_HEIGHT * scale,
+                left: 0.0,
+            });
+        }
         #[cfg(target_os = "macos")]
         if let Some(window) = &ws.window {
             return Some(native::measure(window));
@@ -119,7 +155,13 @@ impl App {
                     Self::cell_size(ws).map_or(16.0, |(_, ch)| ch),
                     self.cfg.tab_bar_pos,
                 )
-                .max(20.0 * scale)
+                .max(
+                    if self.cfg.tab_bar_pos.is_vertical() {
+                        20.0
+                    } else {
+                        28.0
+                    } * scale,
+                )
             },
             |band| band.height,
         )
@@ -284,6 +326,7 @@ mod tests {
             for (height, right, expected) in [
                 (None, None, (28.0, 78.0)),
                 (Some(32.0), Some(72.0), (32.0, 80.0)),
+                (Some(22.0), Some(72.0), (28.0, 80.0)),
                 (Some(f32::NAN), Some(-1.0), (28.0, 78.0)),
             ] {
                 let titlebar = titlebar_band_metrics(scale, height, right, false);

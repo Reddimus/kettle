@@ -102,7 +102,11 @@ fn regression_cell_decorations_paint_after_the_dimmer() {
         "final inactive decoration colours must not be dimmed twice"
     );
     let cells = source.split("    fn build_pane_cells(").nth(1).unwrap();
-    assert!(cells.contains("let decoration_quads = if inactive > 0.0 {"));
+    assert!(
+        cells.contains("let decoration_quads = if !matches!(highlight, CellHighlight::None) {")
+    );
+    assert!(cells.contains("} else if inactive > 0.0 {"));
+    assert!(cells.contains("decorations.extend(highlight_decorations)"));
     assert!(
         cells.contains("&mut *decorations\n            } else {\n                &mut *quads"),
         "active decorations retain their original ordering below the cursor"

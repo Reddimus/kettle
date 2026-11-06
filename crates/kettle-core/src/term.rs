@@ -1185,6 +1185,8 @@ pub struct PtyGeometry {
 /// Overrides needed when reproducing an existing direct client launch.
 #[derive(Clone, Copy, Default)]
 pub struct LaunchOverrides<'a> {
+    /// Validated display-only session text, parsed before the PTY reader starts.
+    pub initial_content: Option<&'a str>,
     /// An exact in-memory launch to replay after a held process exits.
     pub replay: Option<&'a ProcessLaunch>,
     /// Unix invocation name, independent of the executable path.
@@ -5829,7 +5831,11 @@ impl Terminal {
         {
             tconf.semantic_escape_chars = wd.to_string();
         }
-        let term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
+        let mut term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
+        if let Some(content) = launch.initial_content {
+            let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+            parser.advance(&mut term, content.as_bytes());
+        }
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
@@ -6296,8 +6302,9 @@ impl Terminal {
                             None => {
                                 let final_raw = private_output_filter.finish(true);
                                 if !final_raw.is_empty() {
-                                    let stripped = session_log_filter.filter(&final_raw, 0, true);
-                                    if log_active.load(Ordering::Relaxed)
+                                    let logging = log_active.load(Ordering::Relaxed);
+                                    let stripped = session_log_filter.strip_if(&final_raw, logging);
+                                    if logging
                                         && let Ok(mut guard) = session_log.lock()
                                         && let Some(writer) = guard.as_mut()
                                     {
@@ -6305,7 +6312,11 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let filtered = if strip { stripped } else { final_raw.clone() };
+                                        let filtered = if strip {
+                                            stripped.unwrap_or_default()
+                                        } else {
+                                            final_raw.clone()
+                                        };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -6348,13 +6359,14 @@ impl Terminal {
                                     Vec::new()
                                 };
                                 if !raw_output.is_empty() {
-                                    let stripped = session_log_filter.filter(&raw_output, 0, true);
+                                    let logging = log_active.load(Ordering::Relaxed);
+                                    let stripped = session_log_filter.strip_if(&raw_output, logging);
                                     // Publish at most once per PTY read. OSC-heavy output can
                                     // produce thousands of parser chunks, while the logger and
                                     // recorder queues are intentionally bounded in read-sized
                                     // messages. Kettle's private completion OSC is the only data
                                     // removed by `PrivateOutputFilter`.
-                                    if log_active.load(Ordering::Relaxed)
+                                    if logging
                                         && let Ok(mut guard) = session_log.lock()
                                         && let Some(writer) = guard.as_mut()
                                     {
@@ -6362,7 +6374,11 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let filtered = if strip { stripped } else { raw_output.clone() };
+                                        let filtered = if strip {
+                                            stripped.unwrap_or_default()
+                                        } else {
+                                            raw_output.clone()
+                                        };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -8384,6 +8400,19 @@ impl Terminal {
         self.try_resize_geometry(PtyGeometry::new(cols, rows, pixel_width, pixel_height))
     }
 
+    /// Apply cursor Settings to running panes, retaining the new reset default.
+    pub fn set_cursor_defaults(&mut self, shape: CursorShape, blinking: bool) {
+        let style = alacritty_terminal::vte::ansi::CursorStyle { shape, blinking };
+        if self.term_config.default_cursor_style == style {
+            return;
+        }
+        self.term_config.default_cursor_style = style;
+        self.term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_default_cursor_style(style);
+    }
+
     /// Apply an edited `scrollback` / `scrollback-bytes` budget to a pane that
     /// is already running. Returns whether the effective cap moved.
     ///
@@ -8720,6 +8749,23 @@ pub fn selection_text_bounded(
     term: &Term<EventProxy>,
     cap: usize,
 ) -> Result<Option<String>, SelectionTextTooLarge> {
+    selection_text_bounded_mode(term, cap, None)
+}
+
+/// Clipboard copy with an explicit policy for undrawn trailing cells.
+pub fn selection_text_for_copy(
+    term: &Term<EventProxy>,
+    cap: usize,
+    trim_padding: bool,
+) -> Result<Option<String>, SelectionTextTooLarge> {
+    selection_text_bounded_mode(term, cap, Some(trim_padding))
+}
+
+fn selection_text_bounded_mode(
+    term: &Term<EventProxy>,
+    cap: usize,
+    trim_padding: Option<bool>,
+) -> Result<Option<String>, SelectionTextTooLarge> {
     let Some(range) = term
         .selection
         .as_ref()
@@ -8728,7 +8774,13 @@ pub fn selection_text_bounded(
         return Ok(None);
     };
     cells_within(term, &range, cap)?;
-    let text = term.selection_to_string();
+    // Trimming drops trailing whitespace on every copied line, printed or
+    // padding, as Kettle always did for stream selections; `false` keeps the
+    // selection exactly as displayed, block widths included.
+    let text = match trim_padding {
+        Some(false) => term.selection_to_string_with_trim(false),
+        Some(true) | None => term.selection_to_string(),
+    };
     if text.as_ref().is_some_and(|text| text.len() > cap) {
         return Err(SelectionTextTooLarge);
     }
@@ -9494,15 +9546,31 @@ struct SessionLogFilter {
 
 impl SessionLogFilter {
     fn filter(&mut self, input: &[u8], generation: u64, strip: bool) -> Vec<u8> {
-        let current = (generation, strip);
-        if self.observed != Some(current) {
-            self.stripper = AnsiStripper::new();
-            self.observed = Some(current);
-        }
+        self.observe(generation, strip);
         if strip {
             self.stripper.strip(input)
         } else {
             input.to_vec()
+        }
+    }
+
+    /// The stripped text of `input` when `wanted`; otherwise only the parser
+    /// state advances, so a log enabled mid-sequence still cannot expose a
+    /// payload, without building text nobody reads.
+    fn strip_if(&mut self, input: &[u8], wanted: bool) -> Option<Vec<u8>> {
+        if wanted {
+            return Some(self.filter(input, 0, true));
+        }
+        self.observe(0, true);
+        self.stripper.track(input);
+        None
+    }
+
+    fn observe(&mut self, generation: u64, strip: bool) {
+        let current = (generation, strip);
+        if self.observed != Some(current) {
+            self.stripper = AnsiStripper::new();
+            self.observed = Some(current);
         }
     }
 }

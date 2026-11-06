@@ -31,7 +31,7 @@ fn update_rows_present_iff_notice_active() {
         tag: "v5.2.0".into(),
     };
     let actions = |notice| {
-        super::palette_entries(notice, &es)
+        super::palette_entries(notice, &es, &[])
             .into_iter()
             .map(|(_, action)| action)
             .collect::<Vec<_>>()
@@ -39,7 +39,7 @@ fn update_rows_present_iff_notice_active() {
     assert!(!actions(None).contains(&Action::OpenUpdate));
     let with = actions(Some(&notice));
     assert!(with.contains(&Action::OpenUpdate) && with.contains(&Action::DismissUpdate));
-    let entries = super::palette_entries(Some(&notice), &es);
+    let entries = super::palette_entries(Some(&notice), &es, &[]);
     let ranked = kettle_config::palette::rank_entries("release notes", &entries, &es);
     assert_eq!(entries[ranked[0]].1, Action::OpenUpdate);
 }
@@ -118,4 +118,3 @@ fn finding_character_space_activates_focused_toast() {
         .unwrap();
     assert!(branch.contains("confirmation_space_key(&key)"));
 }
-

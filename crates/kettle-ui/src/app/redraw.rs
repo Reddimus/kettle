@@ -94,7 +94,7 @@ impl App {
             projected
         };
         // Hovering any segment of a link wrapped across rows lights them all.
-        let hovered_group = self.link_at_cursor(ws).map(|link| link.group);
+        let hovered_group = self.hovered_link_at_cursor(ws).map(|link| link.group);
         let links = ws
             .links
             .iter()
@@ -103,6 +103,7 @@ impl App {
                 row: l.row,
                 width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
                 hover: hovered_group == Some(l.group),
+                explicit: l.explicit,
             })
             .collect();
 
@@ -142,6 +143,7 @@ impl App {
                     &self.cfg.keybinds,
                     tr,
                     self.update_notice().as_ref(),
+                    &ws.palette_profiles,
                 )),
             ),
             None => (None, String::new(), None),
@@ -204,6 +206,72 @@ impl App {
                 .collect(),
             None => Vec::new(),
         };
+        let mut hint_bounds = Vec::new();
+        if let Some(pane) = self.focused_terminal(ws, self.area(ws)) {
+            let cell = Self::cell_size(ws).unwrap_or((8.0, 16.0));
+            hint_bounds = hint_labels
+                .iter()
+                .map(|label| {
+                    kettle_render::hint_label_rect(
+                        label,
+                        pane,
+                        cell,
+                        (self.cfg.padding_x, self.cfg.padding_y),
+                    )
+                })
+                .collect();
+        }
+        let mut pane_statuses = Vec::new();
+        let terminal_rect = self.focused_terminal(ws, self.area(ws));
+        let status_cell = (
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        );
+        if let Some(pane) = terminal_rect {
+            if let Some((targets, _)) = &ws.hint_state {
+                if let Some(mut status) = kettle_render::hint_legend_layout(
+                    pane,
+                    status_cell,
+                    &self.hint_legend(ws, targets),
+                ) {
+                    kettle_render::avoid_hint_labels(&mut status, pane, &hint_bounds);
+                    pane_statuses.push(status);
+                }
+            } else if let Some(link) = self.hovered_link_at_cursor(ws) {
+                let (cw, ch) = ws
+                    .renderer
+                    .as_ref()
+                    .map_or((8.0, 16.0), |r| (r.cell_w, r.cell_h));
+                let padding = (self.cfg.padding_x, self.cfg.padding_y);
+                let origin = kettle_render::pane_grid_origin(pane, padding);
+                let hovered: Vec<_> = ws
+                    .links
+                    .iter()
+                    .filter(|l| l.group == link.group)
+                    .map(|l| {
+                        (
+                            origin.0 + l.start_col as f32 * cw,
+                            origin.1 + l.row as f32 * ch,
+                            (l.end_col + 1 - l.start_col) as f32 * cw,
+                            ch,
+                        )
+                    })
+                    .collect();
+                if let Some(status) = kettle_render::link_status_layout(
+                    pane,
+                    status_cell,
+                    &link_status_target(&link.uri),
+                    link_open_gesture(
+                        &self.ui_text,
+                        self.cfg.link_single_click,
+                        cfg!(target_os = "macos"),
+                    ),
+                    &hovered,
+                ) {
+                    pane_statuses.push(status);
+                }
+            }
+        }
         let terminal_surface = terminal_surface_available(ws);
         let completion = self.completion_overlay_projection(ws, terminal_surface);
         let media_paste_receipt = self.media_paste_receipt_overlay_projection(
@@ -344,6 +412,8 @@ impl App {
                 theme_picker_hint,
                 edit_title,
                 hint_labels,
+                hint_bounds,
+                pane_statuses,
                 ime_preedit,
                 completion,
                 media_paste_receipt,
@@ -495,6 +565,8 @@ impl App {
             theme_picker_hint,
             edit_title,
             hint_labels,
+            hint_bounds,
+            pane_statuses,
             ime_preedit,
             completion: None,
             media_paste_receipt: None,
@@ -535,6 +607,14 @@ impl App {
             None
         };
         Self::materialize_layer_blink(ws, std::time::Instant::now());
+        #[cfg(target_os = "linux")]
+        {
+            let previous = ws.linux_titlebar;
+            self.sync_macos_titlebar(ws);
+            if previous != ws.linux_titlebar {
+                self.resize_all(ws);
+            }
+        }
         // Flush any pending chrome-geometry change before painting. A title
         // edit materialises a chrome strip (see `tab_bar_h`), so opening or
         // closing one changes the content rectangle and the PTYs must follow.
@@ -749,6 +829,7 @@ impl App {
         let status = self.build_status_bar(ws);
         let layout = self.pane_layout(ws, area);
         let focus = ws.mux.active_focus();
+        let zoom_badge = self.active_zoom_badge(ws);
         let window = ws.window.clone();
 
         // A failed acquire/render owns the next GPU attempt until its one-shot
@@ -859,6 +940,9 @@ impl App {
                     title_parts
                         .prefix
                         .push_str(&media_shelf_badge(p.media_shelf.unseen()));
+                    if let Some(badge) = zoom_badge.as_deref().filter(|_| Some(*id) == focus) {
+                        title_parts.prefix.insert_str(0, badge);
+                    }
                     metas.push((
                         *id,
                         *r,

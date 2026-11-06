@@ -1489,3 +1489,43 @@ fn persistent_notice_accessibility_matches_both_control_rectangles() {
         super::persistent_notice_id(None, 1)
     );
 }
+
+#[test]
+fn config_notice_exposes_open_config_and_dismiss_with_the_shared_hit_rects() {
+    use unicode_width::UnicodeWidthStr;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let details = tr.text(kettle_i18n::Text::ConfigNoticeOpen).to_owned();
+        let close = tr.text(kettle_i18n::Text::NoticeDismiss).to_owned();
+        let toast = kettle_render::UpdateToastOverlay {
+            geometry: kettle_render::persistent_notice_geometry(
+                (0.0, 0.0, 800.0, 600.0), (8.0, 16.0), 4,
+                details.width(), close.width(),
+            ).unwrap(),
+            message: tr.config_notice("kettle.cfg:1"),
+            details,
+            close,
+            opacity: 1.0,
+            focused: None,
+        };
+        let nodes = super::persistent_notice_nodes(None, &toast);
+        for (part, rect, label, hit) in [
+            (1, toast.geometry.details, &toast.details, kettle_render::UpdateToastHit::Details),
+            (2, toast.geometry.close, &toast.close, kettle_render::UpdateToastHit::Close),
+        ] {
+            let node = &nodes.iter()
+                .find(|(id, _)| *id == super::persistent_notice_id(None, part)).unwrap().1;
+            assert_eq!(node.label(), Some(label.as_str()));
+            assert!(node.supports_action(accesskit::Action::Click));
+            let bounds = node.bounds().unwrap();
+            assert_eq!(
+                (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+                (rect.0 as f64, rect.1 as f64, (rect.0 + rect.2) as f64, (rect.1 + rect.3) as f64),
+            );
+            assert_eq!(
+                toast.geometry.hit_test(rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0),
+                Some(hit),
+            );
+        }
+    }
+}

@@ -56,6 +56,8 @@ struct Offer {
     proxy: wl_data_offer::WlDataOffer,
     internal: Option<u64>,
     uri_list: bool,
+    /// The preferred text type the offer lists, for the clipboard.
+    text: Option<&'static str>,
     action: wl_data_device_manager::DndAction,
 }
 
@@ -90,6 +92,10 @@ impl State {
                     .or_insert_with(|| manager.get_data_device(&seat.proxy, qh, id));
             }
         }
+    }
+
+    pub(super) fn device(&self, seat: u32) -> Option<&wl_data_device::WlDataDevice> {
+        self.devices.get(&seat)
     }
 
     pub(super) fn remove_seat(&mut self, seat: u32) {
@@ -370,6 +376,7 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                             proxy: id,
                             internal: None,
                             uri_list: false,
+                            text: None,
                             action: wl_data_device_manager::DndAction::None,
                         },
                     );
@@ -450,10 +457,24 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                     }
                 }
             }
+            // The clipboard keeps a selection that offers text; this device is
+            // the one the compositor reports the selection to.
             wl_data_device::Event::Selection { id: Some(id) } => {
-                if let Some(offer) = state.drag.offers.remove(&id.id().protocol_id()) {
-                    offer.proxy.destroy();
+                match state.drag.offers.remove(&id.id().protocol_id()) {
+                    Some(Offer {
+                        proxy,
+                        text: Some(mime),
+                        ..
+                    }) => super::selection::shared().offer(Some((proxy, mime))),
+                    Some(offer) => {
+                        offer.proxy.destroy();
+                        super::selection::shared().offer(None);
+                    }
+                    None => super::selection::shared().offer(None),
                 }
+            }
+            wl_data_device::Event::Selection { id: None } => {
+                super::selection::shared().offer(None);
             }
             _ => {}
         }
@@ -478,6 +499,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for super::State {
                 if mime_type == super::files::URI_LIST {
                     offer.uri_list = true;
                 }
+                offer.text = super::selection::better_text_mime(offer.text, &mime_type);
                 if let Some(active) = &state.drag.active
                     && mime_type == active.mime
                 {

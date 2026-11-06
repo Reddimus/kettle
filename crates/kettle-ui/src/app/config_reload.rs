@@ -135,6 +135,32 @@ impl App {
         self.set_runtime_theme_state(ws, name.to_string(), self.cfg.theme_by_name(name));
     }
 
+    pub(super) fn poll_system_appearance(&mut self, ws: &mut WindowState) {
+        let dark = self
+            .system_appearance
+            .get_or_init(|| crate::appearance::SystemAppearance::new(self.system_settings_waker()))
+            .dark();
+        if let Some(dark) = dark
+            && self.os_theme_dark != Some(dark)
+        {
+            let theme = if dark {
+                WindowTheme::Dark
+            } else {
+                WindowTheme::Light
+            };
+            // This also runs before the first pane exists. Never save a startup session.
+            self.apply_initial_os_theme_preference(ws, theme);
+            self.maybe_sync_color_scheme(ws);
+        }
+    }
+
+    pub(super) fn theme_pick_key(&self) -> &'static str {
+        theme_pick_key(
+            &self.cfg,
+            self.theme_schedule_is_dark().or(self.os_theme_dark),
+        )
+    }
+
     pub(super) fn os_theme_choice(&self, theme: WindowTheme) -> Option<String> {
         if self.cfg.theme_mode != kettle_config::ThemeMode::Auto {
             return None;
@@ -154,20 +180,35 @@ impl App {
 
     pub(super) fn apply_initial_os_theme_preference(
         &mut self,
-        ws: &WindowState,
+        ws: &mut WindowState,
         theme: WindowTheme,
     ) {
         self.os_theme_dark = Some(matches!(theme, WindowTheme::Dark));
-        if let Some(next) = self.os_theme_choice(theme) {
-            log::info!("theme-mode=auto: initial OS theme selects {next}");
+        if self.cfg.theme_mode == kettle_config::ThemeMode::Auto
+            && self.cfg.theme_schedule.is_none()
+        {
+            let next = self
+                .os_theme_choice(theme)
+                .unwrap_or_else(|| self.cfg.theme_name.clone());
+            log::info!("theme-mode=auto: OS theme selects {next}");
+            let baseline = (next.clone(), self.cfg.theme_by_name(&next));
+            for state in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+                rebase_theme_preview(state, &baseline);
+            }
             self.set_runtime_theme_name(ws, &next);
         }
     }
 
     pub(super) fn apply_os_theme_preference(&mut self, ws: &mut WindowState, theme: WindowTheme) {
-        self.os_theme_dark = Some(matches!(theme, WindowTheme::Dark));
-        if let Some(next) = self.os_theme_choice(theme) {
-            self.apply_theme_name(ws, "theme-mode=auto", next);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let _ = theme;
+            self.poll_system_appearance(ws);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            self.apply_initial_os_theme_preference(ws, theme);
+            self.maybe_sync_color_scheme(ws);
         }
     }
 
@@ -178,6 +219,7 @@ impl App {
             self.cfg.theme_mode,
             self.cfg.theme_schedule.is_some(),
             self.cfg.theme.is_dark(),
+            cfg!(any(target_os = "macos", target_os = "linux")),
         )
     }
 
@@ -326,6 +368,7 @@ impl App {
         } else {
             self.config_notice = None;
             self.config_notice_last = None;
+            self.config_notice_path = None;
         }
         // Surface malformed values (typos the parser silently ignores, e.g.
         // `cursor-style = beem`) on live reload. `--check-config` already
@@ -336,9 +379,9 @@ impl App {
             fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleConfigValuesIgnored),
-                &self
-                    .ui_text
-                    .notify_body_config_values_ignored(&malformed.join("\n")),
+                &self.ui_text.notify_body_config_values_ignored(
+                    self.config_notice_last.as_deref().unwrap_or_default(),
+                ),
             );
         }
         self.config_malformed_last = malformed;
@@ -410,6 +453,8 @@ impl App {
         ws.mux
             .set_unnegotiated_modified_enter(self.cfg.modify_other_keys);
         ws.mux.autoclean_groups = self.cfg.autoclean_groups;
+        ws.mux
+            .set_cursor_defaults(self.cfg.cursor_style, self.cfg.cursor_blink);
         // Push `scrollback` and `scrollback-bytes` edits (config file or
         // Settings rows) into live panes too; otherwise only panes opened
         // afterwards would use them.
@@ -503,6 +548,23 @@ impl App {
     }
 }
 
+/// Choose the configured side, independently of a temporary picker preview's lightness.
+pub(super) fn theme_pick_key(cfg: &Config, active_dark: Option<bool>) -> &'static str {
+    use kettle_config::ThemeMode;
+    match cfg.theme_mode {
+        ThemeMode::Explicit => "theme",
+        ThemeMode::Light => "light-theme",
+        ThemeMode::Dark => "dark-theme",
+        ThemeMode::Auto => {
+            if active_dark.unwrap_or(true) {
+                "dark-theme"
+            } else {
+                "light-theme"
+            }
+        }
+    }
+}
+
 /// Terminator parity (key_next_profile / key_previous_profile):
 /// pick the next profile name after `current`, wrapping at the end.
 /// If `current` isn't in the list (e.g. user launched without `--profile`,
@@ -547,7 +609,8 @@ pub(super) fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> 
 /// matches the palette kettle is actually rendering, instead of staying on
 /// the OS-wide setting under a forced dark/light theme.
 ///
-///   - `Auto` without a schedule → `None`: the palette follows the OS, so
+///   - With an independent system observer, always match the active palette.
+///   - Otherwise `Auto` without a schedule → `None`: the palette follows the OS, so
 ///     let the titlebar follow the OS natively too. Forcing a value here
 ///     would also stop winit's `ThemeChanged` events on some backends,
 ///     which the palette auto-switcher depends on.
@@ -559,8 +622,9 @@ pub(super) fn native_theme_hint(
     mode: kettle_config::ThemeMode,
     has_schedule: bool,
     theme_is_dark: bool,
+    independent_system_appearance: bool,
 ) -> Option<WindowTheme> {
-    if mode == kettle_config::ThemeMode::Auto && !has_schedule {
+    if mode == kettle_config::ThemeMode::Auto && !has_schedule && !independent_system_appearance {
         None
     } else if theme_is_dark {
         Some(WindowTheme::Dark)

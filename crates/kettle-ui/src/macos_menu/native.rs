@@ -17,8 +17,10 @@ use equivalents::new_menu;
 
 struct State {
     model: Vec<Menu>,
-    // NSMenuItem.target is unretained.
-    target: Retained<MenuTarget>,
+}
+
+struct Invocation {
+    action: kettle_config::Action,
     proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -34,28 +36,15 @@ declare_class!(
         type Mutability = mutability::MainThreadOnly;
         const NAME: &'static str = "KettleMenuTarget";
     }
-    impl DeclaredClass for MenuTarget { type Ivars = (); }
+    impl DeclaredClass for MenuTarget { type Ivars = Invocation; }
     // SAFETY: NSObject's protocol implementation is inherited unchanged.
     unsafe impl NSObjectProtocol for MenuTarget {}
     // SAFETY: the selector has AppKit's void(id) action signature.
     unsafe impl MenuTarget {
         #[method(kettleMenuAction:)]
-        fn activate(&self, sender: &NSMenuItem) {
-            STATE.with(|state| {
-                let state = state.borrow();
-                let Some(state) = state.as_ref() else { return };
-                let command = state.model.iter().flat_map(|menu| &menu.rows)
-                    .filter_map(|row| match row {
-                        Row::Item { command: Command::Kettle(action), .. } => Some(action),
-                        _ => None,
-                    }).nth({
-                        // SAFETY: sender is the live menu item AppKit passed to this action.
-                        unsafe { sender.tag() as usize }
-                    });
-                if let Some(action) = command {
-                    let _ = state.proxy.send_event(UserEvent::MenuCommand(action.clone()));
-                }
-            });
+        fn activate(&self, _sender: &NSMenuItem) {
+            let invocation = self.ivars();
+            let _ = invocation.proxy.send_event(UserEvent::MenuCommand(invocation.action.clone()));
         }
     }
 );
@@ -137,16 +126,6 @@ pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
     let app = NSApplication::sharedApplication(mtm);
     let native = NSMenu::new(mtm);
     let bar = new_menu(mtm, &native);
-    // AppKit can retain a replaced menu while tracking it. Reuse the target
-    // for the process lifetime so those unretained target pointers stay valid.
-    let target = STATE
-        .with(|state| state.borrow().as_ref().map(|s| s.target.clone()))
-        .unwrap_or_else(|| {
-            let target = mtm.alloc::<MenuTarget>().set_ivars(());
-            // SAFETY: this is a newly allocated NSObject subclass with initialized ivars.
-            unsafe { msg_send_id![super(target), init] }
-        });
-    let mut tag = 0;
     for menu in &model {
         let submenu = new_menu(mtm, &native);
         // SAFETY: this is our live main-thread menu, validated by the portable model.
@@ -154,47 +133,7 @@ pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
             submenu.setTitle(&NSString::from_str(menu.title));
             submenu.setAutoenablesItems(false);
         }
-        for row in &menu.rows {
-            match row {
-                Row::Separator => submenu.addItem(&NSMenuItem::separatorItem(mtm)),
-                Row::Services(title) => {
-                    let item = NSMenuItem::new(mtm);
-                    // SAFETY: this is a newly allocated main-thread menu item.
-                    unsafe { item.setTitle(&NSString::from_str(title)) };
-                    let services = NSMenu::new(mtm);
-                    item.setSubmenu(Some(&services));
-                    submenu.addItem(&item);
-                    // SAFETY: AppKit retains the live services menu.
-                    unsafe { app.setServicesMenu(Some(&services)) };
-                }
-                Row::Item {
-                    title,
-                    command,
-                    shortcut,
-                    enabled,
-                    ..
-                } => {
-                    let selector = match command {
-                        Command::Kettle(_) => sel!(kettleMenuAction:),
-                        Command::Native(action) => selector_for(*action),
-                    };
-                    let item = make_item(mtm, title, selector, *shortcut);
-                    // SAFETY: enabled comes from the focused window's model.
-                    unsafe { item.setEnabled(*enabled) };
-                    if matches!(command, Command::Kettle(_)) {
-                        // SAFETY: our target interprets these sequential nonnegative tags.
-                        unsafe { item.setTag(tag) };
-                        tag += 1;
-                        let target_obj: &AnyObject = &target;
-                        // SAFETY: State retains target for every menu item's lifetime.
-                        unsafe { item.setTarget(Some(target_obj)) };
-                    } else {
-                        native.addItem(&make_item(mtm, title, selector, *shortcut));
-                    }
-                    submenu.addItem(&item);
-                }
-            }
-        }
+        append_rows(mtm, &submenu, &native, &app, proxy, &menu.rows);
         let item = NSMenuItem::new(mtm);
         // SAFETY: this is a newly allocated main-thread menu item.
         unsafe { item.setTitle(&NSString::from_str(menu.title)) };
@@ -206,11 +145,79 @@ pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
         }
     }
     app.setMainMenu(Some(&bar));
-    STATE.with(|state| {
-        *state.borrow_mut() = Some(State {
-            model,
-            target,
-            proxy: proxy.clone(),
-        })
-    });
+    STATE.with(|state| *state.borrow_mut() = Some(State { model }));
+}
+
+fn append_rows(
+    mtm: MainThreadMarker,
+    submenu: &NSMenu,
+    native: &Retained<NSMenu>,
+    app: &NSApplication,
+    proxy: &EventLoopProxy<UserEvent>,
+    rows: &[Row],
+) {
+    for row in rows {
+        match row {
+            Row::Submenu { title, rows } => {
+                let child = new_menu(mtm, native);
+                // SAFETY: newly created main-thread menu with explicit enabled state.
+                unsafe {
+                    child.setAutoenablesItems(false);
+                }
+                append_rows(mtm, &child, native, app, proxy, rows);
+                let item = NSMenuItem::new(mtm);
+                // SAFETY: newly allocated main-thread menu item.
+                unsafe {
+                    item.setTitle(&NSString::from_str(title));
+                }
+                item.setSubmenu(Some(&child));
+                submenu.addItem(&item);
+            }
+            Row::Separator => submenu.addItem(&NSMenuItem::separatorItem(mtm)),
+            Row::Services(title) => {
+                let item = NSMenuItem::new(mtm);
+                // SAFETY: this is a newly allocated main-thread menu item.
+                unsafe { item.setTitle(&NSString::from_str(title)) };
+                let services = NSMenu::new(mtm);
+                item.setSubmenu(Some(&services));
+                submenu.addItem(&item);
+                // SAFETY: AppKit retains the live services menu.
+                unsafe { app.setServicesMenu(Some(&services)) };
+            }
+            Row::Item {
+                title,
+                command,
+                shortcut,
+                enabled,
+                ..
+            } => {
+                let selector = match command {
+                    Command::Kettle(_) => sel!(kettleMenuAction:),
+                    Command::Native(action) => selector_for(*action),
+                };
+                let item = make_item(mtm, title, selector, *shortcut);
+                // SAFETY: enabled comes from the focused window's model.
+                unsafe { item.setEnabled(*enabled) };
+                if let Command::Kettle(action) = command {
+                    let target = mtm.alloc::<MenuTarget>().set_ivars(Invocation {
+                        action: action.clone(),
+                        proxy: proxy.clone(),
+                    });
+                    // SAFETY: newly allocated NSObject subclass with initialized ivars.
+                    let target: Retained<MenuTarget> = unsafe { msg_send_id![super(target), init] };
+                    let target_obj: &AnyObject = &target;
+                    // AppKit can retain an old menu while tracking it. The item owns its
+                    // invocation, so rebuilding profiles cannot retarget an old selection.
+                    // SAFETY: representedObject retains the target for this item's lifetime.
+                    unsafe {
+                        item.setRepresentedObject(Some(target_obj));
+                        item.setTarget(Some(target_obj));
+                    }
+                } else {
+                    native.addItem(&make_item(mtm, title, selector, *shortcut));
+                }
+                submenu.addItem(&item);
+            }
+        }
+    }
 }

@@ -668,6 +668,14 @@ pub trait Handler {
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
 
+    /// A run of printable ASCII (`0x20..=0x7e`) to be displayed, in order. The
+    /// default displays each character with `input`.
+    fn input_ascii(&mut self, text: &str) {
+        for c in text.chars() {
+            self.input(c);
+        }
+    }
+
     /// Repeat the preceding printable character; embedders may retain a cluster.
     fn repeat_char(&mut self, c: char, count: u16) {
         for _ in 0..count {
@@ -1611,6 +1619,15 @@ where
         self.abandon_dcs_query();
         self.handler.input(c);
         self.state.preceding_char = Some(c);
+    }
+
+    #[inline]
+    fn print_ascii(&mut self, text: &str) {
+        self.abandon_dcs_query();
+        self.handler.input_ascii(text);
+        if let Some(c) = text.chars().next_back() {
+            self.state.preceding_char = Some(c);
+        }
     }
 
     #[inline]

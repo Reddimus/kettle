@@ -628,3 +628,131 @@ fn picker_result_activation_uses_native_and_control_enter_routing() {
         );
     }
 }
+
+#[test]
+fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
+    use kettle_config::{Config, ThemeMode, persist_config_toggle};
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("config");
+    for (mode, os, key) in [
+        (ThemeMode::Auto, Some(false), "light-theme"),
+        (ThemeMode::Auto, Some(true), "dark-theme"),
+        (ThemeMode::Auto, None, "dark-theme"),
+        (ThemeMode::Light, Some(true), "light-theme"),
+        (ThemeMode::Dark, Some(false), "dark-theme"),
+        (ThemeMode::Explicit, Some(false), "theme"),
+    ] {
+        let token = match mode {
+            ThemeMode::Auto => "auto",
+            ThemeMode::Light => "light",
+            ThemeMode::Dark => "dark",
+            ThemeMode::Explicit => "explicit",
+        };
+        std::fs::write(&path, format!("theme = Dracula\ntheme-mode = {token}\n")).unwrap();
+        let mut cfg = Config::parse_text(&std::fs::read_to_string(&path).unwrap());
+        // A preview can be either light or dark; it must never change the destination.
+        for preview in ["TokyoNight Day", "TokyoNight Night"] {
+            cfg.theme = cfg.theme_by_name(preview);
+            assert_eq!(super::theme_pick_key(&cfg, os), key);
+        }
+        persist_config_toggle(&path, key, "Alabaster").unwrap();
+        let mut reloaded = Config::parse_text(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(reloaded.theme_mode, mode);
+        reloaded.resolve_theme_mode(os);
+        assert_eq!(reloaded.theme_name, "Alabaster");
+        if key != "theme" {
+            let other_dark = key == "light-theme";
+            reloaded.theme_mode = if other_dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            };
+            reloaded.resolve_theme_mode(None);
+            assert_eq!(
+                reloaded.theme_name,
+                if other_dark {
+                    "TokyoNight Night"
+                } else {
+                    "TokyoNight Day"
+                }
+            );
+        }
+    }
+    let source = production_source();
+    let commit = source
+        .split("fn commit_theme(")
+        .nth(1)
+        .unwrap()
+        .split("fn ssh_key(")
+        .next()
+        .unwrap();
+    assert!(commit.contains("let key = self.theme_pick_key();"));
+    assert!(commit.contains("self.persist_pref(key, name)"));
+    assert!(commit.contains("self.cfg.light_theme = name.to_string()"));
+    assert!(commit.contains("self.cfg.dark_theme = name.to_string()"));
+    let settings = source
+        .split("fn settings_adjust(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(settings.contains("self.theme_pick_key()"));
+    assert!(settings.contains("self.settings_store(ws, key_str, new_val)"));
+    let store = source
+        .split("fn settings_store(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(store.contains("self.persist_pref(key_str, &new_val)"));
+}
+
+#[test]
+fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
+    for tr in [&EN, &ES] {
+        for key in ["light-theme", "dark-theme", "theme"] {
+            let prefix = super::theme_picker_appearance_prefix(key, tr);
+            assert!(!prefix.is_empty());
+            for width in [160.0, 320.0, 800.0] {
+                let field = kettle_render::TextFieldOverlay {
+                    picker_header: true,
+                    text: "Tokyo".into(),
+                    cursor_byte: 5,
+                    selection: None,
+                    horizontal_scroll: 0,
+                    rect: (0.0, 0.0, width, 32.0),
+                    prefix: prefix.clone(),
+                    hint: String::new(),
+                    accent_palette: 5,
+                };
+                let [prefix_rect, editor, hint] = kettle_render::text_field_rects(&field, 8.0);
+                assert_eq!(editor.0, prefix_rect.0 + prefix_rect.2);
+                assert!(editor.2 > 0.0);
+                assert!(editor.0 + editor.2 <= hint.0 + 0.01);
+            }
+        }
+    }
+    assert!(super::theme_picker_appearance_prefix("dark-theme", &EN).contains("dark theme:"));
+    assert!(super::theme_picker_appearance_prefix("light-theme", &ES).contains("tema claro:"));
+    let source = production_source();
+    assert!(
+        source.contains("theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)")
+    );
+}
+
+#[test]
+fn system_switch_rebases_picker_escape_without_changing_query() {
+    let mut ws = WindowState::new(1, Mux::new());
+    begin_theme_picker(&mut ws, live("TokyoNight Night"));
+    ws.theme_picker_input.as_mut().unwrap().query = "Alabaster".into();
+    let baseline = live("TokyoNight Day");
+    super::rebase_theme_preview(&mut ws, &baseline);
+    assert_eq!(&*ws.theme_picker_input.as_ref().unwrap().query, "Alabaster");
+    ws.theme_picker_input = None;
+    let cfg = kettle_config::Config::parse_text("theme = Alabaster");
+    let restore = theme_preview_change(&mut ws, &cfg, &EN).unwrap();
+    assert_eq!(restore.0, baseline.0);
+    assert_eq!(restore.1.background, baseline.1.background);
+}

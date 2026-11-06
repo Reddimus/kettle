@@ -191,6 +191,7 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
             (TitleEditScope::Tab, Text::EditTitleTab),
             (TitleEditScope::Pane, Text::EditTitlePane),
             (TitleEditScope::Group, Text::EditTitleGroup),
+            (TitleEditScope::SaveLayout, Text::EditLayoutName),
         ] {
             let painted = format!("  ✎ {} 界x", tr.text(text));
             assert_eq!(
@@ -213,14 +214,14 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
 fn picker_rows_and_empty_states_follow_the_ui_language() {
     let bindings = kettle_config::keybinds::defaults();
     assert_eq!(
-        command_picker_list("", 0, &bindings, &ES, None).rows[0].label,
+        command_picker_list("", 0, &bindings, &ES, None, &[],).rows[0].label,
         "Nueva pestaña"
     );
-    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None);
+    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, &[]);
     assert_eq!(none.rows[0].label, "Ningún comando coincide");
     assert!(!none.rows[0].enabled);
     assert_eq!(
-        command_picker_list("zzzqqq", 0, &bindings, &EN, None).rows[0].label,
+        command_picker_list("zzzqqq", 0, &bindings, &EN, None, &[],).rows[0].label,
         "No matching command"
     );
 
@@ -228,10 +229,13 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
     assert_eq!(empty.rows[0].label, "No hay diseños guardados");
     // The command stays as typed; only the workspace name's placeholder is
     // translated.
-    assert_eq!(empty.rows[0].hint, "kettle --layout NOMBRE");
+    assert_eq!(
+        empty.rows[0].hint,
+        "Usar Guardar diseño… en el menú de nueva pestaña"
+    );
     assert_eq!(
         layout_picker_list("", 0, &[], &EN).rows[0].hint,
-        "kettle --layout NAME"
+        "Use Save Layout… in the new-tab menu"
     );
     let layouts = ["dev".to_string()];
     assert_eq!(

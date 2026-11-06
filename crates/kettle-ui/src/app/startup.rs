@@ -690,17 +690,7 @@ impl App {
         // Resolve clipboard availability before constructing the first Mux:
         // DA1 extension 52 is a runtime capability, not merely compiled code,
         // and must not be advertised when policy or the platform denies writes.
-        let clipboard = match arboard::Clipboard::new() {
-            Ok(cb) => Some(cb),
-            Err(e) => {
-                log::warn!(
-                    "clipboard unavailable ({e}); copy/paste and OSC 52 \
-                     will no-op — no DISPLAY/Wayland, headless SSH, or a \
-                     sandbox without clipboard-portal access?"
-                );
-                None
-            }
-        };
+        let clipboard = crate::clipboard::Clipboard::new();
         let osc52_copy_allowed = osc52_copy_is_available(initial_cfg.osc52, clipboard.is_some());
 
         // Per-window state lives in a WindowState; the first window is seq 1.
@@ -756,6 +746,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
+            restore_content: Default::default(),
             restore_identity: None,
             session_load_failed: false,
             session_writer: crate::session::SessionWriter::new()?,
@@ -855,6 +846,7 @@ impl App {
             remote_poll_due: None,
             last_schedule_decision: None,
             os_theme_dark: None,
+            system_appearance: std::sync::OnceLock::new(),
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
@@ -873,6 +865,7 @@ impl App {
             update_restart_dismissed: false,
             config_notice: None,
             config_notice_last: None,
+            config_notice_path: None,
             update_toast: None,
             update_toast_receipts: None,
             update_toast_claiming: None,
@@ -1066,6 +1059,7 @@ impl App {
         // not be written back either — otherwise the flag that names a layout
         // is the same flag that destroys it.
         self.named_layout_writable = !has_launch_override;
+        self.clear_disabled_content();
         let loaded_session = if ws.pre_launch.is_some() || has_launch_override {
             None
         } else {
@@ -1142,7 +1136,14 @@ impl App {
             None
         };
         ws.startup_surface = startup_surface;
-        let startup_titlebar_band = startup_surface.and_then(|_| Self::macos_titlebar_band(ws));
+        let startup_titlebar_band = startup_surface.and_then(|_| {
+            Self::macos_titlebar_band(ws).or_else(|| {
+                cfg!(target_os = "linux").then_some(TitlebarBand {
+                    height: self.tab_bar_h(ws),
+                    left: 0.0,
+                })
+            })
+        });
         // The pane starts before the window only when the window will open at
         // this scale and size: on the monitor the cell was measured for, which
         // a configured position could change, and within it, where the OS
@@ -1203,6 +1204,15 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        {
+            crate::clipboard::Clipboard::attach_wayland(&mut self.clipboard, &window);
+            let allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
+            ws.mux.set_osc52_copy_allowed(allowed);
+            for other in self.windows.values_mut() {
+                other.mux.set_osc52_copy_allowed(allowed);
+            }
+        }
         self.apply_post_create(&window);
         if self.startup.quick_terminal {
             crate::quick_terminal::native::configure(&window);
@@ -1324,7 +1334,10 @@ impl App {
         ws.startup_surface = None;
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        self.sync_macos_titlebar(ws);
         self.sync_output_frame_budget(ws, true);
+        self.poll_system_appearance(ws);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if let Some(theme) = ws.window.as_ref().and_then(|w| w.theme()) {
             self.apply_initial_os_theme_preference(ws, theme);
         }
@@ -1398,10 +1411,19 @@ impl App {
                             windows: Vec::new(),
                         };
                         let geometries = self.restore_geometries(ws, &first_session);
+                        let content = self.restore_content.pop_front().unwrap_or_default();
+                        let divider = self
+                            .ui_text
+                            .restored_content_divider(&crate::wall_clock::local_date_time());
                         let mk = || self.waker();
-                        let outcome =
-                            ws.mux
-                                .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
+                        let outcome = ws.mux.restore_geometry_with_content(
+                            &first_session,
+                            &self.cfg,
+                            &geometries,
+                            &mk,
+                            &content,
+                            &divider,
+                        );
                         // A tab that could not be rebuilt is gone from the live
                         // mux, and the next save rewrites the file from it. Keep
                         // the original so a transient failure — a command not on
@@ -1481,11 +1503,15 @@ impl App {
                     geometry: surface.geometry(),
                 };
                 let size = winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
+                let content_windows = self.restore_content.len();
                 if self
                     .open_window(event_loop, WindowOpen::Restore(sw), None, Some(size))
                     .is_err()
                 {
                     self.stash_unrestorable_session("could not open an additional window");
+                    if self.restore_content.len() == content_windows {
+                        self.restore_content.pop_front();
+                    }
                     log::warn!("session restore: could not open an additional window");
                 }
             }
@@ -1494,6 +1520,13 @@ impl App {
             self.focused_seq = ws.seq;
             record_window_focus(&mut self.window_focus_order, ws.seq);
         }
+        if restored
+            && !self.session_load_failed
+            && let Some(source) = self.restore_source.as_deref()
+        {
+            crate::session_content::remove(source);
+        }
+        self.restore_content.clear();
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
         // cache. The server only needs the pid + a live proxy for its waker, so

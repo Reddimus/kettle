@@ -2,6 +2,34 @@
 
 use super::*;
 
+pub(super) fn tab_bar_geometry_json(
+    bar: &TabBar,
+    segments: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "height": bar.height,
+        "y": bar.y,
+        "new_tab": rect_json(bar.new_tab),
+        "new_tab_menu": rect_json(bar.new_tab_menu),
+        "drag_cursor_x": bar.drag_cursor_x,
+        // A vertical strip reports the drag on its own axis;
+        // additive, so a reader that only knows the x key still
+        // sees exactly what it saw before on a horizontal bar.
+        "drag_cursor_y": bar.drag_cursor_y,
+        // Tear-off state (pre-tear ghost escalation and dock
+        // highlight) for live-UI smokes.
+        "tear_lift": bar.tear_lift,
+        "insert_marker": bar.insert_marker,
+        "dock_highlighted": bar.insert_marker.is_some(),
+        "band": rect_json(bar.band),
+        // The overflow arrows, back then forward (`‹ ›` across,
+        // `⌃ ⌄` down a side bar); zero-sized while it all fits.
+        "scroll_left": rect_json(bar.scroll_left),
+        "scroll_right": rect_json(bar.scroll_right),
+        "segments": segments,
+    })
+}
+
 pub(super) fn diagnostic_titlebar_bell(icon_enabled: bool, bell: bool) -> Option<&'static str> {
     (icon_enabled && bell).then_some("\u{1f514}")
 }
@@ -990,7 +1018,7 @@ impl App {
             self.overlay_text_cell_width(target)
                 * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(target))
         } else {
-            cell_w
+            self.overlay_text_cell_width(target)
         };
         let segments: Vec<serde_json::Value> = bar
             .segments
@@ -1095,6 +1123,7 @@ impl App {
         });
         let home = crate::mux::home_dir_string();
         let focus = target.mux.active_focus();
+        let zoom_badge = self.active_zoom_badge(target);
         let pane_titlebars: Vec<serde_json::Value> = if pane_layout
             .iter()
             .any(|(_, partition)| partition.titlebar.is_some())
@@ -1118,6 +1147,9 @@ impl App {
                     title_parts
                         .prefix
                         .push_str(&media_shelf_badge(pane.media_shelf.unseen()));
+                    if let Some(badge) = zoom_badge.as_deref().filter(|_| Some(*pane_id) == focus) {
+                        title_parts.prefix.insert_str(0, badge);
+                    }
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
@@ -1227,6 +1259,7 @@ impl App {
                 TitleEditScope::Tab => "tab",
                 TitleEditScope::Pane => "pane",
                 TitleEditScope::Group => "group",
+                TitleEditScope::SaveLayout => "save_layout",
             };
             serde_json::json!({
                 "scope": scope,
@@ -1472,6 +1505,26 @@ impl App {
             "pane": pane, "message": toast.message, "rect": rect_json(toast.geometry.rect),
             "restart": rect_json(toast.geometry.details), "close": rect_json(toast.geometry.close),
         })).collect::<Vec<_>>();
+        let pane_statuses = diagnostic_overlay
+            .pane_statuses
+            .iter()
+            .map(|status| {
+                serde_json::json!({
+                    "kind": if status.target.is_some() { "link_hover" } else { "hint_legend" },
+                    "rect": rect_json(status.rect),
+                })
+            })
+            .collect::<Vec<_>>();
+        let hint_labels = diagnostic_overlay
+            .hint_labels
+            .iter()
+            .zip(&diagnostic_overlay.hint_bounds)
+            .map(|(hint, rect)| {
+                serde_json::json!({
+                    "label": hint.label, "rect": rect_json(*rect), "dim": hint.dim,
+                })
+            })
+            .collect::<Vec<_>>();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1570,28 +1623,7 @@ impl App {
                         },
                     }),
                 ),
-                "tab_bar": {
-                    "height": bar.height,
-                    "y": bar.y,
-                    "new_tab": rect_json(bar.new_tab),
-                    "new_tab_menu": rect_json(bar.new_tab_menu),
-                    "drag_cursor_x": bar.drag_cursor_x,
-                    // A vertical strip reports the drag on its own axis;
-                    // additive, so a reader that only knows the x key still
-                    // sees exactly what it saw before on a horizontal bar.
-                    "drag_cursor_y": bar.drag_cursor_y,
-                    // Tear-off state (pre-tear ghost escalation and dock
-                    // highlight) for live-UI smokes.
-                    "tear_lift": bar.tear_lift,
-                    "insert_marker": bar.insert_marker,
-                    "dock_highlighted": bar.insert_marker.is_some(),
-                    "band": rect_json(bar.band),
-                    // The overflow arrows, back then forward (`‹ ›` across,
-                    // `⌃ ⌄` down a side bar); zero-sized while it all fits.
-                    "scroll_left": rect_json(bar.scroll_left),
-                    "scroll_right": rect_json(bar.scroll_right),
-                    "segments": segments,
-                },
+                "tab_bar": tab_bar_geometry_json(&bar, segments),
                 "pane_titlebars": pane_titlebars,
                 // What this window's renderer has sent to the GPU: counts
                 // only, never content. A window that only blinks should add
@@ -1617,6 +1649,13 @@ impl App {
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
         });
+        geometry["pane_statuses"] = serde_json::json!(pane_statuses);
+        geometry["hint_labels"] = serde_json::json!(hint_labels);
+        geometry["linux_header_bar"] = serde_json::json!(target.linux_titlebar);
+        geometry["resize_grip"] = serde_json::json!({
+            "logical_width": 6, "active": self.linux_resize_at(target, 0.0, 0.0).is_some(),
+        });
+        geometry["tab_bar"]["window_controls"] = window_control_geometry(&bar);
         geometry["notices"] = notices.into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
@@ -2375,6 +2414,9 @@ impl App {
         }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.linux_resize_at(ws, px, py).is_some() {
+            return true;
+        }
         if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press, Some(event_loop)) {
             return true;
         }
@@ -2431,11 +2473,20 @@ impl App {
         if self.press_card(ws, px, py, bcode) {
             return true;
         }
+        if let Some(action) = window_control_at(&bar, px, py) {
+            ws.pressed_window_control = (bcode == 0).then_some(action);
+            return true;
+        }
+        if ws.linux_titlebar && empty_titlebar_space(&bar, px, py) {
+            return true;
+        }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
+                ws.pressed_new_tab_menu = true;
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
             } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
+                ws.pressed_new_tab = true;
                 let area = self.area(ws);
                 let (cols, rows) = self.grid_of(ws, area);
                 let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -2544,6 +2595,26 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+            ws.pressed_new_tab = false;
+            ws.pressed_new_tab_menu = false;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        if bcode == 0
+            && let Some(action) = ws.pressed_window_control.take()
+        {
+            let bar = self.tab_bar(ws);
+            if window_control_at(&bar, ws.cursor.x as f32, ws.cursor.y as f32) == Some(action) {
+                self.activate_window_control(ws, action, event_loop);
+            }
+            ws.held_buttons.end_own(bcode);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return true;
+        }
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
         if bcode == 0 {
@@ -3783,4 +3854,21 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
             }))
         }).collect::<Vec<_>>(),
     }))
+}
+
+pub(super) fn window_control_geometry(bar: &TabBar) -> serde_json::Value {
+    serde_json::json!(
+        bar.window_controls
+            .iter()
+            .map(|button| {
+                let (x, y, w, h) = button.rect;
+                serde_json::json!({
+                    "action": button.action.as_str(),
+                    "rect": { "x": x, "y": y, "width": w, "height": h },
+                    "hovered": button.hovered,
+                    "pressed": button.pressed,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
 }

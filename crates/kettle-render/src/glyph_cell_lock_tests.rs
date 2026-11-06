@@ -229,11 +229,28 @@ fn gpu_fault_latch_keeps_first_error_and_bounds_message() {
 }
 
 #[test]
-fn terminal_cursor_is_suppressed_while_window_is_unfocused() {
-    assert!(super::cursor_focus_gate(true, true));
-    assert!(!super::cursor_focus_gate(false, true));
-    assert!(!super::cursor_focus_gate(true, false));
-    assert!(!super::cursor_focus_gate(false, false));
+fn unfocused_cursors_respect_style_and_terminal_visibility() {
+    use alacritty_terminal::vte::ansi::CursorShape as S;
+    use kettle_config::CursorUnfocusedStyle as U;
+    for shape in [S::Block, S::Beam, S::Underline, S::HollowBlock, S::Hidden] {
+        for style in [U::Hollow, U::Hidden, U::Unchanged] {
+            assert_eq!(
+                super::terminal::unfocused_cursor_shape(shape, true, style),
+                shape
+            );
+            let expected = if shape == S::Hidden || style == U::Hidden {
+                S::Hidden
+            } else if style == U::Hollow {
+                S::HollowBlock
+            } else {
+                shape
+            };
+            assert_eq!(
+                super::terminal::unfocused_cursor_shape(shape, false, style),
+                expected
+            );
+        }
+    }
 }
 
 #[test]

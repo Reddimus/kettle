@@ -22,6 +22,59 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+a11y_window_minimize = "draft"
+a11y_window_maximize = "draft"
+a11y_window_restore = "draft"
+a11y_window_close = "draft"
+
+tab_new_options = "draft"
+
+notify_profile_launch_failed_body = "draft"
+notify_profile_launch_failed = "draft"
+notify_profiles_failed_body = "draft"
+notify_profiles_failed = "draft"
+notify_layout_failed_body = "draft"
+notify_layout_failed = "draft"
+edit_layout_name = "draft"
+menu_open_layout = "draft"
+menu_save_layout = "draft"
+palette_launch_profile = "draft"
+menu_no_profiles = "draft"
+menu_new_tab_profile = "draft"
+
+settings_field_cursor_unfocused_style = "draft"
+settings_description_field_cursor_unfocused_style = "draft"
+settings_value_hollow_cursor = "draft"
+settings_value_hidden_cursor = "draft"
+settings_value_unchanged_cursor = "draft"
+settings_field_copy_trim_whitespace = "draft"
+settings_description_field_copy_trim_whitespace = "draft"
+
+link_open_click = "draft"
+link_open_command_click = "draft"
+link_open_control_click = "draft"
+hint_action_open_url = "draft"
+hint_action_open_path = "draft"
+hint_action_copy = "draft"
+hint_action_preview = "draft"
+hint_legend = "draft"
+hint_legend_plain = "draft"
+
+settings_category_sessions = "draft"
+settings_field_restore_scrollback_lines = "draft"
+settings_field_restore_scrollback_remote = "draft"
+settings_description_restore_scrollback_lines = "draft"
+settings_description_restore_scrollback_remote = "draft"
+restored_content_divider = "draft"
+
+settings_field_appearance = "draft"
+settings_description_field_appearance = "draft"
+settings_value_follow_system = "draft"
+settings_value_light_appearance = "draft"
+settings_value_dark_appearance = "draft"
+settings_value_fixed_theme = "draft"
+picker_theme_for_light_appearance = "draft"
+picker_theme_for_dark_appearance = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"
@@ -55,6 +108,14 @@ process_restart = "draft"
 process_close = "draft"
 config_notice = "draft"
 config_notice_more = "draft"
+config_notice_open = "draft"
+config_notice_unknown = "draft"
+config_notice_suggestion = "draft"
+config_notice_invalid = "draft"
+config_notice_number = "draft"
+config_notice_boolean = "draft"
+config_notice_malformed = "draft"
+config_notice_missing_equals = "draft"
 notice_dismiss = "draft"
 a11y_tab_list = "draft"
 a11y_tab_close = "draft"
@@ -860,8 +921,42 @@ media_viewer_pin_short = "accepted"
 media_viewer_overlay_hint = "accepted"
 media_viewer_a11y = "accepted"
 
+confirm_paste_without_controls = "draft"
+osc52_denied_read = "draft"
+osc52_denied_write = "draft"
+confirm_paste_lines = "draft"
+confirm_paste_escapes = "draft"
+confirm_paste_controls = "draft"
+osc52_copied = "draft"
+pane_zoomed = "draft"
+pane_zoomed_unbound = "draft"
+scrollback_a11y_position = "draft"
+settings_hint_reset = "draft"
+
 [second-pass]
 keys = [
+    "a11y_window_minimize",
+    "a11y_window_maximize",
+    "a11y_window_restore",
+    "a11y_window_close",
+
+    "confirm_paste_without_controls",
+    "osc52_denied_read",
+    "osc52_denied_write",
+    "confirm_paste_lines",
+    "confirm_paste_escapes",
+    "confirm_paste_controls",
+    "osc52_copied",
+    "scrollback_a11y_position",
+
+    "hint_legend",
+    "hint_legend_plain",
+    "link_open_click",
+    "link_open_command_click",
+    "link_open_control_click",
+
+    "picker_theme_for_light_appearance",
+    "picker_theme_for_dark_appearance",
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",
@@ -875,6 +970,14 @@ keys = [
     "process_close",
     "config_notice",
     "config_notice_more",
+    "config_notice_open",
+    "config_notice_unknown",
+    "config_notice_suggestion",
+    "config_notice_invalid",
+    "config_notice_number",
+    "config_notice_boolean",
+    "config_notice_malformed",
+    "config_notice_missing_equals",
     "notice_dismiss",
     "a11y_tab_list",
     "a11y_tab_close",

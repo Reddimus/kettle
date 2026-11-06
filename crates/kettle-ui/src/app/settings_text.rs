@@ -119,6 +119,7 @@ pub(super) fn settings_hints(tr: &kettle_i18n::Translator, vim_nav: bool) -> Str
             ("↑↓/jk", Text::SettingsHintField),
             ("←→/hl", Text::SettingsHintChange),
             ("g/G", Text::SettingsHintEnds),
+            ("Del", Text::SettingsHintReset),
             ("Tab", Text::SettingsHintCategory),
             ("Esc", Text::SettingsHintClose),
         ]
@@ -126,6 +127,7 @@ pub(super) fn settings_hints(tr: &kettle_i18n::Translator, vim_nav: bool) -> Str
         &[
             ("↑↓", Text::SettingsHintField),
             ("←→", Text::SettingsHintChange),
+            ("Del", Text::SettingsHintReset),
             ("Tab", Text::SettingsHintCategory),
             ("Esc", Text::SettingsHintClose),
         ]

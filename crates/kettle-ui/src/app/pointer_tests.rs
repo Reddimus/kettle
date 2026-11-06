@@ -171,8 +171,13 @@ fn a_settled_card_under_the_pointer_shows_it_takes_a_click() {
         "WindowEvent::MouseInput { state: ElementState::Released, button, .. } => {",
         "WindowEvent::MouseWheel { delta, phase, .. } => {",
     ] {
+        let dismissal = if handler.contains("MouseWheel") {
+            "dismiss_link_hover(ws); "
+        } else {
+            ""
+        };
         assert!(
-            source.contains(&format!("{handler} ws.resume_native_pointer();")),
+            source.contains(&format!("{handler} {dismissal}ws.resume_native_pointer();")),
             "{handler}"
         );
     }
@@ -1137,6 +1142,33 @@ fn selection_kind_maps_clicks_and_alt() {
 }
 
 #[test]
+fn mouse_selection_reads_physically_held_modifiers() {
+    // On macOS `ws.mods` hides Option unless `macos-option-as-alt` maps it
+    // to Meta, so Option-drag must not read it for block selection.
+    let src = super::production_source();
+    let body = src
+        .split("fn begin_or_extend_mouse_selection")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("selection start");
+    assert!(body.contains("held_modifiers(ws)"));
+    assert!(!body.contains("ws.mods.alt_key()"));
+    assert!(!body.contains("ws.mods.shift_key()"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn option_drag_selects_a_block_with_option_not_mapped_to_alt() {
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.macos_raw_mods = winit::keyboard::ModifiersState::ALT;
+    ws.macos_left_option_pressed = true;
+    super::keyboard::refresh_macos_modifiers(&mut ws, kettle_config::MacosOptionAsAlt::None);
+    assert!(!ws.mods.alt_key(), "Option composes text by default");
+    let held = super::keyboard::held_modifiers(&ws);
+    assert!(matches!(selection_kind(1, held.alt_key()), SelectionType::Block));
+}
+
+#[test]
 fn finding_tab_pointer_uses_painted_band() {
     let body = finding_body(include_str!("chrome.rs"), "cursor_in_tab_bar");
     assert!(
@@ -1228,4 +1260,76 @@ fn command_palette_cancels_an_armed_titlebar_drag() {
         .next()
         .unwrap();
     assert!(palette.contains("self.close_all_modals(ws)"));
+}
+
+#[test]
+fn option_drag_is_rectangular_and_shift_click_preserves_the_anchor_in_history() {
+    let (mux, target, _) = title_test_split_mux();
+    let mut term = mux.panes[&target].term.term.lock().unwrap();
+    // Produce retained history so negative grid lines are valid selection anchors.
+    let mut processor: alacritty_terminal::vte::ansi::Processor =
+        alacritty_terminal::vte::ansi::Processor::new();
+    for _ in 0..30 {
+        processor.advance(&mut *term, b"0123456789\r\n");
+    }
+    let mods = winit::keyboard::ModifiersState::ALT;
+    assert!(matches!(
+        selection_kind(1, mods.alt_key()),
+        SelectionType::Block
+    ));
+    for kind in [selection_kind(1, mods.alt_key()), SelectionType::Simple] {
+        let mut selection = kettle_core::Selection::new(
+            kind,
+            kettle_core::Point::new(kettle_core::Line(-3), kettle_core::Column(2)),
+            kettle_core::Side::Left,
+        );
+        selection.update(
+            kettle_core::Point::new(kettle_core::Line(-1), kettle_core::Column(5)),
+            kettle_core::Side::Right,
+        );
+        let original = selection.to_range(&*term).unwrap();
+        selection.update(
+            kettle_core::Point::new(kettle_core::Line(0), kettle_core::Column(7)),
+            kettle_core::Side::Right,
+        );
+        let extended = selection.to_range(&*term).unwrap();
+        assert_eq!(
+            original.start, extended.start,
+            "Shift-click retains the anchor"
+        );
+        assert_eq!(
+            extended.end,
+            kettle_core::Point::new(kettle_core::Line(0), kettle_core::Column(7))
+        );
+        assert_eq!(extended.is_block, matches!(kind, SelectionType::Block));
+    }
+    let source = production_source();
+    let begin = finding_body(&source, "begin_or_extend_mouse_selection");
+    assert!(
+        begin.contains("held.shift_key() && !held.alt_key() && self.extend_selection_to_cursor")
+    );
+    assert!(begin.contains("selection_kind(clicks, held.alt_key())"));
+}
+
+#[test]
+fn manual_automatic_copy_and_vi_yank_use_the_same_padding_policy() {
+    for source in [
+        include_str!("actions.rs"),
+        include_str!("pointer.rs"),
+        include_str!("modals.rs"),
+    ] {
+        // Pin the production routing; extraction behavior is exercised in kettle-core.
+        assert!(source.contains("kettle_core::selection_text_for_copy("));
+        assert!(source.contains("self.cfg.copy_trim_whitespace"));
+    }
+}
+
+#[test]
+fn exit_banners_sit_under_the_pane_output() {
+    // A held pane's banner is anchored to the pane bottom so it never hides
+    // the last lines of a short session; other pane notices keep the top.
+    let source = production_source();
+    let body = finding_body(&source, "persistent_notices");
+    assert!(body.contains("kettle_render::persistent_notice_geometry_at_bottom"));
+    assert!(body.contains("let place = if pane.held {"));
 }

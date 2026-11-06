@@ -984,7 +984,17 @@ pub(crate) enum PtyOutputClosePhase {
     },
 }
 
+#[derive(Default)]
+pub(crate) struct Osc52NoticeState {
+    pub message: Option<String>,
+    pub revision: u64,
+    pub last_copy: Option<std::time::Instant>,
+    pub denied_read: bool,
+    pub denied_write: bool,
+}
+
 pub struct Pane {
+    pub(crate) osc52_notice: Osc52NoticeState,
     pub inline_cards: kettle_render::InlineCards,
     pub term: Terminal,
     /// The pane's own child process, read right after spawning it. Only this
@@ -1520,6 +1530,14 @@ impl Node {
         }
         let mut idx = 0;
         walk(self, target, &mut idx)
+    }
+
+    /// How many panes this tree holds.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            Node::Leaf(_) => 1,
+            Node::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
+        }
     }
 
     /// All leaf ids in DFS order.
@@ -2138,6 +2156,9 @@ pub struct DetachedTab {
 }
 
 pub struct Mux {
+    restore_content: std::collections::VecDeque<crate::session_content::PaneContent>,
+    restore_divider: String,
+    initial_content: Option<String>,
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
@@ -2211,7 +2232,48 @@ pub struct RestoreOutcome {
     pub skipped: usize,
 }
 
+fn remote_launch(argv: &[String]) -> bool {
+    kettle_remote::detect_ssh(argv).is_some() || kettle_remote::detect_container(argv).is_some()
+}
+
 impl Mux {
+    pub(crate) fn snapshot_content(
+        &self,
+        cfg: &Config,
+        budget: &mut usize,
+    ) -> crate::session_content::WindowContent {
+        self.tabs
+            .iter()
+            .map(|tab| {
+                tab.root
+                    .leaf_ids()
+                    .iter()
+                    .map(|id| {
+                        let Some(pane) = self.panes.get(id) else {
+                            return Default::default();
+                        };
+                        let remote = pane.remote_context.is_some()
+                            || remote_launch(&pane.argv)
+                            || pane
+                                .foreground_process
+                                .as_ref()
+                                .is_some_and(|p| remote_launch(&p.argv));
+                        let lines = if remote && !cfg.restore_scrollback_remote {
+                            Vec::new()
+                        } else {
+                            kettle_core::restore::snapshot(
+                                &pane.term.term.lock().unwrap(),
+                                cfg.restore_scrollback_lines,
+                                budget,
+                            )
+                        };
+                        crate::session_content::PaneContent { remote, lines }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     /// Hang up every child owned by this mux before a startup failure exits.
     pub fn kill_children(&self) {
         for pane in self.panes.values() {
@@ -2223,6 +2285,9 @@ impl Mux {
 
     pub fn new() -> Self {
         Self {
+            restore_content: Default::default(),
+            restore_divider: String::new(),
+            initial_content: None,
             tabs: Vec::new(),
             panes: HashMap::new(),
             active: 0,
@@ -2251,6 +2316,14 @@ impl Mux {
             }
         }
         changed
+    }
+
+    /// Apply cursor edits to existing panes as well as future ones.
+    pub fn set_cursor_defaults(&mut self, style: CursorStyle, blinking: bool) {
+        for pane in self.panes.values_mut() {
+            pane.term
+                .set_cursor_defaults(engine_cursor_shape(style), blinking);
+        }
     }
 
     /// The theme's colours changed: record whether it is dark and pass that to
@@ -2442,6 +2515,7 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
+        let initial_content = self.initial_content.take();
         let mut term = Terminal::new_with_launch_environment(
             argv,
             cwd.map(std::path::Path::new),
@@ -2455,6 +2529,7 @@ impl Mux {
             &cfg.colorterm,
             &pane_env,
             &kettle_core::LaunchOverrides {
+                initial_content: initial_content.as_deref(),
                 replay: replay.map(|(_, command)| command),
                 argv0: launch.and_then(|settings| settings.argv0.as_deref()),
                 remove_env: &remove_env,
@@ -2517,6 +2592,7 @@ impl Mux {
                 group_name: None,
                 closed: false,
                 held: false,
+                osc52_notice: Osc52NoticeState::default(),
                 exit_code: None,
                 close_on_success: false,
                 held_child_reaped: false,
@@ -2637,6 +2713,21 @@ impl Mux {
                 let geometry = geometries
                     .next()
                     .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
+                self.initial_content = self.restore_content.pop_front().and_then(|mut pane| {
+                    if !cfg.restore_scrollback_remote && (pane.remote || remote_launch(&argv)) {
+                        return None;
+                    }
+                    let keep = cfg
+                        .restore_scrollback_lines
+                        .min(kettle_core::restore::MAX_RESTORE_LINES);
+                    pane.lines.drain(..pane.lines.len().saturating_sub(keep));
+                    kettle_core::restore::replay(
+                        &pane.lines,
+                        &self.restore_divider,
+                        geometry.columns,
+                        cfg.grapheme_clustering,
+                    )
+                });
                 let id = self.spawn_pane(cfg, geometry, mk(), cwd.as_deref(), &argv)?;
                 spawned.push(id);
                 // Rejoin the saved broadcast group.
@@ -2709,6 +2800,19 @@ impl Mux {
         geometries: &[Vec<PtyGeometry>],
         mk: &dyn Fn() -> Waker,
     ) -> RestoreOutcome {
+        self.restore_geometry_with_content(s, cfg, geometries, mk, &[], "")
+    }
+
+    pub(crate) fn restore_geometry_with_content(
+        &mut self,
+        s: &Session,
+        cfg: &Config,
+        geometries: &[Vec<PtyGeometry>],
+        mk: &dyn Fn() -> Waker,
+        content: &[crate::session_content::TabContent],
+        divider: &str,
+    ) -> RestoreOutcome {
+        self.restore_divider = divider.to_owned();
         let mut skipped = 0usize;
         let mut skipped_before_active = 0usize;
         // Bound the total PTY fan-out. The 16 MiB file-size
@@ -2737,6 +2841,7 @@ impl Mux {
             // a partial failure (e.g. the 2nd pane of a split fails to fork)
             // can reap the panes already created for the same tree instead of
             // leaking their PTYs + child processes.
+            self.restore_content = content.get(i).cloned().unwrap_or_default().into();
             let mut tab_pane_ids: Vec<u64> = Vec::new();
             let mut tab_geometries = geometries
                 .get(i)
@@ -2790,6 +2895,8 @@ impl Mux {
                 }
             }
         }
+        self.restore_content.clear();
+        self.initial_content = None;
         self.active = restored_active_index(s.active, skipped_before_active, self.tabs.len());
         RestoreOutcome {
             restored_any: !self.tabs.is_empty(),
@@ -3286,7 +3393,13 @@ impl Mux {
         style: LayoutStyle,
     ) -> Vec<(u64, PanePartition)> {
         let leaves = self.leaves(tab, area);
-        let metrics = style.metrics(leaves.len());
+        // A zoomed pane keeps the titlebar of a split: it says the tab has
+        // other panes and how to bring them back.
+        let metrics = style.metrics(
+            self.tabs
+                .get(tab)
+                .map_or(leaves.len(), |t| t.root.leaf_count()),
+        );
         let lanes = self.tabs.get(tab).map(|t| &t.lanes);
         leaves
             .into_iter()
@@ -3313,7 +3426,7 @@ impl Mux {
         } else {
             tab.root.layout(area, &mut leaves);
         }
-        let metrics = style.metrics(leaves.len());
+        let metrics = style.metrics(tab.root.leaf_count());
         let (_, leaf) = leaves.into_iter().find(|(id, _)| *id == pane)?;
         Some(partition_leaf(leaf, metrics, tab.lanes.get(&pane).copied()))
     }
@@ -3383,7 +3496,7 @@ impl Mux {
         } else {
             tab.root.layout(area, &mut leaves);
         }
-        let metrics = style.metrics(leaves.len());
+        let metrics = style.metrics(tab.root.leaf_count());
         let (Some((_, leaf)), Some(lane)) = (
             leaves.into_iter().find(|(id, _)| *id == pane),
             tab.lanes.get_mut(&pane).filter(|lane| lane.expanded),
@@ -7361,6 +7474,33 @@ mod node_tests {
         m.open_lane(5, LaneSide::Bottom);
         let torn = m.detach_tab(1).unwrap();
         assert!(torn.tab.lanes.is_empty());
+    }
+
+    /// A zoomed pane of a split keeps its titlebar, where the badge says the
+    /// tab has other panes; a lone pane, zoomed or not, has none. Every path
+    /// that measures the pane agrees.
+    #[test]
+    fn a_zoomed_pane_of_a_split_keeps_its_titlebar() {
+        use crate::pane_partition::LayoutStyle;
+        let style = LayoutStyle::new((9.0, 18.0), (4.0, 2.0), Some(24.0), false).unwrap();
+        let area = (0.0, 0.0, 1200.0, 800.0);
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        assert_eq!(root.leaf_count(), 2);
+        push_tab(&mut m, root, 1);
+        m.tabs[0].zoomed = true;
+        let zoomed = m.layout(0, area, style);
+        assert_eq!(zoomed.len(), 1);
+        assert_eq!(zoomed[0].1.leaf, area);
+        assert!(zoomed[0].1.titlebar.is_some(), "{zoomed:?}");
+        assert_eq!(m.partition_of(1, area, style), Some(zoomed[0].1));
+
+        push_tab(&mut m, Node::Leaf(3), 3);
+        m.tabs[1].zoomed = true;
+        let alone = m.layout(1, area, style);
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].1.titlebar, None);
     }
 
     fn push_tab(m: &mut Mux, root: Node, focus: u64) {
@@ -11452,3 +11592,121 @@ mod node_tests {
 #[cfg(all(test, unix))]
 #[path = "mux_grapheme_config_tests.rs"]
 mod grapheme_config_tests;
+
+#[cfg(all(test, unix))]
+mod restore_content_tests {
+    use super::*;
+    use crate::session_content::PaneContent;
+    use kettle_core::{Column, Line, Point};
+
+    fn saved_session() -> Session {
+        Session {
+            tabs: (0..2)
+                .map(|_| STab {
+                    root: SNode::Leaf {
+                        cwd: None,
+                        cmd: vec!["/bin/sh".into(), "-c".into(), "read wait".into()],
+                        group: None,
+                    },
+                    focus: 0,
+                    title_override: None,
+                    zoomed: false,
+                })
+                .collect(),
+            ..Session::default()
+        }
+    }
+
+    #[test]
+    fn restored_panes_keep_tab_order_and_current_privacy_and_line_limits() {
+        let cfg = Config {
+            restore_scrollback_lines: 2,
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let content = vec![
+            vec![PaneContent {
+                remote: false,
+                lines: ["drop", "first", "second"]
+                    .map(|s| (s.into(), false, vec![]))
+                    .into(),
+            }],
+            vec![PaneContent {
+                remote: true,
+                lines: vec![("remote secret".into(), false, vec![])],
+            }],
+        ];
+        let mut mux = Mux::new();
+        let outcome = mux.restore_geometry_with_content(
+            &saved_session(),
+            &cfg,
+            &[],
+            &|| Arc::new(|| {}),
+            &content,
+            "divider",
+        );
+        assert!(outcome.restored_any);
+        assert_eq!(outcome.skipped, 0);
+        let first = &mux.panes[&mux.tabs[0].focus];
+        let term = first.term.term.lock().unwrap();
+        assert_eq!(term.grid()[Point::new(Line(0), Column(0))].c, 'f');
+        assert_eq!(term.grid()[Point::new(Line(1), Column(0))].c, 's');
+        assert_eq!(term.grid()[Point::new(Line(2), Column(0))].c, 'd');
+        drop(term);
+        let second = &mux.panes[&mux.tabs[1].focus];
+        assert_eq!(
+            second.term.term.lock().unwrap().grid()[Point::new(Line(0), Column(0))].c,
+            ' '
+        );
+        let first = mux.panes.get_mut(&mux.tabs[0].focus).unwrap();
+        first.argv = vec!["ssh".into(), "example.invalid".into()];
+        let mut budget = crate::session_content::TEXT_BUDGET;
+        let saved = mux.snapshot_content(&cfg, &mut budget);
+        assert!(saved[0][0].remote);
+        assert!(saved[0][0].lines.is_empty());
+        let allowed = Config {
+            restore_scrollback_remote: true,
+            ..cfg
+        };
+        let saved = mux.snapshot_content(&allowed, &mut budget);
+        assert!(!saved[0][0].lines.is_empty());
+    }
+
+    #[test]
+    fn disabled_replay_has_no_divider_or_old_content() {
+        let cfg = Config {
+            restore_scrollback_lines: 0,
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let content = vec![vec![PaneContent {
+            remote: false,
+            lines: vec![("old content".into(), false, vec![])],
+        }]];
+        let mut mux = Mux::new();
+        mux.restore_geometry_with_content(
+            &saved_session(),
+            &cfg,
+            &[],
+            &|| Arc::new(|| {}),
+            &content,
+            "divider",
+        );
+        for pane in mux.panes.values() {
+            assert_eq!(
+                pane.term.term.lock().unwrap().grid()[Point::new(Line(0), Column(0))].c,
+                ' '
+            );
+        }
+        let mut budget = crate::session_content::TEXT_BUDGET;
+        assert!(
+            mux.snapshot_content(&cfg, &mut budget)
+                .iter()
+                .flatten()
+                .all(|pane| pane.lines.is_empty())
+        );
+        assert_eq!(budget, crate::session_content::TEXT_BUDGET);
+    }
+}

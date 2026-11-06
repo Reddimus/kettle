@@ -8,6 +8,15 @@ scheduled dependency scans, and longer fuzz runs. Linux and macOS are supported
 runtime hosts. Windows CI retains compile and regression coverage, but does not
 produce a supported package. Record every skipped check and its reason.
 
+Profile/layout UI regression coverage lives in kettle-ui's `menu_text_tests`,
+`macos_menu::tests` and `picker_text_tests`: English/Spanish menu routes,
+profile lists including empty, native submenu dispatch order, and the shared
+Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
+saves and reloads a split layout, checks picker discovery and validates the
+palette's profile discovery without changing the real config directory.
+Native rendering, OS directory opening, actual profile/window launches and
+Spanish language acceptance still require a live UI pass.
+
 ## Run it
 
 The shell path regression runs Fish integration from directories containing
@@ -93,6 +102,16 @@ checker consumes `ui_geometry`'s per-tab `hovered`, `hint` and `close` fields;
 `python3 scripts/test-native-titlebar.py` checks its scaled fixtures without a
 live window. Full-size control metrics and contrast wiring have portable source
 guards; these do not replace native titlebar screenshots.
+
+Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
+`inactive_tab_separator`, `shortcut_hint_fits_natural_advance` and
+`tooltip_stays_inside_narrow` tests. `kettle-ui`'s
+`narrow_chrome_keeps_active_title` checks 420 by 260 point top/bottom strips,
+traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
+gaps, AccessKit bounds and the production `ui_geometry` serializer.
+`new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+Full render/UI suites and clippy remain required; native focus changes,
+hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
@@ -712,6 +731,23 @@ typed INCR chunks (byte ceiling and absolute deadline). Its
 arboard image/file acquisitions against an unterminated, correctly typed X11
 owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
 clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
+`cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
+backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
+contents, cap/deadline errors, stale-reply isolation, initialization failure and
+image/file fallback without arboard, and that the Wayland text path adds no
+dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
+and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
+tests do not exercise a compositor; the live check below does.
+
+On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
+In a disposable GNOME Wayland session with XWayland disabled, verify text copy
+and paste in both directions with another native application, middle-click
+PRIMARY, OSC 52 CLIPBOARD and PRIMARY policy and ordering, and search/modal
+paste. Check large and stalled selections, and verify that image/file clipboard
+paste logs its limitation and falls through without a crash. Repeat on X11 to
+check arboard and in a compositor offering primary-selection support. No live
+Wayland result can be inferred from a macOS suite pass.
+
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
 
@@ -1610,8 +1646,14 @@ DECRST/DECSET/DECRQM, RIS/DECSTR for both defaults, Settings translations and
 reload isolation through real pane creation. Core `grapheme_` tests cover
 portable mode/query/reset/save semantics, UTF-8 splits,
 regional indicators, modifiers, Indic conjuncts, zero-width prefixes, storage
-limits, late VS16, VS15 width retention, margins, insertion, REP, overwrite,
-copying, search and reflow. Renderer tests exercise shaping metadata and row
+limits, late VS16, VS15 narrowing, margins, insertion, REP, overwrite,
+copying, search and reflow. The vendored `grapheme_width_tests` additionally
+check Mc marks (including GCB=Extend), Indic conjuncts, the Sinhala ZWJ
+tailoring, Thai/Lao spacing vowels, standalone modifiers, VS15 spacer cleanup,
+and scalar-mode preservation. Their edge, DECSLRM, autowrap and insertion
+matrices check cursor columns and cell flags; UTF-8 split and storage-cap
+cases check streaming state. Core regressions check resized cluster columns
+through copying, search and reflow. Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
@@ -1685,17 +1727,18 @@ counts, including its cached language results, rather than independent samples.
 | Wide codepoints | 44,568 | 99.94% | 99.99% |
 | Language sequences, 118 language entries | 25,043 | 94.35% | 79.17% |
 
-These scores compare with the tool's width model, not solely with mode 2027.
-VS15 deliberately retains the allocated width, as the proposal requires. The
-modifier probes attach to the preceding cell in mode 2027, so their measured
-advance is zero. All 3,651 directly measured language mismatches in that mode
-are one cell versus the tool's expected two; another 1,565 failures inherit
-those results from a language sharing the sequence. This reflects first-cell
-cluster width, including spacing marks and Indic conjuncts. Narrow-codepoint
-differences include zero-width prefixes and marks, soft hyphen, and two Khmer
-width choices; the five remaining wide-codepoint differences are the same
-modifiers. The full YAML retains each mismatch. Do not describe these tables as
-complete Unicode rendering conformance or hide them by changing expected widths.
+These scores compare with the tool's width model, not solely with mode 2027,
+and predate the cluster-width corrections. In that run VS15 retained its
+allocated width and standalone modifiers attached to the preceding cell,
+measuring zero advance. All 3,651 directly measured language mismatches in
+that mode were one cell versus the tool's expected two; another 1,565 failures
+inherited those results from a language sharing the sequence. The current
+width rules address those spacing-mark/conjunct, VS15 and modifier cases;
+portable regressions do not establish new ucs-detect percentages. Narrow-codepoint
+differences included zero-width prefixes and marks, soft hyphen, and two Khmer
+width choices; the five remaining wide-codepoint differences were the same
+modifiers. The full YAML retains each mismatch. Rerun the live suite before
+claiming updated scores or complete Unicode rendering conformance.
 
 
 ## Manual / interactive checks
@@ -2974,3 +3017,105 @@ renderer sizing and the first reveal. Run them offline with
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.
+
+## Cursor and selection regression checks
+
+`kettle-render` covers 4.5:1 highlight ink, maximum-contrast fallbacks,
+readable user-foreground precedence, dim/link/ANSI/indexed/truecolour text,
+and inactive fills across bundled themes. Offscreen tests cover link and SGR
+decorations over selected fills, inactive split dimming, steady hollow cursors
+and DEC cursor hiding; they report `C09_GPU_SKIP` without an adapter.
+`kettle-core` tests both copy policies against printed spaces, blank padding,
+blocks, blank rows, wraps, tabs, wide cells, combining marks and byte caps.
+`kettle-ui` and `kettle-config` cover selection modifiers, cursor live reload,
+Settings round trips and the new key validation. Settings rows continue to use
+shared `settings_layout` geometry for rendering, hit testing, AccessKit and
+`ui_geometry`; these controls do not add an editable text field or IME anchor.
+
+Run the four crate suites and `kettle-i18n` offline, followed by their
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --all --check`.
+Native acceptance still needs focus transitions, split cursors, Option/Alt-drag
+and Shift-click on macOS/Linux, IME candidate placement and English/Spanish
+Settings at narrow widths. Source and headless tests do not establish live
+window or fluent-language acceptance.
+
+### Paste safety and program clipboard feedback
+
+Portable `kettle-ui` tests cover complete and unterminated ESC/CSI/OSC and C1
+control strings, DEL, CRLF/CR/LF retention, UTF-8 safety, visible-control previews,
+translated summaries, conditional fourth buttons, keyboard consent, and shared
+hit-test/AccessKit geometry in narrow windows. OSC 52 notice tests cover per-pane
+five-second throttling, Unicode counts, suppression, one-time read/write policy
+messages and polite accessibility status. `kettle-config` tests the
+`osc52-notify` boolean and control-character consent policy; `kettle-i18n` checks
+the English and Spanish draft messages.
+
+Run the full `kettle-ui`, `kettle-config`, `kettle-i18n` and `kettle-render`
+suites and their all-target clippy checks. Live acceptance still needs a desktop:
+paste text containing controls, navigate all four actions in English and Spanish,
+verify screen-reader announcements and cancel focus, then issue allowed and
+blocked OSC 52 operations in separate panes and dismiss the notices. Check
+`kettle ctl ui_geometry` bounds against each painted button and notice. The
+dialog has no IME caret; the notice overlays the terminal without moving its
+IME position. Clipboard backend success/failure and native screen-reader speech
+cannot be established by the portable model tests alone.
+
+
+Link and hint UX has portable coverage in `kettle-core` (path context and
+prefix-free codes), `kettle-render` (rest/hover/OSC 8 decoration, destination
+pill avoidance and elision, legend bounds), and `kettle-ui` (hover invalidation,
+translated gestures and legend actions, label placement, OSC 8 targets,
+AccessKit nodes, context menus, native menu model and palette shortcuts).
+`ui_geometry` reports `pane_statuses` and `hint_labels` with the projected
+bounds; destination text is omitted from diagnostics. These overlays reserve
+no terminal cells and leave pointer cell mapping and terminal IME geometry
+unchanged. Native rendering, hand cursor behavior, screen-reader announcements
+and Spanish layout still require live platform checks.
+
+## Bounded session-output restore
+
+`kettle-core::restore::tests` covers primary-screen capture during alternate
+screen use, SGR and wide/grapheme replay, control/hyperlink stripping, per-pane
+line and row-byte caps, and content/divider/new-output ordering.
+`kettle-ui::session_content::tests` checks the serialized 8 MiB cap, private
+round trips, corrupt and mismatched sidecars, unsafe controls, and removal.
+Session writer tests cover output-disable cleanup. Config and Settings tests
+cover defaults, bounds, both key spellings and persisted values. Run the full
+`kettle-ui`, `kettle-core`, `kettle-state`, `kettle-config` and `kettle-i18n`
+suites, plus clippy and format checks. Native CI must exercise platform-specific
+private-file handling. Live acceptance still needs a graphical session: restore
+styled CJK/emoji output, search and copy old rows, inspect the dated divider and
+fresh prompt, and confirm geometry/IME and screen-reader positions agree.
+
+System appearance regression coverage lives in kettle-config's default and
+legacy-theme tests and kettle-ui's appearance, picker, Settings and native
+material tests. Portable tests cover portal value/filter policy and macOS
+appearance selection; Linux private-bus tests cover color-scheme snapshots,
+SettingChanged and owner loss using the shared reduced-motion transport.
+Native acceptance still requires light/dark switching on macOS and Linux
+(Wayland and X11), including multiple windows, open overlays, custom side
+palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
+
+### Linux header bar
+
+Portable `app::linux_titlebar_tests` cover 46 logical pixel header geometry,
+one and many tabs, window-control names/actions and hit bounds in English and
+Spanish, resize edges/corners, empty-space button routing, startup grids and
+winit feature drift. The existing portal fixture also covers GNOME button-layout
+snapshots, live changes and owner replacement on Linux. Renderer tests cover
+28-point button geometry, rounded hover/pressed fills and
+4.5:1 focused / 3:1 unfocused glyph contrast across bundled themes. Header tests
+also cover narrow control lanes, localized tooltips and ctl geometry parity.
+Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
+host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
+and runs the same suites on Linux, where the header code is built. Cross-clippy with
+`--target x86_64-unknown-linux-gnu -p kettle-ui --all-targets` requires both Rust
+std and a Linux C compiler/sysroot for native dependencies.
+
+Live acceptance still requires GNOME/Mutter and KDE/KWin Wayland sessions:
+check actual decoration negotiation, fractional scale, minimize/restore/close,
+window menus, drag/double-click, all resize edges, maximize/tile/fullscreen
+transitions, inactive colors, localized tooltips, AT-SPI button activation,
+IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
+redock, tab close/activity/bell marks and config reload, plus X11 and borderless
+fallbacks. Portable checks do not establish compositor or rendering acceptance.

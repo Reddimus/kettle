@@ -14,6 +14,25 @@ pub struct HintLabel {
     pub dim: bool,
 }
 
+/// Clipped chip bounds used by painting, AccessKit and control diagnostics.
+pub fn hint_label_rect(
+    hint: &HintLabel,
+    pane: Rect4,
+    cell: (f32, f32),
+    padding: (f32, f32),
+) -> Rect4 {
+    let origin = crate::pane_grid_origin(pane, padding);
+    let (cw, ch) = cell;
+    let x = origin.0 + hint.col as f32 * cw;
+    let y = origin.1 + hint.row as f32 * ch;
+    (
+        x.max(pane.0),
+        y.max(pane.1),
+        (hint.label.chars().count().max(1) as f32 * cw).min((pane.0 + pane.2 - x).max(0.0)),
+        ch.min((pane.1 + pane.3 - y).max(0.0)),
+    )
+}
+
 /// One row of the right-click context menu. Action labels are owned
 /// `String` so the UI can build them on-demand (e.g. conditionally
 /// enable Copy based on whether a selection exists); the renderer
@@ -266,6 +285,9 @@ pub struct Overlay {
     pub links: Vec<LinkRect>,
     /// Quick-select hint labels (drawn over the focused pane).
     pub hint_labels: Vec<HintLabel>,
+    /// Painted label bounds in surface pixels, supplied by the UI projection.
+    pub hint_bounds: Vec<Rect4>,
+    pub pane_statuses: Vec<crate::PaneStatus>,
     /// Input-method preedit text drawn at the focused terminal cursor.
     pub ime_preedit: Option<ImePreedit>,
     /// Shell completion card shown above or below the focused pane's command.
@@ -374,6 +396,21 @@ pub struct UpdateToastOverlay {
     pub close: String,
     pub opacity: f32,
     pub focused: Option<usize>,
+}
+
+impl UpdateToastOverlay {
+    /// Empty labels have no painted surface or hit target, even if a caller
+    /// supplied geometry for them.
+    pub fn control_geometry(&self) -> UpdateToastGeometry {
+        let mut geometry = self.geometry;
+        if self.details.is_empty() {
+            geometry.details.2 = 0.0;
+        }
+        if self.close.is_empty() {
+            geometry.close.2 = 0.0;
+        }
+        geometry
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -533,7 +570,8 @@ pub fn update_toast_geometry(
     })
 }
 
-fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
+/// Number of lines painted by the shared notice/toast word wrapper.
+pub fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
     toast_wrapped_text(text, columns).map(|(_, rows)| rows)
 }
 
@@ -1103,7 +1141,40 @@ impl StatusBar {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowControl {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+impl WindowControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Restore => "restore",
+            Self::Close => "close",
+        }
+    }
+}
+
+pub struct WindowControlButton {
+    pub action: WindowControl,
+    pub rect: Rect4,
+    pub label: String,
+    pub hovered: bool,
+    pub pressed: bool,
+}
+
 pub struct TabBar {
+    /// Linux CSD controls in physical pixels, shared by every consumer.
+    pub window_controls: Vec<WindowControlButton>,
+    pub pressed_new_tab: bool,
+    pub pressed_new_tab_menu: bool,
+    /// Localized action and live shortcut for the currently hovered control.
+    pub tooltip: Option<String>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
     /// Recording warning, independent of the configurable tab format.
@@ -1190,6 +1261,10 @@ pub struct TabBar {
 impl TabBar {
     pub fn hidden() -> Self {
         TabBar {
+            window_controls: Vec::new(),
+            pressed_new_tab: false,
+            pressed_new_tab_menu: false,
+            tooltip: None,
             in_titlebar: false,
             recording_notice: String::new(),
             height: 0.0,
@@ -1701,8 +1776,16 @@ pub fn persistent_notice_geometry(
     let button_h = cell.1.min(height * 0.5);
     let controls_y = y + height - pad - button_h;
     let available = (w - 3.0 * pad).max(0.0);
-    let close_w = (close_cells as f32 * cell.0 + 2.0 * pad).min(available * 0.5);
-    let action_w = (action_cells as f32 * cell.0 + 2.0 * pad).min(available - close_w);
+    let close_w = if close_cells == 0 {
+        0.0
+    } else {
+        (close_cells as f32 * cell.0 + 2.0 * pad).min(available * 0.5)
+    };
+    let action_w = if action_cells == 0 {
+        0.0
+    } else {
+        (action_cells as f32 * cell.0 + 2.0 * pad).min(available - close_w)
+    };
     Some(UpdateToastGeometry {
         rect: (x, y, w, height),
         message: (
@@ -1716,6 +1799,30 @@ pub fn persistent_notice_geometry(
         radius: pad,
         unit: 1.0,
     })
+}
+
+/// A persistent notice anchored to the bottom of `rect`. A pane's exit banner
+/// sits under the output it reports on rather than over its last lines,
+/// which a short session keeps at the top.
+pub fn persistent_notice_geometry_at_bottom(
+    rect: Rect4,
+    cell: (f32, f32),
+    message_rows: usize,
+    action_cells: usize,
+    close_cells: usize,
+) -> Option<UpdateToastGeometry> {
+    let mut geometry =
+        persistent_notice_geometry(rect, cell, message_rows, action_cells, close_cells)?;
+    let shift = (rect.1 + rect.3 - (geometry.rect.1 + geometry.rect.3)).max(0.0);
+    for part in [
+        &mut geometry.rect,
+        &mut geometry.message,
+        &mut geometry.details,
+        &mut geometry.close,
+    ] {
+        part.1 += shift;
+    }
+    Some(geometry)
 }
 
 /// Persistent notices take the same precedence over paste receipts as update toasts.

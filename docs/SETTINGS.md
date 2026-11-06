@@ -6,7 +6,8 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
-control. On/Off pills show boolean state, choices have arrows, and quantities
+control. On/Off switches show their state with a knob as well as the label,
+choices have arrows, and quantities
 show their units. Below a panel width of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
 or right overflow arrow, or scroll over the strip, to page toward earlier or
@@ -31,6 +32,7 @@ assistive technology cancels any pending keybinding capture.
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | ← / → | Change the highlighted option |
+| Delete / Backspace | Reset the highlighted setting to its default (not the theme, GPU, shortcut or text rows) |
 | Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
@@ -76,12 +78,14 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
+| Appearance | `theme-mode` | Follow system (default), Light, Dark or Fixed theme. Fixed theme keeps the current palette; existing configs with `theme` alone remain fixed |
+| Theme | `theme`, `light-theme` or `dark-theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
 | Window padding | `window-padding-x` | 0–40 px |
-| Cursor shape | `cursor-style` | Block · Bar · Underline |
+| Cursor shape | `cursor-style` | Block · Bar · Underline; applies to running panes immediately |
+| Unfocused cursor | `cursor-unfocused-style` | Hollow (default) · Hidden · Unchanged; windows and inactive split panes; applies live |
 | Cursor blink | `cursor-blink` | On / Off |
 | Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
 | Show pane titlebars | `show-titlebar` | On / Off |
@@ -108,12 +112,23 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
-| Copy on selection | `copy-on-select` | On / Off |
+| Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |
+| Trim trailing spaces on copy | `copy-trim-whitespace` | On (default) drops trailing whitespace at each copied line's end. Off copies the selection exactly as displayed |
 | Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
 | Focus mode | `focus` | Click to focus · Follows mouse · System default |
 | Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |
 | Update check interval | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
 | Vim menu navigation | `vim-menu-nav` | On / Off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+
+**Sessions**
+
+| Option | Config key | Notes |
+|---|---|---|
+| Restore session | `restore-session` | Automatic: macOS window settings; restores on Linux; off on Windows. On and Off override this |
+| Restored output lines | `restore-scrollback-lines` | 0–10000 per pane, default 1000; 0 removes saved output. Primary screen plus scrollback, 8 MiB total |
+| Save remote output | `restore-scrollback-remote` | Off by default; opt in to storing remote output locally |
+
+See [Session restore](SESSION-RESTORE.md) for what survives and its privacy limits.
 
 **Search**
 
@@ -205,7 +220,10 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter
 them, or move with ↑/↓ (and Tab); the window wears the selected theme while
 you browse. Enter keeps it and writes it to your config file, and Esc puts
-back the theme you started with. With nothing typed, the themes of your
+back the theme you started with. The prompt names the active appearance:
+**light theme:** or **dark theme:**. Following the
+system saves a pick to that side and keeps following. Forced Light/Dark modes
+also update their own side; Fixed theme writes `theme`. With nothing typed, the themes of your
 current theme's appearance come first, each followed by the most similar one,
 so the arrows never jump between a dark and a light palette until the end of
 the list; each row says whether its theme is dark or light, and your current

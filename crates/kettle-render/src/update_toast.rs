@@ -1,6 +1,4 @@
-use crate::{
-    Rgb, UpdateToastGeometry, chrome, rounded_surface::RoundedSurface, theme::solid_blend,
-};
+use crate::{Rgb, UpdateToastOverlay, chrome, rounded_surface::RoundedSurface, theme::solid_blend};
 
 pub(crate) struct Palette {
     background: Rgb,
@@ -28,13 +26,10 @@ pub(crate) fn palette(
     }
 }
 
-pub(crate) fn surfaces(
-    geometry: UpdateToastGeometry,
-    palette: &Palette,
-    opacity: f32,
-    focused: Option<usize>,
-) -> [RoundedSurface; 3] {
-    let alpha = opacity.clamp(0.0, 1.0);
+pub(crate) fn surfaces(toast: &UpdateToastOverlay, palette: &Palette) -> Vec<RoundedSurface> {
+    let geometry = toast.control_geometry();
+    let focused = toast.focused;
+    let alpha = toast.opacity.clamp(0.0, 1.0);
     let rgba = |color: Rgb, alpha| {
         [
             color.r as f32 / 255.0,
@@ -50,7 +45,7 @@ pub(crate) fn surfaces(
         stroke: rgba(stroke, alpha),
         params: [radius, border, 0.0, 0.0],
     };
-    [
+    let surfaces = [
         shape(
             geometry.rect,
             palette.background,
@@ -80,12 +75,46 @@ pub(crate) fn surfaces(
                 0.0
             },
         ),
-    ]
+    ];
+    surfaces
+        .into_iter()
+        .filter(|surface| surface.size[0] > 0.0 && surface.size[1] > 0.0)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_button_labels_have_no_geometry_hits_or_painted_surface() {
+        let theme = kettle_config::Theme::default();
+        let palette = palette(&theme, theme.foreground, &mut chrome::Colors::default());
+        let geometry =
+            crate::persistent_notice_geometry((0.0, 0.0, 800.0, 600.0), (8.0, 16.0), 2, 0, 7)
+                .unwrap();
+        assert_eq!(geometry.details.2, 0.0);
+        assert_eq!(
+            geometry.hit_test(geometry.details.0 + 1.0, geometry.details.1 + 1.0),
+            Some(crate::UpdateToastHit::Body)
+        );
+        // The shared painter also rejects empty labels with stale/nonempty geometry.
+        let geometry =
+            crate::persistent_notice_geometry((0.0, 0.0, 800.0, 600.0), (8.0, 16.0), 2, 12, 7)
+                .unwrap();
+        let mut toast = crate::UpdateToastOverlay {
+            geometry,
+            message: String::new(),
+            details: String::new(),
+            close: "Dismiss".into(),
+            opacity: 1.0,
+            focused: Some(1),
+        };
+        assert_eq!(surfaces(&toast, &palette).len(), 2);
+        assert_eq!(toast.control_geometry().details.2, 0.0);
+        toast.close.clear();
+        assert_eq!(surfaces(&toast, &palette).len(), 1);
+    }
 
     #[test]
     fn toast_palette_preserves_text_and_focus_contrast_in_all_themes() {

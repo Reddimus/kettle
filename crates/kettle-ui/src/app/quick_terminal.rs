@@ -279,7 +279,7 @@ impl App {
             self.cfg.reduce_motion,
             || {
                 self.system_motion
-                    .get_or_init(|| crate::motion::SystemMotion::new(self.waker()))
+                    .get_or_init(|| crate::motion::SystemMotion::new(self.system_settings_waker()))
                     .allows()
             },
         )

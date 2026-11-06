@@ -329,11 +329,22 @@ fn automatic_highlight_text_is_readable_in_every_bundled_palette() {
                 }
                 if color::contrast_ratio(fg, fill) >= 4.5 {
                     assert_eq!(drawn, fg, "{name}: readable {label} on {kind}");
-                } else if let Some(preferred) = [theme.background, theme.foreground]
+                } else {
+                    let best = [
+                        theme.selection_foreground,
+                        theme.foreground,
+                        theme.background,
+                        Rgb::new(255, 255, 255),
+                        Rgb::new(0, 0, 0),
+                    ]
                     .into_iter()
-                    .find(|candidate| color::contrast_ratio(*candidate, fill) >= 4.5)
-                {
-                    assert_eq!(drawn, preferred, "{name}: prefer theme colour on {kind}");
+                    .map(|ink| color::contrast_ratio(ink, fill))
+                    .fold(0.0, f64::max);
+                    assert_eq!(
+                        color::contrast_ratio(drawn, fill),
+                        best,
+                        "{name}: strongest fallback on {kind}"
+                    );
                 }
             }
         }
@@ -378,10 +389,9 @@ fn automatic_highlight_text_reaches_contrast_when_theme_neutrals_cannot() {
 }
 
 #[test]
-fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
-    // A theme's own selection foreground is preferred, but an unreadable one
-    // (the shipped TokyoNight Night pairs pale text with a fill that must be
-    // strengthened to 3:1) gives way to a colour that reaches 4.5:1.
+fn highlight_foregrounds_prefer_readable_user_ink_and_strong_fallbacks() {
+    // Neither the theme's pale ink nor the cell is readable on white.
+    // Choose the strongest fallback for selections and search matches.
     let theme = Theme::parse("selection-background = #ffffff\nselection-foreground = #eeeeee\n");
     let cfg = Config {
         search_background: Some(Rgb::new(255, 255, 255)),
@@ -412,8 +422,8 @@ fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
             &cfg,
             &readable
         ),
-        readable.selection_foreground,
-        "a readable theme foreground is kept"
+        Rgb::new(0, 0, 0),
+        "the strongest fallback wins over a merely readable theme foreground"
     );
     assert_eq!(
         resolved_cell_foreground(
@@ -425,7 +435,7 @@ fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
             &cfg,
             &theme
         ),
-        cfg.search_foreground.unwrap(),
+        Rgb::new(0, 0, 0),
     );
 
     for text in [
@@ -445,10 +455,140 @@ fn config_highlight_foregrounds_are_preserved_and_theme_ones_stay_readable() {
                         &cfg,
                         &theme,
                     ),
-                    Rgb::new(238, 238, 238),
-                    "config foreground must survive theme changes",
+                    Rgb::new(0, 0, 0),
+                    "unreadable configured foreground must fall back even after a theme change",
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn highlights_choose_maximum_contrast_after_user_and_cell_ink() {
+    let cfg = Config::default();
+    let mut theme = Theme {
+        background: Rgb::new(100, 100, 100),
+        foreground: Rgb::new(130, 130, 130),
+        selection_background: Rgb::new(180, 180, 180),
+        selection_foreground: Rgb::new(120, 120, 120),
+        selection_foreground_user: true,
+        ..Theme::default()
+    };
+    for highlight in [
+        CellHighlight::Selection,
+        CellHighlight::InactiveSelection,
+        CellHighlight::Search(false),
+        CellHighlight::Search(true),
+    ] {
+        let (fg, fill) = super::theme::highlight_colors_cached(
+            highlight,
+            &cfg,
+            &theme,
+            theme.foreground,
+            theme.background,
+            &mut MinimumContrastCache::default(),
+        );
+        let strongest = [
+            theme.selection_foreground,
+            theme.foreground,
+            theme.background,
+            Rgb::new(255, 255, 255),
+            Rgb::new(0, 0, 0),
+        ]
+        .into_iter()
+        .map(|c| color::contrast_ratio(c, fill))
+        .fold(0.0, f64::max);
+        assert_eq!(color::contrast_ratio(fg, fill), strongest);
+        assert!(strongest >= 4.5);
+    }
+    theme.selection_foreground = Rgb::new(20, 20, 20);
+    let (fg, fill) = super::theme::highlight_colors_cached(
+        CellHighlight::Selection,
+        &cfg,
+        &theme,
+        Rgb::new(0, 0, 0),
+        theme.background,
+        &mut MinimumContrastCache::default(),
+    );
+    assert!(color::contrast_ratio(theme.selection_foreground, fill) >= 4.5);
+    assert_eq!(
+        fg, theme.selection_foreground,
+        "readable user ink precedes cell ink"
+    );
+}
+
+#[test]
+fn inactive_selection_moves_toward_background_and_keeps_aa_ink() {
+    let cfg = Config::default();
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let mut cache = MinimumContrastCache::default();
+        let active = super::theme::selection_fill(&theme, theme.background, true, &mut cache);
+        let inactive = super::theme::selection_fill(&theme, theme.background, false, &mut cache);
+        assert!(
+            color::contrast_ratio(inactive, theme.background) >= 1.5,
+            "{name}"
+        );
+        assert!(
+            color::contrast_ratio(inactive, theme.background)
+                < color::contrast_ratio(active, theme.background),
+            "{name}"
+        );
+        for ink in [theme.foreground, theme.palette[4], Rgb::new(150, 100, 120)] {
+            let drawn = resolved_cell_foreground(
+                ink,
+                theme.background,
+                CellHighlight::InactiveSelection,
+                true,
+                false,
+                &cfg,
+                &theme,
+            );
+            assert!(color::contrast_ratio(drawn, inactive) >= 4.5, "{name}");
+        }
+    }
+}
+
+#[test]
+fn selected_ansi_indexed_truecolour_link_and_decoration_ink_meets_aa() {
+    let cfg = Config::default();
+    let theme = Theme::default();
+    for source in [
+        AnsiColor::Named(alacritty_terminal::vte::ansi::NamedColor::Foreground),
+        AnsiColor::Indexed(4),
+        AnsiColor::Indexed(67),
+        AnsiColor::Indexed(244),
+        AnsiColor::Spec(alacritty_terminal::vte::ansi::Rgb {
+            r: 127,
+            g: 140,
+            b: 160,
+        }),
+    ] {
+        let ink = color::resolve(source, &theme, &Default::default());
+        for highlight in [
+            CellHighlight::Selection,
+            CellHighlight::InactiveSelection,
+            CellHighlight::Search(false),
+            CellHighlight::Search(true),
+        ] {
+            let (_, fill) = super::theme::highlight_colors_cached(
+                highlight,
+                &cfg,
+                &theme,
+                ink,
+                theme.background,
+                &mut MinimumContrastCache::default(),
+            );
+            let drawn = resolved_cell_foreground(
+                ink,
+                theme.background,
+                highlight,
+                true,
+                true,
+                &cfg,
+                &theme,
+            );
+            assert!(color::contrast_ratio(drawn, fill) >= 4.5);
         }
     }
 }

@@ -185,6 +185,14 @@ pub enum CursorStyle {
     Bar,
 }
 
+/// Cursor treatment when its window or split pane lacks focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUnfocusedStyle {
+    Hollow,
+    Hidden,
+    Unchanged,
+}
+
 /// How the terminal reacts to `BEL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BellMode {
@@ -199,18 +207,18 @@ pub enum BellMode {
 
 /// Theme selection policy for explicit, forced-light, forced-dark and OS-following modes.
 ///
-/// - `Explicit` — use the `theme = …` value. Default.
+/// - `Explicit` — use the `theme = …` value (implicit for existing theme configs).
 /// - `Light` — always use `light-theme`.
 /// - `Dark` — always use `dark-theme`.
-/// - `Auto` — follow the OS dark-mode preference when winit reports
-///   one; if `theme-schedule` is configured, the schedule owns the
+/// - `Auto` — the default: follow the OS dark-mode preference, falling
+///   back to dark; if `theme-schedule` is configured, the schedule owns the
 ///   light/dark switch instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
-    #[default]
     Explicit,
     Light,
     Dark,
+    #[default]
     Auto,
 }
 
@@ -414,10 +422,21 @@ impl PasteProtection {
     pub fn confirms(self, text: &str, bracketed: bool) -> bool {
         match self {
             Self::Off => false,
-            Self::Always => text.contains(['\n', '\r']),
-            Self::Auto => !bracketed && text.bytes().any(|b| b < 0x20 && b != b'\t'),
+            Self::Always => text.contains(['\n', '\r']) || ends_bracketed_paste_early(text),
+            Self::Auto => {
+                (!bracketed && text.chars().any(|c| c.is_control() && c != '\t'))
+                    || ends_bracketed_paste_early(text)
+            }
         }
     }
+}
+
+/// Whether `text` carries a bracketed-paste end marker, `ESC [ 201 ~` or its
+/// C1 form: a paste that would close bracketed mode early and send the rest as
+/// typed input. Kettle removes the marker in every mode; asking first tells the
+/// user the text was crafted to do that.
+fn ends_bracketed_paste_early(text: &str) -> bool {
+    text.contains("\x1b[201~") || text.contains("\u{9b}201~")
 }
 
 /// Policy for pasting OS file references — a file copied in the file manager
@@ -501,6 +520,14 @@ impl RecordMode {
 /// macOS window chrome. Ignored on other platforms.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MacosTitlebarStyle {
+    #[default]
+    Tabs,
+    Native,
+}
+
+/// Linux Wayland client chrome. Ignored for X11 and server decorations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinuxTitlebarStyle {
     #[default]
     Tabs,
     Native,
@@ -603,14 +630,13 @@ pub enum BackgroundAnimation {
 }
 
 /// `chrome-background`: the fill color of the window chrome strips (tab bar,
-/// status bar, new-tab button) **when a `background-image` is in use**. The
+/// status bar, new-tab button) **when an image or starfield is in use**. The
 /// chrome is drawn opaquely over the wallpaper so the animation cannot bleed
-/// through; this picks that opaque color. Without an image, chrome always uses
-/// the theme.
+/// through; this picks that opaque color. Without a wallpaper, chrome derives
+/// from the theme background independently of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromeBackground {
-    /// Use the theme's chrome color (`palette[8]`) — the default, matches the
-    /// no-wallpaper look.
+    /// Use the theme's chrome color (`palette[8]`) over a wallpaper (default).
     #[default]
     Theme,
     /// Sample the wallpaper's average color, dimmed for text contrast, so the
@@ -1071,7 +1097,7 @@ pub fn schedule_decision_sunrise(
 /// - `Light`: returns `Some(light_theme)` when non-empty.
 /// - `Dark`: returns `Some(dark_theme)` when non-empty.
 /// - `Auto` with `Some(is_dark)`: returns dark/light based on flag.
-/// - `Auto` with `None`: returns `None` (can't decide).
+/// - `Auto` with `None`: selects the dark side.
 ///
 /// Pure: no `&self`, no env, no clock; entirely a function of its
 /// 5 inputs. kettle-ui calls it on an OS theme change and at each
@@ -1098,7 +1124,7 @@ pub fn resolve_theme_for_mode(
         ThemeMode::Auto => match os_dark {
             Some(true) => pick(dark),
             Some(false) => pick(light),
-            None => None,
+            None => pick(dark),
         },
     }
 }
@@ -1398,6 +1424,7 @@ pub struct Config {
     pub window_blur: bool,
     pub completion_overlay: CompletionOverlayMode,
     pub cursor_style: CursorStyle,
+    pub cursor_unfocused_style: CursorUnfocusedStyle,
     pub cursor_blink: bool,
     /// macOS: once a window has been idle for a blink half-period, the window
     /// server blinks the cursor in a Core Animation layer and Kettle stops
@@ -1407,6 +1434,8 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
+    /// Show throttled notices after successful program clipboard writes.
+    pub osc52_notify: bool,
     /// Which macOS Option key acts as terminal Alt. Parsed but inert elsewhere.
     pub macos_option_as_alt: MacosOptionAsAlt,
     /// Kettle's modified-Enter fallback before a client negotiates key encoding.
@@ -1459,6 +1488,7 @@ pub struct Config {
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
     pub macos_titlebar_style: MacosTitlebarStyle,
+    pub linux_titlebar_style: LinuxTitlebarStyle,
     /// Status-bar mode. See [`StatusBarMode`].
     pub status_bar: StatusBarMode,
     /// Terminator parity (terminatorlib/config.py:75
@@ -1782,9 +1812,10 @@ pub struct Config {
     /// `cat`-replayable in a terminal.
     pub log_strip_ansi: bool,
     /// Terminator parity (`plugins/auto_theme.py`):
-    /// theme-mode policy. Default `Explicit` uses the `theme = …` value.
+    /// theme-mode policy. Default `Auto` follows system appearance; a config
+    /// with `theme` and no `theme-mode` retains `Explicit`.
     /// `Light` / `Dark` / `Auto` are the Terminator AutoTheme modes. `Auto`
-    /// follows the OS light/dark preference when winit reports one; an
+    /// follows the OS light/dark preference, defaulting to dark; an
     /// explicit `theme-schedule` overrides OS following.
     pub theme_mode: ThemeMode,
     /// The language of Kettle's own text (`language = auto | en | es`).
@@ -2044,6 +2075,8 @@ pub struct Config {
     pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
+    /// Drop trailing whitespace at the end of each copied line.
+    pub copy_trim_whitespace: bool,
     /// Stable update policy. `auto` is the default (keep Kettle current in the
     /// background, oh-my-zsh style); the first launch only stamps the throttle
     /// and performs no network request. Set `update-policy = off` to opt out.
@@ -2056,6 +2089,10 @@ pub struct Config {
     /// Auto follows macOS window persistence and is false elsewhere. The
     /// resolved policy gates both loading and saving the default session.
     pub restore_session: RestoreSession,
+    /// Recent primary-screen rows persisted per pane; zero disables content restore.
+    pub restore_scrollback_lines: usize,
+    /// Include remote panes in the private content snapshot (opt-in).
+    pub restore_scrollback_remote: bool,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -2140,6 +2177,90 @@ pub struct LoadedConfig {
 pub struct ConfigDiagnostic {
     pub line: usize,
     pub key: String,
+    pub kind: ConfigDiagnosticKind,
+}
+
+/// Value-free reasons suitable for localized UI diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigDiagnosticKind {
+    UnknownKey { suggestion: Option<&'static str> },
+    InvalidValue { expected: Option<ConfigValueForm> },
+    MalformedLine { missing_equals: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigValueForm {
+    NumberRange {
+        min: &'static str,
+        max: &'static str,
+    },
+    Boolean,
+}
+
+include!(concat!(env!("OUT_DIR"), "/config_keys.rs"));
+
+fn suggested_config_key(key: &str) -> Option<&'static str> {
+    // Bound work independently of the file-size cap. All registered keys are ASCII.
+    if !key.is_ascii() || key.len() > 64 {
+        return None;
+    }
+    let key = key.to_ascii_lowercase().replace('_', "-");
+    let limit = if key.len() < 5 { 1 } else { 2 };
+    CONFIG_KEYS
+        .iter()
+        .filter_map(|&candidate| {
+            if key.len().abs_diff(candidate.len()) > limit {
+                return None;
+            }
+            let mut row: Vec<_> = (0..=candidate.len()).collect();
+            for (i, a) in key.bytes().enumerate() {
+                let mut diagonal = row[0];
+                row[0] = i + 1;
+                for (j, b) in candidate.bytes().enumerate() {
+                    let previous = row[j + 1];
+                    row[j + 1] = (row[j] + 1)
+                        .min(previous + 1)
+                        .min(diagonal + usize::from(a != b));
+                    diagonal = previous;
+                }
+                if row.iter().all(|&distance| distance > limit) {
+                    return None;
+                }
+            }
+            let distance = row[candidate.len()];
+            (distance > 0 && distance <= limit).then_some((distance, candidate))
+        })
+        .min()
+        .map(|(_, candidate)| candidate)
+}
+
+fn config_value_form(key: &str) -> Option<ConfigValueForm> {
+    let range = match key {
+        "font-size" => ("5", "72"),
+        "quick-terminal-size" => ("1", "100"),
+        "background-opacity" | "background-darkness" | "bell-flash-intensity" => ("0", "1"),
+        "unfocused-split-opacity" => ("0.1", "1"),
+        "scroll-multiplier" | "mouse-scroll-multiplier" => ("0.1", "50"),
+        "scrollbar-width" => ("2", "40"),
+        "tab-min-width" | "tab-bar-width" => ("40", "600"),
+        "minimum-contrast" => ("0", "21"),
+        "cursor-blink-interval" => ("50", "5000"),
+        "cursor-blink-timeout" => ("0", "3600"),
+        "tab-silence-threshold-ms" | "tab-silence-threshold" => ("1000", "600000"),
+        "command-notify-threshold-ms" | "command-notify-threshold" => ("0", "86400000"),
+        "handle-size" => ("-1", "50"),
+        _ if Config::BOOL_KEYS
+            .iter()
+            .any(|listed| listed.replace('_', "-") == key) =>
+        {
+            return Some(ConfigValueForm::Boolean);
+        }
+        _ => return None,
+    };
+    Some(ConfigValueForm::NumberRange {
+        min: range.0,
+        max: range.1,
+    })
 }
 
 impl LoadedConfig {
@@ -2153,6 +2274,19 @@ impl LoadedConfig {
             if unknown.contains(&entry.raw_key) || malformed.contains(&invalid) {
                 result.push(ConfigDiagnostic {
                     line: entry.line,
+                    kind: if malformed.contains(&invalid) {
+                        ConfigDiagnosticKind::InvalidValue {
+                            expected: if entry.in_keybindings {
+                                None
+                            } else {
+                                config_value_form(&entry.key)
+                            },
+                        }
+                    } else {
+                        ConfigDiagnosticKind::UnknownKey {
+                            suggestion: suggested_config_key(&entry.key),
+                        }
+                    },
                     key: entry.raw_key,
                 });
             }
@@ -2176,6 +2310,9 @@ impl LoadedConfig {
                 result.push(ConfigDiagnostic {
                     line: index + 1,
                     key: key.to_owned(),
+                    kind: ConfigDiagnosticKind::MalformedLine {
+                        missing_equals: !line.contains('='),
+                    },
                 });
             }
         }
@@ -3106,10 +3243,12 @@ impl Default for Config {
             window_blur: true,
             completion_overlay: CompletionOverlayMode::Auto,
             cursor_style: CursorStyle::Block,
+            cursor_unfocused_style: CursorUnfocusedStyle::Hollow,
             cursor_blink: true,
             macos_cursor_blink_layer: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
+            osc52_notify: true,
             macos_option_as_alt: MacosOptionAsAlt::None,
             modify_other_keys: ModifyOtherKeysMode::Auto,
             keybind_yield: KeybindYield::Auto,
@@ -3129,6 +3268,7 @@ impl Default for Config {
             tab_bar: TabBarMode::Auto,
             tab_bar_pos: TabBarPos::Top,
             macos_titlebar_style: MacosTitlebarStyle::Tabs,
+            linux_titlebar_style: LinuxTitlebarStyle::Tabs,
             status_bar: StatusBarMode::Off,
             borderless: false,
             always_on_top: false,
@@ -3200,14 +3340,14 @@ impl Default for Config {
             extra_styling: true,
             force_no_bell: false,
             log_strip_ansi: false,
-            theme_mode: ThemeMode::Explicit,
+            theme_mode: ThemeMode::Auto,
             language: LanguagePreference::Auto,
             theme_schedule: None,
             theme_schedule_lat: None,
             theme_schedule_long: None,
             tab_bar_width: 180.0,
-            light_theme: String::new(),
-            dark_theme: String::new(),
+            light_theme: "TokyoNight Day".into(),
+            dark_theme: "TokyoNight Night".into(),
             icon_bell: true,
             show_titlebar: true,
             title_hide_sizetext: false,
@@ -3263,9 +3403,12 @@ impl Default for Config {
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
+            copy_trim_whitespace: true,
             update_policy: UpdatePolicy::Auto,
             update_check_interval_hours: 24,
             restore_session: RestoreSession::Auto,
+            restore_scrollback_lines: 1000,
+            restore_scrollback_remote: false,
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
@@ -3748,6 +3891,8 @@ impl Config {
     /// it silently keep the default. Kept in lockstep with `parse_collect` by
     /// `bool_and_enum_typos_are_all_flagged`.
     const BOOL_KEYS: &'static [&'static str] = &[
+        "restore-scrollback-remote",
+        "restore_scrollback_remote",
         "grapheme-clustering",
         "grapheme_clustering",
         "allow-bold",
@@ -3778,6 +3923,7 @@ impl Config {
         "close_button_on_tab",
         "record-raw-input",
         "record_raw_input",
+        "copy-trim-whitespace",
         "copy-on-select",
         "copy-on-selection",
         "copy_on_select",
@@ -3819,6 +3965,8 @@ impl Config {
         "login_shell",
         "macos-cursor-blink-layer",
         "macos_cursor_blink_layer",
+        "osc52-notify",
+        "osc52_notify",
         "shell-integration",
         "shell_integration",
         "mouse-autohide",
@@ -4240,6 +4388,9 @@ impl Config {
                 // `cursor-style`. `beam` (Alacritty's name), `ibeam` and
                 // `i-beam` are aliases for kettle's `bar`. Values match
                 // case-insensitively, as in the apply arm.
+                "cursor-unfocused-style" => matches!(
+                    v.to_ascii_lowercase().as_str(), "hollow" | "hidden" | "unchanged"
+                ),
                 "cursor-style" | "cursor-shape" | "cursor_shape" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "block" | "underline" | "bar" | "beam" | "ibeam" | "i-beam"
@@ -4297,6 +4448,7 @@ impl Config {
                 // recognizes. `BOOL_KEYS` lists both spellings of many keys,
                 // but the tokenizer yields only the hyphenated form, so compare
                 // each entry in that folded spelling.
+                "restore-scrollback-lines" => v.parse::<usize>().is_ok_and(|n| n <= 10_000),
                 "restore-session" | "restore_session" => RestoreSession::parse(v).is_some(),
                 "shell-integration" | "shell_integration" =>
                     v.eq_ignore_ascii_case("auto") || parse_bool(v).is_some(),
@@ -4345,7 +4497,7 @@ impl Config {
                         "smart" | "auto" | "always" | "sensitive" | "never" | "insensitive"
                     ) || parse_bool(v).is_some()
                 }
-                "macos-titlebar-style" => matches!(
+                "macos-titlebar-style" | "linux-titlebar-style" => matches!(
                     v.to_ascii_lowercase().as_str(), "tabs" | "native"
                 ),
                 "tab-bar" => matches!(
@@ -4548,6 +4700,18 @@ impl Config {
         // canonical key vs Terminator-spelled alias.
         let mut explicit_canonical_bell = false;
         let entries = parse::parse(text);
+        // An existing fixed theme remains fixed unless its mode is explicitly set.
+        // Named Terminator palettes are another spelling of a fixed theme.
+        let has_theme = entries.iter().any(|entry| {
+            entry.key == "theme"
+                || (entry.key == "palette" && named_palette_theme(&entry.value).is_some())
+        });
+        let has_theme_mode = entries
+            .iter()
+            .any(|entry| matches!(entry.key.as_str(), "theme-mode" | "theme_mode"));
+        if has_theme && !has_theme_mode {
+            cfg.theme_mode = ThemeMode::Explicit;
+        }
         let has_exit_behavior = entries.iter().any(|entry| entry.key == "exit-behavior");
         // A canonical policy wins regardless of line order. This matters for
         // migrated configs that still carry the legacy boolean below it.
@@ -4799,6 +4963,13 @@ impl Config {
                         _ => CompletionOverlayMode::Auto,
                     };
                 }
+                "cursor-unfocused-style" => {
+                    cfg.cursor_unfocused_style = match e.value.to_ascii_lowercase().as_str() {
+                        "hidden" => CursorUnfocusedStyle::Hidden,
+                        "unchanged" => CursorUnfocusedStyle::Unchanged,
+                        _ => CursorUnfocusedStyle::Hollow,
+                    };
+                }
                 "cursor-style" | "cursor-shape" | "cursor_shape" => {
                     // Terminator parity: Terminator's
                     // `cursor_shape` is kettle's `cursor-style`. Same
@@ -4844,6 +5015,11 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "osc52-notify" | "osc52_notify" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.osc52_notify = b;
                     }
                 }
                 "macos-cursor-blink-layer" | "macos_cursor_blink_layer" => {
@@ -4955,6 +5131,12 @@ impl Config {
                     {
                         cfg.record_max_directory_bytes = Some(n as u64);
                     }
+                }
+                "linux-titlebar-style" => {
+                    cfg.linux_titlebar_style = match e.value.to_ascii_lowercase().as_str() {
+                        "native" => LinuxTitlebarStyle::Native,
+                        _ => LinuxTitlebarStyle::Tabs,
+                    };
                 }
                 "macos-titlebar-style" => {
                     cfg.macos_titlebar_style = match e.value.to_ascii_lowercase().as_str() {
@@ -5783,6 +5965,11 @@ impl Config {
                         cfg.command_notify_threshold_ms = v.min(86_400_000);
                     }
                 }
+                "copy-trim-whitespace" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.copy_trim_whitespace = b;
+                    }
+                }
                 // Terminator parity
                 // (terminatorlib/config.py `copy_on_selection`):
                 // VTE per-profile "auto-copy selection to PRIMARY
@@ -5862,6 +6049,16 @@ impl Config {
                         }
                         "off" | "false" | "no" => cfg.add_kettle_to_path = AddKettleToPath::Off,
                         _ => {}
+                    }
+                }
+                "restore-scrollback-lines" | "restore_scrollback_lines" => {
+                    if let Ok(lines) = e.value.parse::<usize>() {
+                        cfg.restore_scrollback_lines = lines.min(10_000);
+                    }
+                }
+                "restore-scrollback-remote" | "restore_scrollback_remote" => {
+                    if let Some(remote) = parse_bool(&e.value) {
+                        cfg.restore_scrollback_remote = remote;
                     }
                 }
                 "restore-session" | "restore_session" => {
@@ -7620,6 +7817,31 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn osc52_notify_boolean_parsing_and_paste_control_coverage() {
+        assert!(Config::default().osc52_notify);
+        for key in ["osc52-notify", "osc52_notify"] {
+            assert!(Config::BOOL_KEYS.contains(&key));
+            let text = format!("{key} = false");
+            let (config, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(!config.osc52_notify);
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert!(Config::parse_text(&format!("{key} = true")).osc52_notify);
+            assert!(Config::parse_text(&format!("{key} = typo")).osc52_notify);
+            assert_eq!(
+                Config::detect_malformed_values(&format!("{key} = typo")).len(),
+                1
+            );
+        }
+        for text in ["\x7f", "\u{85}", "\u{9b}31m", "\x1b[31m"] {
+            assert!(PasteProtection::Auto.confirms(text, false));
+            assert!(!PasteProtection::Auto.confirms(text, true));
+            assert!(!PasteProtection::Off.confirms(text, false));
+        }
+        assert!(!PasteProtection::Auto.confirms("é界\t", false));
+    }
+
+    #[test]
     fn osc52_policy_parsing_and_safe_default() {
         // Default allows writes, denies reads (clipboard exfil guard).
         let d = Config::default().osc52;
@@ -7796,10 +8018,18 @@ cell-height = 1.2\n";
                 matches!(byte, b'\n' | b'\r')
             );
         }
-        for text in ["", "hello", "ñ\t界", "a\u{7f}b"] {
+        for text in ["", "hello", "ñ\t界"] {
             assert!(!PasteProtection::Auto.confirms(text, false));
         }
         assert!(PasteProtection::Always.confirms("a\r\nb", true));
+        // A bracketed-paste end marker asks even where bracketed paste is on:
+        // the text was made to escape it.
+        for text in ["printf x\x1b[201~; echo injected", "x\u{9b}201~y"] {
+            assert!(PasteProtection::Auto.confirms(text, true));
+            assert!(PasteProtection::Always.confirms(text, true));
+            assert!(!PasteProtection::Off.confirms(text, true));
+        }
+        assert!(!PasteProtection::Auto.confirms("\x1b[200~", true));
     }
 
     #[test]
@@ -8050,6 +8280,24 @@ cell-height = 1.2\n";
             Config::parse_text("tab-bar-position = bottom").tab_bar_pos,
             TabBarPos::Bottom
         );
+    }
+
+    #[test]
+    fn linux_titlebar_style_parses_and_validates() {
+        assert_eq!(
+            Config::default().linux_titlebar_style,
+            LinuxTitlebarStyle::Tabs
+        );
+        for (value, style) in [
+            ("tabs", LinuxTitlebarStyle::Tabs),
+            ("native", LinuxTitlebarStyle::Native),
+            ("NATIVE", LinuxTitlebarStyle::Native),
+        ] {
+            let text = format!("linux-titlebar-style = {value}");
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(Config::parse_text(&text).linux_titlebar_style, style);
+        }
+        assert!(!Config::detect_malformed_values("linux-titlebar-style = wrong").is_empty());
     }
 
     #[test]
@@ -11445,8 +11693,11 @@ split_horiz = <Control><Shift>j
             resolve_theme_for_mode(Auto, "x", "L", "D", Some(false)).as_deref(),
             Some("L")
         );
-        // Auto with None: no decision.
-        assert_eq!(resolve_theme_for_mode(Auto, "x", "L", "D", None), None);
+        // No OS preference selects the dark side.
+        assert_eq!(
+            resolve_theme_for_mode(Auto, "x", "L", "D", None).as_deref(),
+            Some("D")
+        );
         // Case-insensitive "already current" comparison.
         assert_eq!(
             resolve_theme_for_mode(Light, "tokyonight day", "TokyoNight Day", "D", None),
@@ -11527,9 +11778,55 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn system_appearance_defaults_and_existing_fixed_themes() {
+        for mut cfg in [
+            Config::default(),
+            Config::parse_text(""),
+            Config::parse_text("font-size = 16"),
+        ] {
+            assert_eq!(cfg.theme_mode, ThemeMode::Auto);
+            assert_eq!(cfg.light_theme, "TokyoNight Day");
+            assert_eq!(cfg.dark_theme, "TokyoNight Night");
+            for (os, expected) in [
+                (Some(false), "TokyoNight Day"),
+                (Some(true), "TokyoNight Night"),
+                (None, "TokyoNight Night"),
+            ] {
+                cfg.resolve_theme_mode(os);
+                assert_eq!(cfg.theme_name, expected);
+                assert_eq!(cfg.theme.background, Theme::by_name(expected).background);
+            }
+        }
+        for text in [
+            "theme = Dracula",
+            "theme = TokyoNight Day",
+            "theme = ",
+            "theme = typo",
+            "palette = tokyonight_night",
+        ] {
+            let mut cfg = Config::parse_text(text);
+            assert_eq!(cfg.theme_mode, ThemeMode::Explicit, "{text}");
+            let before = (cfg.theme_name.clone(), cfg.theme.background);
+            for os in [Some(false), Some(true), None] {
+                cfg.resolve_theme_mode(os);
+                assert_eq!((cfg.theme_name.clone(), cfg.theme.background), before);
+            }
+        }
+        for text in [
+            "theme = Dracula\ntheme-mode = auto",
+            "theme_mode = auto\ntheme = Dracula",
+        ] {
+            let mut cfg = Config::parse_text(text);
+            assert_eq!(cfg.theme_mode, ThemeMode::Auto);
+            cfg.resolve_theme_mode(Some(false));
+            assert_eq!(cfg.theme_name, "TokyoNight Day");
+        }
+    }
+
+    #[test]
     fn theme_mode_parses_terminator_values() {
         use ThemeMode::*;
-        assert_eq!(Config::default().theme_mode, Explicit);
+        assert_eq!(Config::default().theme_mode, Auto);
         for (input, want) in [
             ("theme-mode = explicit", Explicit),
             ("theme-mode = light", Light),
@@ -12003,7 +12300,7 @@ split_horiz = <Control><Shift>j
         let cfg = Config::parse_text("light-theme =   my-custom-fork  \n");
         assert_eq!(cfg.light_theme, "my-custom-fork");
         // An empty or whitespace-only value is ignored (the default is the
-        // empty string), so a later `light-theme = ` doesn't clear an
+        // default side), so a later `light-theme = ` doesn't clear an
         // earlier value.
         let cfg = Config::parse_text(
             "light-theme = TokyoNight Day\n\
@@ -13767,6 +14064,156 @@ mod chrome_state_tests {
     }
 
     #[test]
+    fn diagnostic_kinds_suggestions_and_secret_redaction() {
+        let secret = "FAKE_SECRET_do_not_display";
+        let text = format!(
+            "font-size = {secret}\nfont-sise = {secret}\nnot-a-key = {secret}\nfont-size {secret}\nfont-size = 900\ncursor-blink = {secret}\nfont-family = {secret}\nfont-size = {secret}\nenv = {secret}\nfont-size = {secret}\0\n"
+        );
+        let (config, unknown_keys) = Config::parse_collect(&text);
+        let loaded = LoadedConfig {
+            malformed_values: Config::detect_malformed_values(&text),
+            text,
+            config,
+            unknown_keys,
+        };
+        let entries = loaded.diagnostics();
+        assert_eq!(
+            entries.iter().map(|e| e.line).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 8, 9, 10]
+        );
+        assert_eq!(
+            entries[0].kind,
+            ConfigDiagnosticKind::InvalidValue {
+                expected: Some(ConfigValueForm::NumberRange {
+                    min: "5",
+                    max: "72"
+                }),
+            }
+        );
+        assert_eq!(
+            entries[1].kind,
+            ConfigDiagnosticKind::UnknownKey {
+                suggestion: Some("font-size")
+            }
+        );
+        assert_eq!(
+            entries[2].kind,
+            ConfigDiagnosticKind::UnknownKey { suggestion: None }
+        );
+        assert_eq!(
+            entries[3].kind,
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: true
+            }
+        );
+        assert_eq!(entries[4].kind, entries[0].kind);
+        assert_eq!(
+            entries[5].kind,
+            ConfigDiagnosticKind::InvalidValue {
+                expected: Some(ConfigValueForm::Boolean)
+            }
+        );
+        assert_eq!(
+            entries[7].kind,
+            ConfigDiagnosticKind::InvalidValue { expected: None }
+        );
+        assert_eq!(
+            entries[8].kind,
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: false
+            }
+        );
+        let debug = format!("{entries:?}");
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("900"));
+        assert_eq!(suggested_config_key("CURSOR_SHAP"), Some("cursor-shape"));
+        assert_eq!(
+            suggested_config_key("scrollback-limt"),
+            Some("scrollback-limit")
+        );
+        assert_eq!(suggested_config_key("font-szie"), Some("font-size"));
+        assert_eq!(suggested_config_key("font-size"), None);
+        assert_eq!(suggested_config_key(&"x".repeat(10000)), None);
+        assert_eq!(suggested_config_key("é"), None);
+    }
+
+    #[test]
+    fn suggestion_registry_contains_parser_keys_and_aliases_only() {
+        assert!(CONFIG_KEYS.contains(&"font-size"));
+        assert!(CONFIG_KEYS.contains(&"cursor-shape"));
+        assert!(CONFIG_KEYS.contains(&"osc52-notify"));
+        for key in CONFIG_KEYS {
+            let (_, unknown) = Config::parse_collect(&format!("{key} ="));
+            assert!(unknown.is_empty(), "{key}");
+        }
+        for group in KEY_ALIASES {
+            for alias in *group {
+                assert!(CONFIG_KEYS.contains(alias), "{alias}");
+            }
+        }
+        for key in Config::BOOL_KEYS {
+            assert!(
+                CONFIG_KEYS.contains(&key.replace('_', "-").as_str()),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_expected_ranges_agree_with_the_validator() {
+        for key in CONFIG_KEYS {
+            let Some(form) = config_value_form(key) else {
+                continue;
+            };
+            match form {
+                ConfigValueForm::NumberRange { min, max } => {
+                    for value in [min.to_string(), max.to_string()] {
+                        assert!(
+                            Config::detect_malformed_values(&format!("{key} = {value}")).is_empty(),
+                            "{key} = {value}"
+                        );
+                    }
+                    for value in [
+                        min.parse::<f64>().unwrap() - 1.0,
+                        max.parse::<f64>().unwrap() + 1.0,
+                    ] {
+                        assert!(
+                            !Config::detect_malformed_values(&format!("{key} = {value}"))
+                                .is_empty(),
+                            "{key} = {value}"
+                        );
+                    }
+                }
+                ConfigValueForm::Boolean => {
+                    assert!(
+                        Config::detect_malformed_values(&format!("{key} = true")).is_empty(),
+                        "{key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keybinding_diagnostics_do_not_describe_actions_as_setting_values() {
+        let text = "[keybindings]\nfull-screen = FAKE_SECRET_do_not_display\n".to_owned();
+        let loaded = LoadedConfig {
+            config: Config::parse_text(&text),
+            unknown_keys: Config::parse_collect(&text).1,
+            malformed_values: Config::detect_malformed_values(&text),
+            text,
+        };
+        assert_eq!(
+            loaded.diagnostics(),
+            [ConfigDiagnostic {
+                line: 2,
+                key: "full-screen".into(),
+                kind: ConfigDiagnosticKind::InvalidValue { expected: None },
+            }]
+        );
+    }
+
+    #[test]
     fn diagnostics_keep_source_lines_and_key_spelling_without_values() {
         let text = "\u{feff}# fixture\n[global_config]\nFONT_SIZE = wrong\ntypo_key = private-value\nfont-size = 15\n[profiles]\n[[other]]\nignored = value\n[[default]]\ncursor-style = beem\n".to_string();
         let (config, unknown_keys) = Config::parse_collect(&text);
@@ -13782,15 +14229,23 @@ mod chrome_state_tests {
             vec![
                 ConfigDiagnostic {
                     line: 3,
-                    key: "FONT_SIZE".into()
+                    key: "FONT_SIZE".into(),
+                    kind: ConfigDiagnosticKind::InvalidValue {
+                        expected: Some(ConfigValueForm::NumberRange {
+                            min: "5",
+                            max: "72"
+                        })
+                    },
                 },
                 ConfigDiagnostic {
                     line: 4,
-                    key: "typo_key".into()
+                    key: "typo_key".into(),
+                    kind: ConfigDiagnosticKind::UnknownKey { suggestion: None },
                 },
                 ConfigDiagnostic {
                     line: 10,
-                    key: "cursor-style".into()
+                    key: "cursor-style".into(),
+                    kind: ConfigDiagnosticKind::InvalidValue { expected: None },
                 },
             ]
         );
@@ -13869,5 +14324,64 @@ mod quick_terminal_tests {
             Action::from_name("toggle_quick_terminal"),
             Some(Action::ToggleQuickTerminal)
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_cursor_config_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_unfocused_and_copy_padding_defaults_parse_and_validate() {
+        let cfg = Config::default();
+        assert_eq!(cfg.cursor_unfocused_style, CursorUnfocusedStyle::Hollow);
+        assert!(cfg.copy_trim_whitespace);
+        for (token, expected) in [
+            ("hollow", CursorUnfocusedStyle::Hollow),
+            ("HIDDEN", CursorUnfocusedStyle::Hidden),
+            ("unchanged", CursorUnfocusedStyle::Unchanged),
+        ] {
+            let text = format!("cursor-unfocused-style = {token}\ncopy-trim-whitespace = false");
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(cfg.cursor_unfocused_style, expected);
+            assert!(!cfg.copy_trim_whitespace);
+        }
+        let invalid = "cursor-unfocused-style = solid\ncopy-trim-whitespace = perhaps";
+        assert_eq!(Config::detect_malformed_values(invalid).len(), 2);
+        let cfg = Config::parse_text(invalid);
+        assert_eq!(cfg.cursor_unfocused_style, CursorUnfocusedStyle::Hollow);
+        assert!(cfg.copy_trim_whitespace);
+    }
+}
+
+#[cfg(test)]
+mod restore_scrollback_tests {
+    use super::Config;
+
+    #[test]
+    fn defaults_aliases_bounds_and_diagnostics() {
+        assert_eq!(Config::default().restore_scrollback_lines, 1000);
+        assert!(!Config::default().restore_scrollback_remote);
+        for separator in ['-', '_'] {
+            let lines = "restore-scrollback-lines".replace('-', &separator.to_string());
+            let remote = "restore-scrollback-remote".replace('-', &separator.to_string());
+            for value in [0, 1, 1000, 10_000, 10_001] {
+                let text = format!("{lines} = {value}\n{remote} = true");
+                let (cfg, unknown) = Config::parse_collect(&text);
+                assert!(unknown.is_empty());
+                assert_eq!(cfg.restore_scrollback_lines, value.min(10_000));
+                assert!(cfg.restore_scrollback_remote);
+                assert_eq!(
+                    Config::detect_malformed_values(&text).is_empty(),
+                    value <= 10_000
+                );
+            }
+            for value in ["-1", "invalid", "18446744073709551616"] {
+                assert!(!Config::detect_malformed_values(&format!("{lines} = {value}")).is_empty());
+            }
+            assert!(!Config::detect_malformed_values(&format!("{remote} = maybe")).is_empty());
+        }
     }
 }

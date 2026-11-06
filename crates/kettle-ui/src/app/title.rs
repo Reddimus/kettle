@@ -12,6 +12,7 @@ pub(super) fn title_edit_label(
         TitleEditScope::Tab => Text::EditTitleTab,
         TitleEditScope::Pane => Text::EditTitlePane,
         TitleEditScope::Group => Text::EditTitleGroup,
+        TitleEditScope::SaveLayout => Text::EditLayoutName,
     })
 }
 
@@ -241,6 +242,39 @@ pub(super) fn media_shelf_badge(unseen: usize) -> String {
     }
 }
 
+/// The zoomed pane's titlebar mark: that the zoom hides `hidden` panes, and
+/// the live Toggle Zoom key that shows them again when one is bound.
+pub(super) fn pane_zoom_badge(
+    tr: &kettle_i18n::Translator,
+    hidden: usize,
+    shortcut: Option<&str>,
+) -> String {
+    let count = u64::try_from(hidden).unwrap_or(u64::MAX);
+    match shortcut.filter(|shortcut| !shortcut.is_empty()) {
+        Some(shortcut) => tr.pane_zoomed(count, shortcut),
+        None => tr.pane_zoomed_unbound(count),
+    }
+}
+
+impl App {
+    /// The badge for the active tab's shown pane while the tab is zoomed over
+    /// others; `None` otherwise. The painter and `ui_geometry` both use it.
+    pub(super) fn active_zoom_badge(&self, ws: &WindowState) -> Option<String> {
+        let hidden = ws
+            .mux
+            .tabs
+            .get(ws.mux.active)
+            .filter(|tab| tab.zoomed)
+            .map(|tab| tab.root.leaf_count().saturating_sub(1))
+            .filter(|&hidden| hidden > 0)?;
+        let shortcut = kettle_config::keybinds::ui_hint_label(
+            &self.cfg.keybinds,
+            &kettle_config::keybinds::Action::ToggleZoom,
+        );
+        Some(pane_zoom_badge(&self.ui_text, hidden, shortcut.as_deref()))
+    }
+}
+
 fn pane_title_prefix(badge: &str, attached: bool, read_only: bool) -> String {
     let agent = attached && !badge.is_empty();
     if !read_only && !agent {
@@ -453,6 +487,7 @@ pub enum TitleEditScope {
     /// Edit the opening pane's broadcast-group name (Terminator parity).
     /// Writes to pane.group_name. Empty input clears the group.
     Group,
+    SaveLayout,
 }
 
 #[derive(Debug, Clone)]
@@ -492,9 +527,9 @@ pub(super) fn begin_title_edit(
     window_title: &str,
 ) -> Option<TitleEditState> {
     let target = match (scope, bulk) {
-        (TitleEditScope::Window, _) | (TitleEditScope::Group, GroupBulkScope::Window) => {
-            TitleEditTarget::Window
-        }
+        (TitleEditScope::SaveLayout, _)
+        | (TitleEditScope::Window, _)
+        | (TitleEditScope::Group, GroupBulkScope::Window) => TitleEditTarget::Window,
         (TitleEditScope::Tab, _) | (TitleEditScope::Group, GroupBulkScope::Tab) => {
             let panes = mux.tab_anchor_panes(mux.active);
             if panes.is_empty() {
@@ -507,6 +542,7 @@ pub(super) fn begin_title_edit(
         }
     };
     let input = match (scope, bulk, &target) {
+        (TitleEditScope::SaveLayout, _, TitleEditTarget::Window) => "",
         (TitleEditScope::Window, _, TitleEditTarget::Window) => window_title,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
             let idx = mux.tab_index_of_any_pane(panes)?;
@@ -536,7 +572,8 @@ pub(super) fn begin_title_edit(
 
 fn title_edit_target_is_live(mux: &Mux, state: &TitleEditState) -> bool {
     match (state.scope, state.bulk, &state.target) {
-        (TitleEditScope::Window, _, TitleEditTarget::Window)
+        (TitleEditScope::SaveLayout, _, TitleEditTarget::Window)
+        | (TitleEditScope::Window, _, TitleEditTarget::Window)
         | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => true,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes))
         | (TitleEditScope::Group, GroupBulkScope::Tab, TitleEditTarget::Tab(panes)) => {
@@ -565,7 +602,7 @@ pub(super) fn clear_stale_title_edit(mux: &Mux, editing: &mut Option<TitleEditSt
 pub(super) fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
     let value = state.input.text();
     match (state.scope, state.bulk, &state.target) {
-        (TitleEditScope::Window, _, _) => false,
+        (TitleEditScope::Window | TitleEditScope::SaveLayout, _, _) => false,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
             let Some(idx) = mux.tab_index_of_any_pane(panes) else {
                 return false;
@@ -702,6 +739,23 @@ impl App {
         if let Some(state) = ws.editing_title.take() {
             ws.pending_resize = true;
             match state.scope {
+                TitleEditScope::SaveLayout => {
+                    let result = Self::snapshot_session(
+                        ws,
+                        self.windows.values(),
+                        self.quick_terminal.model.window,
+                        &self.window_focus_order,
+                    )
+                    .ok_or_else(|| std::io::Error::other("no windows to save"))
+                    .and_then(|session| session.save_layout_result(state.input.text()));
+                    if result.is_err() {
+                        fire_notify(
+                            self.ui_text.text(kettle_i18n::Text::NotifyLayoutFailed),
+                            self.ui_text.text(kettle_i18n::Text::NotifyLayoutFailedBody),
+                        );
+                        ws.editing_title = Some(state);
+                    }
+                }
                 TitleEditScope::Window => {
                     let value = state.input.text().to_string();
                     // Empty clears the override and restores the

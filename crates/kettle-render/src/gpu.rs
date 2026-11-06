@@ -624,6 +624,7 @@ impl Renderer {
         let StartupFonts {
             mut font_system,
             text_symbol_family,
+            emoji_family,
             cell: (cell_w, cell_h),
             ..
         } = match fonts {
@@ -651,6 +652,7 @@ impl Renderer {
         let metrics = metrics_for(font_size, scale);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
+        let tab_tooltip_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -765,6 +767,7 @@ impl Renderer {
             font_system,
             grapheme_text_cache: Default::default(),
             text_symbol_family,
+            emoji_family,
             swash,
             atlas,
             viewport,
@@ -825,6 +828,7 @@ impl Renderer {
             tab_buffers: Vec::new(),
             tab_hint_buffers: Vec::new(),
             hint_buffers: Vec::new(),
+            pane_status_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),
             context_menu_texts: Vec::new(),
             context_menu_match_keys: Vec::new(),
@@ -851,6 +855,8 @@ impl Renderer {
             media_receipt_badge_buffer,
             tabbar_buffer,
             new_tab_arrow_buffer,
+            tab_tooltip_buffer,
+            tab_tooltip_text: String::new(),
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,

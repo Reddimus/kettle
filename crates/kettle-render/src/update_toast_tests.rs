@@ -310,3 +310,23 @@ fn persistent_notices_keep_both_click_targets_inside_the_owning_pane() {
         }
     }
 }
+
+#[test]
+fn bottom_persistent_notices_end_at_the_pane_bottom_with_the_same_layout() {
+    for rect in [(0.0, 0.0, 800.0, 600.0), (231.0, 94.0, 200.0, 120.0)] {
+        let top = super::persistent_notice_geometry(rect, (8.0, 16.0), 2, 15, 11).unwrap();
+        let bottom =
+            super::persistent_notice_geometry_at_bottom(rect, (8.0, 16.0), 2, 15, 11).unwrap();
+        assert!((bottom.rect.1 + bottom.rect.3 - (rect.1 + rect.3)).abs() < 0.01);
+        let shift = bottom.rect.1 - top.rect.1;
+        assert!(shift >= 0.0);
+        for (a, b) in [
+            (top.message, bottom.message),
+            (top.details, bottom.details),
+            (top.close, bottom.close),
+        ] {
+            assert_eq!((a.0, a.2, a.3), (b.0, b.2, b.3));
+            assert!((b.1 - a.1 - shift).abs() < 0.01);
+        }
+    }
+}

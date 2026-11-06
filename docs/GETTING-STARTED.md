@@ -38,6 +38,29 @@ Press **Escape**, click **Close**, or use the close-pane chord to close it.
 Successful processes close automatically. Set `exit-behavior = hold` to keep
 successful exits too, or `exit-behavior = close` to close every exit.
 
+### Profiles, layouts and SSH
+
+The **▾** menu beside New tab and the macOS **Shell** menu offer
+**New Tab with Profile**, **Save Layout…**, **Open Layout…** and **SSH launcher**.
+The command palette (`Ctrl+Shift+K`) also offers these actions and one entry
+per profile. Profiles open a separate process/window so their font, theme and
+other application settings apply safely. When none exist, **Create Profile…**
+opens the profiles directory; add a `NAME.config` file there (copy your current
+config as a starting point). Reopen the menu to discover new files.
+
+**Save Layout…** accepts 1–128 ASCII letters, digits, dots, underscores or
+hyphens (except `.` and `..`). Enter saves, Escape cancels. Reusing a name
+replaces the saved arrangement. Open Layout lists saved names, with a hint to
+save when empty. Layouts keep normal windows, tabs, splits and directories;
+quick-terminal windows are excluded. Opening a layout launches new shells or
+saved commands, without prior terminal output or running process state.
+
+Use the palette's broadcast actions to send input to all panes, a group or a
+window, and choose broadcast off to stop. See
+[Sessions, profiles and layouts](../README.md#sessions-profiles-and-layouts)
+for restore behavior and [CONFIG.md](CONFIG.md) for configuration paths and SSH
+host entries.
+
 ## 3. Change settings — no file editing required
 
 Press **`Ctrl + ,`** (or **right-click → Settings…**) to open the **Settings**

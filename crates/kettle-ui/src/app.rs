@@ -95,6 +95,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/system_opener.rs"),
         include_str!("app/title.rs"),
         include_str!("app/titlebar.rs"),
+        include_str!("app/linux_titlebar.rs"),
         include_str!("app/update_toast.rs"),
         include_str!("app/notices.rs"),
         include_str!("app/window_events.rs"),
@@ -192,6 +193,10 @@ mod chrome;
 mod config_reload;
 mod ctl;
 mod gpu_recovery;
+mod linux_titlebar;
+#[cfg(test)]
+mod linux_titlebar_tests;
+use linux_titlebar::*;
 mod media;
 mod menus;
 mod modals;
@@ -217,6 +222,7 @@ mod ctl_target_param_tests;
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    SystemSettingsChanged(Arc<std::sync::atomic::AtomicBool>),
     ShellsDetected,
     GpusDetected(Vec<(String, String)>),
     CardsTipClaimed(bool),
@@ -349,6 +355,7 @@ pub struct App {
     /// from state this never sees, and a one-shot tab handoff is deleted as it
     /// is read.
     restore_source: Option<std::path::PathBuf>,
+    restore_content: std::collections::VecDeque<crate::session_content::WindowContent>,
     restore_identity: Option<crate::session::SnapshotIdentity>,
     /// An unread restore snapshot must survive automatic saves for this launch.
     session_load_failed: bool,
@@ -481,7 +488,7 @@ pub struct App {
     media: crate::media::MediaService,
     /// The one-time tip that a click opens an inline card.
     cards_tip: crate::media::CardsTip,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<crate::clipboard::Clipboard>,
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
@@ -551,6 +558,7 @@ pub struct App {
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
     os_theme_dark: Option<bool>,
+    system_appearance: std::sync::OnceLock<crate::appearance::SystemAppearance>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
     /// Provenance paired with `config_path`; profile switching resets this to
@@ -598,6 +606,7 @@ pub struct App {
     update_restart_dismissed: bool,
     config_notice: Option<String>,
     config_notice_last: Option<String>,
+    config_notice_path: Option<std::path::PathBuf>,
     update_toast: Option<crate::update_toast::Toast>,
     update_toast_receipts: Option<crate::update_toast::ReceiptWriter>,
     update_toast_claiming: Option<(crate::update_notice::Notice, u64)>,
@@ -840,6 +849,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             // PTY wakeups carry no pane id. Fan out, with each window gated on
             // its panes' output generations.
+            UserEvent::SystemSettingsChanged(pending) => {
+                pending.store(false, std::sync::atomic::Ordering::Release);
+                for ws in self.windows.values_mut() {
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             UserEvent::Wakeup => {
                 // Reopen the wakeup latch BEFORE any generation reads below. A
                 // reader that bumps its generation after this store enqueues a
@@ -1180,3 +1198,6 @@ mod native_menu;
 
 #[cfg(test)]
 mod quick_terminal_regression_tests;
+
+#[cfg(test)]
+mod link_hint_ux_tests;

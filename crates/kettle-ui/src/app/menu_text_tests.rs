@@ -68,16 +68,171 @@ fn the_new_tab_dropdown_follows_the_ui_language() {
     };
     assert_eq!(
         labels(&EN),
-        ["zsh", "Settings…", "Command palette", "About kettle"]
+        [
+            "zsh",
+            "Save Layout…",
+            "Open Layout…",
+            "SSH launcher",
+            "Settings…",
+            "Command palette",
+            "About kettle"
+        ]
     );
     // Shell names are shown as detected.
     assert_eq!(
         labels(&ES),
         [
             "zsh",
+            "Guardar diseño…",
+            "Abrir diseño…",
+            "Lanzador SSH",
             "Configuración…",
             "Paleta de comandos",
             "Acerca de kettle"
         ]
+    );
+}
+
+#[test]
+fn session_routes_follow_profiles_in_both_languages() {
+    use super::{Action, profile_launch_entries};
+    for tr in [EN, ES] {
+        for names in [vec![], vec!["home".into(), "Work".into()]] {
+            let menu = App::new_tab_menu_with_profiles(&[], &names, &tr);
+            let commands = super::palette_entries(None, &tr, &names);
+            for action in [
+                Action::SaveLayout,
+                Action::OpenLayoutPicker,
+                Action::OpenSsh,
+            ] {
+                assert!(commands.iter().any(|(_, a)| *a == action));
+                assert!(menu.iter().any(|row| matches!(row, ContextMenuItem::Item { action: a, enabled: true, .. } if *a == action)));
+            }
+            let submenu = menu
+                .iter()
+                .find_map(|row| match row {
+                    ContextMenuItem::Submenu { items, .. } => Some(items),
+                    _ => None,
+                })
+                .unwrap();
+            let palette = profile_launch_entries(&names, &tr);
+            for entry in &palette {
+                assert!(
+                    commands
+                        .iter()
+                        .any(|row| row.1 == entry.1 && row.0.shown(&tr) == entry.0.shown(&tr))
+                );
+            }
+            assert_eq!(submenu.len(), names.len().max(1));
+            for (row, (label, action)) in submenu.iter().zip(&palette) {
+                assert!(
+                    matches!(row, ContextMenuItem::DynamicItem { label: shown, action: a, enabled: true } if shown == label.shown(&tr) && a == action)
+                );
+            }
+            if names.is_empty() {
+                assert_eq!(palette[0].1, Action::OpenProfilesDirectory);
+                assert!(palette[0].0.shown(&tr).contains(
+                    if tr.language() == kettle_i18n::Language::Es {
+                        "Crear perfil"
+                    } else {
+                        "Create Profile"
+                    }
+                ));
+            } else {
+                for (entry, name) in palette.iter().zip(&names) {
+                    assert_eq!(entry.1, Action::LaunchProfile(name.clone()));
+                    assert!(entry.0.shown(&tr).contains(name));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn saved_layout_is_listed_by_picker_in_an_isolated_config_directory() {
+    const CHILD: &str = "KETTLE_C19_LAYOUT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        use super::{
+            Action, GroupBulkScope, TitleEditScope, begin_title_edit, clear_stale_title_edit,
+            layout_picker_list, palette_entries,
+        };
+        let ws = super::WindowState::new(1, super::Mux::new());
+        let mut prompt = begin_title_edit(
+            &ws.mux,
+            TitleEditScope::SaveLayout,
+            GroupBulkScope::Single,
+            "ignored",
+        );
+        assert!(prompt.is_some());
+        assert!(!clear_stale_title_edit(&ws.mux, &mut prompt));
+        let mut s = ws.mux.snapshot();
+        // Use a portable serialized split fixture, without creating a PTY/window.
+        s.tabs = vec![crate::session::STab {
+            root: crate::session::SNode::Split {
+                vertical: false,
+                ratio: 0.5,
+                a: Box::new(crate::session::SNode::Leaf {
+                    cwd: Some("/tmp".into()),
+                    cmd: vec![],
+                    group: None,
+                }),
+                b: Box::new(crate::session::SNode::Leaf {
+                    cwd: Some("/".into()),
+                    cmd: vec![],
+                    group: None,
+                }),
+            },
+            focus: 0,
+            title_override: None,
+            zoomed: false,
+        }];
+        for invalid in ["", "../escape", ".", "..", "two words", &"x".repeat(129)] {
+            assert!(s.save_layout_result(invalid).is_err());
+        }
+        s.save_layout_result("panel-test").unwrap();
+        let layouts = crate::session::Session::list_layouts();
+        assert_eq!(layouts, ["panel-test"]);
+        let loaded = crate::session::Session::load_layout_with_identity("panel-test")
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&s).unwrap()
+        );
+        assert_eq!(
+            layout_picker_list("", 0, &layouts, &ES).rows[0].label,
+            "panel-test"
+        );
+        assert!(!layout_picker_list("", 0, &[], &ES).rows[0].enabled);
+        let profiles = kettle_config::Config::default_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("profiles");
+        std::fs::create_dir_all(&profiles).unwrap();
+        for name in ["Work", "home"] {
+            std::fs::write(profiles.join(format!("{name}.config")), "").unwrap();
+        }
+        let entries = palette_entries(None, &ES, &kettle_config::Config::list_profiles());
+        let launches: Vec<_> = entries
+            .iter()
+            .filter_map(|(_, action)| match action {
+                Action::LaunchProfile(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(launches, ["home", "Work"]);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "app::menu_text_tests::saved_layout_is_listed_by_picker_in_an_isolated_config_directory", "--nocapture"])
+        .env(CHILD, "1").env("XDG_CONFIG_HOME", dir.path()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

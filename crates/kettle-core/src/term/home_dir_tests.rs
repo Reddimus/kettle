@@ -680,3 +680,20 @@ fn ansi_stripper_persists_state_across_split_sequences() {
     out.extend(s.strip(b"196mred"));
     assert_eq!(out, b"beforered");
 }
+
+/// With no log open the filter builds no text, yet its state stays current:
+/// a log opened inside an OSC still never sees the OSC's payload.
+#[test]
+fn a_closed_log_keeps_stripper_state_without_building_text() {
+    let mut filter = super::SessionLogFilter::default();
+    assert_eq!(filter.strip_if(b"before\x1b]0;sec", false), None);
+    assert_eq!(
+        filter.strip_if(b"ret\x07VISIBLE", true).as_deref(),
+        Some(&b"VISIBLE"[..])
+    );
+    assert_eq!(filter.strip_if(b"\x1b[31mred", false), None);
+    assert_eq!(
+        filter.strip_if(b"\x1b[0m plain", true).as_deref(),
+        Some(&b" plain"[..])
+    );
+}

@@ -729,11 +729,28 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// Handle ground dispatch of print/execute for all characters in a string.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            // Runs of printable ASCII, the bulk of terminal output, go out
+            // whole; everything else one character at a time as before.
+            let run = bytes[at..]
+                .iter()
+                .position(|byte| !(0x20..=0x7e).contains(byte))
+                .unwrap_or(bytes.len() - at);
+            if run > 0 {
+                performer.print_ascii(&text[at..at + run]);
+                at += run;
+                continue;
+            }
+            let Some(c) = text[at..].chars().next() else {
+                break;
+            };
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
+            at += c.len_utf8();
         }
     }
 }
@@ -770,6 +787,14 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a run of printable ASCII (`0x20..=0x7e`), in order. The default
+    /// prints each character; a performer can take the run at once.
+    fn print_ascii(&mut self, text: &str) {
+        for c in text.chars() {
+            self.print(c);
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}

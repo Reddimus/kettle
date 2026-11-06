@@ -35,7 +35,8 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteScaledZoom, ScaledZoom),
         (T::PaletteShowHelp, ShowHelp),
         (T::PaletteSendNewline, SendNewline),
-        (T::PaletteOpenLayoutPicker, OpenLayoutPicker),
+        (T::MenuOpenLayout, OpenLayoutPicker),
+        (T::MenuSaveLayout, SaveLayout),
         (T::PaletteOpenThemePicker, OpenThemePicker),
         (T::PaletteOpenMediaShelf, OpenMediaShelf),
         (T::PalettePreviewLink, PreviewLink),
@@ -304,6 +305,9 @@ mod tests {
             InsertPanePadded,
             InsertPaneName,
             OpenCwdInFileManager,
+            // Runtime profile discovery supplies these in kettle-ui.
+            LaunchProfile(String::new()),
+            OpenProfilesDirectory,
             // Parametric, and the payload IS the command — there is nothing to
             // enumerate and nothing a fixed row could send. Reachable by
             // keybind, which is the point of it.
@@ -355,6 +359,9 @@ mod tests {
             ShowHelp,
             SendNewline,
             OpenLayoutPicker,
+            SaveLayout,
+            LaunchProfile(String::new()),
+            OpenProfilesDirectory,
             OpenThemePicker,
             OpenMediaShelf,
             PreviewLink,
@@ -515,6 +522,9 @@ mod tests {
                 | ScaledZoom
                 | ShowHelp
                 | SendNewline
+                | SaveLayout
+                | LaunchProfile(_)
+                | OpenProfilesDirectory
                 | OpenLayoutPicker
                 | OpenThemePicker
                 | OpenMediaShelf

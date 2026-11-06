@@ -288,6 +288,7 @@ fn focus_change_before_redraw_rejects_previous_panes_links() {
         start_col: 0,
         end_col: 4,
         group: 0,
+        explicit: false,
         uri: "https://pane-a.invalid/".into(),
     });
     assert!(super::cached_link_at_cell(&ws, 0, 2).is_some());

@@ -1,9 +1,32 @@
+settings_field_cursor_unfocused_style = "Unfocused cursor"
+settings_description_field_cursor_unfocused_style = "Show an outline, hide, or keep the active cursor shape."
+settings_value_hollow_cursor = "Hollow"
+settings_value_hidden_cursor = "Hidden"
+settings_value_unchanged_cursor = "Unchanged"
+settings_field_copy_trim_whitespace = "Trim trailing spaces on copy"
+settings_description_field_copy_trim_whitespace = "Drop whitespace at the end of each copied line."
+
+settings_category_sessions = "Sessions"
+settings_field_restore_scrollback_lines = "Restored output lines"
+settings_field_restore_scrollback_remote = "Save remote output"
+settings_description_restore_scrollback_lines = "Restore recent output on relaunch; private, 8 MiB total. 0 disables."
+settings_description_restore_scrollback_remote = "Off by default to keep remote output off disk."
+restored_content_divider = "Restored · {date_time}"
+
+settings_field_appearance = "Appearance"
+settings_description_field_appearance = "Follow the system, use light or dark, or keep a fixed theme."
+settings_value_follow_system = "Follow system"
+settings_value_light_appearance = "Light"
+settings_value_dark_appearance = "Dark"
+settings_value_fixed_theme = "Fixed theme"
+picker_theme_for_light_appearance = "light theme:"
+picker_theme_for_dark_appearance = "dark theme:"
 settings_field_restore_session = "Restore session"
-settings_description_field_restore_session = "Automatic follows macOS window settings; off on other platforms."
+settings_description_field_restore_session = "Automatic: macOS window settings; restores on Linux; off on Windows."
 
 menu_category_close_confirmation = "Close confirmation"
 confirm_paste_heading = "Confirm paste"
-confirm_paste_body = "This paste may send commands to the terminal. Preview: {preview}"
+confirm_paste_body = "This paste may send commands to the terminal. {lines}; {escapes}, {controls}.\nPreview:\n{preview}"
 confirm_paste_one_line = "Paste as one line"
 menu_select_all = "Select All"
 menu_category_split = "Split"
@@ -21,6 +44,14 @@ process_restart = "Restart (Enter)"
 process_close = "Close (Esc)"
 config_notice = "Config settings ignored:\n{entries}"
 config_notice_more = "+{count} more"
+config_notice_open = "Open Config"
+config_notice_unknown = "unknown setting"
+config_notice_suggestion = "unknown setting — did you mean {key}?"
+config_notice_invalid = "invalid value"
+config_notice_number = "expects a number from {min} to {max}"
+config_notice_boolean = "expects a boolean (true or false)"
+config_notice_malformed = "malformed line"
+config_notice_missing_equals = "malformed line (missing '=')"
 notice_dismiss = "Dismiss"
 a11y_tab_list = "Tabs"
 a11y_tab_close = "Close {title}"
@@ -500,7 +531,7 @@ picker_a11y_palette = "Command palette"
 picker_a11y_results = "{label} results"
 picker_a11y_ssh = "SSH launcher"
 picker_a11y_themes = "Theme picker"
-picker_create_layout_hint = "kettle --layout NAME"
+picker_create_layout_hint = "Use Save Layout… in the new-tab menu"
 picker_hint_cancel = "cancel"
 picker_hint_complete = "complete"
 picker_hint_connect = "connect"
@@ -632,6 +663,7 @@ settings_hint_change = "change"
 settings_hint_close = "close"
 settings_hint_ends = "ends"
 settings_hint_field = "field"
+settings_hint_reset = "reset"
 settings_keybind_close_pane = "Close pane"
 settings_keybind_command_palette = "Command palette"
 settings_keybind_copy = "Copy"
@@ -761,7 +793,7 @@ settings_description_field_bell = "Choose how terminal bell events notify you."
 settings_description_field_chrome_background = "Choose the bar colors over an image or starfield background."
 settings_description_field_close_button_on_tab = "Show a close button on each tab."
 settings_description_field_completion_overlay = "Show shell completion suggestions in a Kettle overlay."
-settings_description_field_copy_on_select = "Copy selected terminal text to the clipboard automatically."
+settings_description_field_copy_on_select = "Option/Alt-drag: block. Shift-click: extend. Copy on release."
 settings_description_field_cursor_blink = "Blink the terminal cursor."
 settings_description_field_cursor_blink_timeout = "Stop blinking after idle seconds; zero keeps blinking."
 settings_description_field_cursor_shape = "Choose the terminal cursor shape."
@@ -858,6 +890,55 @@ settings_field_grapheme_clustering = "Grapheme clustering"
 settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
 
 
+tab_new_options = "New Tab Options"
+
+menu_new_tab_profile = "New Tab with Profile"
+
+menu_no_profiles = "No profiles yet — Create Profile…"
+
+palette_launch_profile = "New window with profile: {name}"
+
+menu_save_layout = "Save Layout…"
+
+menu_open_layout = "Open Layout…"
+
+edit_layout_name = "Layout name"
+
+notify_layout_failed = "Layout not saved"
+
+notify_layout_failed_body = "Use a name of 1–128 letters, digits, dots, underscores or hyphens. Check that the layouts directory is writable."
+
+notify_profiles_failed = "Profiles directory not opened"
+
+notify_profiles_failed_body = "Check that the config directory is available and writable, and that your file manager can open folders."
+
+notify_profile_launch_failed = "Profile not opened"
+
+notify_profile_launch_failed_body = "The profile may have been removed, or Kettle could not start another process."
+
+confirm_paste_without_controls = "Paste Without Controls"
+osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
+osc52_denied_write = "A program was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."
+
+link_open_click = "Click to open"
+link_open_command_click = "⌘-click to open"
+link_open_control_click = "Ctrl+click to open"
+hint_action_open_url = "open URL"
+hint_action_open_path = "open local path"
+hint_action_copy = "copy text"
+hint_action_preview = "preview"
+hint_legend = "Label: {plain} · Shift+label: {alternate} · Esc to cancel"
+hint_legend_plain = "Label: {plain} · Esc to cancel"
+
+a11y_window_minimize = "Minimize window"
+a11y_window_maximize = "Maximize window"
+a11y_window_restore = "Restore window"
+a11y_window_close = "Close window"
+
+
+
+scrollback_a11y_position = "Scrollback"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"
@@ -885,3 +966,27 @@ other = "↓ {lines} lines"
 [scrollback_a11y]
 one = "Return to live output ({lines} line above bottom)"
 other = "Return to live output ({lines} lines above bottom)"
+
+[confirm_paste_lines]
+one = "{count} line"
+other = "{count} lines"
+
+[confirm_paste_escapes]
+one = "{count} escape sequence"
+other = "{count} escape sequences"
+
+[confirm_paste_controls]
+one = "{count} other control character"
+other = "{count} other control characters"
+
+[osc52_copied]
+one = "A program copied {count} character to the clipboard"
+other = "A program copied {count} characters to the clipboard"
+
+[pane_zoomed]
+one = "⤢ Zoomed · {count} pane hidden · {shortcut} restores  "
+other = "⤢ Zoomed · {count} panes hidden · {shortcut} restores  "
+
+[pane_zoomed_unbound]
+one = "⤢ Zoomed · {count} pane hidden  "
+other = "⤢ Zoomed · {count} panes hidden  "

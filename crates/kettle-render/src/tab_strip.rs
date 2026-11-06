@@ -65,6 +65,32 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
+/// Anchor to the actual control while keeping tooltips outside the header.
+pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    bar.window_controls
+        .iter()
+        .find(|b| b.hovered && !b.pressed)
+        .map_or(bar.band, |b| (b.rect.0, bar.band.1, b.rect.2, bar.band.3))
+}
+
+/// Keep a tooltip inside the window, below top chrome or above bottom chrome.
+pub(crate) fn tooltip_rect(
+    band: Rect4,
+    surface: (f32, f32),
+    text: (f32, f32),
+    scale: f32,
+) -> Rect4 {
+    let w = (text.0 + 16.0 * scale).min(surface.0);
+    let h = (text.1 + 8.0 * scale).min(surface.1);
+    let x = (band.0 + band.2 - w - 8.0 * scale).clamp(0.0, (surface.0 - w).max(0.0));
+    let y = if band.1 < surface.1 * 0.5 {
+        band.1 + band.3 + 4.0 * scale
+    } else {
+        band.1 - h - 4.0 * scale
+    };
+    (x, y.clamp(0.0, (surface.1 - h).max(0.0)), w, h)
+}
+
 pub(crate) fn tab_label_origin(lane: Rect4, label: &str, cell: (f32, f32)) -> (f32, f32) {
     crate::geometry::centered_text_origin(
         lane,
@@ -145,9 +171,8 @@ pub(crate) fn horizontal_tab_quads(
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
-    let hover = crate::color::over(chrome, theme.foreground, 0.06, false);
-    let divider =
-        crate::color::with_min_contrast(theme.palette[8], chrome, crate::chrome::ICON_CONTRAST);
+    let hover = crate::chrome::tab_detail(chrome, theme.foreground, false);
+    let divider = hover;
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
@@ -243,13 +268,16 @@ mod tests {
             assert!(source.contains(&format!("buffer: &self.{buffer},")));
         }
         for statement in [
-            "let plus_fg = self.chrome_colors.text(plus_fg, background);",
-            "let arrow_fg = self.chrome_colors.text(arrow_fg, background);",
-            "let close_fg = self.chrome_colors.text(close_fg, close_background);",
+            "let plus_fg = self.chrome_colors.tab_text(plus_fg, background, overlay.window_focused);",
+            "let arrow_fg = self.chrome_colors.tab_text(arrow_fg, background, overlay.window_focused);",
+            "let close_fg = self.chrome_colors.tab_text(close_fg, close_background, overlay.window_focused);",
             "let hint_fg = self.chrome_colors.muted(fg, tab_background);",
         ] {
             assert!(
-                source.contains(statement),
+                source
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(&statement.split_whitespace().collect::<String>()),
                 "missing contrast resolution: {statement}"
             );
         }
@@ -592,8 +620,7 @@ mod tests {
                             (divider.color[2] * 255.0).round() as u8,
                         );
                         assert!(
-                            crate::color::contrast_ratio(rgb, chrome)
-                                >= crate::chrome::ICON_CONTRAST,
+                            crate::color::contrast_ratio(rgb, chrome) >= 1.5,
                             "{name}, {background_type:?}, {chrome_background:?}, {pos:?}: invisible separator"
                         );
                     }
@@ -710,7 +737,247 @@ mod tests {
                 let hover = &hover.chrome[1..];
                 assert!(sample(hover, 240.0, 14.0).is_some());
                 // Separator at the hovered tab's trailing edge disappears.
-                assert_ne!(sample(hover, 319.5, 14.0), sample(q, 319.5, 14.0));
+                assert!(!hover.iter().any(|q| q.pos[0] == 319.0 && q.size[0] == 1.0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_stays_inside_narrow_top_and_bottom_windows() {
+        for scale in [1.0, 2.0] {
+            for bottom in [false, true] {
+                let band = (
+                    78.0 * scale,
+                    if bottom { 232.0 * scale } else { 0.0 },
+                    342.0 * scale,
+                    28.0 * scale,
+                );
+                let (x, y, w, h) = tooltip_rect(
+                    band,
+                    (420.0 * scale, 260.0 * scale),
+                    (220.0 * scale, 20.0 * scale),
+                    scale,
+                );
+                assert!(x >= 0.0 && x + w <= 420.0 * scale);
+                assert!(y >= 0.0 && y + h <= 260.0 * scale);
+                if bottom {
+                    assert!(y + h < band.1);
+                } else {
+                    assert!(y > band.1 + band.3);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn window_control_quads(
+    quads: &mut Vec<QuadInstance>,
+    bar: &TabBar,
+    fg: Rgb,
+    bg: Rgb,
+    scale: f32,
+    focused: bool,
+    colors: &mut crate::chrome::Colors,
+) {
+    use crate::WindowControl as C;
+    for button in &bar.window_controls {
+        let (x, y, w, h) = button.rect;
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        let diameter = (28.0 * scale).min(w).min(h);
+        let (fill, glyph) =
+            window_control_colors(fg, bg, button.hovered, button.pressed, focused, colors);
+        if button.hovered {
+            rounded_fill(
+                quads,
+                button.rect,
+                6.0 * scale,
+                (true, true),
+                (fill, 1.0),
+                None,
+            );
+        }
+        if diameter < 12.0 * scale {
+            continue;
+        }
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        let size = (10.0 * scale).min(diameter * 0.5);
+        let stroke = (1.5 * scale).max(1.0);
+        let left = cx - size * 0.5;
+        let top = cy - size * 0.5;
+        let mut outline = |left: f32, top: f32, size: f32| {
+            for r in [
+                (left, top, size, stroke),
+                (left, top + size - stroke, size, stroke),
+                (left, top, stroke, size),
+                (left + size - stroke, top, stroke, size),
+            ] {
+                quads.push(rect(r.0, r.1, r.2, r.3, glyph, 1.0));
+            }
+        };
+        match button.action {
+            C::Minimize => quads.push(rect(left, cy, size, stroke, glyph, 1.0)),
+            C::Maximize => outline(left, top, size),
+            C::Restore => {
+                outline(left + 2.0 * scale, top, size - 2.0 * scale);
+                outline(left, top + 2.0 * scale, size - 2.0 * scale);
+            }
+            C::Close => {
+                let steps = size.ceil().max(1.0) as usize;
+                for i in 0..=steps {
+                    let offset = size * i as f32 / steps as f32;
+                    for y in [top + offset, top + size - offset] {
+                        quads.push(rect(
+                            left + offset - stroke * 0.5,
+                            y - stroke * 0.5,
+                            stroke,
+                            stroke,
+                            glyph,
+                            1.0,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn window_control_colors(
+    fg: Rgb,
+    bg: Rgb,
+    hovered: bool,
+    pressed: bool,
+    focused: bool,
+    colors: &mut crate::chrome::Colors,
+) -> (Rgb, Rgb) {
+    let fill = if hovered {
+        crate::chrome::tab_detail(bg, fg, pressed)
+    } else {
+        bg
+    };
+    (fill, colors.tab_text(fg, fill, focused))
+}
+
+#[cfg(test)]
+mod window_control_tests {
+    use super::*;
+    use crate::{WindowControl as C, WindowControlButton};
+
+    #[test]
+    fn linux_header_button_tooltips_follow_left_and_right_controls() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut bar = TabBar::hidden();
+            bar.band = (0.0, 0.0, 800.0 * scale, 46.0 * scale);
+            for x in [9.0, 763.0] {
+                bar.window_controls = vec![WindowControlButton {
+                    action: C::Close,
+                    rect: (x * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale),
+                    label: String::new(),
+                    hovered: true,
+                    pressed: false,
+                }];
+                let anchor = tooltip_anchor(&bar);
+                assert_eq!(anchor.0, x * scale);
+                let bounds = tooltip_rect(
+                    anchor,
+                    (800.0 * scale, 600.0 * scale),
+                    (160.0 * scale, 20.0 * scale),
+                    scale,
+                );
+                assert_eq!(bounds.1, 50.0 * scale);
+                assert!(bounds.0 >= 0.0 && bounds.0 + bounds.2 <= 800.0 * scale);
+                if x < 400.0 {
+                    assert_eq!(bounds.0, 0.0);
+                }
+                bar.window_controls[0].pressed = true;
+                assert_eq!(tooltip_anchor(&bar), bar.band);
+                bar.window_controls[0].hovered = false;
+                assert_eq!(tooltip_anchor(&bar), bar.band);
+            }
+        }
+    }
+
+    #[test]
+    fn linux_header_buttons_use_current_chrome_contrast_hover_and_dimming() {
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let mut colors = crate::chrome::Colors::default();
+            let bg = crate::resolve_chrome_bg(&Default::default(), &theme, None);
+            for focused in [false, true] {
+                for hovered in [false, true] {
+                    for pressed in [false, true] {
+                        let (fill, glyph) = window_control_colors(
+                            theme.foreground,
+                            bg,
+                            hovered,
+                            pressed,
+                            focused,
+                            &mut colors,
+                        );
+                        assert_eq!(
+                            fill,
+                            if hovered {
+                                crate::chrome::tab_detail(bg, theme.foreground, pressed)
+                            } else {
+                                bg
+                            }
+                        );
+                        assert_eq!(glyph, colors.tab_text(theme.foreground, fill, focused));
+                        let floor = if focused { 4.5 } else { 3.0 };
+                        assert!(
+                            crate::color::contrast_ratio(glyph, fill) >= floor - 0.01,
+                            "{name}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn linux_header_button_shapes_follow_shared_bounds_at_fractional_scales() {
+        for scale in [1.0, 1.5, 2.0] {
+            for action in [C::Minimize, C::Maximize, C::Restore, C::Close] {
+                for hovered in [false, true] {
+                    let mut bar = TabBar::hidden();
+                    let target = (756.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+                    bar.window_controls = vec![WindowControlButton {
+                        action,
+                        rect: target,
+                        label: String::new(),
+                        hovered,
+                        pressed: hovered,
+                    }];
+                    let mut quads = Vec::new();
+                    window_control_quads(
+                        &mut quads,
+                        &bar,
+                        Rgb::new(255, 255, 255),
+                        Rgb::new(0, 0, 0),
+                        scale,
+                        true,
+                        &mut Default::default(),
+                    );
+                    assert!(!quads.is_empty());
+                    for q in quads {
+                        assert!(
+                            q.pos[0] >= target.0
+                                && q.pos[0] + q.size[0] <= target.0 + target.2 + 0.01
+                        );
+                        assert!(
+                            q.pos[1] >= target.1
+                                && q.pos[1] + q.size[1] <= target.1 + target.3 + 0.01
+                        );
+                    }
+                }
             }
         }
     }

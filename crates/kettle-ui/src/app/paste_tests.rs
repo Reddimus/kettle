@@ -1388,7 +1388,7 @@ fn bounded_clipboard_extra_byte_rejects_instead_of_truncating() {
 fn paste_preview_is_short_and_cannot_interpret_controls() {
     assert_eq!(
         super::paste_preview("echo hola\n\x1b[201~"),
-        "echo hola\\n\\u{1b}[201~"
+        "echo hola\n\u{241b}[201~"
     );
     assert_eq!(super::paste_preview("español 界"), "español 界");
     let preview = super::paste_preview(&"x".repeat(LOCAL_PREVIEW_TEST_LEN));
@@ -1556,4 +1556,134 @@ fn paste_mode_change_preserves_the_checked_payload() {
             "{scope:?}"
         );
     }
+}
+
+#[test]
+fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
+    use super::{ConfirmKey as K, ConfirmKeyResult as R, confirm_dialog_keypress};
+    use kettle_i18n::{Language, Text, Translator};
+    let text = "one\r\ntwo\x1b[31mred\x1b[0m\x07";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let mut dialog =
+            super::text_paste_confirmation(Some(7), text, BroadcastScope::Off, vec![], tr);
+        assert_eq!(dialog.buttons.len(), 4);
+        assert_eq!(dialog.focus_idx, 0);
+        assert!(dialog.body.contains(&tr.confirm_paste_lines(2)));
+        assert!(dialog.body.contains(&tr.confirm_paste_escapes(2)));
+        assert!(dialog.body.contains(&tr.confirm_paste_controls(1)));
+        assert!(dialog.body.contains("\u{241b}[31mred\u{241b}[0m\u{2407}"));
+        let super::ConfirmAction::Paste {
+            target,
+            text: clean,
+            ..
+        } = super::confirmation_button_action(&dialog, 3).unwrap()
+        else {
+            panic!("paste action")
+        };
+        assert_eq!(target, Some(7));
+        assert_eq!(clean, "one\r\ntwored");
+        assert_eq!(confirm_dialog_keypress(0, 4, K::Enter), R::Activate(0));
+        assert_eq!(confirm_dialog_keypress(0, 4, K::ShiftTab), R::Move(3));
+        assert_eq!(confirm_dialog_keypress(3, 4, K::Tab), R::Move(0));
+        assert_eq!(confirm_dialog_keypress(2, 4, K::Right), R::Move(3));
+        assert_eq!(confirm_dialog_keypress(3, 4, K::Left), R::Move(2));
+        assert_eq!(confirm_dialog_keypress(3, 4, K::Enter), R::Activate(3));
+        assert_eq!(confirm_dialog_keypress(3, 4, K::Escape), R::Cancel);
+        assert_eq!(confirm_dialog_keypress(3, 4, K::Yes), R::Confirm);
+        assert_eq!(confirm_dialog_keypress(3, 4, K::No), R::Cancel);
+        for surface in [(800.0, 600.0), (240.0, 320.0), (120.0, 140.0)] {
+            for index in 0..4 {
+                dialog.focus_idx = index;
+                let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+                let layout =
+                    kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+                dialog.scroll = layout.scroll_to_button(index);
+                let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+                let layout =
+                    kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+                let (x, y, w, h) = layout.buttons[index];
+                assert!(w > 0.0 && h > 0.0);
+                assert_eq!(
+                    super::confirm_dialog_button_hit(&layout, x + w / 2.0, y + h / 2.0),
+                    Some(index)
+                );
+                let projection = super::modal_accessibility_projection(
+                    &kettle_render::Overlay {
+                        confirm_dialog: Some(overlay.clone()),
+                        ..Default::default()
+                    },
+                    surface,
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                let node = &projection
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| Some(*id) == projection.focus)
+                    .unwrap()
+                    .1;
+                assert_eq!(node.label(), Some(overlay.buttons[index].label.as_str()));
+                assert_eq!(
+                    node.bounds(),
+                    Some(accesskit::Rect::new(
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(x + w),
+                        f64::from(y + h)
+                    ))
+                );
+                assert!(
+                    projection
+                        .nodes
+                        .iter()
+                        .any(|(_, n)| n.role() == accesskit::Role::AlertDialog
+                            && n.description() == Some(dialog.body.as_str()))
+                );
+            }
+        }
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        assert_eq!(
+            overlay.buttons[3].label,
+            tr.text(Text::ConfirmPasteWithoutControls)
+        );
+    }
+    for text in ["one\ntwo", "tabs\tonly"] {
+        assert_eq!(
+            super::text_paste_confirmation(
+                None,
+                text,
+                BroadcastScope::Off,
+                vec![],
+                Translator::default()
+            )
+            .buttons
+            .len(),
+            3
+        );
+    }
+    for text in ["\x7f", "\u{85}", "\x1b", "\0"] {
+        assert_eq!(
+            super::text_paste_confirmation(
+                None,
+                text,
+                BroadcastScope::Off,
+                vec![],
+                Translator::default()
+            )
+            .buttons
+            .len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn paste_preview_shows_controls_and_only_the_first_three_lines() {
+    assert_eq!(
+        super::paste_preview("a\x1b\x07\x18\x7f\u{85}\t"),
+        "a\u{241b}\u{2407}^X^?\\u{85}^I"
+    );
+    assert_eq!(super::paste_preview("1\r\n2\r3\n4secret"), "1\n2\n3…");
 }

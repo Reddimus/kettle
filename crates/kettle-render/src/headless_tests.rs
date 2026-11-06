@@ -3634,6 +3634,8 @@ fn inactive_color_emoji_dim(mode: TextRendererMode) {
     cfg.unfocused_split_opacity = 1.0;
     cfg.inactive_color_offset = 1.0;
     cfg.inactive_bg_color_offset = 1.0;
+    // Compare text dimming only: unfocused panes otherwise draw a hollow cursor.
+    cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
     let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
@@ -4179,7 +4181,7 @@ fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
 }
 
 #[test]
-fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
+fn grapheme_vs15_prefers_a_monochrome_face() {
     use image::GenericImageView;
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4192,14 +4194,17 @@ fn grapheme_vs15_after_vs16_prefers_a_monochrome_face_without_shrinking() {
     };
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.background = Rgb::new(0, 0, 0);
-    for sequence in [
-        "\u{2764}\u{fe0f}\u{fe0e}",
-        "\u{231a}\u{fe0e}",
-        "\u{1f600}\u{fe0e}",
+    // VS15 after VS16 keeps the widened cluster; VS15 directly after a wide
+    // variation base narrows it to one cell, as wcwidth measures it. Either way
+    // the text presentation draws with a monochrome face.
+    for (sequence, after_x) in [
+        ("\u{2764}\u{fe0f}\u{fe0e}", 3),
+        ("\u{231a}\u{fe0e}", 2),
+        ("\u{1f600}\u{fe0e}", 3),
     ] {
         let text = format!("\x1b[?2027h{sequence}X\x1b[?25l");
         let snap = snapshot_of(20, 4, text.as_bytes());
-        assert_eq!(snap.cursor.point.column.0, 3);
+        assert_eq!(snap.cursor.point.column.0, after_x, "{sequence:?}");
         let frame = capture(
             &mut renderer,
             &cfg,
@@ -4385,11 +4390,13 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
     };
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.background = Rgb::new(0, 0, 0);
-    for (prefix, base) in [
-        ("\u{600}", "A"),
-        ("\u{605}", "A"),
-        ("\u{70f}", "A"),
-        ("\u{94d}", "\u{915}"),
+    // A prepended concatenation mark takes its own cell (wcwidth), so its
+    // cluster is two cells wide; a leading virama adds nothing.
+    for (prefix, base, after_x) in [
+        ("\u{600}", "A", 3),
+        ("\u{605}", "A", 3),
+        ("\u{70f}", "A", 3),
+        ("\u{94d}", "\u{915}", 2),
     ] {
         let reference = snapshot_of(20, 4, format!("\x1b[?2027h{base}X\x1b[?25l").as_bytes());
         let expected = capture(
@@ -4409,7 +4416,7 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
             4,
             format!("\x1b[?2027h{prefix}{base}X\x1b[?25l").as_bytes(),
         );
-        assert_eq!(snap.cursor.point.column.0, 2);
+        assert_eq!(snap.cursor.point.column.0, after_x, "{prefix:?}");
         let actual = capture(
             &mut renderer,
             &cfg,
@@ -4613,8 +4620,62 @@ fn the_block_cursor_makes_the_same_presentation_choice_as_the_pane() {
         let pane = renderer.pane_buffers[0].lines[0].attrs_list().get_span(0);
         if !qualified {
             assert_eq!(pane.family, glyphon::Family::Name(family));
+        } else if let Some(emoji) = renderer.emoji_family {
+            assert_eq!(pane.family, glyphon::Family::Name(emoji));
+            assert_eq!(cursor.attrs.as_attrs().family, glyphon::Family::Name(emoji));
         }
     }
+}
+
+#[test]
+fn a_qualified_text_default_symbol_draws_in_the_colour_emoji_face() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("EMOJI_PRESENTATION_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(family) = renderer.emoji_family else {
+        eprintln!("EMOJI_PRESENTATION_GPU_SKIP: no colour-emoji face");
+        return;
+    };
+    // Text faces carry U+2764 and U+263A as monochrome symbols; U+FE0F asks
+    // for the emoji, and the cascade alone would pick the text glyph.
+    let snap = snapshot_of(
+        20,
+        4,
+        "\u{2764}\u{fe0f} \u{263a}\u{fe0f}\x1b[?25l".as_bytes(),
+    );
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(true),
+    );
+    let line = &renderer.pane_buffers[0].lines[0];
+    assert_eq!(
+        line.attrs_list().get_span(0).family,
+        glyphon::Family::Name(family)
+    );
+    let keys: Vec<_> = renderer.pane_buffers[0]
+        .layout_runs()
+        .filter(|run| run.line_i == 0)
+        .flat_map(|run| run.glyphs.iter())
+        .map(|g| g.physical((0., 0.), 1.).cache_key)
+        .collect();
+    let colour = keys
+        .into_iter()
+        .filter(|key| {
+            renderer
+                .swash
+                .get_image_uncached(&mut renderer.font_system, *key)
+                .is_some_and(|image| {
+                    image.placement.width > 0
+                        && image.placement.height > 0
+                        && image.content == glyphon::SwashContent::Color
+                })
+        })
+        .count();
+    assert_eq!(colour, 2, "both qualified symbols draw in colour");
 }
 
 #[test]
@@ -5059,4 +5120,237 @@ fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
             );
         }
     }
+}
+
+#[test]
+fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("C09_GPU_SKIP: selected link and decoration colours, no adapter");
+        return;
+    };
+    let mut snap = snapshot_of(
+        30,
+        4,
+        b"\x1b[34;2;4;9;58;2;90;90;90mhttps://example.test\x1b[0m\x1b[?25l",
+    );
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(29)),
+        false,
+    ));
+    let other = snapshot_of(30, 4, b"\x1b[?25l");
+    cfg.show_titlebar = false;
+    cfg.unfocused_split_opacity = 0.1;
+    for window_focused in [true, false] {
+        for split_focused in [true, false] {
+            let mut view = pane(&snap, 320, 180);
+            view.focused = split_focused;
+            let mut sibling = pane(&other, 320, 180);
+            sibling.id = 2;
+            sibling.focused = !split_focused;
+            sibling.rect.0 = 320.0;
+            sibling.terminal.0 = 320.0;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                links: vec![LinkRect {
+                    col: 0,
+                    row: 0,
+                    width: 20,
+                    hover: false,
+                    explicit: false,
+                }],
+                ..Overlay::default()
+            };
+            let frame = capture(&mut renderer, &cfg, &[view, sibling], &overlay);
+            let fill = super::theme::selection_fill(
+                &cfg.theme,
+                cfg.theme.background,
+                window_focused,
+                &mut MinimumContrastCache::default(),
+            );
+            let expected = super::theme::highlight_colors_cached(
+                if window_focused {
+                    CellHighlight::Selection
+                } else {
+                    CellHighlight::InactiveSelection
+                },
+                &cfg,
+                &cfg.theme,
+                cfg.theme.palette[4],
+                cfg.theme.background,
+                &mut MinimumContrastCache::default(),
+            )
+            .0;
+            let attrs = renderer.pane_buffers[0].lines[0].attrs_list().get_span(0);
+            assert_eq!(
+                attrs.color_opt,
+                Some(GColor::rgb(expected.r, expected.g, expected.b))
+            );
+            assert!(color::contrast_ratio(expected, fill) >= 4.5);
+            // Link underlines (the focused pane's overlay) and SGR decorations
+            // must survive the highlight fill: the strongest decoration ink in
+            // the lower half of the first cell reaches 4.5:1 against it.
+            let x = (cfg.padding_x + renderer.cell_w * 0.5) as u32;
+            let rows = (cfg.padding_y + renderer.cell_h * 0.5).ceil() as u32
+                ..(cfg.padding_y + renderer.cell_h).floor() as u32;
+            let rows: Vec<u32> = if split_focused {
+                // The link underline owns the bottom pixel row.
+                vec![(cfg.padding_y + renderer.cell_h - 1.0).floor() as u32]
+            } else {
+                rows.collect()
+            };
+            let ink = rows
+                .into_iter()
+                .map(|y| {
+                    let pixel = frame.get_pixel(x, y);
+                    Rgb::new(pixel[0], pixel[1], pixel[2])
+                })
+                .max_by(|a, b| {
+                    color::contrast_ratio(*a, fill).total_cmp(&color::contrast_ratio(*b, fill))
+                })
+                .expect("cell rows");
+            assert!(
+                color::contrast_ratio(ink, fill) >= 4.5,
+                "{window_focused}/{split_focused}: {ink:?} on {fill:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
+    use alacritty_terminal::vte::ansi::CursorShape;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 160) else {
+        eprintln!("C09_GPU_SKIP: unfocused cursor, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.theme.cursor = Rgb::new(255, 0, 80);
+    let mut snap = snapshot_of(20, 4, b"\r");
+    for window_focused in [true, false] {
+        for pane_focused in [true, false] {
+            if window_focused && pane_focused {
+                continue;
+            }
+            let mut view = pane(&snap, 400, 160);
+            view.focused = pane_focused;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                ..Overlay::default()
+            };
+            let off = capture(&mut renderer, &cfg, &[view], &overlay);
+            assert!(cursor_pixels(&off, &cfg, &snap) > 10);
+            assert!(
+                renderer.cursor_quad_range.is_none(),
+                "inactive cursor must not blink"
+            );
+            assert!(
+                renderer.pending_cursor_glyph.is_none(),
+                "hollow cursor must not invert text"
+            );
+        }
+    }
+    snap.cursor.shape = CursorShape::Hidden;
+    let off = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 400, 160)],
+        &Overlay::default(),
+    );
+    assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
+    cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
+    snap.cursor.shape = CursorShape::Block;
+    let off = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 400, 160)],
+        &Overlay::default(),
+    );
+    assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
+}
+
+/// The focused pane's title is bold, the others regular, so which pane has
+/// focus does not rest on the titlebar colour alone; moving focus reshapes.
+#[test]
+fn the_focused_pane_title_is_bold() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 200) else {
+        eprintln!("PANE_TITLE_WEIGHT_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.show_titlebar = true;
+    let snap = snapshot_of(20, 4, b"left");
+    let other = snapshot_of(20, 4, b"right");
+    let weights = |renderer: &mut Renderer, focus_left: bool| {
+        let mut left = pane(&snap, 320, 200);
+        left.rect = (0.0, 0.0, 320.0, 200.0);
+        left.titlebar = Some((0.0, 0.0, 320.0, 24.0));
+        left.terminal = (0.0, 24.0, 320.0, 176.0);
+        left.title = "left";
+        left.focused = focus_left;
+        let mut right = pane(&other, 320, 200);
+        right.id = 2;
+        right.rect = (320.0, 0.0, 320.0, 200.0);
+        right.titlebar = Some((320.0, 0.0, 320.0, 24.0));
+        right.terminal = (320.0, 24.0, 320.0, 176.0);
+        right.title = "right";
+        right.focused = !focus_left;
+        capture(renderer, &cfg, &[left, right], &focused(true));
+        [0, 1].map(|i| {
+            renderer.pane_titlebar_buffers[i].lines[0]
+                .attrs_list()
+                .defaults()
+                .weight
+        })
+    };
+    assert_eq!(
+        weights(&mut renderer, true),
+        [glyphon::Weight::BOLD, glyphon::Weight::NORMAL]
+    );
+    assert_eq!(
+        weights(&mut renderer, false),
+        [glyphon::Weight::NORMAL, glyphon::Weight::BOLD]
+    );
+}
+
+/// A default-emoji character without U+FE0F asks for the colour face too:
+/// on Linux a monochrome symbol face can come first in the cascade. U+FE0E
+/// still keeps the text face.
+#[test]
+fn default_emoji_without_a_selector_asks_for_the_colour_face() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("EMOJI_DEFAULT_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(family) = renderer.emoji_family else {
+        eprintln!("EMOJI_DEFAULT_GPU_SKIP: no colour-emoji face");
+        return;
+    };
+    let snap = snapshot_of(
+        20,
+        4,
+        "\u{1f600} \u{231a} \u{231a}\u{fe0e}\x1b[?25l".as_bytes(),
+    );
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(true),
+    );
+    let attrs = renderer.pane_buffers[0].lines[0].attrs_list().clone();
+    let text = renderer.pane_buffers[0].lines[0].text().to_owned();
+    let family_at = |needle: &str, nth: usize| {
+        let at = text.match_indices(needle).nth(nth).unwrap().0;
+        attrs.get_span(at).family
+    };
+    assert_eq!(family_at("\u{1f600}", 0), glyphon::Family::Name(family));
+    assert_eq!(family_at("\u{231a}", 0), glyphon::Family::Name(family));
+    assert_ne!(family_at("\u{231a}", 1), glyphon::Family::Name(family));
 }

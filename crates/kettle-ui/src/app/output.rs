@@ -243,7 +243,7 @@ fn drain_pane_events(
     ws: &mut WindowState,
     exit_action: kettle_config::ExitAction,
     force_no_bell: bool,
-    mut reply_for_event: impl FnMut(&Pane, TermEvent) -> Option<String>,
+    mut reply_for_event: impl FnMut(&mut Pane, TermEvent) -> Option<String>,
 ) -> PaneEventBatch {
     let mut bell = false;
     let mut entered_hold = false;
@@ -347,11 +347,13 @@ fn drain_pane_events(
             ws.blink_on = true;
             ws.last_blink = std::time::Instant::now();
         }
+        let notice_revision = pane.osc52_notice.revision;
+        let event_rx = pane.rx.clone();
         for ev in pane
             .term
             .take_clipboard_events()
             .into_iter()
-            .chain(pane.rx.try_iter())
+            .chain(event_rx.try_iter())
         {
             if let Some(reply) = reply_for_event(pane, ev)
                 && pane.queue_protocol_reply(reply.as_bytes()).is_failed()
@@ -361,6 +363,12 @@ fn drain_pane_events(
                     pane.closed = true;
                 }
                 break;
+            }
+        }
+        if pane.osc52_notice.revision != notice_revision {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
         }
         // Terminator parity (terminatorlib/config.py:118
@@ -473,11 +481,20 @@ fn drain_pane_events(
 }
 
 impl App {
-    fn pane_event_reply(&mut self, pane: &Pane, ev: TermEvent) -> Option<String> {
+    fn pane_event_reply(&mut self, pane: &mut Pane, ev: TermEvent) -> Option<String> {
         match ev {
             TermEvent::PtyWrite(s) => Some(s),
             event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
-                apply_osc52_event(self, event)
+                apply_osc52_event(
+                    &mut PaneClipboard {
+                        clipboard: self.clipboard.as_mut(),
+                        policy: self.cfg.osc52,
+                        notify: self.cfg.osc52_notify,
+                        notices: &mut pane.osc52_notice,
+                        tr: &self.ui_text,
+                    },
+                    event,
+                )
             }
             TermEvent::TextAreaSizeRequest(fmt) => {
                 // Use the exact pixel totals published through PtySize so
@@ -747,6 +764,7 @@ impl App {
             UserEvent::CardsTipClaimed(_)
             | UserEvent::GpusDetected(_)
             | UserEvent::ShellsDetected
+            | UserEvent::SystemSettingsChanged(_)
             | UserEvent::ToggleQuickTerminal
             | UserEvent::Activation
             | UserEvent::PastedImageEncoded

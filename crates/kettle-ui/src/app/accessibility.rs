@@ -267,8 +267,24 @@ impl App {
             if let Ok(term) = pane.term.term.lock() {
                 use kettle_core::Dimensions as _;
                 let origin = term.grid().history_origin();
-                let total = term.grid().history_size() + term.grid().screen_lines();
+                let history = term.grid().history_size();
+                let offset = term.grid().display_offset();
+                let screen = term.grid().screen_lines();
+                let total = history + screen;
                 drop(term);
+                let id = accessibility_scrollbar_id(pane_id);
+                pane_children.push(id);
+                let bar_width = (self.cfg.scrollbar_width * scale).max(1.0);
+                nodes.push((
+                    id,
+                    scrollback_bar_accessibility_node(
+                        history,
+                        offset,
+                        screen,
+                        (x + width - bar_width, y, bar_width, height),
+                        &self.ui_text,
+                    ),
+                ));
                 for mark in pane.term.command_marks() {
                     if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
                         partition.terminal,
@@ -929,6 +945,23 @@ impl App {
                 component.to_bits().hash(&mut hasher);
             }
         }
+        for status in &overlay.pane_statuses {
+            status.description.hash(&mut hasher);
+            status.target.hash(&mut hasher);
+            if let Some(bounds) = status.link_bounds {
+                for value in [bounds.0, bounds.1, bounds.2, bounds.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+            for value in [status.rect.0, status.rect.1, status.rect.2, status.rect.3] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+        for bounds in &overlay.hint_bounds {
+            for value in [bounds.0, bounds.1, bounds.2, bounds.3] {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
         for hint in &overlay.hint_labels {
             hint.row.hash(&mut hasher);
             hint.col.hash(&mut hasher);
@@ -1221,9 +1254,10 @@ impl App {
         }
         ws.tab_focus = None;
         if !self.pointer_modal_open(ws) {
-            for (pane, _) in self.persistent_notices(ws) {
-                for part in [1, 2] {
-                    if request.target_node == persistent_notice_id(pane, part)
+            for (pane, toast) in self.persistent_notices(ws) {
+                for (part, label) in [(1, &toast.details), (2, &toast.close)] {
+                    if !label.is_empty()
+                        && request.target_node == persistent_notice_id(pane, part)
                         && request.action == AccessibilityAction::Click
                     {
                         self.activate_persistent_notice(ws, pane, part == 1);
@@ -1244,7 +1278,13 @@ impl App {
             if projected.iter().any(|(id, node)| {
                 *id == request.target_node && node.supports_action(request.action)
             }) {
-                if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
+                if let Some(control) = bar
+                    .window_controls
+                    .iter()
+                    .find(|b| window_control_accessibility_id(b.action) == request.target_node)
+                {
+                    self.activate_window_control(ws, control.action, event_loop);
+                } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
                     self.handle_action(ws, Action::NewTab, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
@@ -1370,6 +1410,34 @@ impl App {
             return;
         }
         self.update_toast_focus = None;
+        if let Some(pane) = ws
+            .mux
+            .tab_pane_ids(ws.mux.active)
+            .into_iter()
+            .find(|pane| accessibility_scrollbar_id(*pane) == request.target_node)
+        {
+            if let Some(p) = ws.mux.panes.get(&pane)
+                && let Ok(mut term) = p.term.term.lock()
+            {
+                use kettle_core::Dimensions as _;
+                let scroll = scrollback_bar_scroll(
+                    request.action,
+                    request.data.as_ref(),
+                    term.grid().history_size(),
+                    term.grid().display_offset(),
+                    term.grid().screen_lines(),
+                );
+                if let Some(scroll) = scroll {
+                    term.scroll_display(scroll);
+                    drop(term);
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+            return;
+        }
         if let Some((pane, _)) =
             self.pane_layout(ws, self.area(ws))
                 .into_iter()
@@ -2190,7 +2258,9 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_modal_id(2, index + 1);
             let mut node = Node::new(Role::MenuItem);
             node.set_label(row.label.clone());
-            if !row.hint.is_empty() {
+            if row.hint == SUBMENU_SIGN {
+                node.set_has_popup(accesskit::HasPopup::Menu);
+            } else if !row.hint.is_empty() {
                 node.set_description(row.hint.clone());
             }
             if !row.enabled {
@@ -2220,6 +2290,45 @@ pub(super) fn modal_accessibility_projection(
         }
     }
 
+    for (index, status) in overlay.pane_statuses.iter().enumerate() {
+        let id = accessibility_modal_id(18, index);
+        let mut node = Node::new(if status.target.is_some() {
+            Role::Tooltip
+        } else {
+            Role::Status
+        });
+        node.set_label(status.description.clone());
+        node.set_live(accesskit::Live::Polite);
+        let (x, y, w, h) = status.rect;
+        node.set_bounds(accesskit::Rect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64,
+        ));
+        if let Some(target) = &status.target {
+            let link_id = accessibility_modal_id(19, index);
+            let mut link = Node::new(Role::Link);
+            link.set_label(target.clone());
+            link.set_tooltip(status.description.clone());
+            link.set_described_by(vec![id]);
+            link.set_children(vec![id]);
+            if let Some((x, y, w, h)) = status.link_bounds {
+                link.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+            }
+            projection.roots.push(link_id);
+            projection.nodes.push((link_id, link));
+        } else {
+            projection.roots.push(id);
+        }
+        projection.nodes.push((id, node));
+    }
+
     if !overlay.hint_labels.is_empty() {
         let container_id = accessibility_modal_id(3, 0);
         let mut children = Vec::with_capacity(overlay.hint_labels.len());
@@ -2227,6 +2336,14 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_modal_id(3, index + 1);
             let mut node = Node::new(Role::ListBoxOption);
             node.set_label(hint.label.clone());
+            if let Some(&(x, y, w, h)) = overlay.hint_bounds.get(index) {
+                node.set_bounds(accesskit::Rect::new(
+                    x as f64,
+                    y as f64,
+                    (x + w) as f64,
+                    (y + h) as f64,
+                ));
+            }
             if hint.dim {
                 node.set_disabled();
             }
@@ -2235,6 +2352,14 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut node = Node::new(Role::ListBox);
         node.set_label(tr.text(kettle_i18n::Text::HintA11yList));
+        if let Some(legend) = overlay
+            .pane_statuses
+            .iter()
+            .find(|status| status.target.is_none())
+        {
+            node.set_description(legend.description.clone());
+        }
+        node.set_live(accesskit::Live::Polite);
         node.set_children(children);
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));
@@ -2259,7 +2384,12 @@ pub(super) fn modal_accessibility_projection(
             &mut projection,
             overlay,
             MODAL_KIND_THEMES,
-            tr.text(kettle_i18n::Text::PickerA11yThemes),
+            overlay
+                .text_field
+                .as_ref()
+                .map_or(tr.text(kettle_i18n::Text::PickerA11yThemes), |field| {
+                    field.prefix.trim()
+                }),
             query,
             full_bounds,
             tr,
@@ -2587,7 +2717,7 @@ pub(super) fn nest_context_menu_accessibility(
             let id = accessibility_modal_id(kind, index + 1);
             let mut item = Node::new(Role::MenuItem);
             item.set_label(row.label.clone());
-            if !row.hint.is_empty() {
+            if !row.hint.is_empty() && row.hint != SUBMENU_SIGN {
                 item.set_description(row.hint.clone());
             }
             if row.enabled {
@@ -2719,6 +2849,65 @@ fn accessibility_scrollback_id(pane: u64) -> NodeId {
     NodeId((1 << 52) | pane)
 }
 
+fn accessibility_scrollbar_id(pane: u64) -> NodeId {
+    NodeId((1 << 50) | pane)
+}
+
+/// A pane's place in its scrollback, as a vertical scroll bar: 0 is the
+/// oldest kept line at the top, `history` the live bottom, one step a line
+/// and one jump a screen.
+pub(super) fn scrollback_bar_accessibility_node(
+    history: usize,
+    offset: usize,
+    screen: usize,
+    (x, y, width, height): (f32, f32, f32, f32),
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::ScrollBar);
+    node.set_label(tr.text(kettle_i18n::Text::ScrollbackA11yPosition));
+    node.set_orientation(accesskit::Orientation::Vertical);
+    node.set_min_numeric_value(0.0);
+    node.set_max_numeric_value(history as f64);
+    node.set_numeric_value(history.saturating_sub(offset) as f64);
+    node.set_numeric_value_step(1.0);
+    node.set_numeric_value_jump(screen.max(1) as f64);
+    node.add_action(AccessibilityAction::Increment);
+    node.add_action(AccessibilityAction::Decrement);
+    node.add_action(AccessibilityAction::SetValue);
+    node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    node
+}
+
+/// The scroll a request on the scrollback bar asks for. Increment moves a
+/// line toward live output, Decrement a line back; SetValue goes to a line.
+pub(super) fn scrollback_bar_scroll(
+    action: AccessibilityAction,
+    data: Option<&ActionData>,
+    history: usize,
+    offset: usize,
+    _screen: usize,
+) -> Option<kettle_core::Scroll> {
+    use kettle_core::Scroll;
+    match (action, data) {
+        (AccessibilityAction::Increment, _) if offset > 0 => Some(Scroll::Delta(-1)),
+        (AccessibilityAction::Decrement, _) if offset < history => Some(Scroll::Delta(1)),
+        (AccessibilityAction::SetValue, Some(ActionData::NumericValue(value)))
+            if value.is_finite() =>
+        {
+            let line = value.round().clamp(0.0, history as f64) as usize;
+            let target = history - line;
+            let delta = i32::try_from(target as i64 - offset as i64).ok()?;
+            (delta != 0).then_some(Scroll::Delta(delta))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn command_mark_accessibility_node(
     mark: kettle_core::term::CommandMark,
     rect: [f32; 4],
@@ -2740,6 +2929,18 @@ pub(super) fn command_mark_accessibility_node(
         (rect[1] + rect[3]) as f64,
     ));
     node
+}
+
+fn window_control_accessibility_id(action: kettle_render::WindowControl) -> NodeId {
+    use kettle_render::WindowControl as C;
+    NodeId(
+        (1 << 51)
+            | match action {
+                C::Minimize => 0,
+                C::Maximize | C::Restore => 1,
+                C::Close => 2,
+            },
+    )
 }
 
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
@@ -2816,6 +3017,15 @@ pub(super) fn tab_accessibility_projection(
             children.push(id);
         }
     }
+    for control in &bar.window_controls {
+        let id = window_control_accessibility_id(control.action);
+        let mut button = Node::new(Role::Button);
+        button.set_label(control.label.clone());
+        button.set_bounds(accessibility_rect(control.rect));
+        button.add_action(AccessibilityAction::Click);
+        nodes.push((id, button));
+        children.push(id);
+    }
     let mut list = Node::new(Role::TabList);
     list.set_orientation(if vertical {
         accesskit::Orientation::Vertical
@@ -2883,6 +3093,106 @@ mod context_menu_nesting_tests {
             panel_h_clamped: 28.0,
             a11y_label: None,
         }
+    }
+
+    /// The scroll bar reports the scrollback position and scrolls it a line,
+    /// or to a line, for assistive technology.
+    #[test]
+    fn the_scrollback_bar_reports_and_moves_the_position() {
+        use kettle_core::Scroll;
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let node = scrollback_bar_accessibility_node(100, 30, 24, (0.0, 0.0, 8.0, 400.0), &tr);
+        assert_eq!(node.role(), Role::ScrollBar);
+        assert_eq!(node.label(), Some("Scrollback"));
+        assert_eq!(node.orientation(), Some(accesskit::Orientation::Vertical));
+        assert_eq!(node.numeric_value(), Some(70.0));
+        assert_eq!(node.max_numeric_value(), Some(100.0));
+        assert_eq!(node.numeric_value_jump(), Some(24.0));
+        assert!(node.supports_action(AccessibilityAction::Increment));
+
+        let at = |action, data: Option<ActionData>, offset| match scrollback_bar_scroll(
+            action,
+            data.as_ref(),
+            100,
+            offset,
+            24,
+        ) {
+            Some(Scroll::Delta(lines)) => Some(lines),
+            None => None,
+            Some(other) => panic!("{other:?}"),
+        };
+        assert_eq!(at(AccessibilityAction::Increment, None, 30), Some(-1));
+        assert_eq!(at(AccessibilityAction::Increment, None, 0), None);
+        assert_eq!(at(AccessibilityAction::Decrement, None, 30), Some(1));
+        assert_eq!(at(AccessibilityAction::Decrement, None, 100), None);
+        // Line 100 is the live bottom (offset 0); line 0 the oldest.
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(100.0)),
+                30
+            ),
+            Some(-30)
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(-5.0)),
+                30
+            ),
+            Some(70)
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(70.0)),
+                30
+            ),
+            None
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(f64::NAN)),
+                30
+            ),
+            None
+        );
+    }
+
+    /// A row that opens a submenu says so through its popup state; the
+    /// drawn sign is not read out as a description. A shortcut still is.
+    #[test]
+    fn a_submenu_row_opens_a_menu_rather_than_describing_its_arrow() {
+        let mut menu = panel("Split", (40.0, 60.0));
+        menu.rows[0].hint = SUBMENU_SIGN.to_string();
+        menu.rows.push(ContextMenuRow {
+            matched_chars: None,
+            label: "Paste".into(),
+            separator: false,
+            enabled: true,
+            hint: "⌘V".into(),
+        });
+        let overlay = Overlay {
+            context_menu: Some(menu),
+            ..Overlay::default()
+        };
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+        let node = |index: usize| {
+            &projection
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == accessibility_modal_id(2, index))
+                .unwrap()
+                .1
+        };
+        assert_eq!(node(1).label(), Some("Split"));
+        assert_eq!(node(1).has_popup(), Some(accesskit::HasPopup::Menu));
+        assert_eq!(node(1).description(), None);
+        assert_eq!(node(2).has_popup(), None);
+        assert_eq!(node(2).description(), Some("⌘V"));
     }
 
     #[test]

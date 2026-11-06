@@ -908,21 +908,21 @@ background-image-align-vert background-image-mode background-opacity background-
 backspace-binding bell bell-flash-intensity bold-is-bright borderless broadcast-default
 case-sensitive cell-height cell-width check-for-updates chrome-background clear-select-on-copy
 clipboard clipboard-paste-protection close-button-on-tab colorterm command command-notify-threshold
-command-notify-threshold-ms completion-overlay copy-on-select copy-on-selection cursor-bg-color
+command-notify-threshold-ms completion-overlay copy-trim-whitespace copy-on-select copy-on-selection cursor-bg-color
 cursor-blink cursor-blink-interval cursor-blink-timeout cursor-color cursor-color-default
-cursor-fg-color cursor-shape cursor-style cursor-style-blink custom-command custom-url-handler
+cursor-fg-color cursor-shape cursor-style cursor-unfocused-style cursor-style-blink custom-command custom-url-handler
 dark-theme delete-binding detachable-tabs disable-mouse-paste disable-mousewheel-zoom
 enabled-plugins env exit-action exit-behavior extra-styling focus focused-split-color font font-family
 font-family-bold font-family-bold-italic font-family-italic font-feature font-size force-no-bell
 foreground foreground-color full-screen geometry-hinting gpu-backend gpu-device-id
 gpu-force-software gpu-name gpu-power-preference gpu-vendor-id grapheme-clustering handle-size hide-from-taskbar
 hide-on-lose-focus http-proxy icon-bell inactive-bg-color-offset inactive-color-offset invert-search
-keybind keybind-yield language light-theme link-single-click log-strip-ansi login-shell lua-sandbox
+keybind keybind-yield language light-theme link-single-click linux-titlebar-style log-strip-ansi login-shell lua-sandbox
 macos-cursor-blink-layer macos-option-as-alt macos-titlebar-style menu-item minimum-contrast modify-other-keys mouse-autohide mouse-hide
-mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
+mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 osc52-notify padding-x padding-y
 palette paste-files paste-image paste-image-preview paste-images paste-protection paste-video-preview
 media-open-mode preview-lane-side putty-paste-style putty-paste-style-source-clipboard quick-terminal-animation quick-terminal-autohide quick-terminal-hotkey quick-terminal-position quick-terminal-size record record-dir record-max-bytes
-record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session
+record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session restore-scrollback-lines restore-scrollback-remote
 scroll-multiplier scroll-on-input scroll-on-keystroke scroll-on-output scroll-tabbar scrollback
 scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scrollback-lines
 scrollback-memory scrollbar scrollbar-width search-background search-case-sensitive
