@@ -288,6 +288,10 @@ def check(kettle, worker, out, case):
                 "shell = /bin/sh\nlogin-shell = false\nshell-integration = false\n"
                 "agent-server = full\nagent-display = true\ncursor-blink = false\n"
                 "window-width = 120\nwindow-height = 40\nstatus-bar = off\n"
+                # A one-tab strip keeps the pane smaller than the window, so
+                # theater presentation has room to be larger than the pane's
+                # (tab-bar = auto, the default, hides it for a single tab).
+                "tab-bar = always\n"
             )
             environment = {"SHELL": "/bin/sh", "ENV": None, "BASH_ENV": None,
                            "WAYLAND_DISPLAY": None, "WAYLAND_SOCKET": None}
