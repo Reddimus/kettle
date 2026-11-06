@@ -175,23 +175,35 @@ fn a_selection_over_reordered_text_fills_its_visual_cells() {
         &mut MinimumContrastCache::default(),
     );
     let (ox, oy) = pane_grid_origin((0.0, 0.0, 320.0, 120.0), (cfg.padding_x, cfg.padding_y));
-    let corner = |col: usize| {
-        let pixel = frame.get_pixel(
-            (ox + col as f32 * renderer.cell_w + 1.0) as u32,
-            (oy + 1.0) as u32,
-        );
-        Rgb::new(pixel[0], pixel[1], pixel[2])
+    // The share of a cell's pixels painted in the selection fill: glyph ink
+    // covers only part of a cell, and adapters round blends differently.
+    let filled = |col: usize| {
+        let (left, top) = (ox + col as f32 * renderer.cell_w, oy);
+        let (mut near, mut total) = (0u32, 0u32);
+        for y in top.ceil() as u32..(top + renderer.cell_h).floor() as u32 {
+            for x in left.ceil() as u32..(left + renderer.cell_w).floor() as u32 {
+                let pixel = frame.get_pixel(x, y);
+                total += 1;
+                if pixel[0].abs_diff(fill.r) <= 8
+                    && pixel[1].abs_diff(fill.g) <= 8
+                    && pixel[2].abs_diff(fill.b) <= 8
+                {
+                    near += 1;
+                }
+            }
+        }
+        near as f32 / total.max(1) as f32
     };
-    let close =
-        |a: Rgb, b: Rgb| a.r.abs_diff(b.r) <= 3 && a.g.abs_diff(b.g) <= 3 && a.b.abs_diff(b.b) <= 3;
-    assert!(
-        close(corner(5), fill) && close(corner(6), fill),
-        "visual 5 and 6 are selected"
-    );
-    assert!(
-        !close(corner(3), fill) && !close(corner(4), fill),
-        "visual 3 and 4 are not"
-    );
+    for col in [5, 6] {
+        assert!(
+            filled(col) > 0.5,
+            "visual {col} is selected: {}",
+            filled(col)
+        );
+    }
+    for col in [3, 4] {
+        assert!(filled(col) < 0.1, "visual {col} is not: {}", filled(col));
+    }
 }
 
 #[test]
