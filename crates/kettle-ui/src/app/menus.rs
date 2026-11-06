@@ -978,6 +978,9 @@ impl App {
                     kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, action)
                         .unwrap_or_default()
                 }
+                // The submenu sign sits in the hint column, right-aligned
+                // like a native menu's.
+                ContextMenuItem::Submenu { .. } => "▸".to_string(),
                 ContextMenuItem::NewTabShell { .. } => {
                     let h = if shell_ordinal < 9 {
                         kettle_config::keybinds::ui_hint_label(
@@ -1659,11 +1662,11 @@ impl App {
                     },
                     ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
                         matched_chars: None,
-                        // Append "▸" to signal "this row opens a submenu".
-                        label: format!("{label} ▸"),
+                        // `hint` is "▸": this row opens a submenu.
+                        label: label.clone(),
                         separator: false,
                         enabled: true,
-                        hint: String::new(),
+                        hint,
                     },
                     // ProfileChoice rows only live inside a Submenu, so they
                     // reach menu.items (and this arm) after a drill-in swaps the
@@ -2474,7 +2477,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
         ContextMenuItem::LuaItem { label, .. } => (label, "", false),
         ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::ReconnectItem { label, .. } => (label, "", false),
-        ContextMenuItem::Submenu { label, .. } => (label, " ▸", false),
+        ContextMenuItem::Submenu { label, .. } => (label, "", true),
         ContextMenuItem::ProfileChoice { label, .. }
         | ContextMenuItem::WindowChoice { label, .. } => (label, "", false),
         ContextMenuItem::NewTabShell { label, .. } => (label, "", true),
@@ -2762,7 +2765,15 @@ pub(super) fn filter_disabled(items: Vec<ContextMenuItem>) -> Vec<ContextMenuIte
             item => Some(item),
         })
         .filter(|it| {
-            !matches!(
+            // Copy stays, greyed, while nothing is selected: the menu then
+            // shows where copying lives, as native menus do.
+            matches!(
+                it,
+                ContextMenuItem::Item {
+                    action: Action::Copy,
+                    ..
+                }
+            ) || !matches!(
                 it,
                 ContextMenuItem::Item { enabled: false, .. }
                     | ContextMenuItem::DynamicItem { enabled: false, .. }
@@ -3140,6 +3151,15 @@ pub(super) fn grouped_terminal_menu(
         } => 3,
         _ => 4,
     });
+    // A divider between the rows about the link under the pointer and the
+    // terminal's own clipboard rows.
+    if let Some(first_after_links) = primary
+        .iter()
+        .position(|item| !matches!(item, ContextMenuItem::UrlItem { .. }))
+        .filter(|&at| at > 0)
+    {
+        primary.insert(first_after_links, ContextMenuItem::Separator);
+    }
     primary.push(ContextMenuItem::Separator);
     for (label, items) in [
         T::MenuCategorySplit,

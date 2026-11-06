@@ -1200,9 +1200,10 @@ fn context_menu_width_covers_every_rendered_row_shape() {
         label: "主题".into(),
         items: vec![],
     };
+    // The submenu sign is the row's right-aligned hint.
     assert_eq!(
-        context_menu_item_columns(&submenu, "ignored"),
-        "主题 ▸".width()
+        context_menu_item_columns(&submenu, "▸"),
+        "主题".width() + "▸".width() + 2
     );
 
     let profile = ContextMenuItem::ProfileChoice {
@@ -1389,22 +1390,24 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
         }
         let grouped = super::grouped_terminal_menu(items, tr);
         assert!(matches!(grouped[0], ContextMenuItem::UrlItem { .. }));
+        // A divider separates the link's rows from the clipboard's.
+        assert!(matches!(grouped[1], ContextMenuItem::Separator));
         assert!(matches!(
-            grouped[1],
+            grouped[2],
             ContextMenuItem::Item {
                 action: Action::Copy,
                 ..
             }
         ));
         assert!(matches!(
-            grouped[2],
+            grouped[3],
             ContextMenuItem::Item {
                 action: Action::Paste,
                 ..
             }
         ));
         assert!(matches!(
-            grouped[3],
+            grouped[4],
             ContextMenuItem::Item {
                 action: Action::SelectAll,
                 ..
@@ -1414,7 +1417,7 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             count_rows_fitting(&grouped, 0, 592.0, 28.0, 8.0),
             grouped.len()
         );
-        for item in grouped.iter().skip(5) {
+        for item in grouped.iter().skip(6) {
             assert!(matches!(item, ContextMenuItem::Submenu { .. }));
         }
     }
@@ -1514,4 +1517,37 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
         ));
         assert!(ws.context_menu.is_none());
     }
+}
+
+#[test]
+fn a_disabled_copy_stays_greyed_while_other_disabled_rows_go() {
+    let items = vec![
+        ContextMenuItem::Item {
+            label: "Copy",
+            action: Action::Copy,
+            enabled: false,
+        },
+        ContextMenuItem::Item {
+            label: "Paste",
+            action: Action::Paste,
+            enabled: true,
+        },
+        ContextMenuItem::Item {
+            label: "Split Right",
+            action: Action::SplitRight,
+            enabled: false,
+        },
+    ];
+    let kept = filter_disabled(items);
+    assert_eq!(kept.len(), 2);
+    assert!(matches!(
+        kept[0],
+        ContextMenuItem::Item {
+            action: Action::Copy,
+            enabled: false,
+            ..
+        }
+    ));
+    assert!(!super::item_is_dispatchable(&kept[0]));
+    assert_eq!(super::next_context_menu_highlight(&kept, 1, 1), 1);
 }

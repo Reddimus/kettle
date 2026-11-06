@@ -88,6 +88,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The terminal's right-click menu shows Copy greyed out until something is
+  selected, puts a divider between a link's actions and the clipboard's, and
+  right-aligns submenu arrows.
+
 - Selected and search-highlighted text, links and decorations stay readable;
   inactive windows use a subdued selection and a steady hollow cursor. Settings
   can hide or retain the unfocused cursor shape, and cursor shape/blink edits
