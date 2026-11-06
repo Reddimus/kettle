@@ -110,7 +110,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `record-max-files` | positive integer | `50` | Kettle-owned casts kept in the managed recording directory; oldest unlocked pruned first |
 | `record-max-directory-bytes` | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB` | `5368709120` (5 GiB) | Total budget for Kettle-owned casts in that directory, pruned oldest-first. Minimum `1048576` (1 MiB): retention deletes to fit, so a bare `500` meaning 500 MB would wipe the directory, and is rejected instead |
 | `tab-bar` | `off`\|`auto`\|`always` | `auto` | When the tab bar is shown (`auto` = only with >1 tab, except the macOS titlebar strip which always shows its title) |
-| `macos-titlebar-style` | `tabs`\|`native` | `tabs` | macOS only; ignored elsewhere. `tabs` puts a top tab strip in a transparent native titlebar with a full-size content view and hidden native title. The strip matches the titlebar height (AppKit measurement, or 28 pt), clears the traffic lights (measured, or 78 pt), and centres a single tab as the window title. It stays visible with `tab-bar = auto`, including fullscreen. Empty strip space drags the window; double-click follows macOS's zoom/minimize/do-nothing preference (zoom when unset). `tab-bar = off`, a position other than `top`, or `borderless = true` retains the previous native/borderless behavior. Config reload updates decorated windows; `native` restores the separate AppKit caption |
+| `macos-titlebar-style` | `tabs`\|`native` | `tabs` | macOS only; ignored elsewhere. `tabs` puts a top tab strip in a transparent native titlebar with a full-size content view and hidden native title. The strip follows the titlebar height (AppKit measurement, at least 28 pt), clears the traffic lights (measured, or 78 pt), and centres a single tab as the window title. It stays visible with `tab-bar = auto`, including fullscreen. Empty strip space drags the window; double-click follows macOS's zoom/minimize/do-nothing preference (zoom when unset). `tab-bar = off`, a position other than `top`, or `borderless = true` retains the previous native/borderless behavior. Config reload updates decorated windows; `native` restores the separate AppKit caption |
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); when its tabs don't fit the window's height it scrolls with `⌃ ⌄` buttons and the mouse wheel, keeping the active tab in view. `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
 | `tab-min-width` | float 40–600 px | `120` | Minimum width of a horizontal tab segment. Outside the macOS titlebar, tabs divide and fill the bar evenly. Titlebar tabs cap their width to leave empty space for native window dragging. Once tabs would shrink below this minimum, the bar overflows and (with `scroll-tabbar`) scrolls. Clamped `[40, 600]` |
@@ -418,7 +418,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `title-inactive-bg-color` / `-fg-color` | color | theme `palette[8]` / theme foreground | Idle-pane titlebar colors; unset values follow the active theme cascade |
 | `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (a zero-config procedural GPU starfield that needs no `background-image`; a fixed built-in example whose look is not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
-| `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. No effect without a wallpaper |
+| `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. Without a wallpaper, strips use a slightly darker theme background instead of the ANSI bright-black colour, in every mode |
 | `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the default; animate even when unfocused, but still freeze when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). Surfaced in Settings → Background |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
@@ -941,3 +941,24 @@ three settings, followed by `+N more`. Values are omitted, including environment
 values. Ignored settings use their defaults; valid settings still apply. Dismissing
 a notice keeps it hidden until the diagnostics change. Use `kettle --check-config`
 for the complete diagnostics.
+
+### Tab-strip appearance and controls
+
+Solid tab strips use the theme background darkened by 24% for dark backgrounds
+or 6% for light backgrounds. The active tab joins the terminal background,
+including its transparency, and keeps an accent line. Wallpaper strips retain
+`chrome-background` behaviour. Solid strips no longer use ANSI bright black;
+`chrome-background = theme` selects that colour only with a wallpaper.
+
+Horizontal New Tab Options and New Tab controls each have a hit area of at
+least 28 by 28 points (growing with a taller strip), a 4 point gap, an 8 point outside margin, and rounded hover and
+pressed feedback. Their tooltips follow the UI language; New Tab also shows
+its current configured shortcut. At 420 by 260 points, overflow keeps the
+active title visible alongside both controls. Closing or renaming tabs uses
+the same layout as pointer actions and accessibility.
+
+When a window loses focus on macOS or Linux, tab text and controls dim toward
+their backgrounds while retaining at least 3:1 contrast, and the active accent
+line becomes neutral. Focused labels and controls retain at least 4.5:1;
+separators and hover fills retain at least 1.5:1. The tab strip does not take
+keyboard focus from the terminal; tab-selection shortcuts remain available.

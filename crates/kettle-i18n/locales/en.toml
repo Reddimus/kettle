@@ -858,6 +858,8 @@ settings_field_grapheme_clustering = "Grapheme clustering"
 settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
 
 
+tab_new_options = "New Tab Options"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

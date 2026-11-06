@@ -1781,6 +1781,23 @@ as the title. Empty strip space starts a native window drag; a double-click
 uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs retain their separate
 reorder/tear-off/re-dock gestures.
 
+Solid tab/status chrome derives from `theme.background` (24% darker for dark
+backgrounds, 6% for light ones); wallpaper modes still resolve through
+`chrome-background`. Horizontal inactive separators and rounded hover/pressed
+fills derive from strip and foreground with a 1.5:1 floor. Window focus from
+`Overlay::window_focused` dims tab text and controls with a 3:1 floor (4.5:1
+when focused), and replaces the active accent with a neutral line. The existing
+focus-event redraw and retained text-area damage keys repaint both transitions.
+`app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
+square (growing with the band height), a 4 pt
+inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
+is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
+clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
+band height. Tooltips use translated action names and the live keymap shortcut,
+with shaped natural chrome metrics and window-clamped placement. Shortcut-hint
+lanes and shaping both use natural chrome advance, independent of terminal
+`cell-width`, including fixed-height macOS titlebar fitting.
+
 `native`, non-top tabs and disabled tabs keep the separate AppKit caption and
 content view below it. Borderless windows retain their sharp-alpha fallback.
 Config reload synchronizes the native style before laying out the content.

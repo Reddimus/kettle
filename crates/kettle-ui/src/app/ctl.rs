@@ -2,6 +2,34 @@
 
 use super::*;
 
+pub(super) fn tab_bar_geometry_json(
+    bar: &TabBar,
+    segments: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "height": bar.height,
+        "y": bar.y,
+        "new_tab": rect_json(bar.new_tab),
+        "new_tab_menu": rect_json(bar.new_tab_menu),
+        "drag_cursor_x": bar.drag_cursor_x,
+        // A vertical strip reports the drag on its own axis;
+        // additive, so a reader that only knows the x key still
+        // sees exactly what it saw before on a horizontal bar.
+        "drag_cursor_y": bar.drag_cursor_y,
+        // Tear-off state (pre-tear ghost escalation and dock
+        // highlight) for live-UI smokes.
+        "tear_lift": bar.tear_lift,
+        "insert_marker": bar.insert_marker,
+        "dock_highlighted": bar.insert_marker.is_some(),
+        "band": rect_json(bar.band),
+        // The overflow arrows, back then forward (`‹ ›` across,
+        // `⌃ ⌄` down a side bar); zero-sized while it all fits.
+        "scroll_left": rect_json(bar.scroll_left),
+        "scroll_right": rect_json(bar.scroll_right),
+        "segments": segments,
+    })
+}
+
 pub(super) fn diagnostic_titlebar_bell(icon_enabled: bool, bell: bool) -> Option<&'static str> {
     (icon_enabled && bell).then_some("\u{1f514}")
 }
@@ -990,7 +1018,7 @@ impl App {
             self.overlay_text_cell_width(target)
                 * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(target))
         } else {
-            cell_w
+            self.overlay_text_cell_width(target)
         };
         let segments: Vec<serde_json::Value> = bar
             .segments
@@ -1570,28 +1598,7 @@ impl App {
                         },
                     }),
                 ),
-                "tab_bar": {
-                    "height": bar.height,
-                    "y": bar.y,
-                    "new_tab": rect_json(bar.new_tab),
-                    "new_tab_menu": rect_json(bar.new_tab_menu),
-                    "drag_cursor_x": bar.drag_cursor_x,
-                    // A vertical strip reports the drag on its own axis;
-                    // additive, so a reader that only knows the x key still
-                    // sees exactly what it saw before on a horizontal bar.
-                    "drag_cursor_y": bar.drag_cursor_y,
-                    // Tear-off state (pre-tear ghost escalation and dock
-                    // highlight) for live-UI smokes.
-                    "tear_lift": bar.tear_lift,
-                    "insert_marker": bar.insert_marker,
-                    "dock_highlighted": bar.insert_marker.is_some(),
-                    "band": rect_json(bar.band),
-                    // The overflow arrows, back then forward (`‹ ›` across,
-                    // `⌃ ⌄` down a side bar); zero-sized while it all fits.
-                    "scroll_left": rect_json(bar.scroll_left),
-                    "scroll_right": rect_json(bar.scroll_right),
-                    "segments": segments,
-                },
+                "tab_bar": tab_bar_geometry_json(&bar, segments),
                 "pane_titlebars": pane_titlebars,
                 // What this window's renderer has sent to the GPU: counts
                 // only, never content. A window that only blinks should add
@@ -2433,9 +2440,11 @@ impl App {
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
+                ws.pressed_new_tab_menu = true;
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
             } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
+                ws.pressed_new_tab = true;
                 let area = self.area(ws);
                 let (cols, rows) = self.grid_of(ws, area);
                 let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -2544,6 +2553,13 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+            ws.pressed_new_tab = false;
+            ws.pressed_new_tab_menu = false;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
         if bcode == 0 {

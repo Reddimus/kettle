@@ -1104,6 +1104,10 @@ impl StatusBar {
 }
 
 pub struct TabBar {
+    pub pressed_new_tab: bool,
+    pub pressed_new_tab_menu: bool,
+    /// Localized action and live shortcut for the currently hovered control.
+    pub tooltip: Option<String>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
     /// Recording warning, independent of the configurable tab format.
@@ -1190,6 +1194,9 @@ pub struct TabBar {
 impl TabBar {
     pub fn hidden() -> Self {
         TabBar {
+            pressed_new_tab: false,
+            pressed_new_tab_menu: false,
+            tooltip: None,
             in_titlebar: false,
             recording_notice: String::new(),
             height: 0.0,

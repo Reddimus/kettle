@@ -22,6 +22,7 @@ pub(super) fn titlebar_band_metrics(
         height: height
             .filter(|h| h.is_finite() && (20.0..=128.0).contains(h))
             .unwrap_or(28.0)
+            .max(28.0)
             * scale,
         left: if fullscreen {
             0.0
@@ -119,7 +120,13 @@ impl App {
                     Self::cell_size(ws).map_or(16.0, |(_, ch)| ch),
                     self.cfg.tab_bar_pos,
                 )
-                .max(20.0 * scale)
+                .max(
+                    if self.cfg.tab_bar_pos.is_vertical() {
+                        20.0
+                    } else {
+                        28.0
+                    } * scale,
+                )
             },
             |band| band.height,
         )
@@ -284,6 +291,7 @@ mod tests {
             for (height, right, expected) in [
                 (None, None, (28.0, 78.0)),
                 (Some(32.0), Some(72.0), (32.0, 80.0)),
+                (Some(22.0), Some(72.0), (28.0, 80.0)),
                 (Some(f32::NAN), Some(-1.0), (28.0, 78.0)),
             ] {
                 let titlebar = titlebar_band_metrics(scale, height, right, false);

@@ -22,6 +22,7 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+tab_new_options = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"

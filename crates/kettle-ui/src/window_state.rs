@@ -1162,6 +1162,8 @@ pub(crate) struct WindowState {
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
     /// actually changes; `tab_bar()` forwards it to the renderer.
+    pub(crate) pressed_new_tab: bool,
+    pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
     /// The pointer is over the tab bar's update chip.
@@ -1598,6 +1600,8 @@ impl WindowState {
             dock_preview: None,
             hovered_close_idx: None,
             hovered_tab_idx: None,
+            pressed_new_tab: false,
+            pressed_new_tab_menu: false,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
             context_menu_a11y_label: None,

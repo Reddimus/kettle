@@ -244,6 +244,8 @@ impl App {
                 ws.scrollbar_hover = None;
                 ws.hovered_close_idx = None;
                 ws.hovered_tab_idx = None;
+                ws.pressed_new_tab = false;
+                ws.pressed_new_tab_menu = false;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
                 ws.search.hovered_control = None;
@@ -714,9 +716,11 @@ impl App {
                         // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
+                        ws.pressed_new_tab_menu = true;
                         let (ax, ay, _, ah) = bar.new_tab_menu;
                         self.open_new_tab_menu(ws, ax, ay + ah);
                     } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
+                        ws.pressed_new_tab = true;
                         let area = self.area(ws);
                         let (cols, rows) = self.grid_of(ws, area);
                         let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -993,6 +997,13 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+                    ws.pressed_new_tab = false;
+                    ws.pressed_new_tab_menu = false;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
                 // Release report for the side buttons, so a tracking app sees
                 // the matching button-up after the press. Only a press the
                 // app saw gets one: a press that a context menu, a modal or
@@ -1321,6 +1332,8 @@ impl App {
                     }
                 }
                 if !f {
+                    ws.pressed_new_tab = false;
+                    ws.pressed_new_tab_menu = false;
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
                     // An unfocused window draws no cursor, and the Metal layer

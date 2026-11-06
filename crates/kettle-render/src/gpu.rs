@@ -651,6 +651,7 @@ impl Renderer {
         let metrics = metrics_for(font_size, scale);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
+        let tab_tooltip_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_right_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -851,6 +852,8 @@ impl Renderer {
             media_receipt_badge_buffer,
             tabbar_buffer,
             new_tab_arrow_buffer,
+            tab_tooltip_buffer,
+            tab_tooltip_text: String::new(),
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,

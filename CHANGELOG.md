@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Quieter tab strips follow the terminal background, with readable separators
+  and visibly dimmed inactive windows. Larger, separated New Tab and options
+  buttons show translated tooltips and shortcut hints, stay reachable in narrow
+  windows, and no longer clip tab shortcuts with narrow terminal cells.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

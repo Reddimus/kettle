@@ -578,6 +578,8 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
+    tab_tooltip_buffer: TextBuffer,
+    tab_tooltip_text: String,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -1227,9 +1229,8 @@ impl Renderer {
         }
 
         // The opaque fill color for the window chrome strips (tab bar, status
-        // bar, new-tab button). It differs from the theme's `palette[8]` only
-        // when a wallpaper is in use AND `chrome-background` asks for it. See
-        // `resolve_chrome_bg`.
+        // bar, new-tab button). Solid strips derive from the terminal background;
+        // wallpaper strips follow `chrome-background`.
         let chrome_strip_bg = resolve_chrome_bg(cfg, theme, bg_frame_avg);
 
         // Status-bar background. The text is uploaded alongside
@@ -1260,7 +1261,9 @@ impl Renderer {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
-            let tab_accent = if tabbar.broadcast {
+            let tab_accent = if !overlay.window_focused {
+                chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
+            } else if tabbar.broadcast {
                 theme.palette[3]
             } else {
                 self.ui_accent(cfg, theme)
@@ -1414,7 +1417,11 @@ impl Renderer {
             // `+` button.
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
-            let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
+            let (bx, bw) = if mw > 0.0 {
+                (mx, nx + nw - mx)
+            } else {
+                (nx, nw)
+            };
             quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
             let accent = if tabbar.broadcast {
                 theme.palette[3]
@@ -1438,12 +1445,20 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                let hover = color::over(chrome_strip_bg, theme.foreground, 0.06, false);
-                for (bounds, hovered) in [
-                    (tabbar.new_tab_menu, tabbar.hovered_new_tab_menu),
-                    (tabbar.new_tab, tabbar.hovered_new_tab),
+                for (bounds, hovered, pressed) in [
+                    (
+                        tabbar.new_tab_menu,
+                        tabbar.hovered_new_tab_menu,
+                        tabbar.pressed_new_tab_menu,
+                    ),
+                    (
+                        tabbar.new_tab,
+                        tabbar.hovered_new_tab,
+                        tabbar.pressed_new_tab,
+                    ),
                 ] {
                     if hovered {
+                        let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
@@ -2395,7 +2410,7 @@ impl Renderer {
                 tab_metrics.line_height,
             )
         } else {
-            (metrics, cw, ch)
+            (metrics, self.overlay_text_cell_width(), ch)
         };
         // `+` and `▾` are small shapes at text size; draw them larger so the
         // strip's controls read as controls, capped to the strip height.
@@ -2647,6 +2662,29 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
+            self.tab_tooltip_buffer.set_metrics(tab_metrics);
+            self.tab_tooltip_buffer
+                .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
+            if self.tab_tooltip_text != *text {
+                self.tab_tooltip_buffer.set_text(
+                    text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.tab_tooltip_text.clone_from(text);
+            }
+            self.tab_tooltip_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            let width = self
+                .tab_tooltip_buffer
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0, f32::max);
+            let lines = self.tab_tooltip_buffer.layout_runs().count().max(1) as f32;
+            tab_strip::tooltip_rect(tabbar.band, (sw, sh), (width, tab_ch * lines), self.scale)
+        });
         let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
         while self.update_toast_buffers.len() < toast_count * 3 {
             self.update_toast_buffers
@@ -3275,6 +3313,37 @@ impl Renderer {
                     bottom: (y + h) as i32,
                 },
                 default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                custom_glyphs: &[],
+            });
+        }
+        if let Some(bounds) = tab_tooltip {
+            let fill = theme.background;
+            let edge = chrome::tab_detail(fill, theme.foreground, false);
+            tab_strip::rounded_fill(
+                &mut menu_q,
+                bounds,
+                5.0 * self.scale,
+                (true, true),
+                (edge, 1.0),
+                None,
+            );
+            let (x, y, w, h) = bounds;
+            tab_strip::rounded_fill(
+                &mut menu_q,
+                (x + 1.0, y + 1.0, w - 2.0, h - 2.0),
+                4.0 * self.scale,
+                (true, true),
+                (fill, 1.0),
+                None,
+            );
+            let ink = self.chrome_colors.text(theme.foreground, fill);
+            menu_areas.push(TextArea {
+                buffer: &self.tab_tooltip_buffer,
+                left: x + 8.0 * self.scale,
+                top: y + 4.0 * self.scale,
+                scale: 1.0,
+                bounds: text_bounds_for_rect(bounds),
+                default_color: gc(ink),
                 custom_glyphs: &[],
             });
         }
@@ -3932,7 +4001,7 @@ impl Renderer {
                 let tab_background = if s.active {
                     default_bg
                 } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
-                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
+                    chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
                 } else {
                     chrome_strip_bg
                 };
@@ -3941,6 +4010,9 @@ impl Renderer {
                 } else {
                     self.chrome_colors.muted(fg, tab_background)
                 };
+                let title_fg =
+                    self.chrome_colors
+                        .tab_text(title_fg, tab_background, overlay.window_focused);
                 let (centered_left, label_top) = tab_strip::tab_label_origin(
                     s.title_rect,
                     &self.tab_texts[bi],
@@ -3962,6 +4034,11 @@ impl Renderer {
                 });
                 if let Some((hint_rect, _)) = &s.hint {
                     let hint_fg = self.chrome_colors.muted(fg, tab_background);
+                    let hint_fg = self.chrome_colors.tab_text(
+                        hint_fg,
+                        tab_background,
+                        overlay.window_focused,
+                    );
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,
@@ -4049,7 +4126,9 @@ impl Renderer {
                     };
                     (self.chrome_colors.muted(fg, background), background)
                 };
-                let close_fg = self.chrome_colors.text(close_fg, close_background);
+                let close_fg =
+                    self.chrome_colors
+                        .tab_text(close_fg, close_background, overlay.window_focused);
                 let (close_left, close_top) =
                     centered_text_origin((cx, cy, ccw, cch), (tab_cw, tab_ch));
                 areas.push(TextArea {
@@ -4073,9 +4152,9 @@ impl Renderer {
             } else {
                 fg
             };
-            let toolbar_background = |colors: &mut chrome::Colors, hovered| {
+            let toolbar_background = |colors: &mut chrome::Colors, hovered, pressed| {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
-                    color::over(chrome_strip_bg, theme.foreground, 0.06, false)
+                    chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed)
                 } else if hovered {
                     colors.surface(
                         chrome_strip_bg,
@@ -4087,8 +4166,14 @@ impl Renderer {
                     chrome_strip_bg
                 }
             };
-            let background = toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab);
-            let plus_fg = self.chrome_colors.text(plus_fg, background);
+            let background = toolbar_background(
+                &mut self.chrome_colors,
+                tabbar.hovered_new_tab,
+                tabbar.pressed_new_tab,
+            );
+            let plus_fg = self
+                .chrome_colors
+                .tab_text(plus_fg, background, overlay.window_focused);
             let plus_w = self
                 .tabbar_buffer
                 .layout_runs()
@@ -4129,9 +4214,14 @@ impl Renderer {
                 } else {
                     fg
                 };
-                let background =
-                    toolbar_background(&mut self.chrome_colors, tabbar.hovered_new_tab_menu);
-                let arrow_fg = self.chrome_colors.text(arrow_fg, background);
+                let background = toolbar_background(
+                    &mut self.chrome_colors,
+                    tabbar.hovered_new_tab_menu,
+                    tabbar.pressed_new_tab_menu,
+                );
+                let arrow_fg =
+                    self.chrome_colors
+                        .tab_text(arrow_fg, background, overlay.window_focused);
                 let arrow_w = self
                     .new_tab_arrow_buffer
                     .layout_runs()
@@ -4179,7 +4269,11 @@ impl Renderer {
                     top,
                     scale: 1.0,
                     bounds,
-                    default_color: gc(self.chrome_colors.icon(fg, chrome_strip_bg)),
+                    default_color: gc(self.chrome_colors.tab_text(
+                        fg,
+                        chrome_strip_bg,
+                        overlay.window_focused,
+                    )),
                     custom_glyphs: &[],
                 });
             }
@@ -4774,6 +4868,7 @@ impl Renderer {
             self.status_bar_text.hash(&mut h);
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
+            tabbar.tooltip.hash(&mut h);
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);

@@ -669,9 +669,8 @@ fn a_renderer_builds_its_quad_and_image_layers_from_shared_pipelines() {
     }
 }
 
-/// `chrome-background` only recolors the chrome with a wallpaper; theme
-/// mode + the no-wallpaper case keep `palette[8]`; auto keeps the tab text
-/// readable; black/white are fixed.
+/// Solid strips derive from the background; wallpaper theme mode retains
+/// ANSI bright black, auto keeps text readable, and black/white are fixed.
 #[test]
 #[allow(
     clippy::field_reassign_with_default,
@@ -684,10 +683,10 @@ fn resolve_chrome_bg_modes() {
     let avg = Rgb::new(90, 60, 120); // a nebula-ish purple
     let mut cfg = kettle_config::Config::default();
 
-    // No wallpaper → always the theme chrome color, whatever the mode.
+    // No wallpaper: a darker background, independent of wallpaper mode.
     cfg.background_type = BackgroundType::Solid;
     cfg.chrome_background = ChromeBackground::Black;
-    assert_eq!(resolve_chrome_bg(&cfg, &theme, Some(avg)), theme.palette[8]);
+    assert_ne!(resolve_chrome_bg(&cfg, &theme, Some(avg)), theme.palette[8]);
 
     // Wallpaper + theme (default) → theme chrome color.
     cfg.background_type = BackgroundType::Image;

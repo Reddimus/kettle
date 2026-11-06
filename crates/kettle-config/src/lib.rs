@@ -603,14 +603,13 @@ pub enum BackgroundAnimation {
 }
 
 /// `chrome-background`: the fill color of the window chrome strips (tab bar,
-/// status bar, new-tab button) **when a `background-image` is in use**. The
+/// status bar, new-tab button) **when an image or starfield is in use**. The
 /// chrome is drawn opaquely over the wallpaper so the animation cannot bleed
-/// through; this picks that opaque color. Without an image, chrome always uses
-/// the theme.
+/// through; this picks that opaque color. Without a wallpaper, chrome derives
+/// from the theme background independently of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromeBackground {
-    /// Use the theme's chrome color (`palette[8]`) — the default, matches the
-    /// no-wallpaper look.
+    /// Use the theme's chrome color (`palette[8]`) over a wallpaper (default).
     #[default]
     Theme,
     /// Sample the wallpaper's average color, dimmed for text contrast, so the

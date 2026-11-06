@@ -96,6 +96,24 @@ impl App {
         }
     }
 
+    fn new_tab_tooltip(&self, ws: &WindowState) -> Option<String> {
+        if !ws.window_focused
+            || self.pointer_modal_open(ws)
+            || ws.context_menu.is_some()
+            || ws.pressed_new_tab
+            || ws.pressed_new_tab_menu
+        {
+            return None;
+        }
+        new_tab_tooltip(
+            ws.hovered_new_tab_menu
+                .then_some(NewTabHoverTarget::Menu)
+                .or_else(|| ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)),
+            &self.ui_text,
+            kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, &Action::NewTab).as_deref(),
+        )
+    }
+
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
         let height = self.tab_bar_h(ws);
         if height <= 0.0 {
@@ -126,6 +144,9 @@ impl App {
                 _ => x0,
             };
             return TabBar {
+                pressed_new_tab: false,
+                pressed_new_tab_menu: false,
+                tooltip: None,
                 in_titlebar: ws.macos_titlebar_tabs,
                 recording_notice: String::new(),
                 height,
@@ -158,36 +179,13 @@ impl App {
             String::new()
         };
         let n = labels.len().max(1);
-        // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
-        // each `height` wide. The strip must reserve the WHOLE
-        // button (arrow + plus), not just `plus_w`, or the last tab segment
-        // overlaps it.
-        let plus_w = height;
-        // Hide the ▾ shell-dropdown when only one shell is
-        // available (e.g. stock Ubuntu = just bash). A zero-width arrow drops it
-        // from both the render pass (`new_tab_menu.2 > 0.0`) and the click
-        // hit-test, and the `+` button reclaims the space.
-        let arrow_w = if new_tab_dropdown_visible() {
-            height
-        } else {
-            0.0
-        };
-        let button_w = plus_w + arrow_w;
-        // Every consumer of segment geometry reads it from this bar, so the
-        // drag-to-reorder handler and the click hit-test agree on where
-        // segments end.
-        let strip = if ws.macos_titlebar_tabs {
-            (sw - button_w).max(0.0)
-        } else {
-            tab_segment_strip_width(sw, plus_w, arrow_w)
-        };
-        let button_x = if ws.macos_titlebar_tabs {
-            (sw - button_w).max(0.0)
-        } else {
-            sw - button_w
-        };
-        let (arrow_rect, plus_rect) =
-            split_new_tab_button((x0 + button_x, y, button_w, height), arrow_w);
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+        let (arrow_rect, plus_rect, button_w) =
+            horizontal_new_tab_controls(band, scale, new_tab_dropdown_visible());
+        let strip = tab_segment_strip_width(sw, button_w, 0.0);
         // Tabs divide the strip evenly and fill the bar; once they would
         // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
         // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
@@ -320,6 +318,9 @@ impl App {
         let to_btn =
             |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, height, height));
         TabBar {
+            pressed_new_tab: ws.pressed_new_tab,
+            pressed_new_tab_menu: ws.pressed_new_tab_menu,
+            tooltip: self.new_tab_tooltip(ws),
             in_titlebar: ws.macos_titlebar_tabs,
             recording_notice,
             height,
@@ -473,6 +474,9 @@ impl App {
             height.min(strip_w * 0.5),
         );
         TabBar {
+            pressed_new_tab: ws.pressed_new_tab,
+            pressed_new_tab_menu: ws.pressed_new_tab_menu,
+            tooltip: self.new_tab_tooltip(ws),
             in_titlebar: false,
             recording_notice: String::new(),
             height,
@@ -895,6 +899,41 @@ pub(super) fn side_tab_rows(n: usize, active: usize, rows: usize) -> SideTabRows
     }
 }
 
+/// Physical rectangles shared by paint, hit tests, AccessKit and ctl.
+/// Reserve a leading gap, a gap between controls, and an outside drag margin.
+pub(super) fn horizontal_new_tab_controls(
+    band: kettle_render::Rect4,
+    scale: f32,
+    dropdown: bool,
+) -> (kettle_render::Rect4, kettle_render::Rect4, f32) {
+    let side = band.3.max(28.0 * scale);
+    let gap = 4.0 * scale;
+    let edge = 8.0 * scale;
+    let reserve = side + edge + gap + if dropdown { side + gap } else { 0.0 };
+    let y = band.1 + (band.3 - side).max(0.0) * 0.5;
+    let plus = (band.0 + band.2 - edge - side, y, side, side);
+    let menu = if dropdown {
+        (plus.0 - gap - side, y, side, side)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    (menu, plus, reserve)
+}
+
+pub(super) fn new_tab_tooltip(
+    target: Option<NewTabHoverTarget>,
+    tr: &kettle_i18n::Translator,
+    shortcut: Option<&str>,
+) -> Option<String> {
+    match target? {
+        NewTabHoverTarget::Menu => Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
+        NewTabHoverTarget::Plus => {
+            let label = tr.text(kettle_i18n::Text::MenuNewTab);
+            Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
+        }
+    }
+}
+
 /// Split the trailing new-tab button into `(arrow_left, plus_right)`
 /// hit-rects — the `▾` dropdown on the LEFT, the `+` on the RIGHT. `arrow_w` is
 /// clamped to the button width so a degenerate (tiny) button can't yield a
@@ -1056,10 +1095,9 @@ pub(super) fn cursor_in_status_bar_band(
 /// `tab_bar()` lays segments out across this width, and the drag-to-reorder
 /// handler hit-tests those rendered segments, so the drag target can't drift
 /// from what is drawn. `arrow_w` is `0.0` when the dropdown is absent
-/// (vertical bars). Floored at `plus_w` so a very narrow bar still reserves room
-/// for the `+` button.
+/// (vertical bars). A fully reserved strip leaves no tab space.
 pub(super) fn tab_segment_strip_width(surface_w: f32, plus_w: f32, arrow_w: f32) -> f32 {
-    (surface_w - plus_w - arrow_w).max(plus_w)
+    (surface_w - plus_w - arrow_w).max(0.0)
 }
 
 /// The shortest a focus change waits before reading the update facts again.

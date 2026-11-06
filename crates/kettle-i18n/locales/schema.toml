@@ -2573,3 +2573,6 @@ context = "crates/kettle-ui/src/settings.rs: label of the three-choice session r
 
 [messages.settings_description_field_restore_session]
 context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Off session restore, including macOS system preferences."
+
+[messages.tab_new_options]
+context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."

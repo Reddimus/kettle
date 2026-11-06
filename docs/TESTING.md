@@ -94,6 +94,16 @@ checker consumes `ui_geometry`'s per-tab `hovered`, `hint` and `close` fields;
 live window. Full-size control metrics and contrast wiring have portable source
 guards; these do not replace native titlebar screenshots.
 
+Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
+`inactive_tab_separator`, `shortcut_hint_fits_natural_advance` and
+`tooltip_stays_inside_narrow` tests. `kettle-ui`'s
+`narrow_chrome_keeps_active_title` checks 420 by 260 point top/bottom strips,
+traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
+gaps, AccessKit bounds and the production `ui_geometry` serializer.
+`new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+Full render/UI suites and clippy remain required; native focus changes,
+hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
+
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery

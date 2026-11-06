@@ -408,8 +408,8 @@ fn tab_segment_strip_width_excludes_both_buttons() {
     assert_eq!(tab_segment_strip_width(800.0, 24.0, 24.0), 752.0);
     // No dropdown (vertical bar): arrow_w = 0 → only `+` excluded.
     assert_eq!(tab_segment_strip_width(800.0, 24.0, 0.0), 776.0);
-    // Degenerate narrow bar floors at plus_w so `+` always has room.
-    assert_eq!(tab_segment_strip_width(20.0, 24.0, 24.0), 24.0);
+    // A degenerate strip has no room for tabs; controls keep their reservation.
+    assert_eq!(tab_segment_strip_width(20.0, 24.0, 24.0), 0.0);
 }
 
 #[test]
@@ -823,4 +823,172 @@ fn review_titlebar_preferred_width_preserves_configured_minimum() {
     assert!(layout.xs[1].is_some());
     let fits = super::titlebar_tab_layout(2, 0, (1400.0, 56.0, 78.0), 28.0, 600.0, true);
     assert!(fits.width >= 600.0 && fits.last_width >= 600.0);
+}
+
+#[test]
+fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
+    use super::*;
+    for scale in [1.0, 1.5, 2.0] {
+        for titlebar in [false, true] {
+            for bottom in [false, true] {
+                let left = if titlebar { 78.0 * scale } else { 0.0 };
+                let y = if bottom { 232.0 * scale } else { 0.0 };
+                let band = (left, y, 420.0 * scale - left, 28.0 * scale);
+                let (menu, plus, reserve) = horizontal_new_tab_controls(band, scale, true);
+                let mut bar = kettle_render::TabBar::hidden();
+                bar.height = band.3;
+                bar.band = band;
+                bar.new_tab = plus;
+                bar.new_tab_menu = menu;
+                for (rect, target) in [
+                    (menu, NewTabHoverTarget::Menu),
+                    (plus, NewTabHoverTarget::Plus),
+                ] {
+                    assert!(rect.2 / scale >= 28.0 && rect.3 / scale >= 28.0);
+                    // Check the whole target, including each corner.
+                    for dx in [0.01, rect.2 - 0.01] {
+                        for dy in [0.01, rect.3 - 0.01] {
+                            assert!(tab_bar_pointer_region_contains(
+                                &bar,
+                                rect.0 + dx,
+                                rect.1 + dy
+                            ));
+                            assert_eq!(
+                                new_tab_hover_target(&bar, rect.0 + dx, rect.1 + dy),
+                                Some(target)
+                            );
+                        }
+                    }
+                }
+                assert_eq!(plus.0 - menu.0 - menu.2, 4.0 * scale);
+                assert_eq!(420.0 * scale - plus.0 - plus.2, 8.0 * scale);
+                assert_eq!(
+                    new_tab_hover_target(&bar, menu.0 + menu.2 + scale, y + 14.0 * scale),
+                    None
+                );
+                let nodes = tab_accessibility_projection(
+                    &bar,
+                    &[],
+                    false,
+                    &kettle_i18n::Translator::default(),
+                );
+                for rect in [plus, menu] {
+                    let expected = accesskit::Rect::new(
+                        rect.0 as f64,
+                        rect.1 as f64,
+                        (rect.0 + rect.2) as f64,
+                        (rect.1 + rect.3) as f64,
+                    );
+                    assert!(
+                        nodes
+                            .iter()
+                            .any(|(_, node)| node.role() == accesskit::Role::Button
+                                && node.bounds() == Some(expected))
+                    );
+                }
+                let geometry = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
+                for (key, rect) in [("new_tab", plus), ("new_tab_menu", menu)] {
+                    assert_eq!(
+                        geometry[key],
+                        serde_json::json!({"x":rect.0,"y":rect.1,"width":rect.2,"height":rect.3})
+                    );
+                }
+                for n in [1, 2, 9, 40] {
+                    for active in [0, n - 1] {
+                        let strip = band.2 - reserve;
+                        let layout = if titlebar {
+                            titlebar_tab_layout(
+                                n,
+                                active,
+                                (strip, reserve, left),
+                                band.3,
+                                120.0,
+                                true,
+                            )
+                        } else {
+                            tab_strip_layout(n, active, strip, reserve, band.3, 120.0, true)
+                        };
+                        let x = left + layout.xs[active].expect("active tab stays visible");
+                        let width = if active + 1 == n {
+                            layout.last_width
+                        } else {
+                            layout.width
+                        };
+                        assert!(x + width <= menu.0 - 4.0 * scale + 0.01);
+                        let content = kettle_render::horizontal_tab_content_layout(
+                            (x, y, width, band.3),
+                            n > 1,
+                            true,
+                            false,
+                            "shell",
+                            Some("Cmd+1"),
+                            8.0 * scale,
+                        );
+                        assert!(
+                            content.title.2 / scale >= 3.0 * 8.0,
+                            "readable title for {n} tabs, active {active}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let ctl = include_str!("ctl.rs");
+    for field in [
+        "\"new_tab\": rect_json(bar.new_tab)",
+        "\"new_tab_menu\": rect_json(bar.new_tab_menu)",
+    ] {
+        assert!(
+            ctl.contains(field),
+            "ui_geometry must serialize the shared control rectangles"
+        );
+    }
+}
+
+#[test]
+fn new_tab_tooltips_translate_and_follow_the_live_shortcut() {
+    use super::{NewTabHoverTarget, new_tab_tooltip};
+    for (language, label, options) in [
+        (kettle_i18n::Language::En, "New Tab", "New Tab Options"),
+        (
+            kettle_i18n::Language::Es,
+            "Nueva pestaña",
+            "Opciones de nueva pestaña",
+        ),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Plus), &tr, Some("Cmd+T")),
+            Some(format!("{label}  Cmd+T"))
+        );
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Plus), &tr, Some("Ctrl+N")),
+            Some(format!("{label}  Ctrl+N"))
+        );
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Plus), &tr, None),
+            Some(label.into())
+        );
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Menu), &tr, None),
+            Some(options.into())
+        );
+        assert_eq!(new_tab_tooltip(None, &tr, Some("Cmd+T")), None);
+    }
+}
+
+#[test]
+fn new_tab_control_targets_grow_with_zoomed_chrome() {
+    for scale in [1.0, 2.0] {
+        for height in [28.0, 40.0, 84.0] {
+            let band = (78.0 * scale, 0.0, 922.0 * scale, height * scale);
+            let (menu, plus, _) = super::horizontal_new_tab_controls(band, scale, true);
+            for rect in [menu, plus] {
+                assert_eq!(rect.2, height * scale);
+                assert_eq!(rect.3, height * scale);
+                assert!(rect.2 >= 28.0 * scale);
+                assert_eq!(rect.1, band.1);
+            }
+        }
+    }
 }

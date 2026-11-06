@@ -161,33 +161,20 @@ pub(crate) fn pick_titlebar_bg(
     }
 }
 
-/// Resolve the opaque fill color for the window chrome strips (tab bar,
-/// status bar, new-tab button). Without a wallpaper, or with
-/// `chrome-background = theme`, this is the theme's chrome color (`palette[8]`).
-/// With a wallpaper, the other modes let the chrome read deliberately against
-/// the moving background:
-///   - `black` / `white`: a fixed neutral panel.
-///   - `auto`: the wallpaper's average color, nudged toward black/white only as
-///     far as needed to keep the (theme-colored) tab text readable on it
-///     (`with_min_contrast` against `theme.foreground`, 3:1). Falls back to the
-///     theme color if no frame has been sampled yet.
-///
-/// `bg_avg` is `Some` only when a wallpaper frame was sampled this frame for
-/// `auto`. Pure so the mapping is unit-tested without a GPU.
+/// Solid chrome is a quiet band darker than the terminal. Wallpaper modes
+/// retain their explicit theme/auto/black/white policy.
 pub(crate) fn resolve_chrome_bg(
     cfg: &kettle_config::Config,
     theme: &kettle_config::Theme,
     bg_avg: Option<Rgb>,
 ) -> Rgb {
     use kettle_config::{BackgroundType, ChromeBackground};
-    // Only a wallpaper (image or starfield) changes the chrome color; otherwise
-    // theme as before. (Over a pure-black starfield, `auto` keeps the chrome
-    // black — black already clears the 3:1 contrast bar against a light fg.)
     if !matches!(
         cfg.background_type,
         BackgroundType::Image | BackgroundType::Starfield
     ) {
-        return theme.palette[8];
+        let darkness = if theme.is_dark() { 0.24 } else { 0.06 };
+        return color::over(theme.background, Rgb::new(0, 0, 0), darkness, false);
     }
     match cfg.chrome_background {
         ChromeBackground::Theme => theme.palette[8],

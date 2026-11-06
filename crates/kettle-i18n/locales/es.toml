@@ -859,6 +859,8 @@ settings_field_grapheme_clustering = "Agrupación de grafemas"
 settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
 
 
+tab_new_options = "Opciones de nueva pestaña"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

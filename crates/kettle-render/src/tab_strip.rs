@@ -65,6 +65,24 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
+/// Keep a tooltip inside the window, below top chrome or above bottom chrome.
+pub(crate) fn tooltip_rect(
+    band: Rect4,
+    surface: (f32, f32),
+    text: (f32, f32),
+    scale: f32,
+) -> Rect4 {
+    let w = (text.0 + 16.0 * scale).min(surface.0);
+    let h = (text.1 + 8.0 * scale).min(surface.1);
+    let x = (band.0 + band.2 - w - 8.0 * scale).clamp(0.0, (surface.0 - w).max(0.0));
+    let y = if band.1 < surface.1 * 0.5 {
+        band.1 + band.3 + 4.0 * scale
+    } else {
+        band.1 - h - 4.0 * scale
+    };
+    (x, y.clamp(0.0, (surface.1 - h).max(0.0)), w, h)
+}
+
 pub(crate) fn tab_label_origin(lane: Rect4, label: &str, cell: (f32, f32)) -> (f32, f32) {
     crate::geometry::centered_text_origin(
         lane,
@@ -145,9 +163,8 @@ pub(crate) fn horizontal_tab_quads(
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
-    let hover = crate::color::over(chrome, theme.foreground, 0.06, false);
-    let divider =
-        crate::color::with_min_contrast(theme.palette[8], chrome, crate::chrome::ICON_CONTRAST);
+    let hover = crate::chrome::tab_detail(chrome, theme.foreground, false);
+    let divider = hover;
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
@@ -243,13 +260,16 @@ mod tests {
             assert!(source.contains(&format!("buffer: &self.{buffer},")));
         }
         for statement in [
-            "let plus_fg = self.chrome_colors.text(plus_fg, background);",
-            "let arrow_fg = self.chrome_colors.text(arrow_fg, background);",
-            "let close_fg = self.chrome_colors.text(close_fg, close_background);",
+            "let plus_fg = self.chrome_colors.tab_text(plus_fg, background, overlay.window_focused);",
+            "let arrow_fg = self.chrome_colors.tab_text(arrow_fg, background, overlay.window_focused);",
+            "let close_fg = self.chrome_colors.tab_text(close_fg, close_background, overlay.window_focused);",
             "let hint_fg = self.chrome_colors.muted(fg, tab_background);",
         ] {
             assert!(
-                source.contains(statement),
+                source
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(&statement.split_whitespace().collect::<String>()),
                 "missing contrast resolution: {statement}"
             );
         }
@@ -592,8 +612,7 @@ mod tests {
                             (divider.color[2] * 255.0).round() as u8,
                         );
                         assert!(
-                            crate::color::contrast_ratio(rgb, chrome)
-                                >= crate::chrome::ICON_CONTRAST,
+                            crate::color::contrast_ratio(rgb, chrome) >= 1.5,
                             "{name}, {background_type:?}, {chrome_background:?}, {pos:?}: invisible separator"
                         );
                     }
@@ -710,7 +729,39 @@ mod tests {
                 let hover = &hover.chrome[1..];
                 assert!(sample(hover, 240.0, 14.0).is_some());
                 // Separator at the hovered tab's trailing edge disappears.
-                assert_ne!(sample(hover, 319.5, 14.0), sample(q, 319.5, 14.0));
+                assert!(!hover.iter().any(|q| q.pos[0] == 319.0 && q.size[0] == 1.0));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    #[test]
+    fn tooltip_stays_inside_narrow_top_and_bottom_windows() {
+        for scale in [1.0, 2.0] {
+            for bottom in [false, true] {
+                let band = (
+                    78.0 * scale,
+                    if bottom { 232.0 * scale } else { 0.0 },
+                    342.0 * scale,
+                    28.0 * scale,
+                );
+                let (x, y, w, h) = tooltip_rect(
+                    band,
+                    (420.0 * scale, 260.0 * scale),
+                    (220.0 * scale, 20.0 * scale),
+                    scale,
+                );
+                assert!(x >= 0.0 && x + w <= 420.0 * scale);
+                assert!(y >= 0.0 && y + h <= 260.0 * scale);
+                if bottom {
+                    assert!(y + h < band.1);
+                } else {
+                    assert!(y > band.1 + band.3);
+                }
             }
         }
     }
