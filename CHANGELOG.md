@@ -179,8 +179,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A failed process's exit banner sits along the bottom of its pane instead of
   covering the first lines, where a short session's output and its error are.
 
-- Copy and paste work in Wayland sessions without XWayland, including GNOME,
-  with native text support for OSC 52 and middle-click PRIMARY selection.
+- Copy and paste of text work in Wayland sessions without XWayland, including
+  GNOME, OSC 52 copies included. Middle-click PRIMARY and image or file paste
+  still use XWayland where it is available.
 
 - With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
   spacing vowels now reserve two cells, VS15 text variants of default emoji

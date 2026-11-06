@@ -1,7 +1,9 @@
 mod drag;
 mod files;
+mod selection;
 pub(crate) use drag::{Point, Update};
 pub(crate) use files::FileUpdate;
+pub(crate) use selection::shared as selection;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -12,7 +14,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use wayland_client::backend::{Backend, ObjectId};
-use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_surface};
+use wayland_client::protocol::{
+    wl_data_device_manager, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use winit::event_loop::OwnedDisplayHandle;
@@ -82,6 +86,7 @@ impl Bridge {
         let backend = unsafe { Backend::from_foreign_display(raw.display.as_ptr().cast()) };
         let connection = Connection::from_backend(backend);
         let queue = connection.new_event_queue::<State>();
+        selection::shared().attach(connection.clone(), queue.handle());
         let registry = connection.display().get_registry(&queue.handle(), ());
         connection.flush().ok()?;
         let (stop, stopped) = UnixStream::pair().ok()?;
@@ -358,7 +363,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     );
                 }
                 "wl_data_device_manager" if version >= 3 && state.drag.data_manager.is_none() => {
-                    state.drag.data_manager = Some(registry.bind(name, 3, qh, ()));
+                    let manager: wl_data_device_manager::WlDataDeviceManager =
+                        registry.bind(name, 3, qh, ());
+                    selection::shared().set_manager(manager.clone());
+                    state.drag.data_manager = Some(manager);
                 }
                 "xdg_toplevel_drag_manager_v1" if state.drag.manager.is_none() => {
                     state.drag.manager = Some(registry.bind(name, 1, qh, ()));
@@ -462,6 +470,7 @@ impl Dispatch<wl_pointer::WlPointer, u32> for State {
                 if let Some(window) = seat.mouse_window {
                     state.gestures.press(*name, window, serial, Instant::now());
                 }
+                selection::shared().input(state.drag.device(*name), serial);
             }
             _ => {}
         }
@@ -486,7 +495,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
             return;
         };
         match event {
-            wl_keyboard::Event::Enter { .. } => seat.key_window = entered,
+            wl_keyboard::Event::Enter { serial, .. } => {
+                seat.key_window = entered;
+                selection::shared().input(state.drag.device(*name), serial);
+            }
             wl_keyboard::Event::Leave { .. } => seat.key_window = None,
             wl_keyboard::Event::Key {
                 serial,
@@ -496,6 +508,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
                 if let Some(window) = seat.key_window {
                     state.gestures.press(*name, window, serial, Instant::now());
                 }
+                selection::shared().input(state.drag.device(*name), serial);
             }
             // Dropping Keymap closes its owned descriptor; no text is read.
             _ => {}
@@ -552,6 +565,7 @@ impl Seat {
 
 impl Drop for Bridge {
     fn drop(&mut self) {
+        selection::shared().close();
         self.state.drag.close();
         let _ = self.stop.write_all(&[0]);
         if let Some(reader) = self.reader.take() {

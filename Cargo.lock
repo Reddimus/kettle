@@ -2554,7 +2554,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "smithay-clipboard",
  "tempfile",
  "unicode-segmentation",
  "unicode-width",
@@ -4814,15 +4813,6 @@ dependencies = [
  "wayland-protocols-wlr",
  "wayland-scanner",
  "xkeysym",
-]
-
-[[package]]
-name = "smithay-clipboard"
-version = "0.7.2"
-dependencies = [
- "libc",
- "smithay-client-toolkit",
- "wayland-backend",
 ]
 
 [[package]]

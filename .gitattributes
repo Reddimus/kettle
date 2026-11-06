@@ -41,8 +41,3 @@ docs/licenses/merman/*/THIRD_PARTY_LICENSES/** -text
 # only that commit: upstream files end without newlines and carry trailing
 # spaces.
 vendor/hayro-syntax-0.8.0/** -text
-
-# smithay-clipboard is the crates.io 0.7.2 release plus Kettle's bounded-read
-# patch (vendor/README.md), kept byte for byte so `diff -r` against the release
-# shows only that patch: its .cargo_vcs_info.json ends without a newline.
-vendor/smithay-clipboard-0.7.2/** -text

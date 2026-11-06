@@ -2,12 +2,6 @@ use super::*;
 use std::time::{Duration, Instant};
 use worker::{TextProvider, TextWorker};
 
-// This is the incremental collector used inside smithay's pipe callback,
-// compiled on every host without the Wayland dependency.
-#[rustfmt::skip]
-#[path = "../../../../vendor/smithay-clipboard-0.7.2/src/bounded.rs"]
-mod bounded;
-
 #[test]
 fn backend_choice_uses_the_actual_display() {
     use winit::raw_window_handle::*;
@@ -15,7 +9,7 @@ fn backend_choice_uses_the_actual_display() {
         text_backend(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
             std::ptr::NonNull::dangling()
         ))),
-        TextBackend::Smithay
+        TextBackend::Native
     );
     assert_eq!(
         text_backend(RawDisplayHandle::Xlib(XlibDisplayHandle::new(None, 0))),
@@ -161,88 +155,16 @@ fn native_initialization_failure_is_reported_for_arboard_fallback() {
 }
 
 #[test]
-fn native_pipe_collector_enforces_caps_before_collecting_and_bounds_lossy_utf8() {
-    use std::io::Cursor;
-    for (bytes, max, expected) in [
-        (b"abcd".as_slice(), 4, Some("abcd")),
-        (b"abcde".as_slice(), 4, None),
-        (b"".as_slice(), 0, Some("")),
-        (b"x".as_slice(), 0, None),
-        (b"\xff".as_slice(), 1, None),
-        (b"\xff".as_slice(), 3, Some("\u{fffd}")),
-    ] {
-        let mut transfer = bounded::Transfer::new(max, Instant::now() + worker::READ_TIMEOUT);
-        let mut reader = Cursor::new(bytes);
-        match expected {
-            Some(text) => assert_eq!(
-                transfer.read_ready(&mut reader).unwrap().as_deref(),
-                Some(text)
-            ),
-            None => assert_eq!(
-                transfer.read_ready(&mut reader).unwrap_err().kind(),
-                std::io::ErrorKind::FileTooLarge
-            ),
-        }
-        assert!(reader.position() <= (max + 1) as u64);
-    }
-}
-
-#[test]
-fn native_pipe_collector_checks_an_absolute_deadline_even_with_continuous_data() {
-    use std::io::{self, Read};
-    struct Trickle;
-    impl Read for Trickle {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            std::thread::sleep(Duration::from_millis(5));
-            buffer[0] = b'x';
-            Ok(1)
-        }
-    }
-    let mut transfer = bounded::Transfer::new(1000, Instant::now() + Duration::from_millis(25));
-    assert_eq!(
-        transfer.read_ready(&mut Trickle).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
-    );
-    struct Idle;
-    impl Read for Idle {
-        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::WouldBlock.into())
-        }
-    }
-    let mut transfer = bounded::Transfer::new(10, Instant::now() + Duration::from_millis(10));
-    assert_eq!(transfer.read_ready(&mut Idle).unwrap(), None);
-    std::thread::sleep(Duration::from_millis(15));
-    assert_eq!(
-        transfer.read_ready(&mut Idle).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
-    );
-}
-
-#[test]
-fn smithay_dependency_and_adapter_stay_linux_only() {
+fn wayland_text_uses_the_bridge_device_without_another_dependency() {
+    // A second data device would never hear of the selection on Mutter; the
+    // clipboard goes through the bridge's device instead.
     let manifest = include_str!("../../Cargo.toml");
-    let linux = manifest
-        .split("[target.'cfg(target_os = \"linux\")'.dependencies]")
-        .nth(1)
-        .unwrap()
-        .split("[target.")
-        .next()
-        .unwrap();
-    assert!(linux.contains("smithay-clipboard ="));
-    assert_eq!(manifest.matches("smithay-clipboard =").count(), 1);
+    assert!(!manifest.contains("smithay-clipboard"));
     let module = include_str!("../clipboard.rs");
     assert!(module.contains("#[cfg(target_os = \"linux\")]\nmod wayland;"));
-}
-
-#[test]
-fn upstream_unbounded_collector_keeps_its_behavior() {
-    let mut transfer = bounded::Transfer::unbounded();
-    assert_eq!(
-        transfer
-            .read_ready(&mut std::io::Cursor::new(b"upstream"))
-            .unwrap()
-            .as_deref(),
-        Some("upstream")
+    let adapter = include_str!("wayland.rs");
+    assert!(
+        adapter.contains(".load(max, deadline)") && adapter.contains("crate::wayland::selection()")
     );
 }
 

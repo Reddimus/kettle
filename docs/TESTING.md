@@ -734,11 +734,10 @@ clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
 contents, cap/deadline errors, stale-reply isolation, initialization failure and
-image/file fallback without arboard. It also compiles smithay's actual incremental
-pipe collector on every host, covering exact caps, lossy UTF-8 expansion,
-continuous input and an idle read that resumes after its deadline. The product's
-smithay dependency and native adapter are Linux-only. These portable tests do
-not exercise Wayland binding, focus/seat serials or calloop timer dispatch.
+image/file fallback without arboard, and that the Wayland text path adds no
+dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
+and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
+tests do not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy

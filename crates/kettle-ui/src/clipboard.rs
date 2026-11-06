@@ -12,14 +12,14 @@ mod worker;
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextBackend {
-    Smithay,
+    Native,
     Arboard,
 }
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn text_backend(display: RawDisplayHandle) -> TextBackend {
     match display {
-        RawDisplayHandle::Wayland(_) => TextBackend::Smithay,
+        RawDisplayHandle::Wayland(_) => TextBackend::Native,
         _ => TextBackend::Arboard,
     }
 }
@@ -46,19 +46,15 @@ impl Clipboard {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn attach_wayland(
-        clipboard: &mut Option<Self>,
-        window: &winit::window::Window,
-        display: winit::event_loop::OwnedDisplayHandle,
-    ) {
+    pub(crate) fn attach_wayland(clipboard: &mut Option<Self>, window: &winit::window::Window) {
         use winit::raw_window_handle::HasDisplayHandle;
         let Ok(handle) = window.display_handle() else {
             return;
         };
-        if text_backend(handle.as_raw()) != TextBackend::Smithay {
+        if text_backend(handle.as_raw()) != TextBackend::Native {
             return;
         }
-        if let Some(worker) = wayland::clipboard(display) {
+        if let Some(worker) = wayland::clipboard() {
             let clipboard = clipboard.get_or_insert_with(|| Self {
                 arboard: None,
                 wayland: None,
@@ -139,9 +135,9 @@ impl Clipboard {
 
     pub(crate) fn get_image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
         let Some(clipboard) = self.arboard.as_mut() else {
-            log::warn!(
-                "clipboard image paste unavailable: Wayland text backend has no image support"
-            );
+            // Every paste asks for an image first; startup already warned once
+            // that arboard is missing, so this stays out of the default log.
+            log::debug!("clipboard image paste unavailable: no arboard clipboard");
             return Err(arboard::Error::ContentNotAvailable);
         };
         clipboard.get_image()
@@ -156,9 +152,16 @@ impl Clipboard {
     }
 }
 
+/// Store text through the Wayland bridge when it is connected; `None` leaves
+/// the caller to use arboard.
 #[cfg(target_os = "linux")]
 pub(crate) fn store_wayland_text(text: &str) -> Option<Result<(), arboard::Error>> {
-    wayland::store_if_initialized(text)
+    let selection = crate::wayland::selection();
+    selection.available().then(|| {
+        selection
+            .store(text.to_owned())
+            .map_err(|_| arboard::Error::ContentNotAvailable)
+    })
 }
 
 #[cfg(test)]

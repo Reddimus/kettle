@@ -1206,11 +1206,7 @@ impl App {
         };
         #[cfg(target_os = "linux")]
         {
-            crate::clipboard::Clipboard::attach_wayland(
-                &mut self.clipboard,
-                &window,
-                event_loop.owned_display_handle(),
-            );
+            crate::clipboard::Clipboard::attach_wayland(&mut self.clipboard, &window);
             let allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
             ws.mux.set_osc52_copy_allowed(allowed);
             for other in self.windows.values_mut() {

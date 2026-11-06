@@ -84,7 +84,7 @@ impl Gestures {
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
-pub(crate) use native::{Bridge, FileUpdate, Point, Update};
+pub(crate) use native::{Bridge, FileUpdate, Point, Update, selection};
 
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod uri_list;

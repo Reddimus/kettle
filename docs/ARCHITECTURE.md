@@ -480,13 +480,21 @@ app.rs and all production modules, or include the specific owning module.
 ### Clipboard backends
 
 `kettle-ui::clipboard` selects its text backend from the window's raw display
-handle: Wayland uses smithay-clipboard, X11 and other displays use arboard.
-Linux initializes smithay once per process after the first Wayland window is
-created, on the process's winit connection with a separate event queue. The
-native provider retains winit's `OwnedDisplayHandle` until smithay and its queue
-thread are gone, including after a caller times out. Initialization failure
-logs once and leaves arboard as the fallback. Clipboard availability refreshes
-OSC 52's DA1 capability for panes that already exist.
+handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
+(`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
+A compositor reports the selection to one data device per client (Mutter sends
+it only to the first one created), and the bridge already owns that device for
+drag and drop, so the clipboard shares it instead of binding a second device
+that would never hear of a selection. The bridge records the current offer, its
+preferred text type and the latest input serial while it dispatches on the UI
+thread. Reads run on the clipboard worker: they send `receive` for the recorded
+offer and read the pipe; Wayland proxies are safe to use from that thread. A
+selection Kettle owns is answered from memory, because its `send` event is
+dispatched on the UI thread that is waiting for the read. Writes create a data
+source on the bridge queue, authorized by the latest input serial; `send`
+requests are answered by a short-lived writer thread that gives up after five
+seconds. Clipboard availability refreshes OSC 52's DA1 capability for panes
+that already exist.
 
 CLIPBOARD and PRIMARY stay separate for OSC 52. Automatic selection copy sets
 both; middle-click retains its PRIMARY-first text behavior. All text paths,
@@ -494,13 +502,11 @@ including modal fields, search, links and preview-source copy, share the same
 native worker. Its queue allows one running operation and one waiting operation;
 a full queue refuses immediately. Stores wait for the native queue's
 acknowledgment, so a stalled compositor cannot accumulate unbounded pending
-text; an expired store is refused before it changes a selection. Blocking smithay loads run off the UI thread,
+text; an expired store is refused before it changes a selection. Blocking Wayland loads run off the UI thread,
 with the same two-second absolute deadline used for arboard reads. Each request
 owns its reply channel, so a timed-out result cannot answer a later request.
-The vendored smithay patch caps bytes while reading its nonblocking selection
-pipe, checks the deadline even during continuous input, and closes an idle pipe
-with a calloop timer at that deadline. Lossy UTF-8 expansion is checked before
-allocation. Local paste keeps its 4 MiB cap and OSC 52 its 1 MiB cap (with the
+The Wayland read caps bytes while it reads the selection pipe and checks the
+deadline before every read; invalid UTF-8 is replaced after the cap. Local paste keeps its 4 MiB cap and OSC 52 its 1 MiB cap (with the
 existing extra-byte acquisition allowance); policy, ordered journal, marker
 scrubbing, bracketed paste and paste protection stay in their existing layers.
 

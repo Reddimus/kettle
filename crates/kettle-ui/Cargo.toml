@@ -143,14 +143,6 @@ md-5 = "0.11"
 url = "2.5"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
-# Wayland-native clipboard and primary selection through the ordinary data
-# device. arboard reaches Wayland only through data-control protocols that
-# GNOME does not offer, so without XWayland copy and paste had no clipboard.
-# Builds on the smithay-client-toolkit winit already uses; winit's
-# `wayland-dlopen` enables the dlopen backend. Pinned: 0.7.3 moves to
-# smithay-client-toolkit 0.20, a second copy beside winit's 0.19. The root
-# patch adds bounded acquisition; see vendor/README.md.
-smithay-clipboard = { version = "=0.7.2", default-features = false }
 
 # ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
 # drive the taskbar button. The `windows` crate gives safe COM wrappers and is
