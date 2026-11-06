@@ -726,11 +726,8 @@ fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
             }
         }
     }
-    assert!(
-        super::theme_picker_appearance_prefix("dark-theme", &EN)
-            .contains("Theme for dark appearance")
-    );
-    assert!(super::theme_picker_appearance_prefix("light-theme", &ES).contains("apariencia clara"));
+    assert!(super::theme_picker_appearance_prefix("dark-theme", &EN).contains("dark theme:"));
+    assert!(super::theme_picker_appearance_prefix("light-theme", &ES).contains("tema claro:"));
     let source = production_source();
     assert!(
         source.contains("theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)")

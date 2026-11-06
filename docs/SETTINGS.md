@@ -218,8 +218,8 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter
 them, or move with ↑/↓ (and Tab); the window wears the selected theme while
 you browse. Enter keeps it and writes it to your config file, and Esc puts
-back the theme you started with. The header identifies the active appearance:
-**Theme for light appearance** or **Theme for dark appearance**. Following the
+back the theme you started with. The prompt names the active appearance:
+**light theme:** or **dark theme:**. Following the
 system saves a pick to that side and keeps following. Forced Light/Dark modes
 also update their own side; Fixed theme writes `theme`. With nothing typed, the themes of your
 current theme's appearance come first, each followed by the most similar one,
