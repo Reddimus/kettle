@@ -2575,7 +2575,8 @@ fn grapheme_sequences_survive_every_utf8_split_and_keep_one_leading_cell() {
         ("\u{1f44d}\u{1f3fb}", 2),
         ("\u{915}\u{94d}\u{937}", 2),
         ("\u{94d}\u{915}", 1),
-        ("\u{600}A", 1),
+        // A prepended number sign takes its own cell, as wcwidth measures it.
+        ("\u{600}A", 2),
         ("\u{1100}\u{1161}\u{11a8}", 2),
         ("e\u{301}", 1),
     ] {
@@ -2783,13 +2784,15 @@ fn grapheme_semantic_selection_and_brackets_use_the_spacing_base() {
         &mut parser,
         "\x1b[?2027h\u{605}(X\u{605})".as_bytes(),
     );
+    // Each number sign joins the bracket after it into a two-cell cluster,
+    // so the closing bracket's cluster starts at column 3.
     assert_eq!(term.grid()[Line(0)][Column(0)].c, '\u{605}');
     assert_eq!(
         term.bracket_search(Point::new(Line(0), Column(0))),
-        Some(Point::new(Line(0), Column(2)))
+        Some(Point::new(Line(0), Column(3)))
     );
     assert_eq!(
-        term.bracket_search(Point::new(Line(0), Column(2))),
+        term.bracket_search(Point::new(Line(0), Column(3))),
         Some(Point::new(Line(0), Column(0)))
     );
 }

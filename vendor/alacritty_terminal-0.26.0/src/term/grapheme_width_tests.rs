@@ -336,3 +336,26 @@ fn grapheme_width_rules_and_scalar_opt_out_stay_distinct() {
         }
     }
 }
+
+#[test]
+fn grapheme_vs15_narrows_east_asian_wide_variation_bases() {
+    for base in ["\u{3030}", "\u{303d}", "\u{3297}", "\u{1f202}"] {
+        let (mut term, mut parser) = terminal();
+        parser.advance(&mut term, format!("{base}\u{fe0e}X").as_bytes());
+        assert_cluster(&term, 0, 0, &format!("{base}\u{fe0e}"), 1);
+        assert_eq!(term.grid[Line(0)][Column(1)].c, 'X');
+    }
+}
+
+#[test]
+fn grapheme_prepended_concatenation_marks_take_their_own_cell() {
+    // Alone, a number sign takes one cell; it joins the following digit
+    // (UAX #29 GB9b) into a two-cell cluster, as wcwidth measures it.
+    let (mut term, mut parser) = terminal();
+    parser.advance(&mut term, "\u{601}".as_bytes());
+    assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(1)));
+    let (mut term, mut parser) = terminal();
+    parser.advance(&mut term, "\u{601}\u{6f1}".as_bytes());
+    assert_cluster(&term, 0, 0, "\u{601}\u{6f1}", 2);
+    assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(2)));
+}

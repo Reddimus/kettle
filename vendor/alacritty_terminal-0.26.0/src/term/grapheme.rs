@@ -108,14 +108,22 @@ impl GraphemeWidth {
             c == '\u{dca}' || (self.sinhala_linker && matches!(gcb(c), Gcb::Extend | Gcb::Zwj));
         let width = if emoji_presentation(c) {
             2
+        } else if prepended_concatenation_mark(c) || c == '\u{ad}' {
+            // Format characters with a visible glyph: number signs such as
+            // U+0600 span the digits after them, and a soft hyphen shows at a
+            // break. wcwidth gives each one cell; unicode-width gives zero.
+            1
         } else {
             c.width().unwrap_or(0)
         };
-        let measured = width > 0 && gcb(c) != Gcb::Prepend;
+        let measured = width > 0;
+        // VS15 narrows any two-cell variation base: emoji presentation and
+        // East Asian Wide bases such as U+3030 alike.
         if c == '\u{fe0e}'
             && self.previous_measured
             && self.previous.is_some_and(|base| {
-                emoji_presentation(base) && property(base, tables::EMOJI_VARIATION_BASE)
+                property(base, tables::EMOJI_VARIATION_BASE)
+                    && (emoji_presentation(base) || base.width() == Some(2))
             })
         {
             self.cells = self.cells.saturating_sub(1);
@@ -144,6 +152,20 @@ impl GraphemeWidth {
         self.previous_measured = false;
         self.cells
     }
+}
+
+/// Prepended_Concatenation_Mark (PropList.txt), a stable Unicode property.
+fn prepended_concatenation_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{600}'..='\u{605}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{890}'..='\u{891}'
+            | '\u{8e2}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+    )
 }
 
 pub(super) fn base_offset(text: &str) -> usize {
@@ -240,7 +262,8 @@ mod tests {
             ("\u{2764}\u{fe0f}\u{200d}\u{1f525}", 2),
             ("\u{1f1fa}\u{1f1f8}", 2),
             ("\u{94d}\u{915}", 1),
-            ("\u{600}A", 1),
+            ("\u{600}A", 2),
+            ("\u{ad}", 1),
             ("\u{1100}\u{1161}\u{11a8}", 2),
             ("e\u{301}", 1),
         ] {
