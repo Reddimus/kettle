@@ -1105,6 +1105,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "regex-automata",
+ "unicode-bidi",
  "unicode-width",
  "windows-sys 0.61.2",
  "winreg 0.56.0",

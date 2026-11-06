@@ -20,6 +20,9 @@ pub struct BufferLine {
     layout_opt: Cached<Vec<LayoutLine>>,
     shaping: Shaping,
     metadata: Option<usize>,
+    /// Kettle local change: shape the whole line as one left-to-right run,
+    /// without the line's own bidi analysis (see [`Self::set_ltr_override`]).
+    ltr_override: bool,
 }
 
 impl BufferLine {
@@ -41,7 +44,26 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping,
             metadata: None,
+            ltr_override: false,
         }
+    }
+
+    /// Kettle local change: when on, the line is shaped as a single
+    /// left-to-right run at level 0, skipping the Unicode Bidirectional
+    /// Algorithm. For text already in display order (a terminal row whose
+    /// cells were reordered by the caller), so the shaper neither reverses
+    /// nor mirrors it again. Kept across [`Self::reset_new`] and
+    /// [`Self::set_text`]; a change resets the shaping cache.
+    pub fn set_ltr_override(&mut self, on: bool) {
+        if self.ltr_override != on {
+            self.ltr_override = on;
+            self.reset_shaping();
+        }
+    }
+
+    /// Whether [`Self::set_ltr_override`] is on.
+    pub const fn ltr_override(&self) -> bool {
+        self.ltr_override
     }
 
     /// Resets the current line with new internal values.
@@ -218,12 +240,13 @@ impl BufferLine {
                 .shape_opt
                 .take_unused()
                 .unwrap_or_else(ShapeLine::empty);
-            line.build(
+            line.build_with_ltr_override(
                 font_system,
                 &self.text,
                 &self.attrs_list,
                 self.shaping,
                 tab_width,
+                self.ltr_override,
             );
             self.shape_opt.set_used(line);
             self.layout_opt.set_unused();
@@ -310,6 +333,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping: Shaping::Advanced,
             metadata: None,
+            ltr_override: false,
         }
     }
 

@@ -1218,5 +1218,18 @@ pub(super) fn link_under_native_pointer(
     }
     let col = ((x - origin.0) / cell.0).floor() as usize;
     let row = ((y - origin.1) / cell.1).floor() as usize;
+    // The pointer is over a drawn cell; links are found by logical cell.
+    let col = painted_row_bidi(ws, pane, row).map_or(col, |map| map.logical(col));
     cached_link_at_cell(ws, row, col)
+}
+
+/// The bidi layout of viewport row `row` in the pane whose terminal is
+/// `terminal`, as the last presented frame drew it, or `None` when that row
+/// is in logical order.
+pub(super) fn painted_row_bidi(
+    ws: &WindowState,
+    terminal: Rect,
+    row: usize,
+) -> Option<&kettle_core::bidi::RowBidi> {
+    ws.renderer.as_ref()?.painted_row_bidi(terminal, row)
 }

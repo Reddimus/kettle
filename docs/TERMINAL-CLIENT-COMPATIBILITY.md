@@ -101,9 +101,18 @@ and the previous scalar cell widths. DECRQM reports the live mode; RIS and
 DECSTR restore the configured startup default. Reloading the config affects
 only terminals created afterwards.
 
-The advanced shaper already produces Arabic initial, medial and final
-joining forms through system fallback fonts, including when optional font
-ligatures are disabled. This does not add bidirectional terminal-grid layout.
+Lines that hold right-to-left text are shown in bidi display order
+("implicit" mode, as in VTE and Konsole): each normal-screen line is laid out
+by the Unicode Bidirectional Algorithm with a left-to-right paragraph level,
+right-to-left runs read right to left, brackets inside them are mirrored, and
+Arabic letters take their contextual (joined) presentation forms, lam-alef as
+two cells. Only the display changes: the grid, the PTY, copies, search, mouse
+reports and screen readers keep logical order, and a pointer maps back to the
+logical cell under it. Each line is laid out on its own, and explicit bidi
+controls (LRE, RLO, LRI and the rest) are ignored, so program output cannot
+reorder the rest of a line. Full-screen programs on the alternate screen keep
+logical order, unlike VTE; BDSM (`CSI 8 h`/`l`) and SCP are not implemented.
+`bidi = false` shows every line in logical order.
 
 ## Terminal-rendered inline graphics
 

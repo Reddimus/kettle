@@ -456,7 +456,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: grapheme-tables-check conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: grapheme-tables-check bidi-tables-check conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -938,6 +938,15 @@ grapheme-tables-check:
 [windows]
 grapheme-tables-check:
     python -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py
+
+# Reproduce the bidi display tables (mirroring, Arabic joining and forms).
+[unix]
+bidi-tables-check:
+    python3 -X warn_default_encoding -W error::EncodingWarning scripts/test-bidi-tables.py
+
+[windows]
+bidi-tables-check:
+    python -X warn_default_encoding -W error::EncodingWarning scripts/test-bidi-tables.py
 
 # Verify that conformance adapters retain assertions and geometry restrictions.
 [unix]

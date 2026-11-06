@@ -141,6 +141,9 @@ pub struct PaneSnapshot {
     pub cursor: RenderableCursor,
     /// Whether `cursor` is alacritty_terminal's scrollback-aware vi cursor.
     pub vi_mode: bool,
+    /// Whether the pane shows the alternate screen (a full-screen program).
+    /// Its rows keep logical order: bidi display applies to the normal screen.
+    pub alt_screen: bool,
     /// DEC cursor blink state captured with the cursor so UI-only redraws do
     /// not need to reacquire the terminal lock just to build the overlay.
     pub cursor_blinking: bool,
@@ -170,6 +173,7 @@ impl Default for PaneSnapshot {
                 point: Point::new(Line(0), Column(0)),
             },
             vi_mode: false,
+            alt_screen: false,
             cursor_blinking: false,
             selection: None,
             colors: TermColors::default(),
@@ -188,6 +192,14 @@ impl PaneSnapshot {
             !cell.flags.contains(Flags::HIDDEN)
                 && super::fonts::emoji_presentation(cell.c, cell.zerowidth())
         })
+    }
+
+    /// Whether a visible cell holds a strong right-to-left character, so a
+    /// row may need a bidi display layout.
+    pub(crate) fn has_rtl(&self) -> bool {
+        self.cells
+            .iter()
+            .any(|cell| kettle_core::bidi::is_strong_rtl(cell.c))
     }
 
     pub(crate) fn has_graphemes(&self) -> bool {
@@ -222,6 +234,7 @@ impl PaneSnapshot {
         self.display_offset = content.display_offset;
         self.cursor = content.cursor;
         self.vi_mode = content.mode.contains(TermMode::VI);
+        self.alt_screen = content.mode.contains(TermMode::ALT_SCREEN);
         self.cursor_blinking = term.cursor_style().blinking;
         self.selection = content.selection;
         self.colors = *content.colors;

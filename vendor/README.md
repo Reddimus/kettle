@@ -318,6 +318,17 @@ upstream release that contains all of these fixes.
   `deny.toml` and examples, are not vendored. The media worker is built on its
   own (`-p kettle-media-worker`), so it still gets none of fontdb's file or
   system-font features.
+- Local change, Kettle's own (not an upstream backport):
+  `BufferLine::set_ltr_override` and `ShapeLine::build_with_ltr_override`
+  shape a whole line as one left-to-right run at level 0, without the line's
+  bidi analysis; `ShapeLine::build` is unchanged. Kettle lays out terminal rows
+  in bidi display order itself (`kettle_core::bidi`) and positions each cell's
+  glyph by its visual column, so the shaper must not reorder or mirror those
+  rows again; chrome text keeps automatic direction. `src/buffer_line.rs` and
+  `src/shape.rs`. Re-check on any upgrade: the change has to be carried
+  forward or replaced by an upstream equivalent, and
+  `kettle-render`'s `pane_rows_shape_left_to_right_without_mirroring` test
+  fails without it.
 - Upstream status, checked 2026-10-16: both commits are on
   pop-os/cosmic-text's `main`, and crates.io's newest `cosmic-text` is still
   0.19.0, published 2026-04-22, before either.

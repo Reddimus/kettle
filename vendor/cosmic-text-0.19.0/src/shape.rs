@@ -1328,6 +1328,21 @@ impl ShapeLine {
         shaping: Shaping,
         tab_width: u16,
     ) {
+        self.build_with_ltr_override(font_system, line, attrs_list, shaping, tab_width, false);
+    }
+
+    /// Kettle local change: [`Self::build`], optionally shaping `line` as one
+    /// left-to-right run at level 0 with no bidi analysis (see
+    /// [`crate::BufferLine::set_ltr_override`]).
+    pub fn build_with_ltr_override(
+        &mut self,
+        font_system: &mut FontSystem,
+        line: &str,
+        attrs_list: &AttrsList,
+        shaping: Shaping,
+        tab_width: u16,
+        ltr_override: bool,
+    ) {
         // Clear stale ellipsis span so it gets recomputed with the current attrs.
         // Without this, reusing a ShapeLine from a previous text (via Cached::Unused)
         // would keep an ellipsis shaped with the old attrs.
@@ -1340,18 +1355,36 @@ impl ShapeLine {
         cached_spans.clear();
         cached_spans.extend(spans.drain(..).rev());
 
-        let bidi = unicode_bidi::BidiInfo::new(line, None);
-        let rtl = if bidi.paragraphs.is_empty() {
-            false
+        let bidi = if ltr_override {
+            None
         } else {
-            bidi.paragraphs[0].level.is_rtl()
+            Some(unicode_bidi::BidiInfo::new(line, None))
         };
+        let rtl = bidi
+            .as_ref()
+            .and_then(|bidi| bidi.paragraphs.first())
+            .is_some_and(|para| para.level.is_rtl());
 
         log::trace!("Line {}: '{}'", if rtl { "RTL" } else { "LTR" }, line);
 
-        for para_info in &bidi.paragraphs {
+        if ltr_override && !line.is_empty() {
+            let mut span = cached_spans.pop().unwrap_or_else(ShapeSpan::empty);
+            span.build(
+                font_system,
+                line,
+                attrs_list,
+                0..line.len(),
+                false,
+                unicode_bidi::Level::ltr(),
+                shaping,
+            );
+            spans.push(span);
+        }
+
+        for para_info in bidi.iter().flat_map(|bidi| &bidi.paragraphs) {
             let line_range = para_info.range.clone();
-            let levels = Self::adjust_levels(&unicode_bidi::Paragraph::new(&bidi, para_info));
+            let bidi = bidi.as_ref().expect("paragraphs come from the bidi analysis");
+            let levels = Self::adjust_levels(&unicode_bidi::Paragraph::new(bidi, para_info));
 
             // Find consecutive level runs. We use this to create Spans.
             // Each span is a set of characters with equal levels.

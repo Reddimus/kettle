@@ -30,6 +30,7 @@
 //! - [`scrollbar`] — `scroll-on-output` per-pane history-diff detection
 //!   and `target_offset` thumb math.
 
+pub mod bidi;
 mod diagram_copy;
 pub use diagram_copy::{
     DiagramCopyError, MAX_COPIED_DIAGRAMS, MAX_DIAGRAM_COPY_BYTES, diagram_sources,

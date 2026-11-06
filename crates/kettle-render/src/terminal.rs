@@ -316,6 +316,20 @@ impl Renderer {
         debug_assert_eq!(self.drawn_cards.len(), self.card_scene.shown.len());
         self.painted_cards.clone_from(&self.drawn_cards);
         self.painted_shown.clone_from(&self.card_scene.shown);
+        self.painted_bidi.clone_from(&self.drawn_bidi);
+    }
+
+    /// The bidi layout of viewport row `row` in the pane drawn at `terminal`
+    /// on screen, or `None` when that row is shown in logical order.
+    pub fn painted_row_bidi(
+        &self,
+        terminal: (f32, f32, f32, f32),
+        row: usize,
+    ) -> Option<&kettle_core::bidi::RowBidi> {
+        self.painted_bidi
+            .iter()
+            .find(|painted| painted.terminal == terminal)
+            .and_then(|painted| painted.row(row))
     }
 
     /// The card on screen under surface point (`x`, `y`), if any.
@@ -420,6 +434,18 @@ impl Renderer {
         let snap = pv.snap;
         let term_colors = &snap.colors;
         let cols = snap.columns;
+        // Rows with right-to-left text are drawn in bidi display order: the
+        // walk below stays logical, and every x it computes goes through the
+        // row's visual column.
+        self.pane_bidi[idx].update(snap, cfg.bidi);
+        let row_maps = self.pane_bidi[idx].rows();
+        let row_map = |vrow: i32| {
+            usize::try_from(vrow)
+                .ok()
+                .and_then(|row| row_maps.get(row))
+                .and_then(Option::as_deref)
+        };
+        let vis = |vrow: i32, col: usize| row_map(vrow).map_or(col, |map| map.visual(col));
         // Highlight foregrounds resolve against the fill painted below them.
         let selection_range = snap.selection;
         // Snapshot cells + selection carry
@@ -486,11 +512,22 @@ impl Renderer {
         // `None` when the next char must open a new run.
         let mut cur: Option<(Rgb, bool, bool)> = None;
         let mut search_highlight_cursor = 0usize;
-        let mut cell_positions: Vec<Option<Vec<CellGlyphSpan>>> = if snap.has_graphemes() {
-            vec![None; screen_rows.max(0) as usize]
-        } else {
-            Vec::new()
-        };
+        // Grapheme rows and bidi rows place each glyph by its cell's metadata
+        // (a bidi row's cells carry their visual column).
+        let bidi_rows = row_maps.iter().any(Option::is_some);
+        let mut cell_positions: Vec<Option<Vec<CellGlyphSpan>>> =
+            if snap.has_graphemes() || bidi_rows {
+                vec![None; screen_rows.max(0) as usize]
+            } else {
+                Vec::new()
+            };
+        for (row, map) in row_maps.iter().enumerate() {
+            if map.is_some()
+                && let Some(positions) = cell_positions.get_mut(row)
+            {
+                positions.get_or_insert_with(Vec::new);
+            }
+        }
         if !cell_positions.is_empty() {
             for cell in &snap.cells {
                 if cell.flags.contains(Flags::GRAPHEME)
@@ -580,6 +617,8 @@ impl Renderer {
             // Viewport row for quad placement; `row` (grid-absolute,
             // negative when scrolled) stays for the relative line-break deltas.
             let vrow = row + display_off;
+            let map = row_map(vrow);
+            let vcol = map.map_or(col, |map| map.visual(col));
             if row != cur_row {
                 row_bytes = 0;
                 cur = None; // runs never span a line break
@@ -625,6 +664,18 @@ impl Renderer {
             saw_styled_text |= bold || italic;
             let hidden = flags.contains(Flags::HIDDEN);
             let mut dc = card_cell.glyph(sc.c, hidden);
+            // A mirrored bracket or an Arabic contextual form, worked out in
+            // logical order; the shaper then runs left to right.
+            if !owned_cell
+                && !hidden
+                && let Some(shown) = map.and_then(|map| map.display_char(col))
+            {
+                dc = shown;
+            }
+            // Cells reordered next to each other were not neighbours in the
+            // text: a zero-width non-joiner after a right-to-left cell keeps
+            // a font ligature from joining across that seam.
+            let guard = map.is_some_and(|map| map.guard_after(col));
             let mut marks: &[char] = if hidden || owned_cell {
                 &[]
             } else {
@@ -654,12 +705,14 @@ impl Renderer {
             if let Ok(row) = usize::try_from(vrow)
                 && let Some(Some(positions)) = cell_positions.get_mut(row)
             {
-                let end =
-                    row_bytes + dc.len_utf8() + marks.iter().map(|c| c.len_utf8()).sum::<usize>();
+                let end = row_bytes
+                    + dc.len_utf8()
+                    + marks.iter().map(|c| c.len_utf8()).sum::<usize>()
+                    + if guard { '\u{200C}'.len_utf8() } else { 0 };
                 positions.push(CellGlyphSpan {
                     bytes: row_bytes..end,
                     cell: super::geometry::GridGlyphCell {
-                        column: col,
+                        column: vcol,
                         width: if flags.contains(Flags::WIDE_CHAR) {
                             2
                         } else {
@@ -720,7 +773,7 @@ impl Renderer {
                         row,
                         col,
                         backdrop,
-                        [ox + col as f32 * cw, oy + vrow as f32 * ch, cw, ch],
+                        [ox + vcol as f32 * cw, oy + vrow as f32 * ch, cw, ch],
                         clip,
                     );
                 }
@@ -796,7 +849,7 @@ impl Renderer {
 
             if bg != default_bg {
                 quads.push(rect(
-                    ox + col as f32 * cw,
+                    ox + vcol as f32 * cw,
                     oy + vrow as f32 * ch,
                     cw,
                     ch,
@@ -815,7 +868,7 @@ impl Renderer {
                 )
                 .1;
                 search_quads.push(rect(
-                    ox + col as f32 * cw,
+                    ox + vcol as f32 * cw,
                     oy + vrow as f32 * ch,
                     cw,
                     ch,
@@ -877,8 +930,8 @@ impl Renderer {
             };
             push_cell_decorations(
                 decoration_quads,
-                (ox + col as f32 * cw, oy + vrow as f32 * ch, cw, ch),
-                col,
+                (ox + vcol as f32 * cw, oy + vrow as f32 * ch, cw, ch),
+                vcol,
                 flags,
                 fg,
                 line_color,
@@ -928,12 +981,18 @@ impl Renderer {
                 } else {
                     (thickness.max(1.5), 1.0)
                 };
-                let cell_x = ox + col as f32 * cw;
+                let cell_x = ox + vcol as f32 * cw;
                 let y = oy + (vrow + 1) as f32 * ch - thickness;
                 if dotted {
-                    // Dots keep one phase across the link's cells.
+                    // Dots keep one phase across the link's cells, from the
+                    // link's leftmost drawn cell.
                     let step = (3.0 * self.scale).max(1.0);
-                    let link_x = ox + link.col as f32 * cw;
+                    let link_vcol = map.map_or(link.col, |map| {
+                        map.visual_runs(link.col..=link.col + link.width.saturating_sub(1))
+                            .first()
+                            .map_or(link.col, |run| run.start)
+                    });
+                    let link_x = ox + link_vcol as f32 * cw;
                     let mut x = link_x + ((cell_x - link_x) / step).ceil() * step;
                     while x < cell_x + cw {
                         let width = self.scale.min(cell_x + cw - x);
@@ -954,6 +1013,9 @@ impl Renderer {
                     // Same style — extend the current run (the last live span).
                     spans[n - 1].0.push(dc);
                     spans[n - 1].0.extend(marks.iter().copied());
+                    if guard {
+                        spans[n - 1].0.push('\u{200C}');
+                    }
                 }
                 _ => {
                     // New run: reuse the pooled slot's String if one exists
@@ -963,6 +1025,9 @@ impl Renderer {
                         slot.0.clear();
                         slot.0.push(dc);
                         slot.0.extend(marks.iter().copied());
+                        if guard {
+                            slot.0.push('\u{200C}');
+                        }
                         slot.1 = fg;
                         slot.2 = bold;
                         slot.3 = italic;
@@ -970,6 +1035,9 @@ impl Renderer {
                         let mut s = String::new();
                         s.push(dc);
                         s.extend(marks.iter().copied());
+                        if guard {
+                            s.push('\u{200C}');
+                        }
                         spans.push((s, fg, bold, italic));
                     }
                     n += 1;
@@ -1003,14 +1071,22 @@ impl Renderer {
                 } else {
                     &mut *quads
                 };
-                target.push(rect(
-                    ox + c0 as f32 * cw,
-                    oy + vrow as f32 * ch,
-                    w as f32 * cw,
-                    ch,
-                    selection_bg,
-                    1.0,
-                ));
+                // A logical span over reordered text covers several runs of
+                // drawn cells.
+                let runs = row_map(vrow).map_or_else(
+                    || std::iter::once(c0..c0 + w).collect(),
+                    |map| map.visual_runs(c0..=c0 + w - 1),
+                );
+                for run in runs {
+                    target.push(rect(
+                        ox + run.start as f32 * cw,
+                        oy + vrow as f32 * ch,
+                        run.len() as f32 * cw,
+                        ch,
+                        selection_bg,
+                        1.0,
+                    ));
+                }
             }
         }
 
@@ -1041,7 +1117,11 @@ impl Renderer {
             // the focused solid-Block path, so beam/underline/hollow shapes
             // and unfocused windows are untouched.
             let (bcol, bcells) = cursor_wide_quad.unwrap_or((cp.column.0, 1.0));
-            let bx = ox + bcol as f32 * cw;
+            // A two-column character keeps its lead on the left when
+            // reordered, so the lead's visual column is the block's left edge.
+            let bx = ox + vis(cvrow, bcol) as f32 * cw;
+            // In right-to-left text a cell's logical start is its right edge.
+            let beam_right = row_map(cvrow).is_some_and(|map| map.is_rtl(cp.column.0));
             let by = oy + cvrow as f32 * ch;
             // OSC 12 cursor color override (stored in `term_colors[258]`)
             // takes precedence over the theme, the same precedence rule the
@@ -1085,7 +1165,12 @@ impl Renderer {
                         (cw * bcells, 1.0, ch, 0.0)
                     }
                 };
-                cursor_quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
+                let cx = if shape == EShape::Beam && beam_right {
+                    bx + cw - cwidth
+                } else {
+                    bx
+                };
+                cursor_quads.push(rect(cx, by + yoff, cwidth, cheight, cursor_color, alpha));
                 // Queue the inverted foreground glyph to be
                 // drawn ON TOP of the solid block in its own pass. Only the
                 // full Block shape covers the glyph; beam/underline leave it
@@ -1173,6 +1258,7 @@ impl Renderer {
                 cfg.family_for(b, i).hash(&mut h);
             }
             cfg.font_ligatures.hash(&mut h);
+            cfg.bidi.hash(&mut h);
             for f in &cfg.font_features {
                 f.tag.hash(&mut h);
                 f.value.hash(&mut h);
@@ -1188,14 +1274,24 @@ impl Renderer {
         let rows = screen_rows.max(0) as usize;
         let old_lines = buf.lines.len();
         while buf.lines.len() < rows {
-            buf.lines.push(BufferLine::new(
+            let mut line = BufferLine::new(
                 String::new(),
                 LineEnding::Lf,
                 AttrsList::new(&default_attrs),
                 shaping,
-            ));
+            );
+            // A terminal row is laid out by the grid: right-to-left rows are
+            // already in display order through their cells' columns, so the
+            // shaper must not reorder or re-mirror them.
+            line.set_ltr_override(true);
+            buf.lines.push(line);
         }
         buf.lines.truncate(rows);
+        // Every row, including the line the buffer was created with: a no-op
+        // once set.
+        for line in &mut buf.lines {
+            line.set_ltr_override(true);
+        }
         // A grow/shrink changes the prepared area set, so the cached glyph
         // vertices can no longer be reused.
         text_changed |= buf.lines.len() != old_lines;
@@ -1341,8 +1437,8 @@ impl Renderer {
                     super::geometry::GridGlyphCell::from_metadata(attrs.metadata)
                         .filter(|cell| {
                             cell.clustered
-                                && cell.column <= cp.column.0
-                                && cp.column.0 < cell.column + cell.width
+                                && cell.column <= vis(cvrow, cp.column.0)
+                                && vis(cvrow, cp.column.0) < cell.column + cell.width
                         })
                         .map(|cell| (range, attrs, cell))
                 })
@@ -1424,6 +1520,7 @@ impl Renderer {
             glyph_char_starts,
             gpu,
             cell_w,
+            pane_bidi,
             ..
         } = self;
         let cw = *cell_w;
@@ -1432,7 +1529,10 @@ impl Renderer {
 
         for (i, pv) in panes.iter().enumerate() {
             let inactive = pane_inactive_amount(pv, panes.len(), cfg);
-            let graphemes = pv.snap.has_graphemes();
+            // Bidi rows carry visual columns in their cells, like grapheme
+            // rows, so Legacy mode cell-locks them too.
+            let graphemes =
+                pv.snap.has_graphemes() || pane_bidi.get(i).is_some_and(|bidi| bidi.any());
             if cfg.text_renderer == TextRendererMode::Legacy
                 && inactive == 0.0
                 && !graphemes

@@ -2116,6 +2116,12 @@ pub struct Config {
     /// Initial DEC mode 2027 for new terminals; resets restore this default.
     /// Reloading does not change existing terminals.
     pub grapheme_clustering: bool,
+    /// Show normal-screen rows in Unicode Bidirectional Algorithm display
+    /// order ("implicit" bidi, as VTE and Konsole): right-to-left runs read
+    /// right to left, brackets in them mirror, and Arabic letters join.
+    /// Stored text, copies, search, the PTY and screen readers stay logical.
+    /// Reloads live.
+    pub bidi: bool,
     pub font_ligatures: bool,
     /// Explicit OpenType feature overrides (`font-feature`, repeatable),
     /// applied on top of the ligature toggle. Later entries win.
@@ -3414,6 +3420,7 @@ impl Default for Config {
             mouse_hide_while_typing: true,
             word_delimiters: String::new(),
             grapheme_clustering: true,
+            bidi: true,
             font_ligatures: true,
             font_features: Vec::new(),
             search_foreground: None, // derive from theme.background
@@ -3895,6 +3902,7 @@ impl Config {
         "restore_scrollback_remote",
         "grapheme-clustering",
         "grapheme_clustering",
+        "bidi",
         "allow-bold",
         "allow_bold",
         "always-on-top",
@@ -5194,6 +5202,11 @@ impl Config {
                 "allow-bold" | "allow_bold" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.allow_bold = b;
+                    }
+                }
+                "bidi" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.bidi = b;
                     }
                 }
                 "bold-is-bright" | "bold_is_bright" => {
@@ -8417,6 +8430,9 @@ cell-height = 1.2\n";
         assert!(!d.link_single_click);
         assert!(!d.clear_select_on_copy);
         assert!(!Config::parse_text("allow-bold = false").allow_bold);
+        // Bidi display is on unless turned off.
+        assert!(d.bidi);
+        assert!(!Config::parse_text("bidi = false").bidi);
         assert!(!Config::parse_text("allow_bold = false").allow_bold);
         assert!(Config::parse_text("bold-is-bright = true").bold_is_bright);
         assert!(Config::parse_text("bold_is_bright = true").bold_is_bright);
