@@ -249,6 +249,8 @@ impl App {
                 ws.pressed_new_tab_menu = false;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                ws.hovered_window_control = None;
+                ws.pressed_window_control = None;
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -607,6 +609,17 @@ impl App {
                 // outside the panel — closes the menu. Middle-click outside
                 // dismisses too; only right-click falls through so it can
                 // reopen/relocate the menu.
+                if let Some(edge) = self.linux_resize_at(ws, ws.cursor.x as f32, ws.cursor.y as f32)
+                {
+                    if bcode == 0
+                        && let Some(window) = &ws.window
+                    {
+                        let _ = window.drag_resize_window(edge);
+                    }
+                    ws.titlebar_click = None;
+                    return;
+                }
+
                 if bcode == 0 && self.modal_text_pointer(ws, true) {
                     return;
                 }
@@ -710,7 +723,9 @@ impl App {
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
-                if bcode == 0 && self.press_titlebar_space(ws, &bar, px, py) {
+                if self.press_linux_chrome(ws, &bar, px, py, bcode)
+                    || bcode == 0 && self.press_titlebar_space(ws, &bar, px, py)
+                {
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -1005,6 +1020,21 @@ impl App {
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
+                }
+                if button == MouseButton::Left
+                    && let Some(action) = ws.pressed_window_control.take()
+                {
+                    let bar = self.tab_bar(ws);
+                    if window_control_at(&bar, ws.cursor.x as f32, ws.cursor.y as f32)
+                        == Some(action)
+                    {
+                        self.activate_window_control(ws, action, event_loop);
+                    }
+                    ws.held_buttons.end_own(0);
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
                 }
                 // Release report for the side buttons, so a tracking app sees
                 // the matching button-up after the press. Only a press the
@@ -1336,6 +1366,9 @@ impl App {
                     }
                 }
                 if !f {
+                    ws.pressed_window_control = None;
+                    ws.hovered_window_control = None;
+                    ws.titlebar_click = None;
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
                     self.confirm_cancel_press(ws);

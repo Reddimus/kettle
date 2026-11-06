@@ -1262,7 +1262,13 @@ impl App {
             if projected.iter().any(|(id, node)| {
                 *id == request.target_node && node.supports_action(request.action)
             }) {
-                if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
+                if let Some(control) = bar
+                    .window_controls
+                    .iter()
+                    .find(|b| window_control_accessibility_id(b.action) == request.target_node)
+                {
+                    self.activate_window_control(ws, control.action, event_loop);
+                } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
                     self.handle_action(ws, Action::NewTab, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
@@ -2820,6 +2826,18 @@ pub(super) fn command_mark_accessibility_node(
     node
 }
 
+fn window_control_accessibility_id(action: kettle_render::WindowControl) -> NodeId {
+    use kettle_render::WindowControl as C;
+    NodeId(
+        (1 << 51)
+            | match action {
+                C::Minimize => 0,
+                C::Maximize | C::Restore => 1,
+                C::Close => 2,
+            },
+    )
+}
+
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
@@ -2893,6 +2911,15 @@ pub(super) fn tab_accessibility_projection(
             nodes.push((id, button));
             children.push(id);
         }
+    }
+    for control in &bar.window_controls {
+        let id = window_control_accessibility_id(control.action);
+        let mut button = Node::new(Role::Button);
+        button.set_label(control.label.clone());
+        button.set_bounds(accessibility_rect(control.rect));
+        button.add_action(AccessibilityAction::Click);
+        nodes.push((id, button));
+        children.push(id);
     }
     let mut list = Node::new(Role::TabList);
     list.set_orientation(if vertical {

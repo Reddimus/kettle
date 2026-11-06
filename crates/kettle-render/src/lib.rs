@@ -112,8 +112,9 @@ pub use overlays::{
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
     MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
     TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    format_media_size, hint_label_rect, media_paste_receipt_geometry, menu, menu_row_chars,
-    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
+    WindowControl, WindowControlButton, format_media_size, hint_label_rect,
+    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
+    notification_geometry_with_notices, persistent_notice_geometry,
     persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
     toast_text_rows, update_toast_geometry,
 };
@@ -2682,7 +2683,12 @@ impl Renderer {
                 .map(|r| r.line_w)
                 .fold(0.0, f32::max);
             let lines = self.tab_tooltip_buffer.layout_runs().count().max(1) as f32;
-            tab_strip::tooltip_rect(tabbar.band, (sw, sh), (width, tab_ch * lines), self.scale)
+            tab_strip::tooltip_rect(
+                tab_strip::tooltip_anchor(tabbar),
+                (sw, sh),
+                (width, tab_ch * lines),
+                self.scale,
+            )
         });
         let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
         while self.update_toast_buffers.len() < toast_count * 3 {
@@ -4351,6 +4357,15 @@ impl Renderer {
         for bounds in &overlay.hint_bounds {
             overlays::exclude_menu_text(&mut menu_areas, *bounds);
         }
+        tab_strip::window_control_quads(
+            &mut quads,
+            tabbar,
+            theme.foreground,
+            chrome_strip_bg,
+            self.scale,
+            overlay.window_focused,
+            &mut self.chrome_colors,
+        );
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
         if let Some((frx, fry, frw, frh)) = focus_origin {

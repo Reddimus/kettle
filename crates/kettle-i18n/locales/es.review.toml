@@ -22,6 +22,11 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+a11y_window_minimize = "draft"
+a11y_window_maximize = "draft"
+a11y_window_restore = "draft"
+a11y_window_close = "draft"
+
 tab_new_options = "draft"
 
 notify_profile_launch_failed_body = "draft"
@@ -926,6 +931,11 @@ osc52_copied = "draft"
 
 [second-pass]
 keys = [
+    "a11y_window_minimize",
+    "a11y_window_maximize",
+    "a11y_window_restore",
+    "a11y_window_close",
+
     "confirm_paste_without_controls",
     "osc52_denied_read",
     "osc52_denied_write",

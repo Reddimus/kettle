@@ -4936,3 +4936,46 @@ macOS observes system appearance separately because forcing NSWindow appearance
 to match the palette suppresses winit's window appearance notifications.
 Both sources enter the existing theme synchronization and all-window redraw
 path; colour-scheme reports use the resulting palette's lightness.
+
+### Linux Wayland header bar
+
+`linux-titlebar-style = tabs` reuses the macOS titlebar strip when Wayland
+negotiates client decorations, with a fixed 46 logical pixel height. The
+shared `WindowState::macos_titlebar_tabs` flag retains its historical name;
+`linux_titlebar` identifies windows that also need Kettle window controls.
+Top tabs, their dropdown and new-tab button share the header with reserved
+button lanes (three right-side buttons by default). `TabBar::window_controls`
+carries the same physical rectangles, localized names and hover/press state
+to painting, pointer routing, AccessKit and
+`kettle ctl ui_geometry`. Terminal layout, status/search bands, title editing
+and IME candidate positioning continue to use the shared content area. Startup
+size correction adds the header before renderer creation, preserving explicit
+grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
+28-point targets, rounded `chrome::tab_detail` hover/pressed fills and
+`Colors::tab_text` unfocused dimming, like the current New Tab controls. Glyphs
+retain 4.5:1 contrast when focused and 3:1 when dimmed. Outer corners remain
+square.
+
+Stock winit cannot report whether the compositor granted server-side
+decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`
+names GNOME or another Mutter-based desktop (which offer no server frame), the
+window is created without decorations and Kettle draws the header; elsewhere
+winit keeps negotiating the compositor's frame, and X11 keeps the window
+manager's. Once the window exists, its display handle confirms Wayland, and
+reloads keep `is_decorated()` equal to "Kettle does not own the header". Without
+a tiled-state query, maximized and fullscreen windows drop the resize band. No
+text renderer or font dependency is added.
+
+Empty-space primary presses call `drag_window`; a second nearby press within
+400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
+presses are consumed. The 6 logical pixel inner resize band takes priority over
+header input and uses `drag_resize_window`, except when maximized, tiled,
+fullscreen or non-resizable. Native window controls activate on release over
+the originally pressed control. Close follows the native `CloseRequested`
+confirmation policy; AccessKit exposes the same actions. Synthetic control
+input can activate buttons but does not impersonate a compositor drag serial.
+The shared `portal_settings.rs` watcher also reads GNOME button-layout beside
+reduced-motion and color-scheme, with bounded parsing and live updates.
+Left/right lanes, order and omissions
+share the control geometry. Missing or invalid settings use the default right
+minimize, maximize/restore, close order.

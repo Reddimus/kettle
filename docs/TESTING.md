@@ -3096,3 +3096,27 @@ SettingChanged and owner loss using the shared reduced-motion transport.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
+
+### Linux header bar
+
+Portable `app::linux_titlebar_tests` cover 46 logical pixel header geometry,
+one and many tabs, window-control names/actions and hit bounds in English and
+Spanish, resize edges/corners, empty-space button routing, startup grids and
+winit feature drift. The existing portal fixture also covers GNOME button-layout
+snapshots, live changes and owner replacement on Linux. Renderer tests cover
+28-point button geometry, rounded hover/pressed fills and
+4.5:1 focused / 3:1 unfocused glyph contrast across bundled themes. Header tests
+also cover narrow control lanes, localized tooltips and ctl geometry parity.
+Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
+host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
+and runs the same suites on Linux, where the header code is built. Cross-clippy with
+`--target x86_64-unknown-linux-gnu -p kettle-ui --all-targets` requires both Rust
+std and a Linux C compiler/sysroot for native dependencies.
+
+Live acceptance still requires GNOME/Mutter and KDE/KWin Wayland sessions:
+check actual decoration negotiation, fractional scale, minimize/restore/close,
+window menus, drag/double-click, all resize edges, maximize/tile/fullscreen
+transitions, inactive colors, localized tooltips, AT-SPI button activation,
+IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
+redock, tab close/activity/bell marks and config reload, plus X11 and borderless
+fallbacks. Portable checks do not establish compositor or rendering acceptance.

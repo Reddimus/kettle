@@ -18,6 +18,13 @@ Native macOS window, TokyoNight Night. [Capture notes](docs/images/README.md).
 On macOS, top tabs now share the titlebar; `macos-titlebar-style = native`
 restores the separate native caption.
 
+On GNOME/Wayland, Kettle draws a 46 logical pixel header with the window title,
+tabs and minimize/maximize/close controls. Empty header space moves the window,
+double-click maximizes, and right-click opens the compositor's window menu.
+Other desktops (KDE, wlroots compositors) and X11 keep their own frames. Set
+`linux-titlebar-style = native` for winit's previous titleless Adwaita header;
+see [configuration](docs/CONFIG.md) for borderless and tab-position behavior.
+
 ## Install
 
 | Platform | Download from the [latest release](https://github.com/Reddimus/kettle/releases/latest) | Setup |

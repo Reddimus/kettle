@@ -1141,7 +1141,36 @@ impl StatusBar {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowControl {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+impl WindowControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Restore => "restore",
+            Self::Close => "close",
+        }
+    }
+}
+
+pub struct WindowControlButton {
+    pub action: WindowControl,
+    pub rect: Rect4,
+    pub label: String,
+    pub hovered: bool,
+    pub pressed: bool,
+}
+
 pub struct TabBar {
+    /// Linux CSD controls in physical pixels, shared by every consumer.
+    pub window_controls: Vec<WindowControlButton>,
     pub pressed_new_tab: bool,
     pub pressed_new_tab_menu: bool,
     /// Localized action and live shortcut for the currently hovered control.
@@ -1232,6 +1261,7 @@ pub struct TabBar {
 impl TabBar {
     pub fn hidden() -> Self {
         TabBar {
+            window_controls: Vec::new(),
             pressed_new_tab: false,
             pressed_new_tab_menu: false,
             tooltip: None,

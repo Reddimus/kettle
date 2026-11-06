@@ -13,6 +13,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the affected file, with keyboard and screen-reader access. Clipboard notices
   no longer show an empty button.
 
+- GNOME/Wayland windows now show their title in a Kettle header, even with one
+  tab, with minimize/maximize/close buttons, tooltips and screen-reader actions.
+  Drag empty header space to move, double-click to maximize, right-click for
+  the window menu, or drag an edge to resize. KDE server frames and X11 frames
+  stay native; `linux-titlebar-style = native` restores the previous header.
+
 - Quieter tab strips follow the terminal background, with readable separators
   and visibly dimmed inactive windows. Larger, separated New Tab and options
   buttons show translated tooltips and shortcut hints, stay reachable in narrow

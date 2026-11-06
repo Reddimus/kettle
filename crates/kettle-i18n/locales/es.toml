@@ -930,6 +930,13 @@ hint_action_preview = "ver vista previa"
 hint_legend = "Etiqueta: {plain} · Shift+etiqueta: {alternate} · Esc para cancelar"
 hint_legend_plain = "Etiqueta: {plain} · Esc para cancelar"
 
+a11y_window_minimize = "Minimizar ventana"
+a11y_window_maximize = "Maximizar ventana"
+a11y_window_restore = "Restaurar ventana"
+a11y_window_close = "Cerrar ventana"
+
+
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

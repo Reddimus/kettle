@@ -2761,3 +2761,15 @@ context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and ra
 
 [messages.config_notice_missing_equals]
 context = "crates/kettle-ui/src/app/notices.rs: diagnostic for a line with no equals sign. Never includes a value."
+
+[messages.a11y_window_minimize]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_maximize]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_restore]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.a11y_window_close]
+context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."

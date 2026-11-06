@@ -1136,7 +1136,14 @@ impl App {
             None
         };
         ws.startup_surface = startup_surface;
-        let startup_titlebar_band = startup_surface.and_then(|_| Self::macos_titlebar_band(ws));
+        let startup_titlebar_band = startup_surface.and_then(|_| {
+            Self::macos_titlebar_band(ws).or_else(|| {
+                cfg!(target_os = "linux").then_some(TitlebarBand {
+                    height: self.tab_bar_h(ws),
+                    left: 0.0,
+                })
+            })
+        });
         // The pane starts before the window only when the window will open at
         // this scale and size: on the monitor the cell was measured for, which
         // a configured position could change, and within it, where the OS
@@ -1331,6 +1338,7 @@ impl App {
         ws.startup_surface = None;
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        self.sync_macos_titlebar(ws);
         self.sync_output_frame_budget(ws, true);
         self.poll_system_appearance(ws);
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -35,6 +35,8 @@ pub(crate) fn allowed(mode: kettle_config::ReduceMotion, system: impl FnOnce() -
 pub(crate) struct SystemMotion {
     #[cfg(target_os = "linux")]
     watch: crate::portal_settings::Watch,
+    #[cfg(target_os = "linux")]
+    buttons: crate::portal_settings::ButtonWatch,
 }
 
 impl SystemMotion {
@@ -42,13 +44,25 @@ impl SystemMotion {
         #[cfg(target_os = "linux")]
         {
             Self {
-                watch: crate::portal_settings::Watch::start(wake, None, "reduced-motion"),
+                watch: crate::portal_settings::Watch::start(wake.clone(), None, "reduced-motion"),
+                buttons: crate::portal_settings::ButtonWatch::start(wake, None, "button-layout"),
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = wake;
             Self {}
+        }
+    }
+
+    pub(crate) fn button_layout(&self) -> crate::window_buttons::ButtonLayout {
+        #[cfg(target_os = "linux")]
+        {
+            self.buttons.button_layout()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Default::default()
         }
     }
 

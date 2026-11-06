@@ -96,8 +96,9 @@ unicode-segmentation.workspace = true
 # ttf-parser route stays out of the graph and the aarch64 cross-build stays
 # free of C font libs (the crossfont variant needs
 # FreeType). Trade-off: the CSD bar renders buttons but no title text. The
-# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title, and
-# kettle's own tab bar labels the window content. Do NOT switch this to
+# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title. Kettle
+# draws its own header with linux-titlebar-style=tabs on Mutter-based desktops
+# (window created undecorated); native retains this titleless fallback. Do NOT switch this to
 # `wayland-csd-adwaita` (ab_glyph); the `winit_wayland_csd_stays_notitle`
 # drift guard in src/app/tests.rs pins it.
 winit = { version = "0.30.13", default-features = false, features = [

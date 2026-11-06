@@ -917,9 +917,9 @@ font-family-bold font-family-bold-italic font-family-italic font-feature font-si
 foreground foreground-color full-screen geometry-hinting gpu-backend gpu-device-id
 gpu-force-software gpu-name gpu-power-preference gpu-vendor-id grapheme-clustering handle-size hide-from-taskbar
 hide-on-lose-focus http-proxy icon-bell inactive-bg-color-offset inactive-color-offset invert-search
-keybind keybind-yield language light-theme link-single-click log-strip-ansi login-shell lua-sandbox
+keybind keybind-yield language light-theme link-single-click linux-titlebar-style log-strip-ansi login-shell lua-sandbox
 macos-cursor-blink-layer macos-option-as-alt macos-titlebar-style menu-item minimum-contrast modify-other-keys mouse-autohide mouse-hide
-mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
+mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 osc52-notify padding-x padding-y
 palette paste-files paste-image paste-image-preview paste-images paste-protection paste-video-preview
 media-open-mode preview-lane-side putty-paste-style putty-paste-style-source-clipboard quick-terminal-animation quick-terminal-autohide quick-terminal-hotkey quick-terminal-position quick-terminal-size record record-dir record-max-bytes
 record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session restore-scrollback-lines restore-scrollback-remote

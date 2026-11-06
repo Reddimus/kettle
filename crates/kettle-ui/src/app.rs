@@ -95,6 +95,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/system_opener.rs"),
         include_str!("app/title.rs"),
         include_str!("app/titlebar.rs"),
+        include_str!("app/linux_titlebar.rs"),
         include_str!("app/update_toast.rs"),
         include_str!("app/notices.rs"),
         include_str!("app/window_events.rs"),
@@ -192,6 +193,10 @@ mod chrome;
 mod config_reload;
 mod ctl;
 mod gpu_recovery;
+mod linux_titlebar;
+#[cfg(test)]
+mod linux_titlebar_tests;
+use linux_titlebar::*;
 mod media;
 mod menus;
 mod modals;
@@ -217,6 +222,7 @@ mod ctl_target_param_tests;
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     Wakeup,
+    SystemSettingsChanged(Arc<std::sync::atomic::AtomicBool>),
     ShellsDetected,
     GpusDetected(Vec<(String, String)>),
     CardsTipClaimed(bool),
@@ -843,6 +849,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             // PTY wakeups carry no pane id. Fan out, with each window gated on
             // its panes' output generations.
+            UserEvent::SystemSettingsChanged(pending) => {
+                pending.store(false, std::sync::atomic::Ordering::Release);
+                for ws in self.windows.values_mut() {
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+            }
             UserEvent::Wakeup => {
                 // Reopen the wakeup latch BEFORE any generation reads below. A
                 // reader that bumps its generation after this store enqueues a

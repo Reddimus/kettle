@@ -18,6 +18,9 @@ use zbus::zvariant::Value;
 #[derive(Default)]
 struct Settings {
     value: AtomicU32,
+    buttons: std::sync::Mutex<String>,
+    button_race: AtomicBool,
+    button_reads: AtomicUsize,
     reads: AtomicUsize,
     race: AtomicBool,
     stall: AtomicBool,
@@ -33,6 +36,19 @@ impl Portal {
         key: &str,
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<OwnedValue> {
+        if namespace
+            == <std::sync::Mutex<crate::window_buttons::ButtonLayout> as SettingState>::NAMESPACE
+            && key == "button-layout"
+        {
+            self.0.button_reads.fetch_add(1, Ordering::AcqRel);
+            let value = self.0.buttons.lock().unwrap().clone();
+            if self.0.button_race.swap(false, Ordering::AcqRel) {
+                *self.0.buttons.lock().unwrap() = "minimize,close:".into();
+                button_signal(connection, Value::from("minimize,close:")).await;
+            }
+            return OwnedValue::try_from(Value::from(value))
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()));
+        }
         if namespace != "org.freedesktop.appearance"
             || !matches!(key, "reduced-motion" | "color-scheme")
         {
@@ -88,7 +104,7 @@ fn wait_for(message: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
-fn stop(mut watch: Watch) {
+fn stop<S>(mut watch: Watch<S>) {
     let thread = watch._thread.take().unwrap();
     drop(watch);
     wait_for("watcher did not stop", || thread.is_finished());
@@ -178,7 +194,7 @@ fn shutdown_does_not_wait_for_a_stalled_portal_method() {
     let state = Arc::new(Settings::default());
     state.stall.store(true, Ordering::Release);
     let _connection = future::block_on(server(&bus, state.clone()));
-    let watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
+    let watch: Watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
     wait_for("portal method not entered", || {
         state.reads.load(Ordering::Acquire) > 0
     });
@@ -301,5 +317,88 @@ fn color_scheme_snapshot_subscription_and_owner_loss() {
     });
     assert!(crate::appearance::portal_dark(watch.value()));
     assert!(wakes.load(Ordering::Acquire) >= 3);
+    stop(watch);
+}
+
+async fn button_signal(connection: &Connection, value: Value<'_>) {
+    connection
+        .emit_signal(
+            None::<&str>,
+            PATH,
+            INTERFACE,
+            "SettingChanged",
+            &(
+                <std::sync::Mutex<crate::window_buttons::ButtonLayout> as SettingState>::NAMESPACE,
+                "button-layout",
+                value,
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+#[test]
+fn linux_header_button_portal_loads_updates_and_recovers_after_owner_loss() {
+    use kettle_render::WindowControl as C;
+    let bus = Bus::start();
+    let state = Arc::new(Settings {
+        buttons: std::sync::Mutex::new("close:".into()),
+        ..Default::default()
+    });
+    let connection = future::block_on(server(&bus, state));
+    let watch = ButtonWatch::start(Arc::new(|| {}), Some(bus.address.clone()), "button-layout");
+    wait_for("left-side button snapshot", || {
+        watch.button_layout().left == [C::Close]
+    });
+    future::block_on(button_signal(
+        &connection,
+        Value::from(":minimize,maximize,close"),
+    ));
+    wait_for("right-side button change", || {
+        watch.button_layout() == Default::default()
+    });
+    future::block_on(connection.release_name(DESTINATION)).unwrap();
+    let replacement = Arc::new(Settings {
+        buttons: std::sync::Mutex::new("minimize,close:".into()),
+        ..Default::default()
+    });
+    let _replacement = future::block_on(server(&bus, replacement));
+    wait_for("replacement button settings", || {
+        watch.button_layout().left == [C::Minimize, C::Close]
+    });
+    stop(watch);
+}
+
+#[test]
+fn linux_header_button_portal_reconciles_races_and_rejects_invalid_values() {
+    use kettle_render::WindowControl as C;
+    let bus = Bus::start();
+    let state = Arc::new(Settings {
+        buttons: std::sync::Mutex::new("close:".into()),
+        button_race: AtomicBool::new(true),
+        ..Default::default()
+    });
+    let connection = future::block_on(server(&bus, state.clone()));
+    let watch = ButtonWatch::start(Arc::new(|| {}), Some(bus.address.clone()), "button-layout");
+    wait_for("button snapshot race reconciled", || {
+        state.button_reads.load(Ordering::Acquire) >= 2
+            && watch.button_layout().left == [C::Minimize, C::Close]
+    });
+    for value in [
+        Value::from("not-a-layout"),
+        Value::from(3u32),
+        Value::from("x".repeat(5000)),
+    ] {
+        future::block_on(button_signal(&connection, value));
+        wait_for("invalid button value resets defaults", || {
+            watch.button_layout() == Default::default()
+        });
+        future::block_on(button_signal(&connection, Value::from("close:")));
+        // A rejected body reconnects; the next snapshot also uses this valid value.
+        *state.buttons.lock().unwrap() = "close:".into();
+        wait_for("valid button layout recovers", || {
+            watch.button_layout().left == [C::Close]
+        });
+    }
     stop(watch);
 }

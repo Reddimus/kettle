@@ -764,6 +764,7 @@ impl App {
             UserEvent::CardsTipClaimed(_)
             | UserEvent::GpusDetected(_)
             | UserEvent::ShellsDetected
+            | UserEvent::SystemSettingsChanged(_)
             | UserEvent::ToggleQuickTerminal
             | UserEvent::Activation
             | UserEvent::PastedImageEncoded

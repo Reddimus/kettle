@@ -1,7 +1,7 @@
 //! Bounded XDG Settings reads and subscriptions, owned by a background worker.
 use futures_lite::{StreamExt, future};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -15,26 +15,80 @@ const UNKNOWN: u64 = u64::MAX;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 4096;
 
-pub(crate) struct Watch {
-    state: Arc<AtomicU64>,
+pub(crate) trait SettingState: Send + Sync + 'static {
+    const NAMESPACE: &'static str;
+    fn initial() -> Self;
+    fn update(&self, value: OwnedValue, wake: &kettle_core::Waker) -> zbus::Result<()>;
+    fn clear(&self, wake: &kettle_core::Waker);
+}
+
+impl SettingState for AtomicU64 {
+    const NAMESPACE: &'static str = NAMESPACE;
+    fn initial() -> Self {
+        Self::new(UNKNOWN)
+    }
+    fn update(&self, value: OwnedValue, wake: &kettle_core::Waker) -> zbus::Result<()> {
+        publish(self, Some(u32::try_from(value)?), wake);
+        Ok(())
+    }
+    fn clear(&self, wake: &kettle_core::Waker) {
+        publish(self, None, wake);
+    }
+}
+
+pub(crate) type ButtonWatch = Watch<Mutex<crate::window_buttons::ButtonLayout>>;
+
+impl SettingState for Mutex<crate::window_buttons::ButtonLayout> {
+    const NAMESPACE: &'static str = "org.gnome.desktop.wm.preferences";
+    fn initial() -> Self {
+        Self::new(Default::default())
+    }
+    fn update(&self, value: OwnedValue, wake: &kettle_core::Waker) -> zbus::Result<()> {
+        let value = String::try_from(value)?;
+        let layout = crate::window_buttons::ButtonLayout::parse(&value)
+            .ok_or_else(|| zbus::Error::Failure("invalid button layout".into()))?;
+        publish_buttons(self, layout, wake);
+        Ok(())
+    }
+    fn clear(&self, wake: &kettle_core::Waker) {
+        publish_buttons(self, Default::default(), wake);
+    }
+}
+
+fn publish_buttons(
+    state: &Mutex<crate::window_buttons::ButtonLayout>,
+    layout: crate::window_buttons::ButtonLayout,
+    wake: &kettle_core::Waker,
+) {
+    if let Ok(mut current) = state.lock()
+        && *current != layout
+    {
+        *current = layout;
+        drop(current);
+        wake();
+    }
+}
+
+pub(crate) struct Watch<S = AtomicU64> {
+    state: Arc<S>,
     stop: Option<async_channel::Sender<()>>,
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl Watch {
+impl<S: SettingState> Watch<S> {
     pub(crate) fn start(
         wake: kettle_core::Waker,
         address: Option<String>,
         key: &'static str,
     ) -> Self {
-        let state = Arc::new(AtomicU64::new(UNKNOWN));
+        let state = Arc::new(S::initial());
         let worker_state = state.clone();
         let (stop, stopped) = async_channel::bounded(1);
         let worker = std::thread::Builder::new()
             .name(format!("kettle-{key}"))
             .spawn(move || {
                 future::block_on(future::or(
-                    watch(address.as_deref(), &worker_state, &wake, key),
+                    watch(address.as_deref(), worker_state.as_ref(), &wake, key),
                     async {
                         let _ = stopped.recv().await;
                     },
@@ -56,13 +110,21 @@ impl Watch {
             }
         }
     }
+}
 
+impl Watch {
     pub(crate) fn value(&self) -> Option<u32> {
         u32::try_from(self.state.load(Ordering::Acquire)).ok()
     }
 }
 
-impl Drop for Watch {
+impl ButtonWatch {
+    pub(crate) fn button_layout(&self) -> crate::window_buttons::ButtonLayout {
+        self.state.lock().map(|b| b.clone()).unwrap_or_default()
+    }
+}
+
+impl<S> Drop for Watch<S> {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.try_send(());
@@ -77,13 +139,18 @@ fn publish(state: &AtomicU64, preference: Option<u32>, wake: &kettle_core::Waker
     }
 }
 
-async fn watch(address: Option<&str>, state: &AtomicU64, wake: &kettle_core::Waker, key: &str) {
+async fn watch<S: SettingState>(
+    address: Option<&str>,
+    state: &S,
+    wake: &kettle_core::Waker,
+    key: &str,
+) {
     let mut backoff = Duration::from_secs(1);
     loop {
         if let Err(error) = connected(address, state, wake, &mut backoff, key).await {
             log::debug!("system appearance setting portal unavailable: {error}");
         }
-        publish(state, None, wake);
+        state.clear(wake);
         async_io::Timer::after(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
@@ -115,9 +182,9 @@ fn bounded(message: &zbus::Message) -> zbus::Result<()> {
     }
 }
 
-async fn connected(
+async fn connected<S: SettingState>(
     address: Option<&str>,
-    state: &AtomicU64,
+    state: &S,
     wake: &kettle_core::Waker,
     backoff: &mut Duration,
     key: &str,
@@ -126,7 +193,7 @@ async fn connected(
     let proxy = Proxy::new(&connection, DESTINATION, PATH, INTERFACE).await?;
     let mut owners = proxy.receive_owner_changed().await?;
     let mut settings = proxy
-        .receive_signal_with_args("SettingChanged", &[(0, NAMESPACE), (1, key)])
+        .receive_signal_with_args("SettingChanged", &[(0, S::NAMESPACE), (1, key)])
         .await?;
     // A backend may yield during ReadOne. An overlapping signal makes the
     // snapshot's age ambiguous, so reconcile with another bounded read.
@@ -144,7 +211,7 @@ async fn connected(
         if future::poll_once(owners.next()).await.is_some() {
             return Err(zbus::Error::Failure("settings portal owner changed".into()));
         }
-        let reply = proxy.call_method("ReadOne", &(NAMESPACE, key)).await?;
+        let reply = proxy.call_method("ReadOne", &(S::NAMESPACE, key)).await?;
         bounded(&reply)?;
         if future::poll_once(owners.next()).await.is_some() {
             return Err(zbus::Error::Failure("settings portal owner changed".into()));
@@ -161,9 +228,8 @@ async fn connected(
     let snapshot = snapshot
         .ok_or_else(|| zbus::Error::Failure("settings portal preference is unstable".into()))?;
     let mut after = snapshot.recv_position();
-    let initial = u32::try_from(snapshot.body().deserialize::<OwnedValue>()?)?;
+    state.update(snapshot.body().deserialize::<OwnedValue>()?, wake)?;
     *backoff = Duration::from_secs(1);
-    publish(state, Some(initial), wake);
     loop {
         let message = future::or(
             async {
@@ -185,8 +251,8 @@ async fn connected(
         bounded(&message)?;
         let (namespace, changed_key, value): (String, String, OwnedValue) =
             message.body().deserialize()?;
-        if crate::appearance::portal_setting_matches(&namespace, &changed_key, key) {
-            publish(state, Some(u32::try_from(value)?), wake);
+        if namespace == S::NAMESPACE && changed_key == key {
+            state.update(value, wake)?;
         }
     }
 }

@@ -6,7 +6,7 @@ pub(crate) fn portal_dark(value: Option<u32>) -> bool {
     value != Some(2)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(crate) fn portal_setting_matches(namespace: &str, changed_key: &str, key: &str) -> bool {
     namespace == "org.freedesktop.appearance" && changed_key == key
 }
@@ -194,7 +194,7 @@ mod tests {
         ));
         let source = include_str!("portal_settings.rs");
         assert!(source.contains(
-            ".receive_signal_with_args(\"SettingChanged\", &[(0, NAMESPACE), (1, key)])"
+            ".receive_signal_with_args(\"SettingChanged\", &[(0, S::NAMESPACE), (1, key)])"
         ));
         assert!(
             source.find(".receive_signal_with_args(").unwrap()

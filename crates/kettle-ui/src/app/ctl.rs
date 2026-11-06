@@ -1647,6 +1647,11 @@ impl App {
         });
         geometry["pane_statuses"] = serde_json::json!(pane_statuses);
         geometry["hint_labels"] = serde_json::json!(hint_labels);
+        geometry["linux_header_bar"] = serde_json::json!(target.linux_titlebar);
+        geometry["resize_grip"] = serde_json::json!({
+            "logical_width": 6, "active": self.linux_resize_at(target, 0.0, 0.0).is_some(),
+        });
+        geometry["tab_bar"]["window_controls"] = window_control_geometry(&bar);
         geometry["notices"] = notices.into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
@@ -2405,6 +2410,9 @@ impl App {
         }
         let bar = self.tab_bar(ws);
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.linux_resize_at(ws, px, py).is_some() {
+            return true;
+        }
         if bcode == 0 && self.picker_pointer(ws, PickerPointer::Press, Some(event_loop)) {
             return true;
         }
@@ -2459,6 +2467,13 @@ impl App {
             return true;
         }
         if self.press_card(ws, px, py, bcode) {
+            return true;
+        }
+        if let Some(action) = window_control_at(&bar, px, py) {
+            ws.pressed_window_control = (bcode == 0).then_some(action);
+            return true;
+        }
+        if ws.linux_titlebar && empty_titlebar_space(&bar, px, py) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -2582,6 +2597,19 @@ impl App {
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
+        }
+        if bcode == 0
+            && let Some(action) = ws.pressed_window_control.take()
+        {
+            let bar = self.tab_bar(ws);
+            if window_control_at(&bar, ws.cursor.x as f32, ws.cursor.y as f32) == Some(action) {
+                self.activate_window_control(ws, action, event_loop);
+            }
+            ws.held_buttons.end_own(bcode);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return true;
         }
         // As natively: a gesture of Kettle's own ends with its release.
         ws.held_buttons.end_own(bcode);
@@ -3822,4 +3850,21 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
             }))
         }).collect::<Vec<_>>(),
     }))
+}
+
+pub(super) fn window_control_geometry(bar: &TabBar) -> serde_json::Value {
+    serde_json::json!(
+        bar.window_controls
+            .iter()
+            .map(|button| {
+                let (x, y, w, h) = button.rect;
+                serde_json::json!({
+                    "action": button.action.as_str(),
+                    "rect": { "x": x, "y": y, "width": w, "height": h },
+                    "hovered": button.hovered,
+                    "pressed": button.pressed,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
 }

@@ -845,7 +845,11 @@ pub(crate) struct WindowState {
     /// layer tree before the view goes.
     pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
     pub(crate) native_fullscreen: Option<crate::native_fullscreen::NativeFullscreen>,
+    // Shared titlebar-strip mode; the name predates Linux CSD support.
     pub(crate) macos_titlebar_tabs: bool,
+    pub(crate) linux_titlebar: bool,
+    pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
+    pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
@@ -1508,6 +1512,9 @@ impl WindowState {
             native_fullscreen: None,
             native_caption_drag: None,
             macos_titlebar_tabs: false,
+            linux_titlebar: false,
+            pressed_window_control: None,
+            hovered_window_control: None,
             titlebar_click: None,
             native_material: None,
             accessibility: None,

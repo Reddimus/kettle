@@ -96,14 +96,22 @@ impl App {
         }
     }
 
-    fn new_tab_tooltip(&self, ws: &WindowState) -> Option<String> {
+    fn new_tab_tooltip(
+        &self,
+        ws: &WindowState,
+        controls: &[kettle_render::WindowControlButton],
+    ) -> Option<String> {
         if !ws.window_focused
             || self.pointer_modal_open(ws)
             || ws.context_menu.is_some()
             || ws.pressed_new_tab
             || ws.pressed_new_tab_menu
+            || ws.pressed_window_control.is_some()
         {
             return None;
+        }
+        if let Some(label) = window_control_tooltip_label(controls) {
+            return Some(label.to_owned());
         }
         new_tab_tooltip(
             ws.hovered_new_tab_menu
@@ -124,8 +132,16 @@ impl App {
 
     pub(super) fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {
         let band = self.tab_band(ws, height);
-        let sw = band.2;
-        let x0 = band.0;
+        let button_layout = self.linux_button_layout(ws);
+        let window_controls = self.linux_window_controls(ws, band, &button_layout);
+        let (left_controls, right_controls) = if ws.linux_titlebar {
+            button_layout.reservations(band.2, height)
+        } else {
+            (0.0, 0.0)
+        };
+        let sw = (band.2 - left_controls - right_controls).max(0.0);
+        let x0 = band.0 + left_controls;
+        let tab_lane = (x0, band.1, sw, band.3);
         let y = band.1;
         let is_vertical = self.cfg.tab_bar_pos.is_vertical();
         // Left/Right strips route through a separate vertical-stacked path;
@@ -144,6 +160,7 @@ impl App {
                 _ => x0,
             };
             return TabBar {
+                window_controls,
                 pressed_new_tab: false,
                 pressed_new_tab_menu: false,
                 tooltip: None,
@@ -183,8 +200,11 @@ impl App {
             .window
             .as_ref()
             .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
-        let (arrow_rect, plus_rect, button_w) =
-            horizontal_new_tab_controls(band, scale, new_tab_dropdown_visible());
+        let (arrow_rect, plus_rect, button_w) = if ws.linux_titlebar {
+            linux_header_tab_controls(tab_lane, scale, new_tab_dropdown_visible())
+        } else {
+            horizontal_new_tab_controls(tab_lane, scale, new_tab_dropdown_visible())
+        };
         let strip = tab_segment_strip_width(sw, button_w, 0.0);
         // Tabs divide the strip evenly and fill the bar; once they would
         // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
@@ -290,7 +310,7 @@ impl App {
                     cell_w,
                 );
                 if ws.macos_titlebar_tabs && n == 1 {
-                    let window_width = sw + x0;
+                    let window_width = band.0 + band.2;
                     content.title = centered_title_lane(content.title, window_width * 0.5);
                 }
                 let close = content.close;
@@ -315,12 +335,19 @@ impl App {
                     .is_some_and(|p| rect_contains(s.rect, p.x as f32, p.y as f32))
             })
             .map(|s| s.idx);
+        let arrow_width = if ws.linux_titlebar {
+            height.min(strip * 0.5)
+        } else {
+            height
+        };
         let to_btn =
-            |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, height, height));
+            |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, arrow_width, height));
+        let tooltip = self.new_tab_tooltip(ws, &window_controls);
         TabBar {
+            window_controls,
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
-            tooltip: self.new_tab_tooltip(ws),
+            tooltip,
             in_titlebar: ws.macos_titlebar_tabs,
             recording_notice,
             height,
@@ -378,6 +405,15 @@ impl App {
             sh,
             row_h,
         );
+        if ws.linux_titlebar {
+            let (left, right) = self.linux_button_layout(ws).reservations(sw, bar.height);
+            return (
+                rect.0 + left,
+                rect.1,
+                (rect.2 - left - right).max(0.0),
+                rect.3,
+            );
+        }
         if let Some(band) = Self::macos_titlebar_band(ws) {
             (
                 rect.0 + band.left,
@@ -474,9 +510,10 @@ impl App {
             height.min(strip_w * 0.5),
         );
         TabBar {
+            window_controls: Vec::new(),
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
-            tooltip: self.new_tab_tooltip(ws),
+            tooltip: self.new_tab_tooltip(ws, &[]),
             in_titlebar: false,
             recording_notice: String::new(),
             height,

@@ -929,6 +929,13 @@ hint_action_preview = "preview"
 hint_legend = "Label: {plain} · Shift+label: {alternate} · Esc to cancel"
 hint_legend_plain = "Label: {plain} · Esc to cancel"
 
+a11y_window_minimize = "Minimize window"
+a11y_window_maximize = "Maximize window"
+a11y_window_restore = "Restore window"
+a11y_window_close = "Close window"
+
+
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"

@@ -607,6 +607,14 @@ impl App {
             None
         };
         Self::materialize_layer_blink(ws, std::time::Instant::now());
+        #[cfg(target_os = "linux")]
+        {
+            let previous = ws.linux_titlebar;
+            self.sync_macos_titlebar(ws);
+            if previous != ws.linux_titlebar {
+                self.resize_all(ws);
+            }
+        }
         // Flush any pending chrome-geometry change before painting. A title
         // edit materialises a chrome strip (see `tab_bar_h`), so opening or
         // closing one changes the content rectangle and the PTYs must follow.

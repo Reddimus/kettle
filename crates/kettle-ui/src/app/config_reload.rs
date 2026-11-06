@@ -138,7 +138,7 @@ impl App {
     pub(super) fn poll_system_appearance(&mut self, ws: &mut WindowState) {
         let dark = self
             .system_appearance
-            .get_or_init(|| crate::appearance::SystemAppearance::new(self.waker()))
+            .get_or_init(|| crate::appearance::SystemAppearance::new(self.system_settings_waker()))
             .dark();
         if let Some(dark) = dark
             && self.os_theme_dark != Some(dark)

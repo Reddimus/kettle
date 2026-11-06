@@ -47,6 +47,7 @@ pub mod startup_trace;
 // Per-window state container. `App` keeps only process-global state;
 // everything tied to one OS window lives here.
 mod window_accent;
+mod window_buttons;
 mod window_state;
 // The cursor blink's timeline, shared by the GPU scheduler and the macOS
 // Core Animation layer that can take the blink over.

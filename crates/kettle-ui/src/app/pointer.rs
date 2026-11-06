@@ -1674,6 +1674,14 @@ impl App {
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let control_hover = window_control_at(&bar, cursor_x, cursor_y);
+        if control_hover != ws.hovered_window_control {
+            ws.hovered_window_control = control_hover;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+
         let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
         ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
         ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
@@ -1737,7 +1745,11 @@ impl App {
                     kettle_render::UpdateToastHit::Body => CursorIcon::Default,
                 })
             });
-        let want = drag_icon
+        let outer_resize = self.linux_resize_at(ws, cursor_x, cursor_y);
+        let want = outer_resize
+            .map(linux_resize_cursor)
+            .or(control_hover.map(|_| CursorIcon::Pointer))
+            .or(drag_icon)
             .or(toast_hover)
             .or(close_hover)
             .or(new_tab_hover_icon)
@@ -1765,7 +1777,10 @@ impl App {
                     CursorIcon::Text
                 }
             });
-        let want = if ws.preview_overlay.is_some() && !self.non_search_modal_open(ws) {
+        let want = if outer_resize.is_none()
+            && ws.preview_overlay.is_some()
+            && !self.non_search_modal_open(ws)
+        {
             self.lane_cursor_icon(ws).unwrap_or(CursorIcon::Default)
         } else {
             want
