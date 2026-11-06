@@ -25,6 +25,7 @@ fuzzing = []
 test-recording = ["asciicast"]
 
 [dependencies]
+unicode-bidi.workspace = true
 unicode-width.workspace = true
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true

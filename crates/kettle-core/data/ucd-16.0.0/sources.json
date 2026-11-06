@@ -1,0 +1,29 @@
+{
+  "unicode_version": "16.0.0",
+  "sources": [
+    {
+      "file": "BidiMirroring.txt",
+      "url": "https://www.unicode.org/Public/16.0.0/ucd/BidiMirroring.txt",
+      "sha256": "d7afdadd1bbd66f5a663ac0e8f7958f18fd9491fc0bc59ec5877cb82db71db7d"
+    },
+    {
+      "file": "ArabicShaping.txt",
+      "url": "https://www.unicode.org/Public/16.0.0/ucd/ArabicShaping.txt",
+      "sha256": "8ac43fab1c83d6d66fa163ddf88e4f44cab7cbde922105e1ecf393e55ab421f0",
+      "upstream_sha256": "764f420cedfc8b43d9fec251c957a5d55fc45d40f6573f162990ed1dce7e36e0",
+      "normalization": "Remove trailing ASCII spaces from comment lines only"
+    },
+    {
+      "file": "UnicodeData-arabic-forms.txt",
+      "url": "https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt",
+      "sha256": "eacbbba6bf2edb59536cfd664276781a06ff3362b1c220fb996abc00ec967547",
+      "upstream_sha256": "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f",
+      "normalization": "Only the lines for U+FB50..U+FDFF and U+FE70..U+FEFF (Arabic presentation forms)"
+    },
+    {
+      "file": "LICENSE.txt",
+      "url": "https://www.unicode.org/license.txt",
+      "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
+    }
+  ]
+}

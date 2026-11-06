@@ -2345,6 +2345,7 @@ dependencies = [
  "regex",
  "regex-automata",
  "serde_json",
+ "unicode-bidi",
  "unicode-width",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
