@@ -1497,6 +1497,13 @@ fn normalize_gtk_accelerator(s: &str) -> Option<std::borrow::Cow<'_, str>> {
 }
 
 pub fn parse_trigger(s: &str) -> Option<Trigger> {
+    let trigger = parse_symbolic_trigger(s)?;
+    Some(Trigger::new(trigger.mods, trigger.key))
+}
+
+/// Global shortcuts resolve symbols against the native keyboard map, without
+/// the US number-row aliases used by ordinary keybinding defaults.
+pub(crate) fn parse_symbolic_trigger(s: &str) -> Option<Trigger> {
     let s = normalize_gtk_accelerator(s)?;
     let mut mods = Mods::empty();
     let mut key: Option<Key> = None;
@@ -1552,7 +1559,7 @@ pub fn parse_trigger(s: &str) -> Option<Trigger> {
             key = parse_key(&lower);
         }
     }
-    Some(Trigger::new(mods, key?))
+    Some(Trigger { mods, key: key? })
 }
 
 pub type Bindings = HashMap<Trigger, Action>;

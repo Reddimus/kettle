@@ -711,23 +711,8 @@ impl QuickTerminalPosition {
 
 /// A global chord must include a modifier and round-trip through Settings.
 pub fn parse_quick_terminal_hotkey(value: &str) -> Option<keybinds::Trigger> {
-    let trigger = keybinds::parse_trigger(value)?;
-    (!trigger.mods.is_empty()).then(|| normalize_quick_terminal_hotkey(trigger))
-}
-
-/// Canonical chord passed to native global-shortcut registration.
-pub fn normalize_quick_terminal_hotkey(mut trigger: keybinds::Trigger) -> keybinds::Trigger {
-    use keybinds::{Key, Mods};
-    if let Key::Char(symbol) = trigger.key
-        && let Some(base) = "~!@#$%^&*()_+{}|:\"<>?"
-            .chars()
-            .zip("`1234567890-=[]\\;',./".chars())
-            .find_map(|(shifted, base)| (symbol == shifted).then_some(base))
-    {
-        trigger.key = Key::Char(base);
-        trigger.mods |= Mods::SHIFT;
-    }
-    trigger
+    let trigger = keybinds::parse_symbolic_trigger(value)?;
+    (!trigger.mods.is_empty()).then_some(trigger)
 }
 
 /// `gpu-power-preference`: which GPU wgpu should request the adapter from.
@@ -13816,6 +13801,23 @@ mod chrome_state_tests {
 #[cfg(test)]
 mod quick_terminal_tests {
     use super::*;
+    #[test]
+    fn review_s4_quick_hotkey_preserves_configured_symbols() {
+        use keybinds::{Key, Mods};
+        for (value, symbol, mods) in [
+            ("ctrl+plus", '+', Mods::CTRL),
+            ("ctrl+~", '~', Mods::CTRL),
+            ("ctrl+shift+~", '~', Mods::CTRL | Mods::SHIFT),
+            ("ctrl+shift+exclam", '!', Mods::CTRL | Mods::SHIFT),
+        ] {
+            let config = Config::parse_text(&format!("quick-terminal-hotkey = {value}"));
+            let trigger = config.quick_terminal_hotkey.unwrap();
+            assert_eq!(trigger.key, Key::Char(symbol));
+            assert_eq!(trigger.mods, mods);
+            assert_eq!(parse_quick_terminal_hotkey(&trigger.label()), Some(trigger));
+        }
+    }
+
     #[test]
     fn defaults_and_all_quick_terminal_settings_parse() {
         let d = Config::default();

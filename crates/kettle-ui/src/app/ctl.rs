@@ -1996,7 +1996,7 @@ impl App {
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
                 TextModal::Settings => {
                     if !self.settings_search_key(ws, key, text) {
-                        self.settings_key(ws, key, event_loop);
+                        self.settings_key(ws, key, None, event_loop);
                     }
                 }
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),

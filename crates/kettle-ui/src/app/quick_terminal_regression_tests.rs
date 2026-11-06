@@ -167,6 +167,65 @@ fn review_quick_reopen_after_hide_tracks_visibility_and_autohide() {
 }
 
 #[test]
+fn review_s4_capture_composing_option_a() {
+    use kettle_config::keybinds::{Key as K, Mods, Trigger};
+    let mut ws = WindowState::new(1, Mux::new());
+    #[cfg(target_os = "macos")]
+    {
+        ws.macos_raw_mods = ModifiersState::ALT;
+        ws.mods = macos_effective_modifiers(
+            ModifiersState::ALT,
+            kettle_config::MacosOptionAsAlt::None,
+            false,
+            false,
+        );
+        assert!(ws.mods.is_empty());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ws.mods = ModifiersState::empty();
+    }
+    let composed = Key::Character("\u{e5}".into());
+    let unmodified = Key::Character("a".into());
+    assert_eq!(
+        super::modals::capture_global_hotkey(
+            &composed,
+            Some(&unmodified),
+            ModifiersState::ALT,
+            ws.mods,
+        ),
+        crate::settings::HotkeyCapture::Value(Some(Trigger::new(Mods::ALT, K::Char('a'))))
+    );
+    let shifted_mods = ModifiersState::ALT | ModifiersState::SHIFT;
+    assert_eq!(
+        super::modals::capture_global_hotkey(
+            &Key::Character("\u{c5}".into()),
+            Some(&unmodified),
+            shifted_mods,
+            ModifiersState::SHIFT,
+        ),
+        crate::settings::HotkeyCapture::Value(Some(Trigger::new(
+            Mods::ALT | Mods::SHIFT,
+            K::Char('a'),
+        )))
+    );
+    // Outside composing Option, keep the symbol actually typed, even when
+    // the layout's unmodified character is different.
+    assert_eq!(
+        super::modals::capture_global_hotkey(
+            &Key::Character("+".into()),
+            Some(&Key::Character("=".into())),
+            shifted_mods,
+            shifted_mods,
+        ),
+        crate::settings::HotkeyCapture::Value(Some(Trigger::new(
+            Mods::ALT | Mods::SHIFT,
+            K::Char('+'),
+        )))
+    );
+}
+
+#[test]
 fn review_quick_capture_preserves_physical_option() {
     use kettle_config::keybinds::{Key as K, Mods, Trigger};
     use winit::keyboard::ModifiersState as M;
@@ -187,10 +246,19 @@ fn review_quick_capture_preserves_physical_option() {
         (NamedKey::Backspace, K::Backspace),
     ] {
         assert_eq!(
-            super::modals::capture_global_hotkey(&ws, &Key::Named(key)),
+            super::modals::capture_global_hotkey(
+                &Key::Named(key),
+                None,
+                held_modifiers(&ws),
+                ws.mods,
+            ),
             crate::settings::HotkeyCapture::Value(Some(Trigger::new(Mods::ALT, expected)))
         );
     }
     let source = include_str!("modals.rs");
-    assert!(source.contains("match capture_global_hotkey(ws, key)"));
+    assert!(
+        source.contains(
+            "match capture_global_hotkey(key, unmodified_key, held_modifiers(ws), ws.mods)"
+        )
+    );
 }

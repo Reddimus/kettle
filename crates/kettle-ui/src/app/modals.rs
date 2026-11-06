@@ -2,8 +2,20 @@
 
 use super::*;
 
-pub(super) fn capture_global_hotkey(ws: &WindowState, key: &Key) -> crate::settings::HotkeyCapture {
-    crate::settings::capture_hotkey(to_kkey(key), to_mods(held_modifiers(ws)))
+pub(super) fn capture_global_hotkey(
+    key: &Key,
+    unmodified_key: Option<&Key>,
+    physical_mods: ModifiersState,
+    effective_mods: ModifiersState,
+) -> crate::settings::HotkeyCapture {
+    // Composition may consume Option from the effective modifiers while the
+    // logical key contains the composed character (for example Option+A).
+    let key = if physical_mods.alt_key() && !effective_mods.alt_key() {
+        unmodified_key.unwrap_or(key)
+    } else {
+        key
+    };
+    crate::settings::capture_hotkey(to_kkey(key), to_mods(physical_mods))
 }
 
 pub(super) fn begin_settings_text_edit(
@@ -1739,6 +1751,7 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         key: &Key,
+        unmodified_key: Option<&Key>,
         _event_loop: &ActiveEventLoop,
     ) {
         let cats = crate::settings::categories(&self.gpu_choices);
@@ -1765,7 +1778,7 @@ impl App {
         // the config file so it survives restart.
         if capturing && cats[cat].fields[fld].key == "quick-terminal-hotkey" {
             use crate::settings::HotkeyCapture;
-            match capture_global_hotkey(ws, key) {
+            match capture_global_hotkey(key, unmodified_key, held_modifiers(ws), ws.mods) {
                 HotkeyCapture::Pending => return,
                 HotkeyCapture::Cancel => {}
                 HotkeyCapture::Value(trigger) => {

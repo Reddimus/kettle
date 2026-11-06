@@ -1919,7 +1919,12 @@ impl App {
                             ws.closing_keys.insert(event.physical_key);
                         }
                         if !handled {
-                            self.settings_key(ws, &event.logical_key, event_loop);
+                            self.settings_key(
+                                ws,
+                                &event.logical_key,
+                                Some(&event.key_without_modifiers()),
+                                event_loop,
+                            );
                         }
                     }
                     remember_closing_key(ws, key_modal, event.physical_key);
