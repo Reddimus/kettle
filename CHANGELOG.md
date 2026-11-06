@@ -91,6 +91,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Settings switches show a knob (right when on, left when off) with a label
+  chosen for contrast against the accent. Delete or Backspace resets the
+  highlighted setting to its default, and the footer says so.
+
 - The focused pane's title is bold as well as highlighted, so focus does not
   rest on colour alone.
 

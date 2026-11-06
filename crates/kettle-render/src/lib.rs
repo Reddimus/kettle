@@ -160,7 +160,7 @@ pub use settings::{
     SettingsRow, SettingsRowGeometry, settings_hit_test, settings_hit_test_with_text_width,
     settings_layout, settings_panel_geometry, settings_value_rect,
 };
-use settings::{SettingsTextKind, settings_text_items};
+use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
@@ -4544,6 +4544,15 @@ impl Renderer {
                 self.config.format.is_srgb(),
             );
             let rail = self.chrome_colors.icon(acc, selected);
+            // Ink on a switched-on toggle: whichever theme end stands out more
+            // against the accent, for its knob and its label.
+            let on_ink = if color::contrast_ratio(theme.foreground, acc)
+                >= color::contrast_ratio(theme.background, acc)
+            {
+                theme.foreground
+            } else {
+                theme.background
+            };
             let rgba = |c: Rgb, a| {
                 [
                     c.r as f32 / 255.0,
@@ -4623,11 +4632,20 @@ impl Renderer {
                         4.0
                     },
                 );
+                // A switch's knob: at the right end when on, the left when
+                // off, so the state reads without the label or the colour.
+                if matches!(data.control, SettingsControl::Toggle(_)) {
+                    let (x, y, w, h) = row.chip_rect;
+                    let d = settings_toggle_knob(h);
+                    let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
+                    let fill = if on { on_ink } else { border };
+                    shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
+                }
             }
             let items = settings_text_items(set, &layout, self.overlay_text_cell_width());
             for (i, item) in items.iter().enumerate() {
                 let mut background = theme.background;
-                let foreground = theme.foreground;
+                let mut foreground = theme.foreground;
                 let mut muted = matches!(
                     item.kind,
                     SettingsTextKind::Muted | SettingsTextKind::Description(_)
@@ -4644,6 +4662,7 @@ impl Renderer {
                         if item.kind == SettingsTextKind::Value(index) {
                             if row.control == SettingsControl::Toggle(true) && !row.disabled {
                                 background = acc;
+                                foreground = on_ink;
                             }
                         } else if index == set.focused_row && !set.search_focused {
                             background = selected;

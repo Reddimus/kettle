@@ -6,7 +6,8 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
-control. On/Off pills show boolean state, choices have arrows, and quantities
+control. On/Off switches show their state with a knob as well as the label,
+choices have arrows, and quantities
 show their units. Below a panel width of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
 or right overflow arrow, or scroll over the strip, to page toward earlier or
@@ -31,6 +32,7 @@ assistive technology cancels any pending keybinding capture.
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | ← / → | Change the highlighted option |
+| Delete / Backspace | Reset the highlighted setting to its default (not the theme, GPU, shortcut or text rows) |
 | Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |

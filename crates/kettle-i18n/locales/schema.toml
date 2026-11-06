@@ -2786,3 +2786,6 @@ plural = "count"
 
 [messages.scrollback_a11y_position]
 context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of a pane's vertical scroll bar; its value is the position in the terminal's scrollback history."
+
+[messages.settings_hint_reset]
+context = "crates/kettle-ui/src/app/settings_text.rs settings_hints: Settings footer, after the Del key: puts the focused setting back to its default."

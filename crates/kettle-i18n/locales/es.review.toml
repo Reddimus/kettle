@@ -931,6 +931,7 @@ osc52_copied = "draft"
 pane_zoomed = "draft"
 pane_zoomed_unbound = "draft"
 scrollback_a11y_position = "draft"
+settings_hint_reset = "draft"
 
 [second-pass]
 keys = [

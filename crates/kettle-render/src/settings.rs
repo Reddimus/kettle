@@ -134,6 +134,11 @@ impl SettingsLayout {
     }
 }
 
+/// The diameter of a settings switch's knob in a chip `height` tall.
+pub(crate) fn settings_toggle_knob(height: f32) -> f32 {
+    (height - 6.0).max(4.0)
+}
+
 fn inset((x, y, w, h): Rect4, padding: f32) -> Rect4 {
     let p = padding.min(w * 0.5).min(h * 0.5);
     (x + p, y + p, (w - p * 2.0).max(0.0), (h - p * 2.0).max(0.0))
@@ -351,10 +356,16 @@ pub fn settings_layout(
             groups.push((row.category, (inner.0, y, inner.2, line)));
             y += group_h;
         }
+        // A switch also holds its knob beside the label.
+        let knob = if matches!(row.control, SettingsControl::Toggle(_)) {
+            settings_toggle_knob(line + 8.0) + 2.0
+        } else {
+            0.0
+        };
         let chip_w = if row.control == SettingsControl::Text {
             inner.2 * 0.48
         } else {
-            (display_width(&row.chip_text()) as f32 * text_cw + 20.0)
+            (display_width(&row.chip_text()) as f32 * text_cw + 20.0 + knob)
                 .max(64.0)
                 .min(inner.2 * 0.48)
         };
@@ -551,7 +562,15 @@ pub(crate) fn settings_text_items(
             row.label_rect,
             SettingsTextKind::Label(row.index),
         );
-        let value_rect = inset(row.chip_rect, 4.0);
+        let mut value_rect = inset(row.chip_rect, 4.0);
+        // An off switch keeps its knob at the left; the label starts after it.
+        if matches!(data.control, SettingsControl::Toggle(_))
+            && (data.control == SettingsControl::Toggle(false) || data.disabled)
+        {
+            let knob = settings_toggle_knob(row.chip_rect.3) + 2.0;
+            value_rect.0 += knob;
+            value_rect.2 = (value_rect.2 - knob).max(0.0);
+        }
         let cols = (value_rect.2 / cw.max(1.0)).floor().max(0.0) as usize;
         let value =
             if data.control == SettingsControl::Choice && !data.value.is_empty() && cols >= 4 {

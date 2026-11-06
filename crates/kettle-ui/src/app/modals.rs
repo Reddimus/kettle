@@ -1965,6 +1965,9 @@ impl App {
                 };
                 self.settings_adjust(ws, &cats, cat, fld, dir);
             }
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                self.settings_reset(ws, &cats, cat, fld);
+            }
             // `vim-menu-nav`: j/k mirror ↓/↑, h/l mirror ←/→, g/G jump to the
             // first/last field, Ctrl+d / Ctrl+u move half a page. Chord-capture
             // mode (handled before this match) already consumed the key, so
@@ -2121,6 +2124,32 @@ impl App {
                 crate::settings::next_value(&self.cfg, field, dir),
             )
         };
+        self.settings_store(ws, key_str, new_val);
+    }
+
+    /// Reset the focused Settings row to the value a config that does not set
+    /// it would give, through the same write and reload as a change.
+    pub(super) fn settings_reset(
+        &mut self,
+        ws: &mut WindowState,
+        cats: &[crate::settings::Category],
+        cat: usize,
+        fld: usize,
+    ) {
+        let field = &cats[cat].fields[fld];
+        if crate::settings::field_disabled(&self.cfg, field.key)
+            || crate::settings::holds_default(&self.cfg, field)
+        {
+            return;
+        }
+        if let Some(value) = crate::settings::default_value(field) {
+            self.settings_store(ws, field.key, value);
+        }
+    }
+
+    /// Persist `new_val` for `key_str` from Settings, with the companion keys
+    /// and restart notes some settings need, then reload.
+    fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
         // Freezing the active palette must survive a reload, including a config
         // that still has a different fixed theme from before system following.
         if key_str == "theme-mode"

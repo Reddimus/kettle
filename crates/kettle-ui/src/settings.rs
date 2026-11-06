@@ -1233,6 +1233,42 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
     }
 }
 
+/// The value `field` has in a config that does not set it, in the token
+/// [`next_value`] writes; `None` for rows a reset does not cover: the theme
+/// (its picker and light/dark following own it), the GPU pin, shortcuts and
+/// free text.
+pub fn default_value(field: &Field) -> Option<String> {
+    let defaults = Config::default();
+    match &field.kind {
+        FieldKind::Toggle => Some(read_bool(&defaults, field.key).to_string()),
+        FieldKind::Choice { .. } if field.key == "theme" => None,
+        FieldKind::Choice { .. } => Some(read_choice(&defaults, field.key)),
+        FieldKind::Number { suffix, .. } => Some(write_number(
+            field.key,
+            read_number(&defaults, field.key),
+            suffix,
+        )),
+        FieldKind::ChoiceOwned { .. }
+        | FieldKind::Hotkey
+        | FieldKind::Keybind { .. }
+        | FieldKind::Text { .. } => None,
+    }
+}
+
+/// Whether `field` already holds its [`default_value`] in `cfg`.
+pub fn holds_default(cfg: &Config, field: &Field) -> bool {
+    match &field.kind {
+        FieldKind::Toggle => read_bool(cfg, field.key) == read_bool(&Config::default(), field.key),
+        FieldKind::Choice { .. } => {
+            read_choice(cfg, field.key) == read_choice(&Config::default(), field.key)
+        }
+        FieldKind::Number { .. } => {
+            read_number(cfg, field.key) == read_number(&Config::default(), field.key)
+        }
+        _ => true,
+    }
+}
+
 /// Is this field a rebindable keybinding? The overlay handler uses
 /// this to route Enter/Space into chord-capture instead of the value-cycle path.
 pub fn is_keybind(field: &Field) -> bool {
@@ -1634,6 +1670,41 @@ mod tests {
         let off = Config::parse_text("grapheme-clustering = false");
         assert!(!read_bool(&off, field.key));
         assert_eq!(next_value(&off, field, 1), "true");
+    }
+
+    /// Every row a reset covers writes a token the config accepts, and that
+    /// token reads back as the default: after an edit the row is no longer at
+    /// its default, and writing the default value brings it back.
+    #[test]
+    fn reset_writes_each_rows_default_back() {
+        for field in categories(&[]).iter().flat_map(|c| &c.fields) {
+            let Some(default) = default_value(field) else {
+                continue;
+            };
+            let line = format!("{} = {default}", field.key);
+            assert!(Config::detect_malformed_values(&line).is_empty(), "{line}");
+            let restored = Config::parse_text(&line);
+            assert!(holds_default(&restored, field), "{line}");
+            assert_eq!(
+                read(&restored, field, &EN),
+                read(&Config::default(), field, &EN),
+                "{line}"
+            );
+            let edited = Config::parse_text(&format!(
+                "{} = {}",
+                field.key,
+                next_value(&Config::default(), field, 1)
+            ));
+            if read(&edited, field, &EN) != read(&Config::default(), field, &EN) {
+                assert!(!holds_default(&edited, field), "{}", field.key);
+            }
+        }
+        let theme = categories(&[])
+            .into_iter()
+            .flat_map(|c| c.fields)
+            .find(|f| f.key == "theme")
+            .unwrap();
+        assert_eq!(default_value(&theme), None);
     }
 
     #[test]

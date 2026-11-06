@@ -698,7 +698,15 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
         .next()
         .unwrap();
     assert!(settings.contains("self.theme_pick_key()"));
-    assert!(settings.contains("self.persist_pref(key_str, &new_val)"));
+    assert!(settings.contains("self.settings_store(ws, key_str, new_val)"));
+    let store = source
+        .split("fn settings_store(")
+        .nth(1)
+        .unwrap()
+        .split("fn ")
+        .next()
+        .unwrap();
+    assert!(store.contains("self.persist_pref(key_str, &new_val)"));
 }
 
 #[test]
