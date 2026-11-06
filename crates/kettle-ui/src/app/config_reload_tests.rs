@@ -653,7 +653,6 @@ fn finding_watcher_refresh_keeps_working_registration() {
     );
 }
 
-
 #[cfg(unix)]
 #[test]
 fn config_watch_paths_keep_dangling_symlink_targets() {
@@ -778,4 +777,11 @@ fn review_config_watcher_survives_a_missing_target_parent() {
         .expect("retargeting must wake configuration reload");
     let refreshed = super::config_watch_paths(&link).unwrap();
     assert!(refreshed.contains(&std::fs::canonicalize(valid).unwrap()));
+}
+
+#[test]
+fn cursor_settings_are_applied_to_running_panes_on_reload() {
+    let src = production_source();
+    let apply = src.split("fn apply_reloaded_config(").nth(1).unwrap();
+    assert!(apply.contains("set_cursor_defaults(self.cfg.cursor_style, self.cfg.cursor_blink)"));
 }

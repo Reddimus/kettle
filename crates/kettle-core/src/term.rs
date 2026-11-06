@@ -8384,6 +8384,19 @@ impl Terminal {
         self.try_resize_geometry(PtyGeometry::new(cols, rows, pixel_width, pixel_height))
     }
 
+    /// Apply cursor Settings to running panes, retaining the new reset default.
+    pub fn set_cursor_defaults(&mut self, shape: CursorShape, blinking: bool) {
+        let style = alacritty_terminal::vte::ansi::CursorStyle { shape, blinking };
+        if self.term_config.default_cursor_style == style {
+            return;
+        }
+        self.term_config.default_cursor_style = style;
+        self.term
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_default_cursor_style(style);
+    }
+
     /// Apply an edited `scrollback` / `scrollback-bytes` budget to a pane that
     /// is already running. Returns whether the effective cap moved.
     ///
@@ -8720,6 +8733,23 @@ pub fn selection_text_bounded(
     term: &Term<EventProxy>,
     cap: usize,
 ) -> Result<Option<String>, SelectionTextTooLarge> {
+    selection_text_bounded_mode(term, cap, None)
+}
+
+/// Clipboard copy with an explicit policy for undrawn trailing cells.
+pub fn selection_text_for_copy(
+    term: &Term<EventProxy>,
+    cap: usize,
+    trim_padding: bool,
+) -> Result<Option<String>, SelectionTextTooLarge> {
+    selection_text_bounded_mode(term, cap, Some(trim_padding))
+}
+
+fn selection_text_bounded_mode(
+    term: &Term<EventProxy>,
+    cap: usize,
+    trim_padding: Option<bool>,
+) -> Result<Option<String>, SelectionTextTooLarge> {
     let Some(range) = term
         .selection
         .as_ref()
@@ -8728,7 +8758,13 @@ pub fn selection_text_bounded(
         return Ok(None);
     };
     cells_within(term, &range, cap)?;
-    let text = term.selection_to_string();
+    // Trimming drops trailing whitespace on every copied line, printed or
+    // padding, as Kettle always did for stream selections; `false` keeps the
+    // selection exactly as displayed, block widths included.
+    let text = match trim_padding {
+        Some(false) => term.selection_to_string_with_trim(false),
+        Some(true) | None => term.selection_to_string(),
+    };
     if text.as_ref().is_some_and(|text| text.len() > cap) {
         return Err(SelectionTextTooLarge);
     }

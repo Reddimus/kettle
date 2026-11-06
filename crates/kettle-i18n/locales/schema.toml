@@ -2613,3 +2613,24 @@ context = "crates/kettle-ui/src/app/actions.rs: Profile process launch failure n
 
 [messages.notify_profile_launch_failed_body]
 context = "crates/kettle-ui/src/app/actions.rs: The selected profile disappeared or process/reaper creation failed."
+
+[messages.settings_field_cursor_unfocused_style]
+context = "crates/kettle-ui/src/settings.rs: Settings row: cursor appearance in inactive windows and split panes."
+
+[messages.settings_description_field_cursor_unfocused_style]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."
+
+[messages.settings_value_hollow_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: an outlined block."
+
+[messages.settings_value_hidden_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: do not draw it."
+
+[messages.settings_value_unchanged_cursor]
+context = "crates/kettle-ui/src/settings.rs: Unfocused cursor choice: retain the terminal-selected shape."
+
+[messages.settings_field_copy_trim_whitespace]
+context = "crates/kettle-ui/src/settings.rs: Settings row: exclude undrawn trailing cells from clipboard text."
+
+[messages.settings_description_field_copy_trim_whitespace]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."

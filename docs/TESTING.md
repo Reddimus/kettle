@@ -3000,3 +3000,24 @@ renderer sizing and the first reveal. Run them offline with
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.
+
+## Cursor and selection regression checks
+
+`kettle-render` covers 4.5:1 highlight ink, maximum-contrast fallbacks,
+readable user-foreground precedence, dim/link/ANSI/indexed/truecolour text,
+and inactive fills across bundled themes. Offscreen tests cover link and SGR
+decorations over selected fills, inactive split dimming, steady hollow cursors
+and DEC cursor hiding; they report `C09_GPU_SKIP` without an adapter.
+`kettle-core` tests both copy policies against printed spaces, blank padding,
+blocks, blank rows, wraps, tabs, wide cells, combining marks and byte caps.
+`kettle-ui` and `kettle-config` cover selection modifiers, cursor live reload,
+Settings round trips and the new key validation. Settings rows continue to use
+shared `settings_layout` geometry for rendering, hit testing, AccessKit and
+`ui_geometry`; these controls do not add an editable text field or IME anchor.
+
+Run the four crate suites and `kettle-i18n` offline, followed by their
+`cargo clippy --all-targets -- -D warnings` and `cargo fmt --all --check`.
+Native acceptance still needs focus transitions, split cursors, Option/Alt-drag
+and Shift-click on macOS/Linux, IME candidate placement and English/Spanish
+Settings at narrow widths. Source and headless tests do not establish live
+window or fluent-language acceptance.

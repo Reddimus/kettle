@@ -3174,3 +3174,128 @@ fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() 
         assert_eq!(next.c, 'B');
     }
 }
+
+#[test]
+fn clipboard_copy_trims_trailing_whitespace_unless_disabled() {
+    let (mut term, mut parser) = harness(12, 4);
+    feed(&mut term, &mut parser, b"a  b  \r\nx \r\n");
+    for kind in [SelectionType::Simple, SelectionType::Block] {
+        let mut sel = Selection::new(kind, Point::new(Line(0), Column(0)), Side::Left);
+        sel.update(Point::new(Line(1), Column(11)), Side::Right);
+        term.selection = Some(sel);
+        // The default trims every line end, printed spaces included.
+        assert_eq!(term.selection_to_string().as_deref(), Some("a  b\nx"));
+        assert_eq!(
+            selection_text_for_copy(&term, 1024, true)
+                .unwrap()
+                .as_deref(),
+            Some("a  b\nx")
+        );
+        assert_eq!(
+            selection_text_for_copy(&term, 1024, false)
+                .unwrap()
+                .as_deref(),
+            Some("a  b        \nx           ")
+        );
+        assert_eq!(
+            selection_text_for_copy(&term, 4, true),
+            Err(SelectionTextTooLarge)
+        );
+    }
+}
+
+#[test]
+fn clipboard_blocks_preserve_interior_spaces_and_blank_rows() {
+    let (mut term, mut parser) = harness(12, 4);
+    feed(&mut term, &mut parser, b"a  b  z\r\n\r\nx   y");
+    let mut sel = Selection::new(
+        SelectionType::Block,
+        Point::new(Line(0), Column(1)),
+        Side::Left,
+    );
+    sel.update(Point::new(Line(2), Column(5)), Side::Right);
+    term.selection = Some(sel);
+    assert_eq!(
+        selection_text_for_copy(&term, 1024, true)
+            .unwrap()
+            .as_deref(),
+        Some("  b\n\n   y")
+    );
+    assert_eq!(
+        selection_text_for_copy(&term, 1024, false)
+            .unwrap()
+            .as_deref(),
+        Some("  b  \n     \n   y ")
+    );
+}
+
+#[test]
+fn clipboard_copy_keeps_wraps_tabs_wide_cells_and_combining_marks() {
+    let (mut term, mut parser) = harness(10, 4);
+    feed(&mut term, &mut parser, "0123456789界e\u{301}  ".as_bytes());
+    let mut sel = Selection::new(
+        SelectionType::Simple,
+        Point::new(Line(0), Column(0)),
+        Side::Left,
+    );
+    sel.update(Point::new(Line(1), Column(9)), Side::Right);
+    term.selection = Some(sel);
+    assert_eq!(
+        selection_text_for_copy(&term, 1024, true)
+            .unwrap()
+            .as_deref(),
+        Some("0123456789界e\u{301}")
+    );
+    // Selecting the spacer of a wide character includes the whole glyph.
+    let mut sel = Selection::new(
+        SelectionType::Block,
+        Point::new(Line(1), Column(1)),
+        Side::Left,
+    );
+    sel.update(Point::new(Line(1), Column(1)), Side::Right);
+    term.selection = Some(sel);
+    assert_eq!(
+        selection_text_for_copy(&term, 1024, true)
+            .unwrap()
+            .as_deref(),
+        Some("界")
+    );
+    let (mut term, mut parser) = harness(12, 3);
+    feed(&mut term, &mut parser, b"a\tb");
+    let mut sel = Selection::new(
+        SelectionType::Simple,
+        Point::new(Line(0), Column(0)),
+        Side::Left,
+    );
+    sel.update(Point::new(Line(0), Column(11)), Side::Right);
+    term.selection = Some(sel);
+    assert_eq!(
+        selection_text_for_copy(&term, 1024, true)
+            .unwrap()
+            .as_deref(),
+        Some("a\tb")
+    );
+}
+
+#[test]
+fn cursor_default_edits_apply_live_without_unhiding_or_resetting_on_noop() {
+    use alacritty_terminal::vte::ansi::CursorStyle;
+    let (mut term, mut parser) = harness(12, 3);
+    feed(&mut term, &mut parser, b"\x1b[5 q\x1b[?25l");
+    let style = CursorStyle {
+        shape: CursorShape::Underline,
+        blinking: false,
+    };
+    term.set_default_cursor_style(style);
+    assert_eq!(term.cursor_style(), style);
+    assert_eq!(term.renderable_content().cursor.shape, CursorShape::Hidden);
+    feed(&mut term, &mut parser, b"\x1b[?25h\x1b[5 q");
+    term.set_default_cursor_style(style);
+    assert_eq!(
+        term.cursor_style().shape,
+        CursorShape::Beam,
+        "no-op keeps application style"
+    );
+    feed(&mut term, &mut parser, b"\x1bc");
+    assert_eq!(term.cursor_style(), style, "RIS uses the edited default");
+}

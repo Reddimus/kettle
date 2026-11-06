@@ -5060,3 +5060,139 @@ fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
         }
     }
 }
+
+#[test]
+fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("C09_GPU_SKIP: selected link and decoration colours, no adapter");
+        return;
+    };
+    let mut snap = snapshot_of(
+        30,
+        4,
+        b"\x1b[34;2;4;9;58;2;90;90;90mhttps://example.test\x1b[0m\x1b[?25l",
+    );
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(29)),
+        false,
+    ));
+    let other = snapshot_of(30, 4, b"\x1b[?25l");
+    cfg.show_titlebar = false;
+    cfg.unfocused_split_opacity = 0.1;
+    for window_focused in [true, false] {
+        for split_focused in [true, false] {
+            let mut view = pane(&snap, 320, 180);
+            view.focused = split_focused;
+            let mut sibling = pane(&other, 320, 180);
+            sibling.id = 2;
+            sibling.focused = !split_focused;
+            sibling.rect.0 = 320.0;
+            sibling.terminal.0 = 320.0;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                links: vec![LinkRect {
+                    col: 0,
+                    row: 0,
+                    width: 20,
+                    hover: false,
+                }],
+                ..Overlay::default()
+            };
+            let frame = capture(&mut renderer, &cfg, &[view, sibling], &overlay);
+            let fill = super::theme::selection_fill(
+                &cfg.theme,
+                cfg.theme.background,
+                window_focused,
+                &mut MinimumContrastCache::default(),
+            );
+            let expected = super::theme::highlight_colors_cached(
+                if window_focused {
+                    CellHighlight::Selection
+                } else {
+                    CellHighlight::InactiveSelection
+                },
+                &cfg,
+                &cfg.theme,
+                cfg.theme.palette[4],
+                cfg.theme.background,
+                &mut MinimumContrastCache::default(),
+            )
+            .0;
+            let attrs = renderer.pane_buffers[0].lines[0].attrs_list().get_span(0);
+            assert_eq!(
+                attrs.color_opt,
+                Some(GColor::rgb(expected.r, expected.g, expected.b))
+            );
+            assert!(color::contrast_ratio(expected, fill) >= 4.5);
+            // Link underlines and SGR decorations must survive the highlight fill.
+            let pixel = frame.get_pixel(
+                (cfg.padding_x + renderer.cell_w * 0.5) as u32,
+                (cfg.padding_y + renderer.cell_h - 1.0).floor() as u32,
+            );
+            let ink = Rgb::new(pixel[0], pixel[1], pixel[2]);
+            assert!(
+                color::contrast_ratio(ink, fill) >= 4.5,
+                "{window_focused}/{split_focused}: {ink:?} on {fill:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
+    use alacritty_terminal::vte::ansi::CursorShape;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 160) else {
+        eprintln!("C09_GPU_SKIP: unfocused cursor, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.theme.cursor = Rgb::new(255, 0, 80);
+    let mut snap = snapshot_of(20, 4, b"\r");
+    for window_focused in [true, false] {
+        for pane_focused in [true, false] {
+            if window_focused && pane_focused {
+                continue;
+            }
+            let mut view = pane(&snap, 400, 160);
+            view.focused = pane_focused;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                ..Overlay::default()
+            };
+            let off = capture(&mut renderer, &cfg, &[view], &overlay);
+            assert!(cursor_pixels(&off, &cfg, &snap) > 10);
+            assert!(
+                renderer.cursor_quad_range.is_none(),
+                "inactive cursor must not blink"
+            );
+            assert!(
+                renderer.pending_cursor_glyph.is_none(),
+                "hollow cursor must not invert text"
+            );
+        }
+    }
+    snap.cursor.shape = CursorShape::Hidden;
+    let off = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 400, 160)],
+        &Overlay::default(),
+    );
+    assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
+    cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
+    snap.cursor.shape = CursorShape::Block;
+    let off = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 400, 160)],
+        &Overlay::default(),
+    );
+    assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
+}

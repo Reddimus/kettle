@@ -163,8 +163,8 @@ use terminal::{
 };
 #[cfg(test)]
 use terminal::{
-    ShapedRow, cursor_focus_gate, ime_cursor_shape, push_cell_decorations, push_underline_quads,
-    run_attrs, search_highlight_at,
+    ShapedRow, ime_cursor_shape, push_cell_decorations, push_underline_quads, run_attrs,
+    search_highlight_at,
 };
 use theme::{
     CellHighlight, CompletionPalette, MinimumContrastCache, background_has_wallpaper,
@@ -1794,6 +1794,7 @@ impl Renderer {
                 } else {
                     &[]
                 },
+                if pv.focused { &overlay.links } else { &[] },
                 &mut quads,
                 &mut decorations,
                 &mut pane_bases,
@@ -1861,26 +1862,6 @@ impl Renderer {
                 }
             }
 
-            // Hyperlink underlines, focused pane only (brighter on hover).
-            for ln in &overlay.links {
-                if !pv.focused {
-                    break;
-                }
-                let col = if ln.hover {
-                    theme.palette[6]
-                } else {
-                    theme.palette[4]
-                };
-                quads.push(rect(
-                    grid_origin.0 + ln.col as f32 * cw,
-                    grid_origin.1 + ln.row as f32 * ch + ch - 1.5,
-                    ln.width as f32 * cw,
-                    1.5,
-                    col,
-                    1.0,
-                ));
-            }
-
             // Search coordinates belong to the pane captured when the lane
             // opened, even if focus changes through automation or pane reap.
             if pane_has_search {
@@ -1888,10 +1869,22 @@ impl Renderer {
                 // Underline the current match as well, so even identical theme fills
                 // leave the current result distinct from the other matches.
                 for hl in overlay.highlights.iter().filter(|hl| hl.active) {
-                    let fill = cfg.search_background.unwrap_or(theme.palette[3]);
-                    let ink = color::with_min_contrast(theme.foreground, fill, 3.0);
+                    let ink = theme::highlight_colors_cached(
+                        CellHighlight::Search(true),
+                        cfg,
+                        theme,
+                        theme.foreground,
+                        theme.background,
+                        &mut self.minimum_contrast_cache,
+                    )
+                    .0;
                     let height = (2.0 * self.scale).min(ch);
-                    quads.push(rect(
+                    let target = if pane_inactive_amount(pv, panes.len(), cfg) > 0.0 {
+                        &mut decorations
+                    } else {
+                        &mut quads
+                    };
+                    target.push(rect(
                         grid_origin.0 + hl.col as f32 * cw,
                         grid_origin.1 + (hl.row + 1) as f32 * ch - height,
                         hl.width as f32 * cw,

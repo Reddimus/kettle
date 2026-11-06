@@ -345,6 +345,8 @@ pub(crate) fn attributed_foreground(
 pub(crate) struct MinimumContrastCache {
     pub(crate) entries: std::collections::HashMap<(u32, u32, u64), Rgb>,
     pub(crate) misses: usize,
+    highlight_ink: std::collections::HashMap<[u32; 6], Rgb>,
+    inactive_fills: std::collections::HashMap<(u32, u32), Rgb>,
 }
 
 impl MinimumContrastCache {
@@ -368,6 +370,8 @@ impl MinimumContrastCache {
 
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.highlight_ink.clear();
+        self.inactive_fills.clear();
         self.misses = 0;
     }
 
@@ -381,10 +385,11 @@ impl MinimumContrastCache {
 pub(crate) enum CellHighlight {
     None,
     Selection,
+    InactiveSelection,
     Search(bool),
 }
 
-/// Keep explicit foregrounds intact and resolve automatic text against the fill.
+/// Give readable explicit foregrounds priority over automatic highlight ink.
 #[cfg(test)]
 pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) -> (Rgb, Rgb) {
     highlight_colors_cached(
@@ -395,6 +400,32 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
         background,
         &mut MinimumContrastCache::default(),
     )
+}
+
+/// Move the active fill toward the background while retaining visible separation.
+pub(crate) fn selection_fill(
+    theme: &kettle_config::Theme,
+    background: Rgb,
+    focused: bool,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    let active = cache.resolve(theme.selection_background, background, 3.0);
+    if focused {
+        return active;
+    }
+    let key = (
+        MinimumContrastCache::color_key(active),
+        MinimumContrastCache::color_key(background),
+    );
+    if let Some(fill) = cache.inactive_fills.get(&key) {
+        return *fill;
+    }
+    let fill = (1..=100)
+        .map(|percent| solid_blend(active, background, percent))
+        .find(|fill| color::contrast_ratio(*fill, background) >= 1.5)
+        .unwrap_or(active);
+    cache.inactive_fills.insert(key, fill);
+    fill
 }
 
 pub(crate) fn highlight_colors_cached(
@@ -411,7 +442,12 @@ pub(crate) fn highlight_colors_cached(
             cfg.search_background.unwrap_or(theme.palette[3]),
         ),
         _ => {
-            let bg = cache.resolve(theme.selection_background, background, 3.0);
+            let bg = selection_fill(
+                theme,
+                background,
+                !matches!(highlight, CellHighlight::InactiveSelection),
+                cache,
+            );
             (
                 theme
                     .selection_foreground_user
@@ -420,24 +456,39 @@ pub(crate) fn highlight_colors_cached(
             )
         }
     };
-    if let Some(fg) = explicit {
-        return (fg, bg);
+    let key = [
+        MinimumContrastCache::color_key(foreground),
+        MinimumContrastCache::color_key(bg),
+        explicit
+            .map(MinimumContrastCache::color_key)
+            .unwrap_or(u32::MAX),
+        MinimumContrastCache::color_key(theme.selection_foreground),
+        MinimumContrastCache::color_key(theme.foreground),
+        MinimumContrastCache::color_key(theme.background),
+    ];
+    if let Some(fg) = cache.highlight_ink.get(&key) {
+        return (*fg, bg);
     }
-    // A theme's own selection foreground comes first but must stay readable on
-    // the (possibly strengthened) fill; then readable cell colours, then the
-    // theme's neutrals. Cache the comparisons: palette colours share this path.
-    let theme_choice = (!matches!(highlight, CellHighlight::Search(true))
-        && theme.selection_foreground_explicit)
-        .then_some(theme.selection_foreground);
-    for fg in theme_choice
-        .into_iter()
-        .chain([foreground, theme.background, theme.foreground])
-    {
-        if cache.resolve(fg, bg, 4.5) == fg {
+    // User colours have precedence when readable, followed by the cell's ink.
+    // If neither passes, choose the strongest neutral instead of barely AA ink.
+    for fg in explicit.into_iter().chain([foreground]) {
+        if color::contrast_ratio(fg, bg) >= 4.5 {
+            cache.highlight_ink.insert(key, fg);
             return (fg, bg);
         }
     }
-    (cache.resolve(foreground, bg, 4.5), bg)
+    let fg = [
+        theme.selection_foreground,
+        theme.foreground,
+        theme.background,
+        Rgb::new(255, 255, 255),
+        Rgb::new(0, 0, 0),
+    ]
+    .into_iter()
+    .max_by(|a, b| color::contrast_ratio(*a, bg).total_cmp(&color::contrast_ratio(*b, bg)))
+    .expect("highlight candidates");
+    cache.highlight_ink.insert(key, fg);
+    (fg, bg)
 }
 
 #[cfg(test)]
@@ -650,7 +701,7 @@ mod selection_contrast_tests {
         theme.selection_foreground_explicit = true;
         assert_eq!(
             selection_colors(&theme, theme.background),
-            (theme.selection_foreground, theme.selection_background)
+            (Rgb::new(0, 0, 0), theme.selection_background)
         );
     }
 }

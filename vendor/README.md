@@ -30,7 +30,11 @@ date. Recheck that before upgrading a crate or dropping a patch.
   README's four relative links are rewritten as absolute links to upstream's
   `v0.16.1` tag so that they resolve here. That tag ships
   `alacritty_terminal` 0.25.1; 0.26.0 shipped with `v0.17.0`.
-- Local changes: keyboard-mode stack overflow evicts the oldest keyboard mode,
+- Local changes: selection copying exposes a padding policy based on printed
+  (`DRAWN`) cells, retaining typed spaces for both stream and block selections.
+  The original engine extraction API retains its behavior. Host cursor-default
+  edits apply live while no-op reloads preserve application cursor styles.
+  Keyboard-mode stack overflow evicts the oldest keyboard mode,
   not an unrelated title-stack entry; active keyboard flags are tracked per
   screen so direct flag changes are queryable, survive screen switches, and
   remain synchronized with the active stack entry. The grid also exposes a

@@ -957,8 +957,26 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
+    /// Apply an edited host default without disturbing application styles on no-op reloads.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        if self.config.default_cursor_style != style {
+            self.config.default_cursor_style = style;
+            self.cursor_style = Some(style);
+            self.mark_fully_damaged();
+        }
+    }
+
     /// Convert the active selection to a String.
     pub fn selection_to_string(&self) -> Option<String> {
+        self.selection_to_string_mode(None)
+    }
+
+    /// Copy a selection, retaining printed spaces and optionally omitting undrawn padding.
+    pub fn selection_to_string_with_trim(&self, trim_padding: bool) -> Option<String> {
+        self.selection_to_string_mode(Some(trim_padding))
+    }
+
+    fn selection_to_string_mode(&self, trim_padding: Option<bool>) -> Option<String> {
         let selection_range = self.selection.as_ref().and_then(|s| s.to_range(self))?;
         let SelectionRange { start, end, .. } = selection_range;
 
@@ -970,24 +988,40 @@ impl<T> Term<T> {
                 ..
             }) => {
                 for line in (start.line.0..end.line.0).map(Line::from) {
-                    res += self
-                        .line_to_string(line, start.column..end.column, start.column.0 != 0)
-                        .trim_end();
+                    let text = self.line_to_string_mode(
+                        line,
+                        start.column..end.column,
+                        start.column.0 != 0,
+                        trim_padding,
+                    );
+                    res += if trim_padding.is_none() {
+                        text.trim_end()
+                    } else {
+                        text.trim_end_matches('\n')
+                    };
                     res += "\n";
                 }
 
-                res += self
-                    .line_to_string(end.line, start.column..end.column, true)
-                    .trim_end();
+                let text = self.line_to_string_mode(
+                    end.line,
+                    start.column..end.column,
+                    true,
+                    trim_padding,
+                );
+                res += if trim_padding.is_none() {
+                    text.trim_end()
+                } else {
+                    text.trim_end_matches('\n')
+                };
             }
             Some(Selection {
                 ty: SelectionType::Lines,
                 ..
             }) => {
-                res = self.bounds_to_string(start, end) + "\n";
+                res = self.bounds_to_string_mode(start, end, trim_padding) + "\n";
             }
             _ => {
-                res = self.bounds_to_string(start, end);
+                res = self.bounds_to_string_mode(start, end, trim_padding);
             }
         }
 
@@ -996,6 +1030,15 @@ impl<T> Term<T> {
 
     /// Convert range between two points to a String.
     pub fn bounds_to_string(&self, start: Point, end: Point) -> String {
+        self.bounds_to_string_mode(start, end, None)
+    }
+
+    fn bounds_to_string_mode(
+        &self,
+        start: Point,
+        end: Point,
+        trim_padding: Option<bool>,
+    ) -> String {
         let mut res = String::new();
 
         for line in (start.line.0..=end.line.0).map(Line::from) {
@@ -1010,23 +1053,36 @@ impl<T> Term<T> {
                 self.last_column()
             };
 
-            res += &self.line_to_string(line, start_col..end_col, line == end.line);
+            res +=
+                &self.line_to_string_mode(line, start_col..end_col, line == end.line, trim_padding);
         }
 
         res.strip_suffix('\n').map(str::to_owned).unwrap_or(res)
     }
 
     /// Convert a single line in the grid to a String.
-    fn line_to_string(
+    fn line_to_string_mode(
         &self,
         line: Line,
         mut cols: Range<Column>,
         include_wrapped_wide: bool,
+        trim_padding: Option<bool>,
     ) -> String {
         let mut text = String::new();
 
         let grid_line = &self.grid[line];
-        let line_length = cmp::min(grid_line.line_length(), cols.end + 1);
+        let occupied = match trim_padding {
+            None => grid_line.line_length(),
+            Some(false) => Column(self.columns()),
+            Some(true) => {
+                let printed = grid_line[..]
+                    .iter()
+                    .rposition(|cell| cell.flags.contains(Flags::DRAWN))
+                    .map_or(Column(0), |column| Column(column + 1));
+                cmp::max(grid_line.line_length(), printed)
+            }
+        };
+        let line_length = cmp::min(occupied, cols.end + 1);
 
         // Include wide char when trailing spacer is selected.
         if grid_line[cols.start]

@@ -908,9 +908,9 @@ background-image-align-vert background-image-mode background-opacity background-
 backspace-binding bell bell-flash-intensity bold-is-bright borderless broadcast-default
 case-sensitive cell-height cell-width check-for-updates chrome-background clear-select-on-copy
 clipboard clipboard-paste-protection close-button-on-tab colorterm command command-notify-threshold
-command-notify-threshold-ms completion-overlay copy-on-select copy-on-selection cursor-bg-color
+command-notify-threshold-ms completion-overlay copy-trim-whitespace copy-on-select copy-on-selection cursor-bg-color
 cursor-blink cursor-blink-interval cursor-blink-timeout cursor-color cursor-color-default
-cursor-fg-color cursor-shape cursor-style cursor-style-blink custom-command custom-url-handler
+cursor-fg-color cursor-shape cursor-style cursor-unfocused-style cursor-style-blink custom-command custom-url-handler
 dark-theme delete-binding detachable-tabs disable-mouse-paste disable-mousewheel-zoom
 enabled-plugins env exit-action exit-behavior extra-styling focus focused-split-color font font-family
 font-family-bold font-family-bold-italic font-family-italic font-feature font-size force-no-bell

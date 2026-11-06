@@ -1256,3 +1256,67 @@ fn command_palette_cancels_an_armed_titlebar_drag() {
         .unwrap();
     assert!(palette.contains("self.close_all_modals(ws)"));
 }
+
+#[test]
+fn option_drag_is_rectangular_and_shift_click_preserves_the_anchor_in_history() {
+    let (mux, target, _) = title_test_split_mux();
+    let mut term = mux.panes[&target].term.term.lock().unwrap();
+    // Produce retained history so negative grid lines are valid selection anchors.
+    let mut processor: alacritty_terminal::vte::ansi::Processor =
+        alacritty_terminal::vte::ansi::Processor::new();
+    for _ in 0..30 {
+        processor.advance(&mut *term, b"0123456789\r\n");
+    }
+    let mods = winit::keyboard::ModifiersState::ALT;
+    assert!(matches!(
+        selection_kind(1, mods.alt_key()),
+        SelectionType::Block
+    ));
+    for kind in [selection_kind(1, mods.alt_key()), SelectionType::Simple] {
+        let mut selection = kettle_core::Selection::new(
+            kind,
+            kettle_core::Point::new(kettle_core::Line(-3), kettle_core::Column(2)),
+            kettle_core::Side::Left,
+        );
+        selection.update(
+            kettle_core::Point::new(kettle_core::Line(-1), kettle_core::Column(5)),
+            kettle_core::Side::Right,
+        );
+        let original = selection.to_range(&*term).unwrap();
+        selection.update(
+            kettle_core::Point::new(kettle_core::Line(0), kettle_core::Column(7)),
+            kettle_core::Side::Right,
+        );
+        let extended = selection.to_range(&*term).unwrap();
+        assert_eq!(
+            original.start, extended.start,
+            "Shift-click retains the anchor"
+        );
+        assert_eq!(
+            extended.end,
+            kettle_core::Point::new(kettle_core::Line(0), kettle_core::Column(7))
+        );
+        assert_eq!(extended.is_block, matches!(kind, SelectionType::Block));
+    }
+    let source = production_source();
+    let begin = finding_body(&source, "begin_or_extend_mouse_selection");
+    assert!(
+        begin.contains(
+            "ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor"
+        )
+    );
+    assert!(begin.contains("selection_kind(clicks, ws.mods.alt_key())"));
+}
+
+#[test]
+fn manual_automatic_copy_and_vi_yank_use_the_same_padding_policy() {
+    for source in [
+        include_str!("actions.rs"),
+        include_str!("pointer.rs"),
+        include_str!("modals.rs"),
+    ] {
+        // Pin the production routing; extraction behavior is exercised in kettle-core.
+        assert!(source.contains("kettle_core::selection_text_for_copy("));
+        assert!(source.contains("self.cfg.copy_trim_whitespace"));
+    }
+}

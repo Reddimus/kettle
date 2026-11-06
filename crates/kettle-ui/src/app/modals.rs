@@ -1450,11 +1450,21 @@ impl App {
                 }
             }
             'y' => {
-                let yanked = owner
-                    .visual
-                    .then(|| term.selection_to_string())
-                    .flatten()
-                    .unwrap_or_default();
+                let yanked = if owner.visual {
+                    match kettle_core::selection_text_for_copy(
+                        &term,
+                        16 * 1024 * 1024,
+                        self.cfg.copy_trim_whitespace,
+                    ) {
+                        Ok(text) => text.unwrap_or_default(),
+                        Err(_) => {
+                            log::warn!("vi-mode yank: selection exceeds the 16 MiB limit");
+                            return;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
                 drop(term);
                 let yanked = match kettle_core::scrub_card_markers(yanked) {
                     Ok(text) => text,

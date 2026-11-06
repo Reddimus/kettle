@@ -52,6 +52,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Selected and search-highlighted text, links and decorations stay readable;
+  inactive windows use a subdued selection and a steady hollow cursor. Settings
+  can hide or retain the unfocused cursor shape, and cursor shape/blink edits
+  now apply to running panes.
+- `copy-trim-whitespace` (on by default) drops trailing whitespace at each
+  copied line's end, for blocks as well as stream selections; `false` copies
+  the selection exactly as displayed, including block widths.
+  README and Settings now explain Option/Alt block selection and Shift-click
+  extension.
+
 - `restore-session` now defaults to `auto`: on macOS it follows "Close windows
   when quitting an application" and restores when unchecked. Other platforms
   still open fresh. `true`, `false` and legacy boolean spellings remain valid,

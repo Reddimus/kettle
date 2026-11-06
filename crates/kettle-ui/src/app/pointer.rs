@@ -366,14 +366,22 @@ impl App {
         let target = ws.selecting_pane.or_else(|| ws.mux.active_focus());
         let sel = target
             .and_then(|id| ws.mux.panes.get(&id))
-            .and_then(|p| {
-                p.term
-                    .term
-                    .lock()
-                    .ok()
-                    .and_then(|t| t.selection_to_string())
+            .and_then(|p| p.term.term.lock().ok())
+            .map(|t| {
+                kettle_core::selection_text_for_copy(
+                    &t,
+                    16 * 1024 * 1024,
+                    self.cfg.copy_trim_whitespace,
+                )
             })
-            .filter(|s| !s.is_empty());
+            .transpose();
+        let sel = match sel {
+            Ok(text) => text.flatten().filter(|s| !s.is_empty()),
+            Err(_) => {
+                log::warn!("selection copy: selection exceeds the 16 MiB limit");
+                return;
+            }
+        };
         let sel = match copy_clipboard_decision(sel, true) {
             Ok(selection) => selection,
             Err(error) => {

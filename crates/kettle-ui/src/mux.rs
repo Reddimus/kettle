@@ -2253,6 +2253,14 @@ impl Mux {
         changed
     }
 
+    /// Apply cursor edits to existing panes as well as future ones.
+    pub fn set_cursor_defaults(&mut self, style: CursorStyle, blinking: bool) {
+        for pane in self.panes.values_mut() {
+            pane.term
+                .set_cursor_defaults(engine_cursor_shape(style), blinking);
+        }
+    }
+
     /// The theme's colours changed: record whether it is dark and pass that to
     /// every pane, which reports it to a program that turned on DEC mode 2031.
     pub fn set_color_scheme(&mut self, dark: Option<bool>) {

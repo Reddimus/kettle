@@ -15,7 +15,9 @@
 
 use std::borrow::Cow;
 
-use kettle_config::{BellMode, Config, CursorStyle, FocusMode, ScrollbarMode, UpdatePolicy};
+use kettle_config::{
+    BellMode, Config, CursorStyle, CursorUnfocusedStyle, FocusMode, ScrollbarMode, UpdatePolicy,
+};
 use kettle_i18n::{Text, Translator};
 
 /// What a choice shows: catalogue text, or a proper name (a theme, a GPU, a
@@ -166,6 +168,10 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldChromeBackground => Text::SettingsDescriptionFieldChromeBackground,
         Text::SettingsFieldCloseButtonOnTab => Text::SettingsDescriptionFieldCloseButtonOnTab,
         Text::SettingsFieldCompletionOverlay => Text::SettingsDescriptionFieldCompletionOverlay,
+        Text::SettingsFieldCopyTrimWhitespace => Text::SettingsDescriptionFieldCopyTrimWhitespace,
+        Text::SettingsFieldCursorUnfocusedStyle => {
+            Text::SettingsDescriptionFieldCursorUnfocusedStyle
+        }
         Text::SettingsFieldCopyOnSelect => Text::SettingsDescriptionFieldCopyOnSelect,
         Text::SettingsFieldCursorBlink => Text::SettingsDescriptionFieldCursorBlink,
         Text::SettingsFieldCursorBlinkTimeout => Text::SettingsDescriptionFieldCursorBlinkTimeout,
@@ -623,6 +629,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                         Label::Text(T::SettingsValueUnderline),
                     ],
                 ),
+                choice(
+                    T::SettingsFieldCursorUnfocusedStyle,
+                    "cursor-unfocused-style",
+                    &["hollow", "hidden", "unchanged"],
+                    &[
+                        Label::Text(T::SettingsValueHollowCursor),
+                        Label::Text(T::SettingsValueHiddenCursor),
+                        Label::Text(T::SettingsValueUnchangedCursor),
+                    ],
+                ),
                 toggle(T::SettingsFieldCursorBlink, "cursor-blink"),
                 // Seconds without typing before the blink rests on a visible
                 // cursor; 0 blinks indefinitely.
@@ -756,6 +772,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "MB",
                 ),
                 toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
+                toggle(T::SettingsFieldCopyTrimWhitespace, "copy-trim-whitespace"),
                 toggle(
                     T::SettingsFieldMouseHideWhileTyping,
                     "mouse-hide-while-typing",
@@ -1278,6 +1295,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
         "copy-on-select" => cfg.copy_on_select,
+        "copy-trim-whitespace" => cfg.copy_trim_whitespace,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
         "gpu-force-software" => cfg.gpu_force_software,
@@ -1320,6 +1338,12 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         .to_string(),
         // Keyed on the canonical `cursor-style` (not the `cursor-shape` alias)
         // to match the catalogue field + CONFIG.md.
+        "cursor-unfocused-style" => match cfg.cursor_unfocused_style {
+            CursorUnfocusedStyle::Hollow => "hollow",
+            CursorUnfocusedStyle::Hidden => "hidden",
+            CursorUnfocusedStyle::Unchanged => "unchanged",
+        }
+        .to_string(),
         "cursor-style" => match cfg.cursor_style {
             CursorStyle::Block => "block",
             CursorStyle::Bar => "beam",
@@ -1491,6 +1515,39 @@ mod tests {
 
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn cursor_and_copy_settings_round_trip_and_explain_selection_gestures() {
+        let cats = categories(&[]);
+        for key in [
+            "cursor-style",
+            "cursor-blink",
+            "cursor-unfocused-style",
+            "copy-trim-whitespace",
+        ] {
+            let field = cats
+                .iter()
+                .flat_map(|c| &c.fields)
+                .find(|f| f.key == key)
+                .unwrap();
+            let cfg = Config::default();
+            let value = next_value(&cfg, field, 1);
+            let edited = Config::parse_text(&format!("{key} = {value}"));
+            assert!(Config::detect_malformed_values(&format!("{key} = {value}")).is_empty());
+            assert_ne!(read(&cfg, field, &EN), read(&edited, field, &EN));
+            assert_ne!(EN.text(field.label), ES.text(field.label));
+            assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        }
+        let field = cats
+            .iter()
+            .flat_map(|c| &c.fields)
+            .find(|f| f.key == "copy-on-select")
+            .unwrap();
+        for tr in [EN, ES] {
+            let help = tr.text(description(field));
+            assert!(help.contains("Option/Alt") && help.contains("Shift"));
+        }
+    }
 
     #[test]
     fn restore_session_settings_has_three_choices() {

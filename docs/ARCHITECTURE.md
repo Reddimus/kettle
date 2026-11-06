@@ -3460,6 +3460,19 @@ glyphon batches glyphs by atlas, not by renderer, so each pass reuses
 already-cached glyphs (the cursor glyph is part of the visible pane
 text, so its bitmap is already resident).
 
+Terminal highlight ink resolves after ANSI, hyperlink and dim attributes,
+against the opaque fill actually painted. Readable user ink precedes readable
+cell ink; automatic fallback chooses the highest contrast of the theme's
+selection foreground and neutrals plus white and black. Per-frame colour caches
+include this decision and inactive selection fills. Highlight fills in dimmed
+splits and highlight decorations use the post-dimmer decoration pass, with
+fills before underlines and strikeouts. Unfocused cursors use steady quads
+outside the focused cursor's blink range; `unchanged` solid cursors recolour
+their pane glyph directly. Only the focused blinking block uses the separate
+cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay
+in the terminal engine; Kettle's bounded copy helper applies the same policy
+to manual copy, copy on selection and vi yank.
+
 ### Cursor patch
 
 `Renderer::present_cursor_patch` (`crates/kettle-render/src/cursor_patch.rs`)

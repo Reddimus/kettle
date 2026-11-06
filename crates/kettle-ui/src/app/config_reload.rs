@@ -410,6 +410,8 @@ impl App {
         ws.mux
             .set_unnegotiated_modified_enter(self.cfg.modify_other_keys);
         ws.mux.autoclean_groups = self.cfg.autoclean_groups;
+        ws.mux
+            .set_cursor_defaults(self.cfg.cursor_style, self.cfg.cursor_blink);
         // Push `scrollback` and `scrollback-bytes` edits (config file or
         // Settings rows) into live panes too; otherwise only panes opened
         // afterwards would use them.

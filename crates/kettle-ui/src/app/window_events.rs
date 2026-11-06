@@ -1336,8 +1336,8 @@ impl App {
                     ws.pressed_new_tab_menu = false;
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
-                    // An unfocused window draws no cursor, and the Metal layer
-                    // beneath already shows the off phase.
+                    // Retire the blink layer so the next frame paints the steady
+                    // unfocused cursor and inactive selection.
                     Self::hide_cursor_layer(ws);
                     // Its release may never come here.
                     ws.lane_drag = None;

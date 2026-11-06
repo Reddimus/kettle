@@ -81,9 +81,9 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | Selection fills meet 3:1 against the terminal background. A `selection-foreground` set in your config is used as given. Otherwise text uses the theme's selection foreground or its own colour when that meets 4.5:1 against the effective fill, then the theme background or foreground, with contrast adjustment as a fallback |
+| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background; unfocused windows use a subdued fill at least 1.5:1 against it. Text and decorations meet 4.5:1 against the fill. A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
-| `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Automatic search text keeps its colour at 4.5:1 against that fill, then prefers the theme background or foreground, with contrast adjustment as a fallback. Quick-select labels default to the theme background. An explicit search foreground is preserved |
+| `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Search text follows the selection contrast rule: a readable explicit foreground has priority, then readable cell ink, then the strongest fallback. Quick-select labels default to the theme background |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `64000000` | Per-pane scrollback memory budget (64 MB by default; the 10,000-line cap still applies). Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px), `0` or more |
@@ -92,6 +92,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background-opacity` | float | `0.86` macOS/Windows; `0.99` elsewhere | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. macOS and Windows default to visible native material; other targets stay at 99% whether compositor blur is available or not. Set this to `1.0` and `window-blur = false` for a fully opaque window. On macOS, the titlebar tab strip is opaque theme chrome; `macos-titlebar-style = native` keeps AppKit's opaque caption following the selected light or dark appearance |
 | `window-blur` | bool | `true` | Ask the window system to blur content behind Kettle. macOS keeps material behind the content and an opaque theme-matched titlebar band, follows the selected light or dark appearance, and becomes opaque when Reduce Transparency is enabled. Windows requests the system backdrop and palette-matches its DWM caption. Other targets default to 99% opacity. Linux enables blur only when the active Wayland compositor advertises KWin's blur protocol; X11 and unsupported Wayland sessions also apply a 99% live-opacity safety floor to explicit lower values. Screenshots and the saved opacity are unchanged. A newly opened window is required when changing from an opaque startup surface |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` is an alias for `bar` |
+| `cursor-unfocused-style` | `hollow`\|`hidden`\|`unchanged` | `hollow` | Steady cursor in unfocused windows and split panes: hollow block, hidden, or the terminal-selected shape. Respects DEC cursor hiding and cursor colour. Applies live |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `bell-flash-intensity` (`bell_flash_intensity`) | float 0–1 | `0.03` | Peak strength of the visual-bell flash as a step of CIE L\* lightness (a fraction of the 0–100 scale): `0.03` lifts a dark theme's background by 3 L\* and dips a light theme's by 3 L\* on the frame the bell rings, then eases out to nothing over 300 ms. Only the pane that rang flashes, under its text. Defined perceptually rather than as an alpha because the renderer blends in linear light, where one alpha reads very differently per theme (a `0.10` alpha would be a +22 L\* jump on TokyoNight). The most frequent bell in practice is an empty Tab completion, which does not warrant more than a barely-there cue; raise this (`0.06`–`0.10`) for a stronger flash, `1` paints the foreground solid, or set `0` to drop the flash while keeping window attention and the tab/titlebar bell marks. Full-pane flashes are also the part of a terminal most likely to affect a photosensitive user |
@@ -136,6 +137,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `tab-silence-threshold-ms` (`tab-silence-threshold`) | int ms | `10000` | An inactive tab whose unseen output went quiet for this long transitions from the cyan `Output` dot to the dim `Silent` dot. Clamped `[1000, 600_000]` |
 | `command-notify-threshold-ms` (`command-notify-threshold`) | int ms | `5000` | Minimum command duration before Kettle fires a desktop notification when an OSC 133 D (CommandEnd) event arrives **while the window is unfocused**. `0` disables. Requires shell integration because the shell emits the event. Clamped `[0, 86_400_000]` |
 | `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
+| `copy-trim-whitespace` | bool | `true` | Drop trailing whitespace at the end of each copied line, whether the program printed it or it is cell padding. Spaces inside a line are kept. `false` copies the selection exactly as displayed, including rectangular block widths. Applies to manual copy, copy on selection and vi-mode yank; live in Settings |
 | `update-policy` | `off`\|`notify`\|`auto` | `auto` | Stable-channel behavior after the first-launch privacy skip: no automatic request, a brief top-center update toast, or an authenticated background install used on the next launch. **`auto` is the default** (kettle keeps itself current, oh-my-zsh style); set `off` to opt out. Official installer ownership is required for installation. See [UPDATES.md](UPDATES.md) |
 | `update-check-interval-hours` | int hours | `24` | How often the background check may contact the release feed. Default 24 (daily); floored at 1. `update-policy = off` disables checking regardless |
 | `update-check` (`check-for-updates`) | bool | compatibility alias | Legacy setting mapped to `notify` (`true`) or `off` (`false`). `update-policy` wins regardless of line order. `kettle --check-update` always performs a one-shot check |
@@ -518,17 +520,30 @@ moves a key into the main table without changing its parser arm.
 
 ### Selection and history controls
 
-Faint selection fills are strengthened to at least 3:1 against the terminal
-background. Unless your config sets `selection-foreground`, selected text uses
-the theme's selection foreground, then its own cell colour, whichever first
-meets 4.5:1 against the effective selection fill. Otherwise Kettle uses the
-theme background or foreground, whichever first meets 4.5:1, and adjusts the
-cell colour if neither passes. This also applies to dim text and underlined
-links. A `selection-foreground` in your config is used as given. Non-current search matches use the same rules,
-with fills meeting 3:1 against each cell background. The current match uses
-the same automatic text contrast rule against its search fill, unless
-`search-foreground` is explicit, and also has an underline. The optional
-`minimum-contrast` setting still applies after resolving highlight colours.
+Active selection fills are strengthened to at least 3:1 against the terminal
+background. When the window loses focus the fill moves toward the background,
+retaining at least 1.5:1 separation. Focus changes repaint both selection and
+cursor without changing terminal state.
+
+Text, underlines, strikeouts and link decorations on a highlight meet 4.5:1
+against its effective fill, including dim, ANSI, indexed and truecolour text.
+A user `selection-foreground` has first priority when it meets that ratio,
+followed by the cell's own ink. Otherwise Kettle chooses the highest contrast
+among the theme selection foreground, theme foreground, theme background, white
+and black. An unreadable user colour also falls back. Non-current search
+matches use the active selection rules with fills meeting 3:1 against each
+cell background. The current match uses its search fill and gives a readable
+`search-foreground` first priority, then the same cell/fallback rule. The
+optional `minimum-contrast` setting still applies after highlight resolution.
+
+Copy drops trailing whitespace at the end of each copied line by default.
+`copy-trim-whitespace = false` includes every selected cell, trailing spaces
+and padding included. Blocks copy one selected column slice per row, separated by
+newlines, without joining wrapped rows. Stream selections join soft wraps.
+Copy uses a conservative 16 MiB byte budget; a selection that exceeds it
+leaves the clipboard unchanged.
+See [Selecting text](../README.md#selecting-text) for mouse modifiers and copy
+rules, and [Settings](SETTINGS.md) for live cursor and copy controls.
 
 A pane scrolled into history shows a bottom-right **↓ 1,234 lines** pill. Click it
 to return that pane to live output. It disappears at the bottom and when a pane

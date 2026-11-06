@@ -584,13 +584,25 @@ impl App {
                 //     want Ctrl+Shift+C to consistently mean "the
                 //     clipboard now reflects the current selection
                 //     (empty or not)" without smart heuristics.
-                let selection_text = ws.mux.focused().and_then(|p| {
-                    p.term
-                        .term
-                        .lock()
-                        .ok()
-                        .and_then(|t| t.selection_to_string())
-                });
+                let selection_text = ws
+                    .mux
+                    .focused()
+                    .and_then(|p| p.term.term.lock().ok())
+                    .map(|t| {
+                        kettle_core::selection_text_for_copy(
+                            &t,
+                            16 * 1024 * 1024,
+                            self.cfg.copy_trim_whitespace,
+                        )
+                    })
+                    .transpose();
+                let selection_text = match selection_text {
+                    Ok(text) => text.flatten(),
+                    Err(_) => {
+                        log::warn!("copy: selection exceeds the 16 MiB limit");
+                        return;
+                    }
+                };
                 let payload = match copy_clipboard_decision(selection_text, self.cfg.smart_copy) {
                     Ok(payload) => payload,
                     Err(error) => {

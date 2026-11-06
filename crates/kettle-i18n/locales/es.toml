@@ -1,3 +1,11 @@
+settings_field_cursor_unfocused_style = "Cursor sin foco"
+settings_description_field_cursor_unfocused_style = "Mostrar un contorno, ocultar o mantener la forma activa del cursor."
+settings_value_hollow_cursor = "Hueco"
+settings_value_hidden_cursor = "Oculto"
+settings_value_unchanged_cursor = "Sin cambios"
+settings_field_copy_trim_whitespace = "Recortar espacios finales al copiar"
+settings_description_field_copy_trim_whitespace = "Quitar los espacios al final de cada línea copiada."
+
 settings_field_restore_session = "Restaurar sesión"
 settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
 
@@ -762,7 +770,7 @@ settings_description_field_bell = "Elegir cómo se notifican los avisos de la te
 settings_description_field_chrome_background = "Elegir los colores de las barras sobre imágenes o estrellas."
 settings_description_field_close_button_on_tab = "Mostrar un botón para cerrar en cada pestaña."
 settings_description_field_completion_overlay = "Mostrar sugerencias de la shell en una capa de Kettle."
-settings_description_field_copy_on_select = "Copiar automáticamente el texto seleccionado al portapapeles."
+settings_description_field_copy_on_select = "Option/Alt y arrastrar: bloque. Shift y clic: extender. Copiar al soltar."
 settings_description_field_cursor_blink = "Hacer parpadear el cursor de la terminal."
 settings_description_field_cursor_blink_timeout = "Detener el parpadeo tras segundos sin escribir; cero lo mantiene."
 settings_description_field_cursor_shape = "Elegir la forma del cursor de la terminal."

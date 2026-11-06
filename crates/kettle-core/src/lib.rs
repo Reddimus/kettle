@@ -92,6 +92,7 @@ pub use term::{
     PtyInputTail, PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
     SelectionTextTooLarge, SessionLogFailure, SharedTerm, ShellActivity, Terminal,
     TerminalCapabilities, WorkingDirectoryPolicy, selected_diagram_sources, selection_text_bounded,
+    selection_text_for_copy,
 };
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).

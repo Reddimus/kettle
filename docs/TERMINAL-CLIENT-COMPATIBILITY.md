@@ -346,11 +346,14 @@ not scan hovered or pasted path text.
 
 ## Focus and cursor state
 
-When a Kettle window is unfocused, Kettle suppresses the rendered terminal
-cursor. It does not replace the cursor with a hollow block and does not send a
-DEC cursor command to the child. On refocus, the exact client-selected DEC shape,
-visibility, and blink state is rendered again. This avoids the hollow bottom-left
-caret that interactive clients can leave visible while another window is active.
+Unfocused windows and split panes show a steady hollow block cursor by default.
+`cursor-unfocused-style = hidden` suppresses it, and `unchanged` retains the
+terminal-selected shape without blinking. DEC cursor hiding still wins and the
+configured cursor colour (or OSC 12 override) is retained. Focus changes are
+renderer state: Kettle sends no DEC cursor command to the child. Refocusing
+restores the client-selected shape, visibility and blink state. Cursor shape
+and blink edits in Settings apply to running panes and become their reset
+defaults; unrelated config reloads preserve application cursor choices.
 
 ## Keyboard encoding
 

@@ -185,6 +185,14 @@ pub enum CursorStyle {
     Bar,
 }
 
+/// Cursor treatment when its window or split pane lacks focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUnfocusedStyle {
+    Hollow,
+    Hidden,
+    Unchanged,
+}
+
 /// How the terminal reacts to `BEL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BellMode {
@@ -1397,6 +1405,7 @@ pub struct Config {
     pub window_blur: bool,
     pub completion_overlay: CompletionOverlayMode,
     pub cursor_style: CursorStyle,
+    pub cursor_unfocused_style: CursorUnfocusedStyle,
     pub cursor_blink: bool,
     /// macOS: once a window has been idle for a blink half-period, the window
     /// server blinks the cursor in a Core Animation layer and Kettle stops
@@ -2043,6 +2052,8 @@ pub struct Config {
     pub command_notify_threshold_ms: u64,
     /// Auto-copy the selection to the clipboard on release.
     pub copy_on_select: bool,
+    /// Drop trailing whitespace at the end of each copied line.
+    pub copy_trim_whitespace: bool,
     /// Stable update policy. `auto` is the default (keep Kettle current in the
     /// background, oh-my-zsh style); the first launch only stamps the throttle
     /// and performs no network request. Set `update-policy = off` to opt out.
@@ -3105,6 +3116,7 @@ impl Default for Config {
             window_blur: true,
             completion_overlay: CompletionOverlayMode::Auto,
             cursor_style: CursorStyle::Block,
+            cursor_unfocused_style: CursorUnfocusedStyle::Hollow,
             cursor_blink: true,
             macos_cursor_blink_layer: true,
             bell: BellMode::Both,
@@ -3262,6 +3274,7 @@ impl Default for Config {
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
+            copy_trim_whitespace: true,
             update_policy: UpdatePolicy::Auto,
             update_check_interval_hours: 24,
             restore_session: RestoreSession::Auto,
@@ -3777,6 +3790,7 @@ impl Config {
         "close_button_on_tab",
         "record-raw-input",
         "record_raw_input",
+        "copy-trim-whitespace",
         "copy-on-select",
         "copy-on-selection",
         "copy_on_select",
@@ -4239,6 +4253,9 @@ impl Config {
                 // `cursor-style`. `beam` (Alacritty's name), `ibeam` and
                 // `i-beam` are aliases for kettle's `bar`. Values match
                 // case-insensitively, as in the apply arm.
+                "cursor-unfocused-style" => matches!(
+                    v.to_ascii_lowercase().as_str(), "hollow" | "hidden" | "unchanged"
+                ),
                 "cursor-style" | "cursor-shape" | "cursor_shape" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "block" | "underline" | "bar" | "beam" | "ibeam" | "i-beam"
@@ -4796,6 +4813,13 @@ impl Config {
                     cfg.completion_overlay = match e.value.to_ascii_lowercase().as_str() {
                         "off" | "false" | "no" | "none" => CompletionOverlayMode::Off,
                         _ => CompletionOverlayMode::Auto,
+                    };
+                }
+                "cursor-unfocused-style" => {
+                    cfg.cursor_unfocused_style = match e.value.to_ascii_lowercase().as_str() {
+                        "hidden" => CursorUnfocusedStyle::Hidden,
+                        "unchanged" => CursorUnfocusedStyle::Unchanged,
+                        _ => CursorUnfocusedStyle::Hollow,
                     };
                 }
                 "cursor-style" | "cursor-shape" | "cursor_shape" => {
@@ -5780,6 +5804,11 @@ impl Config {
                     if let Ok(v) = e.value.parse::<u64>() {
                         // 0 = disable; positive clamps to 1 day.
                         cfg.command_notify_threshold_ms = v.min(86_400_000);
+                    }
+                }
+                "copy-trim-whitespace" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.copy_trim_whitespace = b;
                     }
                 }
                 // Terminator parity
@@ -13868,5 +13897,34 @@ mod quick_terminal_tests {
             Action::from_name("toggle_quick_terminal"),
             Some(Action::ToggleQuickTerminal)
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_cursor_config_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_unfocused_and_copy_padding_defaults_parse_and_validate() {
+        let cfg = Config::default();
+        assert_eq!(cfg.cursor_unfocused_style, CursorUnfocusedStyle::Hollow);
+        assert!(cfg.copy_trim_whitespace);
+        for (token, expected) in [
+            ("hollow", CursorUnfocusedStyle::Hollow),
+            ("HIDDEN", CursorUnfocusedStyle::Hidden),
+            ("unchanged", CursorUnfocusedStyle::Unchanged),
+        ] {
+            let text = format!("cursor-unfocused-style = {token}\ncopy-trim-whitespace = false");
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert_eq!(cfg.cursor_unfocused_style, expected);
+            assert!(!cfg.copy_trim_whitespace);
+        }
+        let invalid = "cursor-unfocused-style = solid\ncopy-trim-whitespace = perhaps";
+        assert_eq!(Config::detect_malformed_values(invalid).len(), 2);
+        let cfg = Config::parse_text(invalid);
+        assert_eq!(cfg.cursor_unfocused_style, CursorUnfocusedStyle::Hollow);
+        assert!(cfg.copy_trim_whitespace);
     }
 }

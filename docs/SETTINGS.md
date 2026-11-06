@@ -81,7 +81,8 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
 | Window padding | `window-padding-x` | 0–40 px |
-| Cursor shape | `cursor-style` | Block · Bar · Underline |
+| Cursor shape | `cursor-style` | Block · Bar · Underline; applies to running panes immediately |
+| Unfocused cursor | `cursor-unfocused-style` | Hollow (default) · Hidden · Unchanged; windows and inactive split panes; applies live |
 | Cursor blink | `cursor-blink` | On / Off |
 | Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
 | Show pane titlebars | `show-titlebar` | On / Off |
@@ -108,7 +109,8 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
-| Copy on selection | `copy-on-select` | On / Off |
+| Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |
+| Trim trailing spaces on copy | `copy-trim-whitespace` | On (default) drops trailing whitespace at each copied line's end. Off copies the selection exactly as displayed |
 | Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
 | Focus mode | `focus` | Click to focus · Follows mouse · System default |
 | Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |

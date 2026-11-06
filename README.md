@@ -79,6 +79,35 @@ Window menus expose common actions and show their current Cmd shortcuts,
 including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.
 
+## Selecting text
+
+- Drag to select text. Double-click selects a word or detected path; triple-click
+  selects a line. Drag past the top or bottom to scroll through history.
+- **Option-drag on macOS / Alt-drag elsewhere** selects a rectangular block.
+- **Shift-click** extends the existing selection from its anchor; keep dragging
+  to adjust the end. Without a selection it starts one. Shift also bypasses a
+  terminal application's mouse reporting so you can select text there;
+  Shift+Option/Alt-drag starts a block.
+- **Shift-right-click** off an existing selection extends it to the pointer;
+  right-click on it opens its context menu.
+- **Cmd-click or Ctrl-click** opens a detected link (`link-single-click = true`
+  also permits an unmodified click).
+
+Releasing a drag copies the selection by default (`copy-on-select = true`).
+Copy explicitly with **Cmd+C on macOS / Ctrl+Shift+C elsewhere**, the Copy menu
+item, or vi-mode yank. With no selection, explicit copy keeps the clipboard
+unless `smart-copy = false`. Linux/X11 automatic copy also updates PRIMARY
+for middle-click paste. Double- and triple-click selections copy immediately.
+
+Copy drops trailing whitespace at the end of each copied line
+(`copy-trim-whitespace = true`). Set it to `false` to copy the selection exactly
+as displayed, including trailing spaces and block padding. Stream selections join soft-wrapped lines; rectangular blocks
+copy each row's column slice on its own line. Settings > Behavior exposes the
+copy controls and selection modifiers. Settings > Appearance changes cursor
+shape, blinking and the unfocused style immediately. An unfocused window uses
+a subdued selection and, by default, a steady hollow cursor; an application
+that hides its cursor keeps it hidden.
+
 ## Agent previews
 
 Claude Code and Codex running in a Kettle pane can show you images, SVG and
