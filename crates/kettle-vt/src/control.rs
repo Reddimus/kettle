@@ -84,6 +84,25 @@ impl ControlParser {
         self.state
     }
 
+    /// Consume the run of plain text at the start of `input` at once and
+    /// return its length; 0 when the parser is not at rest in Ground. Every
+    /// byte counted is one `advance` would report as text without changing
+    /// the state: below 0x80 and not ESC, CAN or SUB, with no UTF-8 sequence
+    /// open. C1 introducers and UTF-8 leads stop the run.
+    pub fn skip_plain(&mut self, input: &[u8]) -> usize {
+        if self.state != State::Ground || self.utf8_continuation != 0 {
+            return 0;
+        }
+        let run = input
+            .iter()
+            .position(|&byte| byte >= 0x80 || matches!(byte, 0x1b | 0x18 | 0x1a))
+            .unwrap_or(input.len());
+        if run > 0 {
+            self.utf8_kind = None;
+        }
+        run
+    }
+
     /// Consume exactly one byte. A malformed UTF-8 lead stops shielding at the
     /// first non-continuation; no validation or replacement of text is done.
     pub fn advance(&mut self, byte: u8) -> Event {
@@ -267,13 +286,33 @@ impl AnsiStripper {
     /// Append text directly to the caller's buffer without an intermediate copy.
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         let mut start = 0;
-        for (index, &byte) in input.iter().enumerate() {
+        let mut index = 0;
+        while index < input.len() {
+            index += self.parser.skip_plain(&input[index..]);
+            let Some(&byte) = input.get(index) else {
+                break;
+            };
             if !self.parser.advance(byte).is_text() {
                 out.extend_from_slice(&input[start..index]);
                 start = index + 1;
             }
+            index += 1;
         }
         out.extend_from_slice(&input[start..]);
+    }
+
+    /// Advance over `input` as `push` would, keeping no text: the state a
+    /// later `push` needs when nothing wants this chunk's text.
+    pub fn track(&mut self, input: &[u8]) {
+        let mut index = 0;
+        while index < input.len() {
+            index += self.parser.skip_plain(&input[index..]);
+            let Some(&byte) = input.get(index) else {
+                break;
+            };
+            self.parser.advance(byte);
+            index += 1;
+        }
     }
 
     /// Strip one chunk, retaining parser state for the next call.

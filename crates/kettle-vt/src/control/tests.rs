@@ -531,3 +531,69 @@ fn stage_two_private_recovery_depends_on_bulk_run_boundaries() {
     }
     assert_eq!(whole, split);
 }
+
+/// The plain-text run skip in `push` and `track` must match feeding every
+/// byte through `advance`, output and final state alike, across chunk
+/// boundaries that split escapes and UTF-8 sequences.
+#[test]
+fn skipping_plain_runs_matches_byte_at_a_time_stripping() {
+    let pieces: &[&[u8]] = &[
+        b"plain text ",
+        b"\x1b[31m",
+        b"\x1b]0;title\x07",
+        b"\x1b]8;;x\x1b\\",
+        b"\x9b2J",
+        b"\x9d0;c1\x9c",
+        b"\x18",
+        b"\x1a",
+        "é".as_bytes(),
+        "界".as_bytes(),
+        "😀".as_bytes(),
+        b"\xe2\x82",
+        b"\xac",
+        b"\x80",
+        b"\xff",
+        b"\r\n",
+        b"\t",
+        b"\x1b",
+        b"[",
+        b"\x1bP1;2",
+        b"\x1b\\",
+        b"\x1b(B",
+        b"0123456789",
+        b"\x07",
+        b"\x1b_apc\x1b\\",
+    ];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..400 {
+        let mut input = Vec::new();
+        for _ in 0..(next() % 40) {
+            input.extend_from_slice(pieces[(next() % pieces.len() as u64) as usize]);
+        }
+        let mut reference_parser = ControlParser::new();
+        let reference: Vec<u8> = input
+            .iter()
+            .copied()
+            .filter(|&byte| reference_parser.advance(byte).is_text())
+            .collect();
+        let mut fast = AnsiStripper::new();
+        let mut tracked = AnsiStripper::new();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < input.len() {
+            let end = (at + 1 + (next() % 9) as usize).min(input.len());
+            fast.push(&input[at..end], &mut out);
+            tracked.track(&input[at..end]);
+            at = end;
+        }
+        assert_eq!(out, reference, "{input:?}");
+        assert_eq!(fast.parser, reference_parser, "{input:?}");
+        assert_eq!(tracked, fast, "{input:?}");
+    }
+}
