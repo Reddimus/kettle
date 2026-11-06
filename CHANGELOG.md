@@ -96,6 +96,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- In Kettle's GNOME header bar the new-tab options button is drawn and named as
+  the window's primary menu (≡, "Main menu"), as GNOME apps place it.
+
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
 

@@ -119,9 +119,9 @@ pub use overlays::{
     toast_text_rows, update_toast_geometry,
 };
 use overlays::{
-    MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
-    media_paste_receipt_text, menu_chrome_quads, push_input_bar, scroll_arrow_glyphs,
-    toast_buffer_text,
+    MAIN_MENU_GLYPH, MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH,
+    context_menu_panel_width, media_paste_receipt_text, menu_chrome_quads, push_input_bar,
+    scroll_arrow_glyphs, toast_buffer_text,
 };
 #[cfg(test)]
 use overlays::{
@@ -2542,15 +2542,21 @@ impl Renderer {
                 self.new_tab_arrow_buffer.set_metrics(control_metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
-                // Constant glyph, shaped once per font family.
-                if self.new_tab_arrow_text != NEW_TAB_MENU_GLYPH {
+                // Constant glyph, shaped once per font family: GNOME's
+                // primary-menu sign where Kettle draws the header bar.
+                let glyph = if tabbar.window_controls.is_empty() {
+                    NEW_TAB_MENU_GLYPH
+                } else {
+                    MAIN_MENU_GLYPH
+                };
+                if self.new_tab_arrow_text != glyph {
                     self.new_tab_arrow_buffer.set_text(
-                        NEW_TAB_MENU_GLYPH,
+                        glyph,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.new_tab_arrow_text = NEW_TAB_MENU_GLYPH.into();
+                    self.new_tab_arrow_text = glyph.into();
                 }
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);

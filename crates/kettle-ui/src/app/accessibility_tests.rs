@@ -1435,6 +1435,24 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
                 assert!(nodes.iter().any(|(_, node)| node.label() == Some(text)
                     && node.supports_action(accesskit::Action::Click)));
             }
+            // In a Kettle-drawn GNOME header bar the same button is the
+            // window's primary menu.
+            bar.window_controls.push(kettle_render::WindowControlButton {
+                action: kettle_render::WindowControl::Close,
+                rect: (300.0, 0.0, 28.0, 28.0),
+                label: "Close".into(),
+                hovered: false,
+                pressed: false,
+            });
+            let header = super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr);
+            let main = tr.text(kettle_i18n::Text::A11yMainMenu);
+            assert!(header.iter().any(|(_, node)| node.label() == Some(main)));
+            assert!(
+                !header
+                    .iter()
+                    .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::A11yNewTabMenu)))
+            );
+            bar.window_controls.clear();
             bar.height = 0.0;
             assert!(super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr).is_empty());
             bar.height = 28.0;

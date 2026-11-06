@@ -3131,7 +3131,13 @@ pub(super) fn tab_accessibility_projection(
         (
             ACCESSIBILITY_TAB_MENU_ID,
             bar.new_tab_menu,
-            tr.text(kettle_i18n::Text::A11yNewTabMenu),
+            // In a Kettle-drawn GNOME header bar the menu is the window's
+            // primary menu, drawn as one.
+            tr.text(if bar.window_controls.is_empty() {
+                kettle_i18n::Text::A11yNewTabMenu
+            } else {
+                kettle_i18n::Text::A11yMainMenu
+            }),
         ),
     ] {
         if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {

@@ -1289,6 +1289,8 @@ impl TabBar {
 }
 
 pub(crate) const NEW_TAB_MENU_GLYPH: &str = "▾";
+/// The same menu in a GNOME header bar, drawn as GNOME's primary menu.
+pub(crate) const MAIN_MENU_GLYPH: &str = "≡";
 
 pub(crate) const NEW_TAB_PLUS_GLYPH: &str = "+";
 

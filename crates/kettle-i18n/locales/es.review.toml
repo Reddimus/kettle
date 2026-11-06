@@ -933,6 +933,7 @@ pane_zoomed_unbound = "draft"
 scrollback_a11y_position = "draft"
 settings_hint_reset = "draft"
 a11y_output_lines = "draft"
+a11y_main_menu = "draft"
 
 [second-pass]
 keys = [
@@ -950,6 +951,7 @@ keys = [
     "osc52_copied",
     "scrollback_a11y_position",
     "a11y_output_lines",
+    "a11y_main_menu",
 
     "hint_legend",
     "hint_legend_plain",
