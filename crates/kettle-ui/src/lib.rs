@@ -64,6 +64,7 @@ mod lua;
 mod lua_pattern;
 #[cfg(target_os = "macos")]
 mod macos_display;
+mod paste_safety;
 // The Core Animation layer that blinks the cursor on macOS. Never exists
 // elsewhere.
 mod macos_cursor_layer;

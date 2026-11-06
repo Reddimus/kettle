@@ -560,7 +560,9 @@ impl App {
         };
         match button {
             ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
-            ConfirmButton::Confirm { .. } | ConfirmButton::PasteOneLine { .. } => {
+            ConfirmButton::Confirm { .. }
+            | ConfirmButton::PasteOneLine { .. }
+            | ConfirmButton::PasteWithoutControls { .. } => {
                 let Some(action) = confirmation_button_action(dialog, index) else {
                     return;
                 };
@@ -1237,8 +1239,8 @@ impl App {
             } else {
                 ConfirmKey::Tab
             }),
-            Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
-            Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(ConfirmKey::Left),
+            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(ConfirmKey::Right),
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && !ws.mods.control_key()
@@ -2706,9 +2708,9 @@ pub(super) fn confirm_dialog_keypress(
 fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Translator) -> &'a str {
     match button {
         ConfirmButton::Cancel => tr.text(kettle_i18n::Text::ConfirmButtonCancel),
-        ConfirmButton::Confirm { label, .. } | ConfirmButton::PasteOneLine { label } => {
-            label.as_str()
-        }
+        ConfirmButton::Confirm { label, .. }
+        | ConfirmButton::PasteOneLine { label }
+        | ConfirmButton::PasteWithoutControls { label } => label.as_str(),
     }
 }
 
@@ -2876,9 +2878,12 @@ pub enum ConfirmAction {
 }
 
 /// Buttons in a confirmation. Close and rebind questions use Cancel/Confirm;
-/// paste questions also offer a one-line alternative.
+/// paste questions also offer one-line and control-removing alternatives.
 #[derive(Debug, Clone)]
 pub enum ConfirmButton {
+    PasteWithoutControls {
+        label: String,
+    },
     PasteOneLine {
         label: String,
     },
@@ -3288,12 +3293,16 @@ pub(super) fn confirmation_button_action(
     match button {
         ConfirmButton::Cancel => None,
         ConfirmButton::Confirm { .. } => Some(dialog.on_confirm.clone()),
-        ConfirmButton::PasteOneLine { .. } => {
+        ConfirmButton::PasteOneLine { .. } | ConfirmButton::PasteWithoutControls { .. } => {
             let mut action = dialog.on_confirm.clone();
             let ConfirmAction::Paste { text, .. } = &mut action else {
                 return None;
             };
-            *text = paste_as_one_line(text);
+            *text = if matches!(button, ConfirmButton::PasteWithoutControls { .. }) {
+                crate::paste_safety::without_controls(text)
+            } else {
+                paste_as_one_line(text)
+            };
             Some(action)
         }
     }

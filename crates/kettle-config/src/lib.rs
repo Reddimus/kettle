@@ -423,7 +423,7 @@ impl PasteProtection {
         match self {
             Self::Off => false,
             Self::Always => text.contains(['\n', '\r']),
-            Self::Auto => !bracketed && text.bytes().any(|b| b < 0x20 && b != b'\t'),
+            Self::Auto => !bracketed && text.chars().any(|c| c.is_control() && c != '\t'),
         }
     }
 }
@@ -1415,6 +1415,8 @@ pub struct Config {
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
+    /// Show throttled notices after successful program clipboard writes.
+    pub osc52_notify: bool,
     /// Which macOS Option key acts as terminal Alt. Parsed but inert elsewhere.
     pub macos_option_as_alt: MacosOptionAsAlt,
     /// Kettle's modified-Enter fallback before a client negotiates key encoding.
@@ -3121,6 +3123,7 @@ impl Default for Config {
             macos_cursor_blink_layer: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
+            osc52_notify: true,
             macos_option_as_alt: MacosOptionAsAlt::None,
             modify_other_keys: ModifyOtherKeysMode::Auto,
             keybind_yield: KeybindYield::Auto,
@@ -3832,6 +3835,8 @@ impl Config {
         "login_shell",
         "macos-cursor-blink-layer",
         "macos_cursor_blink_layer",
+        "osc52-notify",
+        "osc52_notify",
         "shell-integration",
         "shell_integration",
         "mouse-autohide",
@@ -4867,6 +4872,11 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "osc52-notify" | "osc52_notify" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.osc52_notify = b;
                     }
                 }
                 "macos-cursor-blink-layer" | "macos_cursor_blink_layer" => {
@@ -7648,6 +7658,31 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn osc52_notify_boolean_parsing_and_paste_control_coverage() {
+        assert!(Config::default().osc52_notify);
+        for key in ["osc52-notify", "osc52_notify"] {
+            assert!(Config::BOOL_KEYS.contains(&key));
+            let text = format!("{key} = false");
+            let (config, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty());
+            assert!(!config.osc52_notify);
+            assert!(Config::detect_malformed_values(&text).is_empty());
+            assert!(Config::parse_text(&format!("{key} = true")).osc52_notify);
+            assert!(Config::parse_text(&format!("{key} = typo")).osc52_notify);
+            assert_eq!(
+                Config::detect_malformed_values(&format!("{key} = typo")).len(),
+                1
+            );
+        }
+        for text in ["\x7f", "\u{85}", "\u{9b}31m", "\x1b[31m"] {
+            assert!(PasteProtection::Auto.confirms(text, false));
+            assert!(!PasteProtection::Auto.confirms(text, true));
+            assert!(!PasteProtection::Off.confirms(text, false));
+        }
+        assert!(!PasteProtection::Auto.confirms("é界\t", false));
+    }
+
+    #[test]
     fn osc52_policy_parsing_and_safe_default() {
         // Default allows writes, denies reads (clipboard exfil guard).
         let d = Config::default().osc52;
@@ -7824,7 +7859,7 @@ cell-height = 1.2\n";
                 matches!(byte, b'\n' | b'\r')
             );
         }
-        for text in ["", "hello", "ñ\t界", "a\u{7f}b"] {
+        for text in ["", "hello", "ñ\t界"] {
             assert!(!PasteProtection::Auto.confirms(text, false));
         }
         assert!(PasteProtection::Always.confirms("a\r\nb", true));

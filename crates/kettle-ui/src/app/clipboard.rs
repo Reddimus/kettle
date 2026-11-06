@@ -107,46 +107,109 @@ pub(super) fn apply_osc52_event(
     }
 }
 
-impl Osc52Clipboard for App {
-    fn store(&mut self, target: ClipboardType, text: String) {
-        self.store_osc52_writes(vec![(target, text)]);
+pub(super) trait Osc52Backend {
+    fn set(&mut self, target: ClipboardType, text: String) -> Result<(), arboard::Error>;
+    fn get(&mut self, target: ClipboardType) -> Result<String, arboard::Error>;
+}
+
+impl Osc52Backend for arboard::Clipboard {
+    fn set(&mut self, target: ClipboardType, text: String) -> Result<(), arboard::Error> {
+        set_osc52_clipboard(self, target, text)
     }
 
-    fn load(&mut self, target: ClipboardType) -> String {
-        // OSC 52 read lets a (remote) program exfiltrate the
-        // clipboard; denied by default — reply empty so the
-        // protocol stays well-formed without leaking.
-        if self.cfg.osc52.can_paste() {
-            self.clipboard
-                .as_mut()
-                .map(|c| osc52_read_result(get_clipboard_text_bounded(c, target, OSC52_MAX + 1)))
-                .unwrap_or_default()
+    fn get(&mut self, target: ClipboardType) -> Result<String, arboard::Error> {
+        get_clipboard_text_bounded(self, target, OSC52_MAX + 1)
+    }
+}
+
+pub(super) struct PaneClipboard<'a, C> {
+    pub clipboard: Option<&'a mut C>,
+    pub policy: Osc52,
+    pub notify: bool,
+    pub notices: &'a mut crate::mux::Osc52NoticeState,
+    pub tr: &'a kettle_i18n::Translator,
+}
+
+impl crate::mux::Osc52NoticeState {
+    fn show(&mut self, message: String) {
+        self.message = Some(message);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub(super) fn copied(
+        &mut self,
+        now: std::time::Instant,
+        enabled: bool,
+        count: usize,
+        tr: &kettle_i18n::Translator,
+    ) {
+        if enabled
+            && self.last_copy.is_none_or(|last| {
+                now.saturating_duration_since(last) >= std::time::Duration::from_secs(5)
+            })
+        {
+            self.last_copy = Some(now);
+            self.show(tr.osc52_copied(count as u64));
+        }
+    }
+
+    pub(super) fn denied(&mut self, read: bool, tr: &kettle_i18n::Translator) {
+        let seen = if read {
+            &mut self.denied_read
         } else {
-            String::new()
+            &mut self.denied_write
+        };
+        if !*seen {
+            *seen = true;
+            self.show(
+                tr.text(if read {
+                    kettle_i18n::Text::Osc52DeniedRead
+                } else {
+                    kettle_i18n::Text::Osc52DeniedWrite
+                })
+                .to_string(),
+            );
         }
     }
 }
 
-impl App {
-    /// Apply OSC 52 stores when the config allows programs to copy.
-    fn store_osc52_writes(&mut self, writes: Vec<(ClipboardType, String)>) {
-        for (target, s) in writes {
-            // Normalize complete card clusters before clipping so a
-            // byte limit cannot leave a partial placeholder behind.
-            if self.cfg.osc52.can_copy()
-                && let Some(cb) = &mut self.clipboard
-            {
-                match prepare_osc52_copy(s, OSC52_MAX) {
-                    Ok(text) => {
-                        if let Err(error) = set_osc52_clipboard(cb, target, text) {
-                            log::warn!(
-                                "clipboard write failed (OSC 52 {target:?} target): {error}"
-                            );
+impl<C: Osc52Backend> Osc52Clipboard for PaneClipboard<'_, C> {
+    fn store(&mut self, target: ClipboardType, text: String) {
+        if !self.policy.can_copy() {
+            self.notices.denied(false, self.tr);
+            return;
+        }
+        if let Some(cb) = &mut self.clipboard {
+            match prepare_osc52_copy(text, OSC52_MAX) {
+                Ok(text) => {
+                    let count = text.chars().count();
+                    match cb.set(target, text) {
+                        Ok(()) => self.notices.copied(
+                            std::time::Instant::now(),
+                            self.notify,
+                            count,
+                            self.tr,
+                        ),
+                        Err(error) => {
+                            log::warn!("clipboard write failed (OSC 52 {target:?} target): {error}")
                         }
                     }
-                    Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
                 }
+                Err(error) => log::warn!("OSC 52: could not prepare text: {error}"),
             }
+        }
+    }
+
+    fn load(&mut self, target: ClipboardType) -> String {
+        // Denied reads still receive an empty, well-formed protocol reply.
+        if self.policy.can_paste() {
+            self.clipboard
+                .as_mut()
+                .map(|c| osc52_read_result(c.get(target)))
+                .unwrap_or_default()
+        } else {
+            self.notices.denied(true, self.tr);
+            String::new()
         }
     }
 }

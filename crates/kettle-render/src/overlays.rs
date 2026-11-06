@@ -533,7 +533,8 @@ pub fn update_toast_geometry(
     })
 }
 
-fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
+/// Number of lines painted by the shared notice/toast word wrapper.
+pub fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
     toast_wrapped_text(text, columns).map(|(_, rows)| rows)
 }
 

@@ -984,7 +984,17 @@ pub(crate) enum PtyOutputClosePhase {
     },
 }
 
+#[derive(Default)]
+pub(crate) struct Osc52NoticeState {
+    pub message: Option<String>,
+    pub revision: u64,
+    pub last_copy: Option<std::time::Instant>,
+    pub denied_read: bool,
+    pub denied_write: bool,
+}
+
 pub struct Pane {
+    pub(crate) osc52_notice: Osc52NoticeState,
     pub inline_cards: kettle_render::InlineCards,
     pub term: Terminal,
     /// The pane's own child process, read right after spawning it. Only this
@@ -2525,6 +2535,7 @@ impl Mux {
                 group_name: None,
                 closed: false,
                 held: false,
+                osc52_notice: Osc52NoticeState::default(),
                 exit_code: None,
                 close_on_success: false,
                 held_child_reaped: false,

@@ -882,8 +882,23 @@ media_viewer_pin_short = "accepted"
 media_viewer_overlay_hint = "accepted"
 media_viewer_a11y = "accepted"
 
+confirm_paste_without_controls = "draft"
+osc52_denied_read = "draft"
+osc52_denied_write = "draft"
+confirm_paste_lines = "draft"
+confirm_paste_escapes = "draft"
+confirm_paste_controls = "draft"
+osc52_copied = "draft"
+
 [second-pass]
 keys = [
+    "confirm_paste_without_controls",
+    "osc52_denied_read",
+    "osc52_denied_write",
+    "confirm_paste_lines",
+    "confirm_paste_escapes",
+    "confirm_paste_controls",
+    "osc52_copied",
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",

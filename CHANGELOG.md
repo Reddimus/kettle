@@ -17,6 +17,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   menu, macOS Shell menu and command palette. Profiles open separate windows;
   empty lists explain how to create a profile or save a layout.
 
+- Risky paste confirmations now explain line and control counts, preview controls
+  visibly, and offer Paste Without Controls while keeping line breaks. Cancel
+  remains the default, with keyboard and screen-reader access to every choice.
+  Program clipboard copies show a per-pane notice (disable with
+  `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
+  once per pane. The README now documents paste choices and accessibility.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

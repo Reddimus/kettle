@@ -108,6 +108,67 @@ shape, blinking and the unfocused style immediately. An unfocused window uses
 a subdued selection and, by default, a steady hollow cursor; an application
 that hides its cursor keeps it hidden.
 
+## Pasting
+
+Use the Paste shortcut (Cmd+V on macOS, Ctrl+Shift+V on Linux). With
+`paste-protection = auto`, Kettle asks before text containing line breaks or
+control characters reaches any writable recipient without bracketed paste.
+`always` asks for every multiline paste, including bracketed paste; `off`
+disables confirmation. The dialog reports the line count, escape sequences
+and other controls, and previews up to three lines with controls drawn visibly
+(for example, ␛, ␇ and ^X). Long previews are truncated.
+
+- **Paste** sends the original text through the normal paste rules.
+- **Paste as one line** replaces CRLF, CR, LF and ASCII controls other than
+  TAB with spaces. It keeps tabs; escape-sequence payload text can remain.
+- **Paste Without Controls**, offered when controls are present, removes C0
+  controls other than TAB/LF/CR, DEL and C1 controls, plus whole ESC, CSI and
+  OSC sequences (including control strings). It preserves tabs and line breaks.
+  An unterminated sequence is removed through the end of the paste.
+- **Cancel** sends nothing and has focus initially.
+
+Bracketed paste wraps the text so a supporting program can treat it as data.
+Kettle strips every embedded ESC byte inside that wrapper, even after choosing
+Paste, so clipboard text cannot end the wrapper early. Within the wrapper LF
+stays LF and CRLF becomes LF; without it, line endings become CR for terminal
+input. Removing controls does not make pasted shell commands safe to run.
+
+With `paste-files = on` (default), copied files paste their existing local
+paths, quoted for the pane's shell. `paste-files = off` ignores copied file
+references and uses text instead; explicit drops still paste paths. Kettle
+does not upload the files or change their lifetime.
+With `paste-images = on` (the default), a clipboard bitmap becomes a private
+PNG such as `$TMPDIR/kettle-paste-*/0001.png` in an owner-only directory
+under the OS temporary directory
+(on Windows, under per-user Local App Data). Its quoted local path is written
+to the pane. Kettle keeps the PNG until exit, with a per-session limit of 64 PNGs and
+256 MiB; a bounded startup sweep removes stale sessions left by a dead
+process. A remote shell cannot read a local file merely from its path.
+
+An accepted bitmap path shows a short-lived receipt card with a thumbnail;
+its body opens the retained image in Kettle without typing more text. Copied
+or dropped videos can show an informational receipt. `paste-image-preview`
+and `paste-video-preview` disable these cards. A new media paste replaces the
+previous receipt, and later input removes it; closing the card does not delete
+the retained PNG.
+
+Programs can use OSC 52 to access the clipboard. `osc52 = copy` (default)
+allows writes and denies reads; `off` denies both, `paste` allows reads only,
+and `both` allows both. Allowing reads lets a remote program obtain clipboard
+contents. Successful writes show "A program copied N characters to the
+clipboard" at most once every five seconds per pane, counting Unicode code
+points after the size limit and internal-marker removal. Set
+`osc52-notify = false` to silence successful-write notices. Blocked reads and
+writes each show one notice per pane explaining the `osc52` policy key.
+Notices are dismissible and contain no clipboard text.
+
+**Accessibility:** the paste confirmation exposes an alert dialog, its full
+message and every button to screen readers. Tab and Shift+Tab cycle choices;
+arrows move between them, Enter activates the focused choice and Esc cancels.
+With `vim-menu-nav`, Y chooses Paste, N cancels, and H/L move focus. The
+confirmation has no editable field or IME caret. OSC 52 notices are polite
+screen-reader status announcements with a Dismiss action.
+
 ## Agent previews
 
 Claude Code and Codex running in a Kettle pane can show you images, SVG and

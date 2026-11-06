@@ -69,29 +69,49 @@ impl App {
         );
         let mut notices = Vec::new();
         for (id, partition) in self.pane_layout(ws, self.area(ws)) {
-            let Some(pane) = ws.mux.panes.get(&id).filter(|pane| pane.held) else {
+            let Some(pane) = ws
+                .mux
+                .panes
+                .get(&id)
+                .filter(|pane| pane.held || pane.osc52_notice.message.is_some())
+            else {
                 continue;
             };
-            let message = pane
-                .exit_code
-                .map(|code| self.ui_text.process_exited(u64::from(code)))
-                .unwrap_or_else(|| {
+            let (message, details, close) = if pane.held {
+                (
+                    pane.exit_code
+                        .map(|code| self.ui_text.process_exited(u64::from(code)))
+                        .unwrap_or_else(|| {
+                            self.ui_text
+                                .text(kettle_i18n::Text::ProcessExitPending)
+                                .into()
+                        }),
                     self.ui_text
-                        .text(kettle_i18n::Text::ProcessExitPending)
-                        .into()
-                });
-            let details = self
-                .ui_text
-                .text(kettle_i18n::Text::ProcessRestart)
-                .to_string();
-            let close = self
-                .ui_text
-                .text(kettle_i18n::Text::ProcessClose)
-                .to_string();
+                        .text(kettle_i18n::Text::ProcessRestart)
+                        .to_string(),
+                    self.ui_text
+                        .text(kettle_i18n::Text::ProcessClose)
+                        .to_string(),
+                )
+            } else {
+                (
+                    pane.osc52_notice.message.clone().unwrap_or_default(),
+                    String::new(),
+                    self.ui_text
+                        .text(kettle_i18n::Text::NoticeDismiss)
+                        .to_string(),
+                )
+            };
+            let columns = ((partition.terminal.2 - 12.0) / cell.0).floor().max(2.0) as usize - 1;
+            let rows = if pane.held {
+                2
+            } else {
+                kettle_render::toast_text_rows(&message, columns).unwrap_or(1)
+            };
             if let Some(geometry) = kettle_render::persistent_notice_geometry(
                 partition.terminal,
                 cell,
-                2,
+                rows,
                 details.width(),
                 close.width(),
             ) {
@@ -152,10 +172,14 @@ impl App {
         restart: bool,
     ) {
         if let Some(id) = pane {
-            if !ws.mux.panes.get(&id).is_some_and(|p| p.held) {
+            let Some(pane) = ws.mux.panes.get_mut(&id) else {
                 return;
-            }
-            if restart {
+            };
+            if !pane.held {
+                if !restart {
+                    pane.osc52_notice.message = None;
+                }
+            } else if restart {
                 let rect = self
                     .pane_layout(ws, self.area(ws))
                     .into_iter()

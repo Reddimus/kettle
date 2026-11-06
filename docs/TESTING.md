@@ -3021,3 +3021,24 @@ Native acceptance still needs focus transitions, split cursors, Option/Alt-drag
 and Shift-click on macOS/Linux, IME candidate placement and English/Spanish
 Settings at narrow widths. Source and headless tests do not establish live
 window or fluent-language acceptance.
+
+### Paste safety and program clipboard feedback
+
+Portable `kettle-ui` tests cover complete and unterminated ESC/CSI/OSC and C1
+control strings, DEL, CRLF/CR/LF retention, UTF-8 safety, visible-control previews,
+translated summaries, conditional fourth buttons, keyboard consent, and shared
+hit-test/AccessKit geometry in narrow windows. OSC 52 notice tests cover per-pane
+five-second throttling, Unicode counts, suppression, one-time read/write policy
+messages and polite accessibility status. `kettle-config` tests the
+`osc52-notify` boolean and control-character consent policy; `kettle-i18n` checks
+the English and Spanish draft messages.
+
+Run the full `kettle-ui`, `kettle-config`, `kettle-i18n` and `kettle-render`
+suites and their all-target clippy checks. Live acceptance still needs a desktop:
+paste text containing controls, navigate all four actions in English and Spanish,
+verify screen-reader announcements and cancel focus, then issue allowed and
+blocked OSC 52 operations in separate panes and dismiss the notices. Check
+`kettle ctl ui_geometry` bounds against each painted button and notice. The
+dialog has no IME caret; the notice overlays the terminal without moving its
+IME position. Clipboard backend success/failure and native screen-reader speech
+cannot be established by the portable model tests alone.

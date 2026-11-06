@@ -2428,7 +2428,7 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.confirm_paste_body]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
-args = [{ name = "preview", type = "str" }]
+args = [{ name = "lines", type = "str" }, { name = "escapes", type = "str" }, { name = "controls", type = "str" }, { name = "preview", type = "str" }]
 [messages.confirm_paste_one_line]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.menu_select_all]
@@ -2634,3 +2634,32 @@ context = "crates/kettle-ui/src/settings.rs: Settings row: exclude undrawn trail
 
 [messages.settings_description_field_copy_trim_whitespace]
 context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."
+
+[messages.confirm_paste_without_controls]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.osc52_denied_read]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.osc52_denied_write]
+context = "Paste safety dialog action or pane clipboard-policy notice. Keep the osc52 key and values literal."
+
+[messages.confirm_paste_lines]
+context = "crates/kettle-ui/src/app/paste.rs: line-count fragment in the paste warning. CRLF counts once; a trailing line break starts an empty final line."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste_escapes]
+context = "crates/kettle-ui/src/app/paste.rs: number of escape/control sequences, including C1 CSI and OSC; used in the paste warning summary."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste_controls]
+context = "crates/kettle-ui/src/app/paste.rs: C0 except TAB/CR/LF, DEL and C1 code points outside escape sequences; used in the paste warning summary."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.osc52_copied]
+context = "crates/kettle-ui/src/app/clipboard.rs: per-pane notice after a program successfully sets the clipboard. count is Unicode code points after internal markers and excess bytes are removed. No clipboard text is shown."
+args = [{ name = "count", type = "u64" }]
+plural = "count"

@@ -4755,7 +4755,20 @@ the original pane, and the broadcast scope and recipient set. Consent fails
 closed if that scope changes. Queued input behind a paste cannot pass through
 an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
 `input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
+`paste_safety` scans Unicode code points in linear time for the summary and
+control-removing alternative. It removes whole escape/control strings, retaining
+TAB/CR/LF even within malformed strings. Preview work is capped at 160 visible
+characters and three lines. The fourth action uses the same confirmation layout
+for painting, pointer input, AccessKit and `ui_geometry`; it adds no IME caret.
 Path pastes retain their stricter rejection of control characters in filenames.
+
+OSC 52 operations remain ordered in the terminal clipboard journal. The UI
+records successful platform clipboard writes in per-pane notice state, with a
+five-second successful-copy interval and separate lifetime read/write denial
+latches. The pane's dismissible notice uses the persistent notice painter and
+its shared word wrapper, geometry, hit tests and polite AccessKit status. Held
+process banners take precedence. Notice content contains counts and policy text,
+never clipboard contents, and never moves terminal or IME geometry.
 
 Context menus keep ancestor levels and their physical anchors while a submenu
 is open. The app supplies each panel to the renderer in stacking order and

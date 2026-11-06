@@ -171,6 +171,9 @@ fn every_spanish_message_has_a_review_status() {
                         | "config_notice"
                         | "config_notice_more"
                         | "notice_dismiss"
+                        | "osc52_copied"
+                        | "osc52_denied_read"
+                        | "osc52_denied_write"
                 )
         })
         .cloned()

@@ -112,7 +112,7 @@ pub use overlays::{
     TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
     format_media_size, media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
     notification_geometry_with_notices, persistent_notice_geometry, tab_drag, theme_picker_prefix,
-    title_edit_prefix, update_toast_geometry,
+    title_edit_prefix, toast_text_rows, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,

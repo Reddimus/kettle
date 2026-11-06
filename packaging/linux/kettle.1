@@ -1025,6 +1025,35 @@ The same controls are available under Settings > Search and persist
 immediately. Search input is Kettle-owned UI chrome and is never forwarded to
 the active PTY.
 .
+.SS Pasting
+With
+.B paste\-protection = auto
+Kettle confirms line breaks and controls before an unbracketed paste.
+.B always
+confirms every multiline paste;
+.B off
+never asks. The dialog shows line and control counts and a bounded preview.
+Paste sends the text normally; Paste as one line replaces line breaks and ASCII
+controls other than TAB with spaces. Paste Without Controls removes controls
+and whole escape sequences while keeping TAB, CR and LF, and appears only when
+controls exist. Cancel is initially focused. Tab/Shift+Tab and arrows move,
+Enter activates, and Esc cancels. Screen readers receive the dialog, full
+message and each button. Bracketed paste strips embedded ESC bytes.
+.PP
+.B osc52 = copy
+allows program clipboard writes and denies reads by default.
+.B off
+blocks both;
+.B paste
+allows reads only;
+.B both
+allows both. A successful write shows a character-count notice at most once
+every five seconds per pane. Set
+.B osc52\-notify = false
+to silence successful-copy notices. Blocked reads and writes each explain the
+policy once per pane. Notices expose a polite screen-reader status and a
+Dismiss action.
+.
 .SH ENVIRONMENT
 .TP
 .B SHELL

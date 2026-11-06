@@ -166,3 +166,208 @@ fn bounded_osc52_errors_reply_with_an_empty_payload() {
         assert_eq!(reply.as_deref(), Some("\x1b]52;c;\x07"));
     }
 }
+
+#[test]
+fn osc52_notice_throttle_is_per_pane_and_counts_unicode_characters() {
+    use std::time::{Duration, Instant};
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let now = Instant::now();
+        let mut first = crate::mux::Osc52NoticeState::default();
+        let mut second = crate::mux::Osc52NoticeState::default();
+        let prepared = super::prepare_osc52_copy("é界".into(), 100).unwrap();
+        first.copied(now, true, prepared.chars().count(), &tr);
+        assert_eq!(first.message, Some(tr.osc52_copied(2)));
+        first.message = None;
+        first.copied(now + Duration::from_secs(4), true, 7, &tr);
+        assert_eq!(first.message, None);
+        second.copied(now + Duration::from_secs(4), true, 7, &tr);
+        assert_eq!(second.message, Some(tr.osc52_copied(7)));
+        first.copied(now + Duration::from_secs(5), true, 1, &tr);
+        assert_eq!(first.message, Some(tr.osc52_copied(1)));
+        first.message = None;
+        first.copied(now + Duration::from_secs(10), false, 5, &tr);
+        assert_eq!(first.message, None);
+        first.copied(now + Duration::from_secs(10), true, 5, &tr);
+        assert_eq!(first.message, Some(tr.osc52_copied(5)));
+    }
+}
+
+#[test]
+fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let mut state = crate::mux::Osc52NoticeState::default();
+        for read in [true, false] {
+            state.denied(read, &tr);
+            let message = state.message.take().unwrap();
+            assert!(message.contains(if read {
+                "osc52 = paste"
+            } else {
+                "osc52 = copy"
+            }));
+            assert!(!message.contains("secret"));
+            state.denied(read, &tr);
+            assert_eq!(state.message, None);
+            let toast = kettle_render::UpdateToastOverlay {
+                geometry: kettle_render::persistent_notice_geometry(
+                    (0.0, 0.0, 800.0, 600.0),
+                    (8.0, 16.0),
+                    3,
+                    0,
+                    10,
+                )
+                .unwrap(),
+                message: message.clone(),
+                details: String::new(),
+                close: tr.text(kettle_i18n::Text::NoticeDismiss).into(),
+                opacity: 1.0,
+                focused: None,
+            };
+            let nodes = super::persistent_notice_nodes(Some(7), &toast);
+            let node = &nodes
+                .iter()
+                .find(|(_, n)| n.role() == accesskit::Role::Status)
+                .unwrap()
+                .1;
+            assert_eq!(node.label(), Some(message.as_str()));
+            assert_eq!(node.live(), Some(accesskit::Live::Polite));
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|(_, n)| n.role() == accesskit::Role::Button)
+                    .count(),
+                1
+            );
+        }
+        let mut other_pane = crate::mux::Osc52NoticeState::default();
+        other_pane.denied(true, &tr);
+        assert!(other_pane.message.is_some());
+    }
+}
+
+#[test]
+fn osc52_policy_gates_backend_effects_and_only_successful_writes_notify() {
+    use super::{Osc52Backend, Osc52Clipboard, PaneClipboard};
+    use kettle_config::Osc52;
+    use kettle_core::TermEvent;
+    #[derive(Default)]
+    struct Backend {
+        text: String,
+        sets: usize,
+        gets: usize,
+        fail: bool,
+    }
+    impl Osc52Backend for Backend {
+        fn set(&mut self, _: ClipboardType, text: String) -> Result<(), arboard::Error> {
+            self.sets += 1;
+            if self.fail {
+                return Err(arboard::Error::ContentNotAvailable);
+            }
+            self.text = text;
+            Ok(())
+        }
+        fn get(&mut self, _: ClipboardType) -> Result<String, arboard::Error> {
+            self.gets += 1;
+            Ok(self.text.clone())
+        }
+    }
+    let tr = kettle_i18n::Translator::default();
+    for policy in [Osc52::Off, Osc52::Copy, Osc52::Paste, Osc52::Both] {
+        let mut backend = Backend {
+            text: "private".into(),
+            ..Default::default()
+        };
+        let mut notices = crate::mux::Osc52NoticeState::default();
+        {
+            let mut clipboard = PaneClipboard {
+                clipboard: Some(&mut backend),
+                policy,
+                notify: true,
+                notices: &mut notices,
+                tr: &tr,
+            };
+            let reply = super::apply_osc52_event(
+                &mut clipboard,
+                TermEvent::ClipboardLoad(
+                    ClipboardType::Clipboard,
+                    Arc::new(|s| format!("reply:{s}")),
+                ),
+            );
+            assert_eq!(
+                reply.as_deref(),
+                Some(if policy.can_paste() {
+                    "reply:private"
+                } else {
+                    "reply:"
+                })
+            );
+            clipboard.store(ClipboardType::Clipboard, "é界".into());
+        }
+        assert_eq!(backend.sets, usize::from(policy.can_copy()));
+        assert_eq!(backend.gets, usize::from(policy.can_paste()));
+        assert_eq!(notices.denied_read, !policy.can_paste());
+        assert_eq!(notices.denied_write, !policy.can_copy());
+        if policy.can_copy() {
+            assert_eq!(notices.message, Some(tr.osc52_copied(2)));
+        } else {
+            assert!(notices.message.as_ref().unwrap().contains("osc52 = copy"));
+        }
+    }
+    for (available, fail, notify) in [
+        (false, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
+        let mut backend = Backend {
+            fail,
+            ..Default::default()
+        };
+        let mut notices = crate::mux::Osc52NoticeState::default();
+        let mut clipboard = PaneClipboard {
+            clipboard: available.then_some(&mut backend),
+            policy: Osc52::Copy,
+            notify,
+            notices: &mut notices,
+            tr: &tr,
+        };
+        clipboard.store(ClipboardType::Clipboard, "test".into());
+        assert_eq!(notices.message, None);
+        assert_eq!(notices.last_copy, None);
+        assert_eq!(backend.sets, usize::from(available));
+    }
+}
+
+#[test]
+fn osc52_policy_notice_geometry_has_room_for_the_shared_word_wrapping() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        for message in [
+            tr.text(kettle_i18n::Text::Osc52DeniedRead).to_string(),
+            tr.text(kettle_i18n::Text::Osc52DeniedWrite).to_string(),
+            tr.osc52_copied(123456),
+        ] {
+            for width in [240.0, 400.0, 800.0] {
+                let cell = (8.0, 16.0);
+                let columns = ((width - 12.0_f32) / cell.0).floor() as usize - 1;
+                let rows = kettle_render::toast_text_rows(&message, columns).unwrap();
+                let geometry = kettle_render::persistent_notice_geometry(
+                    (0.0, 0.0, width, 600.0),
+                    cell,
+                    rows,
+                    0,
+                    10,
+                )
+                .unwrap();
+                assert!(geometry.message.3 >= rows as f32 * cell.1);
+                assert_eq!(
+                    geometry.hit_test(
+                        geometry.close.0 + geometry.close.2 / 2.0,
+                        geometry.close.1 + geometry.close.3 / 2.0
+                    ),
+                    Some(kettle_render::UpdateToastHit::Close)
+                );
+            }
+        }
+    }
+}
