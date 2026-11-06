@@ -22,7 +22,7 @@ settings_value_fixed_theme = "Fixed theme"
 picker_theme_for_light_appearance = "light theme:"
 picker_theme_for_dark_appearance = "dark theme:"
 settings_field_restore_session = "Restore session"
-settings_description_field_restore_session = "Automatic follows macOS window settings; off on other platforms."
+settings_description_field_restore_session = "Automatic: macOS window settings; restores on Linux; off on Windows."
 
 menu_category_close_confirmation = "Close confirmation"
 confirm_paste_heading = "Confirm paste"

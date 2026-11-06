@@ -679,5 +679,11 @@ fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {
         let global = read(unsafe { NSGlobalDomain });
         return policy.resolve(true, app, global);
     }
+    // Linux has no system setting for this. Kettle keeps the session, as
+    // Ptyxis, GNOME's terminal, does by default.
+    #[cfg(target_os = "linux")]
+    if policy == kettle_config::RestoreSession::Auto {
+        return policy.resolve(true, None, None);
+    }
     policy.resolve(false, None, None)
 }

@@ -2,7 +2,8 @@
 
 Enable `restore-session = true` or launch once with `kettle --restore` to reopen
 windows, tabs, splits and working directories. On macOS the default `auto`
-follows the system's window-persistence setting; elsewhere it opens fresh.
+follows the system's window-persistence setting, Linux restores, and Windows
+opens fresh.
 Named workspaces (`--layout NAME`) restore independently.
 
 Recent output now survives too: the default is at most **1000 rows per pane**

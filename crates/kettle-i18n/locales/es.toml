@@ -22,7 +22,7 @@ settings_value_fixed_theme = "Tema fijo"
 picker_theme_for_light_appearance = "tema claro:"
 picker_theme_for_dark_appearance = "tema oscuro:"
 settings_field_restore_session = "Restaurar sesión"
-settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
+settings_description_field_restore_session = "Automático: ajustes de macOS; restaura en Linux; no en Windows."
 
 menu_category_close_confirmation = "Confirmación de cierre"
 confirm_paste_heading = "Confirmar pegado"

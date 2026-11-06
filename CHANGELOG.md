@@ -91,6 +91,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- On Linux, `restore-session = auto` (the default) now reopens the previous
+  session, as Ptyxis, GNOME's terminal, does. Set `restore-session = false` to
+  open fresh windows as before.
+
 - Large output is processed faster: plain ASCII skips the grapheme tables, and
   the session-log stripper keeps only its state while no log is open.
 

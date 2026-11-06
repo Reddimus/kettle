@@ -108,6 +108,23 @@ fn restore_session_gate_truth_table() {
     ));
 }
 
+/// Linux has no system window-persistence setting: `auto` keeps the session,
+/// as Ptyxis does. Windows still opens fresh.
+#[test]
+fn auto_restore_follows_the_platform_default() {
+    let auto = should_restore_session(false, kettle_config::RestoreSession::Auto, false);
+    if cfg!(target_os = "linux") {
+        assert!(auto);
+    } else if cfg!(windows) {
+        assert!(!auto);
+    }
+    assert!(!should_restore_session(
+        false,
+        kettle_config::RestoreSession::Auto,
+        true
+    ));
+}
+
 /// #575: after an update, the new build's first window opens while the old
 /// version's windows are still running. The session is still theirs, so the
 /// new build neither restores it (duplicating their tabs) nor overwrites it.

@@ -4524,7 +4524,8 @@ launch follows `restore-session = auto` by default. On macOS, `auto` reads
 `NSQuitAlwaysKeepsWindows` from the app's NSUserDefaults domain, then the global
 domain. A true value keeps windows; false corresponds to the checked "Close
 windows when quitting an application" box. If neither domain sets a value,
-windows are kept. On other platforms `auto` is false. `true` always enables
+windows are kept. On Linux `auto` restores (no system setting exists; GNOME's
+Ptyxis restores by default); on Windows it is false. `true` always enables
 restore and `false` always opens fresh; legacy boolean spellings still work.
 `--restore` enables restore for one launch and `--layout NAME` remains independent.
 The session is saved only in restore mode, so a fresh window never clobbers a

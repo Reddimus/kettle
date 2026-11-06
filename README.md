@@ -249,8 +249,9 @@ true`. The saved text is private to your account and is never sent as input.
 Running processes are not restored: shells and saved commands start again; see
 [session restore](docs/SESSION-RESTORE.md). With `restore-session = auto` (the default), macOS
 restores when **Close windows when quitting an application** is unchecked;
-if the system has no preference set, it keeps windows. Other platforms open
-fresh with `auto`. Use `true` or `false` to choose explicitly.
+if the system has no preference set, it keeps windows. Linux restores with
+`auto`, as Ptyxis does; Windows opens fresh. Use `true` or `false` to choose
+explicitly.
 
 Open the new-tab **▾** menu beside **+** (set `tab-bar = always` to keep it
 visible with one tab), or the macOS **Shell** menu:
