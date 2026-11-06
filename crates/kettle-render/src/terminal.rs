@@ -780,6 +780,12 @@ impl Renderer {
                     })
                 {
                     attrs = attrs.family(Family::Name(symbol_family));
+                } else if let Some(emoji_family) = self
+                    .emoji_family
+                    .filter(|_| !text_presentation && marks.contains(&'\u{FE0F}'))
+                {
+                    // The same choice as the pane's span for this cell.
+                    attrs = attrs.family(Family::Name(emoji_family));
                 }
                 if cursor_focused {
                     cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
@@ -1142,6 +1148,7 @@ impl Renderer {
         let ff = font_features(cfg);
         // Copied out before the `&mut self` borrows below.
         let text_symbol_family = self.text_symbol_family;
+        let emoji_family = self.emoji_family;
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
@@ -1265,6 +1272,24 @@ impl Renderer {
                             attrs_list.add_span(at..at + len, &text_attrs);
                         }
                         at += len;
+                    }
+                }
+                // And the colour-emoji face for a grapheme carrying U+FE0F:
+                // text faces have many emoji-capable symbols (U+2764, U+263A,
+                // keycap digits), and the cascade would take theirs. The span
+                // covers the whole grapheme, so a keycap or ZWJ sequence is
+                // shaped in one face.
+                if let Some(emoji_family) = emoji_family
+                    && text.contains('\u{FE0F}')
+                {
+                    use unicode_segmentation::UnicodeSegmentation;
+                    for (offset, grapheme) in text.grapheme_indices(true) {
+                        if grapheme.contains('\u{FE0F}') && !grapheme.contains('\u{FE0E}') {
+                            let emoji_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
+                                .family(Family::Name(emoji_family));
+                            attrs_list
+                                .add_span(s + offset..s + offset + grapheme.len(), &emoji_attrs);
+                        }
                     }
                 }
             }

@@ -179,6 +179,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A failed process's exit banner sits along the bottom of its pane instead of
   covering the first lines, where a short session's output and its error are.
 
+- Emoji written with U+FE0F, such as ❤️, ☺️ and keycaps, draw in colour instead
+  of as the monochrome symbol a text font carries.
+
 - Copy and paste of text work in Wayland sessions without XWayland, including
   GNOME, OSC 52 copies included. Middle-click PRIMARY and image or file paste
   still use XWayland where it is available.

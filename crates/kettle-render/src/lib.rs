@@ -353,6 +353,9 @@ pub struct Renderer {
     /// when this system has one. `None` leaves such cells on the platform
     /// fallback cascade.
     text_symbol_family: Option<&'static str>,
+    /// The colour-emoji face to request for a grapheme carrying U+FE0F, when
+    /// this system has one.
+    emoji_family: Option<&'static str>,
     grapheme_text_cache: fonts::GraphemeTextCache,
     swash: SwashCache,
     atlas: TextAtlas,

@@ -624,6 +624,7 @@ impl Renderer {
         let StartupFonts {
             mut font_system,
             text_symbol_family,
+            emoji_family,
             cell: (cell_w, cell_h),
             ..
         } = match fonts {
@@ -766,6 +767,7 @@ impl Renderer {
             font_system,
             grapheme_text_cache: Default::default(),
             text_symbol_family,
+            emoji_family,
             swash,
             atlas,
             viewport,

@@ -108,11 +108,44 @@ const TEXT_SYMBOL_FAMILIES: &[&str] = &[
 /// face here. A host where no candidate passes keeps the cascade it had.
 pub(crate) const TEXT_SYMBOL_PROBE: char = '\u{23FA}';
 
+/// Colour-emoji faces, most preferred first.
+///
+/// U+FE0F asks for emoji presentation, but cosmic-text takes the first family
+/// in the cascade whose cmap has the codepoint. Text faces carry many
+/// emoji-capable symbols (U+2764 HEAVY BLACK HEART, U+263A WHITE SMILING FACE,
+/// the digits of keycaps), so without a request for this face `❤️` drew as a
+/// monochrome text heart.
+#[cfg(target_os = "macos")]
+const EMOJI_FAMILIES: &[&str] = &["Apple Color Emoji"];
+
+#[cfg(target_os = "windows")]
+const EMOJI_FAMILIES: &[&str] = &["Segoe UI Emoji"];
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const EMOJI_FAMILIES: &[&str] = &["Noto Color Emoji", "Twemoji", "JoyPixels", "EmojiOne Color"];
+
+/// The codepoint the colour-emoji candidates are probed with: a text-default
+/// symbol that text faces carry too, the case the request exists for.
+pub(crate) const EMOJI_PROBE: char = '\u{2764}';
+
 /// The first [`TEXT_SYMBOL_FAMILIES`] entry this system has AND that carries a
 /// glyph for [`TEXT_SYMBOL_PROBE`].
 pub(crate) fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static str> {
-    let probe = TEXT_SYMBOL_PROBE;
-    for wanted in TEXT_SYMBOL_FAMILIES.iter().copied() {
+    first_family_with(font_system, TEXT_SYMBOL_FAMILIES, TEXT_SYMBOL_PROBE)
+}
+
+/// The first [`EMOJI_FAMILIES`] entry this system has AND that carries a glyph
+/// for [`EMOJI_PROBE`].
+pub(crate) fn resolve_emoji_family(font_system: &mut FontSystem) -> Option<&'static str> {
+    first_family_with(font_system, EMOJI_FAMILIES, EMOJI_PROBE)
+}
+
+fn first_family_with(
+    font_system: &mut FontSystem,
+    families: &[&'static str],
+    probe: char,
+) -> Option<&'static str> {
+    for wanted in families.iter().copied() {
         let ids: Vec<fontdb::ID> = font_system
             .db()
             .faces()
@@ -545,6 +578,7 @@ pub fn pane_metrics(font_size: f32, cell_h: f32) -> Metrics {
 pub struct StartupFonts {
     pub(crate) font_system: FontSystem,
     pub(crate) text_symbol_family: Option<&'static str>,
+    pub(crate) emoji_family: Option<&'static str>,
     /// Physical-pixel cell size, with `cell-width` and `cell-height` applied.
     pub cell: (f32, f32),
     /// The inputs `cell` was measured from.
@@ -580,6 +614,7 @@ impl StartupFontsKey {
 pub struct PreparedFonts {
     font_system: FontSystem,
     text_symbol_family: Option<&'static str>,
+    emoji_family: Option<&'static str>,
     /// Families [`PreparedFonts::warm_family`] has already shaped.
     pub(crate) warm: Vec<String>,
 }
@@ -596,7 +631,10 @@ impl PreparedFonts {
         // Resolved once: fontdb is already populated and the answer cannot
         // change while the renderer lives.
         let text_symbol_family = resolve_text_symbol_family(&mut font_system);
-        log::info!("renderer init: text-presentation face {text_symbol_family:?}");
+        let emoji_family = resolve_emoji_family(&mut font_system);
+        log::info!(
+            "renderer init: text-presentation face {text_symbol_family:?}, emoji face {emoji_family:?}"
+        );
         // Split, because `FontSystem::new()` is the one people suspect (it
         // enumerates system fonts) and a combined figure cannot exonerate it.
         log::info!(
@@ -606,6 +644,7 @@ impl PreparedFonts {
         Self {
             font_system,
             text_symbol_family,
+            emoji_family,
             warm: Vec::new(),
         }
     }
@@ -633,6 +672,7 @@ impl PreparedFonts {
         let Self {
             mut font_system,
             text_symbol_family,
+            emoji_family,
             ..
         } = self;
         let key = StartupFontsKey::new(cfg, scale);
@@ -648,6 +688,7 @@ impl PreparedFonts {
         StartupFonts {
             font_system,
             text_symbol_family,
+            emoji_family,
             cell,
             key,
         }
@@ -675,11 +716,13 @@ impl StartupFonts {
         let Self {
             font_system,
             text_symbol_family,
+            emoji_family,
             ..
         } = self;
         PreparedFonts {
             font_system,
             text_symbol_family,
+            emoji_family,
             warm: Vec::new(),
         }
         .measure(cfg, scale)

@@ -4620,8 +4620,62 @@ fn the_block_cursor_makes_the_same_presentation_choice_as_the_pane() {
         let pane = renderer.pane_buffers[0].lines[0].attrs_list().get_span(0);
         if !qualified {
             assert_eq!(pane.family, glyphon::Family::Name(family));
+        } else if let Some(emoji) = renderer.emoji_family {
+            assert_eq!(pane.family, glyphon::Family::Name(emoji));
+            assert_eq!(cursor.attrs.as_attrs().family, glyphon::Family::Name(emoji));
         }
     }
+}
+
+#[test]
+fn a_qualified_text_default_symbol_draws_in_the_colour_emoji_face() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("EMOJI_PRESENTATION_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(family) = renderer.emoji_family else {
+        eprintln!("EMOJI_PRESENTATION_GPU_SKIP: no colour-emoji face");
+        return;
+    };
+    // Text faces carry U+2764 and U+263A as monochrome symbols; U+FE0F asks
+    // for the emoji, and the cascade alone would pick the text glyph.
+    let snap = snapshot_of(
+        20,
+        4,
+        "\u{2764}\u{fe0f} \u{263a}\u{fe0f}\x1b[?25l".as_bytes(),
+    );
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(true),
+    );
+    let line = &renderer.pane_buffers[0].lines[0];
+    assert_eq!(
+        line.attrs_list().get_span(0).family,
+        glyphon::Family::Name(family)
+    );
+    let keys: Vec<_> = renderer.pane_buffers[0]
+        .layout_runs()
+        .filter(|run| run.line_i == 0)
+        .flat_map(|run| run.glyphs.iter())
+        .map(|g| g.physical((0., 0.), 1.).cache_key)
+        .collect();
+    let colour = keys
+        .into_iter()
+        .filter(|key| {
+            renderer
+                .swash
+                .get_image_uncached(&mut renderer.font_system, *key)
+                .is_some_and(|image| {
+                    image.placement.width > 0
+                        && image.placement.height > 0
+                        && image.content == glyphon::SwashContent::Color
+                })
+        })
+        .count();
+    assert_eq!(colour, 2, "both qualified symbols draw in colour");
 }
 
 #[test]
