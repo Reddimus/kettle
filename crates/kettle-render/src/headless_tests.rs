@@ -5318,3 +5318,39 @@ fn the_focused_pane_title_is_bold() {
         [glyphon::Weight::NORMAL, glyphon::Weight::BOLD]
     );
 }
+
+/// A default-emoji character without U+FE0F asks for the colour face too:
+/// on Linux a monochrome symbol face can come first in the cascade. U+FE0E
+/// still keeps the text face.
+#[test]
+fn default_emoji_without_a_selector_asks_for_the_colour_face() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("EMOJI_DEFAULT_GPU_SKIP: no adapter");
+        return;
+    };
+    let Some(family) = renderer.emoji_family else {
+        eprintln!("EMOJI_DEFAULT_GPU_SKIP: no colour-emoji face");
+        return;
+    };
+    let snap = snapshot_of(
+        20,
+        4,
+        "\u{1f600} \u{231a} \u{231a}\u{fe0e}\x1b[?25l".as_bytes(),
+    );
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 320, 120)],
+        &focused(true),
+    );
+    let attrs = renderer.pane_buffers[0].lines[0].attrs_list().clone();
+    let text = renderer.pane_buffers[0].lines[0].text().to_owned();
+    let family_at = |needle: &str, nth: usize| {
+        let at = text.match_indices(needle).nth(nth).unwrap().0;
+        attrs.get_span(at).family
+    };
+    assert_eq!(family_at("\u{1f600}", 0), glyphon::Family::Name(family));
+    assert_eq!(family_at("\u{231a}", 0), glyphon::Family::Name(family));
+    assert_ne!(family_at("\u{231a}", 1), glyphon::Family::Name(family));
+}

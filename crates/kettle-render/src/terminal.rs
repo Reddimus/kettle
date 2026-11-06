@@ -782,7 +782,7 @@ impl Renderer {
                     attrs = attrs.family(Family::Name(symbol_family));
                 } else if let Some(emoji_family) = self
                     .emoji_family
-                    .filter(|_| !text_presentation && marks.contains(&'\u{FE0F}'))
+                    .filter(|_| !text_presentation && super::fonts::emoji_presentation(dc, marks))
                 {
                     // The same choice as the pane's span for this cell.
                     attrs = attrs.family(Family::Name(emoji_family));
@@ -1274,17 +1274,19 @@ impl Renderer {
                         at += len;
                     }
                 }
-                // And the colour-emoji face for a grapheme carrying U+FE0F:
-                // text faces have many emoji-capable symbols (U+2764, U+263A,
-                // keycap digits), and the cascade would take theirs. The span
-                // covers the whole grapheme, so a keycap or ZWJ sequence is
-                // shaped in one face.
+                // And the colour-emoji face for a grapheme presented as emoji:
+                // one carrying U+FE0F, or a default-emoji base without U+FE0E.
+                // Text faces have many emoji-capable symbols (U+2764, U+263A,
+                // keycap digits), and on Linux a monochrome symbol face can
+                // precede the colour one in the cascade even for U+1F600. The
+                // span covers the whole grapheme, so a keycap or ZWJ sequence
+                // is shaped in one face.
                 if let Some(emoji_family) = emoji_family
-                    && text.contains('\u{FE0F}')
+                    && !text.is_ascii()
                 {
                     use unicode_segmentation::UnicodeSegmentation;
                     for (offset, grapheme) in text.grapheme_indices(true) {
-                        if grapheme.contains('\u{FE0F}') && !grapheme.contains('\u{FE0E}') {
+                        if !grapheme.is_ascii() && super::fonts::emoji_text(grapheme) {
                             let emoji_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
                                 .family(Family::Name(emoji_family));
                             attrs_list
