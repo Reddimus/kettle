@@ -36,6 +36,8 @@ pub mod search;
 #[cfg(test)]
 mod column_tests;
 #[cfg(test)]
+mod ascii_run_tests;
+#[cfg(test)]
 mod grapheme_width_tests;
 #[cfg(test)]
 mod rectangle_tests;
@@ -344,7 +346,7 @@ impl TermDamageState {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GraphemeAnchor {
     point: Point,
     after: Point,
@@ -411,6 +413,9 @@ pub struct Term<T> {
     grapheme_anchor: Option<GraphemeAnchor>,
     grapheme_template: Cell,
     last_grapheme: Vec<char>,
+    /// Tests turn the run writer off to compare it with the per-character path.
+    #[cfg(test)]
+    ascii_runs: bool,
     attribute_extent: u8,
     saved_private_modes: Vec<(u16, Option<bool>)>,
 
@@ -775,6 +780,8 @@ impl<T> Term<T> {
             grapheme_anchor: None,
             grapheme_template: Cell::default(),
             last_grapheme: Vec::new(),
+            #[cfg(test)]
+            ascii_runs: true,
             attribute_extent: 0,
             saved_private_modes: Vec::new(),
             event_proxy,
@@ -2341,6 +2348,76 @@ impl<T: EventListener> Term<T> {
         });
     }
 
+    /// Write the start of `run`, printable ASCII, straight into the cursor's
+    /// row: the cells, cursor and grapheme state `input` leaves one character
+    /// at a time. Returns how many bytes it took; 0 when the next character
+    /// needs the full path: a pending wrap, insert mode, a non-ASCII charset,
+    /// a wide cell in the way, or a Prepend it would join.
+    fn write_ascii_run(&mut self, run: &[u8]) -> usize {
+        #[cfg(test)]
+        if !self.ascii_runs {
+            return 0;
+        }
+        let start = self.grid.cursor.point;
+        if run.is_empty()
+            || self.grid.cursor.input_needs_wrap
+            || self.mode.contains(TermMode::INSERT)
+            || self.grid.cursor.charsets[self.active_charset] != StandardCharset::Ascii
+            || (self.grapheme_clustering && !self.grapheme_state.ascii_breaks())
+        {
+            return 0;
+        }
+        let right = self.input_right_edge().0;
+        if start.column.0 >= right {
+            return 0;
+        }
+        let taken = run.len().min(right - start.column.0);
+        let template = &self.grid.cursor.template;
+        let (fg, bg, extra) = (template.fg, template.bg, template.extra.clone());
+        let mut flags = template.flags | Flags::DRAWN;
+        if self.grapheme_clustering {
+            flags |= Flags::GRAPHEME;
+        }
+        let row = &mut self.grid[start.line];
+        let cells = &mut row[start.column..start.column + taken];
+        if cells
+            .iter()
+            .any(|cell| cell.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER))
+        {
+            return 0;
+        }
+        for (cell, &byte) in cells.iter_mut().zip(run) {
+            cell.c = byte as char;
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.flags = flags;
+            cell.extra.clone_from(&extra);
+        }
+        let last = Point::new(start.line, start.column + (taken - 1));
+        if start.column.0 + taken < right {
+            self.grid.cursor.point.column = start.column + taken;
+        } else {
+            self.grid.cursor.point.column = last.column;
+            self.grid.cursor.input_needs_wrap = true;
+        }
+        if self.grapheme_clustering {
+            let c = run[taken - 1] as char;
+            self.grapheme_state = grapheme::GraphemeState::after_ascii();
+            self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+            self.last_grapheme.clear();
+            self.last_grapheme.push(c);
+            self.grapheme_template = self.grid.cursor.template.clone();
+            self.grapheme_anchor = Some(GraphemeAnchor {
+                point: last,
+                after: self.grid.cursor.point,
+                pending_wrap: self.grid.cursor.input_needs_wrap,
+                width: 1,
+                has_cell: true,
+            });
+        }
+        taken
+    }
+
     fn input_grapheme(&mut self, c: char, width: usize) {
         if self.grapheme_anchor.is_some_and(|a| {
             a.after != self.grid.cursor.point || a.pending_wrap != self.grid.cursor.input_needs_wrap
@@ -2479,6 +2556,22 @@ impl<T: EventListener> Handler for Term<T> {
 
     fn sync_marker(&mut self, id: u64) {
         self.record_graphics_event(GraphicsEvent::SyncMarker { id });
+    }
+
+    /// A run of printable ASCII: written a row at a time where it can be,
+    /// otherwise one character at a time.
+    fn input_ascii(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            let taken = self.write_ascii_run(&bytes[at..]);
+            if taken > 0 {
+                at += taken;
+            } else {
+                self.input(bytes[at] as char);
+                at += 1;
+            }
+        }
     }
 
     /// A character to be displayed.

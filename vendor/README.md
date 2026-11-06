@@ -260,6 +260,13 @@ date. Recheck that before upgrading a crate or dropping a patch.
     path would, without the property tables; a test checks the two agree for
     every printable ASCII scalar after a range of preceding text. Printing a
     cluster no longer clones its retained scalars.
+  - `Term::input_ascii` writes a run of printable ASCII straight into the
+    cursor's row up to the right edge, leaving the cells, cursor and grapheme
+    state the per-character path would. A pending wrap, insert mode, a
+    non-ASCII charset, a wide cell in the way or a Prepend before the run
+    sends the next character down the per-character path. A differential
+    test compares the two over random escapes, margins, wide and combining
+    text, with and without clustering.
   - Sinhala al-lakuna + ZWJ + consonant continuations are a terminal tailoring
     alongside unattached-modifier boundaries. The pinned Unicode 18 InCB table
     does not classify Sinhala consonants as Consonant; the raw UAX state and
@@ -385,6 +392,10 @@ cosmic-text release that contains both commits.
   `GraphemeClustering`. CSI REP dispatches to `Handler::repeat_char`, whose
   default preserves legacy scalar repetition while Kettle can repeat a cell's
   complete retained cluster.
+  Ground-state text goes out in runs: `Perform::print_ascii` receives each
+  run of printable ASCII (`0x20..=0x7e`) and `Handler::input_ascii` takes it
+  from the ANSI performer. Both default to the old character-at-a-time
+  `print`/`input`, so other performers and handlers see no change.
   SGR 53 and 55 dispatch explicit Overline and CancelOverline attributes.
   XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
   split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,
