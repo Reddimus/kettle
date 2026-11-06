@@ -731,6 +731,24 @@ typed INCR chunks (byte ceiling and absolute deadline). Its
 arboard image/file acquisitions against an unterminated, correctly typed X11
 owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
 clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
+`cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
+backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
+contents, cap/deadline errors, stale-reply isolation, initialization failure and
+image/file fallback without arboard. It also compiles smithay's actual incremental
+pipe collector on every host, covering exact caps, lossy UTF-8 expansion,
+continuous input and an idle read that resumes after its deadline. The product's
+smithay dependency and native adapter are Linux-only. These portable tests do
+not exercise Wayland binding, focus/seat serials or calloop timer dispatch.
+
+On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
+In a disposable GNOME Wayland session with XWayland disabled, verify text copy
+and paste in both directions with another native application, middle-click
+PRIMARY, OSC 52 CLIPBOARD and PRIMARY policy and ordering, and search/modal
+paste. Check large and stalled selections, and verify that image/file clipboard
+paste logs its limitation and falls through without a crash. Repeat on X11 to
+check arboard and in a compositor offering primary-selection support. No live
+Wayland result can be inferred from a macOS suite pass.
+
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
 

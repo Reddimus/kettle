@@ -150,6 +150,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Copy and paste work in Wayland sessions without XWayland, including GNOME,
+  with native text support for OSC 52 and middle-click PRIMARY selection.
+
 - With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
   spacing vowels now reserve two cells, VS15 text variants of default emoji
   narrow to one, and standalone skin-tone modifiers occupy their own two

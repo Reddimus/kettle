@@ -112,6 +112,15 @@ impl CopyService {
         let mut clipboard = None::<arboard::Clipboard>;
         Self::start(
             move |content| {
+                #[cfg(target_os = "linux")]
+                if let CopyContent::Text(text) = content {
+                    let Ok(text) = std::str::from_utf8(text.as_slice()) else {
+                        return false;
+                    };
+                    if let Some(result) = crate::clipboard::store_wayland_text(text) {
+                        return result.is_ok();
+                    }
+                }
                 if clipboard.is_none() {
                     clipboard = arboard::Clipboard::new().ok();
                 }

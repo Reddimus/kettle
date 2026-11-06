@@ -5,7 +5,7 @@ here only when a released dependency has a correctness defect on Kettle's
 supported path and no fixed upstream release is available.
 
 The patched packages remain outside the product workspace, but
-`vendor/Cargo.toml` groups them, except `cosmic-text` and `hayro-syntax`
+`vendor/Cargo.toml` groups them, except `cosmic-text`, `hayro-syntax` and `smithay-clipboard`
 (see their sections), into a validation-only workspace.
 `vendor/Cargo.lock` is committed so direct package tests never resolve a fresh
 dependency graph; package-local `Cargo.lock` files and `target/` directories
@@ -622,3 +622,32 @@ It swaps foreground/background and ANSI black/white pairs on indexed reads and
 writes, leaving cell data intact. RIS clears the mapping; DECSTR and OSC special
 resources otherwise keep their existing lifetime. Named mode parsing and private
 save/restore/query use the same engine state.
+
+## `smithay-clipboard-0.7.2`
+
+- Source: the locally cached crates.io `smithay-clipboard` 0.7.2, checksum
+  `cc8216eec463674a0e90f29e0ae41a4db573ec5b56b1c6c1c71615d249b6d846`.
+  Upstream revision: `ca11fd0bf6f71654af952ea4d710e8f1c828e600`;
+  `.cargo_vcs_info.json`, the MIT license and upstream README are retained.
+- Local changes: expose bounded CLIPBOARD/PRIMARY loads and initialization
+  readiness, fallible queue setup and acknowledged stores that expire before
+  execution. The pipe reader caps incoming bytes before extending its buffer,
+  bounds lossy UTF-8 expansion, checks an absolute deadline during every read,
+  and uses a calloop timer to remove an idle read source and return a timeout.
+  Keyboard focus establishes the active seat for program-driven clipboard
+  access before the first key press. Kettle serializes native requests through
+  one bounded worker; upstream unbounded APIs remain available.
+- Manifest: a standalone validation workspace; unused example declarations and
+  their xkbcommon dev dependency are omitted. The local code uses Kettle's Rust
+  1.95 floor. Error constructors use current Clippy spellings; the stable
+  protocol-identity map retains its upstream key type. No product dependency
+  versions or features are added.
+- Verification: `kettle-ui` compiles the actual incremental collector into its
+  portable tests. Native protocol behavior still requires Linux CI and a
+  focused Wayland window; see `docs/TESTING.md`. The dependency remains Linux
+  only in the product. A standalone vendor check can run on Linux with
+  `cargo check --offline --manifest-path vendor/smithay-clipboard-0.7.2/Cargo.toml --lib`.
+- Upstream status (2026-11-05): local Kettle changes, not submitted upstream.
+  No network verification or upstream availability claim was made for this
+  offline task. Retain the patch until a reviewed release provides equivalent
+  acquisition bounds and readiness behavior.

@@ -736,13 +736,12 @@ impl App {
     pub(super) fn clipboard_file_paste_paths(&mut self) -> Option<Vec<std::path::PathBuf>> {
         self.clipboard
             .as_mut()?
-            .get()
             .file_list()
             .ok()
             .filter(|paths| !paths.is_empty())
     }
 
-    /// Paste selected X11 text, falling back to the full clipboard pipeline
+    /// Paste selected Linux PRIMARY text, falling back to the full clipboard pipeline
     /// when PRIMARY is empty or unavailable. Other platforms have one clipboard.
     pub(super) fn paste_primary(&mut self, ws: &mut WindowState) {
         #[cfg(target_os = "linux")]

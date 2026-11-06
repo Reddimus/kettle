@@ -477,6 +477,41 @@ fixtures and includes the tests split out of its original body, preserving their
 names too. Guards that read the App's source use `app_source()`, which joins
 app.rs and all production modules, or include the specific owning module.
 
+### Clipboard backends
+
+`kettle-ui::clipboard` selects its text backend from the window's raw display
+handle: Wayland uses smithay-clipboard, X11 and other displays use arboard.
+Linux initializes smithay once per process after the first Wayland window is
+created, on the process's winit connection with a separate event queue. The
+native provider retains winit's `OwnedDisplayHandle` until smithay and its queue
+thread are gone, including after a caller times out. Initialization failure
+logs once and leaves arboard as the fallback. Clipboard availability refreshes
+OSC 52's DA1 capability for panes that already exist.
+
+CLIPBOARD and PRIMARY stay separate for OSC 52. Automatic selection copy sets
+both; middle-click retains its PRIMARY-first text behavior. All text paths,
+including modal fields, search, links and preview-source copy, share the same
+native worker. Its queue allows one running operation and one waiting operation;
+a full queue refuses immediately. Stores wait for the native queue's
+acknowledgment, so a stalled compositor cannot accumulate unbounded pending
+text; an expired store is refused before it changes a selection. Blocking smithay loads run off the UI thread,
+with the same two-second absolute deadline used for arboard reads. Each request
+owns its reply channel, so a timed-out result cannot answer a later request.
+The vendored smithay patch caps bytes while reading its nonblocking selection
+pipe, checks the deadline even during continuous input, and closes an idle pipe
+with a calloop timer at that deadline. Lossy UTF-8 expansion is checked before
+allocation. Local paste keeps its 4 MiB cap and OSC 52 its 1 MiB cap (with the
+existing extra-byte acquisition allowance); policy, ordered journal, marker
+scrubbing, bracketed paste and paste protection stay in their existing layers.
+
+Images and file lists remain on arboard. This build enables its image support
+but not its optional Wayland data-control backend, so those formats require X11
+or XWayland on Linux. With only native Wayland text available, bitmap paste
+logs that it is unavailable and falls through to text without materializing a
+file. Preview image copies also retain their arboard worker. Native Wayland
+text requires focus and PRIMARY requires the compositor's primary-selection
+protocol; no data-control extension is required.
+
 ### Private clipboard images and video receipts
 
 Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of

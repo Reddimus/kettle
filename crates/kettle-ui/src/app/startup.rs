@@ -690,17 +690,7 @@ impl App {
         // Resolve clipboard availability before constructing the first Mux:
         // DA1 extension 52 is a runtime capability, not merely compiled code,
         // and must not be advertised when policy or the platform denies writes.
-        let clipboard = match arboard::Clipboard::new() {
-            Ok(cb) => Some(cb),
-            Err(e) => {
-                log::warn!(
-                    "clipboard unavailable ({e}); copy/paste and OSC 52 \
-                     will no-op — no DISPLAY/Wayland, headless SSH, or a \
-                     sandbox without clipboard-portal access?"
-                );
-                None
-            }
-        };
+        let clipboard = crate::clipboard::Clipboard::new();
         let osc52_copy_allowed = osc52_copy_is_available(initial_cfg.osc52, clipboard.is_some());
 
         // Per-window state lives in a WindowState; the first window is seq 1.
@@ -1203,6 +1193,19 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        {
+            crate::clipboard::Clipboard::attach_wayland(
+                &mut self.clipboard,
+                &window,
+                event_loop.owned_display_handle(),
+            );
+            let allowed = osc52_copy_is_available(self.cfg.osc52, self.clipboard.is_some());
+            ws.mux.set_osc52_copy_allowed(allowed);
+            for other in self.windows.values_mut() {
+                other.mux.set_osc52_copy_allowed(allowed);
+            }
+        }
         self.apply_post_create(&window);
         if self.startup.quick_terminal {
             crate::quick_terminal::native::configure(&window);

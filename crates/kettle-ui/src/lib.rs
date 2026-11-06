@@ -33,6 +33,7 @@ pub use agent_plugin::{ClaudeStatus, claude_status};
 /// Explicit native agy plugin staging.
 pub mod agy_plugin;
 mod app;
+mod clipboard;
 pub mod codex_shell;
 mod held_buttons;
 #[cfg(all(test, unix))]

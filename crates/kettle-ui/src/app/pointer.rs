@@ -390,19 +390,10 @@ impl App {
             }
         };
         if let (Some(s), Some(cb)) = (sel, self.clipboard.as_mut()) {
-            // On Linux also write the X11 PRIMARY selection that `paste_primary`
-            // reads, so the select→middle-click-paste loop works. No PRIMARY on
-            // Wayland/macOS/Windows; those keep clipboard-only.
+            // Linux selections also own PRIMARY for middle-click paste.
             #[cfg(target_os = "linux")]
-            {
-                use arboard::{LinuxClipboardKind, SetExtLinux};
-                if let Err(e) = cb
-                    .set()
-                    .clipboard(LinuxClipboardKind::Primary)
-                    .text(s.clone())
-                {
-                    log::warn!("clipboard set PRIMARY failed (selection copy): {e}");
-                }
+            if let Err(e) = cb.set_selection(true, s.clone()) {
+                log::warn!("clipboard set PRIMARY failed (selection copy): {e}");
             }
             // Log clipboard failures so a broken clipboard is diagnosable,
             // matching the vi-mode yank path.

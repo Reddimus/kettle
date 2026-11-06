@@ -96,7 +96,7 @@ including config overrides. See
 Releasing a drag copies the selection by default (`copy-on-select = true`).
 Copy explicitly with **Cmd+C on macOS / Ctrl+Shift+C elsewhere**, the Copy menu
 item, or vi-mode yank. With no selection, explicit copy keeps the clipboard
-unless `smart-copy = false`. Linux/X11 automatic copy also updates PRIMARY
+unless `smart-copy = false`. Linux automatic copy also updates PRIMARY
 for middle-click paste. Double- and triple-click selections copy immediately.
 
 Copy drops trailing whitespace at the end of each copied line
@@ -151,6 +151,14 @@ or dropped videos can show an informational receipt. `paste-image-preview`
 and `paste-video-preview` disable these cards. A new media paste replaces the
 previous receipt, and later input removes it; closing the card does not delete
 the retained PNG.
+
+On Linux, Wayland text copy and paste use the window's Wayland connection,
+including on GNOME without XWayland. Middle-click uses PRIMARY when the
+compositor supports the primary-selection protocol. Text access requires the
+window to have focus. Images and explicit file lists still use arboard's X11
+backend in this build: without XWayland they are unavailable, image paste logs
+the limitation and falls through to text, and drag and drop remains available.
+No clipboard configuration change is needed.
 
 Programs can use OSC 52 to access the clipboard. `osc52 = copy` (default)
 allows writes and denies reads; `off` denies both, `paste` allows reads only,

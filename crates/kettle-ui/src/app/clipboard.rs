@@ -31,41 +31,29 @@ pub(super) fn prepare_osc52_copy(
     Ok(text)
 }
 
-fn set_osc52_clipboard(
-    clipboard: &mut arboard::Clipboard,
-    target: ClipboardType,
-    text: String,
-) -> Result<(), arboard::Error> {
+fn osc52_is_primary(target: ClipboardType) -> bool {
     match osc52_clipboard_channel(target) {
-        Osc52ClipboardChannel::Clipboard => clipboard.set_text(text),
+        Osc52ClipboardChannel::Clipboard => false,
         #[cfg(target_os = "linux")]
-        Osc52ClipboardChannel::Primary => {
-            use arboard::{LinuxClipboardKind, SetExtLinux};
-            clipboard
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text)
-        }
+        Osc52ClipboardChannel::Primary => true,
     }
 }
 
+fn set_osc52_clipboard(
+    clipboard: &mut crate::clipboard::Clipboard,
+    target: ClipboardType,
+    text: String,
+) -> Result<(), arboard::Error> {
+    clipboard.set_selection(osc52_is_primary(target), text)
+}
+
 pub(super) fn get_clipboard_text_bounded(
-    clipboard: &mut arboard::Clipboard,
+    clipboard: &mut crate::clipboard::Clipboard,
     target: ClipboardType,
     max_bytes: usize,
 ) -> Result<String, arboard::Error> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    match osc52_clipboard_channel(target) {
-        Osc52ClipboardChannel::Clipboard => clipboard.get_text_bounded(max_bytes, deadline),
-        #[cfg(target_os = "linux")]
-        Osc52ClipboardChannel::Primary => {
-            use arboard::{GetExtLinux, LinuxClipboardKind};
-            clipboard
-                .get()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text_bounded(max_bytes, deadline)
-        }
-    }
+    clipboard.get_selection_bounded(osc52_is_primary(target), max_bytes, deadline)
 }
 
 /// Cap an OSC 52 clipboard payload so a hostile program can't make the
@@ -112,7 +100,7 @@ pub(super) trait Osc52Backend {
     fn get(&mut self, target: ClipboardType) -> Result<String, arboard::Error>;
 }
 
-impl Osc52Backend for arboard::Clipboard {
+impl Osc52Backend for crate::clipboard::Clipboard {
     fn set(&mut self, target: ClipboardType, text: String) -> Result<(), arboard::Error> {
         set_osc52_clipboard(self, target, text)
     }

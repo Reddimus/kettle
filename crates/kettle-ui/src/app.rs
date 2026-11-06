@@ -481,7 +481,7 @@ pub struct App {
     media: crate::media::MediaService,
     /// The one-time tip that a click opens an inline card.
     cards_tip: crate::media::CardsTip,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<crate::clipboard::Clipboard>,
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
