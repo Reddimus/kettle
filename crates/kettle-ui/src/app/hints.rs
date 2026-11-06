@@ -112,8 +112,10 @@ pub(super) fn hint_previews(what: &HintWhat) -> bool {
     }
 }
 
-/// Prefer enough blank cells before a match; at the left edge use blank
-/// cells after it if possible. Otherwise retain the overlay fallback.
+/// Where a label of `width` cells goes for the match at `start..=end`, so it
+/// hides none of the text: in blank cells just before the match, else in
+/// blank cells just after it. Only when neither has room does it cover the
+/// start of the match.
 pub(super) fn hint_label_column(
     start: usize,
     end: usize,
@@ -123,10 +125,7 @@ pub(super) fn hint_label_column(
 ) -> usize {
     if start >= width && (start - width..start).all(&blank) {
         start - width
-    } else if start == 0
-        && end.saturating_add(width) < columns
-        && (end + 1..=end + width).all(blank)
-    {
+    } else if end.saturating_add(width) < columns && (end + 1..=end + width).all(blank) {
         end + 1
     } else {
         start

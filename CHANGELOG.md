@@ -88,6 +88,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Quick-select labels that do not fit in the blank space before a match go in
+  the blank space after it instead of covering the match's first letters.
+
 - The terminal's right-click menu shows Copy greyed out until something is
   selected, puts a divider between a link's actions and the clipboard's, and
   right-aligns submenu arrows.

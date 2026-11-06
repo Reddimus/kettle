@@ -39,7 +39,7 @@ fn hover_is_dismissed_until_pointer_motion_and_bound_to_the_viewport() {
 }
 
 #[test]
-fn labels_prefer_blank_cells_and_keep_the_match_start_at_the_left_edge() {
+fn labels_prefer_blank_cells_before_then_after_the_match() {
     assert_eq!(hint_label_column(8, 18, 1, 80, |col| col == 7), 7);
     assert_eq!(
         hint_label_column(8, 18, 2, 80, |col| (6..8).contains(&col)),
@@ -49,6 +49,19 @@ fn labels_prefer_blank_cells_and_keep_the_match_start_at_the_left_edge() {
     assert_eq!(hint_label_column(8, 18, 1, 80, |_| false), 8);
     assert_eq!(hint_label_column(0, 18, 1, 80, |col| col == 19), 19);
     assert_eq!(hint_label_column(0, 79, 1, 80, |_| false), 0);
+    // A two-letter label with one blank cell before the match goes after
+    // it rather than over its first letters.
+    assert_eq!(
+        hint_label_column(8, 18, 2, 80, |col| col == 7 || (19..=20).contains(&col)),
+        19
+    );
+    // Before still wins when both sides have room.
+    assert_eq!(
+        hint_label_column(8, 18, 2, 80, |col| (6..8).contains(&col) || col > 18),
+        6
+    );
+    // No room after the right edge: cover the start.
+    assert_eq!(hint_label_column(8, 79, 2, 80, |col| col == 7), 8);
 }
 
 #[test]
