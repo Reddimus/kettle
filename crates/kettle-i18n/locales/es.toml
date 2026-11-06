@@ -991,3 +991,7 @@ other = "⤢ Ampliado · {count} paneles ocultos · {shortcut} restaura  "
 [pane_zoomed_unbound]
 one = "⤢ Ampliado · {count} panel oculto  "
 other = "⤢ Ampliado · {count} paneles ocultos  "
+
+[a11y_output_lines]
+one = "{count} línea nueva de salida"
+other = "{count} líneas nuevas de salida"

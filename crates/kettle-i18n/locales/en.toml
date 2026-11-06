@@ -990,3 +990,7 @@ other = "⤢ Zoomed · {count} panes hidden · {shortcut} restores  "
 [pane_zoomed_unbound]
 one = "⤢ Zoomed · {count} pane hidden  "
 other = "⤢ Zoomed · {count} panes hidden  "
+
+[a11y_output_lines]
+one = "{count} new line of output"
+other = "{count} new lines of output"

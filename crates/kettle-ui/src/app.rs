@@ -149,6 +149,7 @@ mod startup;
 mod title;
 mod window_events;
 
+pub(crate) use accessibility::OutputAnnouncement;
 use accessibility::*;
 pub(crate) use actions::*;
 use automation::*;

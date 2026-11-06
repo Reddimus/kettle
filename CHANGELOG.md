@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Screen readers announce new command output (politely, the last lines of each
+  batch, or a count for a flood), never the command just typed, and stay quiet
+  for full-screen programs. Checked with Orca; macOS uses the system's
+  announcement notification.
+
 - Screen readers find each pane's place in its scrollback as a vertical scroll
   bar, and can move it a line at a time or straight to a line.
 

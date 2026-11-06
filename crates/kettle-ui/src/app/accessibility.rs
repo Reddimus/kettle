@@ -271,6 +271,51 @@ impl App {
                 let offset = term.grid().display_offset();
                 let screen = term.grid().screen_lines();
                 let total = history + screen;
+                // New output for screen readers: read from the grid while it
+                // is locked; announced only for the focused pane, and never
+                // from the alternate screen a full-screen program draws on.
+                let alt = term.mode().contains(kettle_core::TermMode::ALT_SCREEN);
+                let mut outputs = ws.accessibility_output.borrow_mut();
+                let state = outputs.entry(pane_id).or_default();
+                if alt {
+                    state.seen = None;
+                } else {
+                    let (now, output) = kettle_core::grid_text::new_output(
+                        term.grid(),
+                        state.seen,
+                        state.input_row,
+                    );
+                    state.seen = Some(now);
+                    if state.input_row.is_some_and(|row| row < now.row()) {
+                        state.input_row = None;
+                    }
+                    let spoken = if state.typing {
+                        String::new()
+                    } else {
+                        output_announcement(&output, &self.ui_text)
+                    };
+                    if !spoken.is_empty() && Some(pane_id) == focused {
+                        state.text = spoken;
+                        state.serial = state.serial.wrapping_add(1);
+                    }
+                }
+                if Some(pane_id) == focused && !alt && !state.text.is_empty() {
+                    let id = accessibility_output_id(pane_id, state.serial);
+                    let mut announcement = Node::new(Role::Label);
+                    // A label's text is its value on AT-SPI; macOS reads the label.
+                    announcement.set_label(state.text.clone());
+                    announcement.set_value(state.text.clone());
+                    announcement.set_live(accesskit::Live::Polite);
+                    announcement.set_bounds(accesskit::Rect::new(
+                        f64::from(text_rect.0),
+                        f64::from(text_rect.1),
+                        f64::from(text_rect.0 + text_rect.2),
+                        f64::from(text_rect.1 + text_rect.3),
+                    ));
+                    pane_children.push(id);
+                    nodes.push((id, announcement));
+                }
+                drop(outputs);
                 drop(term);
                 let id = accessibility_scrollbar_id(pane_id);
                 pane_children.push(id);
@@ -2853,6 +2898,87 @@ fn accessibility_scrollbar_id(pane: u64) -> NodeId {
     NodeId((1 << 50) | pane)
 }
 
+fn accessibility_output_id(pane: u64, serial: u64) -> NodeId {
+    NodeId((1 << 49) | (pane << 1) | (serial & 1))
+}
+
+/// A pane's output as screen readers have heard it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OutputAnnouncement {
+    pub(crate) seen: Option<kettle_core::grid_text::OutputCursor>,
+    pub(crate) text: String,
+    pub(crate) serial: u64,
+    /// The row a command was last entered on; output starts below it.
+    pub(crate) input_row: Option<u64>,
+    /// Text has been typed since the last Enter: rows the cursor leaves are
+    /// the line being typed wrapping, so they are not read as output.
+    pub(crate) typing: bool,
+}
+
+/// The most of a batch read out: its last lines.
+const OUTPUT_SPOKEN_LINES: usize = 8;
+const OUTPUT_SPOKEN_BYTES: usize = 600;
+
+impl App {
+    /// Keyboard input reached `recipients`: Enter marks the row the command
+    /// was entered on, so its echo is not read back as output; typed text
+    /// marks the line as being typed.
+    pub(super) fn note_accessibility_input(
+        ws: &WindowState,
+        recipients: &[u64],
+        key: &winit::keyboard::Key,
+        text: Option<&str>,
+    ) {
+        use winit::keyboard::{Key, NamedKey};
+        let enter = matches!(key, Key::Named(NamedKey::Enter));
+        let edits = matches!(
+            key,
+            Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Space)
+        ) || text.is_some_and(|text| text.chars().any(|c| !c.is_control()));
+        if !enter && !edits {
+            return;
+        }
+        let mut outputs = ws.accessibility_output.borrow_mut();
+        for id in recipients {
+            let state = outputs.entry(*id).or_default();
+            if enter {
+                state.input_row = ws.mux.panes.get(id).and_then(|pane| {
+                    pane.term
+                        .term
+                        .lock()
+                        .ok()
+                        .map(|term| kettle_core::grid_text::cursor_row(term.grid()))
+                });
+                state.typing = false;
+            } else {
+                state.typing = true;
+            }
+        }
+    }
+}
+
+/// The words for a batch of new output: its last lines, bounded, or a count.
+pub(super) fn output_announcement(
+    output: &kettle_core::grid_text::NewOutput,
+    tr: &kettle_i18n::Translator,
+) -> String {
+    use kettle_core::grid_text::NewOutput;
+    match output {
+        NewOutput::Many(rows) => tr.a11y_output_lines(*rows),
+        NewOutput::Lines(lines) => {
+            let mut text = lines[lines.len().saturating_sub(OUTPUT_SPOKEN_LINES)..].join("\n");
+            if text.len() > OUTPUT_SPOKEN_BYTES {
+                let mut cut = text.len() - OUTPUT_SPOKEN_BYTES;
+                while !text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                text.drain(..cut);
+            }
+            text
+        }
+    }
+}
+
 /// A pane's place in its scrollback, as a vertical scroll bar: 0 is the
 /// oldest kept line at the top, `history` the live bottom, one step a line
 /// and one jump a screen.
@@ -3093,6 +3219,32 @@ mod context_menu_nesting_tests {
             panel_h_clamped: 28.0,
             a11y_label: None,
         }
+    }
+
+    /// New output is read as its last lines, bounded, or counted when it is
+    /// a flood, in the UI's language.
+    #[test]
+    fn output_announcements_keep_the_last_lines_or_count_a_flood() {
+        use kettle_core::grid_text::NewOutput;
+        let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        let lines = NewOutput::Lines((1..=10).map(|n| format!("line {n}")).collect());
+        let spoken = output_announcement(&lines, &en);
+        assert!(
+            spoken.starts_with("line 3\n") && spoken.ends_with("line 10"),
+            "{spoken}"
+        );
+        let long = NewOutput::Lines(vec!["é".repeat(400)]);
+        assert!(output_announcement(&long, &en).len() <= OUTPUT_SPOKEN_BYTES);
+        assert_eq!(output_announcement(&NewOutput::Lines(vec![]), &en), "");
+        assert_eq!(
+            output_announcement(&NewOutput::Many(300), &en),
+            "300 new lines of output"
+        );
+        assert_eq!(
+            output_announcement(&NewOutput::Many(300), &es),
+            "300 líneas nuevas de salida"
+        );
     }
 
     /// The scroll bar reports the scrollback position and scrolls it a line,
