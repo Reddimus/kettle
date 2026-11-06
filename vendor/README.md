@@ -255,6 +255,11 @@ date. Recheck that before upgrading a crate or dropping a patch.
     using the locally cached `unicode-width` 0.2.3 generated
     `src/gen/tables.rs::EMOJI_PRESENTATION_LEAVES`; `sources.json` records the
     extraction and source hash. Regeneration uses only checked-in data.
+  - Printable ASCII that begins its own cluster (anything but a Prepend
+    before it) takes a shortcut that sets the state, width and anchor the full
+    path would, without the property tables; a test checks the two agree for
+    every printable ASCII scalar after a range of preceding text. Printing a
+    cluster no longer clones its retained scalars.
   - Sinhala al-lakuna + ZWJ + consonant continuations are a terminal tailoring
     alongside unattached-modifier boundaries. The pinned Unicode 18 InCB table
     does not classify Sinhala consonants as Consonant; the raw UAX state and

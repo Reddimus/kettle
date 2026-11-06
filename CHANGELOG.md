@@ -88,6 +88,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Large output is processed faster: plain ASCII skips the grapheme tables, and
+  the session-log stripper keeps only its state while no log is open.
+
 - Quick-select labels that do not fit in the blank space before a match go in
   the blank space after it instead of covering the match's first letters.
 

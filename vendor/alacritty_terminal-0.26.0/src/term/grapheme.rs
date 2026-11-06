@@ -83,7 +83,7 @@ pub(super) fn cluster_width(codepoints: &[char]) -> usize {
 }
 
 /// Width context survives scalars discarded at the cell's storage limit.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct GraphemeWidth {
     cells: usize,
     base: Option<char>,
@@ -93,6 +93,19 @@ pub(super) struct GraphemeWidth {
 }
 
 impl GraphemeWidth {
+    /// The context after printable ASCII `c` opened a cluster: what
+    /// `GraphemeWidth::default().advance(c)` leaves, without the lookups.
+    pub(super) fn after_ascii(c: char) -> Self {
+        debug_assert!(matches!(c, ' '..='~'));
+        Self {
+            cells: 1,
+            base: Some(c),
+            previous: Some(c),
+            previous_measured: true,
+            sinhala_linker: false,
+        }
+    }
+
     pub(super) fn joins_sinhala(&self, c: char) -> bool {
         // Sinhala rakaransaya uses al-lakuna + ZWJ + consonant, but Sinhala
         // consonants are excluded from the UCD's InCB=Consonant property.
@@ -183,7 +196,7 @@ pub(super) fn is_base(c: char) -> bool {
 }
 
 /// Streaming UAX #29 state, independent of how much cell text is retained.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct GraphemeState {
     previous: Option<Gcb>,
     regional_odd: bool,
@@ -194,6 +207,22 @@ pub(super) struct GraphemeState {
 }
 
 impl GraphemeState {
+    /// Whether printable ASCII starts a new grapheme here. Printable ASCII is
+    /// Grapheme_Cluster_Break=Other with no InCB or emoji property, so only a
+    /// preceding Prepend joins it (GB9b).
+    pub(super) fn ascii_breaks(&self) -> bool {
+        self.previous != Some(Gcb::Prepend)
+    }
+
+    /// The state after printable ASCII began a grapheme: what `advance`
+    /// leaves whenever `ascii_breaks` held.
+    pub(super) fn after_ascii() -> Self {
+        Self {
+            previous: Some(Gcb::Other),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn accepts_modifier(&self) -> bool {
         self.pictographic_extend || self.modifier_base_extend
     }
@@ -239,6 +268,40 @@ impl GraphemeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ASCII fast path in `Term::input_grapheme` must leave exactly the
+    /// state the full path does, whatever came before.
+    #[test]
+    fn printable_ascii_shortcut_matches_the_full_state_machine() {
+        let prefixes: &[&str] = &[
+            "", "a", " ", "\u{600}", "\u{110bd}", "\u{1f44d}", "\u{1f44d}\u{200d}",
+            "\u{915}\u{94d}", "\u{1f1ef}", "e\u{301}", "\u{d9a}\u{dca}\u{200d}",
+            "\u{1100}", "#\u{fe0f}", "\u{2764}", "\u{fe0f}",
+        ];
+        for prefix in prefixes {
+            let mut state = GraphemeState::default();
+            let mut width = GraphemeWidth::default();
+            for c in prefix.chars() {
+                if state.advance(c) {
+                    width = GraphemeWidth::default();
+                }
+                width.advance(c);
+            }
+            for c in ' '..='~' {
+                let mut full = state;
+                let breaks = full.advance(c) && !width.joins_sinhala(c);
+                assert_eq!(breaks, state.ascii_breaks(), "{prefix:?} then {c:?}");
+                if breaks {
+                    assert_eq!(full, GraphemeState::after_ascii(), "{prefix:?} then {c:?}");
+                    let mut fresh = GraphemeWidth::default();
+                    assert_eq!(fresh.advance(c), 1);
+                    assert_eq!(fresh, GraphemeWidth::after_ascii(c));
+                    assert_eq!(cluster_width(&[c]), 1);
+                    assert!(!emoji_modifier(c) && !emoji_presentation(c));
+                }
+            }
+        }
+    }
 
     #[test]
     fn cluster_width_matches_script_and_presentation_rules() {

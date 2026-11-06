@@ -2292,7 +2292,9 @@ impl<T: EventListener> Term<T> {
     }
 
     fn print_grapheme(&mut self, width: usize) {
-        let text = self.last_grapheme.clone();
+        // Borrowed out and back rather than cloned: `input_char` never reads
+        // the retained text, and this runs once per cluster.
+        let text = mem::take(&mut self.last_grapheme);
         let template = mem::replace(
             &mut self.grid.cursor.template,
             self.grapheme_template.clone(),
@@ -2313,6 +2315,30 @@ impl<T: EventListener> Term<T> {
                 has_cell: true,
             }
         });
+        self.last_grapheme = text;
+    }
+
+    /// Printable ASCII that begins its own cluster, the common case of
+    /// terminal output: the state, width and anchor the full path in
+    /// `input_grapheme` would leave, without its table lookups. The grapheme
+    /// tests check the two agree for every printable ASCII scalar.
+    fn input_ascii_grapheme(&mut self, c: char) {
+        self.grapheme_state = grapheme::GraphemeState::after_ascii();
+        self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+        self.last_grapheme.clear();
+        self.last_grapheme.push(c);
+        self.grapheme_template = self.grid.cursor.template.clone();
+        let point = self.input_char(c, 1);
+        self.grapheme_anchor = point.map(|point| {
+            self.grid[point].flags.insert(Flags::GRAPHEME);
+            GraphemeAnchor {
+                point,
+                after: self.grid.cursor.point,
+                pending_wrap: self.grid.cursor.input_needs_wrap,
+                width: 1,
+                has_cell: true,
+            }
+        });
     }
 
     fn input_grapheme(&mut self, c: char, width: usize) {
@@ -2320,6 +2346,10 @@ impl<T: EventListener> Term<T> {
             a.after != self.grid.cursor.point || a.pending_wrap != self.grid.cursor.input_needs_wrap
         }) {
             self.stop_grapheme();
+        }
+        if matches!(c, ' '..='~') && self.grapheme_state.ascii_breaks() {
+            self.input_ascii_grapheme(c);
+            return;
         }
         let mut state = self.grapheme_state;
         // UAX #29 classifies modifiers as Extend even after a space. A
@@ -2454,6 +2484,11 @@ impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
+        if self.grapheme_clustering && matches!(c, ' '..='~') {
+            // Printable ASCII is one cell and never emoji-presented.
+            self.input_grapheme(c, 1);
+            return;
+        }
         let Some(mut width) = c.width() else {
             if self.grapheme_clustering {
                 self.stop_grapheme();
