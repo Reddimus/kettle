@@ -2789,3 +2789,11 @@ context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of a pa
 
 [messages.settings_hint_reset]
 context = "crates/kettle-ui/src/app/settings_text.rs settings_hints: Settings footer, after the Del key: puts the focused setting back to its default."
+
+[messages.a11y_output_lines]
+context = "crates/kettle-ui/src/app/accessibility.rs output_announcement: spoken by screen readers instead of the text when a burst of terminal output is too long to read out; count is the number of new lines."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.a11y_main_menu]
+context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the ≡ button in Kettle's GNOME header bar, the window's primary menu (new tabs, profiles, layouts, Settings, About)."

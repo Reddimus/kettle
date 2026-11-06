@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Screen readers announce new command output (politely, the last lines of each
+  batch, or a count for a flood), never the command just typed, and stay quiet
+  for full-screen programs. Checked with Orca; macOS uses the system's
+  announcement notification.
+
 - Screen readers find each pane's place in its scrollback as a vertical scroll
   bar, and can move it a line at a time or straight to a line.
 
@@ -90,6 +95,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   chords.
 
 ### Changed
+
+- In Kettle's GNOME header bar the new-tab options button is drawn and named as
+  the window's primary menu (≡, "Main menu"), as GNOME apps place it.
+
+- An unfocused window's selection keeps a 2:1 contrast with the background
+  (was 1.5:1), so it stays visible while still quieter than the focused one.
+
+- The paste confirmation puts its counts on their own line, keeps each count
+  with its noun when wrapping, lists Paste without controls first after Cancel
+  when the text holds controls, and shows a raw Paste in the warning colour.
 
 - Settings switches show a knob (right when on, left when off) with a label
   chosen for contrast against the accent. Delete or Backspace resets the

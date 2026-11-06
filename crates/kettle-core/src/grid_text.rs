@@ -18,6 +18,85 @@ pub(crate) fn is_spacer(flags: Flags) -> bool {
     flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
 }
 
+/// A place in a pane's output: a document row (monotonic, see
+/// `Grid::history_origin`) and a column on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutputCursor {
+    row: u64,
+    column: usize,
+}
+
+impl OutputCursor {
+    /// The document row.
+    pub fn row(&self) -> u64 {
+        self.row
+    }
+}
+
+/// The output a reader has not had since `seen` (for screen readers).
+#[derive(Debug, PartialEq, Eq)]
+pub enum NewOutput {
+    Lines(Vec<String>),
+    /// More rows than are worth reading out; how many.
+    Many(u64),
+}
+
+/// Rows past which new output is counted rather than read.
+const OUTPUT_READ_ROWS: u64 = 200;
+
+/// The output the cursor has moved past since `seen`: the rest of the row
+/// it was on, then every row it has left since, never the row it is on now
+/// (a prompt, or a line still being typed or written). With no `seen`, or
+/// after the screen was cleared back above it, nothing is new.
+/// The document row the cursor is on.
+pub fn cursor_row(grid: &Grid<Cell>) -> u64 {
+    grid.history_origin() + grid.history_size() as u64 + grid.cursor.point.line.0.max(0) as u64
+}
+
+/// See [`OutputCursor`]; rows up to `input` (the row a command was entered
+/// on, and any it wrapped from) are the user's, not output.
+pub fn new_output(
+    grid: &Grid<Cell>,
+    seen: Option<OutputCursor>,
+    input: Option<u64>,
+) -> (OutputCursor, NewOutput) {
+    let origin = grid.history_origin();
+    let history = grid.history_size() as u64;
+    let cursor = grid.cursor.point;
+    let now = OutputCursor {
+        row: origin + history + cursor.line.0.max(0) as u64,
+        column: cursor.column.0,
+    };
+    let Some(seen) = seen.filter(|seen| seen.row < now.row) else {
+        return (now, NewOutput::Lines(Vec::new()));
+    };
+    let first = seen
+        .row
+        .max(origin)
+        .max(input.map_or(0, |row| row.saturating_add(1)));
+    if first >= now.row {
+        return (now, NewOutput::Lines(Vec::new()));
+    }
+    if now.row - first > OUTPUT_READ_ROWS {
+        return (now, NewOutput::Many(now.row - first));
+    }
+    let (mut text, mut columns, mut lines) = (String::new(), Vec::new(), Vec::new());
+    for row in first..now.row {
+        let line = (row - origin) as i64 - history as i64;
+        row_text_into(grid, line as i32, grid.columns(), &mut text, &mut columns);
+        let from = if row == seen.row { seen.column } else { 0 };
+        let start = columns
+            .iter()
+            .position(|&c| c >= from)
+            .unwrap_or(text.len());
+        let piece = text[start..].trim();
+        if !piece.is_empty() {
+            lines.push(piece.to_string());
+        }
+    }
+    (now, NewOutput::Lines(lines))
+}
+
 /// Rebuild row `line`'s text into `text` (cleared first), pushing to
 /// `col_of_byte` the originating grid column for each UTF-8 byte appended — so a
 /// regex match offset maps back to the exact column. Wide-char spacer cells are
@@ -186,6 +265,72 @@ pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screen reader hears output once, as the cursor leaves it: never the
+    /// prompt row it is on, never what was typed there before Enter, and a
+    /// count rather than the text of a flood.
+    #[test]
+    fn new_output_is_what_the_cursor_left_since_last_time() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::{Config, Term, test::TermSize};
+        use alacritty_terminal::vte::ansi::Processor;
+        let mut term = Term::new(Config::default(), &TermSize::new(30, 5), VoidListener);
+        let mut parser: Processor = Processor::new();
+        let mut feed =
+            |term: &mut Term<VoidListener>, bytes: &str| parser.advance(term, bytes.as_bytes());
+
+        feed(&mut term, "$ ");
+        let (seen, output) = new_output(term.grid(), None, None);
+        assert_eq!(output, NewOutput::Lines(vec![]));
+        feed(&mut term, "echo hi");
+        let (seen, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(output, NewOutput::Lines(vec![]), "typing on the prompt row");
+        feed(&mut term, "\r\nhi\r\nthere\r\n$ ");
+        let (seen, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(
+            output,
+            NewOutput::Lines(vec!["hi".into(), "there".into()]),
+            "the output, not the command typed before Enter"
+        );
+        let (seen, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(output, NewOutput::Lines(vec![]), "heard once");
+
+        // Scrolling past the screen keeps counting rows.
+        feed(&mut term, "\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n$ ");
+        let (seen, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(
+            output,
+            NewOutput::Lines((1..=6).map(|n| n.to_string()).collect())
+        );
+
+        // Clearing moves the cursor up: nothing new.
+        feed(&mut term, "\x1b[H\x1b[2J$ ");
+        let (seen, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(output, NewOutput::Lines(vec![]));
+
+        // A command entered on a row that its last update caught half-typed:
+
+        // the rest of that row is input, not output.
+
+        feed(&mut term, "echo par");
+
+        let (seen, _) = new_output(term.grid(), Some(seen), None);
+
+        feed(&mut term, "tial");
+
+        let input = cursor_row(term.grid());
+
+        feed(&mut term, "\r\npartial\r\n$ ");
+
+        let (seen, output) = new_output(term.grid(), Some(seen), Some(input));
+
+        assert_eq!(output, NewOutput::Lines(vec!["partial".into()]));
+
+        let flood: String = (0..300).map(|n| format!("{n}\r\n")).collect();
+        feed(&mut term, &flood);
+        let (_, output) = new_output(term.grid(), Some(seen), None);
+        assert_eq!(output, NewOutput::Many(300));
+    }
 
     #[test]
     fn bounded_rows_stop_retaining_combining_text_at_the_byte_cap() {

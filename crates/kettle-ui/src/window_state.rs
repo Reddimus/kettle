@@ -864,6 +864,10 @@ pub(crate) struct WindowState {
     /// Row node IDs stay stable across text-only accessibility updates.
     pub(crate) accessibility_text_rows:
         std::cell::RefCell<std::collections::HashMap<u64, Vec<accesskit::NodeId>>>,
+    /// Per pane: where its output was last read for screen readers, and the
+    /// latest announcement (its serial picks the live node's id).
+    pub(crate) accessibility_output:
+        std::cell::RefCell<std::collections::HashMap<u64, crate::app::OutputAnnouncement>>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
     pub(crate) accessibility_pending: bool,
     /// Short-lived thumbnail for a Kettle-created clipboard bitmap or an
@@ -1520,6 +1524,7 @@ impl WindowState {
             accessibility: None,
             accessibility_key: None,
             accessibility_text_rows: Default::default(),
+            accessibility_output: Default::default(),
             accessibility_updated_at: None,
             accessibility_pending: false,
             media_paste_receipt: None,

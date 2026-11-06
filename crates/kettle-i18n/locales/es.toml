@@ -26,7 +26,7 @@ settings_description_field_restore_session = "Automático: ajustes de macOS; res
 
 menu_category_close_confirmation = "Confirmación de cierre"
 confirm_paste_heading = "Confirmar pegado"
-confirm_paste_body = "Este pegado puede enviar comandos a la terminal. {lines}; {escapes}, {controls}.\nVista previa:\n{preview}"
+confirm_paste_body = "Este pegado puede enviar comandos a la terminal.\n{lines} · {escapes} · {controls}\nVista previa:\n{preview}"
 confirm_paste_one_line = "Pegar en una sola línea"
 menu_select_all = "Seleccionar todo"
 menu_category_split = "Dividir"
@@ -55,6 +55,7 @@ config_notice_missing_equals = "línea con formato incorrecto (falta '=')"
 notice_dismiss = "Descartar"
 a11y_tab_list = "Pestañas"
 a11y_tab_close = "Cerrar {title}"
+a11y_main_menu = "Menú principal"
 a11y_new_tab_menu = "Menú de nueva pestaña"
 quick_terminal_toggle = "Mostrar u ocultar la terminal rápida"
 settings_category_quick_terminal = "Terminal rápida"
@@ -969,16 +970,16 @@ one = "Volver a la salida en vivo ({lines} línea sobre el final)"
 other = "Volver a la salida en vivo ({lines} líneas sobre el final)"
 
 [confirm_paste_lines]
-one = "{count} línea"
-other = "{count} líneas"
+one = "{count}\u00A0línea"
+other = "{count}\u00A0líneas"
 
 [confirm_paste_escapes]
-one = "{count} secuencia de escape"
-other = "{count} secuencias de escape"
+one = "{count}\u00A0secuencia de escape"
+other = "{count}\u00A0secuencias de escape"
 
 [confirm_paste_controls]
-one = "{count} carácter de control adicional"
-other = "{count} caracteres de control adicionales"
+one = "{count}\u00A0carácter de control adicional"
+other = "{count}\u00A0caracteres de control adicionales"
 
 [osc52_copied]
 one = "Un programa copió {count} carácter al portapapeles"
@@ -991,3 +992,7 @@ other = "⤢ Ampliado · {count} paneles ocultos · {shortcut} restaura  "
 [pane_zoomed_unbound]
 one = "⤢ Ampliado · {count} panel oculto  "
 other = "⤢ Ampliado · {count} paneles ocultos  "
+
+[a11y_output_lines]
+one = "{count} línea nueva de salida"
+other = "{count} líneas nuevas de salida"

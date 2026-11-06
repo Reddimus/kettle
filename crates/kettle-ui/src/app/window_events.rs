@@ -1557,6 +1557,17 @@ impl App {
                     winit::event::Ime::Commit(text) => {
                         let redraw = ws.ime_preedit.is_some() || !text.is_empty();
                         if take_ime_commit(ws) {
+                            if let Some(pane) = ws.mux.active_focus() {
+                                // Composed text is typing, like a key's.
+                                Self::note_accessibility_input(
+                                    ws,
+                                    &[pane],
+                                    &winit::keyboard::Key::Unidentified(
+                                        winit::keyboard::NativeKey::Unidentified,
+                                    ),
+                                    Some(&text),
+                                );
+                            }
                             self.commit_ime_text(ws, &text, event_loop);
                         }
                         redraw

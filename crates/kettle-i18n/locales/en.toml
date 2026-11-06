@@ -26,7 +26,7 @@ settings_description_field_restore_session = "Automatic: macOS window settings; 
 
 menu_category_close_confirmation = "Close confirmation"
 confirm_paste_heading = "Confirm paste"
-confirm_paste_body = "This paste may send commands to the terminal. {lines}; {escapes}, {controls}.\nPreview:\n{preview}"
+confirm_paste_body = "This paste may send commands to the terminal.\n{lines} · {escapes} · {controls}\nPreview:\n{preview}"
 confirm_paste_one_line = "Paste as one line"
 menu_select_all = "Select All"
 menu_category_split = "Split"
@@ -55,6 +55,7 @@ config_notice_missing_equals = "malformed line (missing '=')"
 notice_dismiss = "Dismiss"
 a11y_tab_list = "Tabs"
 a11y_tab_close = "Close {title}"
+a11y_main_menu = "Main menu"
 a11y_new_tab_menu = "New tab menu"
 quick_terminal_toggle = "Toggle quick terminal"
 settings_category_quick_terminal = "Quick terminal"
@@ -916,7 +917,7 @@ notify_profile_launch_failed = "Profile not opened"
 
 notify_profile_launch_failed_body = "The profile may have been removed, or Kettle could not start another process."
 
-confirm_paste_without_controls = "Paste Without Controls"
+confirm_paste_without_controls = "Paste without controls"
 osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
 osc52_denied_write = "A program was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."
 
@@ -968,16 +969,16 @@ one = "Return to live output ({lines} line above bottom)"
 other = "Return to live output ({lines} lines above bottom)"
 
 [confirm_paste_lines]
-one = "{count} line"
-other = "{count} lines"
+one = "{count}\u00A0line"
+other = "{count}\u00A0lines"
 
 [confirm_paste_escapes]
-one = "{count} escape sequence"
-other = "{count} escape sequences"
+one = "{count}\u00A0escape sequence"
+other = "{count}\u00A0escape sequences"
 
 [confirm_paste_controls]
-one = "{count} other control character"
-other = "{count} other control characters"
+one = "{count}\u00A0other control character"
+other = "{count}\u00A0other control characters"
 
 [osc52_copied]
 one = "A program copied {count} character to the clipboard"
@@ -990,3 +991,7 @@ other = "⤢ Zoomed · {count} panes hidden · {shortcut} restores  "
 [pane_zoomed_unbound]
 one = "⤢ Zoomed · {count} pane hidden  "
 other = "⤢ Zoomed · {count} panes hidden  "
+
+[a11y_output_lines]
+one = "{count} new line of output"
+other = "{count} new lines of output"

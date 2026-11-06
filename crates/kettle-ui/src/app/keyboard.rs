@@ -1453,6 +1453,12 @@ impl App {
                 && !bytes.is_empty()
                 && let Some(pane_id) = ws.mux.active_focus()
             {
+                Self::note_accessibility_input(
+                    ws,
+                    &[pane_id],
+                    &event.logical_key,
+                    event.text.as_deref(),
+                );
                 if let Some(release) = key_release_bytes(&self.cfg, event, mods, mode) {
                     ws.terminal_key_release_bytes
                         .entry((event.physical_key, pane_id))
@@ -1501,6 +1507,14 @@ impl App {
                     .and_modify(|release| release.mark_accepted())
                     .or_insert_with(|| TerminalKeyRelease::new(bytes, true));
             }
+        }
+        if delivery.accepted {
+            Self::note_accessibility_input(
+                ws,
+                &recipients,
+                &event.logical_key,
+                event.text.as_deref(),
+            );
         }
         ws.terminal_key_recipients
             .entry(event.physical_key)

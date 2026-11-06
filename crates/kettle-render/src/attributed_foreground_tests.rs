@@ -525,8 +525,9 @@ fn inactive_selection_moves_toward_background_and_keeps_aa_ink() {
         let mut cache = MinimumContrastCache::default();
         let active = super::theme::selection_fill(&theme, theme.background, true, &mut cache);
         let inactive = super::theme::selection_fill(&theme, theme.background, false, &mut cache);
+        // Plainly visible: at least 2:1 (1.5:1 nearly vanished on dark themes).
         assert!(
-            color::contrast_ratio(inactive, theme.background) >= 1.5,
+            color::contrast_ratio(inactive, theme.background) >= 2.0,
             "{name}"
         );
         assert!(
