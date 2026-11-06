@@ -235,6 +235,8 @@ mod update_toast;
 
 mod snapshot;
 
+mod bidi_rows;
+
 mod starfield;
 
 mod upload;
@@ -248,6 +250,7 @@ pub use bg_image::{
     decode_bg_image_frames_with_blur, decode_bg_image_with_blur,
 };
 
+pub use bidi_rows::PaintedBidi;
 pub use snapshot::{PaneSnapshot, SnapCell};
 
 use std::sync::Arc;
@@ -425,6 +428,12 @@ pub struct Renderer {
     /// are wiped so every row re-sets via `reset_new` (the only path that
     /// updates a `BufferLine`'s internal shaping mode).
     pane_style_keys: Vec<u64>,
+    /// Each pane's row bidi layouts, grown and truncated with `pane_buffers`.
+    pane_bidi: Vec<bidi_rows::PaneBidi>,
+    /// The row layouts the last frame drew, and those of the last frame
+    /// presented, for pointer hit tests.
+    drawn_bidi: Vec<PaintedBidi>,
+    painted_bidi: Vec<PaintedBidi>,
     /// Pooled scratch for assembling one row's text.
     line_text_scratch: String,
     /// Chrome-label caches (titlebar / tab / status / glyph
@@ -942,6 +951,9 @@ impl Renderer {
         while self.pane_style_keys.len() < panes.len() {
             self.pane_style_keys.push(0);
         }
+        while self.pane_bidi.len() < panes.len() {
+            self.pane_bidi.push(bidi_rows::PaneBidi::default());
+        }
         // Parallel grow for per-pane titlebar buffers.
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -965,12 +977,14 @@ impl Renderer {
                 self.pane_buffers.swap(i, j);
                 self.pane_line_keys.swap(i, j);
                 self.pane_style_keys.swap(i, j);
+                self.pane_bidi.swap(i, j);
                 self.pane_titlebar_buffers.swap(i, j);
                 self.pane_titlebar_texts.swap(i, j);
             } else {
                 self.pane_buffer_ids[i] = Some(pane_id);
                 self.pane_line_keys[i].clear();
                 self.pane_style_keys[i] = 0;
+                self.pane_bidi[i].clear();
                 self.pane_titlebar_texts[i].clear();
             }
         }
@@ -984,6 +998,7 @@ impl Renderer {
         self.pane_buffer_ids.truncate(panes.len());
         self.pane_line_keys.truncate(panes.len());
         self.pane_style_keys.truncate(panes.len());
+        self.pane_bidi.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
         self.pane_titlebar_texts.truncate(panes.len());
         // Write each pane's title into its titlebar
@@ -1682,6 +1697,7 @@ impl Renderer {
         card_scene.clear();
         let mut drawn_cards = std::mem::take(&mut self.drawn_cards);
         drawn_cards.clear();
+        self.drawn_bidi.clear();
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -1821,6 +1837,10 @@ impl Renderer {
                 &mut card_scene.base,
                 &mut card_scene.cursors,
             );
+            if self.pane_bidi[i].any() {
+                let rows = self.pane_bidi[i].rows();
+                self.drawn_bidi.push(PaintedBidi::new(pv.terminal, rows));
+            }
 
             // Image placements, anchored history-aware so they scroll.
             {
@@ -1903,14 +1923,21 @@ impl Renderer {
                     } else {
                         &mut quads
                     };
-                    target.push(rect(
-                        grid_origin.0 + hl.col as f32 * cw,
-                        grid_origin.1 + (hl.row + 1) as f32 * ch - height,
-                        hl.width as f32 * cw,
-                        height,
-                        ink,
-                        1.0,
-                    ));
+                    // A match over reordered text covers several runs.
+                    let runs = self.pane_bidi[i].row(hl.row as i32).map_or_else(
+                        || std::iter::once(hl.col..hl.col + hl.width).collect(),
+                        |map| map.visual_runs(hl.col..=hl.col + hl.width.saturating_sub(1)),
+                    );
+                    for run in runs {
+                        target.push(rect(
+                            grid_origin.0 + run.start as f32 * cw,
+                            grid_origin.1 + (hl.row + 1) as f32 * ch - height,
+                            run.len() as f32 * cw,
+                            height,
+                            ink,
+                            1.0,
+                        ));
+                    }
                 }
             }
             if pv.focused {
@@ -3976,6 +4003,7 @@ impl Renderer {
             if cfg.text_renderer == TextRendererMode::Legacy {
                 if pane_inactive_amount(pv, panes.len(), cfg) > 0.0
                     || pv.snap.has_graphemes()
+                    || self.pane_bidi.get(i).is_some_and(|bidi| bidi.any())
                     || pv.snap.has_emoji()
                 {
                     continue;
@@ -5236,6 +5264,11 @@ impl Renderer {
             // over the colour square the user explicitly asked for.
             self.cursor_glyph_buffer
                 .set_text(gtext, &gattrs, Shaping::Advanced, None);
+            // Shaped left to right like the pane row it overdraws: the cell
+            // already holds its mirrored or joined form.
+            for line in &mut self.cursor_glyph_buffer.lines {
+                line.set_ltr_override(true);
+            }
             self.cursor_glyph_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             let (left, top, scale) = fonts::emoji_cursor_transform(
@@ -5666,6 +5699,9 @@ mod gpu_tests;
 
 #[cfg(test)]
 mod present_mode_tests;
+
+#[cfg(test)]
+mod bidi_render_tests;
 
 #[cfg(test)]
 mod screenshot_demo_tests;

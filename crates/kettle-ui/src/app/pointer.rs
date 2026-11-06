@@ -228,6 +228,12 @@ impl App {
             (cw, ch),
             (self.cfg.padding_x, self.cfg.padding_y),
         );
+        // A row drawn in bidi display order: the pointer is over a visual
+        // cell, and selection, links and mouse reports want the logical one.
+        let map = usize::try_from(line)
+            .ok()
+            .and_then(|row| super::links::painted_row_bidi(ws, rect, row));
+        let (col, side) = bidi_point(map, col, side);
         (
             kettle_core::Point::new(kettle_core::Line(line), kettle_core::Column(col)),
             side,
@@ -1193,6 +1199,19 @@ pub(super) fn px_to_cell(
         kettle_core::Side::Right
     };
     (col, line, side)
+}
+
+/// The logical cell and side under a pointer at visual column `col`, side
+/// `side`, of a row drawn with `map` (`None`: logical order).
+pub(super) fn bidi_point(
+    map: Option<&kettle_core::bidi::RowBidi>,
+    col: usize,
+    side: kettle_core::Side,
+) -> (usize, kettle_core::Side) {
+    match map {
+        Some(map) if col < map.columns() => map.logical_point(col, side),
+        _ => (col, side),
+    }
 }
 
 /// Map a VIEWPORT-relative point (line 0 = top visible row, what `px_to_point`

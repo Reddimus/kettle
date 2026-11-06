@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Hebrew, Arabic and other right-to-left text reads right to left. Each
+  normal-screen line is shown in Unicode bidi display order, as in VTE and
+  Konsole: brackets inside right-to-left text are mirrored and Arabic letters
+  join. Selection, links and mouse clicks follow the text as drawn, while
+  copies, search and the program see it in its original order. Full-screen
+  programs keep logical order, and `bidi = false` turns it off.
+
 - Screen readers announce new command output (politely, the last lines of each
   batch, or a count for a flood), never the command just typed, and stay quiet
   for full-screen programs. Checked with Orca; macOS uses the system's

@@ -1333,3 +1333,25 @@ fn exit_banners_sit_under_the_pane_output() {
     assert!(body.contains("kettle_render::persistent_notice_geometry_at_bottom"));
     assert!(body.contains("let place = if pane.held {"));
 }
+
+#[test]
+fn a_pointer_over_reordered_text_maps_to_the_logical_cell() {
+    use super::{bidi_point, px_to_cell};
+    use kettle_core::Side;
+    use kettle_core::bidi::{BidiCell, CellKind, row_bidi};
+    let cells: Vec<BidiCell> = "ab שלום"
+        .chars()
+        .map(|c| BidiCell::new(c, CellKind::Narrow, &[]))
+        .collect();
+    let map = row_bidi(&cells).expect("a Hebrew row has a layout");
+    let rect = (0.0, 0.0, 800.0, 600.0);
+    // The left half of drawn column 3 shows ם, the last letter in logical
+    // order: logical column 6, whose start side is on the right.
+    let (col, _, side) = px_to_cell(3.0 * 8.0 + 1.0, 4.0, rect, (8.0, 16.0), (0.0, 0.0));
+    assert_eq!(bidi_point(Some(&map), col, side), (6, Side::Right));
+    // Latin cells and rows without a layout are unchanged.
+    assert_eq!(bidi_point(Some(&map), 1, Side::Left), (1, Side::Left));
+    assert_eq!(bidi_point(None, 3, Side::Left), (3, Side::Left));
+    // A pointer past the row's cells keeps its column.
+    assert_eq!(bidi_point(Some(&map), 30, Side::Left), (30, Side::Left));
+}
