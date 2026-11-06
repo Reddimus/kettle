@@ -402,6 +402,10 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
     )
 }
 
+/// The contrast an unfocused window's selection keeps against the background:
+/// quieter than the focused fill's 3:1, yet still plainly a selection.
+pub(crate) const INACTIVE_SELECTION_CONTRAST: f64 = 2.0;
+
 /// Move the active fill toward the background while retaining visible separation.
 pub(crate) fn selection_fill(
     theme: &kettle_config::Theme,
@@ -422,7 +426,7 @@ pub(crate) fn selection_fill(
     }
     let fill = (1..=100)
         .map(|percent| solid_blend(active, background, percent))
-        .find(|fill| color::contrast_ratio(*fill, background) >= 1.5)
+        .find(|fill| color::contrast_ratio(*fill, background) >= INACTIVE_SELECTION_CONTRAST)
         .unwrap_or(active);
     cache.inactive_fills.insert(key, fill);
     fill

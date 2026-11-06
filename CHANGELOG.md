@@ -96,6 +96,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- An unfocused window's selection keeps a 2:1 contrast with the background
+  (was 1.5:1), so it stays visible while still quieter than the focused one.
+
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel
   when the text holds controls, and shows a raw Paste in the warning colour.
