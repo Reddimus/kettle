@@ -809,10 +809,12 @@ fn sweep_stale_scratch(base: &Path, prefix: &str, max_age: std::time::Duration) 
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
+        // A modification time slightly after `now` (timestamp granularity or
+        // clock adjustment) counts as age zero rather than as unknown.
         let stale = metadata
             .modified()
             .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
+            .map(|modified| now.duration_since(modified).unwrap_or_default())
             .is_some_and(|age| age >= max_age);
         if stale {
             let path = entry.path();
@@ -940,6 +942,27 @@ mod sweep_tests {
             "dropping the guard must remove its directory"
         );
         assert!(!path.with_added_extension("lock").exists());
+    }
+
+    /// A lock whose mtime reads slightly after the sweep's clock is still an
+    /// abandoned lock: nightly CI met timestamps a few ticks ahead of `now`.
+    #[test]
+    fn a_lock_with_a_future_mtime_is_swept_at_zero_age() {
+        let base = super::private_tempdir("kettle-sweep-future-");
+        let lock_path = base.path().join("kettle-future-aaaa.lock");
+        let lock = std::fs::File::create_new(&lock_path).unwrap();
+        lock.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(lock);
+        super::sweep_stale_scratch_for_test(
+            base.path(),
+            "kettle-future-",
+            std::time::Duration::ZERO,
+        );
+        assert!(
+            !lock_path.exists(),
+            "a future mtime is age zero, not unknown"
+        );
     }
 
     #[test]
