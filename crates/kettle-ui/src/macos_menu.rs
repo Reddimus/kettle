@@ -31,11 +31,15 @@ pub(crate) enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Row {
     Item {
-        title: &'static str,
+        title: String,
         command: Command,
         shortcut: Option<Trigger>,
         shortcut_label: Option<String>,
         enabled: bool,
+    },
+    Submenu {
+        title: &'static str,
+        rows: Vec<Row>,
     },
     Services(&'static str),
     Separator,
@@ -103,6 +107,21 @@ fn command_shortcut(bindings: &Bindings, action: &Action) -> Option<(Trigger, St
 /// their standard equivalents unless the live keymap owns that chord.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context) -> Vec<Menu> {
+    menu_model_with_profiles(
+        tr,
+        bindings,
+        context,
+        &kettle_config::Config::list_profiles(),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn menu_model_with_profiles(
+    tr: &Translator,
+    bindings: &Bindings,
+    context: Context,
+    profiles: &[String],
+) -> Vec<Menu> {
     use Row::{Separator as Sep, Services};
     let command_bindings: Bindings = bindings
         .iter()
@@ -112,7 +131,7 @@ pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context)
     let item = |text, action: Action| {
         let shortcut = command_shortcut(&command_bindings, &action);
         Row::Item {
-            title: tr.text(text),
+            title: tr.text(text).to_string(),
             enabled: context.enables(&action),
             command: Command::Kettle(action),
             shortcut: shortcut.as_ref().map(|(trigger, _)| *trigger),
@@ -122,7 +141,7 @@ pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context)
     let native = |text, action, chord: Option<Trigger>| {
         let shortcut = chord.filter(|trigger| !bindings.contains_key(trigger));
         Row::Item {
-            title: tr.text(text),
+            title: tr.text(text).to_string(),
             command: Command::Native(action),
             shortcut,
             shortcut_label: shortcut.map(|trigger| trigger.label()),
@@ -170,6 +189,22 @@ pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context)
             vec![
                 item(T::MenuNewWindow, Action::NewWindow),
                 item(T::MenuNewTab, Action::NewTab),
+                Row::Submenu {
+                    title: tr.text(T::MenuNewTabProfile),
+                    rows: crate::app::profile_launch_entries(profiles, tr)
+                        .into_iter()
+                        .map(|(label, action)| Row::Item {
+                            title: label.shown(tr).to_string(),
+                            enabled: context.enables(&action),
+                            command: Command::Kettle(action),
+                            shortcut: None,
+                            shortcut_label: None,
+                        })
+                        .collect(),
+                },
+                item(T::MenuSaveLayout, Action::SaveLayout),
+                item(T::MenuOpenLayout, Action::OpenLayoutPicker),
+                item(T::PaletteOpenSsh, Action::OpenSsh),
                 Sep,
                 item(T::MenuSplitRight, Action::SplitRight),
                 item(T::MenuSplitDown, Action::SplitDown),
@@ -239,3 +274,19 @@ pub(crate) fn sync(
 #[cfg(test)]
 #[path = "macos_menu/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+fn kettle_actions(rows: &[Row]) -> Vec<&Action> {
+    let mut actions = Vec::new();
+    for row in rows {
+        match row {
+            Row::Item {
+                command: Command::Kettle(action),
+                ..
+            } => actions.push(action),
+            Row::Submenu { rows, .. } => actions.extend(kettle_actions(rows)),
+            _ => {}
+        }
+    }
+    actions
+}

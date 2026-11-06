@@ -962,3 +962,22 @@ their backgrounds while retaining at least 3:1 contrast, and the active accent
 line becomes neutral. Focused labels and controls retain at least 4.5:1;
 separators and hover fills retain at least 1.5:1. The tab strip does not take
 keyboard focus from the terminal; tab-selection shortcuts remain available.
+
+## Profiles and named layouts in the UI
+
+See [Sessions, profiles and layouts](../README.md#sessions-profiles-and-layouts)
+and the [getting started guide](GETTING-STARTED.md#profiles-layouts-and-ssh)
+for the new-tab menu, macOS Shell menu and command palette routes. Profile
+choices follow `kettle --list-profiles` from the default config directory's
+`profiles/*.config`, including when launched with `--config FILE`. They launch
+separate processes/windows. The empty Create Profile action opens that directory.
+Named layouts use `layouts/*.json` beside the default config; Save Layout
+replaces an existing name and excludes quick-terminal windows.
+
+No new configuration keys are needed. Optional `keybind` actions
+`save_layout` (name prompt), `open_layout_picker` (Open Layout) and
+`open_profiles_directory` (create/open the profiles directory) expose the same
+routes. `ssh` opens the SSH launcher; `ssh-host = name=target` supplies its
+configured targets. Save names accept 1–128 ASCII letters, digits, `.`, `_` and
+`-`, except `.` and `..`. Restore policy remains controlled by `restore-session`
+and the launch flags described above.

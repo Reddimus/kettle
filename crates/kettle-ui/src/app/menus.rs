@@ -993,12 +993,43 @@ impl App {
         shells: &[kettle_core::term::ShellChoice],
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
+        Self::new_tab_menu_with_profiles(shells, &kettle_config::Config::list_profiles(), tr)
+    }
+
+    pub(super) fn new_tab_menu_with_profiles(
+        shells: &[kettle_core::term::ShellChoice],
+        profiles: &[String],
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
         use kettle_i18n::Text as T;
         let mut items: Vec<ContextMenuItem> = shells
             .iter()
             .cloned()
             .map(|(label, argv)| ContextMenuItem::NewTabShell { label, argv })
             .collect();
+        items.push(ContextMenuItem::Separator);
+        items.push(ContextMenuItem::Submenu {
+            label: tr.text(T::MenuNewTabProfile).to_string(),
+            items: profile_launch_entries(profiles, tr)
+                .into_iter()
+                .map(|(label, action)| ContextMenuItem::DynamicItem {
+                    label: label.shown(tr).to_string(),
+                    action,
+                    enabled: true,
+                })
+                .collect(),
+        });
+        for (label, action) in [
+            (T::MenuSaveLayout, Action::SaveLayout),
+            (T::MenuOpenLayout, Action::OpenLayoutPicker),
+            (T::PaletteOpenSsh, Action::OpenSsh),
+        ] {
+            items.push(ContextMenuItem::Item {
+                label: tr.text(label),
+                action,
+                enabled: true,
+            });
+        }
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Item {
             label: tr.text(T::MenuSettings),

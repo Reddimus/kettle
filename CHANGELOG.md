@@ -13,6 +13,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   buttons show translated tooltips and shortcut hints, stay reachable in narrow
   windows, and no longer clip tab shortcuts with narrow terminal cells.
 
+- Discover profiles, save and open named layouts, and launch SSH from the new-tab
+  menu, macOS Shell menu and command palette. Profiles open separate windows;
+  empty lists explain how to create a profile or save a layout.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

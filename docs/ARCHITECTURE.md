@@ -4476,6 +4476,16 @@ restore and `false` always opens fresh; legacy boolean spellings still work.
 The session is saved only in restore mode, so a fresh window never clobbers a
 saved layout. Privacy rules and crash recovery prompts do not change.
 
+Save Layout reuses the title editor's single-line field and all of its layout,
+IME, hit-test, control-geometry and accessibility projections. It captures the
+same multi-window snapshot as automatic saving, excluding the quick terminal,
+and uses the named-layout writer with strict filename validation and visible
+failure feedback. It does not change the current automatic save destination.
+Profile launches use separate processes because configuration is application-wide.
+The dropdown, native Shell submenu and palette share profile launch entries from
+`Config::list_profiles`; the palette captures names on open so row activation
+and geometry use the same list throughout that interaction.
+
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
 with no surface above 32 Mi pixels and no more than 64 Mi pixels

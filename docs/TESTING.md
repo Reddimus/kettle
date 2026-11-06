@@ -8,6 +8,15 @@ scheduled dependency scans, and longer fuzz runs. Linux and macOS are supported
 runtime hosts. Windows CI retains compile and regression coverage, but does not
 produce a supported package. Record every skipped check and its reason.
 
+Profile/layout UI regression coverage lives in kettle-ui's `menu_text_tests`,
+`macos_menu::tests` and `picker_text_tests`: English/Spanish menu routes,
+profile lists including empty, native submenu dispatch order, and the shared
+Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
+saves and reloads a split layout, checks picker discovery and validates the
+palette's profile discovery without changing the real config directory.
+Native rendering, OS directory opening, actual profile/window launches and
+Spanish language acceptance still require a live UI pass.
+
 ## Run it
 
 The shell path regression runs Fish integration from directories containing

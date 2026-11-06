@@ -1030,6 +1030,7 @@ impl App {
             }
             Action::CommandPalette => {
                 self.close_all_modals(ws);
+                ws.palette_profiles = kettle_config::Config::list_profiles();
                 ws.palette_input = Some((Default::default(), 0));
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
@@ -1052,9 +1053,78 @@ impl App {
                 ws.settings_restart_pending = false;
                 ws.settings_nav = Some(crate::settings::SettingsNav::default());
             }
-            // Terminator parity (layoutlauncher.py): open the runtime layout
-            // picker. With no saved layouts the modal still opens, with a hint
-            // to save one with `kettle --layout NAME`.
+            Action::SaveLayout => {
+                self.close_all_modals(ws);
+                ws.editing_title = begin_title_edit(
+                    &ws.mux,
+                    TitleEditScope::SaveLayout,
+                    GroupBulkScope::Single,
+                    "",
+                );
+                ws.pending_resize = true;
+            }
+            Action::LaunchProfile(name) => {
+                let tr = self.ui_text;
+                // Config and renderer state are application-wide. Isolate profile launches.
+                if kettle_config::Config::list_profiles().contains(&name) {
+                    let exe = std::env::current_exe().unwrap_or_else(|_| "kettle".into());
+                    if let Err(error) = std::thread::Builder::new()
+                        .name("kettle-profile".into())
+                        .spawn(move || {
+                            if let Err(error) = std::process::Command::new(exe)
+                                .arg(format!("--profile={name}"))
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .and_then(|mut child| child.wait())
+                            {
+                                log::warn!("profile launch failed: {error}");
+                                fire_notify(
+                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                                );
+                            }
+                        })
+                    {
+                        log::warn!("profile reaper failed to start: {error}");
+                        fire_notify(
+                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                        );
+                    }
+                } else {
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
+                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
+                    );
+                }
+            }
+            Action::OpenProfilesDirectory => {
+                let path = kettle_config::Config::default_path()
+                    .and_then(|p| p.parent().map(|d| d.join("profiles")));
+                let tr = self.ui_text;
+                if let Some(path) = path {
+                    if kettle_state::create_private_dirs(&path).is_ok() {
+                        system_opener::open(path, move |_| {
+                            fire_notify(
+                                tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                                tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                            )
+                        });
+                    } else {
+                        fire_notify(
+                            tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                            tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                        );
+                    }
+                } else {
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyProfilesFailed),
+                        tr.text(kettle_i18n::Text::NotifyProfilesFailedBody),
+                    );
+                }
+            }
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();

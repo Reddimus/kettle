@@ -501,7 +501,7 @@ picker_a11y_palette = "Paleta de comandos"
 picker_a11y_results = "{label}: resultados"
 picker_a11y_ssh = "Lanzador SSH"
 picker_a11y_themes = "Selector de temas"
-picker_create_layout_hint = "kettle --layout NOMBRE"
+picker_create_layout_hint = "Usar Guardar diseño… en el menú de nueva pestaña"
 picker_hint_cancel = "cancelar"
 picker_hint_complete = "completar"
 picker_hint_connect = "conectar"
@@ -860,6 +860,30 @@ settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en
 
 
 tab_new_options = "Opciones de nueva pestaña"
+
+menu_new_tab_profile = "Nueva pestaña con perfil"
+
+menu_no_profiles = "Aún no hay perfiles — Crear perfil…"
+
+palette_launch_profile = "Nueva ventana con el perfil: {name}"
+
+menu_save_layout = "Guardar diseño…"
+
+menu_open_layout = "Abrir diseño…"
+
+edit_layout_name = "Nombre del diseño"
+
+notify_layout_failed = "No se guardó el diseño"
+
+notify_layout_failed_body = "Usar un nombre de 1 a 128 letras, dígitos, puntos, guiones bajos o guiones. Comprobar que se pueda escribir en el directorio de diseños."
+
+notify_profiles_failed = "No se abrió el directorio de perfiles"
+
+notify_profiles_failed_body = "Comprobar que el directorio de configuración esté disponible y permita escribir, y que el administrador de archivos pueda abrir carpetas."
+
+notify_profile_launch_failed = "No se abrió el perfil"
+
+notify_profile_launch_failed_body = "Es posible que se haya eliminado el perfil o que Kettle no haya podido iniciar otro proceso."
 
 [completion_matches]
 one = "{count} coincidencia"

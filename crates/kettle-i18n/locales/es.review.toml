@@ -23,6 +23,19 @@
 
 [status]
 tab_new_options = "draft"
+
+notify_profile_launch_failed_body = "draft"
+notify_profile_launch_failed = "draft"
+notify_profiles_failed_body = "draft"
+notify_profiles_failed = "draft"
+notify_layout_failed_body = "draft"
+notify_layout_failed = "draft"
+edit_layout_name = "draft"
+menu_open_layout = "draft"
+menu_save_layout = "draft"
+palette_launch_profile = "draft"
+menu_no_profiles = "draft"
+menu_new_tab_profile = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"

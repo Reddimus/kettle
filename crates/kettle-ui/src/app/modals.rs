@@ -1619,7 +1619,11 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(self.update_notice().as_ref(), &self.ui_text);
+        let cmds = palette_entries(
+            self.update_notice().as_ref(),
+            &self.ui_text,
+            &ws.palette_profiles,
+        );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
         };

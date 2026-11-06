@@ -384,15 +384,31 @@ impl Session {
     /// `kettle --layout dev` from a fresh install needs to create
     /// `<config-dir>/layouts/` itself).
     pub fn save_layout(&self, name: &str) {
-        let Some(p) = Self::path_for_layout(name) else {
-            return;
-        };
-        if let Some(parent) = p.parent() {
-            let _ = kettle_state::create_private_dirs(parent);
+        if let Err(error) = self.write_layout(name) {
+            log::warn!("could not save layout: {error}");
         }
-        if let Err(e) = save_to_path(self, &p) {
-            log::warn!("could not save layout {name:?} to {}: {e}", p.display());
+    }
+
+    fn write_layout(&self, name: &str) -> std::io::Result<()> {
+        let path = Self::path_for_layout(name)
+            .ok_or_else(|| std::io::Error::other("no config directory"))?;
+        save_to_path(self, &path)
+    }
+
+    pub(crate) fn save_layout_result(&self, name: &str) -> std::io::Result<()> {
+        if name.is_empty()
+            || name.len() > 128
+            || matches!(name, "." | "..")
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid layout name",
+            ));
         }
+        self.write_layout(name)
     }
 
     pub fn is_empty(&self) -> bool {

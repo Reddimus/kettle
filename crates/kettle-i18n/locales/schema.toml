@@ -1051,7 +1051,7 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the theme picker dialog."
 
 [messages.picker_create_layout_hint]
-context = "crates/kettle-ui/src/app.rs: command shown when no layouts exist. Keep kettle --layout unchanged; NAME is the name of the workspace to create and use."
+context = "crates/kettle-ui/src/app.rs: hint shown when no layouts exist: directs the user to Save Layout in the new-tab menu."
 
 [messages.picker_hint_cancel]
 context = "crates/kettle-ui/src/app.rs: key hint after Esc: close the picker or the title editor. Lowercase, one or two words."
@@ -2576,3 +2576,40 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
+
+[messages.menu_new_tab_profile]
+context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu; profiles launch in a separate window/process."
+
+[messages.menu_no_profiles]
+context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."
+
+[messages.palette_launch_profile]
+context = "crates/kettle-ui/src/app/pickers.rs: Palette entry launching a profile in a separate process; name is a config filename stem."
+args = [{ name = "name", type = "str" }]
+
+[messages.menu_save_layout]
+context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/src/palette.rs: Open a single-line prompt for a named window arrangement."
+
+[messages.menu_open_layout]
+context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/src/palette.rs: Open the named-layout picker."
+
+[messages.edit_layout_name]
+context = "crates/kettle-ui/src/app/title.rs: Single-line layout save prompt label."
+
+[messages.notify_layout_failed]
+context = "crates/kettle-ui/src/app/title.rs: Layout save failure notification title."
+
+[messages.notify_layout_failed_body]
+context = "crates/kettle-ui/src/app/title.rs: Layout save failure: invalid ASCII filename or write error."
+
+[messages.notify_profiles_failed]
+context = "crates/kettle-ui/src/app/actions.rs: Failure opening or creating the profiles directory."
+
+[messages.notify_profiles_failed_body]
+context = "crates/kettle-ui/src/app/actions.rs: Profiles directory resolution, creation or OS opening failed."
+
+[messages.notify_profile_launch_failed]
+context = "crates/kettle-ui/src/app/actions.rs: Profile process launch failure notification."
+
+[messages.notify_profile_launch_failed_body]
+context = "crates/kettle-ui/src/app/actions.rs: The selected profile disappeared or process/reaper creation failed."

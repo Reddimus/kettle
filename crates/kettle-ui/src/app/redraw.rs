@@ -142,6 +142,7 @@ impl App {
                     &self.cfg.keybinds,
                     tr,
                     self.update_notice().as_ref(),
+                    &ws.palette_profiles,
                 )),
             ),
             None => (None, String::new(), None),

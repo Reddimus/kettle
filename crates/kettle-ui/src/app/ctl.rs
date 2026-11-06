@@ -1255,6 +1255,7 @@ impl App {
                 TitleEditScope::Tab => "tab",
                 TitleEditScope::Pane => "pane",
                 TitleEditScope::Group => "group",
+                TitleEditScope::SaveLayout => "save_layout",
             };
             serde_json::json!({
                 "scope": scope,

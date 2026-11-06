@@ -109,14 +109,18 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
         &shells,
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
     );
-    assert_eq!(items.len(), 6, "2 shells + separator + 3 bottom rows");
+    assert_eq!(
+        items.len(),
+        11,
+        "shells, profile submenu, layouts, SSH and bottom rows"
+    );
     assert!(matches!(
         &items[0],
         ContextMenuItem::NewTabShell { label, .. } if label == "PowerShell"
     ));
     assert!(matches!(items[2], ContextMenuItem::Separator));
     assert!(matches!(
-        items[3],
+        items[8],
         ContextMenuItem::Item {
             label: "Settings…",
             action: Action::OpenSettings,
@@ -124,7 +128,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
         }
     ));
     assert!(matches!(
-        items[4],
+        items[9],
         ContextMenuItem::Item {
             label: "Command palette",
             action: Action::CommandPalette,
@@ -132,7 +136,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
         }
     ));
     assert!(matches!(
-        items[5],
+        items[10],
         ContextMenuItem::Item {
             label: "About kettle",
             action: Action::About,
@@ -143,10 +147,10 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     // assignment must keep working with the new bottom rows.
     let mn = assign_mnemonics(&items, &[]);
     let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
-    assert_eq!(letters.len(), 5, "all 5 dispatchable rows get mnemonics");
+    assert_eq!(letters.len(), 9, "all dispatchable rows get mnemonics");
     letters.sort_unstable();
     letters.dedup();
-    assert_eq!(letters.len(), 5, "mnemonics are distinct");
+    assert_eq!(letters.len(), 9, "mnemonics are distinct");
 }
 
 /// An `Info` row (About panel) is inert — not
@@ -644,6 +648,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
                 &kettle_config::keybinds::defaults(),
                 &kettle_i18n::Translator::new(kettle_i18n::Language::En),
                 None,
+                &[],
             )),
             None,
             None,

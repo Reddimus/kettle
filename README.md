@@ -126,6 +126,38 @@ Use `kettle agent-setup --status` to check which command runs first. The
 [wrapper forms](docs/AGENT.md#wrapping-your-own-claude-or-codex-function)
 let your function keep its account environment and call Kettle's launcher.
 
+## Sessions, profiles and layouts
+
+Session restore keeps windows, tabs, split arrangements and working directories.
+It starts new shells or saved commands; terminal contents, scrollback and running
+processes are not restored. With `restore-session = auto` (the default), macOS
+restores when **Close windows when quitting an application** is unchecked;
+if the system has no preference set, it keeps windows. Other platforms open
+fresh with `auto`. Use `true` or `false` to choose explicitly.
+
+Open the new-tab **▾** menu beside **+** (set `tab-bar = always` to keep it
+visible with one tab), or the macOS **Shell** menu:
+
+- **New Tab with Profile** lists the same profiles as `kettle --list-profiles`.
+  Each choice opens a separate Kettle process/window with that profile, since
+  profiles include application-wide settings. The empty **Create Profile…**
+  action creates and opens the profiles directory; add a `NAME.config` file
+  there, for example a copy of your config. Profiles live in the default
+  config directory's `profiles/`, even with `--config FILE`.
+- **Save Layout…** asks for a name and saves the current windows, tabs, splits
+  and working directories. **Open Layout…** opens the searchable picker and
+  launches the selected arrangement in a separate process. Saving an existing
+  name replaces that layout. Layouts live in the default config directory's
+  `layouts/`. Quick-terminal windows are excluded.
+- **SSH launcher** opens configured SSH hosts or accepts a typed target.
+
+The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
+profile, and **Broadcast input…** actions for all panes in the tab, a group or the
+window. Broadcast sends input to multiple panes; choose **Stop broadcasting
+input** when finished. Profiles and
+layouts can also be selected with `--profile NAME` and `--layout NAME`.
+See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.md).
+
 ## Features
 
 - Tabs, splits, multiple windows, and tabs you can drag between windows

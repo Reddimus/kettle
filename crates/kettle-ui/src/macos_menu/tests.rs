@@ -16,14 +16,15 @@ fn ready() -> Context {
     }
 }
 
-fn titles(model: &[Menu]) -> Vec<Vec<&'static str>> {
+fn titles(model: &[Menu]) -> Vec<Vec<&str>> {
     model
         .iter()
         .map(|menu| {
             menu.rows
                 .iter()
                 .map(|row| match row {
-                    Row::Item { title, .. } | Row::Services(title) => *title,
+                    Row::Item { title, .. } => title.as_str(),
+                    Row::Services(title) | Row::Submenu { title, .. } => *title,
                     Row::Separator => "|",
                 })
                 .collect()
@@ -62,6 +63,10 @@ fn complete_structure_in_english_and_spanish() {
             vec![
                 "New Window",
                 "New Tab",
+                "New Tab with Profile",
+                "Save Layout…",
+                "Open Layout…",
+                "SSH launcher",
                 "|",
                 "Split Right",
                 "Split Down",
@@ -113,6 +118,10 @@ fn complete_structure_in_english_and_spanish() {
             vec![
                 "Nueva ventana",
                 "Nueva pestaña",
+                "Nueva pestaña con perfil",
+                "Guardar diseño…",
+                "Abrir diseño…",
+                "Lanzador SSH",
                 "|",
                 "Dividir a la derecha",
                 "Dividir hacia abajo",
@@ -184,6 +193,9 @@ fn complete_structure_in_english_and_spanish() {
             Action::OpenSettings,
             Action::NewWindow,
             Action::NewTab,
+            Action::SaveLayout,
+            Action::OpenLayoutPicker,
+            Action::OpenSsh,
             Action::SplitRight,
             Action::SplitDown,
             Action::ClosePane,
@@ -345,9 +357,9 @@ fn menu_equivalents_leave_yielded_keys_on_the_original_pane_path() {
     assert!(route.contains("services.performKeyEquivalent(event)"));
     assert!(!route.contains("super"));
     assert!(native.contains("native.addItem(&make_item(mtm, title, selector, *shortcut))"));
-    assert!(native.contains("if matches!(command, Command::Kettle(_))"));
+    assert!(native.contains("if let Command::Kettle(action) = command"));
     assert!(native.contains("let submenu = new_menu(mtm, &native)"));
-    assert!(native.contains("s.target.clone()"));
+    assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
     let events = kettle_test_support::production_source(include_str!("../app/window_events.rs"));
     let dispatch = events
         .split("if let Some((trigger, act)) = resolve_keybind_action(")
@@ -379,4 +391,43 @@ fn resume_dispatch_and_reload_reconcile_menus_and_registrations() {
     assert!(
         include_str!("../macos_menu.rs").contains("cfg.language.resolve(kettle_i18n::os_locale)")
     );
+}
+
+#[test]
+fn shell_profiles_are_dynamic_and_native_dispatch_includes_submenus() {
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for names in [vec![], vec!["dev".into(), "ops".into()]] {
+            let menus = menu_model_with_profiles(&tr, &Bindings::new(), ready(), &names);
+            let actions = kettle_actions(&menus[1].rows);
+            for action in [
+                Action::SaveLayout,
+                Action::OpenLayoutPicker,
+                Action::OpenSsh,
+            ] {
+                assert!(actions.contains(&&action));
+            }
+            let launches: Vec<_> = actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::LaunchProfile(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(launches, names);
+            assert_eq!(
+                actions.contains(&&Action::OpenProfilesDirectory),
+                names.is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn native_items_retain_the_command_they_were_built_with() {
+    let native = kettle_test_support::production_source(include_str!("native.rs"));
+    assert!(native.contains("action: action.clone()"));
+    assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
+    assert!(native.contains("invocation.action.clone()"));
+    assert!(!native.contains("sender.tag()"));
 }

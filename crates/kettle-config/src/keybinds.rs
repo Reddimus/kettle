@@ -376,6 +376,9 @@ pub enum Action {
     /// the `CommandPalette` overlay; uses
     /// `WindowState::layout_picker_input: Option<(String, usize)>`.
     OpenLayoutPicker,
+    SaveLayout,
+    LaunchProfile(String),
+    OpenProfilesDirectory,
     /// Open the theme picker: type to filter the bundled themes, step through
     /// them by look with the arrows (each previews live), Enter keeps one and
     /// Esc restores the theme it opened on.
@@ -820,6 +823,8 @@ pub fn action_names() -> Vec<&'static str> {
         "send_newline",
         "layout_launcher",
         "open_layout_picker",
+        "save_layout",
+        "open_profiles_directory",
         "open_theme_picker",
         "open_media_shelf",
         "preview_link",
@@ -1137,6 +1142,8 @@ impl Action {
             "send_newline" | "send-newline" => SendNewline,
             "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
+            "save_layout" | "save-layout" => SaveLayout,
+            "open_profiles_directory" | "open-profiles-directory" => OpenProfilesDirectory,
             "open_theme_picker" | "open-theme-picker" => OpenThemePicker,
             "open_media_shelf" | "open-media-shelf" => OpenMediaShelf,
             "preview_link" | "preview-link" => PreviewLink,
