@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
+  the key that restores them, in English and Spanish.
+
 - Config error notices explain ignored settings, suggest nearby setting names,
   and show expected types or ranges without exposing values. Open Config opens
   the affected file, with keyboard and screen-reader access. Clipboard notices

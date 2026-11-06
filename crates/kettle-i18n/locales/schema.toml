@@ -2773,3 +2773,13 @@ context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button toolt
 
 [messages.a11y_window_close]
 context = "crates/kettle-ui/src/app/linux_titlebar.rs: Linux header button tooltip and screen-reader action name. Needs screen-reader second pass."
+
+[messages.pane_zoomed]
+context = "crates/kettle-ui/src/app/redraw.rs pane_zoom_badge: start of a zoomed pane's titlebar, before its title. count is how many other panes of the tab the zoom hides; shortcut is the live Toggle Zoom key, such as Ctrl+Shift+X, which shows them again. Keep the ⤢ sign and the two trailing spaces that separate the title."
+args = [{ name = "count", type = "u64" }, { name = "shortcut", type = "str" }]
+plural = "count"
+
+[messages.pane_zoomed_unbound]
+context = "crates/kettle-ui/src/app/redraw.rs pane_zoom_badge: the same badge when no key is bound to Toggle Zoom. count is how many panes the zoom hides. Keep the ⤢ sign and the two trailing spaces."
+args = [{ name = "count", type = "u64" }]
+plural = "count"

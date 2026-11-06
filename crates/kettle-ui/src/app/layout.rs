@@ -381,7 +381,9 @@ impl App {
                         (!geometries.is_empty()).then(|| tab.focus.min(geometries.len() - 1))
                     && let Some(focused) = geometries.get_mut(focused_index)
                 {
-                    *focused = self.pty_geometry_for_terminal(ws, terminal(area, 1));
+                    // Measured as `Mux::layout` shows it: the whole area,
+                    // with the titlebar a split's pane keeps while zoomed.
+                    *focused = self.pty_geometry_for_terminal(ws, terminal(area, pane_count));
                 }
                 geometries
             })

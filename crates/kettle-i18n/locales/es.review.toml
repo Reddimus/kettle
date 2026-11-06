@@ -928,6 +928,8 @@ confirm_paste_lines = "draft"
 confirm_paste_escapes = "draft"
 confirm_paste_controls = "draft"
 osc52_copied = "draft"
+pane_zoomed = "draft"
+pane_zoomed_unbound = "draft"
 
 [second-pass]
 keys = [

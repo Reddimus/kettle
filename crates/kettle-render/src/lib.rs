@@ -872,12 +872,14 @@ impl Renderer {
         // Terminator parity, per-pane-titlebar: hoisted alongside
         // buffer allocation so the titlebar text-setting block below
         // can reference it. Same condition as the titlebar quad
-        // render (see `pick_titlebar_bg`; cfg.show_titlebar && >1 pane).
-        let pane_titlebar_h: f32 = if cfg.show_titlebar && panes.len() > 1 {
-            ch + 6.0
-        } else {
-            0.0
-        };
+        // render (see `pick_titlebar_bg`): the layout gave a pane a titlebar,
+        // as it does in a split and for a zoomed pane of one.
+        let pane_titlebar_h: f32 =
+            if cfg.show_titlebar && panes.iter().any(|p| p.titlebar.is_some()) {
+                ch + 6.0
+            } else {
+                0.0
+            };
         // The chrome-label caches below compare TEXT only, which is sound while
         // the font family is stable, so invalidate them all once when it
         // changes (config reload with a new `font-family`).

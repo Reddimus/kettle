@@ -829,6 +829,7 @@ impl App {
         let status = self.build_status_bar(ws);
         let layout = self.pane_layout(ws, area);
         let focus = ws.mux.active_focus();
+        let zoom_badge = self.active_zoom_badge(ws);
         let window = ws.window.clone();
 
         // A failed acquire/render owns the next GPU attempt until its one-shot
@@ -939,6 +940,9 @@ impl App {
                     title_parts
                         .prefix
                         .push_str(&media_shelf_badge(p.media_shelf.unseen()));
+                    if let Some(badge) = zoom_badge.as_deref().filter(|_| Some(*id) == focus) {
+                        title_parts.prefix.insert_str(0, badge);
+                    }
                     metas.push((
                         *id,
                         *r,

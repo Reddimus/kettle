@@ -1123,6 +1123,7 @@ impl App {
         });
         let home = crate::mux::home_dir_string();
         let focus = target.mux.active_focus();
+        let zoom_badge = self.active_zoom_badge(target);
         let pane_titlebars: Vec<serde_json::Value> = if pane_layout
             .iter()
             .any(|(_, partition)| partition.titlebar.is_some())
@@ -1146,6 +1147,9 @@ impl App {
                     title_parts
                         .prefix
                         .push_str(&media_shelf_badge(pane.media_shelf.unseen()));
+                    if let Some(badge) = zoom_badge.as_deref().filter(|_| Some(*pane_id) == focus) {
+                        title_parts.prefix.insert_str(0, badge);
+                    }
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));

@@ -76,11 +76,15 @@ Escape dismisses the notice.
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
 | Focus the pane in a direction, Linux | `Alt+Arrow` |
 | Focus the pane in a direction, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
+| Zoom the focused pane, or restore the split | `Ctrl+Shift+X` |
 | Search | `Ctrl+Shift+F` |
 | Toggle regex while searching | `Alt+R` (Linux/Windows), `Cmd+Alt+R` (macOS) |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
+
+A zoomed pane keeps its titlebar, which shows how many panes the zoom hides
+and the key that restores them.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
 below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run

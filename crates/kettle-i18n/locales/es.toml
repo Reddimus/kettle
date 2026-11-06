@@ -980,3 +980,11 @@ other = "{count} caracteres de control adicionales"
 [osc52_copied]
 one = "Un programa copió {count} carácter al portapapeles"
 other = "Un programa copió {count} caracteres al portapapeles"
+
+[pane_zoomed]
+one = "⤢ Ampliado · {count} panel oculto · {shortcut} restaura  "
+other = "⤢ Ampliado · {count} paneles ocultos · {shortcut} restaura  "
+
+[pane_zoomed_unbound]
+one = "⤢ Ampliado · {count} panel oculto  "
+other = "⤢ Ampliado · {count} paneles ocultos  "

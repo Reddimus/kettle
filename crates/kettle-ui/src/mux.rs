@@ -1532,6 +1532,14 @@ impl Node {
         walk(self, target, &mut idx)
     }
 
+    /// How many panes this tree holds.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            Node::Leaf(_) => 1,
+            Node::Split { a, b, .. } => a.leaf_count() + b.leaf_count(),
+        }
+    }
+
     /// All leaf ids in DFS order.
     pub fn leaf_ids(&self) -> Vec<u64> {
         fn walk(n: &Node, out: &mut Vec<u64>) {
@@ -3385,7 +3393,13 @@ impl Mux {
         style: LayoutStyle,
     ) -> Vec<(u64, PanePartition)> {
         let leaves = self.leaves(tab, area);
-        let metrics = style.metrics(leaves.len());
+        // A zoomed pane keeps the titlebar of a split: it says the tab has
+        // other panes and how to bring them back.
+        let metrics = style.metrics(
+            self.tabs
+                .get(tab)
+                .map_or(leaves.len(), |t| t.root.leaf_count()),
+        );
         let lanes = self.tabs.get(tab).map(|t| &t.lanes);
         leaves
             .into_iter()
@@ -3412,7 +3426,7 @@ impl Mux {
         } else {
             tab.root.layout(area, &mut leaves);
         }
-        let metrics = style.metrics(leaves.len());
+        let metrics = style.metrics(tab.root.leaf_count());
         let (_, leaf) = leaves.into_iter().find(|(id, _)| *id == pane)?;
         Some(partition_leaf(leaf, metrics, tab.lanes.get(&pane).copied()))
     }
@@ -3482,7 +3496,7 @@ impl Mux {
         } else {
             tab.root.layout(area, &mut leaves);
         }
-        let metrics = style.metrics(leaves.len());
+        let metrics = style.metrics(tab.root.leaf_count());
         let (Some((_, leaf)), Some(lane)) = (
             leaves.into_iter().find(|(id, _)| *id == pane),
             tab.lanes.get_mut(&pane).filter(|lane| lane.expanded),
@@ -7460,6 +7474,33 @@ mod node_tests {
         m.open_lane(5, LaneSide::Bottom);
         let torn = m.detach_tab(1).unwrap();
         assert!(torn.tab.lanes.is_empty());
+    }
+
+    /// A zoomed pane of a split keeps its titlebar, where the badge says the
+    /// tab has other panes; a lone pane, zoomed or not, has none. Every path
+    /// that measures the pane agrees.
+    #[test]
+    fn a_zoomed_pane_of_a_split_keeps_its_titlebar() {
+        use crate::pane_partition::LayoutStyle;
+        let style = LayoutStyle::new((9.0, 18.0), (4.0, 2.0), Some(24.0), false).unwrap();
+        let area = (0.0, 0.0, 1200.0, 800.0);
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        assert_eq!(root.leaf_count(), 2);
+        push_tab(&mut m, root, 1);
+        m.tabs[0].zoomed = true;
+        let zoomed = m.layout(0, area, style);
+        assert_eq!(zoomed.len(), 1);
+        assert_eq!(zoomed[0].1.leaf, area);
+        assert!(zoomed[0].1.titlebar.is_some(), "{zoomed:?}");
+        assert_eq!(m.partition_of(1, area, style), Some(zoomed[0].1));
+
+        push_tab(&mut m, Node::Leaf(3), 3);
+        m.tabs[1].zoomed = true;
+        let alone = m.layout(1, area, style);
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].1.titlebar, None);
     }
 
     fn push_tab(m: &mut Mux, root: Node, focus: u64) {

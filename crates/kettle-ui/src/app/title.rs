@@ -242,6 +242,39 @@ pub(super) fn media_shelf_badge(unseen: usize) -> String {
     }
 }
 
+/// The zoomed pane's titlebar mark: that the zoom hides `hidden` panes, and
+/// the live Toggle Zoom key that shows them again when one is bound.
+pub(super) fn pane_zoom_badge(
+    tr: &kettle_i18n::Translator,
+    hidden: usize,
+    shortcut: Option<&str>,
+) -> String {
+    let count = u64::try_from(hidden).unwrap_or(u64::MAX);
+    match shortcut.filter(|shortcut| !shortcut.is_empty()) {
+        Some(shortcut) => tr.pane_zoomed(count, shortcut),
+        None => tr.pane_zoomed_unbound(count),
+    }
+}
+
+impl App {
+    /// The badge for the active tab's shown pane while the tab is zoomed over
+    /// others; `None` otherwise. The painter and `ui_geometry` both use it.
+    pub(super) fn active_zoom_badge(&self, ws: &WindowState) -> Option<String> {
+        let hidden = ws
+            .mux
+            .tabs
+            .get(ws.mux.active)
+            .filter(|tab| tab.zoomed)
+            .map(|tab| tab.root.leaf_count().saturating_sub(1))
+            .filter(|&hidden| hidden > 0)?;
+        let shortcut = kettle_config::keybinds::ui_hint_label(
+            &self.cfg.keybinds,
+            &kettle_config::keybinds::Action::ToggleZoom,
+        );
+        Some(pane_zoom_badge(&self.ui_text, hidden, shortcut.as_deref()))
+    }
+}
+
 fn pane_title_prefix(badge: &str, attached: bool, read_only: bool) -> String {
     let agent = attached && !badge.is_empty();
     if !read_only && !agent {
