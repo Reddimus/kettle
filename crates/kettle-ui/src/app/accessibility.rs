@@ -1298,6 +1298,10 @@ impl App {
             return;
         }
         ws.tab_focus = None;
+        // Focus on the config notice lets Enter and Escape answer it; focus
+        // anywhere else hands those keys back to the terminal.
+        self.config_notice_focus = request.action == AccessibilityAction::Focus
+            && (0..=2).any(|part| request.target_node == persistent_notice_id(None, part));
         if !self.pointer_modal_open(ws) {
             for (pane, toast) in self.persistent_notices(ws) {
                 for (part, label) in [(1, &toast.details), (2, &toast.close)] {

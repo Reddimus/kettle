@@ -1607,9 +1607,14 @@ impl App {
                             .persistent_notices(ws)
                             .iter()
                             .any(|(pane, _)| pane.is_none()),
+                    self.config_notice_focus,
                     &event.logical_key,
                     ws.mods,
                 );
+                // Any other key press takes focus back to the terminal.
+                if event.state == ElementState::Pressed && config_key.is_none() {
+                    self.config_notice_focus = false;
+                }
                 let held_key = (config_key.is_none()
                     && !self.any_modal_open(ws)
                     && ws.preview_focus.is_none()

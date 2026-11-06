@@ -873,6 +873,7 @@ impl App {
             update_toast_unavailable: None,
             update_toast_retry: None,
             update_toast_focus: None,
+            config_notice_focus: false,
             update_facts_requested: None,
             update_facts_refresh: Default::default(),
             logged_restart_pending: None,

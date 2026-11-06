@@ -615,6 +615,9 @@ pub struct App {
     update_toast_unavailable: Option<crate::update_notice::Notice>,
     update_toast_retry: Option<std::time::Instant>,
     update_toast_focus: Option<NodeId>,
+    /// Whether a screen reader moved focus to the config notice; only then do
+    /// Enter and Escape answer it instead of reaching the terminal.
+    config_notice_focus: bool,
     /// When the update facts were last asked for, to throttle focus refreshes.
     update_facts_requested: Option<std::time::Instant>,
     update_facts_refresh: crate::update_check::FactsRefresh,

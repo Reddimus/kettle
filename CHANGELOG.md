@@ -228,6 +228,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A config notice no longer takes Enter and Escape from the terminal under
+  it: a command typed while the notice is up runs, and Escape reaches the
+  program in the pane. The notice answers those keys once a screen reader has
+  moved focus to it; its buttons, the mouse and Edit Config work as before.
+
 - On GNOME Wayland a window keeps repainting after it enters or leaves
   fullscreen. Mesa's vsync path could hold a frame with no word from the
   compositor, so the window (and its size chip) froze until something else
