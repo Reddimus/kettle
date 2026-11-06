@@ -2783,3 +2783,6 @@ plural = "count"
 context = "crates/kettle-ui/src/app/redraw.rs pane_zoom_badge: the same badge when no key is bound to Toggle Zoom. count is how many panes the zoom hides. Keep the ⤢ sign and the two trailing spaces."
 args = [{ name = "count", type = "u64" }]
 plural = "count"
+
+[messages.scrollback_a11y_position]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of a pane's vertical scroll bar; its value is the position in the terminal's scrollback history."

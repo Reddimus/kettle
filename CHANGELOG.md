@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Screen readers find each pane's place in its scrollback as a vertical scroll
+  bar, and can move it a line at a time or straight to a line.
+
 - A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
   the key that restores them, in English and Spanish.
 

@@ -930,6 +930,7 @@ confirm_paste_controls = "draft"
 osc52_copied = "draft"
 pane_zoomed = "draft"
 pane_zoomed_unbound = "draft"
+scrollback_a11y_position = "draft"
 
 [second-pass]
 keys = [
@@ -945,6 +946,7 @@ keys = [
     "confirm_paste_escapes",
     "confirm_paste_controls",
     "osc52_copied",
+    "scrollback_a11y_position",
 
     "hint_legend",
     "hint_legend_plain",

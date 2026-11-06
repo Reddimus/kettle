@@ -267,8 +267,24 @@ impl App {
             if let Ok(term) = pane.term.term.lock() {
                 use kettle_core::Dimensions as _;
                 let origin = term.grid().history_origin();
-                let total = term.grid().history_size() + term.grid().screen_lines();
+                let history = term.grid().history_size();
+                let offset = term.grid().display_offset();
+                let screen = term.grid().screen_lines();
+                let total = history + screen;
                 drop(term);
+                let id = accessibility_scrollbar_id(pane_id);
+                pane_children.push(id);
+                let bar_width = (self.cfg.scrollbar_width * scale).max(1.0);
+                nodes.push((
+                    id,
+                    scrollback_bar_accessibility_node(
+                        history,
+                        offset,
+                        screen,
+                        (x + width - bar_width, y, bar_width, height),
+                        &self.ui_text,
+                    ),
+                ));
                 for mark in pane.term.command_marks() {
                     if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
                         partition.terminal,
@@ -1394,6 +1410,34 @@ impl App {
             return;
         }
         self.update_toast_focus = None;
+        if let Some(pane) = ws
+            .mux
+            .tab_pane_ids(ws.mux.active)
+            .into_iter()
+            .find(|pane| accessibility_scrollbar_id(*pane) == request.target_node)
+        {
+            if let Some(p) = ws.mux.panes.get(&pane)
+                && let Ok(mut term) = p.term.term.lock()
+            {
+                use kettle_core::Dimensions as _;
+                let scroll = scrollback_bar_scroll(
+                    request.action,
+                    request.data.as_ref(),
+                    term.grid().history_size(),
+                    term.grid().display_offset(),
+                    term.grid().screen_lines(),
+                );
+                if let Some(scroll) = scroll {
+                    term.scroll_display(scroll);
+                    drop(term);
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+            return;
+        }
         if let Some((pane, _)) =
             self.pane_layout(ws, self.area(ws))
                 .into_iter()
@@ -2805,6 +2849,65 @@ fn accessibility_scrollback_id(pane: u64) -> NodeId {
     NodeId((1 << 52) | pane)
 }
 
+fn accessibility_scrollbar_id(pane: u64) -> NodeId {
+    NodeId((1 << 50) | pane)
+}
+
+/// A pane's place in its scrollback, as a vertical scroll bar: 0 is the
+/// oldest kept line at the top, `history` the live bottom, one step a line
+/// and one jump a screen.
+pub(super) fn scrollback_bar_accessibility_node(
+    history: usize,
+    offset: usize,
+    screen: usize,
+    (x, y, width, height): (f32, f32, f32, f32),
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::ScrollBar);
+    node.set_label(tr.text(kettle_i18n::Text::ScrollbackA11yPosition));
+    node.set_orientation(accesskit::Orientation::Vertical);
+    node.set_min_numeric_value(0.0);
+    node.set_max_numeric_value(history as f64);
+    node.set_numeric_value(history.saturating_sub(offset) as f64);
+    node.set_numeric_value_step(1.0);
+    node.set_numeric_value_jump(screen.max(1) as f64);
+    node.add_action(AccessibilityAction::Increment);
+    node.add_action(AccessibilityAction::Decrement);
+    node.add_action(AccessibilityAction::SetValue);
+    node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + width),
+        f64::from(y + height),
+    ));
+    node
+}
+
+/// The scroll a request on the scrollback bar asks for. Increment moves a
+/// line toward live output, Decrement a line back; SetValue goes to a line.
+pub(super) fn scrollback_bar_scroll(
+    action: AccessibilityAction,
+    data: Option<&ActionData>,
+    history: usize,
+    offset: usize,
+    _screen: usize,
+) -> Option<kettle_core::Scroll> {
+    use kettle_core::Scroll;
+    match (action, data) {
+        (AccessibilityAction::Increment, _) if offset > 0 => Some(Scroll::Delta(-1)),
+        (AccessibilityAction::Decrement, _) if offset < history => Some(Scroll::Delta(1)),
+        (AccessibilityAction::SetValue, Some(ActionData::NumericValue(value)))
+            if value.is_finite() =>
+        {
+            let line = value.round().clamp(0.0, history as f64) as usize;
+            let target = history - line;
+            let delta = i32::try_from(target as i64 - offset as i64).ok()?;
+            (delta != 0).then_some(Scroll::Delta(delta))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn command_mark_accessibility_node(
     mark: kettle_core::term::CommandMark,
     rect: [f32; 4],
@@ -2990,6 +3093,71 @@ mod context_menu_nesting_tests {
             panel_h_clamped: 28.0,
             a11y_label: None,
         }
+    }
+
+    /// The scroll bar reports the scrollback position and scrolls it a line,
+    /// or to a line, for assistive technology.
+    #[test]
+    fn the_scrollback_bar_reports_and_moves_the_position() {
+        use kettle_core::Scroll;
+        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let node = scrollback_bar_accessibility_node(100, 30, 24, (0.0, 0.0, 8.0, 400.0), &tr);
+        assert_eq!(node.role(), Role::ScrollBar);
+        assert_eq!(node.label(), Some("Scrollback"));
+        assert_eq!(node.orientation(), Some(accesskit::Orientation::Vertical));
+        assert_eq!(node.numeric_value(), Some(70.0));
+        assert_eq!(node.max_numeric_value(), Some(100.0));
+        assert_eq!(node.numeric_value_jump(), Some(24.0));
+        assert!(node.supports_action(AccessibilityAction::Increment));
+
+        let at = |action, data: Option<ActionData>, offset| match scrollback_bar_scroll(
+            action,
+            data.as_ref(),
+            100,
+            offset,
+            24,
+        ) {
+            Some(Scroll::Delta(lines)) => Some(lines),
+            None => None,
+            Some(other) => panic!("{other:?}"),
+        };
+        assert_eq!(at(AccessibilityAction::Increment, None, 30), Some(-1));
+        assert_eq!(at(AccessibilityAction::Increment, None, 0), None);
+        assert_eq!(at(AccessibilityAction::Decrement, None, 30), Some(1));
+        assert_eq!(at(AccessibilityAction::Decrement, None, 100), None);
+        // Line 100 is the live bottom (offset 0); line 0 the oldest.
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(100.0)),
+                30
+            ),
+            Some(-30)
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(-5.0)),
+                30
+            ),
+            Some(70)
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(70.0)),
+                30
+            ),
+            None
+        );
+        assert_eq!(
+            at(
+                AccessibilityAction::SetValue,
+                Some(ActionData::NumericValue(f64::NAN)),
+                30
+            ),
+            None
+        );
     }
 
     /// A row that opens a submenu says so through its popup state; the

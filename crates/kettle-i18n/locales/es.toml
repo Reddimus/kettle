@@ -937,6 +937,8 @@ a11y_window_close = "Cerrar ventana"
 
 
 
+scrollback_a11y_position = "Historial de desplazamiento"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

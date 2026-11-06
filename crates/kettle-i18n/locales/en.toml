@@ -936,6 +936,8 @@ a11y_window_close = "Close window"
 
 
 
+scrollback_a11y_position = "Scrollback"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"
