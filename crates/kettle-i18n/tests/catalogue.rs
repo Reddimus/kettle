@@ -169,6 +169,8 @@ fn every_spanish_message_has_a_review_status() {
                         | "link_open_click"
                         | "link_open_command_click"
                         | "link_open_control_click"
+                        | "picker_theme_for_light_appearance"
+                        | "picker_theme_for_dark_appearance"
                         | "process_exited"
                         | "process_exit_pending"
                         | "process_restart"
@@ -324,7 +326,7 @@ fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
         }
     }
     assert_eq!(
-        descriptions, 60,
+        descriptions, 63,
         "every curated field and keybind has its own description"
     );
 }

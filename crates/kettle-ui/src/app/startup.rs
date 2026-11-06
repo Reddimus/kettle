@@ -846,6 +846,7 @@ impl App {
             remote_poll_due: None,
             last_schedule_decision: None,
             os_theme_dark: None,
+            system_appearance: std::sync::OnceLock::new(),
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
@@ -1330,6 +1331,8 @@ impl App {
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
         self.sync_output_frame_budget(ws, true);
+        self.poll_system_appearance(ws);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if let Some(theme) = ws.window.as_ref().and_then(|w| w.theme()) {
             self.apply_initial_os_theme_preference(ws, theme);
         }

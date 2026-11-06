@@ -1306,11 +1306,9 @@ fn option_drag_is_rectangular_and_shift_click_preserves_the_anchor_in_history() 
     let source = production_source();
     let begin = finding_body(&source, "begin_or_extend_mouse_selection");
     assert!(
-        begin.contains(
-            "ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor"
-        )
+        begin.contains("held.shift_key() && !held.alt_key() && self.extend_selection_to_cursor")
     );
-    assert!(begin.contains("selection_kind(clicks, ws.mods.alt_key())"));
+    assert!(begin.contains("selection_kind(clicks, held.alt_key())"));
 }
 
 #[test]

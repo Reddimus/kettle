@@ -207,18 +207,18 @@ pub enum BellMode {
 
 /// Theme selection policy for explicit, forced-light, forced-dark and OS-following modes.
 ///
-/// - `Explicit` — use the `theme = …` value. Default.
+/// - `Explicit` — use the `theme = …` value (implicit for existing theme configs).
 /// - `Light` — always use `light-theme`.
 /// - `Dark` — always use `dark-theme`.
-/// - `Auto` — follow the OS dark-mode preference when winit reports
-///   one; if `theme-schedule` is configured, the schedule owns the
+/// - `Auto` — the default: follow the OS dark-mode preference, falling
+///   back to dark; if `theme-schedule` is configured, the schedule owns the
 ///   light/dark switch instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeMode {
-    #[default]
     Explicit,
     Light,
     Dark,
+    #[default]
     Auto,
 }
 
@@ -1078,7 +1078,7 @@ pub fn schedule_decision_sunrise(
 /// - `Light`: returns `Some(light_theme)` when non-empty.
 /// - `Dark`: returns `Some(dark_theme)` when non-empty.
 /// - `Auto` with `Some(is_dark)`: returns dark/light based on flag.
-/// - `Auto` with `None`: returns `None` (can't decide).
+/// - `Auto` with `None`: selects the dark side.
 ///
 /// Pure: no `&self`, no env, no clock; entirely a function of its
 /// 5 inputs. kettle-ui calls it on an OS theme change and at each
@@ -1105,7 +1105,7 @@ pub fn resolve_theme_for_mode(
         ThemeMode::Auto => match os_dark {
             Some(true) => pick(dark),
             Some(false) => pick(light),
-            None => None,
+            None => pick(dark),
         },
     }
 }
@@ -1792,9 +1792,10 @@ pub struct Config {
     /// `cat`-replayable in a terminal.
     pub log_strip_ansi: bool,
     /// Terminator parity (`plugins/auto_theme.py`):
-    /// theme-mode policy. Default `Explicit` uses the `theme = …` value.
+    /// theme-mode policy. Default `Auto` follows system appearance; a config
+    /// with `theme` and no `theme-mode` retains `Explicit`.
     /// `Light` / `Dark` / `Auto` are the Terminator AutoTheme modes. `Auto`
-    /// follows the OS light/dark preference when winit reports one; an
+    /// follows the OS light/dark preference, defaulting to dark; an
     /// explicit `theme-schedule` overrides OS following.
     pub theme_mode: ThemeMode,
     /// The language of Kettle's own text (`language = auto | en | es`).
@@ -3218,14 +3219,14 @@ impl Default for Config {
             extra_styling: true,
             force_no_bell: false,
             log_strip_ansi: false,
-            theme_mode: ThemeMode::Explicit,
+            theme_mode: ThemeMode::Auto,
             language: LanguagePreference::Auto,
             theme_schedule: None,
             theme_schedule_lat: None,
             theme_schedule_long: None,
             tab_bar_width: 180.0,
-            light_theme: String::new(),
-            dark_theme: String::new(),
+            light_theme: "TokyoNight Day".into(),
+            dark_theme: "TokyoNight Night".into(),
             icon_bell: true,
             show_titlebar: true,
             title_hide_sizetext: false,
@@ -4578,6 +4579,18 @@ impl Config {
         // canonical key vs Terminator-spelled alias.
         let mut explicit_canonical_bell = false;
         let entries = parse::parse(text);
+        // An existing fixed theme remains fixed unless its mode is explicitly set.
+        // Named Terminator palettes are another spelling of a fixed theme.
+        let has_theme = entries.iter().any(|entry| {
+            entry.key == "theme"
+                || (entry.key == "palette" && named_palette_theme(&entry.value).is_some())
+        });
+        let has_theme_mode = entries
+            .iter()
+            .any(|entry| matches!(entry.key.as_str(), "theme-mode" | "theme_mode"));
+        if has_theme && !has_theme_mode {
+            cfg.theme_mode = ThemeMode::Explicit;
+        }
         let has_exit_behavior = entries.iter().any(|entry| entry.key == "exit-behavior");
         // A canonical policy wins regardless of line order. This matters for
         // migrated configs that still carry the legacy boolean below it.
@@ -11527,8 +11540,11 @@ split_horiz = <Control><Shift>j
             resolve_theme_for_mode(Auto, "x", "L", "D", Some(false)).as_deref(),
             Some("L")
         );
-        // Auto with None: no decision.
-        assert_eq!(resolve_theme_for_mode(Auto, "x", "L", "D", None), None);
+        // No OS preference selects the dark side.
+        assert_eq!(
+            resolve_theme_for_mode(Auto, "x", "L", "D", None).as_deref(),
+            Some("D")
+        );
         // Case-insensitive "already current" comparison.
         assert_eq!(
             resolve_theme_for_mode(Light, "tokyonight day", "TokyoNight Day", "D", None),
@@ -11609,9 +11625,55 @@ split_horiz = <Control><Shift>j
     }
 
     #[test]
+    fn system_appearance_defaults_and_existing_fixed_themes() {
+        for mut cfg in [
+            Config::default(),
+            Config::parse_text(""),
+            Config::parse_text("font-size = 16"),
+        ] {
+            assert_eq!(cfg.theme_mode, ThemeMode::Auto);
+            assert_eq!(cfg.light_theme, "TokyoNight Day");
+            assert_eq!(cfg.dark_theme, "TokyoNight Night");
+            for (os, expected) in [
+                (Some(false), "TokyoNight Day"),
+                (Some(true), "TokyoNight Night"),
+                (None, "TokyoNight Night"),
+            ] {
+                cfg.resolve_theme_mode(os);
+                assert_eq!(cfg.theme_name, expected);
+                assert_eq!(cfg.theme.background, Theme::by_name(expected).background);
+            }
+        }
+        for text in [
+            "theme = Dracula",
+            "theme = TokyoNight Day",
+            "theme = ",
+            "theme = typo",
+            "palette = tokyonight_night",
+        ] {
+            let mut cfg = Config::parse_text(text);
+            assert_eq!(cfg.theme_mode, ThemeMode::Explicit, "{text}");
+            let before = (cfg.theme_name.clone(), cfg.theme.background);
+            for os in [Some(false), Some(true), None] {
+                cfg.resolve_theme_mode(os);
+                assert_eq!((cfg.theme_name.clone(), cfg.theme.background), before);
+            }
+        }
+        for text in [
+            "theme = Dracula\ntheme-mode = auto",
+            "theme_mode = auto\ntheme = Dracula",
+        ] {
+            let mut cfg = Config::parse_text(text);
+            assert_eq!(cfg.theme_mode, ThemeMode::Auto);
+            cfg.resolve_theme_mode(Some(false));
+            assert_eq!(cfg.theme_name, "TokyoNight Day");
+        }
+    }
+
+    #[test]
     fn theme_mode_parses_terminator_values() {
         use ThemeMode::*;
-        assert_eq!(Config::default().theme_mode, Explicit);
+        assert_eq!(Config::default().theme_mode, Auto);
         for (input, want) in [
             ("theme-mode = explicit", Explicit),
             ("theme-mode = light", Light),
@@ -12085,7 +12147,7 @@ split_horiz = <Control><Shift>j
         let cfg = Config::parse_text("light-theme =   my-custom-fork  \n");
         assert_eq!(cfg.light_theme, "my-custom-fork");
         // An empty or whitespace-only value is ignored (the default is the
-        // empty string), so a later `light-theme = ` doesn't clear an
+        // default side), so a later `light-theme = ` doesn't clear an
         // earlier value.
         let cfg = Config::parse_text(
             "light-theme = TokyoNight Day\n\

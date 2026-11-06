@@ -4927,3 +4927,12 @@ starts, then resets attributes for the fresh shell. Restored rows therefore use
 the normal grid, scrollback, search, selection, accessibility, control geometry
 and IME paths. No chrome or terminal rectangle changes. A successful startup
 restore removes its sidecar; later session saves capture the current grid again.
+
+System appearance is observed independently of a window's rendered palette.
+Linux appearance and reduced motion share a bounded XDG Settings worker
+transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
+owner changes invalidate state, and retries and shutdown stay off the UI thread.
+macOS observes system appearance separately because forcing NSWindow appearance
+to match the palette suppresses winit's window appearance notifications.
+Both sources enter the existing theme synchronization and all-window redraw
+path; colour-scheme reports use the resulting palette's lightness.

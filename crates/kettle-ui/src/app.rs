@@ -552,6 +552,7 @@ pub struct App {
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
     os_theme_dark: Option<bool>,
+    system_appearance: std::sync::OnceLock<crate::appearance::SystemAppearance>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
     /// Provenance paired with `config_path`; profile switching resets this to

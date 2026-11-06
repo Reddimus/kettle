@@ -2331,7 +2331,12 @@ pub(super) fn modal_accessibility_projection(
             &mut projection,
             overlay,
             MODAL_KIND_THEMES,
-            tr.text(kettle_i18n::Text::PickerA11yThemes),
+            overlay
+                .text_field
+                .as_ref()
+                .map_or(tr.text(kettle_i18n::Text::PickerA11yThemes), |field| {
+                    field.prefix.trim()
+                }),
             query,
             full_bounds,
             tr,

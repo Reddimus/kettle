@@ -61,6 +61,15 @@ settings_field_restore_scrollback_remote = "draft"
 settings_description_restore_scrollback_lines = "draft"
 settings_description_restore_scrollback_remote = "draft"
 restored_content_divider = "draft"
+
+settings_field_appearance = "draft"
+settings_description_field_appearance = "draft"
+settings_value_follow_system = "draft"
+settings_value_light_appearance = "draft"
+settings_value_dark_appearance = "draft"
+settings_value_fixed_theme = "draft"
+picker_theme_for_light_appearance = "draft"
+picker_theme_for_dark_appearance = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"
@@ -922,6 +931,9 @@ keys = [
     "link_open_click",
     "link_open_command_click",
     "link_open_control_click",
+
+    "picker_theme_for_light_appearance",
+    "picker_theme_for_dark_appearance",
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",

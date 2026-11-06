@@ -2,7 +2,7 @@
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Preference {
+pub(crate) enum Preference {
     #[default]
     Unknown,
     Normal,
@@ -11,7 +11,7 @@ enum Preference {
 
 #[cfg(any(target_os = "linux", test))]
 impl Preference {
-    fn from_portal(value: u32) -> Self {
+    pub(crate) fn from_portal(value: u32) -> Self {
         if value == 1 {
             Self::Reduced
         } else {
@@ -34,7 +34,7 @@ pub(crate) fn allowed(mode: kettle_config::ReduceMotion, system: impl FnOnce() -
 
 pub(crate) struct SystemMotion {
     #[cfg(target_os = "linux")]
-    watch: linux::Watch,
+    watch: crate::portal_settings::Watch,
 }
 
 impl SystemMotion {
@@ -42,7 +42,7 @@ impl SystemMotion {
         #[cfg(target_os = "linux")]
         {
             Self {
-                watch: linux::Watch::start(wake, None),
+                watch: crate::portal_settings::Watch::start(wake, None, "reduced-motion"),
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -66,7 +66,10 @@ impl SystemMotion {
         }
         #[cfg(target_os = "linux")]
         {
-            self.watch.preference().allows()
+            self.watch
+                .value()
+                .map_or(Preference::Unknown, Preference::from_portal)
+                .allows()
         }
         #[cfg(windows)]
         {
@@ -93,9 +96,6 @@ impl SystemMotion {
         }
     }
 }
-
-#[cfg(target_os = "linux")]
-mod linux;
 
 #[cfg(test)]
 mod tests {

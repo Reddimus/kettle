@@ -874,22 +874,25 @@ fn native_theme_hint_decision_table() {
     use super::{WindowTheme, native_theme_hint};
     use kettle_config::ThemeMode;
     // Plain Auto: follow the OS regardless of the active palette.
-    assert_eq!(native_theme_hint(ThemeMode::Auto, false, true), None);
-    assert_eq!(native_theme_hint(ThemeMode::Auto, false, false), None);
+    assert_eq!(native_theme_hint(ThemeMode::Auto, false, true, false), None);
+    assert_eq!(native_theme_hint(ThemeMode::Auto, false, false, false), None);
+    // The macOS/Linux observers keep receiving OS changes even with forced window chrome.
+    assert_eq!(native_theme_hint(ThemeMode::Auto, false, false, true), Some(WindowTheme::Light));
+    assert_eq!(native_theme_hint(ThemeMode::Auto, false, true, true), Some(WindowTheme::Dark));
     // Auto + schedule: the schedule drives the palette, so the titlebar
     // matches the palette, not the OS.
     assert_eq!(
-        native_theme_hint(ThemeMode::Auto, true, true),
+        native_theme_hint(ThemeMode::Auto, true, true, false),
         Some(WindowTheme::Dark)
     );
     // Explicit / Light / Dark: titlebar matches the active theme.
     for mode in [ThemeMode::Explicit, ThemeMode::Light, ThemeMode::Dark] {
         assert_eq!(
-            native_theme_hint(mode, false, true),
+            native_theme_hint(mode, false, true, false),
             Some(WindowTheme::Dark)
         );
         assert_eq!(
-            native_theme_hint(mode, false, false),
+            native_theme_hint(mode, false, false, false),
             Some(WindowTheme::Light)
         );
     }

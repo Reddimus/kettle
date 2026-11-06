@@ -217,7 +217,7 @@ impl App {
         let prefix = if ws.palette_input.is_some() {
             "  \u{2318} ".to_string()
         } else if ws.theme_picker_input.is_some() {
-            kettle_render::theme_picker_prefix(&self.ui_text)
+            theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
             rect = kettle_render::settings_value_rect(
@@ -2113,10 +2113,28 @@ impl App {
         // Scope the cfg borrow so reload_config (&mut self) is free.
         let (key_str, new_val) = {
             (
-                field.key,
+                if field.key == "theme" {
+                    self.theme_pick_key()
+                } else {
+                    field.key
+                },
                 crate::settings::next_value(&self.cfg, field, dir),
             )
         };
+        // Freezing the active palette must survive a reload, including a config
+        // that still has a different fixed theme from before system following.
+        if key_str == "theme-mode"
+            && new_val == "explicit"
+            && !self.persist_pref("theme", &self.cfg.theme_name)
+        {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
+            );
+            return;
+        }
         // The GPU device picker is one row but persists THREE keys
         // (vendor/device/name). "auto" clears the pin; "<vendor>:<device>:<name>"
         // sets it. GPU changes apply on the NEXT launch (the wgpu device/surface
@@ -2497,13 +2515,19 @@ impl App {
     /// theme the picker opened on.
     pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
         ws.theme_preview = None;
+        let key = self.theme_pick_key();
+        match key {
+            "light-theme" => self.cfg.light_theme = name.to_string(),
+            "dark-theme" => self.cfg.dark_theme = name.to_string(),
+            _ => {}
+        }
         self.set_runtime_theme_name(ws, name);
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time
         // default on restore, so neither a default change nor a fresh-config
         // user would see the new theme. Notify if the write fails so the pick
         // isn't silently lost on the next launch.
-        if !self.persist_pref("theme", name) {
+        if !self.persist_pref(key, name) {
             fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),

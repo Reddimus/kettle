@@ -76,7 +76,8 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
+| Appearance | `theme-mode` | Follow system (default), Light, Dark or Fixed theme. Fixed theme keeps the current palette; existing configs with `theme` alone remain fixed |
+| Theme | `theme`, `light-theme` or `dark-theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
@@ -217,7 +218,10 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter
 them, or move with ↑/↓ (and Tab); the window wears the selected theme while
 you browse. Enter keeps it and writes it to your config file, and Esc puts
-back the theme you started with. With nothing typed, the themes of your
+back the theme you started with. The header identifies the active appearance:
+**Theme for light appearance** or **Theme for dark appearance**. Following the
+system saves a pick to that side and keeps following. Forced Light/Dark modes
+also update their own side; Fixed theme writes `theme`. With nothing typed, the themes of your
 current theme's appearance come first, each followed by the most similar one,
 so the arrows never jump between a dark and a light palette until the end of
 the list; each row says whether its theme is dark or light, and your current

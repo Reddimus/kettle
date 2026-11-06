@@ -1,8 +1,8 @@
-use super::Preference;
+//! Bounded XDG Settings reads and subscriptions, owned by a background worker.
 use futures_lite::{StreamExt, future};
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
 use zbus::{Connection, Proxy, connection::Builder, zvariant::OwnedValue};
@@ -11,26 +11,30 @@ const DESTINATION: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
 const INTERFACE: &str = "org.freedesktop.portal.Settings";
 const NAMESPACE: &str = "org.freedesktop.appearance";
-const KEY: &str = "reduced-motion";
+const UNKNOWN: u64 = u64::MAX;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 4096;
 
-pub(super) struct Watch {
-    state: Arc<AtomicU8>,
+pub(crate) struct Watch {
+    state: Arc<AtomicU64>,
     stop: Option<async_channel::Sender<()>>,
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Watch {
-    pub(super) fn start(wake: kettle_core::Waker, address: Option<String>) -> Self {
-        let state = Arc::new(AtomicU8::new(0));
+    pub(crate) fn start(
+        wake: kettle_core::Waker,
+        address: Option<String>,
+        key: &'static str,
+    ) -> Self {
+        let state = Arc::new(AtomicU64::new(UNKNOWN));
         let worker_state = state.clone();
         let (stop, stopped) = async_channel::bounded(1);
         let worker = std::thread::Builder::new()
-            .name("kettle-motion".into())
+            .name(format!("kettle-{key}"))
             .spawn(move || {
                 future::block_on(future::or(
-                    watch(address.as_deref(), &worker_state, &wake),
+                    watch(address.as_deref(), &worker_state, &wake, key),
                     async {
                         let _ = stopped.recv().await;
                     },
@@ -43,7 +47,7 @@ impl Watch {
                 _thread: Some(worker),
             },
             Err(error) => {
-                log::debug!("system motion watcher unavailable: {error}");
+                log::debug!("system appearance setting watcher unavailable: {error}");
                 Self {
                     state,
                     stop: None,
@@ -53,12 +57,8 @@ impl Watch {
         }
     }
 
-    pub(super) fn preference(&self) -> Preference {
-        match self.state.load(Ordering::Acquire) {
-            1 => Preference::Normal,
-            2 => Preference::Reduced,
-            _ => Preference::Unknown,
-        }
+    pub(crate) fn value(&self) -> Option<u32> {
+        u32::try_from(self.state.load(Ordering::Acquire)).ok()
     }
 }
 
@@ -70,24 +70,20 @@ impl Drop for Watch {
     }
 }
 
-fn publish(state: &AtomicU8, preference: Preference, wake: &kettle_core::Waker) {
-    let value = match preference {
-        Preference::Unknown => 0,
-        Preference::Normal => 1,
-        Preference::Reduced => 2,
-    };
+fn publish(state: &AtomicU64, preference: Option<u32>, wake: &kettle_core::Waker) {
+    let value = preference.map_or(UNKNOWN, u64::from);
     if state.swap(value, Ordering::AcqRel) != value {
         wake();
     }
 }
 
-async fn watch(address: Option<&str>, state: &AtomicU8, wake: &kettle_core::Waker) {
+async fn watch(address: Option<&str>, state: &AtomicU64, wake: &kettle_core::Waker, key: &str) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        if let Err(error) = connected(address, state, wake, &mut backoff).await {
-            log::debug!("system motion portal unavailable: {error}");
+        if let Err(error) = connected(address, state, wake, &mut backoff, key).await {
+            log::debug!("system appearance setting portal unavailable: {error}");
         }
-        publish(state, Preference::Unknown, wake);
+        publish(state, None, wake);
         async_io::Timer::after(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
@@ -103,7 +99,7 @@ async fn connection(address: Option<&str>) -> zbus::Result<Connection> {
     future::or(builder.build(), async {
         async_io::Timer::after(TIMEOUT).await;
         Err(zbus::Error::Failure(
-            "motion portal connection timed out".into(),
+            "settings portal connection timed out".into(),
         ))
     })
     .await
@@ -112,28 +108,25 @@ async fn connection(address: Option<&str>) -> zbus::Result<Connection> {
 fn bounded(message: &zbus::Message) -> zbus::Result<()> {
     if message.body().len() > MAX_BODY_BYTES {
         Err(zbus::Error::Failure(
-            "motion portal reply is too large".into(),
+            "settings portal reply is too large".into(),
         ))
     } else {
         Ok(())
     }
 }
 
-fn preference(value: OwnedValue) -> zbus::Result<Preference> {
-    Ok(Preference::from_portal(u32::try_from(value)?))
-}
-
 async fn connected(
     address: Option<&str>,
-    state: &AtomicU8,
+    state: &AtomicU64,
     wake: &kettle_core::Waker,
     backoff: &mut Duration,
+    key: &str,
 ) -> zbus::Result<()> {
     let connection = connection(address).await?;
     let proxy = Proxy::new(&connection, DESTINATION, PATH, INTERFACE).await?;
     let mut owners = proxy.receive_owner_changed().await?;
     let mut settings = proxy
-        .receive_signal_with_args("SettingChanged", &[(0, NAMESPACE), (1, KEY)])
+        .receive_signal_with_args("SettingChanged", &[(0, NAMESPACE), (1, key)])
         .await?;
     // A backend may yield during ReadOne. An overlapping signal makes the
     // snapshot's age ambiguous, so reconcile with another bounded read.
@@ -144,17 +137,17 @@ async fn connected(
                 None => break,
                 Some(Some(message)) => bounded(&message)?,
                 Some(None) => {
-                    return Err(zbus::Error::Failure("motion portal disconnected".into()));
+                    return Err(zbus::Error::Failure("settings portal disconnected".into()));
                 }
             }
         }
         if future::poll_once(owners.next()).await.is_some() {
-            return Err(zbus::Error::Failure("motion portal owner changed".into()));
+            return Err(zbus::Error::Failure("settings portal owner changed".into()));
         }
-        let reply = proxy.call_method("ReadOne", &(NAMESPACE, KEY)).await?;
+        let reply = proxy.call_method("ReadOne", &(NAMESPACE, key)).await?;
         bounded(&reply)?;
         if future::poll_once(owners.next()).await.is_some() {
-            return Err(zbus::Error::Failure("motion portal owner changed".into()));
+            return Err(zbus::Error::Failure("settings portal owner changed".into()));
         }
         match future::poll_once(settings.next()).await {
             None => {
@@ -162,15 +155,15 @@ async fn connected(
                 break;
             }
             Some(Some(message)) => bounded(&message)?,
-            Some(None) => return Err(zbus::Error::Failure("motion portal disconnected".into())),
+            Some(None) => return Err(zbus::Error::Failure("settings portal disconnected".into())),
         }
     }
     let snapshot = snapshot
-        .ok_or_else(|| zbus::Error::Failure("motion portal preference is unstable".into()))?;
+        .ok_or_else(|| zbus::Error::Failure("settings portal preference is unstable".into()))?;
     let mut after = snapshot.recv_position();
-    let initial = preference(snapshot.body().deserialize::<OwnedValue>()?)?;
+    let initial = u32::try_from(snapshot.body().deserialize::<OwnedValue>()?)?;
     *backoff = Duration::from_secs(1);
-    publish(state, initial, wake);
+    publish(state, Some(initial), wake);
     loop {
         let message = future::or(
             async {
@@ -181,22 +174,23 @@ async fn connected(
         )
         .await
         .ok_or_else(|| {
-            zbus::Error::Failure("motion portal disconnected or owner changed".into())
+            zbus::Error::Failure("settings portal disconnected or owner changed".into())
         })?;
         if message.recv_position() <= after {
             return Err(zbus::Error::Failure(
-                "motion portal snapshot needs reconciliation".into(),
+                "settings portal snapshot needs reconciliation".into(),
             ));
         }
         after = message.recv_position();
         bounded(&message)?;
-        let (namespace, key, value): (String, String, OwnedValue) = message.body().deserialize()?;
-        if namespace == NAMESPACE && key == KEY {
-            publish(state, preference(value)?, wake);
+        let (namespace, changed_key, value): (String, String, OwnedValue) =
+            message.body().deserialize()?;
+        if crate::appearance::portal_setting_matches(&namespace, &changed_key, key) {
+            publish(state, Some(u32::try_from(value)?), wake);
         }
     }
 }
 
 #[cfg(test)]
-#[path = "portal_tests.rs"]
+#[path = "motion/portal_tests.rs"]
 mod tests;

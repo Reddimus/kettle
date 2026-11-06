@@ -2711,3 +2711,27 @@ context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions descri
 [messages.restored_content_divider]
 context = "crates/kettle-ui/src/settings.rs, session_content.rs: Terminal history divider before the new shell prompt. date_time is local YYYY-MM-DD HH:MM:SS."
 args = [{ name = "date_time", type = "str" }]
+
+[messages.settings_field_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance policy row, mapped to theme-mode."
+
+[messages.settings_description_field_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance policy help."
+
+[messages.settings_value_follow_system]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: follow OS light/dark preference."
+
+[messages.settings_value_light_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use light-theme."
+
+[messages.settings_value_dark_appearance]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use dark-theme."
+
+[messages.settings_value_fixed_theme]
+context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: always use theme."
+
+[messages.picker_theme_for_light_appearance]
+context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update light-theme. Keep short; prefix is clipped separately from query."
+
+[messages.picker_theme_for_dark_appearance]
+context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update dark-theme. Keep short; prefix is clipped separately from query."

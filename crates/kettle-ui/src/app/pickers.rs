@@ -269,6 +269,16 @@ pub(super) fn theme_picker_matches(
     ranked.into_iter().map(|(_, _, _, theme)| theme).collect()
 }
 
+pub(super) fn theme_picker_appearance_prefix(key: &str, tr: &kettle_i18n::Translator) -> String {
+    use kettle_i18n::Text;
+    let label = match key {
+        "light-theme" => Text::PickerThemeForLightAppearance,
+        "dark-theme" => Text::PickerThemeForDarkAppearance,
+        _ => return kettle_render::theme_picker_prefix(tr),
+    };
+    format!("  ◐ {} ", tr.text(label))
+}
+
 /// The theme picker's rows. The theme it opened on is ticked, and each row
 /// says whether it is dark or light.
 pub(super) fn theme_picker_list(
@@ -387,6 +397,13 @@ pub(super) fn theme_preview_change(
             .as_ref()
             .filter(|(name, _)| name != live_name)
             .cloned(),
+    }
+}
+
+/// Escape from a picker must restore the new system side after a live appearance change.
+pub(super) fn rebase_theme_preview(ws: &mut WindowState, baseline: &ThemeState) {
+    if ws.theme_preview.is_some() {
+        ws.theme_preview = Some(baseline.clone());
     }
 }
 

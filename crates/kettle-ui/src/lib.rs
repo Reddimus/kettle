@@ -27,6 +27,7 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod agent_plugin;
+mod appearance;
 #[cfg(unix)]
 mod shell_integration;
 pub use agent_plugin::{ClaudeStatus, claude_status};
@@ -84,6 +85,8 @@ mod notifications;
 mod owned_dir;
 mod pane_partition;
 mod paste_image;
+#[cfg(target_os = "linux")]
+mod portal_settings;
 mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;

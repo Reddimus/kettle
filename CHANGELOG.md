@@ -34,6 +34,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   settings control how much output survives; private storage is bounded to
   8 MiB, and remote output requires opting in.
 
+- Follow the system light/dark appearance by default with TokyoNight Day/Night,
+  including live Linux portal changes. Existing fixed-theme configs keep their
+  look. Settings adds an Appearance choice; theme picks customize the active
+  side while following the system. macOS material matches the active palette.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

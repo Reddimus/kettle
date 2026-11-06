@@ -418,6 +418,7 @@ impl NativeMaterial {
             window,
             config.theme.background,
             policy.window_opaque,
+            config.theme.is_dark(),
             &main_thread,
         );
         self.status.set(macos_backdrop_status(
@@ -493,14 +494,24 @@ fn macos_reduce_transparency(_main_thread: &objc2_foundation::MainThreadMarker) 
     unsafe { NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency() }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_appearance_name(theme_is_dark: bool) -> &'static str {
+    if theme_is_dark {
+        "NSAppearanceNameDarkAqua"
+    } else {
+        "NSAppearanceNameAqua"
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn sync_macos_window_background(
     window: &Window,
     color: kettle_config::Rgb,
     opaque: bool,
+    theme_is_dark: bool,
     _main_thread: &objc2_foundation::MainThreadMarker,
 ) {
-    use objc2_app_kit::{NSColor, NSView};
+    use objc2_app_kit::{NSAppearanceCustomization, NSColor, NSView};
     use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
     let Ok(handle) = window.window_handle() else {
@@ -524,6 +535,10 @@ fn sync_macos_window_background(
             if opaque { 1.0 } else { 0.0 },
         )
     };
+    let name = objc2_foundation::NSString::from_str(macos_appearance_name(theme_is_dark));
+    let appearance = objc2_app_kit::NSAppearance::appearanceNamed(&name);
+    // SAFETY: The borrowed window and appearance are live on the AppKit main thread.
+    unsafe { ns_window.setAppearance(appearance.as_deref()) };
     ns_window.setOpaque(opaque);
     ns_window.setBackgroundColor(Some(&background));
     // Full-size content owns the titlebar pixels; material sync must preserve it.
@@ -868,6 +883,21 @@ mod tests {
             !sync.contains("window_requires_alpha_surface"),
             "an opacity reload cannot change an existing window's surface capabilities"
         );
+    }
+
+    #[test]
+    fn macos_appearance_matches_the_active_theme_including_auto_overrides() {
+        assert_eq!(super::macos_appearance_name(false), "NSAppearanceNameAqua");
+        assert_eq!(
+            super::macos_appearance_name(true),
+            "NSAppearanceNameDarkAqua"
+        );
+        let source = kettle_test_support::production_source(include_str!("native_material.rs"));
+        assert!(source.contains("macos_appearance_name(theme_is_dark)"));
+        assert!(source.contains("ns_window.setAppearance(appearance.as_deref())"));
+        assert!(source.contains("config.theme.is_dark(),"));
+        let titlebar = include_str!("app/titlebar.rs");
+        assert!(titlebar.contains("native.setTitlebarAppearsTransparent(tabs)"));
     }
 
     #[test]

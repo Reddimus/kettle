@@ -3087,3 +3087,12 @@ suites, plus clippy and format checks. Native CI must exercise platform-specific
 private-file handling. Live acceptance still needs a graphical session: restore
 styled CJK/emoji output, search and copy old rows, inspect the dated divider and
 fresh prompt, and confirm geometry/IME and screen-reader positions agree.
+
+System appearance regression coverage lives in kettle-config's default and
+legacy-theme tests and kettle-ui's appearance, picker, Settings and native
+material tests. Portable tests cover portal value/filter policy and macOS
+appearance selection; Linux private-bus tests cover color-scheme snapshots,
+SettingChanged and owner loss using the shared reduced-motion transport.
+Native acceptance still requires light/dark switching on macOS and Linux
+(Wayland and X11), including multiple windows, open overlays, custom side
+palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

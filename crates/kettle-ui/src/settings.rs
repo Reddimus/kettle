@@ -201,6 +201,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldTabBarPosition => Text::SettingsDescriptionFieldTabBarPosition,
         Text::SettingsFieldTabMinWidth => Text::SettingsDescriptionFieldTabMinWidth,
         Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
+        Text::SettingsFieldAppearance => Text::SettingsDescriptionFieldAppearance,
         Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
         Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
         Text::SettingsFieldRestoreScrollbackLines => {
@@ -593,6 +594,17 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 // full 500+ bundle stays reachable via the right-click Theme
                 // submenu / NextTheme / the `theme =` config line. Theme names
                 // are proper names, shown verbatim.
+                choice(
+                    T::SettingsFieldAppearance,
+                    "theme-mode",
+                    &["auto", "light", "dark", "explicit"],
+                    &[
+                        Label::Text(T::SettingsValueFollowSystem),
+                        Label::Text(T::SettingsValueLightAppearance),
+                        Label::Text(T::SettingsValueDarkAppearance),
+                        Label::Text(T::SettingsValueFixedTheme),
+                    ],
+                ),
                 Field {
                     label: T::SettingsFieldTheme,
                     key: "theme",
@@ -1421,6 +1433,13 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
+        "theme-mode" => match cfg.theme_mode {
+            kettle_config::ThemeMode::Auto => "auto",
+            kettle_config::ThemeMode::Light => "light",
+            kettle_config::ThemeMode::Dark => "dark",
+            kettle_config::ThemeMode::Explicit => "explicit",
+        }
+        .to_string(),
         // Graphics.
         "gpu-power-preference" => match cfg.gpu_power_preference {
             kettle_config::GpuPowerPreference::Low => "low",
@@ -1703,7 +1722,8 @@ mod tests {
                             label.chars().next().is_some_and(char::is_uppercase),
                             "{label}"
                         );
-                        if *token == "auto" && field.key != "update-policy" {
+                        if *token == "auto" && !matches!(field.key, "update-policy" | "theme-mode")
+                        {
                             assert!(label.starts_with("Automatic"), "{}: {label}", field.key);
                         }
                     }
@@ -2967,5 +2987,30 @@ mod restore_scrollback_tests {
             .unwrap();
         assert_eq!(read(&cfg, remote, &tr), tr.text(Text::SettingsValueOn));
         assert_eq!(sessions.fields.len(), 3);
+    }
+
+    #[test]
+    fn appearance_choices_round_trip_modes_and_localize() {
+        let categories = categories(&[]);
+        let field = categories
+            .iter()
+            .flat_map(|category| &category.fields)
+            .find(|field| field.key == "theme-mode")
+            .unwrap();
+        for (mode, next, label) in [
+            (kettle_config::ThemeMode::Auto, "light", "Follow system"),
+            (kettle_config::ThemeMode::Light, "dark", "Light"),
+            (kettle_config::ThemeMode::Dark, "explicit", "Dark"),
+            (kettle_config::ThemeMode::Explicit, "auto", "Fixed theme"),
+        ] {
+            let cfg = Config {
+                theme_mode: mode,
+                ..Config::default()
+            };
+            assert_eq!(read(&cfg, field, &Translator::default()), label);
+            assert_eq!(next_value(&cfg, field, 1), next);
+            let spanish = Translator::new(kettle_i18n::Language::Es);
+            assert_ne!(read(&cfg, field, &spanish), label);
+        }
     }
 }

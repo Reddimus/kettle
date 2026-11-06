@@ -297,6 +297,16 @@ Paths need path context: progress counters such as `158/158`, ratios such as
 path is underlined when its last part has an extension or it has three parts. Remote or unresolved paths are copied; see
 [configuration and hint actions](docs/CONFIG.md).
 
+## Themes
+
+Kettle follows the system's light/dark appearance by default, with TokyoNight
+Day and TokyoNight Night. Existing configs with `theme` and no `theme-mode`
+keep their fixed theme. Settings → Appearance offers Follow system, Light,
+Dark and Fixed theme. Choosing a theme while following the system saves it
+for the active appearance. Linux uses the XDG Settings portal; if appearance
+is unavailable or has no preference, Kettle uses dark.
+See [theme configuration](docs/CONFIG.md#auto-lightdark-theme-switching).
+
 ## Privacy
 
 Pasting media sends a quoted local path to the pane, never the file. The
