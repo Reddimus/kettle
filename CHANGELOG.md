@@ -221,6 +221,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On GNOME Wayland a window keeps repainting after it enters or leaves
+  fullscreen. Mesa's vsync path could hold a frame with no word from the
+  compositor, so the window (and its size chip) froze until something else
+  redrew the screen. Wayland windows now present in mailbox mode, which the
+  compositor still shows without tearing, once per refresh.
+
 - A failed process's exit banner sits along the bottom of its pane instead of
   covering the first lines, where a short session's output and its error are.
 
