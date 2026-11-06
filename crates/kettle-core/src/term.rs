@@ -6302,8 +6302,9 @@ impl Terminal {
                             None => {
                                 let final_raw = private_output_filter.finish(true);
                                 if !final_raw.is_empty() {
-                                    let stripped = session_log_filter.filter(&final_raw, 0, true);
-                                    if log_active.load(Ordering::Relaxed)
+                                    let logging = log_active.load(Ordering::Relaxed);
+                                    let stripped = session_log_filter.strip_if(&final_raw, logging);
+                                    if logging
                                         && let Ok(mut guard) = session_log.lock()
                                         && let Some(writer) = guard.as_mut()
                                     {
@@ -6311,7 +6312,11 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let filtered = if strip { stripped } else { final_raw.clone() };
+                                        let filtered = if strip {
+                                            stripped.unwrap_or_default()
+                                        } else {
+                                            final_raw.clone()
+                                        };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -6354,13 +6359,14 @@ impl Terminal {
                                     Vec::new()
                                 };
                                 if !raw_output.is_empty() {
-                                    let stripped = session_log_filter.filter(&raw_output, 0, true);
+                                    let logging = log_active.load(Ordering::Relaxed);
+                                    let stripped = session_log_filter.strip_if(&raw_output, logging);
                                     // Publish at most once per PTY read. OSC-heavy output can
                                     // produce thousands of parser chunks, while the logger and
                                     // recorder queues are intentionally bounded in read-sized
                                     // messages. Kettle's private completion OSC is the only data
                                     // removed by `PrivateOutputFilter`.
-                                    if log_active.load(Ordering::Relaxed)
+                                    if logging
                                         && let Ok(mut guard) = session_log.lock()
                                         && let Some(writer) = guard.as_mut()
                                     {
@@ -6368,7 +6374,11 @@ impl Terminal {
                                             .lock()
                                             .map(|value| *value)
                                             .unwrap_or(false);
-                                        let filtered = if strip { stripped } else { raw_output.clone() };
+                                        let filtered = if strip {
+                                            stripped.unwrap_or_default()
+                                        } else {
+                                            raw_output.clone()
+                                        };
                                         if writer.try_write(filtered).is_err() {
                                             log_generation.fetch_add(1, Ordering::AcqRel);
                                             log_active.store(false, Ordering::Release);
@@ -9536,15 +9546,31 @@ struct SessionLogFilter {
 
 impl SessionLogFilter {
     fn filter(&mut self, input: &[u8], generation: u64, strip: bool) -> Vec<u8> {
-        let current = (generation, strip);
-        if self.observed != Some(current) {
-            self.stripper = AnsiStripper::new();
-            self.observed = Some(current);
-        }
+        self.observe(generation, strip);
         if strip {
             self.stripper.strip(input)
         } else {
             input.to_vec()
+        }
+    }
+
+    /// The stripped text of `input` when `wanted`; otherwise only the parser
+    /// state advances, so a log enabled mid-sequence still cannot expose a
+    /// payload, without building text nobody reads.
+    fn strip_if(&mut self, input: &[u8], wanted: bool) -> Option<Vec<u8>> {
+        if wanted {
+            return Some(self.filter(input, 0, true));
+        }
+        self.observe(0, true);
+        self.stripper.track(input);
+        None
+    }
+
+    fn observe(&mut self, generation: u64, strip: bool) {
+        let current = (generation, strip);
+        if self.observed != Some(current) {
+            self.stripper = AnsiStripper::new();
+            self.observed = Some(current);
         }
     }
 }
