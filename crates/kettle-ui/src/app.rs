@@ -349,6 +349,7 @@ pub struct App {
     /// from state this never sees, and a one-shot tab handoff is deleted as it
     /// is read.
     restore_source: Option<std::path::PathBuf>,
+    restore_content: std::collections::VecDeque<crate::session_content::WindowContent>,
     restore_identity: Option<crate::session::SnapshotIdentity>,
     /// An unread restore snapshot must survive automatic saves for this launch.
     session_load_failed: bool,

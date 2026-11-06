@@ -2692,3 +2692,22 @@ args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
 [messages.hint_legend_plain]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
 args = [{ name = "plain", type = "str" }]
+
+[messages.settings_category_sessions]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Settings category for saved workspace and terminal output."
+
+[messages.settings_field_restore_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions numeric row: maximum primary screen and scrollback rows saved per pane."
+
+[messages.settings_field_restore_scrollback_remote]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions toggle: opt in to saving output of remote/SSH panes."
+
+[messages.settings_description_restore_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions description. Applies only when session restore is enabled."
+
+[messages.settings_description_restore_scrollback_remote]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Sessions description: remote output can contain sensitive server data."
+
+[messages.restored_content_divider]
+context = "crates/kettle-ui/src/settings.rs, session_content.rs: Terminal history divider before the new shell prompt. date_time is local YYYY-MM-DD HH:MM:SS."
+args = [{ name = "date_time", type = "str" }]

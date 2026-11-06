@@ -922,7 +922,7 @@ macos-cursor-blink-layer macos-option-as-alt macos-titlebar-style menu-item mini
 mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
 palette paste-files paste-image paste-image-preview paste-images paste-protection paste-video-preview
 media-open-mode preview-lane-side putty-paste-style putty-paste-style-source-clipboard quick-terminal-animation quick-terminal-autohide quick-terminal-hotkey quick-terminal-position quick-terminal-size record record-dir record-max-bytes
-record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session
+record-max-directory-bytes record-max-files record-raw-input reduce-motion resize-overlay restore-session restore-scrollback-lines restore-scrollback-remote
 scroll-multiplier scroll-on-input scroll-on-keystroke scroll-on-output scroll-tabbar scrollback
 scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scrollback-lines
 scrollback-memory scrollbar scrollbar-width search-background search-case-sensitive

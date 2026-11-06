@@ -88,6 +88,7 @@ mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;
 mod session;
+mod session_content;
 mod settings;
 mod text_editor;
 // In-app release checker. It notifies of a newer release, or installs one under

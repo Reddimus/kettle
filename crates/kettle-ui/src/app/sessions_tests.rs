@@ -230,7 +230,7 @@ fn review_unread_startup_snapshot_disables_saving() {
     let source: String = include_str!("sessions.rs").split_whitespace().collect();
     assert!(
         source
-            .contains("fnsave_session(&self,ws:&WindowState){ifself.session_load_failed{return;}"),
+            .contains("fnsave_session(&self,ws:&WindowState){self.clear_disabled_content();ifself.session_load_failed{return;}"),
         "automatic saves must stop before taking a default snapshot"
     );
     // Both named layouts and the default restored session need this guard.

@@ -203,6 +203,12 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
         Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
         Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
+        Text::SettingsFieldRestoreScrollbackLines => {
+            Text::SettingsDescriptionRestoreScrollbackLines
+        }
+        Text::SettingsFieldRestoreScrollbackRemote => {
+            Text::SettingsDescriptionRestoreScrollbackRemote
+        }
         Text::SettingsFieldUpdatePolicy => Text::SettingsDescriptionFieldUpdatePolicy,
         Text::SettingsFieldVimMenuNav => Text::SettingsDescriptionFieldVimMenuNav,
         Text::SettingsFieldWindowBlur => Text::SettingsDescriptionFieldWindowBlur,
@@ -778,16 +784,6 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "mouse-hide-while-typing",
                 ),
                 choice(
-                    T::SettingsFieldRestoreSession,
-                    "restore-session",
-                    &["auto", "true", "false"],
-                    &[
-                        Label::Text(T::SettingsValueAutomatic),
-                        Label::Text(T::SettingsValueOn),
-                        Label::Text(T::SettingsValueOff),
-                    ],
-                ),
-                choice(
                     T::SettingsFieldUpdatePolicy,
                     "update-policy",
                     &["off", "notify", "auto"],
@@ -938,6 +934,33 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 keybind(T::SettingsKeybindToggleZoom, "toggle_zoom"),
                 keybind(T::SettingsKeybindCopy, "copy"),
                 keybind(T::SettingsKeybindPaste, "paste"),
+            ],
+        },
+        Category {
+            name: T::SettingsCategorySessions,
+            fields: vec![
+                choice(
+                    T::SettingsFieldRestoreSession,
+                    "restore-session",
+                    &["auto", "true", "false"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOn),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
+                number(
+                    T::SettingsFieldRestoreScrollbackLines,
+                    "restore-scrollback-lines",
+                    0,
+                    10_000,
+                    100,
+                    "",
+                ),
+                toggle(
+                    T::SettingsFieldRestoreScrollbackRemote,
+                    "restore-scrollback-remote",
+                ),
             ],
         },
         Category {
@@ -1294,6 +1317,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
+        "restore-scrollback-remote" => cfg.restore_scrollback_remote,
         "copy-on-select" => cfg.copy_on_select,
         "copy-trim-whitespace" => cfg.copy_trim_whitespace,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
@@ -1453,6 +1477,7 @@ fn read_string(cfg: &Config, key: &str) -> String {
 
 fn read_number(cfg: &Config, key: &str) -> i64 {
     match key {
+        "restore-scrollback-lines" => cfg.restore_scrollback_lines as i64,
         "quick-terminal-size" => i64::from(cfg.quick_terminal_size),
         "font-size" => cfg.font_size.round() as i64,
         // opacity is stored 0.0–1.0; the overlay edits it as a percent.
@@ -1486,6 +1511,7 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
         "font-size" => value.clamp(5, 72),
         "background-opacity" => value.clamp(0, 100),
         "window-padding-x" => value.max(0),
+        "restore-scrollback-lines" => value.clamp(0, 10_000),
         "scrollback" => value.clamp(0, kettle_config::INFINITE_SCROLLBACK as i64),
         "scrollback-bytes" => {
             value.clamp(0, (kettle_config::MAX_SCROLLBACK_BYTES / 1_000_000) as i64)
@@ -2388,14 +2414,11 @@ mod tests {
         assert_eq!(openers, ["theme"]);
     }
 
-    /// Pseudo-locale layout check: in English, Spanish and the pseudo-locale
-    /// (text about 38% longer), the panel's columns and its category tabs fit
-    /// the 144 columns a default window has on a 1366 px laptop, so no label
-    /// or value is cut there.
+    /// Rows fit the default window; category paging keeps every active
+    /// category visible and pointer-accessible in all supported languages.
     #[cfg(debug_assertions)]
     #[test]
     fn the_panel_fits_a_default_window_in_every_language() {
-        use unicode_width::UnicodeWidthStr as _;
         let cats = categories(&[]);
         let cfg = Config::default();
         for tr in [
@@ -2405,18 +2428,25 @@ mod tests {
         ] {
             let (label_cols, value_cols) = column_widths(&cfg, &cats, &tr);
             let columns = 2 + label_cols + 2 + value_cols;
-            let tabs = cats
-                .iter()
-                .map(|category| tr.text(category.name))
-                .collect::<Vec<_>>()
-                .join("  ")
-                .width();
             assert!(
                 columns <= 144,
                 "{:?}: rows need {columns} columns",
                 tr.language()
             );
-            assert!(tabs <= 144, "{:?}: tabs need {tabs} columns", tr.language());
+            for active in 0..cats.len() {
+                let set = kettle_render::SettingsOverlay {
+                    categories: cats.iter().map(|cat| tr.text(cat.name).into()).collect(),
+                    active_category: active,
+                    ..Default::default()
+                };
+                let layout =
+                    kettle_render::settings_layout(&set, (8.0, 16.0), (1152.0, 720.0), 8.0);
+                let rect = layout.category_rects[active].expect("selected category stays visible");
+                assert_eq!(
+                    layout.pointer_hit((rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0), None),
+                    kettle_render::SettingsHit::Category(active)
+                );
+            }
         }
     }
 
@@ -2905,5 +2935,37 @@ mod search_tests {
                 assert_ne!(en, es, "{}", field.key);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod restore_scrollback_tests {
+    use super::*;
+
+    #[test]
+    fn sessions_fields_read_and_edit_output_policy() {
+        let tr = Translator::new(kettle_i18n::Language::Es);
+        let categories = categories(&[]);
+        let sessions = categories
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategorySessions)
+            .unwrap();
+        let cfg =
+            Config::parse_text("restore-scrollback-lines = 4321\nrestore-scrollback-remote = true");
+        let lines = sessions
+            .fields
+            .iter()
+            .find(|f| f.key == "restore-scrollback-lines")
+            .unwrap();
+        assert_eq!(read(&cfg, lines, &tr), "4321");
+        assert_eq!(write_number(lines.key, -1, ""), "0");
+        assert_eq!(write_number(lines.key, 20_000, ""), "10000");
+        let remote = sessions
+            .fields
+            .iter()
+            .find(|f| f.key == "restore-scrollback-remote")
+            .unwrap();
+        assert_eq!(read(&cfg, remote, &tr), tr.text(Text::SettingsValueOn));
+        assert_eq!(sessions.fields.len(), 3);
     }
 }

@@ -226,9 +226,13 @@ let your function keep its account environment and call Kettle's launcher.
 
 ## Sessions, profiles and layouts
 
-Session restore keeps windows, tabs, split arrangements and working directories.
-It starts new shells or saved commands; terminal contents, scrollback and running
-processes are not restored. With `restore-session = auto` (the default), macOS
+Session restore keeps windows, tabs, split arrangements and working directories,
+and each pane's recent output: up to `restore-scrollback-lines` lines (1,000 by
+default, `0` turns it off), shown faint above a **Restored** divider and a fresh
+shell. Output from remote panes is left out unless `restore-scrollback-remote =
+true`. The saved text is private to your account and is never sent as input.
+Running processes are not restored: shells and saved commands start again; see
+[session restore](docs/SESSION-RESTORE.md). With `restore-session = auto` (the default), macOS
 restores when **Close windows when quitting an application** is unchecked;
 if the system has no preference set, it keeps windows. Other platforms open
 fresh with `auto`. Use `true` or `false` to choose explicitly.
@@ -261,6 +265,10 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 - Tabs, splits, multiple windows, and tabs you can drag between windows
 - Centered close confirmations with Cancel focused to protect running work
 - Search, bounded scrollback, broadcast input and session restore
+  (windows, tabs, splits, working directories and up to 1000 recent output lines
+  per pane survive a relaunch when restore is enabled). Output is stored in
+  private files, capped at 8 MiB total; remote output is opt-in. See
+  [session restore](docs/SESSION-RESTORE.md) for privacy and limits.
 - Inline images (kitty, iTerm2 and Sixel), file drop and pasted screenshots
 - Shell-driven completion cards, recording and SSH profiles
 - A bundled font and more than 500 themes, in English or Spanish

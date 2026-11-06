@@ -411,7 +411,7 @@ fn launch_recorder_precedes_restored_sibling_windows() {
 fn review_recording_header_follows_restore_and_precedes_siblings() {
     let src = production_source();
     let startup = finding_body(&src, "resumed_inner");
-    let restore = startup.find(".restore_geometry(").unwrap();
+    let restore = startup.find(".restore_geometry_with_content(").unwrap();
     let resize = startup[restore..].find("self.resize_all(ws);").unwrap() + restore;
     let header = startup.find("Recorder::start_target_async(").unwrap();
     let recorder = startup.find("self.recorder = Some(rec);").unwrap();

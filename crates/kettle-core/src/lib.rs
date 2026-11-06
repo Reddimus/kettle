@@ -47,6 +47,7 @@ pub mod hints;
 pub mod images;
 pub mod links;
 mod persistence;
+pub mod restore;
 pub mod scrollbar;
 pub mod search;
 // Agent-first asciicast session recorder. Behind the

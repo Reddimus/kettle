@@ -6,6 +6,12 @@ settings_value_unchanged_cursor = "Unchanged"
 settings_field_copy_trim_whitespace = "Trim trailing spaces on copy"
 settings_description_field_copy_trim_whitespace = "Drop whitespace at the end of each copied line."
 
+settings_category_sessions = "Sessions"
+settings_field_restore_scrollback_lines = "Restored output lines"
+settings_field_restore_scrollback_remote = "Save remote output"
+settings_description_restore_scrollback_lines = "Restore recent output on relaunch; private, 8 MiB total. 0 disables."
+settings_description_restore_scrollback_remote = "Off by default to keep remote output off disk."
+restored_content_divider = "Restored · {date_time}"
 settings_field_restore_session = "Restore session"
 settings_description_field_restore_session = "Automatic follows macOS window settings; off on other platforms."
 

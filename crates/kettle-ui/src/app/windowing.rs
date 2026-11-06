@@ -537,9 +537,20 @@ impl App {
                 // Route through the LATCHED waker constructor. A hand-rolled
                 // closure bypasses the wakeup-dedup latch, so restored panes
                 // would bring back the one-wakeup-per-read flood it eliminates.
+                let content = self.restore_content.pop_front().unwrap_or_default();
+                let divider = self
+                    .ui_text
+                    .restored_content_divider(&crate::wall_clock::local_date_time());
                 let mk = || self.waker();
                 let geometries = self.restore_geometries(&ws, &sess);
-                let outcome = ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk);
+                let outcome = ws.mux.restore_geometry_with_content(
+                    &sess,
+                    &self.cfg,
+                    &geometries,
+                    &mk,
+                    &content,
+                    &divider,
+                );
                 if !outcome.restored_any {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");

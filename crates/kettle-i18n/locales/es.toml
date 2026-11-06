@@ -6,6 +6,12 @@ settings_value_unchanged_cursor = "Sin cambios"
 settings_field_copy_trim_whitespace = "Recortar espacios finales al copiar"
 settings_description_field_copy_trim_whitespace = "Quitar los espacios al final de cada línea copiada."
 
+settings_category_sessions = "Sesiones"
+settings_field_restore_scrollback_lines = "Líneas de salida restauradas"
+settings_field_restore_scrollback_remote = "Guardar salida remota"
+settings_description_restore_scrollback_lines = "Restaurar salida al reiniciar; privada, hasta 8 MiB. 0 desactiva."
+settings_description_restore_scrollback_remote = "Desactivado por defecto para no guardar la salida remota en disco."
+restored_content_divider = "Restaurado · {date_time}"
 settings_field_restore_session = "Restaurar sesión"
 settings_description_field_restore_session = "Automático sigue los ajustes de macOS; no en otros sistemas."
 

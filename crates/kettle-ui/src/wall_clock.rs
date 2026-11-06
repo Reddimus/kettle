@@ -13,6 +13,26 @@ pub(crate) fn now_local() -> (u8, u8, u8) {
     time_of_day(secs, local_utc_offset(secs))
 }
 
+pub(crate) fn local_date_time() -> String {
+    date_time_at(unix_seconds())
+}
+
+fn date_time_at(secs: i64) -> String {
+    let local = secs.saturating_add(local_utc_offset(secs));
+    let days = local.div_euclid(86_400) + 719_468;
+    let era = days.div_euclid(146_097);
+    let doe = days.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = era * 400 + yoe;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    let (hour, minute, second) = time_of_day(local, 0);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
 fn unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

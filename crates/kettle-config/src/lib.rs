@@ -2068,6 +2068,10 @@ pub struct Config {
     /// Auto follows macOS window persistence and is false elsewhere. The
     /// resolved policy gates both loading and saving the default session.
     pub restore_session: RestoreSession,
+    /// Recent primary-screen rows persisted per pane; zero disables content restore.
+    pub restore_scrollback_lines: usize,
+    /// Include remote panes in the private content snapshot (opt-in).
+    pub restore_scrollback_remote: bool,
     /// When the user types while scrolled back in scrollback, jump back to
     /// the bottom of the screen (Alacritty `scrolling.history.scroll_on_input`,
     /// xterm `scrollKey`). Default `true`.
@@ -3281,6 +3285,8 @@ impl Default for Config {
             update_policy: UpdatePolicy::Auto,
             update_check_interval_hours: 24,
             restore_session: RestoreSession::Auto,
+            restore_scrollback_lines: 1000,
+            restore_scrollback_remote: false,
             scroll_on_keystroke: true,
             scroll_on_output: false,
             mouse_hide_while_typing: true,
@@ -3763,6 +3769,8 @@ impl Config {
     /// it silently keep the default. Kept in lockstep with `parse_collect` by
     /// `bool_and_enum_typos_are_all_flagged`.
     const BOOL_KEYS: &'static [&'static str] = &[
+        "restore-scrollback-remote",
+        "restore_scrollback_remote",
         "grapheme-clustering",
         "grapheme_clustering",
         "allow-bold",
@@ -4318,6 +4326,7 @@ impl Config {
                 // recognizes. `BOOL_KEYS` lists both spellings of many keys,
                 // but the tokenizer yields only the hyphenated form, so compare
                 // each entry in that folded spelling.
+                "restore-scrollback-lines" => v.parse::<usize>().is_ok_and(|n| n <= 10_000),
                 "restore-session" | "restore_session" => RestoreSession::parse(v).is_some(),
                 "shell-integration" | "shell_integration" =>
                     v.eq_ignore_ascii_case("auto") || parse_bool(v).is_some(),
@@ -5900,6 +5909,16 @@ impl Config {
                         }
                         "off" | "false" | "no" => cfg.add_kettle_to_path = AddKettleToPath::Off,
                         _ => {}
+                    }
+                }
+                "restore-scrollback-lines" | "restore_scrollback_lines" => {
+                    if let Ok(lines) = e.value.parse::<usize>() {
+                        cfg.restore_scrollback_lines = lines.min(10_000);
+                    }
+                }
+                "restore-scrollback-remote" | "restore_scrollback_remote" => {
+                    if let Some(remote) = parse_bool(&e.value) {
+                        cfg.restore_scrollback_remote = remote;
                     }
                 }
                 "restore-session" | "restore_session" => {
@@ -13961,5 +13980,35 @@ mod selection_cursor_config_tests {
         let cfg = Config::parse_text(invalid);
         assert_eq!(cfg.cursor_unfocused_style, CursorUnfocusedStyle::Hollow);
         assert!(cfg.copy_trim_whitespace);
+    }
+}
+
+#[cfg(test)]
+mod restore_scrollback_tests {
+    use super::Config;
+
+    #[test]
+    fn defaults_aliases_bounds_and_diagnostics() {
+        assert_eq!(Config::default().restore_scrollback_lines, 1000);
+        assert!(!Config::default().restore_scrollback_remote);
+        for separator in ['-', '_'] {
+            let lines = "restore-scrollback-lines".replace('-', &separator.to_string());
+            let remote = "restore-scrollback-remote".replace('-', &separator.to_string());
+            for value in [0, 1, 1000, 10_000, 10_001] {
+                let text = format!("{lines} = {value}\n{remote} = true");
+                let (cfg, unknown) = Config::parse_collect(&text);
+                assert!(unknown.is_empty());
+                assert_eq!(cfg.restore_scrollback_lines, value.min(10_000));
+                assert!(cfg.restore_scrollback_remote);
+                assert_eq!(
+                    Config::detect_malformed_values(&text).is_empty(),
+                    value <= 10_000
+                );
+            }
+            for value in ["-1", "invalid", "18446744073709551616"] {
+                assert!(!Config::detect_malformed_values(&format!("{lines} = {value}")).is_empty());
+            }
+            assert!(!Config::detect_malformed_values(&format!("{remote} = maybe")).is_empty());
+        }
     }
 }

@@ -1185,6 +1185,8 @@ pub struct PtyGeometry {
 /// Overrides needed when reproducing an existing direct client launch.
 #[derive(Clone, Copy, Default)]
 pub struct LaunchOverrides<'a> {
+    /// Validated display-only session text, parsed before the PTY reader starts.
+    pub initial_content: Option<&'a str>,
     /// An exact in-memory launch to replay after a held process exits.
     pub replay: Option<&'a ProcessLaunch>,
     /// Unix invocation name, independent of the executable path.
@@ -5829,7 +5831,11 @@ impl Terminal {
         {
             tconf.semantic_escape_chars = wd.to_string();
         }
-        let term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
+        let mut term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
+        if let Some(content) = launch.initial_content {
+            let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+            parser.advance(&mut term, content.as_bytes());
+        }
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));

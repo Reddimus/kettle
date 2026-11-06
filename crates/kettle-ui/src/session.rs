@@ -335,15 +335,6 @@ impl Session {
         Some(session)
     }
 
-    pub fn save(&self) {
-        let Some(p) = Self::path() else {
-            return;
-        };
-        if let Err(e) = save_to_path(self, &p) {
-            log::warn!("could not save session to {}: {e}", p.display());
-        }
-    }
-
     /// List saved layouts by name, alphabetically (Terminator parity,
     /// `terminatorlib/layoutlauncher.py`). Walks `<config-dir>/layouts/*.json`
     /// and strips the extension; `Action::OpenLayoutPicker` filters against
@@ -379,16 +370,8 @@ impl Session {
         names
     }
 
-    /// Save to the named-layout path. Creates the parent
-    /// directory if it doesn't exist (a first-time
-    /// `kettle --layout dev` from a fresh install needs to create
-    /// `<config-dir>/layouts/` itself).
-    pub fn save_layout(&self, name: &str) {
-        if let Err(error) = self.write_layout(name) {
-            log::warn!("could not save layout: {error}");
-        }
-    }
-
+    /// Write to the named-layout path; `save_to_path` creates
+    /// `<config-dir>/layouts/` on a first save.
     fn write_layout(&self, name: &str) -> std::io::Result<()> {
         let path = Self::path_for_layout(name)
             .ok_or_else(|| std::io::Error::other("no config directory"))?;
@@ -599,9 +582,37 @@ pub(crate) fn clamp_geometry_to_monitors(
     sanitized
 }
 
+fn save_with_content(
+    session: &Session,
+    path: &std::path::Path,
+    content: Option<crate::session_content::ContentSnapshot>,
+) -> std::io::Result<()> {
+    let result = save_to_path(session, path).and_then(|()| {
+        if let Some(content) = content {
+            content.save(path)
+        } else {
+            crate::session_content::remove(path);
+            Ok(())
+        }
+    });
+    if result.is_err() {
+        crate::session_content::remove(path);
+    }
+    result
+}
+
+enum SaveJob {
+    Save(
+        Session,
+        Option<String>,
+        Option<crate::session_content::ContentSnapshot>,
+    ),
+    RemoveContent(PathBuf),
+}
+
 #[derive(Default)]
 struct PendingSave {
-    snapshot: Option<(Session, Option<String>)>,
+    snapshot: Option<SaveJob>,
     closing: bool,
 }
 
@@ -612,14 +623,31 @@ pub(crate) struct SessionWriter {
 
 impl SessionWriter {
     pub(crate) fn new() -> std::io::Result<Self> {
-        Self::with_sink(|session, layout| match layout {
-            Some(name) => session.save_layout(&name),
-            None => session.save(),
+        Self::with_content_sink(|session, layout, content| {
+            let path = match layout.as_deref() {
+                Some(name) => Session::path_for_layout(name),
+                None => Session::path(),
+            };
+            let Some(path) = path else {
+                return;
+            };
+            if let Err(error) = save_with_content(&session, &path, content) {
+                log::warn!("could not save session snapshot ({:?})", error.kind());
+            }
         })
     }
 
+    #[cfg(test)]
     fn with_sink(
         mut write: impl FnMut(Session, Option<String>) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::with_content_sink(move |session, layout, _| write(session, layout))
+    }
+
+    fn with_content_sink(
+        mut write: impl FnMut(Session, Option<String>, Option<crate::session_content::ContentSnapshot>)
+        + Send
+        + 'static,
     ) -> std::io::Result<Self> {
         let pending = std::sync::Arc::new((
             std::sync::Mutex::new(PendingSave::default()),
@@ -641,7 +669,10 @@ impl SessionWriter {
                             None => break,
                         }
                     };
-                    write(next.0, next.1);
+                    match next {
+                        SaveJob::Save(session, layout, content) => write(session, layout, content),
+                        SaveJob::RemoveContent(path) => crate::session_content::remove(&path),
+                    }
                 }
             })?;
         Ok(Self {
@@ -650,9 +681,26 @@ impl SessionWriter {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn submit(&self, session: Session, layout: Option<String>) {
+        self.submit_content(session, layout, None);
+    }
+
+    pub(crate) fn submit_content(
+        &self,
+        session: Session,
+        layout: Option<String>,
+        content: Option<crate::session_content::ContentSnapshot>,
+    ) {
         let (lock, ready) = &*self.pending;
-        lock.lock().expect("session save lock").snapshot = Some((session, layout));
+        lock.lock().expect("session save lock").snapshot =
+            Some(SaveJob::Save(session, layout, content));
+        ready.notify_one();
+    }
+
+    pub(crate) fn remove_content(&self, path: PathBuf) {
+        let (lock, ready) = &*self.pending;
+        lock.lock().expect("session save lock").snapshot = Some(SaveJob::RemoveContent(path));
         ready.notify_one();
     }
 }
@@ -2470,5 +2518,52 @@ mod tests {
             }
             _ => panic!("expected leaf"),
         }
+    }
+}
+
+#[cfg(test)]
+mod content_writer_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_content_writes_nothing_and_removes_an_old_file() {
+        let dir = kettle_test_support::private_tempdir("kettle-content-disabled-");
+        let path = dir.path().join("session.json");
+        let session = Session::default();
+        save_with_content(&session, &path, None).unwrap();
+        assert!(!crate::session_content::path(&path).exists());
+        kettle_state::atomic_replace(
+            &crate::session_content::path(&path),
+            b"old private output",
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )
+        .unwrap();
+        save_with_content(&session, &path, None).unwrap();
+        assert!(!crate::session_content::path(&path).exists());
+    }
+
+    #[test]
+    fn disabling_while_a_snapshot_is_writing_removes_the_final_sidecar() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = kettle_test_support::private_tempdir("kettle-content-disable-race-");
+        let path = dir.path().join("session.json");
+        let destination = path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = SessionWriter::with_content_sink(move |session, _, content| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            save_with_content(&session, &destination, content).unwrap();
+        })
+        .unwrap();
+        let session = Session::default();
+        let content = crate::session_content::ContentSnapshot::new(&session, vec![]);
+        writer.submit_content(session, None, Some(content));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        writer.remove_content(path.clone());
+        release_tx.send(()).unwrap();
+        drop(writer);
+        assert!(!crate::session_content::path(&path).exists());
     }
 }

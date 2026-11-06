@@ -117,6 +117,16 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Update check interval | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
 | Vim menu navigation | `vim-menu-nav` | On / Off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
 
+**Sessions**
+
+| Option | Config key | Notes |
+|---|---|---|
+| Restore session | `restore-session` | Automatic follows macOS window settings; off on other platforms. On and Off override this |
+| Restored output lines | `restore-scrollback-lines` | 0–10000 per pane, default 1000; 0 removes saved output. Primary screen plus scrollback, 8 MiB total |
+| Save remote output | `restore-scrollback-remote` | Off by default; opt in to storing remote output locally |
+
+See [Session restore](SESSION-RESTORE.md) for what survives and its privacy limits.
+
 **Search**
 
 | Option | Config key | Notes |

@@ -746,6 +746,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wayland_file_drops: std::collections::BTreeMap::new(),
             restore_source: None,
+            restore_content: Default::default(),
             restore_identity: None,
             session_load_failed: false,
             session_writer: crate::session::SessionWriter::new()?,
@@ -1056,6 +1057,7 @@ impl App {
         // not be written back either — otherwise the flag that names a layout
         // is the same flag that destroys it.
         self.named_layout_writable = !has_launch_override;
+        self.clear_disabled_content();
         let loaded_session = if ws.pre_launch.is_some() || has_launch_override {
             None
         } else {
@@ -1401,10 +1403,19 @@ impl App {
                             windows: Vec::new(),
                         };
                         let geometries = self.restore_geometries(ws, &first_session);
+                        let content = self.restore_content.pop_front().unwrap_or_default();
+                        let divider = self
+                            .ui_text
+                            .restored_content_divider(&crate::wall_clock::local_date_time());
                         let mk = || self.waker();
-                        let outcome =
-                            ws.mux
-                                .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
+                        let outcome = ws.mux.restore_geometry_with_content(
+                            &first_session,
+                            &self.cfg,
+                            &geometries,
+                            &mk,
+                            &content,
+                            &divider,
+                        );
                         // A tab that could not be rebuilt is gone from the live
                         // mux, and the next save rewrites the file from it. Keep
                         // the original so a transient failure — a command not on
@@ -1484,11 +1495,15 @@ impl App {
                     geometry: surface.geometry(),
                 };
                 let size = winit::dpi::PhysicalSize::new(surface.size.0, surface.size.1);
+                let content_windows = self.restore_content.len();
                 if self
                     .open_window(event_loop, WindowOpen::Restore(sw), None, Some(size))
                     .is_err()
                 {
                     self.stash_unrestorable_session("could not open an additional window");
+                    if self.restore_content.len() == content_windows {
+                        self.restore_content.pop_front();
+                    }
                     log::warn!("session restore: could not open an additional window");
                 }
             }
@@ -1497,6 +1512,13 @@ impl App {
             self.focused_seq = ws.seq;
             record_window_focus(&mut self.window_focus_order, ws.seq);
         }
+        if restored
+            && !self.session_load_failed
+            && let Some(source) = self.restore_source.as_deref()
+        {
+            crate::session_content::remove(source);
+        }
+        self.restore_content.clear();
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
         // cache. The server only needs the pid + a live proxy for its waker, so

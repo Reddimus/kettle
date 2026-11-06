@@ -1160,6 +1160,15 @@ impl<T> Term<T> {
         RenderableContent::new(self)
     }
 
+    /// Primary screen, including history, even while an alternate screen is active.
+    pub fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            &self.inactive_grid
+        } else {
+            &self.grid
+        }
+    }
+
     /// Access to the raw grid data structure.
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid

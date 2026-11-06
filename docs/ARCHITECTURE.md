@@ -4903,3 +4903,27 @@ focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text.
+
+## Disposable session content
+
+`kettle-core::restore` snapshots the primary grid (including its history while
+an alternate screen is active), generating printable text and SGR from cells.
+The raw PTY stream is never persisted for this feature. Hyperlinks and other
+controls cannot enter the snapshot. Validated UTF-8 cell boundaries and each
+cell's grapheme mode preserve widths even across DEC 2027 changes; replay
+generates its own mode controls, then restores the new shell's configured mode.
+Rows, encoded bytes and pane/window counts
+are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
+sidecar next to the session layout through `kettle-state` private durable writes.
+The digest prevents applying an old sidecar to a changed layout; it is not an
+authentication mechanism. Content remains untrusted and is validated again on
+load. The existing coalescing session writer serializes layout, content and
+output-disable cleanup; an interrupted pair safely loses content rather than
+applying it to another layout.
+
+Restore consumes content in window, tab and DFS leaf order. Each terminal
+parses validated content and a localized divider before its PTY reader or child
+starts, then resets attributes for the fresh shell. Restored rows therefore use
+the normal grid, scrollback, search, selection, accessibility, control geometry
+and IME paths. No chrome or terminal rectangle changes. A successful startup
+restore removes its sidecar; later session saves capture the current grid again.

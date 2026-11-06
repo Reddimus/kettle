@@ -29,6 +29,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   labels that use nearby blank space, and entries in the Edit and terminal
   menus. Progress counters such as `158/158` no longer look like file links.
 
+- Session restore now brings back recent terminal output with its colors and
+  text styling, followed by a dated divider and a fresh shell prompt. Sessions
+  settings control how much output survives; private storage is bounded to
+  8 MiB, and remote output requires opting in.
+
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
   dedicated window in from a screen edge. Its tabs and splits persist while

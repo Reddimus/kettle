@@ -34,6 +34,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
   (`DRAWN`) cells, retaining typed spaces for both stream and block selections.
   The original engine extraction API retains its behavior. Host cursor-default
   edits apply live while no-op reloads preserve application cursor styles.
+
+- Local changes: a read-only `primary_grid` accessor lets bounded session
+  content snapshots read primary text/history while the alternate screen is
+  active, without switching screens or mutating selection/cursor state.
   Keyboard-mode stack overflow evicts the oldest keyboard mode,
   not an unrelated title-stack entry; active keyboard flags are tracked per
   screen so direct flag changes are queryable, survive screen switches, and

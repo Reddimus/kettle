@@ -3072,3 +3072,18 @@ bounds; destination text is omitted from diagnostics. These overlays reserve
 no terminal cells and leave pointer cell mapping and terminal IME geometry
 unchanged. Native rendering, hand cursor behavior, screen-reader announcements
 and Spanish layout still require live platform checks.
+
+## Bounded session-output restore
+
+`kettle-core::restore::tests` covers primary-screen capture during alternate
+screen use, SGR and wide/grapheme replay, control/hyperlink stripping, per-pane
+line and row-byte caps, and content/divider/new-output ordering.
+`kettle-ui::session_content::tests` checks the serialized 8 MiB cap, private
+round trips, corrupt and mismatched sidecars, unsafe controls, and removal.
+Session writer tests cover output-disable cleanup. Config and Settings tests
+cover defaults, bounds, both key spellings and persisted values. Run the full
+`kettle-ui`, `kettle-core`, `kettle-state`, `kettle-config` and `kettle-i18n`
+suites, plus clippy and format checks. Native CI must exercise platform-specific
+private-file handling. Live acceptance still needs a graphical session: restore
+styled CJK/emoji output, search and copy old rows, inspect the dated divider and
+fresh prompt, and confirm geometry/IME and screen-reader positions agree.
