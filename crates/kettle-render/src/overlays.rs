@@ -1771,6 +1771,30 @@ pub fn persistent_notice_geometry(
     })
 }
 
+/// A persistent notice anchored to the bottom of `rect`. A pane's exit banner
+/// sits under the output it reports on rather than over its last lines,
+/// which a short session keeps at the top.
+pub fn persistent_notice_geometry_at_bottom(
+    rect: Rect4,
+    cell: (f32, f32),
+    message_rows: usize,
+    action_cells: usize,
+    close_cells: usize,
+) -> Option<UpdateToastGeometry> {
+    let mut geometry =
+        persistent_notice_geometry(rect, cell, message_rows, action_cells, close_cells)?;
+    let shift = (rect.1 + rect.3 - (geometry.rect.1 + geometry.rect.3)).max(0.0);
+    for part in [
+        &mut geometry.rect,
+        &mut geometry.message,
+        &mut geometry.details,
+        &mut geometry.close,
+    ] {
+        part.1 += shift;
+    }
+    Some(geometry)
+}
+
 /// Persistent notices take the same precedence over paste receipts as update toasts.
 pub fn notification_geometry_with_notices(
     toast: Option<UpdateToastGeometry>,

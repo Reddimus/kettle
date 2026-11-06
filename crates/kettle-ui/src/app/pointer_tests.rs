@@ -1323,3 +1323,13 @@ fn manual_automatic_copy_and_vi_yank_use_the_same_padding_policy() {
         assert!(source.contains("self.cfg.copy_trim_whitespace"));
     }
 }
+
+#[test]
+fn exit_banners_sit_under_the_pane_output() {
+    // A held pane's banner is anchored to the pane bottom so it never hides
+    // the last lines of a short session; other pane notices keep the top.
+    let source = production_source();
+    let body = finding_body(&source, "persistent_notices");
+    assert!(body.contains("kettle_render::persistent_notice_geometry_at_bottom"));
+    assert!(body.contains("let place = if pane.held {"));
+}

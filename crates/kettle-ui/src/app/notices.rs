@@ -146,7 +146,14 @@ impl App {
             } else {
                 kettle_render::toast_text_rows(&message, columns).unwrap_or(1)
             };
-            if let Some(geometry) = kettle_render::persistent_notice_geometry(
+            // The exit banner sits under the pane's output; a short session's
+            // last lines are at the top, where the banner would hide them.
+            let place = if pane.held {
+                kettle_render::persistent_notice_geometry_at_bottom
+            } else {
+                kettle_render::persistent_notice_geometry
+            };
+            if let Some(geometry) = place(
                 partition.terminal,
                 cell,
                 rows,

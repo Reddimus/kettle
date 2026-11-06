@@ -170,6 +170,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A failed process's exit banner sits along the bottom of its pane instead of
+  covering the first lines, where a short session's output and its error are.
+
 - Copy and paste work in Wayland sessions without XWayland, including GNOME,
   with native text support for OSC 52 and middle-click PRIMARY selection.
 
