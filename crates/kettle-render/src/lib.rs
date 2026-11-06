@@ -5665,6 +5665,9 @@ mod underline_style_tests;
 mod gpu_tests;
 
 #[cfg(test)]
+mod present_mode_tests;
+
+#[cfg(test)]
 mod screenshot_demo_tests;
 
 #[cfg(test)]

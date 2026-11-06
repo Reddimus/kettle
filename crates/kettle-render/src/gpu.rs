@@ -7,6 +7,36 @@ use super::{
     rounded_surface, starfield, upload,
 };
 
+/// The swapchain present mode for a window surface.
+///
+/// On Wayland, Mailbox where the surface offers it. Mesa presents FIFO there
+/// through the fifo and commit-timing protocols, and on GNOME Shell 50 a commit
+/// held behind them after a fullscreen change can wait with no frame callback,
+/// so the window stops repainting (the resize chip stays up) until something
+/// else redraws the screen. A Wayland compositor never shows a torn frame, and
+/// winit already paces each redraw on the compositor's frame callback, so
+/// Mailbox still draws at most once per refresh. Everywhere else, vsync.
+pub(crate) fn desired_present_mode(
+    supported: &[wgpu::PresentMode],
+    wayland: bool,
+) -> wgpu::PresentMode {
+    if wayland && supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::AutoVsync
+    }
+}
+
+/// Whether `window` is a Wayland surface.
+fn display_is_wayland(window: &impl HasDisplayHandle) -> bool {
+    window.display_handle().is_ok_and(|handle| {
+        matches!(
+            handle.as_raw(),
+            raw_window_handle::RawDisplayHandle::Wayland(_)
+        )
+    })
+}
+
 /// The process-wide GPU objects shared by every window's
 /// Renderer. wgpu's Instance/Adapter/Device/Queue handles are internally
 /// ref-counted — `Clone` is a refcount bump, and one device happily serves N
@@ -401,6 +431,7 @@ impl Renderer {
         // and a comparator benchmark can only report the total. Separating
         // adapter/device setup from the rest identifies the slow phase.
         let t_start = std::time::Instant::now();
+        let wayland = display_is_wayland(&*window);
         let (instance, surface, adapter, (device, queue)) = resolve_window_adapter(
             window,
             display_handle.as_ref(),
@@ -428,7 +459,8 @@ impl Renderer {
             recovery_wake,
         };
         let t_rest = std::time::Instant::now();
-        let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg, fonts);
+        let built =
+            Self::with_gpu_and_surface(gpu, surface, wayland, width, height, scale, cfg, fonts);
         // This span covers everything after device creation, INCLUDING the
         // font-system time logged separately, so do not add the two together.
         log::info!(
@@ -457,20 +489,32 @@ impl Renderer {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
+        let wayland = display_is_wayland(&*window);
         let surface = gpu.instance.create_surface(window)?;
         if !gpu.adapter.is_surface_supported(&surface) {
             return Err(anyhow!(
                 "the shared GPU adapter cannot present to the new window's surface"
             ));
         }
-        Self::with_gpu_and_surface(gpu.clone(), surface, width, height, scale, cfg, fonts)
+        Self::with_gpu_and_surface(
+            gpu.clone(),
+            surface,
+            wayland,
+            width,
+            height,
+            scale,
+            cfg,
+            fonts,
+        )
     }
 
     /// Shared constructor tail: everything after a surface + GPU exist
     /// (format/alpha selection, surface configure, font system, pipelines).
+    #[allow(clippy::too_many_arguments)]
     fn with_gpu_and_surface(
         gpu: GpuContext,
         surface: wgpu::Surface<'static>,
+        wayland: bool,
         width: u32,
         height: u32,
         scale: f32,
@@ -484,11 +528,13 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        let present_mode = desired_present_mode(&caps.present_modes, wayland);
         Self::with_gpu(
             gpu,
             Some(surface),
             format,
             caps.alpha_modes,
+            present_mode,
             width,
             height,
             scale,
@@ -572,6 +618,7 @@ impl Renderer {
                 None,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
                 alpha_modes,
+                wgpu::PresentMode::AutoVsync,
                 width,
                 height,
                 scale,
@@ -590,6 +637,7 @@ impl Renderer {
         surface: Option<wgpu::Surface<'static>>,
         format: wgpu::TextureFormat,
         supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+        present_mode: wgpu::PresentMode,
         width: u32,
         height: u32,
         scale: f32,
@@ -609,7 +657,7 @@ impl Renderer {
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
