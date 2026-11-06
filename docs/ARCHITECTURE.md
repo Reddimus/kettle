@@ -359,6 +359,11 @@ terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
 share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
 validate, backup, and replacement transaction.
+Windows lock creation requests DELETE access and shares deletion from the
+first handle while retaining the private creation checks. Retirement reopens
+that held object and uses POSIX deletion while the exclusive lock remains
+held. Volumes without POSIX deletion keep the reusable lock file; a waiter
+holding a retired object receives the retryable retired-lock error.
 
 Screenshot persistence has two deliberately separate policies. UI/default
 screenshots are private state and therefore require Kettle-owned, verified
@@ -385,8 +390,10 @@ overwrites or follows an existing leaf. A writable export parent can still
 rename or remove the staging name or published pathname; the open file object
 remains the one Kettle created. Unix cleanup uses the held private staging
 directory and never unlinks a published export pathname. Empty staging
-directories are removed only under a verified trusted parent; a concurrently
-writable parent retains the empty reservation. Cleanup failure is
+directories are identity-checked and removed through the verified trusted parent
+when available, or through the selected parent descriptor already held for
+staging. Removal uses `unlinkat(..., AT_REMOVEDIR)`, so even in a writable parent
+it can remove only an empty directory. Cleanup failure is
 reported, but the pathname is not
 a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
@@ -2495,6 +2502,14 @@ Overflow or a journal/marker mismatch is sticky for that update and fails
 closed by clearing both buffer-local graphics stores and resynchronizing the
 extractor to the engine's active screen.
 
+Output-trigger snapshots drain a separate bounded copy of the terminal's row
+mutation journal under the grid lock. Consumed matches move with retained rows
+inside scroll regions; rows lost from a region lose their consumed spans.
+Full-screen scrolling into history retains the absolute document identities.
+If this journal overflows, previously consumed text stays suppressed regardless
+of its position until a later screen reset or cache eviction, since lost
+movements cannot prove a new occurrence.
+
 DEC mode 69 enables left/right scrolling margins. The engine clips cursor
 movement and edits to the applicable margins and applies vertical scrolls
 inside their rectangle without rotating whole rows into history. A wide glyph
@@ -3101,7 +3116,13 @@ pane child. The npm route additionally checks Node and its immediate native
 child. Executable and npm metadata checks inspect access ACLs through the
 open descriptor before accepting private-group write bits. Named users other
 than the owner or root, and named groups other than that private group, must
-have no effective write grant. This is owner-enabled local provenance, not
+have no effective write grant. The primary-group scan requires an exhaustive
+local passwd database: every `passwd:` NSS source must be `files`, `compat`,
+`systemd`, `altfiles`, or `extrausers`. Missing `nsswitch.conf` uses glibc's
+`files` default; unknown sources, duplicate passwd rules, malformed or
+unreadable configuration, and files over 64 KiB refuse the exception. A clean
+`getpwent` EOF alone cannot establish that NSS enumerated every account.
+This is owner-enabled local provenance, not
 vendor authentication.
 
 Rendering retains a launch witness and rechecks it before registering a card.

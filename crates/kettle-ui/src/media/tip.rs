@@ -26,6 +26,10 @@ struct TipFile {
 pub(crate) enum CardsTip {
     /// Not shown to this user yet: the next card on screen shows it.
     Waiting,
+    Pending {
+        pane: u64,
+        nonce: InlineNonce,
+    },
     /// On `nonce`'s card in `pane`, until `until`.
     Showing {
         pane: u64,
@@ -46,33 +50,76 @@ impl CardsTip {
         }
     }
 
-    /// Show the tip on the first of `cards` (pane and nonce, in paint
-    /// order), if it is waiting and no other Kettle has recorded it, and
-    /// record it. Returns the card it began on.
+    /// Reserve the first shown card while a worker claims the durable record.
     pub(crate) fn begin(
         &mut self,
         cards: impl Iterator<Item = (u64, InlineNonce)>,
-        now: Instant,
-    ) -> Option<(u64, InlineNonce)> {
-        self.begin_at(cards, now, tip_path)
+        complete: impl FnOnce(bool) + Send + 'static,
+    ) {
+        self.begin_with(cards, tip_path, claim, complete);
     }
 
-    /// [`Self::begin`], recording at `path` once there is a card to show it
-    /// on.
-    fn begin_at(
+    fn begin_with(
         &mut self,
         mut cards: impl Iterator<Item = (u64, InlineNonce)>,
-        now: Instant,
-        path: impl FnOnce() -> Option<PathBuf>,
-    ) -> Option<(u64, InlineNonce)> {
+        path: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+        mut write: impl FnMut(&Path) -> std::io::Result<bool> + Send + 'static,
+        complete: impl FnOnce(bool) + Send + 'static,
+    ) -> bool {
         if *self != Self::Waiting {
-            return None;
+            return false;
         }
-        let (pane, nonce) = cards.next()?;
-        // Another Kettle may have shown it since this one started. A few
-        // small file operations, once per user.
-        if path().is_some_and(|path| !claim(&path)) {
+        let Some((pane, nonce)) = cards.next() else {
+            return false;
+        };
+        *self = Self::Pending { pane, nonce };
+        if let Err(error) = std::thread::Builder::new()
+            .name("kettle-tip-claim".into())
+            .spawn(move || {
+                let claimed = match path() {
+                    None => true,
+                    Some(path) => {
+                        let mut claimed = false;
+                        for _ in 0..2 {
+                            match write(&path) {
+                                Ok(created) => {
+                                    claimed = created;
+                                    break;
+                                }
+                                Err(error) => {
+                                    log::warn!("tip: could not record that it was shown: {error}")
+                                }
+                            }
+                        }
+                        claimed
+                    }
+                };
+                complete(claimed);
+            })
+        {
+            log::warn!("tip: claim worker could not start: {error}");
             *self = Self::Done;
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn pending_card(&self) -> Option<(u64, InlineNonce)> {
+        match *self {
+            Self::Pending { pane, nonce } => Some((pane, nonce)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn complete(
+        &mut self,
+        claimed: bool,
+        visible: bool,
+        now: Instant,
+    ) -> Option<(u64, InlineNonce)> {
+        let (pane, nonce) = self.pending_card()?;
+        *self = Self::Done;
+        if !claimed || !visible {
             return None;
         }
         *self = Self::Showing {
@@ -81,6 +128,26 @@ impl CardsTip {
             until: now + TIP_TIME,
         };
         Some((pane, nonce))
+    }
+
+    #[cfg(test)]
+    fn begin_at(
+        &mut self,
+        cards: impl Iterator<Item = (u64, InlineNonce)>,
+        now: Instant,
+        path: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+    ) -> Option<(u64, InlineNonce)> {
+        let (send, receive) = std::sync::mpsc::channel();
+        if !self.begin_with(cards, path, claim, move |claimed| {
+            send.send(claimed).unwrap()
+        }) {
+            return None;
+        }
+        self.complete(
+            receive.recv_timeout(Duration::from_secs(5)).unwrap(),
+            true,
+            now,
+        )
     }
 
     /// When the tip ends, while it shows.
@@ -96,7 +163,7 @@ impl CardsTip {
     pub(crate) fn end(&mut self) -> Option<u64> {
         let pane = match *self {
             Self::Showing { pane, .. } => Some(pane),
-            Self::Waiting => None,
+            Self::Waiting | Self::Pending { .. } => None,
             Self::Done => return None,
         };
         *self = Self::Done;
@@ -129,33 +196,26 @@ fn seen(path: &Path) -> bool {
     serde_json::from_slice::<TipFile>(&bytes).is_ok_and(|tip| tip.version == 1 && tip.inline_cards)
 }
 
-/// Record at `path` that the tip shows, unless something is already there:
-/// false then. The record is written whole and published by an exclusive
-/// link, so only one process can create it and none ever sees it half
-/// written. An entry already there, a record or not, means the tip has shown
-/// or Kettle cannot tell, so it does not show again; a record that cannot be
-/// written leaves the tip to show unrecorded.
-fn claim(path: &Path) -> bool {
-    let Ok(json) = serde_json::to_vec(&TipFile {
+/// Publish one private record exclusively; an existing entry suppresses the tip.
+fn claim(path: &Path) -> std::io::Result<bool> {
+    let json = serde_json::to_vec(&TipFile {
         version: 1,
         inline_cards: true,
-    }) else {
-        return true;
-    };
+    })?;
     match kettle_state::atomic_create_new(path, &json, kettle_state::AtomicWriteOptions::PRIVATE) {
-        Ok(created) => created,
-        // A link or something else that is not a regular file is there.
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => false,
-        Err(error) => {
-            log::warn!("tip: could not record that it was shown: {error}");
-            true
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(false),
+        result => result,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_path(path: &Path) -> impl FnOnce() -> Option<PathBuf> + Send + 'static {
+        let path = path.to_path_buf();
+        move || Some(path)
+    }
 
     /// The tip shows once, on the first card on screen, for its time; it is
     /// remembered across sessions, only the Kettle that records it shows
@@ -193,12 +253,12 @@ mod tests {
         // first to record it shows it.
         let (mut first, mut second) = (CardsTip::Waiting, CardsTip::Waiting);
         assert_eq!(
-            first.begin_at([(7, nonce)].into_iter(), now, || Some(path.clone())),
+            first.begin_at([(7, nonce)].into_iter(), now, test_path(&path)),
             Some((7, nonce))
         );
         assert!(seen(&path), "recorded before it shows");
         assert_eq!(
-            second.begin_at([(7, nonce)].into_iter(), now, || Some(path.clone())),
+            second.begin_at([(7, nonce)].into_iter(), now, test_path(&path)),
             None
         );
         assert_eq!(second, CardsTip::Done);
@@ -211,14 +271,123 @@ mod tests {
         ] {
             std::fs::write(&path, &unreadable).unwrap();
             assert!(!seen(&path));
-            assert!(!claim(&path));
+            assert!(!claim(&path).unwrap());
             assert_eq!(std::fs::read(&path).unwrap(), unreadable, "left alone");
             let mut tip = CardsTip::Waiting;
             assert_eq!(
-                tip.begin_at([(7, nonce)].into_iter(), now, || Some(path.clone())),
+                tip.begin_at([(7, nonce)].into_iter(), now, test_path(&path)),
                 None
             );
         }
+    }
+
+    #[test]
+    fn durable_tip_claim_does_not_run_on_caller_thread() {
+        let caller = std::thread::current().id();
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let mut tip = CardsTip::Waiting;
+        tip.begin_at([(7, nonce)].into_iter(), Instant::now(), move || {
+            assert_ne!(
+                caller,
+                std::thread::current().id(),
+                "durable tip path and claim must run off the event loop"
+            );
+            None
+        });
+    }
+
+    #[test]
+    fn pending_tip_is_reserved_and_its_deadline_starts_on_completion() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let now = Instant::now();
+        let mut tip = CardsTip::Waiting;
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (send, receive) = std::sync::mpsc::channel();
+        assert!(tip.begin_with(
+            [(7, nonce)].into_iter(),
+            || Some(PathBuf::from("unused")),
+            move |_| {
+                blocked.recv().unwrap();
+                Ok(true)
+            },
+            move |claimed| send.send(claimed).unwrap()
+        ));
+        assert_eq!(tip.pending_card(), Some((7, nonce)));
+        assert_eq!(tip.until(), None);
+        assert!(!tip.begin_with(
+            [(8, nonce)].into_iter(),
+            || panic!("duplicate path"),
+            |_| panic!("duplicate claim"),
+            |_| panic!("duplicate completion")
+        ));
+        release.send(()).unwrap();
+        let claimed = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        let completed = now + Duration::from_secs(30);
+        assert_eq!(tip.complete(claimed, true, completed), Some((7, nonce)));
+        assert_eq!(tip.until(), Some(completed + TIP_TIME));
+        assert_eq!(tip.complete(true, true, completed), None);
+
+        let mut hidden = CardsTip::Pending { pane: 7, nonce };
+        assert_eq!(hidden.complete(true, false, completed), None);
+        assert_eq!(hidden, CardsTip::Done, "a hidden card cannot start the tip");
+        let mut opened = CardsTip::Pending { pane: 7, nonce };
+        opened.end();
+        assert_eq!(
+            opened.complete(true, true, completed),
+            None,
+            "completion cannot resurrect an opened tip"
+        );
+    }
+
+    #[test]
+    fn failed_tip_claim_retries_once_and_stays_claimed_in_memory() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_calls = calls.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut tip = CardsTip::Waiting;
+        assert!(tip.begin_with(
+            [(7, nonce)].into_iter(),
+            || Some(PathBuf::from("unused")),
+            move |_| {
+                worker_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(std::io::Error::other("stalled storage"))
+            },
+            move |claimed| send.send(claimed).unwrap()
+        ));
+        assert!(!receive.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(tip.complete(false, true, Instant::now()), None);
+        assert_eq!(tip, CardsTip::Done);
+        assert!(!tip.begin_with(
+            [(7, nonce)].into_iter(),
+            || panic!("no third attempt"),
+            |_| panic!("no third write"),
+            |_| panic!("no third completion")
+        ));
+    }
+
+    #[test]
+    fn tip_claim_can_succeed_on_its_single_retry() {
+        let nonce = InlineNonce::new([1, 2, 3, 4, 5, 6]).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut writes = 0;
+        let mut tip = CardsTip::Waiting;
+        assert!(tip.begin_with(
+            [(7, nonce)].into_iter(),
+            || Some(PathBuf::from("unused")),
+            move |_| {
+                writes += 1;
+                if writes == 1 {
+                    Err(std::io::Error::other("temporary failure"))
+                } else {
+                    Ok(true)
+                }
+            },
+            move |claimed| send.send(claimed).unwrap()
+        ));
+        assert!(receive.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(tip.complete(true, true, Instant::now()), Some((7, nonce)));
     }
 
     /// Only a regular file counts: a link to a record, even a valid one, is
@@ -228,12 +397,12 @@ mod tests {
     fn only_a_regular_tip_file_is_read() {
         let dir = kettle_test_support::private_tempdir("kettle-tip-");
         let record = dir.path().join("record.json");
-        assert!(claim(&record));
+        assert!(claim(&record).unwrap());
         assert!(seen(&record));
         let link = dir.path().join(TIP_FILE);
         std::os::unix::fs::symlink(&record, &link).unwrap();
         assert!(!seen(&link));
-        assert!(!claim(&link), "and no tip over a link");
+        assert!(!claim(&link).unwrap(), "and no tip over a link");
         let pipe = dir.path().join("pipe.json");
         let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: `name` is a valid NUL-terminated path.

@@ -977,14 +977,15 @@ impl App {
         // The first card a user ever sees says a click opens it, once its
         // image is on screen with nothing over it: a card that loads in
         // place, or that a dialog or the viewer uncovers, qualifies then.
-        let tip_begun = if presented && cards_uncovered {
+        if presented && cards_uncovered {
+            let proxy = self.proxy.clone();
             self.cards_tip.begin(
                 renderer.shown_cards().map(|card| (card.pane, card.nonce)),
-                std::time::Instant::now(),
-            )
-        } else {
-            None
-        };
+                move |claimed| {
+                    let _ = proxy.send_event(UserEvent::CardsTipClaimed(claimed));
+                },
+            );
+        }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
         let cursor_patch = if blink_handoff && matches!(&frame_result, Ok(FrameOutcome::Presented))
@@ -995,14 +996,6 @@ impl App {
         };
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
-        if let Some((pane, nonce)) = tip_begun
-            && let Some(state) = ws.mux.panes.get_mut(&pane)
-        {
-            state.inline_cards.set_tip(Some(nonce));
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-        }
         ws.pane_snapshots = snaps;
         ws.pane_snapshot_keys = snapshot_keys;
         match frame_result {

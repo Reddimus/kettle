@@ -175,6 +175,33 @@ mod linux {
             ret(KILL),
             load(NR),
         ];
+        for (number, selector) in [
+            (libc::SYS_setpriority, libc::PRIO_PROCESS),
+            (libc::SYS_ioprio_set, 1),
+        ] {
+            program.extend([
+                jump(libc::BPF_JEQ, number as u32, 0, 6),
+                load(ARG0_LOW),
+                jump(libc::BPF_JEQ, selector, 0, 3),
+                load(ARG0_LOW + 8),
+                jump(libc::BPF_JEQ, 0, 0, 1),
+                ret(ALLOW),
+                ret(EPERM),
+            ]);
+        }
+        for number in [
+            libc::SYS_sched_setscheduler,
+            libc::SYS_sched_setparam,
+            libc::SYS_sched_setattr,
+        ] {
+            program.extend([
+                jump(libc::BPF_JEQ, number as u32, 0, 4),
+                load(ARG0_LOW),
+                jump(libc::BPF_JEQ, 0, 0, 1),
+                ret(ALLOW),
+                ret(EPERM),
+            ]);
+        }
         #[cfg(target_arch = "x86_64")]
         {
             // Over the x32 range to the refusal just past the main table.
@@ -307,6 +334,12 @@ mod tests {
                 .flatten()
         };
         let zero: libc::c_long = 0;
+        if let Some(pid) = check.strip_prefix("priority:") {
+            let pid = pid.parse::<u32>().unwrap();
+            // SAFETY: the parent keeps this disposable bystander alive and
+            // reaps it after reading its nice value.
+            return unsafe { libc::setpriority(libc::PRIO_PROCESS, pid, 19) } == 0;
+        }
         match check {
             "clone3-enosys" => {
                 // SAFETY: a null argument block of size zero is refused before
@@ -369,6 +402,28 @@ mod tests {
             Some("true") => true,
             Some("false") => false,
             _ => panic!("no report from the {check} child: {text}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_decoder_cannot_change_an_unrelated_process_priority() {
+        for contained in [false, true] {
+            let mut bystander = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+            let pid = bystander.id();
+            // SAFETY: getpriority only reads the live bystander's nice value.
+            let before = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) };
+            let made = child_made(&format!("priority:{pid}"), contained);
+            // SAFETY: the bystander is still live and getpriority only reads.
+            let after = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) };
+            bystander.kill().unwrap();
+            bystander.wait().unwrap();
+            assert_eq!(made, !contained, "contained={contained}");
+            assert_eq!(
+                after,
+                if contained { before } else { 19 },
+                "decoder changed an unrelated process's nice value"
+            );
         }
     }
 

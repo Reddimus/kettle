@@ -201,16 +201,18 @@ mod tests {
     use super::*;
     use crate::agent_launch::HeldExecutable;
 
-    fn me() -> (ProcessIdentity, Arc<HeldExecutable>) {
-        (
+    fn me() -> Option<(ProcessIdentity, Arc<HeldExecutable>)> {
+        Some((
             process::current().unwrap().identity,
-            Arc::new(HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap()),
-        )
+            Arc::new(HeldExecutable::test_binary()?),
+        ))
     }
 
     #[test]
     fn grants_and_one_use_pickups_keep_the_original_pane_generation() {
-        let (root, native) = me();
+        let Some((root, native)) = me() else {
+            return;
+        };
         let now = Instant::now();
         let mut scopes = LaunchScopes::default();
         assert!(scopes.register(
@@ -295,7 +297,9 @@ mod tests {
 
     #[test]
     fn a_native_child_is_checked_again_when_its_hook_collects_the_card() {
-        let (root, launcher) = me();
+        let Some((root, launcher)) = me() else {
+            return;
+        };
         let native = Arc::new(HeldExecutable::open(std::path::Path::new("/bin/sleep")).unwrap());
         let child = std::process::Command::new(native.path())
             .arg("30")

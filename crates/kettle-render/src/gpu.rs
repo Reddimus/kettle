@@ -398,10 +398,10 @@ impl Renderer {
         // Startup is measured, not guessed. This init blocks the event-loop
         // thread and the window stays hidden until the first paint, so every
         // millisecond here is time the user spends looking at nothing --
-        // and a comparator benchmark can only report the total. Splitting it
-        // three ways says WHICH part to attack.
+        // and a comparator benchmark can only report the total. Separating
+        // adapter/device setup from the rest identifies the slow phase.
         let t_start = std::time::Instant::now();
-        let (instance, surface, adapters) = resolve_window_adapter(
+        let (instance, surface, adapter, (device, queue)) = resolve_window_adapter(
             window,
             display_handle.as_ref(),
             cfg,
@@ -410,24 +410,7 @@ impl Renderer {
             "Renderer::new",
         )
         .await?;
-        let adapter_ms = t_start.elapsed().as_secs_f64() * 1000.0;
-        let t_device = std::time::Instant::now();
-        // wgpu's default requested limit is 8192 even when the adapter can
-        // present a larger surface. Request the adapter's real 2D limit up
-        // front so later high-DPI or multi-display resizes can configure the
-        // swapchain at the window's actual physical dimensions.
-        let (adapter, (device, queue)) = try_adapter_candidates(adapters, |adapter| async move {
-            adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("kettle-device"),
-                    required_features: upload::mapped_upload_features(&adapter),
-                    required_limits: live_device_limits(adapter.limits()),
-                    ..Default::default()
-                })
-                .await
-                .map_err(|e| anyhow!("failed to create device: {e:?}"))
-        })
-        .await?;
+        let adapter_device_ms = t_start.elapsed().as_secs_f64() * 1000.0;
         // Turn a GPU driver reset (TDR) / VRAM exhaustion into a logged,
         // observable event instead of wgpu's default panic, which `panic=abort`
         // makes a hard crash. Installed once on the shared device.
@@ -444,13 +427,12 @@ impl Renderer {
             gpu_fault,
             recovery_wake,
         };
-        let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
         let t_rest = std::time::Instant::now();
         let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg, fonts);
         // This span covers everything after device creation, INCLUDING the
         // font-system time logged separately, so do not add the two together.
         log::info!(
-            "renderer init: adapter {adapter_ms:.1}ms, device {device_ms:.1}ms,              surface+fonts+pipelines {:.1}ms (font init logged separately is              part of it), total {:.1}ms",
+            "renderer init: adapter+device {adapter_device_ms:.1}ms,              surface+fonts+pipelines {:.1}ms (font init logged separately is              part of it), total {:.1}ms",
             t_rest.elapsed().as_secs_f64() * 1000.0,
             t_start.elapsed().as_secs_f64() * 1000.0
         );
@@ -934,6 +916,7 @@ impl Renderer {
             live_background_opacity_floor: None,
             pending_screenshot: None,
             screenshot_worker: None,
+            screenshot_retirements: Default::default(),
         })
     }
 
@@ -1239,6 +1222,30 @@ where
     for candidate in candidates.into_iter().take(MAX_RECOVERY_ADAPTER_ATTEMPTS) {
         match request(candidate.clone()).await {
             Ok(device) => return Ok((candidate, device)),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+pub(crate) async fn try_discovered_devices<C, T, D, F, Fut, R, DeviceFuture>(
+    candidates: impl IntoIterator<Item = C>,
+    mut discover: F,
+    mut request: R,
+) -> Result<(T, D)>
+where
+    F: FnMut(C) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+    R: FnMut(T) -> DeviceFuture,
+    DeviceFuture: std::future::Future<Output = Result<(T, D)>>,
+{
+    let mut failure = anyhow!("no eligible GPU adapter");
+    for candidate in candidates {
+        match discover(candidate).await {
+            Ok(adapter) => match request(adapter).await {
+                Ok(device) => return Ok(device),
+                Err(error) => failure = error,
+            },
             Err(error) => failure = error,
         }
     }
@@ -1730,6 +1737,27 @@ fn direct_probe_passes(force_software: bool) -> &'static [bool] {
     }
 }
 
+async fn request_live_device(adapter: wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)> {
+    // Request the real 2D limit so high-DPI surfaces fit the device.
+    adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("kettle-device"),
+            required_features: upload::mapped_upload_features(&adapter),
+            required_limits: live_device_limits(adapter.limits()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| {
+            let info = adapter.get_info();
+            log::warn!(
+                "skipping GPU {} ({}): device creation failed: {error:?}",
+                info.name,
+                backend_str(info.backend)
+            );
+            anyhow!("failed to create device: {error:?}")
+        })
+}
+
 /// Fast startup for the common unpinned Auto policy. Each instance enables one
 /// backend, so a successful native request is one adapter discovery and does
 /// not initialize lower-priority ICDs. Hardware across every backend is tried
@@ -1741,61 +1769,109 @@ async fn resolve_window_adapter<W>(
     escalation: AdapterEscalation,
     avoid: Option<GpuAdapterKey>,
     context: &str,
-) -> Result<(wgpu::Instance, wgpu::Surface<'static>, Vec<wgpu::Adapter>)>
+) -> Result<(
+    wgpu::Instance,
+    wgpu::Surface<'static>,
+    wgpu::Adapter,
+    (wgpu::Device, wgpu::Queue),
+)>
 where
     W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
 {
     if escalation == AdapterEscalation::Preferred && can_probe_native_backend_directly(cfg) {
         let mut failures = Vec::new();
         for &software_pass in direct_probe_passes(cfg.gpu_force_software) {
-            for backend in backend_attempt_order(cfg) {
-                let instance = gpu_instance_for_live_display(display_handle, backend_mask(backend));
-                let surface = match instance.create_surface(window.clone()) {
-                    Ok(surface) => surface,
-                    Err(error) => {
-                        failures.push(format!("{} surface: {error}", backend_str(backend)));
-                        continue;
+            let result = try_discovered_devices(
+                backend_attempt_order(cfg),
+                |backend| {
+                    let window = window.clone();
+                    async move {
+                        let instance =
+                            gpu_instance_for_live_display(display_handle, backend_mask(backend));
+                        let surface = instance.create_surface(window)?;
+                        let adapter =
+                            request_direct_adapter(&instance, Some(&surface), cfg, software_pass)
+                                .await?;
+                        if !software_pass && adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                        {
+                            return Err(anyhow!(
+                                "{} hardware pass returned a software adapter",
+                                backend_str(backend)
+                            ));
+                        }
+                        Ok((instance, surface, adapter))
                     }
-                };
-                match request_direct_adapter(&instance, Some(&surface), cfg, software_pass).await {
-                    Ok(adapter)
-                        if !software_pass
-                            && adapter.get_info().device_type == wgpu::DeviceType::Cpu =>
-                    {
-                        failures.push(format!(
-                            "{} hardware pass returned a software adapter",
-                            backend_str(backend)
-                        ));
-                    }
-                    Ok(adapter) => {
-                        log_direct_adapter_choice(context, cfg, &adapter.get_info());
-                        return Ok((instance, surface, vec![adapter]));
-                    }
-                    Err(error) => {
-                        failures.push(format!("{}: {error}", backend_str(backend)));
-                    }
+                },
+                |(instance, surface, adapter)| async move {
+                    let device = request_live_device(adapter.clone()).await?;
+                    Ok(((instance, surface, adapter), device))
+                },
+            )
+            .await;
+            match result {
+                Ok(((instance, surface, adapter), device)) => {
+                    log_direct_adapter_choice(context, cfg, &adapter.get_info());
+                    return Ok((instance, surface, adapter, device));
                 }
+                Err(error) => failures.push(error.to_string()),
             }
             if !software_pass {
                 log::warn!(
-                    "{context}: no hardware GPU adapter in native backend order; \
-                     trying software fallback"
+                    "{context}: no usable hardware GPU device in native backend order; trying software fallback"
                 );
             }
         }
         return Err(anyhow!(
-            "{context}: no usable GPU adapter in native backend order: {}",
+            "{context}: no usable GPU device in native backend order: {}",
             failures.join("; ")
         ));
     }
 
-    // Pins and low/high preference need a cross-backend view. Recovery also
-    // inspects alternate backends and physical GPUs deliberately.
     let instance = gpu_instance_for_live_display(display_handle, wgpu::Backends::all());
     let surface = instance.create_surface(window)?;
-    let adapter =
-        resolve_adapters(&instance, Some(&surface), cfg, escalation, avoid, context).await?;
-    Ok((instance, surface, adapter))
+    let mut remaining: Vec<_> = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .await
+        .into_iter()
+        .filter(|adapter| adapter.is_surface_supported(&surface))
+        .collect();
+    let mut failure = anyhow!("{context}: no eligible GPU device");
+    let mut attempts = 0;
+    while attempts < MAX_RECOVERY_ADAPTER_ATTEMPTS {
+        let adapters = match resolve_adapter_candidates(
+            &instance,
+            Some(&surface),
+            cfg,
+            escalation,
+            avoid,
+            context,
+            remaining.clone(),
+        )
+        .await
+        {
+            Ok(adapters) => adapters
+                .into_iter()
+                .take(MAX_RECOVERY_ADAPTER_ATTEMPTS - attempts)
+                .collect::<Vec<_>>(),
+            Err(error) => return Err(failure.context(error)),
+        };
+        attempts += adapters.len();
+        let exhausted = adapters.iter().any(|adapter| !remaining.contains(adapter));
+        match try_adapter_candidates(adapters.clone(), |adapter| async move {
+            request_live_device(adapter).await
+        })
+        .await
+        {
+            Ok((adapter, device)) => return Ok((instance, surface, adapter, device)),
+            Err(error) => failure = error,
+        }
+        remaining.retain(|candidate| !adapters.contains(candidate));
+        // A forced fallback absent from enumeration cannot be selected again.
+        if exhausted {
+            break;
+        }
+    }
+    Err(failure)
 }
 
 pub(crate) async fn resolve_headless_adapter(
@@ -1870,6 +1946,29 @@ pub(crate) async fn resolve_adapters(
     avoid: Option<GpuAdapterKey>,
     context: &str,
 ) -> Result<Vec<wgpu::Adapter>> {
+    let candidates: Vec<wgpu::Adapter> = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .await
+        .into_iter()
+        .filter(|adapter| surface.is_none_or(|s| adapter.is_surface_supported(s)))
+        .collect();
+
+    resolve_adapter_candidates(
+        instance, surface, cfg, escalation, avoid, context, candidates,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_adapter_candidates(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'_>>,
+    cfg: &Config,
+    escalation: AdapterEscalation,
+    avoid: Option<GpuAdapterKey>,
+    context: &str,
+    mut candidates: Vec<wgpu::Adapter>,
+) -> Result<Vec<wgpu::Adapter>> {
     let requested = configured_backend(cfg.gpu_backend);
     let force_software = cfg.gpu_force_software || escalation == AdapterEscalation::ForceSoftware;
     let preferred = if should_query_preferred_adapter(escalation, force_software) {
@@ -1877,13 +1976,6 @@ pub(crate) async fn resolve_adapters(
     } else {
         None
     };
-    let mut candidates: Vec<wgpu::Adapter> = instance
-        .enumerate_adapters(wgpu::Backends::all())
-        .await
-        .into_iter()
-        .filter(|adapter| surface.is_none_or(|s| adapter.is_surface_supported(s)))
-        .collect();
-
     // Resolve a visible settings/config pin before separating hardware from
     // software. CPU adapters such as llvmpipe/lavapipe are valid explicit
     // choices, and the GPU device picker offers them.

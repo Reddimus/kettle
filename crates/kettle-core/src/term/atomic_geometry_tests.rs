@@ -39,6 +39,7 @@ fn widening_discards_a_prompt_partially_merged_into_the_preceding_row() {
         &term,
         &geometry,
         Some(&prompts),
+        None,
         desired,
         Some(TermConfig::default()),
     );
@@ -83,6 +84,7 @@ fn transient_resize_round_trip_keeps_the_current_single_row_prompt() {
         &term,
         &geometry,
         Some(&prompts),
+        None,
         narrowed,
         Some(TermConfig::default()),
     );
@@ -90,6 +92,7 @@ fn transient_resize_round_trip_keeps_the_current_single_row_prompt() {
         &term,
         &geometry,
         Some(&prompts),
+        None,
         first,
         Some(TermConfig::default()),
     );

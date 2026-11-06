@@ -1297,6 +1297,7 @@ impl App {
                 // after dispatch.
                 if f {
                     self.focused_seq = ws.seq;
+                    record_window_focus(&mut self.window_focus_order, ws.seq);
                 }
                 if !f {
                     self.confirm_cancel_press(ws);

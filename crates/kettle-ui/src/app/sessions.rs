@@ -87,6 +87,36 @@ fn receive_handoff_session_until(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
+pub(super) fn session_windows_for_save(
+    mut windows: Vec<(u64, crate::session::SWindow)>,
+    focus_order: &VecDeque<u64>,
+) -> Vec<crate::session::SWindow> {
+    windows.retain(|(_, window)| !window.tabs.is_empty());
+    windows.sort_by_key(|(seq, _)| {
+        (
+            focus_order
+                .iter()
+                .position(|focused| focused == seq)
+                .unwrap_or(usize::MAX),
+            *seq,
+        )
+    });
+    if windows.len() > crate::session::MAX_RESTORE_WINDOWS {
+        log::debug!(
+            "session truncated: retaining {} of {} nonempty windows in focus order",
+            crate::session::MAX_RESTORE_WINDOWS,
+            windows.len()
+        );
+        windows.truncate(crate::session::MAX_RESTORE_WINDOWS);
+    }
+    windows.into_iter().map(|(_, window)| window).collect()
+}
+
+pub(super) fn record_window_focus(order: &mut VecDeque<u64>, seq: u64) {
+    order.retain(|known| *known != seq);
+    order.push_front(seq);
+}
+
 impl App {
     /// Snapshot ONE window (its tabs + geometry).
     pub(super) fn snapshot_window(w: &WindowState) -> crate::session::SWindow {
@@ -143,24 +173,15 @@ impl App {
         if target == SessionWriteTarget::Skip {
             return;
         }
-        // Serialize EVERY live window (the checked-out one plus the map),
-        // ordered by seq so window 1 stays first. Windows whose mux is already
-        // empty (a close_window in flight) are dropped, since there is nothing
-        // to restore.
+        // Include the checked-out window; the save budget prefers recently
+        // focused nonempty windows without restricting window creation.
         let mut wins: Vec<(u64, crate::session::SWindow)> =
             vec![(ws.seq, Self::snapshot_window(ws))];
         for w in self.windows.values() {
             wins.push((w.seq, Self::snapshot_window(w)));
         }
-        wins.sort_by_key(|(seq, _)| *seq);
-        let windows: Vec<crate::session::SWindow> = wins
-            .into_iter()
-            .map(|(_, w)| w)
-            .filter(|w| !w.tabs.is_empty())
-            .collect();
-        // Downgrade-compat dual-write: mirror window 1 into the legacy
-        // top-level fields so an older kettle reading this file still
-        // restores its first window.
+        let windows = session_windows_for_save(wins, &self.window_focus_order);
+        // Mirror the first retained window for older readers.
         let mut s = crate::session::Session {
             tabs: windows.first().map(|w| w.tabs.clone()).unwrap_or_default(),
             active: windows.first().map(|w| w.active).unwrap_or(0),

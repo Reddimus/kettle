@@ -25,6 +25,38 @@ fn grapheme_boundary_at_or_before(text: &str, byte: usize) -> usize {
     boundary
 }
 
+pub(crate) struct EditorCharacters<'a> {
+    text: &'a str,
+    boundaries: Vec<usize>,
+}
+
+impl<'a> EditorCharacters<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        let mut boundaries: Vec<_> = text.grapheme_indices(true).map(|(byte, _)| byte).collect();
+        boundaries.push(text.len());
+        Self { text, boundaries }
+    }
+
+    pub(crate) fn byte_at(&self, index: usize) -> usize {
+        self.boundaries
+            .get(index)
+            .copied()
+            .unwrap_or(self.text.len())
+    }
+
+    pub(crate) fn index_at(&self, byte: usize) -> usize {
+        self.boundaries
+            .partition_point(|&at| at <= byte)
+            .saturating_sub(1)
+    }
+
+    pub(crate) fn graphemes(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.boundaries
+            .windows(2)
+            .map(|pair| &self.text[pair[0]..pair[1]])
+    }
+}
+
 /// The query byte of the painted caret position nearest `x`, from the
 /// renderer's (query byte, window x) stops.
 pub(crate) fn nearest_stop_byte(stops: &[(usize, f32)], x: f32) -> Option<usize> {
@@ -429,14 +461,9 @@ impl TextEditor {
 
     pub(crate) fn set_character_selection(&mut self, anchor: usize, focus: usize) {
         self.run = None;
-        let byte_at_character = |index: usize| {
-            self.text
-                .char_indices()
-                .nth(index)
-                .map_or(self.text.len(), |(byte, _)| byte)
-        };
-        let anchor = grapheme_boundary_at_or_before(&self.text, byte_at_character(anchor));
-        let focus = grapheme_boundary_at_or_before(&self.text, byte_at_character(focus));
+        let characters = EditorCharacters::new(&self.text);
+        let anchor = characters.byte_at(anchor);
+        let focus = characters.byte_at(focus);
         self.anchor = (anchor != focus).then_some(anchor);
         self.cursor = focus;
     }

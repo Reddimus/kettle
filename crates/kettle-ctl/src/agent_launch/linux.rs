@@ -5,6 +5,9 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
+use super::private_group::{
+    GroupFacts, MAX_NSSWITCH_BYTES, is_private_group, passwd_enumeration_is_exhaustive,
+};
 use crate::process::{self, ProcessIdentity};
 
 const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -46,6 +49,30 @@ pub struct HeldExecutable {
 }
 
 impl HeldExecutable {
+    /// Hold the running test binary, which inherits the build's umask. Under
+    /// umask 002 it is group-writable, acceptable only through a provable
+    /// private group; where that proof is unavailable (for example an `sss`
+    /// passwd source) refusing it is the correct result, and a test that
+    /// needs a held image cannot run.
+    #[cfg(test)]
+    pub(crate) fn test_binary() -> Option<Self> {
+        let exe = std::env::current_exe().unwrap();
+        match Self::open(&exe) {
+            Ok(held) => Some(held),
+            Err(error) => {
+                let file = File::open(&exe).unwrap();
+                let metadata = file.metadata().unwrap();
+                assert!(
+                    metadata.mode() & 0o020 != 0
+                        && !owned_and_writable_by_owner_alone(&file, &metadata),
+                    "the test binary was refused for another reason: {error}"
+                );
+                eprintln!("skipped: the group-writable test binary has no provable private group");
+                None
+            }
+        }
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() || path.as_os_str().as_bytes().len() > 4096 {
             return Err(io::Error::new(
@@ -208,27 +235,23 @@ fn access_acl_allows_owner_write(file: &File, metadata: &Metadata) -> bool {
     })
 }
 
-/// The owner and group facts the private-group rule reads.
-#[derive(Debug, PartialEq, Eq)]
-struct GroupFacts<'a> {
-    owner_name: &'a [u8],
-    owner_primary_gid: u32,
-    gid: u32,
-    group_name: &'a [u8],
-    group_has_members: bool,
-}
-
-/// A user private group: the owner's primary group, named after the owner,
-/// listing no supplementary members.
-fn is_private_group(facts: &GroupFacts) -> bool {
-    facts.owner_primary_gid == facts.gid
-        && facts.group_name == facts.owner_name
-        && !facts.group_has_members
-}
-
 /// [`is_private_group`] for `owner` and `gid` as the system's user and group
 /// databases name them. An entry that cannot be read counts as shared.
 fn private_group_of(owner: u32, gid: u32) -> bool {
+    use std::io::Read as _;
+
+    let config = (|| -> io::Result<String> {
+        let mut config = String::new();
+        File::open("/etc/nsswitch.conf")?
+            .take(MAX_NSSWITCH_BYTES as u64 + 1)
+            .read_to_string(&mut config)?;
+        Ok(config)
+    })();
+    let enumeration_is_exhaustive =
+        passwd_enumeration_is_exhaustive(config.as_deref().map_err(io::Error::kind));
+    if !enumeration_is_exhaustive {
+        return false;
+    }
     const BUFFER: usize = 16 * 1024;
     let mut user_buffer = vec![0 as libc::c_char; BUFFER];
     let mut group_buffer = vec![0 as libc::c_char; BUFFER];
@@ -271,13 +294,57 @@ fn private_group_of(owner: u32, gid: u32) -> bool {
             !group.gr_mem.is_null() && !(*group.gr_mem).is_null(),
         )
     };
-    is_private_group(&GroupFacts {
-        owner_name,
-        owner_primary_gid: user.pw_gid,
-        gid,
-        group_name,
-        group_has_members,
-    })
+    static PASSWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = PASSWD.lock() else {
+        return false;
+    };
+    struct Passwd;
+    impl Drop for Passwd {
+        fn drop(&mut self) {
+            // SAFETY: the serialized passwd enumeration is finished.
+            unsafe { libc::endpwent() };
+        }
+    }
+    // SAFETY: this mutex serializes the process-wide passwd enumeration.
+    // setpwent returns nothing and may leave errno set by an NSS module even
+    // when it succeeds, so errno is not read here.
+    unsafe { libc::setpwent() };
+    let _passwd = Passwd;
+    let accounts = std::iter::from_fn(|| {
+        // SAFETY: the cursor is serialized, errno is thread-local, and the
+        // numeric fields are copied before the next call invalidates the record.
+        unsafe {
+            *libc::__errno_location() = 0;
+            let account = libc::getpwent();
+            if account.is_null() {
+                passwd_end(*libc::__errno_location())
+            } else {
+                Some(Ok(((*account).pw_uid, (*account).pw_gid)))
+            }
+        }
+    });
+    is_private_group(
+        &GroupFacts {
+            owner_name,
+            owner_primary_gid: user.pw_gid,
+            gid,
+            group_name,
+            group_has_members,
+            enumeration_is_exhaustive,
+        },
+        owner,
+        accounts,
+    )
+}
+
+/// What a null `getpwent` means. glibc's NSS modules (files, systemd) report
+/// the end of the database with errno left at 0, ENOENT or ESRCH; any other
+/// errno is a failed read, which cannot establish that a group is private.
+fn passwd_end(errno: i32) -> Option<io::Result<(u32, u32)>> {
+    match errno {
+        0 | libc::ENOENT | libc::ESRCH => None,
+        error => Some(Err(io::Error::from_raw_os_error(error))),
+    }
 }
 
 fn native_header(header: &[u8; 64]) -> bool {
@@ -317,10 +384,22 @@ mod tests {
     }
 
     #[test]
+    fn passwd_end_of_database_is_not_a_read_failure() {
+        // glibc's NSS modules leave ENOENT or ESRCH behind at the end of the
+        // database; reading that as a failure made every user private group
+        // look shared, and every group-writable executable unusable.
+        for errno in [0, libc::ENOENT, libc::ESRCH] {
+            assert!(super::passwd_end(errno).is_none(), "errno {errno}");
+        }
+        assert!(matches!(super::passwd_end(libc::EIO), Some(Err(_))));
+    }
+
+    #[test]
     fn a_held_executable_matches_only_its_exact_running_process() {
         let me = process::current().unwrap().identity;
-        let held = HeldExecutable::open(&std::env::current_exe().unwrap())
-            .expect("hold native executable");
+        let Some(held) = HeldExecutable::test_binary() else {
+            return;
+        };
         assert!(held.matches(me));
         assert!(!held.matches(ProcessIdentity::new_for_tests(me.pid(), me.start() + 1)));
         assert!(!held.matches(ProcessIdentity::new_for_tests(0, me.start())));
@@ -330,7 +409,9 @@ mod tests {
     fn descriptor_transfer_is_bound_to_the_checked_peer_and_exact_file() {
         use std::os::fd::AsRawFd as _;
         let me = process::current().unwrap().identity;
-        let held = HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap();
+        let Some(held) = HeldExecutable::test_binary() else {
+            return;
+        };
         let descriptor = u32::try_from(held.as_fd().as_raw_fd()).unwrap();
         let transferred = HeldExecutable::from_peer(me, descriptor, held.stamp())
             .expect("transfer held descriptor");
@@ -370,8 +451,13 @@ mod tests {
             gid: 1000,
             group_name: b"kevin",
             group_has_members: false,
+            enumeration_is_exhaustive: true,
         };
-        assert!(is_private_group(&private));
+        assert!(is_private_group(
+            &private,
+            1000,
+            [Ok((1000, 1000))].into_iter()
+        ));
         for shared in [
             GroupFacts {
                 gid: 100,
@@ -390,7 +476,10 @@ mod tests {
                 ..private
             },
         ] {
-            assert!(!is_private_group(&shared), "{shared:?}");
+            assert!(
+                !is_private_group(&shared, 1000, [Ok((1000, 1000))].into_iter()),
+                "{shared:?}"
+            );
         }
     }
 

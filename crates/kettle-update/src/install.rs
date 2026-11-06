@@ -43,7 +43,7 @@ pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 128;
 pub(crate) const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(any(windows, target_os = "linux"))]
 const PACKAGE_MANIFEST_FILE: &str = "kettle-package-manifest.json";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const UNIX_INSTALL_PROVENANCE_FILE: &str = "share/kettle/install-files.json";
 #[cfg(any(windows, target_os = "linux"))]
 const MAX_PACKAGE_MANIFEST_BYTES: usize = 256 * 1024;
@@ -92,7 +92,7 @@ struct InstallMarker {
     version: String,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UnixInstallProvenance {
@@ -105,7 +105,7 @@ struct UnixInstallProvenance {
     directories: Vec<UnixInstallDirectory>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UnixInstallFile {
@@ -115,7 +115,7 @@ struct UnixInstallFile {
     mode: u32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UnixInstallDirectory {
@@ -897,25 +897,16 @@ fn bootstrap_linux_worker(
         ));
     }
     let mut transaction = Transaction::begin(&install.prefix, &running_version.to_string())?;
-    let result = (|| {
-        transaction.preflight_destinations(&[
+    let result = apply_linux_replacements(
+        &mut transaction,
+        install,
+        previous,
+        vec![(
             worker.to_path_buf(),
-            PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE),
-        ])?;
-        transaction.install_bytes(worker, &bytes, Some(0o755))?;
-        install_unix_provenance(
-            &mut transaction,
-            install,
-            previous,
-            vec![UnixInstallFile {
-                path: relative_to_string(worker)?,
-                size: bytes.len() as u64,
-                sha256: sha256_bytes(&bytes),
-                mode: 0o755,
-            }],
-        )?;
-        transaction.finish_preflight()
-    })();
+            std::borrow::Cow::Borrowed(bytes.as_slice()),
+            0o755,
+        )],
+    );
     if let Err(error) = result {
         transaction.rollback()?;
         return Err(error);
@@ -3157,123 +3148,144 @@ fn apply_verified_linux_update(
         .iter()
         .filter(|file| file.relative.starts_with("shell-integration"))
         .collect::<Vec<_>>();
-    let mut destinations = map
-        .iter()
-        .map(|entry| entry.destination.clone())
-        .collect::<Vec<_>>();
-    for source in &shell_files {
-        let relative = source
-            .relative
-            .strip_prefix("shell-integration")
-            .map_err(|_| UpdateError::UnsafeArchive(source.relative.display().to_string()))?;
-        validate_archive_path(relative)?;
-        destinations.push(Path::new("share/kettle/shell-integration").join(relative));
-    }
-    destinations.push(PathBuf::from("bin/kettle-media-worker"));
-    destinations.push(PathBuf::from("bin/kettle"));
-    destinations.push(PathBuf::from("share/kettle/install.json"));
-    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
-
-    transaction.preflight_destinations(&destinations)?;
-
-    // Every file this transaction writes must appear in the NEW provenance
-    // record. If the OLD hashes still describe the NEW files, the next
-    // verification reports the installation unmanaged. Startup then cannot
-    // confirm or clean the committed transaction, and every later self-update
-    // refuses to run. `install_unix_provenance` below merges these with what
-    // the previous release already owned.
-    let mut provenance_files = Vec::with_capacity(destinations.len());
+    let mut replacements = Vec::new();
     for entry in map {
         let bytes = package.bytes(&entry.source)?;
-        if entry.destination.ends_with("kettle.desktop") {
-            let desktop = render_linux_desktop_bytes(bytes, &install.prefix)?;
-            transaction.install_bytes(&entry.destination, desktop.as_bytes(), Some(entry.mode))?;
-            provenance_files.push(UnixInstallFile {
-                path: relative_to_string(&entry.destination)?,
-                size: desktop.len() as u64,
-                sha256: sha256_bytes(desktop.as_bytes()),
-                mode: entry.mode,
-            });
+        let bytes = if entry.destination.ends_with("kettle.desktop") {
+            std::borrow::Cow::Owned(
+                render_linux_desktop_bytes(bytes, &install.prefix)?.into_bytes(),
+            )
         } else {
-            transaction.install_bytes(&entry.destination, bytes, Some(entry.mode))?;
-            provenance_files.push(UnixInstallFile {
-                path: relative_to_string(&entry.destination)?,
-                size: bytes.len() as u64,
-                sha256: sha256_bytes(bytes),
-                mode: entry.mode,
-            });
-        }
+            std::borrow::Cow::Borrowed(bytes)
+        };
+        replacements.push((entry.destination, bytes, entry.mode));
     }
     for source in shell_files {
         let relative = source
             .relative
             .strip_prefix("shell-integration")
             .map_err(|_| UpdateError::UnsafeArchive(source.relative.display().to_string()))?;
-        let destination = Path::new("share/kettle/shell-integration").join(relative);
-        transaction.install_bytes(&destination, &source.bytes, Some(0o644))?;
-        provenance_files.push(UnixInstallFile {
-            path: relative_to_string(&destination)?,
-            size: source.bytes.len() as u64,
-            sha256: sha256_bytes(&source.bytes),
-            mode: 0o644,
-        });
+        validate_archive_path(relative)?;
+        replacements.push((
+            Path::new("share/kettle/shell-integration").join(relative),
+            std::borrow::Cow::Borrowed(source.bytes.as_slice()),
+            0o644,
+        ));
     }
-    let worker = package.bytes(Path::new("kettle-media-worker"))?;
-    transaction.install_bytes(Path::new("bin/kettle-media-worker"), worker, Some(0o755))?;
-    provenance_files.push(UnixInstallFile {
-        path: "bin/kettle-media-worker".into(),
-        size: worker.len() as u64,
-        sha256: sha256_bytes(worker),
-        mode: 0o755,
-    });
-    let binary = package.bytes(Path::new("kettle"))?;
-    transaction.install_bytes(Path::new("bin/kettle"), binary, Some(0o755))?;
-    provenance_files.push(UnixInstallFile {
-        path: "bin/kettle".into(),
-        size: binary.len() as u64,
-        sha256: sha256_bytes(binary),
-        mode: 0o755,
-    });
-    let marker = marker_json(&update.version.to_string())?;
-    transaction.install_bytes(
-        Path::new("share/kettle/install.json"),
-        marker.as_bytes(),
-        Some(0o644),
-    )?;
-    provenance_files.push(UnixInstallFile {
-        path: "share/kettle/install.json".into(),
-        size: marker.len() as u64,
-        sha256: sha256_bytes(marker.as_bytes()),
-        mode: 0o644,
-    });
+    for (source, destination) in [
+        ("kettle-media-worker", "bin/kettle-media-worker"),
+        ("kettle", "bin/kettle"),
+    ] {
+        replacements.push((
+            PathBuf::from(destination),
+            std::borrow::Cow::Borrowed(package.bytes(Path::new(source))?),
+            0o755,
+        ));
+    }
+    replacements.push((
+        PathBuf::from("share/kettle/install.json"),
+        std::borrow::Cow::Owned(marker_json(&update.version.to_string())?.into_bytes()),
+        0o644,
+    ));
+    apply_linux_replacements(transaction, install, previous_provenance, replacements)
+}
 
-    install_unix_provenance(transaction, install, previous_provenance, provenance_files)?;
+#[cfg(target_os = "linux")]
+fn apply_linux_replacements(
+    transaction: &mut Transaction,
+    install: &ManagedInstall,
+    previous_provenance: UnixInstallProvenance,
+    mut replacements: Vec<(PathBuf, std::borrow::Cow<'_, [u8]>, u32)>,
+) -> Result<(), UpdateError> {
+    let mut destinations = replacements
+        .iter()
+        .map(|(destination, _, _)| destination.clone())
+        .collect::<Vec<_>>();
+    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
+    transaction.preflight_linux_destinations(&destinations, &previous_provenance)?;
+    let provenance_files = replacements
+        .iter()
+        .map(|(destination, bytes, mode)| {
+            Ok(UnixInstallFile {
+                path: relative_to_string(destination)?,
+                size: bytes.len() as u64,
+                sha256: sha256_bytes(bytes),
+                mode: *mode,
+            })
+        })
+        .collect::<Result<Vec<_>, UpdateError>>()?;
+    let directories = planned_linux_directories(&install.prefix, &destinations)?;
+    let provenance = unix_install_provenance_bytes(
+        install,
+        previous_provenance,
+        provenance_files,
+        &directories,
+    )?;
+    replacements.push((
+        PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE),
+        std::borrow::Cow::Owned(provenance),
+        0o644,
+    ));
+    validate_replacement_sizes(replacements.iter().map(|(_, bytes, _)| bytes.len() as u64))?;
+
+    for (relative, bytes, mode) in replacements {
+        // Provenance may claim only the directories publication actually created.
+        if relative == Path::new(UNIX_INSTALL_PROVENANCE_FILE)
+            && transaction.created_directories() != &directories
+        {
+            return Err(UpdateError::Transaction(
+                "install directories changed after preflight".into(),
+            ));
+        }
+        transaction.install_bytes(&relative, &bytes, Some(mode))?;
+    }
     transaction.finish_preflight()?;
     Ok(())
 }
 
-/// Write the Linux install provenance for a transaction that has just published
-/// its files, as its final journaled entry.
-///
-/// Both Linux appliers end here so the record they produce cannot drift.
-///
-/// `published` is what THIS transaction wrote; `previous` is the record it
-/// replaces. The two are merged because a file an earlier release installed and
-/// this archive no longer ships is still on disk. Uninstall deletes only what
-/// provenance lists, so dropping its record would leave that file unremovable.
-/// `install-unix.py` seeds from the old record for the same reason, and the two
-/// writers have to agree.
-#[cfg(target_os = "linux")]
-fn install_unix_provenance(
-    transaction: &mut Transaction,
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn planned_linux_directories(
+    prefix: &Path,
+    destinations: &[PathBuf],
+) -> Result<std::collections::BTreeMap<String, u32>, UpdateError> {
+    let mut directories = std::collections::BTreeMap::new();
+    for destination in destinations {
+        let mut parent = destination.parent();
+        while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
+            match fs::symlink_metadata(prefix.join(path)) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(_) => {
+                    return Err(UpdateError::Transaction(format!(
+                        "install path component is not a directory: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    directories.insert(relative_to_string(path)?, 0o755);
+                }
+                Err(error) => return Err(error.into()),
+            }
+            parent = path.parent();
+        }
+    }
+    if directories.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(UpdateError::Transaction(
+            "transaction directory set exceeds the safety limit".into(),
+        ));
+    }
+    Ok(directories)
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn unix_install_provenance_bytes(
     install: &ManagedInstall,
     previous: UnixInstallProvenance,
     published: Vec<UnixInstallFile>,
-) -> Result<(), UpdateError> {
+    created_directories: &std::collections::BTreeMap<String, u32>,
+) -> Result<Vec<u8>, UpdateError> {
     use std::collections::BTreeMap;
 
-    // `BTreeMap` gives the strict path ordering the reader requires, and lets a
-    // republished path replace its old record rather than duplicating it.
+    // Retain files an older release owned, even when the new archive drops them.
     let mut files = previous
         .files
         .into_iter()
@@ -3282,31 +3294,17 @@ fn install_unix_provenance(
     for file in published {
         files.insert(file.path.clone(), file);
     }
-
-    // Carry the previous record's directories forward and add the ones this
-    // transaction actually created. Rollback removes that same set, so the
-    // record and the cleanup cannot disagree. Checking `try_exists` before the
-    // writes would treat a directory left by a rolled-back attempt as
-    // pre-existing and omit it, so uninstall would never remove it.
-    //
-    // This is called after every other publication and installs the record as
-    // the transaction's last entry, so `created_directories` is complete: the
-    // provenance file's own parent is created by an earlier entry.
     let mut directories = previous
         .directories
         .into_iter()
         .map(|record| (record.path, record.mode))
         .collect::<BTreeMap<_, _>>();
     directories.extend(
-        transaction
-            .created_directories()
+        created_directories
             .iter()
             .map(|(path, mode)| (path.clone(), *mode)),
     );
 
-    // Enforce the reader's bounds BEFORE writing. `read_linux_install_provenance`
-    // refuses a record past `MAX_ARCHIVE_ENTRIES`, and upgrade and uninstall both
-    // need a readable record, so an oversized one would strand the install.
     if files.len() > MAX_ARCHIVE_ENTRIES || directories.len() > MAX_ARCHIVE_ENTRIES {
         return Err(UpdateError::UnmanagedInstall(format!(
             "refusing to record Linux install provenance with {} files and {} \
@@ -3346,11 +3344,7 @@ fn install_unix_provenance(
             "Linux install provenance exceeds its byte limit".into(),
         ));
     }
-    transaction.install_bytes(
-        Path::new(UNIX_INSTALL_PROVENANCE_FILE),
-        provenance.as_bytes(),
-        Some(0o644),
-    )
+    Ok(provenance.into_bytes())
 }
 
 #[cfg(target_os = "linux")]
@@ -3391,22 +3385,7 @@ fn apply_staged_update(
         .into_iter()
         .filter(|source| source.starts_with(&shell_root))
         .collect::<Vec<_>>();
-    let mut destinations = map
-        .iter()
-        .map(|entry| entry.destination.clone())
-        .collect::<Vec<_>>();
-    for source in &shell_sources {
-        let relative = source
-            .strip_prefix(&shell_root)
-            .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))?;
-        destinations.push(Path::new("share/kettle/shell-integration").join(relative));
-    }
-    destinations.push(PathBuf::from("bin/kettle"));
-    destinations.push(PathBuf::from("share/kettle/install.json"));
-    destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
-
-    transaction.preflight_destinations(&destinations)?;
-    let mut provenance_files = Vec::with_capacity(destinations.len() - 1);
+    let mut replacements = Vec::new();
     for entry in map {
         let source = root.join(&entry.source);
         require_file(
@@ -3416,64 +3395,38 @@ fn apply_staged_update(
                 .unwrap_or(&source)
                 .to_string_lossy(),
         )?;
-        if entry.destination.ends_with("kettle.desktop") {
-            let desktop = render_linux_desktop(&source, &install.prefix)?;
-            transaction.install_bytes(&entry.destination, desktop.as_bytes(), Some(entry.mode))?;
-            provenance_files.push(UnixInstallFile {
-                path: relative_to_string(&entry.destination)?,
-                size: desktop.len() as u64,
-                sha256: sha256_bytes(desktop.as_bytes()),
-                mode: entry.mode,
-            });
+        let bytes = if entry.destination.ends_with("kettle.desktop") {
+            render_linux_desktop(&source, &install.prefix)?.into_bytes()
         } else {
-            transaction.install(&entry.destination, &source, Some(entry.mode))?;
-            provenance_files.push(UnixInstallFile {
-                path: relative_to_string(&entry.destination)?,
-                size: source.metadata()?.len(),
-                sha256: sha256_file(&source)?,
-                mode: entry.mode,
-            });
-        }
+            read_transaction_file(&source)?.0
+        };
+        replacements.push((
+            entry.destination,
+            std::borrow::Cow::Owned(bytes),
+            entry.mode,
+        ));
     }
     for source in shell_sources {
         let relative = source
             .strip_prefix(&shell_root)
             .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))?;
-        transaction.install(
-            &Path::new("share/kettle/shell-integration").join(relative),
-            &source,
-            Some(0o644),
-        )?;
-        let destination = Path::new("share/kettle/shell-integration").join(relative);
-        provenance_files.push(UnixInstallFile {
-            path: relative_to_string(&destination)?,
-            size: source.metadata()?.len(),
-            sha256: sha256_file(&source)?,
-            mode: 0o644,
-        });
+        replacements.push((
+            Path::new("share/kettle/shell-integration").join(relative),
+            std::borrow::Cow::Owned(read_transaction_file(&source)?.0),
+            0o644,
+        ));
     }
-    transaction.install(Path::new("bin/kettle"), &binary, Some(0o755))?;
-    provenance_files.push(UnixInstallFile {
-        path: "bin/kettle".into(),
-        size: binary.metadata()?.len(),
-        sha256: sha256_file(&binary)?,
-        mode: 0o755,
-    });
-    let marker = marker_json(&update.version.to_string())?;
-    transaction.install_bytes(
-        Path::new("share/kettle/install.json"),
-        marker.as_bytes(),
-        Some(0o644),
-    )?;
-    provenance_files.push(UnixInstallFile {
-        path: "share/kettle/install.json".into(),
-        size: marker.len() as u64,
-        sha256: sha256_bytes(marker.as_bytes()),
-        mode: 0o644,
-    });
-    install_unix_provenance(transaction, install, previous_provenance, provenance_files)?;
-    transaction.finish_preflight()?;
-    Ok(())
+    replacements.push((
+        PathBuf::from("bin/kettle"),
+        std::borrow::Cow::Owned(read_transaction_file(&binary)?.0),
+        0o755,
+    ));
+    replacements.push((
+        PathBuf::from("share/kettle/install.json"),
+        std::borrow::Cow::Owned(marker_json(&update.version.to_string())?.into_bytes()),
+        0o644,
+    ));
+    apply_linux_replacements(transaction, install, previous_provenance, replacements)
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -3662,6 +3615,7 @@ enum JournalEntryState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionProgress {
     ParentDirectoriesPersisted,
+    BackupIntentPersisted,
     BackupStreaming,
     BackupSynced,
     EntryPrepared,
@@ -3756,6 +3710,17 @@ fn open_anchored_directory(path: &Path) -> Result<File, UpdateError> {
     Ok(directory)
 }
 
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn install_component_error(path: &Path, error: UpdateError) -> UpdateError {
+    if matches!(&error, UpdateError::Io(error) if error.kind() == std::io::ErrorKind::NotFound) {
+        return error;
+    }
+    UpdateError::Transaction(format!(
+        "install path component cannot be opened safely ({}): {error}",
+        path.display()
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn directory_descriptor_path(directory: &File) -> PathBuf {
     use std::os::fd::AsRawFd as _;
@@ -3795,6 +3760,10 @@ fn anchored_parent_recording(
 ) -> Result<AnchoredParent, UpdateError> {
     validate_relative(relative)?;
     let directory = open_anchored_directory(prefix).map_err(|error| {
+        if matches!(&error, UpdateError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return error;
+        }
         UpdateError::Transaction(format!(
             "cannot anchor install prefix {}: {error}",
             prefix.display()
@@ -3853,10 +3822,7 @@ fn anchored_parent_recording_from(
                     open_anchored_directory(&candidate)?
                 }
                 Err(error) => {
-                    return Err(UpdateError::Transaction(format!(
-                        "install path component cannot be opened safely ({}): {error}",
-                        candidate.display()
-                    )));
+                    return Err(install_component_error(&candidate, error));
                 }
             };
             directory = next;
@@ -4787,6 +4753,39 @@ struct Transaction {
     preflight: Option<std::collections::HashMap<String, PreflightDestination>>,
 }
 
+#[cfg(any(windows, target_os = "linux", test))]
+fn validate_replacement_sizes(sizes: impl IntoIterator<Item = u64>) -> Result<(), UpdateError> {
+    let mut total = 0_u64;
+    for (index, size) in sizes.into_iter().enumerate() {
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| UpdateError::Transaction("transaction size overflow".into()))?;
+        if total > MAX_UNPACKED_BYTES || index >= MAX_ARCHIVE_ENTRIES {
+            return Err(UpdateError::Transaction(
+                "transaction replacement exceeds the safety quota".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn validate_linux_destination_ownership<'a>(
+    relative: &Path,
+    occupied: bool,
+    recorded: impl IntoIterator<Item = &'a str>,
+) -> Result<(), UpdateError> {
+    let path = relative_to_string(relative)?;
+    if occupied
+        && path != UNIX_INSTALL_PROVENANCE_FILE
+        && path != "share/kettle/install.json"
+        && !recorded.into_iter().any(|recorded| recorded == path)
+    {
+        return Err(UpdateError::OccupiedInstallPath(relative.to_path_buf()));
+    }
+    Ok(())
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 struct PreflightDestination {
     file: Option<File>,
@@ -4905,6 +4904,28 @@ impl Transaction {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    fn preflight_linux_destinations(
+        &mut self,
+        destinations: &[PathBuf],
+        previous: &UnixInstallProvenance,
+    ) -> Result<(), UpdateError> {
+        self.preflight_destinations(destinations)?;
+        let snapshots = self
+            .preflight
+            .as_ref()
+            .expect("preflight was just recorded");
+        for relative in destinations {
+            let path = relative_to_string(relative)?;
+            validate_linux_destination_ownership(
+                relative,
+                snapshots[&path.to_ascii_lowercase()].file.is_some(),
+                previous.files.iter().map(|file| file.path.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
     fn finish_preflight(&self) -> Result<(), UpdateError> {
         if self
             .preflight
@@ -4918,7 +4939,7 @@ impl Transaction {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(windows, test))]
     fn install(
         &mut self,
         relative: &Path,
@@ -4988,13 +5009,13 @@ impl Transaction {
                 "duplicate install destination {relative_string}"
             )));
         }
-        if bytes.len() as u64 > MAX_UNPACKED_BYTES
-            || self.journal.entries.len() >= MAX_ARCHIVE_ENTRIES
-        {
-            return Err(UpdateError::Transaction(
-                "transaction replacement exceeds the safety quota".into(),
-            ));
-        }
+        validate_replacement_sizes(
+            self.journal
+                .entries
+                .iter()
+                .map(|entry| entry.replacement_size)
+                .chain(std::iter::once(bytes.len() as u64)),
+        )?;
         // Record each missing parent durably BEFORE creating it, and record
         // what the walk actually created before propagating any error from it.
         //
@@ -5086,6 +5107,7 @@ impl Transaction {
         self.persist_journal()?;
 
         if let Some(previous) = snapshot.file.as_mut() {
+            progress(TransactionProgress::BackupIntentPersisted);
             let backup_relative = Path::new(&self.journal.backup_dir).join(relative);
             let (_backup_parent, backup) =
                 anchored_destination(&self.prefix, &backup_relative, true)?;
@@ -6288,7 +6310,7 @@ fn remove_journal_path(prefix: &Path, journal_path: &Path) -> Result<(), UpdateE
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn sha256_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -6857,6 +6879,62 @@ mod tests {
         assert!(detect_managed_install_at(&executable).is_err());
         assert!(prefix.join(".kettle-update-journal.json").is_file());
         (root, prefix, executable)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_startup_recovers_backup_intent_without_backup_ancestors() {
+        for relative in ["bin/kettle", "share/kettle/install.sh"] {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            seed_linux_install_provenance(&prefix);
+            fs::write(
+                prefix.join("share/kettle/install.json"),
+                marker_json("2.35.0").unwrap(),
+            )
+            .unwrap();
+            seed_linux_install_provenance(&prefix);
+            let original = fs::read(prefix.join(relative)).unwrap();
+            let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+            let backup_dir = transaction.backup_dir.clone();
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction
+                    .install_bytes_with_progress_and_post_publish(
+                        Path::new(relative),
+                        b"replacement",
+                        Some(0o755),
+                        |progress| {
+                            if progress == TransactionProgress::BackupIntentPersisted {
+                                panic!("simulated stop before backup parent creation");
+                            }
+                        },
+                        || Ok(()),
+                    )
+                    .unwrap();
+            }));
+            assert!(stopped.is_err());
+            assert!(
+                !backup_dir
+                    .join(Path::new(relative).parent().unwrap())
+                    .exists()
+            );
+            let persisted: Journal =
+                serde_json::from_slice(&fs::read(&transaction.journal_path).unwrap()).unwrap();
+            assert_eq!(persisted.entries[0].state, JournalEntryState::BackingUp);
+            std::mem::forget(transaction);
+
+            prepare_linux_process_start_at(
+                &prefix.join("bin/kettle"),
+                &semver::Version::new(2, 35, 0),
+            )
+            .expect("startup must recover an intent whose backup parents were never created");
+
+            assert_eq!(fs::read(prefix.join(relative)).unwrap(), original);
+            assert!(!prefix.join(".kettle-update-journal.json").exists());
+            assert!(!backup_dir.exists());
+            detect_managed_install_at(&prefix.join("bin/kettle")).unwrap();
+            recover_transaction(&prefix).unwrap();
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -8016,6 +8094,155 @@ mod tests {
         tx.rollback().unwrap();
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn missing_install_ancestor_remains_distinguishable_for_cleanup() {
+        let root = test_tempdir();
+        let missing = root.path().join("missing/parent");
+        let error = open_anchored_directory(&missing).unwrap_err();
+        let error = install_component_error(&missing, error);
+        assert!(
+            matches!(&error, UpdateError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "a missing install ancestor must remain NotFound for idempotent cleanup: {error}"
+        );
+        let error = install_component_error(
+            &missing,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+        );
+        assert!(matches!(error, UpdateError::Transaction(_)));
+    }
+
+    #[test]
+    fn linux_destination_ownership_allows_only_recorded_or_reserved_occupied_paths() {
+        let worker = Path::new("bin/kettle-media-worker");
+        let error = validate_linux_destination_ownership(worker, true, ["bin/kettle"]).unwrap_err();
+        assert!(matches!(error, UpdateError::OccupiedInstallPath(path) if path == worker));
+        validate_linux_destination_ownership(worker, false, []).unwrap();
+        validate_linux_destination_ownership(worker, true, ["bin/kettle-media-worker"]).unwrap();
+        for reserved in [
+            "share/kettle/install.json",
+            "share/kettle/install-files.json",
+        ] {
+            validate_linux_destination_ownership(Path::new(reserved), true, []).unwrap();
+        }
+        assert!(
+            validate_linux_destination_ownership(Path::new("other/install.json"), true, [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linux_provenance_preflight_counts_generated_bytes_and_missing_directories() {
+        let root = test_tempdir();
+        fs::create_dir(root.path().join("existing")).unwrap();
+        let install = ManagedInstall {
+            prefix: root.path().to_path_buf(),
+            executable: root.path().join("bin/kettle"),
+            marker_path: root.path().join("share/kettle/install.json"),
+        };
+        let destinations = [
+            PathBuf::from("existing/file"),
+            PathBuf::from("new/deep/file"),
+        ];
+        let directories = planned_linux_directories(root.path(), &destinations).unwrap();
+        assert_eq!(
+            directories.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["new", "new/deep"]
+        );
+        let previous = UnixInstallProvenance {
+            schema: 1,
+            product: "kettle".into(),
+            managed_by: "kettle-installer".into(),
+            prefix: root.path().to_str().unwrap().into(),
+            // SAFETY: geteuid has no preconditions.
+            owner_uid: unsafe { libc::geteuid() },
+            files: Vec::new(),
+            directories: Vec::new(),
+        };
+        let marker = marker_json("99.0.0").unwrap();
+        let provenance = unix_install_provenance_bytes(
+            &install,
+            previous,
+            vec![UnixInstallFile {
+                path: "share/kettle/install.json".into(),
+                size: marker.len() as u64,
+                sha256: sha256_bytes(marker.as_bytes()),
+                mode: 0o644,
+            }],
+            &directories,
+        )
+        .unwrap();
+        let decoded: UnixInstallProvenance = serde_json::from_slice(&provenance).unwrap();
+        assert_eq!(
+            decoded
+                .directories
+                .iter()
+                .map(|directory| directory.path.as_str())
+                .collect::<Vec<_>>(),
+            ["new", "new/deep"]
+        );
+        let generated_bytes = (marker.len() + provenance.len()) as u64;
+        let archive_bytes = MAX_UNPACKED_BYTES - generated_bytes + 1;
+        validate_replacement_sizes([archive_bytes]).unwrap();
+        assert!(
+            validate_replacement_sizes([
+                archive_bytes,
+                marker.len() as u64,
+                provenance.len() as u64
+            ])
+            .is_err()
+        );
+        assert!(!root.path().join("new").exists());
+    }
+
+    #[test]
+    fn replacement_quota_includes_generated_transaction_bytes() {
+        let archive_sizes = [MAX_UNPACKED_BYTES - 3, 2];
+        validate_replacement_sizes(archive_sizes).unwrap();
+        validate_replacement_sizes(archive_sizes.into_iter().chain([1])).unwrap();
+        let result = validate_replacement_sizes(archive_sizes.into_iter().chain([1, 1]));
+        assert!(
+            result.is_err(),
+            "generated bytes must not push replacements past the recovery quota"
+        );
+        assert!(validate_replacement_sizes([u64::MAX, 1]).is_err());
+        assert!(
+            validate_replacement_sizes(std::iter::repeat_n(0, MAX_ARCHIVE_ENTRIES + 1)).is_err()
+        );
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn transaction_rejects_aggregate_replacement_before_creating_parents() {
+        let root = test_tempdir();
+        let mut tx = Transaction::begin(root.path(), "99.0.0").unwrap();
+        tx.journal.phase = JournalPhase::Applying;
+        tx.journal.entries.push(JournalEntry {
+            relative: "first".into(),
+            existed: false,
+            previous_unix_mode: None,
+            previous_size: None,
+            previous_sha256: None,
+            replacement_size: MAX_UNPACKED_BYTES,
+            replacement_sha256: "0".repeat(64),
+            state: JournalEntryState::Prepared,
+        });
+        tx.persist_journal().unwrap();
+        let before = fs::read(&tx.journal_path).unwrap();
+
+        let result = tx.install_bytes(Path::new("new/second"), b"x", None);
+
+        assert!(
+            result.is_err(),
+            "an oversized journal must be refused before mutation"
+        );
+        assert_eq!(tx.journal.entries.len(), 1);
+        assert_eq!(fs::read(&tx.journal_path).unwrap(), before);
+        assert!(!root.path().join("new").exists());
+        tx.rollback().unwrap();
+    }
+
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn transaction_rejects_duplicate_destinations() {
@@ -8943,6 +9170,119 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn linux_plan_rejects_generated_provenance_over_quota_before_publication() {
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        seed_linux_install_provenance(&prefix);
+        let previous = read_linux_install_provenance(&prefix).unwrap();
+        let before = fs::read(prefix.join(UNIX_INSTALL_PROVENANCE_FILE)).unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+        let marker = marker_json("99.0.0").unwrap();
+        // Share a chunk across payloads to exercise the real quota without a
+        // quota-sized allocation or any publication of those bytes.
+        let chunk = vec![0; (MAX_UNPACKED_BYTES / 64) as usize];
+        let mut replacements = (0..64)
+            .map(|index| {
+                let size = chunk.len() - if index == 63 { marker.len() } else { 0 };
+                (
+                    PathBuf::from(format!("share/kettle/payload-{index}")),
+                    std::borrow::Cow::Borrowed(&chunk[..size]),
+                    0o644,
+                )
+            })
+            .collect::<Vec<_>>();
+        let archive_bytes = replacements
+            .iter()
+            .map(|(_, bytes, _)| bytes.len() as u64)
+            .sum::<u64>();
+        assert!(archive_bytes < MAX_UNPACKED_BYTES);
+        replacements.push((
+            PathBuf::from("share/kettle/install.json"),
+            std::borrow::Cow::Borrowed(marker.as_bytes()),
+            0o644,
+        ));
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|(_, bytes, _)| bytes.len() as u64)
+                .sum::<u64>(),
+            MAX_UNPACKED_BYTES
+        );
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+
+        let result = apply_linux_replacements(&mut transaction, &install, previous, replacements);
+
+        assert!(
+            result.is_err(),
+            "generated provenance must be included in preflight replacement bytes"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("replacement exceeds")
+        );
+        assert!(transaction.journal.entries.is_empty());
+        assert!(!prefix.join("share/kettle/payload-0").exists());
+        assert_eq!(
+            fs::read(prefix.join(UNIX_INSTALL_PROVENANCE_FILE)).unwrap(),
+            before
+        );
+        assert_eq!(
+            fs::read(prefix.join("share/kettle/install.json")).unwrap(),
+            b"{}\n"
+        );
+        transaction.rollback().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_refuses_unrecorded_worker_before_publication() {
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        seed_linux_install_provenance(&prefix);
+        let worker = prefix.join("bin/kettle-media-worker");
+        let foreign_bytes = b"user-owned worker\0keep every byte\xff";
+        fs::write(&worker, foreign_bytes).unwrap();
+        let before = fs::read(prefix.join(UNIX_INSTALL_PROVENANCE_FILE)).unwrap();
+        let package =
+            load_linux_package(&test_linux_package_tar("99.0.0"), &fake_update()).unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+
+        let result =
+            apply_verified_linux_update(&mut transaction, &package, &install, &fake_update());
+
+        assert!(
+            result.is_err(),
+            "an occupied unrecorded worker must refuse the update"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, UpdateError::OccupiedInstallPath(path) if path == Path::new("bin/kettle-media-worker"))
+        );
+        assert!(error.to_string().contains("bin/kettle-media-worker"));
+        assert!(transaction.journal.entries.is_empty());
+        assert_eq!(fs::read(&worker).unwrap(), foreign_bytes);
+        assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"fixture");
+        assert_eq!(
+            fs::read(prefix.join(UNIX_INSTALL_PROVENANCE_FILE)).unwrap(),
+            before
+        );
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(worker).unwrap(), foreign_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn linux_update_rolls_back_unsafe_changelog_destinations_without_escape() {
         use std::os::unix::fs::{DirBuilderExt as _, symlink};
 
@@ -8975,10 +9315,12 @@ mod tests {
             apply_verified_linux_update(&mut transaction, &package, &install, &fake_update())
                 .unwrap_err();
 
+        // Preflight now refuses the linked component while checking ownership,
+        // before publication would try to open it; either refusal is safe.
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("install path component cannot be opened safely"),
+            message.contains("install path component cannot be opened safely")
+                || message.contains("install path component is not a directory"),
             "unexpected unsafe-destination error: {error}"
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
@@ -9174,7 +9516,7 @@ mod tests {
 
         // The record describes who wrote the files. This agrees with the prefix
         // owner in every case that verifies, so it does not catch a change back
-        // to the prefix's uid on its own — see `install_unix_provenance`. It
+        // to the prefix's uid on its own — see `unix_install_provenance_bytes`. It
         // does pin the field against `install-unix.py`, which records the same
         // thing.
         assert_eq!(

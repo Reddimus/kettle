@@ -727,7 +727,9 @@ impl App {
             UserEvent::Wayland | UserEvent::BlurDiscovered => {}
             // Consumed by the outer window-less dispatch before a WindowState
             // is checked out.
-            UserEvent::ShellsDetected
+            UserEvent::CardsTipClaimed(_)
+            | UserEvent::GpusDetected(_)
+            | UserEvent::ShellsDetected
             | UserEvent::Activation
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }

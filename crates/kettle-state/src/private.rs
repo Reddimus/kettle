@@ -127,10 +127,10 @@ fn publish_with_atomic_fallback(
 }
 
 /// An owner-only sibling file that is invisible at its requested destination
-/// until [`publish`](Self::publish) atomically creates that destination.
+/// until [`publish`](Self::publish) atomically publishes that destination.
 ///
-/// The staging leaf is removed on drop. Publication never replaces an existing
-/// entry and retains the platform's pinned parent capability across the final
+/// The staging leaf is removed on drop. Its constructor selects whether
+/// publication replaces an existing entry. The pinned parent capability spans the final
 /// link-or-rename operation, so a renamed parent cannot redirect the write.
 pub struct StagedUserSelectedFile {
     staged: Option<CreatedUserSelectedFile>,
@@ -168,9 +168,8 @@ impl StagedUserSelectedFile {
             .sync_all()
     }
 
-    /// Atomically create the requested destination from an already-synced
-    /// staging file and retire the sibling staging name. Existing destinations
-    /// are refused.
+    /// Atomically publish an already-synced staging file and retire its staging
+    /// name. The staging constructor determines whether existing leaves are replaced.
     pub fn publish_synced(mut self) -> Result<(), StagedFilePublishError> {
         let staged = self
             .staged
@@ -212,8 +211,8 @@ impl StagedUserSelectedFile {
         }
     }
 
-    /// Flush the staged inode, atomically create the requested destination,
-    /// and retire the sibling staging name. Existing destinations are refused.
+    /// Flush the staged inode, atomically publish the requested destination,
+    /// and retire the sibling staging name.
     pub fn publish(self) -> Result<(), StagedFilePublishError> {
         if let Err(error) = self.sync_for_publish() {
             return Err(StagedFilePublishError::not_published(with_cleanup_error(
@@ -854,9 +853,21 @@ fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
+    windows::create_parent_dirs(&directory.join(".kettle-directory-create"))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     std::fs::create_dir_all(directory)
+}
+
+/// Validate a current-user-owned Windows directory without allowing mutation
+/// grants to principals other than that user, SYSTEM and Administrators.
+#[cfg(windows)]
+pub fn validate_private_directory(directory: &Path) -> io::Result<()> {
+    windows::validate_private_directory(directory)
 }
 
 /// Create a new private regular file without an inherited-permission window.
@@ -900,28 +911,37 @@ pub fn create_user_selected_file_new(path: &Path) -> io::Result<CreatedUserSelec
 /// counterpart to `atomic_create_new`: it avoids buffering a potentially large
 /// export in RAM.
 pub fn stage_user_selected_file_new(path: &Path) -> io::Result<StagedUserSelectedFile> {
-    stage_user_selected_file_new_with(path, || {
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).map_err(|error| {
-            io::Error::other(format!(
-                "secure randomness for export staging failed: {error}"
-            ))
-        })?;
-        Ok(nonce)
-    })
+    stage_user_selected_file_new_with(path, export_nonce)
+}
+
+/// Stage an owner-only export beside `path`, atomically replacing its leaf on
+/// publication. Existing contents remain intact until the staged file is synced.
+pub fn stage_user_selected_file_replace(path: &Path) -> io::Result<StagedUserSelectedFile> {
+    stage_user_selected_file_new_with_mode(path, export_nonce, HardLinkMode::Native, true)
+}
+
+fn export_nonce() -> io::Result<[u8; 16]> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| {
+        io::Error::other(format!(
+            "secure randomness for export staging failed: {error}"
+        ))
+    })?;
+    Ok(nonce)
 }
 
 fn stage_user_selected_file_new_with(
     path: &Path,
     next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
 ) -> io::Result<StagedUserSelectedFile> {
-    stage_user_selected_file_new_with_mode(path, next_nonce, HardLinkMode::Native)
+    stage_user_selected_file_new_with_mode(path, next_nonce, HardLinkMode::Native, false)
 }
 
 fn stage_user_selected_file_new_with_mode(
     path: &Path,
     mut next_nonce: impl FnMut() -> io::Result<[u8; 16]>,
     hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<StagedUserSelectedFile> {
     const ATTEMPTS: usize = 32;
 
@@ -946,7 +966,8 @@ fn stage_user_selected_file_new_with_mode(
         }
         let staged_path = parent.join(format!(".kettle-export-{suffix}.tmp"));
         #[cfg(unix)]
-        match unix::stage_user_selected_file_at(&staged_path, &destination, hard_link_mode) {
+        match unix::stage_user_selected_file_at(&staged_path, &destination, hard_link_mode, replace)
+        {
             Ok(Some(staged)) => return Ok(staged),
             Ok(None) => continue,
             Err(error) => return Err(error),
@@ -965,6 +986,7 @@ fn stage_user_selected_file_new_with_mode(
             &destination,
             &staged,
             hard_link_mode,
+            replace,
         ) {
             Ok(publish) => return Ok(StagedUserSelectedFile::new(staged, publish)),
             Err(error) => {
@@ -989,6 +1011,11 @@ fn stage_user_selected_file_new_with_mode(
 /// the effective token's default owner SID.
 pub fn open_private_file(path: &Path) -> io::Result<File> {
     open_private_file_impl(path)
+}
+
+#[cfg(windows)]
+pub(super) fn open_lock_file(path: &Path) -> io::Result<File> {
+    windows::open_lock_file(path)
 }
 
 /// Open an existing private regular file for reading and writing.
@@ -1185,8 +1212,9 @@ fn create_user_selected_file_publish_impl(
     destination: &Path,
     file: &File,
     hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<CreatedFilePublish> {
-    windows::create_user_selected_file_publish(staged, destination, file, hard_link_mode)
+    windows::create_user_selected_file_publish(staged, destination, file, hard_link_mode, replace)
 }
 
 #[cfg(windows)]
@@ -1286,10 +1314,15 @@ fn create_user_selected_file_publish_impl(
     destination: &Path,
     _file: &File,
     _hard_link_mode: HardLinkMode,
+    replace: bool,
 ) -> io::Result<CreatedFilePublish> {
     let staged = staged.to_path_buf();
     let destination = destination.to_path_buf();
     Ok(Box::new(move |_| {
+        if replace {
+            std::fs::rename(staged, destination)?;
+            return Ok(CreatedFilePublication::Renamed);
+        }
         std::fs::hard_link(staged, destination)?;
         Ok(CreatedFilePublication::Linked)
     }))
@@ -1373,6 +1406,11 @@ fn discard_created_private_file_checked_impl(file: File, path: &Path) -> io::Res
 #[cfg(windows)]
 fn restrict_private_object(file: &File) -> io::Result<()> {
     windows::restrict_private_object(file)
+}
+
+#[cfg(windows)]
+pub(super) fn retire_locked_file(file: &File) {
+    windows::retire_locked_file(file);
 }
 
 #[cfg(windows)]
@@ -2737,6 +2775,7 @@ pub(crate) mod unix {
         staged_path: &Path,
         destination: &Path,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<Option<StagedUserSelectedFile>> {
         let parent_path = destination
             .parent()
@@ -2794,6 +2833,7 @@ pub(crate) mod unix {
         macos_acl::clear_extended_acl(&directory)?;
         let directory_identity = FileIdentity::from_metadata(&directory.metadata()?);
         let cleanup_directory = directory.try_clone()?;
+        let cleanup_parent = parent.try_clone()?;
         let cleanup_guard = PrivateParentGuard::new(staged_path).ok().filter(|guard| {
             guard.directory().metadata().ok().is_some_and(|metadata| {
                 parent.metadata().ok().is_some_and(|parent_metadata| {
@@ -2813,18 +2853,20 @@ pub(crate) mod unix {
                 }
             }
             sync_directory(&cleanup_directory)?;
-            // A writable parent cannot support conditional removal of even
-            // an empty directory. Retain the empty reservation in that case.
-            if let Some(guard) = cleanup_guard
-                && guard.verify_directory().is_ok()
-                && entry_stat(guard.directory(), &staging_name)?
-                    .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
+            // A writable parent can swap the reservation after the identity
+            // check, but AT_REMOVEDIR can remove only an empty directory there.
+            let removal_parent = cleanup_guard
+                .as_ref()
+                .filter(|guard| guard.verify_directory().is_ok())
+                .map_or(&cleanup_parent, |guard| guard.directory());
+            if entry_stat(removal_parent, &staging_name)?
+                .is_some_and(|stat| FileIdentity::from_stat(&stat) == directory_identity)
             {
-                // SAFETY: guard holds the directory fd open and staging_c remains
+                // SAFETY: removal_parent holds the directory fd open and staging_c remains
                 // NUL-terminated for unlinkat; AT_REMOVEDIR requests directory removal.
                 if unsafe {
                     libc::unlinkat(
-                        guard.directory().as_raw_fd(),
+                        removal_parent.as_raw_fd(),
                         staging_c.as_ptr(),
                         libc::AT_REMOVEDIR,
                     )
@@ -2832,7 +2874,7 @@ pub(crate) mod unix {
                 {
                     return Err(io::Error::last_os_error());
                 }
-                sync_directory(guard.directory())?;
+                sync_directory(removal_parent)?;
             }
             Ok(())
         });
@@ -2878,6 +2920,7 @@ pub(crate) mod unix {
             destination_leaf.to_os_string(),
             &staged,
             hard_link_mode,
+            replace,
         )?;
         Ok(Some(StagedUserSelectedFile::new(staged, publish)))
     }
@@ -2944,6 +2987,7 @@ pub(crate) mod unix {
         destination_leaf: OsString,
         file: &File,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<CreatedFilePublish> {
         let staged_c = c_name(&staged_leaf, "staged export file name")?;
         let destination_c = c_name(&destination_leaf, "export destination file name")?;
@@ -2956,7 +3000,7 @@ pub(crate) mod unix {
                 "staged export path no longer identifies the open file",
             ));
         }
-        if entry_stat(&parent, &destination_leaf)?.is_some() {
+        if !replace && entry_stat(&parent, &destination_leaf)?.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "export destination already exists",
@@ -2972,6 +3016,22 @@ pub(crate) mod unix {
                     "staged export changed before publication",
                 )
                 .into());
+            }
+            if replace {
+                // SAFETY: both directory fds stay open and both names are NUL-terminated.
+                if unsafe {
+                    libc::renameat(
+                        source_parent.as_raw_fd(),
+                        staged_c.as_ptr(),
+                        parent.as_raw_fd(),
+                        destination_c.as_ptr(),
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error().into());
+                }
+                sync_directory(&parent).map_err(CreatedFilePublishError::published)?;
+                return Ok(CreatedFilePublication::Renamed);
             }
             // Prefer a hard link because it keeps the staging cleanup path
             // available until every postcondition is checked. Some ordinary
@@ -4282,7 +4342,17 @@ mod windows {
     }
 
     pub(super) fn create_private_file_new(path: &Path) -> io::Result<File> {
-        create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE)
+        create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE, false)
+    }
+
+    pub(super) fn open_lock_file(path: &Path) -> io::Result<File> {
+        match create_private_file_new_with_access(path, GENERIC_READ | GENERIC_WRITE, true) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                open_existing_private_file(path, false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn create_user_selected_file_new(
@@ -4306,6 +4376,7 @@ mod windows {
         destination: &Path,
         file: &File,
         hard_link_mode: HardLinkMode,
+        replace: bool,
     ) -> io::Result<CreatedFilePublish> {
         let requested_destination = destination.file_name().ok_or_else(|| {
             io::Error::new(
@@ -4361,12 +4432,13 @@ mod windows {
             ));
         }
         match std::fs::symlink_metadata(&destination) {
-            Ok(_) => {
+            Ok(_) if !replace => {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "export destination already exists",
                 ));
             }
+            Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
@@ -4379,6 +4451,10 @@ mod windows {
                     "staged export changed before publication",
                 )
                 .into());
+            }
+            if replace {
+                rename_open_file(file, &destination_path[..destination_path.len() - 1], true)?;
+                return Ok(CreatedFilePublication::Renamed);
             }
             // Prefer a hard link so the staging name remains available through
             // the postcondition check. ReFS, FAT-family volumes, and some
@@ -4409,7 +4485,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || rename_open_file_new(file, &destination_path[..destination_path.len() - 1]),
+                || rename_open_file(file, &destination_path[..destination_path.len() - 1], false),
             )?;
             let post_publish = (|| {
                 let published = inspect.open(&stable_destination)?;
@@ -4493,8 +4569,8 @@ mod windows {
         let result = (|| {
             require_regular_non_reparse(&file, &path)?;
             require_single_link(&file, &path)?;
-            if !owned_by_user_handle(&file, current_user.sid)?
-                || !has_current_user_only_dacl_handle(&file, current_user.sid)?
+            if !owned_by_any_handle_direct(&file, &[current_user.sid])?
+                || !has_current_user_only_dacl_direct(&file, current_user.sid)?
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4543,10 +4619,14 @@ mod windows {
     }
 
     pub(super) fn create_private_file_new_append(path: &Path) -> io::Result<File> {
-        create_private_file_new_with_access(path, FILE_APPEND_DATA)
+        create_private_file_new_with_access(path, FILE_APPEND_DATA, false)
     }
 
-    fn create_private_file_new_with_access(path: &Path, desired_access: u32) -> io::Result<File> {
+    fn create_private_file_new_with_access(
+        path: &Path,
+        desired_access: u32,
+        share_delete: bool,
+    ) -> io::Result<File> {
         create_parent_dirs(path)?;
         let path = std::path::absolute(path)?;
         let parent = PrivateParentGuard::new(&path)?;
@@ -4561,17 +4641,20 @@ mod windows {
         };
         let mut path_wide = parent.stable_path(&path)?;
         path_wide.push(0);
+        // Lock handles must allow retirement to reopen this same object with
+        // DELETE access while its exclusive byte-range lock remains held.
+        // Other creation handles pin the new entry through validation.
+        let sharing =
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 };
         // SAFETY: every pointer is valid for the call. The descriptor owns no
         // storage; its SID and ACL are anchored above until CreateFileW returns.
         let handle = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
-                desired_access | DELETE,
-                // Keep the new directory entry stable until every
-                // postcondition has been checked. In particular, this makes
-                // the failure cleanup below incapable of deleting a path an
-                // attacker swapped in after creation.
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                // Verify owner/DACL on this handle, including append-only
+                // creation handles, without reopening for ACL mutation.
+                desired_access | DELETE | READ_CONTROL,
+                sharing,
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -4587,8 +4670,8 @@ mod windows {
             require_regular_non_reparse(&file, &path)?;
             require_single_link(&file, &path)?;
             parent.verify()?;
-            if !owned_by_user_handle(&file, current_user.sid)?
-                || !has_current_user_only_dacl_handle(&file, current_user.sid)?
+            if !owned_by_any_handle_direct(&file, &[current_user.sid])?
+                || !has_current_user_only_dacl_direct(&file, current_user.sid)?
             {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4735,9 +4818,7 @@ mod windows {
         require_trusted_object_security(
             &file,
             &path,
-            current_user.sid,
-            administrators.sid,
-            system.sid,
+            |sid| trusted_windows_sid(sid, current_user.sid, administrators.sid, system.sid),
             DANGEROUS_FILE_RIGHTS,
             "trusted file",
         )?;
@@ -4773,9 +4854,7 @@ mod windows {
             require_trusted_object_security(
                 &link,
                 requested,
-                current_user.sid,
-                administrators.sid,
-                system.sid,
+                |sid| trusted_windows_sid(sid, current_user.sid, administrators.sid, system.sid),
                 DANGEROUS_FILE_RIGHTS,
                 "trusted file link",
             )?;
@@ -4812,6 +4891,42 @@ mod windows {
         // SAFETY: ReOpenFile transferred ownership of this valid handle.
         let writable = File::from(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
         writable.set_len(len)
+    }
+
+    pub(super) fn retire_locked_file(file: &File) {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx,
+        };
+        // SAFETY: ReOpenFile targets the held kernel file, with cooperative
+        // sharing; the exclusive byte-range lock remains on the original handle.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle() as HANDLE,
+                DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+        // SAFETY: ReOpenFile transferred ownership of this valid handle.
+        let deletion = unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) };
+        let disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        };
+        // SAFETY: the handle has DELETE access and the disposition has the
+        // requested layout. Failure leaves the reusable lock file untouched;
+        // legacy delete-pending semantics would deny access to waiting openers.
+        unsafe {
+            SetFileInformationByHandle(
+                deletion.as_raw_handle() as HANDLE,
+                FileDispositionInfoEx,
+                std::ptr::addr_of!(disposition).cast(),
+                std::mem::size_of_val(&disposition) as u32,
+            );
+        }
     }
 
     pub(super) fn remove_open_private_file(file: File, path: &Path) -> io::Result<()> {
@@ -5164,9 +5279,7 @@ mod windows {
     fn require_trusted_object_security(
         object: &File,
         path: &Path,
-        current_user: PSID,
-        administrators: PSID,
-        system: PSID,
+        trusted_sid: impl Fn(PSID) -> bool,
         dangerous_rights: u32,
         description: &str,
     ) -> io::Result<()> {
@@ -5191,7 +5304,7 @@ mod windows {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let _descriptor = SecurityDescriptor(descriptor);
-        if !trusted_windows_sid(owner, current_user, administrators, system) {
+        if !trusted_sid(owner) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("{description} has an untrusted owner: {}", path.display()),
@@ -5282,7 +5395,7 @@ mod windows {
                     ),
                 ));
             }
-            if !trusted_windows_sid(sid, current_user, administrators, system) {
+            if !trusted_sid(sid) {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
@@ -5293,6 +5406,41 @@ mod windows {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn validate_private_directory(directory: &Path) -> io::Result<()> {
+        let guard = PrivateParentGuard::new(&directory.join(".kettle-directory-trust-check"))?;
+        let target = guard
+            ._handles
+            .last()
+            .expect("a directory guard has a target");
+        let token = effective_token()?;
+        let user = token_user_sid(&token)?;
+        let owner = token_owner_sid(&token)?;
+        let administrators = builtin_administrators_sid()?;
+        let system = well_known_sid(WinLocalSystemSid)?;
+        if !owned_by_any_handle_direct(target, &[user.sid, owner.sid])? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private directory has another owner",
+            ));
+        }
+        require_trusted_object_security(
+            target,
+            directory,
+            |sid| {
+                // SAFETY: the validator supplies a SID in its retained security
+                // descriptor; the trusted SID buffers outlive this call.
+                unsafe {
+                    EqualSid(sid, user.sid) != 0
+                        || EqualSid(sid, administrators.sid) != 0
+                        || EqualSid(sid, system.sid) != 0
+                }
+            },
+            DANGEROUS_PATH_RIGHTS | DANGEROUS_CONTENT_RIGHTS,
+            "private directory",
+        )?;
+        guard.verify_directory()
     }
 
     fn require_trusted_directory_security(
@@ -5311,15 +5459,13 @@ mod windows {
         require_trusted_object_security(
             directory,
             path,
-            current_user,
-            administrators,
-            system,
+            |sid| trusted_windows_sid(sid, current_user, administrators, system),
             dangerous_rights,
             "private parent",
         )
     }
 
-    fn rename_open_file_new(file: &File, destination_name: &[u16]) -> io::Result<()> {
+    fn rename_open_file(file: &File, destination_name: &[u16], replace: bool) -> io::Result<()> {
         let name_bytes = destination_name
             .len()
             .checked_mul(std::mem::size_of::<u16>())
@@ -5337,7 +5483,14 @@ mod windows {
         // SAFETY: the aligned buffer holds the header and all trailing UTF-16
         // code units. The caller provides a stable, non-NUL destination path.
         unsafe {
-            (*info).Anonymous.ReplaceIfExists = false;
+            if replace {
+                // Legacy replacement refuses an open destination even when
+                // its readers share deletion (for example NamedTempFile).
+                (*info).Anonymous.Flags =
+                    FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+            } else {
+                (*info).Anonymous.ReplaceIfExists = false;
+            }
             (*info).RootDirectory = std::ptr::null_mut();
             (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "destination is too long")
@@ -5351,11 +5504,15 @@ mod windows {
         let buffer_len = u32::try_from(total_bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "destination is too long"))?;
         // SAFETY: the creation handle has DELETE access and `info` remains
-        // valid for the duration of this synchronous no-replace rename.
+        // valid for the duration of this synchronous rename.
         if unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle() as HANDLE,
-                FileRenameInfo,
+                if replace {
+                    FileRenameInfoEx
+                } else {
+                    FileRenameInfo
+                },
                 info.cast(),
                 buffer_len,
             )
@@ -5548,7 +5705,7 @@ mod windows {
                         "injected hard-link rejection",
                     )),
                 },
-                || rename_open_file_new(staged, &destination_name),
+                || rename_open_file(staged, &destination_name, false),
             )
         }
 
@@ -5946,12 +6103,9 @@ mod windows {
         Ok(unsafe { EqualSid(sid, current_user) } != 0)
     }
 
-    fn has_current_user_only_dacl_handle(file: &File, current_user: PSID) -> io::Result<bool> {
-        let handle = reopen_for_acl(file)?;
-        has_current_user_only_dacl_raw(handle.as_raw_handle() as HANDLE, current_user)
-    }
-
     fn has_current_user_only_dacl_direct(file: &File, current_user: PSID) -> io::Result<bool> {
+        // READ_CONTROL is sufficient for inspection. ReOpenFile is for files,
+        // so using the ACL-mutation reopen here would also reject directories.
         has_current_user_only_dacl_raw(file.as_raw_handle() as HANDLE, current_user)
     }
 
@@ -5976,11 +6130,6 @@ mod windows {
         }
         let descriptor = SecurityDescriptor(descriptor);
         dacl_is_current_user_only(descriptor.0, dacl, current_user)
-    }
-
-    fn owned_by_user_handle(file: &File, current_user: PSID) -> io::Result<bool> {
-        let handle = reopen_for_acl(file)?;
-        owned_by_any_raw(handle.as_raw_handle() as HANDLE, &[current_user])
     }
 
     fn owned_by_any_handle_direct(file: &File, expected_owners: &[PSID]) -> io::Result<bool> {
@@ -6022,20 +6171,20 @@ mod windows {
     #[cfg(test)]
     pub(super) fn has_current_user_only_dacl(file: &File) -> io::Result<bool> {
         let current_user = current_user_sid()?;
-        has_current_user_only_dacl_handle(file, current_user.sid)
+        has_current_user_only_dacl_direct(file, current_user.sid)
     }
 
     #[cfg(test)]
     pub(super) fn owned_by_current_user(file: &File) -> io::Result<bool> {
         let current_user = current_user_sid()?;
-        owned_by_user_handle(file, current_user.sid)
+        owned_by_any_handle_direct(file, &[current_user.sid])
     }
 
     #[cfg(test)]
     pub(super) fn owned_by_current_token_owner(file: &File) -> io::Result<bool> {
         let token = effective_token()?;
         let current_owner = token_owner_sid(&token)?;
-        owned_by_user_handle(file, current_owner.sid)
+        owned_by_any_handle_direct(file, &[current_owner.sid])
     }
 
     #[cfg(test)]
@@ -6495,6 +6644,30 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn private_directory_creation_uses_a_protected_current_user_dacl() {
+        let root = crate::test_tempdir();
+        let directory = root.path().join("new").join("control");
+        create_private_dirs(&directory).unwrap();
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL};
+        for path in [root.path().join("new"), directory.clone()] {
+            let handle = std::fs::OpenOptions::new()
+                .access_mode(READ_CONTROL)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&path)
+                .expect("owner can open a newly created private directory with READ_CONTROL");
+            assert!(has_current_user_only_dacl(&handle).unwrap());
+            assert!(owned_by_current_user(&handle).unwrap());
+            // Exercise the kernel's access check as well as the exact DACL.
+            let child = path.join("child");
+            std::fs::create_dir(&child).expect("owner can create child directories");
+            std::fs::write(child.join("data"), b"private").expect("owner can create child files");
+            std::fs::write(path.join("data"), b"private").expect("owner can create files");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn atomic_create_new_windows_rename_fallback_keeps_the_destination() {
         let root = crate::test_tempdir();
         let destination = root.path().join("default.config");
@@ -6540,6 +6713,55 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    fn staged_replacement_preserves_old_contents_until_publication() {
+        let root = crate::test_tempdir();
+        let destination = root.path().join("replace.png");
+        std::fs::write(&destination, b"previous").unwrap();
+        {
+            let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+            staged.write_all(b"partial").unwrap();
+            staged.sync_for_publish().unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+        }
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete").unwrap();
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staged_replacement_preserves_open_destination_handles() {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let root = crate::test_tempdir();
+        let destination = root.path().join("open.png");
+        let mut previous = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .unwrap();
+        previous.write_all(b"previous").unwrap();
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous");
+
+        staged.publish().unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        previous.seek(SeekFrom::Start(0)).unwrap();
+        let mut old_bytes = Vec::new();
+        previous.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"previous");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
     fn platform_atomic_rename_fallback_publishes_and_never_replaces() {
         let root = crate::test_tempdir();
         let destination = root.path().join("fallback.png");
@@ -6551,6 +6773,7 @@ mod tests {
                 Ok([nonce; 16])
             },
             HardLinkMode::ForceUnsupported,
+            false,
         )
         .unwrap();
         staged.write_all(b"complete").unwrap();
@@ -6566,6 +6789,7 @@ mod tests {
                 Ok([nonce; 16])
             },
             HardLinkMode::ForceUnsupported,
+            false,
         )
         .unwrap();
         staged.write_all(b"ours").unwrap();
@@ -6709,7 +6933,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn staged_discard_retains_an_empty_reservation_in_a_writable_parent() {
+    fn staged_replacement_and_discard_remove_reservations_in_a_writable_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = crate::test_tempdir();
+        let exports = root.path().join("exports");
+        std::fs::create_dir(&exports).unwrap();
+        std::fs::set_permissions(&exports, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let destination = exports.join("shot.png");
+        std::fs::write(&destination, b"previous PNG").unwrap();
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"complete PNG").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous PNG");
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete PNG");
+
+        let mut staged = stage_user_selected_file_replace(&destination).unwrap();
+        staged.write_all(b"partial PNG").unwrap();
+        staged.discard().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete PNG");
+        let entries: Vec<_> = std::fs::read_dir(&exports)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [std::ffi::OsString::from("shot.png")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_discard_removes_an_empty_reservation_in_a_writable_parent() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = crate::test_tempdir();
@@ -6723,8 +6977,8 @@ mod tests {
         staged.discard().unwrap();
 
         let reservation = exports.join(format!(".kettle-export-{}.tmp", "ab".repeat(16)));
-        assert!(reservation.is_dir());
-        assert_eq!(std::fs::read_dir(reservation).unwrap().count(), 0);
+        assert!(!reservation.exists());
+        assert_eq!(std::fs::read_dir(exports).unwrap().count(), 0);
         assert!(!destination.exists());
     }
 
@@ -6848,10 +7102,12 @@ mod tests {
     #[test]
     fn private_creation_has_no_inherited_acl_before_first_hardening() {
         use std::io::{Seek as _, SeekFrom};
+        use std::os::unix::fs::PermissionsExt as _;
 
         let root = crate::test_tempdir();
         let parent = root.path().join("searchable");
         std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = std::process::Command::new("/bin/chmod")
             .args(["+a", "everyone allow read,file_inherit"])
             .arg(&parent)

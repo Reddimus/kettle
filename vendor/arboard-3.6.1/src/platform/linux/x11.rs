@@ -26,7 +26,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use crate::platform::x11_incr::IncrRead;
+use crate::platform::x11_incr::{read_paste, IncrRead, PasteFormat};
 
 use log::{error, trace, warn};
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
@@ -35,8 +35,8 @@ use x11rb::{
 	protocol::{
 		xproto::{
 			Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Property,
-			PropertyNotifyEvent, SelectionNotifyEvent, SelectionRequestEvent, Time, WindowClass,
-			SELECTION_NOTIFY_EVENT,
+			PropertyNotifyEvent, SelectionNotifyEvent, SelectionRequestEvent, Time, Window,
+			WindowClass, SELECTION_NOTIFY_EVENT,
 		},
 		Event,
 	},
@@ -296,6 +296,18 @@ impl Inner {
 	/// The first format from `formats`, which the clipboard owner supports will be the
 	/// format of the return value.
 	fn read(&self, formats: &[Atom], selection: LinuxClipboardKind) -> Result<ClipboardData> {
+		self.read_inner(formats, selection, None)
+	}
+
+	fn read_inner(
+		&self,
+		formats: &[Atom],
+		selection: LinuxClipboardKind,
+		bounds: Option<crate::common::ReadBounds>,
+	) -> Result<ClipboardData> {
+		if let Some(bounds) = bounds {
+			bounds.check(0)?;
+		}
 		// if we are the current owner, we can get the current clipboard ourselves
 		if self.is_owner(selection)? {
 			let data = self.selection_of(selection).data.read();
@@ -303,6 +315,9 @@ impl Inner {
 				for data in data_list {
 					for format in formats {
 						if *format == data.format {
+							if let Some(bounds) = bounds {
+								bounds.check(data.bytes.len())?;
+							}
 							return Ok(data.clone());
 						}
 					}
@@ -317,7 +332,7 @@ impl Inner {
 
 		trace!("Trying to get the clipboard data.");
 		for format in formats {
-			match self.read_single(&reader, selection, *format) {
+			match self.read_single(&reader, selection, *format, bounds) {
 				Ok(bytes) => {
 					return Ok(ClipboardData { bytes, format: *format });
 				}
@@ -335,7 +350,15 @@ impl Inner {
 		reader: &XContext,
 		selection: LinuxClipboardKind,
 		target_format: Atom,
+		bounds: Option<crate::common::ReadBounds>,
 	) -> Result<Vec<u8>> {
+		if let Some(bounds) = bounds {
+			bounds.check(0)?;
+		}
+		let _cleanup = ScopeGuard::new(|| {
+			let _ = reader.conn.delete_property(reader.win_id, self.atoms.ARBOARD_CLIPBOARD);
+			let _ = reader.conn.flush();
+		});
 		// Delete the property so that we can detect (using property notify)
 		// when the selection owner receives our request.
 		reader
@@ -358,12 +381,18 @@ impl Inner {
 
 		trace!("Finished `convert_selection`");
 
-		let mut incr = IncrRead::default();
+		let mut incr = match bounds {
+			Some(bounds) => IncrRead::bounded(bounds.max_bytes, bounds.deadline),
+			None => IncrRead::default(),
+		};
 		let mut using_incr = false;
 
 		let mut timeout_end = Instant::now() + LONG_TIMEOUT_DUR;
 
 		while Instant::now() < timeout_end {
+			if let Some(bounds) = bounds {
+				bounds.check(incr.data.len())?;
+			}
 			let event = reader.conn.poll_for_event().map_err(into_unknown)?;
 			let event = match event {
 				Some(e) => e,
@@ -381,10 +410,16 @@ impl Inner {
 						target_format,
 						&mut using_incr,
 						&mut incr.data,
+						bounds,
 						event,
 					)?;
 					match result {
-						ReadSelNotifyResult::GotData(data) => return Ok(data),
+						ReadSelNotifyResult::GotData(data) => {
+							if let Some(bounds) = bounds {
+								bounds.check(data.len())?;
+							}
+							return Ok(data);
+						}
 						ReadSelNotifyResult::IncrStarted => {
 							// This means we received an indication that an the
 							// data is going to be sent INCRementally. Let's
@@ -417,6 +452,9 @@ impl Inner {
 			}
 		}
 		log::info!("Time-out hit while reading the clipboard.");
+		if bounds.is_some() {
+			return Err(Error::Timeout);
+		}
 		Err(Error::ContentNotAvailable)
 	}
 
@@ -493,6 +531,7 @@ impl Inner {
 		target_format: u32,
 		using_incr: &mut bool,
 		incr_data: &mut Vec<u8>,
+		bounds: Option<crate::common::ReadBounds>,
 		event: SelectionNotifyEvent,
 	) -> Result<ReadSelNotifyResult> {
 		// The property being set to NONE means that the `convert_selection`
@@ -512,12 +551,8 @@ impl Inner {
 			return Ok(ReadSelNotifyResult::EventNotRecognized);
 		}
 		// request the selection
-		let mut reply = reader
-			.conn
-			.get_property(true, event.requestor, event.property, event.target, 0, u32::MAX / 4)
-			.map_err(into_unknown)?
-			.reply()
-			.map_err(into_unknown)?;
+		let mut reply =
+			read_property(reader, event.requestor, event.property, event.target, bounds)?;
 
 		// trace!("Property.type: {:?}", self.atom_name(reply.type_));
 
@@ -529,22 +564,20 @@ impl Inner {
 			// indicating that we are ready to receive the data by deleting the
 			// property, however deleting only works if the type matches the
 			// property type. But the type didn't match in the previous call.
-			reply = reader
-				.conn
-				.get_property(
-					true,
-					event.requestor,
-					event.property,
-					self.atoms.INCR,
-					0,
-					u32::MAX / 4,
-				)
-				.map_err(into_unknown)?
-				.reply()
-				.map_err(into_unknown)?;
+			reply = read_property(
+				reader,
+				event.requestor,
+				event.property,
+				self.atoms.INCR,
+				bounds.map(|bounds| crate::common::ReadBounds { max_bytes: 4, ..bounds }),
+			)?;
 			log::trace!("Receiving INCR segments");
 			*using_incr = true;
-			if reply.value_len == 4 {
+			if let Some(bounds) = bounds {
+				if let Some(min_data_len) = reply.value32().and_then(|mut vals| vals.next()) {
+					bounds.check(min_data_len as usize)?;
+				}
+			} else if reply.value_len == 4 {
 				let min_data_len = reply.value32().and_then(|mut vals| vals.next()).unwrap_or(0);
 				incr_data.reserve(min_data_len as usize);
 			}
@@ -580,12 +613,9 @@ impl Inner {
 		// reads as the end of the transfer, and the owner waits forever,
 		// unable to answer the next request. Such a transfer is drained and
 		// then refused.
-		let reply = reader
-			.conn
-			.get_property(true, event.window, event.atom, AtomEnum::ANY, 0, u32::MAX / 4)
-			.map_err(into_unknown)?
-			.reply()
-			.map_err(into_unknown)?;
+		let remaining = incr.remaining_bounds();
+		let reply =
+			read_property(reader, event.window, event.atom, AtomEnum::ANY.into(), remaining)?;
 
 		if incr.push(reply.type_ == target_format, reply.value, Instant::now())? {
 			return Ok(true);
@@ -955,6 +985,22 @@ impl Clipboard {
 	}
 
 	pub(crate) fn get_text(&self, selection: LinuxClipboardKind) -> Result<String> {
+		self.get_text_inner(selection, None)
+	}
+
+	pub(crate) fn get_text_bounded(
+		&self,
+		selection: LinuxClipboardKind,
+		bounds: crate::common::ReadBounds,
+	) -> Result<String> {
+		self.get_text_inner(selection, Some(bounds))
+	}
+
+	fn get_text_inner(
+		&self,
+		selection: LinuxClipboardKind,
+		bounds: Option<crate::common::ReadBounds>,
+	) -> Result<String> {
 		let formats = [
 			self.inner.atoms.UTF8_STRING,
 			self.inner.atoms.UTF8_MIME_0,
@@ -963,10 +1009,14 @@ impl Clipboard {
 			self.inner.atoms.TEXT,
 			self.inner.atoms.TEXT_MIME_UNKNOWN,
 		];
-		let result = self.inner.read(&formats, selection)?;
+		let result = self.inner.read_inner(&formats, selection, bounds)?;
 		if result.format == self.inner.atoms.STRING {
 			// ISO Latin-1
 			// See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
+			if let Some(bounds) = bounds {
+				let bytes = result.bytes.iter().map(|&c| char::from(c).len_utf8()).sum();
+				bounds.check(bytes)?;
+			}
 			Ok(result.bytes.into_iter().map(|c| c as char).collect())
 		} else {
 			String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)
@@ -1032,7 +1082,10 @@ impl Clipboard {
 	#[cfg(feature = "image-data")]
 	pub(crate) fn get_image(&self, selection: LinuxClipboardKind) -> Result<ImageData<'static>> {
 		let formats = [self.inner.atoms.PNG_MIME];
-		let bytes = self.inner.read(&formats, selection)?.bytes;
+		let bytes = read_paste(PasteFormat::Image, |bounds| {
+			self.inner.read_inner(&formats, selection, bounds)
+		})?
+		.bytes;
 
 		let cursor = std::io::Cursor::new(&bytes);
 		let mut reader = image::ImageReader::new(cursor);
@@ -1066,7 +1119,9 @@ impl Clipboard {
 	}
 
 	pub(crate) fn get_file_list(&self, selection: LinuxClipboardKind) -> Result<Vec<PathBuf>> {
-		let result = self.inner.read(&[self.inner.atoms.URI_LIST], selection)?;
+		let result = read_paste(PasteFormat::Files, |bounds| {
+			self.inner.read_inner(&[self.inner.atoms.URI_LIST], selection, bounds)
+		})?;
 
 		Ok(paths_from_uri_list(result.bytes))
 	}
@@ -1183,6 +1238,46 @@ impl Drop for Clipboard {
 			}
 		}
 	}
+}
+
+fn read_property(
+	reader: &XContext,
+	window: Window,
+	property: Atom,
+	type_: Atom,
+	bounds: Option<crate::common::ReadBounds>,
+) -> Result<x11rb::protocol::xproto::GetPropertyReply> {
+	let length = if let Some(bounds) = bounds {
+		bounds.check(0)?;
+		// Probe without copying, then cap the read in case the owner replaces the property.
+		let info = reader
+			.conn
+			.get_property(false, window, property, type_, 0, 0)
+			.map_err(into_unknown)?
+			.reply()
+			.map_err(into_unknown)?;
+		if type_ == u32::from(AtomEnum::ANY) || info.type_ == type_ {
+			bounds.check(info.bytes_after as usize)?;
+		}
+		(bounds.max_bytes / 4 + usize::from(bounds.max_bytes % 4 != 0)).min(u32::MAX as usize)
+			as u32
+	} else {
+		u32::MAX / 4
+	};
+	let reply = reader
+		.conn
+		.get_property(true, window, property, type_, 0, length)
+		.map_err(into_unknown)?
+		.reply()
+		.map_err(into_unknown)?;
+	if let Some(bounds) = bounds {
+		if type_ == u32::from(AtomEnum::ANY) || reply.type_ == type_ {
+			bounds.check(reply.value.len().saturating_add(reply.bytes_after as usize))?;
+		} else {
+			bounds.check(0)?;
+		}
+	}
+	Ok(reply)
 }
 
 #[cfg(test)]

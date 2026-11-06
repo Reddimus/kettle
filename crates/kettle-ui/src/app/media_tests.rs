@@ -272,13 +272,13 @@ fn failed_facts_from_an_old_generation_leave_the_new_placeholder_alone() {
 fn followup_replaced_restore_snapshot_disables_saving() {
     let temp = kettle_test_support::private_tempdir("kettle-replaced-restore-");
     let path = temp.path().join("session.json");
-    std::fs::write(&path, br#"{"tabs":[],"active":0}"#).unwrap();
+    crate::session::write_test_session_file(&path, br#"{"tabs":[],"active":0}"#);
     let (_, identity) = crate::session::load_snapshot_result(&path)
         .unwrap()
         .unwrap();
     let newer = temp.path().join("newer.json");
     let contents = br#"{"tabs":[],"active":1}"#;
-    std::fs::write(&newer, contents).unwrap();
+    crate::session::write_test_session_file(&newer, contents);
     std::fs::rename(&newer, &path).unwrap();
     let mut failed = false;
     super::sessions::recover_startup_snapshot(

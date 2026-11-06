@@ -241,7 +241,7 @@ fn review_unread_startup_snapshot_disables_saving() {
 fn repeated_restore_recovery_keeps_session_saving_enabled() {
     let temp = kettle_test_support::private_tempdir("kettle-repeat-restore-");
     let path = temp.path().join("session.json");
-    std::fs::write(&path, br#"{"tabs":[],"active":0}"#).unwrap();
+    crate::session::write_test_session_file(&path, br#"{"tabs":[],"active":0}"#);
     let (_, identity) = crate::session::load_snapshot_result(&path)
         .unwrap()
         .unwrap();
@@ -260,4 +260,58 @@ fn repeated_restore_recovery_keeps_session_saving_enabled() {
         "successful recovery must remain successful after another window fails"
     );
     assert!(!path.exists());
+}
+
+#[test]
+fn saved_windows_fit_restore_budget_in_focus_order() {
+    let mut windows: Vec<_> = (1..=17)
+        .map(|seq| {
+            let window: crate::session::SWindow = serde_json::from_value(serde_json::json!({
+                "tabs": [{"root": {"Leaf": {"cwd": null}}, "title_override": seq.to_string()}]
+            }))
+            .unwrap();
+            (seq, window)
+        })
+        .collect();
+    windows.push((
+        18,
+        crate::session::SWindow {
+            tabs: Vec::new(),
+            active: 0,
+            geometry: None,
+        },
+    ));
+    let mut focus_order = std::collections::VecDeque::new();
+    for seq in [16, 3, 17, 18] {
+        super::sessions::record_window_focus(&mut focus_order, seq);
+    }
+    let windows = super::sessions::session_windows_for_save(windows, &focus_order);
+    assert_eq!(
+        windows.len(),
+        16,
+        "session saves must retain at most 16 nonempty windows"
+    );
+    let titles: Vec<_> = windows
+        .iter()
+        .map(|w| w.tabs[0].title_override.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "17", "3", "16", "1", "2", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"
+        ]
+    );
+    let session = crate::session::Session {
+        tabs: windows[0].tabs.clone(),
+        active: windows[0].active,
+        windows,
+        theme: None,
+    };
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("session.json");
+    crate::session::save_to_path(&session, &path).expect("save bounded session");
+    let loaded: crate::session::Session =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(loaded.validated_restore_windows().unwrap().len(), 16);
+    assert_eq!(loaded.tabs[0].title_override.as_deref(), Some("17"));
 }

@@ -2229,6 +2229,45 @@ impl App {
         true
     }
 
+    pub(super) fn cards_tip_claimed(&mut self, claimed: bool) {
+        let Some((pane, nonce)) = self.cards_tip.pending_card() else {
+            return;
+        };
+        let window_seq = self.windows.iter().find_map(|(&seq, ws)| {
+            let visible = ws.window_shown
+                && !ws.window_occluded
+                && terminal_surface_available(ws)
+                && ws
+                    .window
+                    .as_ref()
+                    .is_some_and(|window| window.is_minimized() != Some(true))
+                && !self.pointer_modal_open(ws)
+                && ws
+                    .mux
+                    .panes
+                    .get(&pane)
+                    .is_some_and(|state| state.inline_cards.contains(nonce))
+                && ws.renderer.as_ref().is_some_and(|renderer| {
+                    renderer
+                        .shown_cards()
+                        .any(|card| card.pane == pane && card.nonce == nonce)
+                });
+            visible.then_some(seq)
+        });
+        if self
+            .cards_tip
+            .complete(claimed, window_seq.is_some(), std::time::Instant::now())
+            .is_some()
+            && let Some(ws) = window_seq.and_then(|seq| self.windows.get_mut(&seq))
+            && let Some(state) = ws.mux.panes.get_mut(&pane)
+        {
+            state.inline_cards.set_tip(Some(nonce));
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// End the tip that a click opens a card, and take it off its card in
     /// whichever window holds that pane.
     pub(super) fn end_cards_tip(&mut self, ws: &mut WindowState) {

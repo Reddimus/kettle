@@ -299,6 +299,10 @@ impl App {
             .screenshot_completion
             .as_ref()
             .map(|_| std::time::Duration::from_millis(50));
+        let screenshot_retirement_wait = ws
+            .renderer
+            .as_ref()
+            .and_then(Renderer::poll_screenshot_retirements);
         if ws
             .pending_video_paste_receipt
             .as_ref()
@@ -358,6 +362,7 @@ impl App {
         let automation_wait = automation_wait
             .into_iter()
             .chain(screenshot_wait)
+            .chain(screenshot_retirement_wait)
             .chain(pending_run_wait)
             .min();
         if self.window_close_pending(ws.seq) || self.quit_requested {

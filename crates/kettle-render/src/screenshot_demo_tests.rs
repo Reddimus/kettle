@@ -75,3 +75,72 @@ fn screenshot_pane_ink_stays_above_the_caption() {
         assert_eq!(plain, [x, 32.0, width, 168.0]);
     }
 }
+
+#[test]
+fn failed_offscreen_screenshot_preserves_destination() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("existing.png");
+    std::fs::write(&out, b"previous PNG").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let result = super::capture::persist_offscreen_screenshot_with(&out, |writer| {
+        writer.write_all(b"partial PNG")?;
+        writer.flush()?;
+        Err(anyhow::anyhow!("injected encoder failure"))
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        b"previous PNG",
+        "failed encoding replaced the previous screenshot"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn offscreen_screenshot_atomically_replaces_destination() {
+    use std::io::Write as _;
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("existing.png");
+    std::fs::write(&out, b"previous PNG").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    super::capture::persist_offscreen_screenshot_with(&out, |writer| {
+        writer.write_all(b"complete PNG")?;
+        writer.flush()?;
+        assert_eq!(std::fs::read(&out).unwrap(), b"previous PNG");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"complete PNG");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory() {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+
+    // The visual tests and --screenshot accept caller-selected destinations,
+    // including open files beneath the system temp directory on Windows.
+    let mut out = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+    out.write_all(b"previous PNG").unwrap();
+    super::capture::persist_offscreen_screenshot_with(out.path(), |writer| {
+        writer.write_all(b"complete PNG")?;
+        assert_eq!(std::fs::read(out.path()).unwrap(), b"previous PNG");
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(std::fs::read(out.path()).unwrap(), b"complete PNG");
+    out.seek(SeekFrom::Start(0)).unwrap();
+    let mut previous = Vec::new();
+    out.read_to_end(&mut previous).unwrap();
+    assert_eq!(previous, b"previous PNG");
+}

@@ -1,6 +1,19 @@
 use super::*;
 
 pub(super) fn remote_watch_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let (parent, filename) = remote_watch_parts(path)?;
+    // The spool may not exist yet. Resolve only its existing, private parent
+    // so native events through aliases such as /tmp use the same path.
+    kettle_state::create_private_dirs(&parent)?;
+    Ok(std::fs::canonicalize(&parent)?.join(filename))
+}
+
+/// Split a spool path into its absolute parent and file name. A relative
+/// path is made absolute first, so a bare `remote.cmd` selects the current
+/// directory rather than an empty parent.
+pub(super) fn remote_watch_parts(
+    path: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::ffi::OsString)> {
     let path = std::path::absolute(path)?;
     let filename = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -14,10 +27,7 @@ pub(super) fn remote_watch_path(path: &std::path::Path) -> std::io::Result<std::
             "remote spool needs a parent",
         )
     })?;
-    // The spool may not exist yet. Resolve only its existing, private parent
-    // so native events through aliases such as /tmp use the same path.
-    kettle_state::create_private_dirs(parent)?;
-    Ok(std::fs::canonicalize(parent)?.join(filename))
+    Ok((parent.to_path_buf(), filename.to_owned()))
 }
 
 /// Locate the XDG cache dir for the current user without
@@ -720,12 +730,14 @@ impl App {
             windows,
             accent_registry: crate::window_accent::AccentRegistry::default(),
             focused_seq: 1,
+            window_focus_order: VecDeque::from([1]),
             next_window_seq: 2,
             gpu: None,
             font_preload: Some(font_preload),
             launch_override: plan.launch_override,
             pre_launch_eligible: plan.pre_launch && !plan.may_restore,
             gpu_choices: Vec::new(),
+            gpu_discovery_pending: false,
             ui_text,
             gpu_recovery: RecoveryState::default(),
             gpu_incident: None,
@@ -790,6 +802,7 @@ impl App {
             video_previewer,
             next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
+            trigger_matches: TriggerMatches::default(),
             last_trigger_fire: None,
             remote_scan_worker,
             remote_applied: std::collections::HashMap::new(),
@@ -1449,6 +1462,7 @@ impl App {
             // Focus comes home to window 1 (open_window moves
             // focused_seq to each window it opens).
             self.focused_seq = ws.seq;
+            record_window_focus(&mut self.window_focus_order, ws.seq);
         }
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader

@@ -442,16 +442,9 @@ impl App {
                         node.add_action(AccessibilityAction::ReplaceSelectedText);
                         node.add_action(AccessibilityAction::SetTextSelection);
 
-                        let mut text_node = Node::new(Role::TextRun);
-                        text_node.set_value(query);
-                        text_node.set_character_lengths(
-                            query
-                                .chars()
-                                .map(|character| character.len_utf8() as u8)
-                                .collect::<Vec<_>>(),
-                        );
-                        let byte_character_index =
-                            |byte: usize| query[..byte.min(query.len())].chars().count();
+                        let characters = crate::text_editor::EditorCharacters::new(query);
+                        let text_node = editor_accessibility_run(&characters);
+                        let byte_character_index = |byte| characters.index_at(byte);
                         let (anchor, focus) = ws.search.editor.directed_selection().map_or_else(
                             || {
                                 let cursor = byte_character_index(ws.search.editor.cursor());
@@ -1665,6 +1658,28 @@ pub(super) fn accessibility_modal_input_kind(ws: &WindowState) -> Option<u64> {
     }
 }
 
+pub(super) fn editor_accessibility_run(
+    characters: &crate::text_editor::EditorCharacters<'_>,
+) -> Node {
+    let mut run = Node::new(Role::TextRun);
+    let mut value = String::new();
+    let mut lengths = Vec::new();
+    for grapheme in characters.graphemes() {
+        // AccessKit's byte lengths are u8. An oversized cluster stays one
+        // selectable unit, represented by a replacement character in AT text.
+        let grapheme = if grapheme.len() > u8::MAX as usize {
+            "\u{fffd}"
+        } else {
+            grapheme
+        };
+        value.push_str(grapheme);
+        lengths.push(grapheme.len() as u8);
+    }
+    run.set_value(value);
+    run.set_character_lengths(lengths);
+    run
+}
+
 /// Give a modal text input its text as a text run, with the caret or the
 /// selection when `field` is that input's projection. AT-SPI exposes text
 /// only through text ranges, so without the run Orca announces the field as
@@ -1676,20 +1691,14 @@ fn push_text_input_run(
     text: &str,
     field: Option<&kettle_render::TextFieldOverlay>,
 ) {
-    let mut run = Node::new(Role::TextRun);
-    run.set_value(text);
-    run.set_character_lengths(
-        text.chars()
-            .map(|character| character.len_utf8() as u8)
-            .collect::<Vec<_>>(),
-    );
+    let characters = crate::text_editor::EditorCharacters::new(text);
+    let run = editor_accessibility_run(&characters);
     input.set_children([run_id]);
     input.add_action(AccessibilityAction::SetValue);
     input.add_action(AccessibilityAction::ReplaceSelectedText);
     input.add_action(AccessibilityAction::SetTextSelection);
     if let Some(field) = field.filter(|field| field.text == text) {
-        let character_index =
-            |byte: usize| text.char_indices().take_while(|(at, _)| *at < byte).count();
+        let character_index = |byte| characters.index_at(byte);
         let focus = field.cursor_byte;
         let anchor = match field.selection {
             Some((start, end)) if start != end => {

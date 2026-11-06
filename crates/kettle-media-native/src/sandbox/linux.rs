@@ -563,6 +563,23 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
         yes: To::Label("eperm"),
         no: To::Next,
     });
+    ops.push(jeq(
+        libc::SYS_setpriority as u32,
+        To::Label("priority"),
+        To::Next,
+    ));
+    ops.push(jeq(
+        libc::SYS_ioprio_set as u32,
+        To::Label("ioprio"),
+        To::Next,
+    ));
+    for number in [
+        libc::SYS_sched_setscheduler,
+        libc::SYS_sched_setparam,
+        libc::SYS_sched_setattr,
+    ] {
+        ops.push(jeq(number as u32, To::Label("caller"), To::Next));
+    }
     ops.push(jeq(libc::SYS_clone as u32, To::Label("clone"), To::Next));
     ops.push(jeq(libc::SYS_openat as u32, To::Label("openat"), To::Next));
     #[cfg(target_arch = "x86_64")]
@@ -604,6 +621,23 @@ fn filter(runs_programs: bool, me: u32, scoped: bool) -> Vec<sock_filter> {
         ));
     }
     ops.push(Op::Ret(ALLOW));
+    // Zero names the calling process even in a decoder inheriting this filter.
+    ops.push(Op::Label("priority"));
+    ops.push(Op::Load(arg_low(0)));
+    ops.push(jeq(
+        libc::PRIO_PROCESS,
+        To::Label("priority_caller"),
+        To::Label("eperm"),
+    ));
+    ops.push(Op::Label("ioprio"));
+    ops.push(Op::Load(arg_low(0)));
+    ops.push(jeq(1, To::Label("priority_caller"), To::Label("eperm")));
+    ops.push(Op::Label("priority_caller"));
+    ops.push(Op::Load(arg_low(1)));
+    ops.push(jeq(0, To::Label("allow"), To::Label("eperm")));
+    ops.push(Op::Label("caller"));
+    ops.push(Op::Load(arg_low(0)));
+    ops.push(jeq(0, To::Label("allow"), To::Label("eperm")));
     // A thread shares everything; a process may be started only to run a
     // program; neither may make a namespace.
     ops.push(Op::Label("clone"));
@@ -797,6 +831,50 @@ mod tests {
                 pc += usize::from(if taken { op.jt } else { op.jf });
             }
             pc += 1;
+        }
+    }
+
+    #[test]
+    fn scheduling_changes_target_only_the_caller() {
+        for (programs, scoped) in [(false, false), (true, false), (true, true)] {
+            let program = filter(programs, 4000, scoped);
+            for (nr, selector) in [
+                (libc::SYS_setpriority, libc::PRIO_PROCESS),
+                (libc::SYS_ioprio_set, 1),
+            ] {
+                for which in [0, 1, 2, 3] {
+                    for who in [0, 4000, 4001, u32::MAX] {
+                        let expected = if which == selector && who == 0 {
+                            ALLOW
+                        } else {
+                            EPERM
+                        };
+                        assert_eq!(
+                            run(
+                                &program,
+                                ARCH,
+                                nr as u32,
+                                [which as u64, who as u64, 19, 0, 0, 0]
+                            ),
+                            expected,
+                            "syscall {nr}, which {which}, who {who}"
+                        );
+                    }
+                }
+            }
+            for nr in [
+                libc::SYS_sched_setscheduler,
+                libc::SYS_sched_setparam,
+                libc::SYS_sched_setattr,
+            ] {
+                for pid in [0, 4000, 4001, u32::MAX] {
+                    assert_eq!(
+                        run(&program, ARCH, nr as u32, [pid as u64, 0, 0, 0, 0, 0]),
+                        if pid == 0 { ALLOW } else { EPERM },
+                        "syscall {nr}, pid {pid}"
+                    );
+                }
+            }
         }
     }
 

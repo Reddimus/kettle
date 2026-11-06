@@ -24,8 +24,8 @@ use windows_sys::Win32::{
 	Foundation::{GetLastError, GlobalFree, HANDLE, HGLOBAL, POINT, S_OK},
 	Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS, VOLUME_NAME_DOS},
 	System::{
-		DataExchange::SetClipboardData,
-		Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND},
+		DataExchange::{GetClipboardData, SetClipboardData},
+		Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GHND},
 		Ole::CF_HDROP,
 	},
 	UI::Shell::{PathCchStripPrefix, DROPFILES},
@@ -583,6 +583,14 @@ impl<'clipboard> Get<'clipboard> {
 	}
 
 	pub(crate) fn text(self) -> Result<String, Error> {
+		self.text_inner(None)
+	}
+
+	pub(crate) fn text_bounded(self, bounds: crate::common::ReadBounds) -> Result<String, Error> {
+		self.text_inner(Some(bounds))
+	}
+
+	fn text_inner(self, bounds: Option<crate::common::ReadBounds>) -> Result<String, Error> {
 		const FORMAT: u32 = clipboard_win::formats::CF_UNICODETEXT;
 
 		let _clipboard_assertion = self.clipboard?;
@@ -603,6 +611,50 @@ impl<'clipboard> Get<'clipboard> {
 		// the UTF-8 space as best as possible.
 		//
 		// (locale-specific text data, locale id) -> app -> system -> arboard (locale-specific text data) -> UTF-8
+		if let Some(bounds) = bounds {
+			use windows_sys::Win32::Globalization::{WideCharToMultiByte, CP_UTF8};
+			bounds.check(0)?;
+			// SAFETY: This thread holds the clipboard open for the entire read.
+			let handle = unsafe { GetClipboardData(FORMAT) };
+			if handle.is_null() {
+				return Err(Error::ContentNotAvailable);
+			}
+			// SAFETY: The CF_UNICODETEXT handle is valid while the clipboard is open.
+			let size = unsafe { GlobalSize(handle) } / std::mem::size_of::<u16>();
+			bounds.check(size.saturating_sub(1))?;
+			let size = i32::try_from(size).map_err(|_| Error::LimitExceeded)?;
+			// SAFETY: The handle is valid; the lock is released by the guard below.
+			let ptr = unsafe { GlobalLock(handle) };
+			if ptr.is_null() {
+				return Err(Error::ContentNotAvailable);
+			}
+			let _unlock = crate::common::ScopeGuard::new(|| {
+				// SAFETY: This handle was locked above and remains alive.
+				unsafe { GlobalUnlock(handle) };
+			});
+			// SAFETY: The locked buffer contains `size` UTF-16 units. A null output
+			// asks Windows for the UTF-8 size without allocating a copy.
+			let bytes = unsafe {
+				WideCharToMultiByte(
+					CP_UTF8,
+					0,
+					ptr.cast(),
+					size,
+					std::ptr::null_mut(),
+					0,
+					std::ptr::null(),
+					std::ptr::null_mut(),
+				)
+			};
+			if bytes == 0 {
+				return Err(Error::ConversionFailure);
+			}
+			// clipboard-win removes one trailing NUL, if present.
+			// SAFETY: `size` came from the locked allocation's size.
+			let trailing_nul =
+				size > 0 && unsafe { *ptr.cast::<u16>().add(size as usize - 1) } == 0;
+			bounds.check(bytes as usize - usize::from(trailing_nul))?;
+		}
 		let mut out = Vec::new();
 		clipboard_win::raw::get_string(&mut out).map_err(|_| Error::ContentNotAvailable)?;
 		String::from_utf8(out).map_err(|_| Error::ConversionFailure)

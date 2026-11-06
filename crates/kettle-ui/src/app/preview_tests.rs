@@ -363,12 +363,26 @@ fn the_first_card_shows_the_tip_until_opened_or_timed_out() {
     assert!(source.contains("cards_tip: crate::media::CardsTip::load(),"));
     assert!(source.contains("let cards_uncovered = !self.pointer_modal_open(ws);"));
     assert!(source.contains(
-        "let tip_begun = if presented && cards_uncovered { self.cards_tip.begin( renderer.shown_cards().map(|card| (card.pane, card.nonce)),"
+        "if presented && cards_uncovered { let proxy = self.proxy.clone(); self.cards_tip.begin( renderer.shown_cards().map(|card| (card.pane, card.nonce)),"
     ));
-    let begun = source
-        .find("drop(panes); if let Some((pane, nonce)) = tip_begun")
-        .expect("set after the views");
-    assert!(source[begun..].contains("state.inline_cards.set_tip(Some(nonce));"));
+    assert!(source.contains("proxy.send_event(UserEvent::CardsTipClaimed(claimed))"));
+    let completion = source
+        .split("fn cards_tip_claimed(")
+        .nth(1)
+        .unwrap()
+        .split("fn end_cards_tip(")
+        .next()
+        .unwrap();
+    assert!(
+        completion.contains(".complete(claimed, window_seq.is_some(), std::time::Instant::now())")
+    );
+    assert!(completion.contains("state.inline_cards.set_tip(Some(nonce));"));
+    assert!(
+        completion
+            .split_whitespace()
+            .collect::<String>()
+            .contains("renderer.shown_cards().any(|card|")
+    );
     assert!(source.contains(
         "self.show_media_item(ws, pane, item); // Opening a card is what the tip taught. self.end_cards_tip(ws);"
     ));

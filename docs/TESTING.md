@@ -430,6 +430,32 @@ For private-path and trusted-decoder changes, repeat focused tests under
 umask `002`. Fixtures must create private roots explicitly rather than inherit
 ambient permissions. Existing unrelated directories must keep their modes.
 
+`staged_replacement_and_discard_remove_reservations_in_a_writable_parent` creates
+an explicitly mode-0775 export parent and checks that replacement and discarded
+exports leave only the destination. Unix cleanup removes the identity-matching
+empty reservation through the held selected-parent descriptor when private-parent
+verification is unavailable. The `screenshot_demo_tests` destination fixtures
+are explicitly mode 0600 on Unix; their parents keep their created permissions.
+Session loading and restore-recovery fixtures also set mode 0600 explicitly,
+so they exercise recovery rather than the trusted reader's writable-file refusal.
+The macOS `private_creation_has_no_inherited_acl_before_first_hardening` fixture
+sets its searchable private-state parent to mode 0755 before seeding its ACL.
+Repeat these tests under both umask `022` and `002`.
+
+`kettle-state`'s Windows-only
+`private_directory_creation_uses_a_protected_current_user_dacl` checks both
+levels of a newly created directory tree through `READ_CONTROL` handles,
+verifies the current-user owner and protected full-access DACL, and creates
+child directories and files. Read-only verification must query the held
+directory rather than use the file-only `ReOpenFile` ACL-mutation path.
+`staged_replacement_preserves_open_destination_handles` checks atomic
+replacement while an existing reader retains the old bytes. The renderer's
+`offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory`
+exercises the same open-tempfile destination used by `bell_visual`,
+`menu_visual`, and `scrollbar_visual`, without needing a GPU. These tests run
+in the existing `windows-latest` workspace test job; a pass on Unix does not
+verify the Windows `FileRenameInfoEx` replacement semantics.
+
 `kettle-state`'s `trusted_leaf_follow_` tests cover relative config and Lua
 dotfile targets, writable link parents, link loops, and the link/component
 budgets. Run these on Unix and Windows; the Windows junction-chain test also
@@ -566,6 +592,22 @@ the same process account, failed decode/growth rollback, shared query/staging
 ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
 they do not require a GPU or live UI.
 
+### Placement depth, screenshot retirement, and resize capture
+
+`kettle-core`'s `anonymous_relative_depth_admission_uses_its_own_parent` and
+`relative_replacement_preserves_anonymous_descendant_depth` exercise anonymous
+relative placement admission and replacement. The shell-backed column-reflow
+capture test runs only on Unix; `local_column_reflow_invalidates_active_and_finished_capture_without_a_shell`
+checks the same invalidation through the local geometry commit on every platform.
+
+`kettle-render`'s `idle_ticks_retire_failed_worker_charges_without_new_screenshot_admission`
+uses a controlled completion callback and real budget reservations. It checks that
+idle ticks keep polling until both charges retire, even while a retry cannot be
+admitted. `idle_gpu_ticks_retire_a_screenshot_after_worker_startup_failure` checks
+actual queue completion without mapped uploads or another submission; it skips
+when no GPU adapter is available. A source guard pins polling and its next wake
+to the UI tick, independent of frame visibility and screenshot admission.
+
 ### Drift guards and source scans
 
 Some contracts cross files or cannot be exercised cheaply in every unit test.
@@ -642,7 +684,15 @@ The parser gate tests and lints `vte` with `ansi` and `alacritty_terminal`.
 The PTY gate uses `serde_support` for compatibility with serialized builders.
 The clipboard gate runs display-free Linux URI-list tests, then the X11 INCR
 paste test under `xvfb-run` when xvfb-run and xclip are installed. Other hosts
-check formatting for that patch.
+check formatting for that patch. `kettle-ui --test clipboard_transfer` also
+exercises the default image/file acquisition bounds with scripted correctly
+typed INCR chunks (byte ceiling and absolute deadline). Its
+`default_paste_x11_owner_cannot_renew_media_incr_forever` test drives the actual
+arboard image/file acquisitions against an unterminated, correctly typed X11
+owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
+clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
+The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
+movement, and eligibility after an old match scrolls out.
 
 CI runs parser patches on Linux and portable-pty on all three native hosts.
 Only Windows executes its ConPTY-specific code.

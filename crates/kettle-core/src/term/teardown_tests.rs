@@ -1,5 +1,64 @@
 #[cfg(unix)]
 #[test]
+fn column_reflow_invalidates_active_and_undrained_command_capture() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Terminal::new(
+        &["/bin/sh".into(), "-c".into(), "read ready".into()],
+        None,
+        100,
+        80,
+        24,
+        8,
+        16,
+        false,
+        CursorShape::Block,
+        None,
+        tx,
+        Arc::new(|| {}),
+    )
+    .expect("command capture fixture");
+    let at = std::time::Instant::now();
+    for finished in [false, true] {
+        terminal
+            .try_resize_geometry(PtyGeometry::new(80, 24, 640, 384))
+            .unwrap();
+        let token = kettle_vt::CommandToken::parse(&[b'a'; 32]).unwrap();
+        {
+            let mut term = terminal.term.lock().unwrap();
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut *term, b"\x1b[2J\x1b[H");
+            processor.advance(&mut *term, &[b'x'; 60]);
+            processor.advance(&mut *term, b"\r\noutput");
+        }
+        {
+            let mut state = terminal.command_correlation.lock().unwrap();
+            state.arm(token);
+            assert!(state.start(token, at, 1));
+            if finished {
+                assert!(state.finish(Some(token), 1, Some(0), at));
+            }
+        }
+        terminal
+            .try_resize_geometry(PtyGeometry::new(40, 24, 320, 384))
+            .unwrap();
+        assert_eq!(
+            terminal.correlated_command_start_line(token),
+            Some(u64::MAX),
+            "reflow must make command output unavailable"
+        );
+        let mut state = terminal.command_correlation.lock().unwrap();
+        if !finished {
+            assert!(state.finish(Some(token), 1, Some(0), at));
+        }
+        let events = state.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_line, u64::MAX);
+        assert_eq!(events[0].command.exit_code, Some(0));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn native_resize_observes_committed_geometry_and_failure_is_retryable() {
     struct ResizeProbe {
         master: Box<dyn portable_pty::MasterPty + Send>,
@@ -2439,4 +2498,78 @@ fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         "a success path that returns without disarming would kill a live \
              terminal's child"
     );
+}
+
+#[test]
+fn shell_resize_capture_fixture_is_unix_only() {
+    let source = include_str!("teardown_tests.rs");
+    let fixture = source
+        .split("fn column_reflow_invalidates_active_and_undrained_command_capture()")
+        .next()
+        .unwrap();
+    assert!(
+        fixture.contains("#[cfg(unix)]"),
+        "the /bin/sh fixture must not run on Windows"
+    );
+}
+
+#[test]
+fn local_column_reflow_invalidates_active_and_finished_capture_without_a_shell() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let proxy = EventProxy::new(tx, Arc::new(|| {}));
+    let at = std::time::Instant::now();
+    for finished in [false, true] {
+        let term = Arc::new(Mutex::new(Term::new(
+            TermConfig::default(),
+            &TermSize::new(80, 24),
+            proxy.clone(),
+        )));
+        let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+            geometry: PtyGeometry::new(80, 24, 640, 384),
+            generation: 0,
+        }));
+        let correlation = Mutex::new(command_correlation::CommandCorrelation::default());
+        let token = kettle_vt::CommandToken::parse(&[b'a'; 32]).unwrap();
+        {
+            let mut term = term.lock().unwrap();
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut *term, &[b'x'; 60]);
+            processor.advance(&mut *term, b"\r\noutput");
+        }
+        {
+            let mut state = correlation.lock().unwrap();
+            state.arm(token);
+            assert!(state.start(token, at, 1));
+            if finished {
+                assert!(state.finish(Some(token), 1, Some(0), at));
+            }
+        }
+        // Row-only changes preserve capture; a column reflow invalidates it.
+        commit_local_geometry_inner(
+            &term,
+            &geometry,
+            None,
+            Some(&correlation),
+            PtyGeometry::new(80, 25, 640, 400),
+            Some(TermConfig::default()),
+        );
+        assert_eq!(correlation.lock().unwrap().start_line(token), Some(1));
+        commit_local_geometry_inner(
+            &term,
+            &geometry,
+            None,
+            Some(&correlation),
+            PtyGeometry::new(40, 25, 320, 400),
+            Some(TermConfig::default()),
+        );
+        let mut state = correlation.lock().unwrap();
+        assert_eq!(state.start_line(token), Some(u64::MAX));
+        if !finished {
+            assert!(state.finish(Some(token), 1, Some(0), at));
+        }
+        let events = state.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].start_line, u64::MAX);
+        assert_eq!(events[0].command.exit_code, Some(0));
+    }
 }

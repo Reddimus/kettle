@@ -92,6 +92,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Docs: corrected drift in the supported DECRQSS list, the newline-mode
   Enter table, OSC 52 ordering, the GPU diagnostics cache override, and
   parser versions.
+- Linux self-update refuses to overwrite a file the install never recorded,
+  instead of backing it up and deleting it after the update, and counts
+  generated files toward the recovery limit so a completed update can always
+  be rolled back.
+- Agent launch treats a primary group shared with another account as not
+  private, Windows control directories are checked and created with a
+  private ACL, Windows lock files are retired while still locked, and the
+  Linux media worker can change only its own scheduling priority.
+- Paste, PRIMARY paste and OSC 52 clipboard reads are bounded in size and
+  time before their contents are collected, so a misbehaving clipboard owner
+  can no longer block the UI or grow memory without limit.
+- Opening Settings no longer waits for GPU detection, media tips are claimed
+  off the UI thread, a trigger never reruns for a match it already handled,
+  sessions save at most the 16 windows restore accepts, and screen readers
+  get the same character boundaries as the caret.
+- Kitty relative-placement chains deeper than eight are refused when
+  defined, command output captures are reported unavailable after a column
+  reflow instead of copying the wrong rows, offscreen screenshots no longer
+  leave a truncated file when they fail, GPU setup keeps trying other
+  backends when one device fails to open, and macOS audio decoding moved off
+  the sound-control thread.
 
 ## [5.9.0] — 2026-11-03
 

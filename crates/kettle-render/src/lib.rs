@@ -774,6 +774,7 @@ pub struct Renderer {
     /// stop dispatching while output globals are changing. The worker owns the
     /// finite GPU wait, mapping, PNG encoding, and file write.
     screenshot_worker: Option<ScreenshotWorker>,
+    screenshot_retirements: screenshot::ScreenshotRetirements,
 }
 
 #[cfg(test)]

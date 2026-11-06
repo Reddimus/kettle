@@ -45,7 +45,9 @@ date. Recheck that before upgrading a crate or dropping a patch.
   reports committed screen lifecycle and scroll-region mutations, coalesces
   compatible adjacent scrolls without losing the full monotonic screen delta,
   and exposes sticky overflow plus the current active screen for fail-safe
-  resynchronization. The Windows ConPTY backend also no longer probes a bare
+  resynchronization. An independent copy of this bounded journal lets output
+  triggers move consumed spans with rows without draining graphics events.
+  The Windows ConPTY backend also no longer probes a bare
   `conpty.dll`. A bare name searches the application directory, the working
   directory, and `PATH`, which is a DLL preloading vector for a terminal
   launched inside an untrusted project; the same probe was removed from
@@ -544,6 +546,11 @@ them.
   `master` reads segments the same old way (checked 2026-10-16). The drain of a
   refused transfer is bounded (four seconds and 4,096 segments, not renewed by
   each segment), so an owner that keeps sending cannot hold a read forever.
+- Patch: the X11 image and file-list acquisitions used before text in default
+  paste now share the bounded property/INCR reader. PNG transfers allow the
+  existing 256 MiB image-paste limit plus one byte; URI lists allow 1 MiB plus
+  one byte. Each acquisition has an absolute two-second deadline that correctly
+  typed, nonempty INCR chunks cannot renew.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream

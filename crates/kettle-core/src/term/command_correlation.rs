@@ -153,6 +153,16 @@ impl CommandCorrelation {
         self.finished.retain(|event| event.token != token);
     }
 
+    pub(super) fn invalidate_capture(&mut self) {
+        // A physical row cannot identify command output after wrapping or merging.
+        if let Some((_, line)) = self.started.as_mut() {
+            *line = u64::MAX;
+        }
+        for event in &mut self.finished {
+            event.start_line = u64::MAX;
+        }
+    }
+
     pub(super) fn start_line(&self, token: CommandToken) -> Option<u64> {
         if self.expected == Some(token) {
             self.started.map(|(_, line)| line)

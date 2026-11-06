@@ -91,6 +91,19 @@ impl Clipboard {
 		self.get().text()
 	}
 
+	/// Fetches text with a byte ceiling and an absolute transfer deadline.
+	///
+	/// X11 bounds incoming properties and INCR chunks before accumulating them.
+	/// Native APIs may materialize data in this process before exposing its size;
+	/// those backends check the reported size before copying and check the result.
+	pub fn get_text_bounded(
+		&mut self,
+		max_bytes: usize,
+		deadline: std::time::Instant,
+	) -> Result<String, Error> {
+		self.get().text_bounded(max_bytes, deadline)
+	}
+
 	/// Places the text onto the clipboard. Any valid UTF-8 string is accepted.
 	///
 	/// # Errors
@@ -183,6 +196,19 @@ impl Get<'_> {
 	/// Completes the "get" operation by fetching UTF-8 text from the clipboard.
 	pub fn text(self) -> Result<String, Error> {
 		self.platform.text()
+	}
+
+	/// Fetches text with the same bounds as [`Clipboard::get_text_bounded`].
+	pub fn text_bounded(
+		self,
+		max_bytes: usize,
+		deadline: std::time::Instant,
+	) -> Result<String, Error> {
+		let bounds = common::ReadBounds { max_bytes, deadline };
+		bounds.check(0)?;
+		let text = self.platform.text_bounded(bounds)?;
+		bounds.check(text.len())?;
+		Ok(text)
 	}
 
 	/// Completes the "get" operation by fetching image data from the clipboard and returning the

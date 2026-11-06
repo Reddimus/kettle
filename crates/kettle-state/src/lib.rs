@@ -22,14 +22,16 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 #[cfg(unix)]
 pub use private::create_user_selected_file_new_at;
+#[cfg(windows)]
+pub use private::validate_private_directory;
 pub use private::{
     CreatedUserSelectedFile, StagedFilePublishError, StagedUserSelectedFile, create_private_dirs,
     create_private_file_new, create_user_selected_file_new, discard_created_private_file,
     discard_created_private_file_checked, is_kettle_owned_dir_name, open_existing_private_file,
     open_private_file, open_private_file_append, open_trusted_file_read,
     open_trusted_file_read_following_leaf, remove_open_private_file, restrict_private_file,
-    stage_user_selected_file_new, truncate_private_file, validate_private_file_parent,
-    validate_trusted_directory,
+    stage_user_selected_file_new, stage_user_selected_file_replace, truncate_private_file,
+    validate_private_file_parent, validate_trusted_directory,
 };
 #[cfg(unix)]
 pub use tree::{
@@ -814,14 +816,23 @@ impl ExclusiveFileLock {
     /// Removes the lock file, then releases it. A caller that opened the
     /// file before the removal finds it retired (see [`is_retired_lock`])
     /// instead of locking a file nobody else can see. Removes nothing if
-    /// `path` no longer names the locked file. Windows cannot delete a file
-    /// that is still open, so there the lock is released first.
+    /// `path` no longer names the locked file. Windows leaves the reusable
+    /// lock file in place if the volume cannot retire it with POSIX semantics.
     pub fn remove(self, path: &Path) -> io::Result<()> {
+        self.remove_with(path, || {})
+    }
+
+    fn remove_with(self, path: &Path, before_retire: impl FnOnce()) -> io::Result<()> {
         if !private::same_file_identity(&self.file, path)? {
             return Err(retired_lock());
         }
+        before_retire();
         #[cfg(windows)]
-        drop(self);
+        {
+            private::retire_locked_file(&self.file);
+            Ok(())
+        }
+        #[cfg(not(windows))]
         fs::remove_file(path)
     }
 }
@@ -907,7 +918,14 @@ fn poll_with_timeout<T>(
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    open_private_file(path)
+    #[cfg(windows)]
+    {
+        private::open_lock_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        open_private_file(path)
+    }
 }
 
 fn acquire_file_lock(
@@ -922,10 +940,13 @@ fn acquire_file_lock(
 fn verify_locked_file(file: File, path: &Path) -> io::Result<File> {
     // Uninstall, or a sweep of stale locks, may retire an idle lock while
     // another caller holds its old fd.
-    if !private::same_file_identity(&file, path)? {
-        return Err(retired_lock());
+    match private::same_file_identity(&file, path) {
+        Ok(true) => Ok(file),
+        Ok(false) => Err(retired_lock()),
+        #[cfg(windows)]
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(retired_lock()),
+        Err(error) => Err(error),
     }
-    Ok(file)
 }
 
 /// The lock file a caller opened was removed or replaced before it could be
@@ -967,6 +988,80 @@ fn set_unix_mode(_file: &File, _mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_retirement_keeps_waiters_out_until_the_file_is_retired() {
+        for preexisting in [false, true] {
+            let root = test_tempdir();
+            let path = root.path().join("lock");
+            if preexisting {
+                drop(open_private_file(&path).unwrap());
+            }
+            let lock = ExclusiveFileLock::acquire(&path).unwrap();
+            #[cfg(windows)]
+            let retirement_supported = supports_posix_retirement(&lock.file);
+            #[cfg(not(windows))]
+            let retirement_supported = true;
+            let waiter = open_lock_file(&path).unwrap();
+            lock.remove_with(&path, || {
+                assert!(
+                    ExclusiveFileLock::try_acquire(&path).unwrap().is_none(),
+                    "retirement released the exclusive lock before retiring the file"
+                );
+            })
+            .unwrap();
+            if retirement_supported {
+                assert_eq!(
+                    fs::symlink_metadata(&path).unwrap_err().kind(),
+                    io::ErrorKind::NotFound,
+                    "remove must retire the name while a waiter still holds the file"
+                );
+            }
+            fs4::FileExt::lock(&waiter).unwrap();
+            let result = verify_locked_file(waiter, &path);
+            match result {
+                Ok(file) => {
+                    assert!(!retirement_supported, "waiter acquired a retired lock");
+                    fs4::FileExt::unlock(&file).unwrap();
+                }
+                Err(error) => assert!(
+                    is_retired_lock(&error),
+                    "waiter saw a non-retryable error: {error}"
+                ),
+            }
+            assert!(ExclusiveFileLock::try_acquire(&path).unwrap().is_some());
+        }
+    }
+
+    #[cfg(windows)]
+    fn supports_posix_retirement(file: &File) -> bool {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+        use windows_sys::Win32::System::SystemServices::FILE_SUPPORTS_POSIX_UNLINK_RENAME;
+
+        let mut flags = 0;
+        // SAFETY: the handle is live, flags is writable, and unused output
+        // buffers are null with zero lengths.
+        let result = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut flags,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_ne!(
+            result,
+            0,
+            "query lock volume: {}",
+            io::Error::last_os_error()
+        );
+        flags & FILE_SUPPORTS_POSIX_UNLINK_RENAME != 0
+    }
 
     #[cfg(unix)]
     #[test]

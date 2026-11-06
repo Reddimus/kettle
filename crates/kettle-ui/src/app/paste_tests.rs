@@ -1339,3 +1339,48 @@ fn coalesced_input_never_exceeds_one_pty_message() {
     assert!(delivered[..size].iter().all(|byte| *byte == b'a'));
     assert!(delivered[size..].iter().all(|byte| *byte == b'b'));
 }
+
+#[test]
+fn bounded_clipboard_errors_reject_paste_with_translated_feedback() {
+    use kettle_i18n::{Language, Translator};
+    for (error, expected) in [
+        (
+            arboard::Error::LimitExceeded,
+            kettle_i18n::Text::NotifyBodyClipboardLimitExceeded,
+        ),
+        (
+            arboard::Error::Timeout,
+            kettle_i18n::Text::NotifyBodyClipboardTimeout,
+        ),
+    ] {
+        let reason = super::paste::clipboard_paste_result(Err(error));
+        assert!(
+            reason.is_err(),
+            "clipboard budget failure must reject paste with feedback"
+        );
+        let reason = reason.unwrap_err();
+        assert_eq!(reason, expected);
+        let en = Translator::new(Language::En).text(reason);
+        let es = Translator::new(Language::Es).text(reason);
+        assert!(en.contains("Clipboard"));
+        assert_ne!(en, es);
+    }
+    assert_eq!(
+        super::paste::clipboard_paste_result(Ok("text".into())).unwrap(),
+        "text"
+    );
+    assert_eq!(
+        super::paste::clipboard_paste_result(Err(arboard::Error::ContentNotAvailable)).unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn bounded_clipboard_extra_byte_rejects_instead_of_truncating() {
+    use super::paste::clipboard_paste_result;
+    assert!(clipboard_paste_result(Ok("x".repeat(4 << 20))).is_ok());
+    assert_eq!(
+        clipboard_paste_result(Ok("x".repeat((4 << 20) + 1))),
+        Err(kettle_i18n::Text::NotifyBodyClipboardLimitExceeded)
+    );
+}

@@ -234,3 +234,6 @@ pub struct PickupRequest {
     pub target: InlineTarget,
     pub permit: PickupPermit,
 }
+
+#[cfg(any(target_os = "linux", test))]
+mod private_group;

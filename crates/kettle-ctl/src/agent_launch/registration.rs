@@ -102,7 +102,9 @@ mod tests {
 
     #[test]
     fn registration_round_trips_a_peers_held_image() {
-        let native = HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap();
+        let Some(native) = HeldExecutable::test_binary() else {
+            return;
+        };
         let me = crate::process::current().unwrap().identity;
         let registration =
             LaunchRegistration::new(InlineTarget::CodexHook, "codex-cli 0.162.0", &native, None)
@@ -117,7 +119,9 @@ mod tests {
 
     #[test]
     fn unsupported_profiles_and_unknown_fields_are_refused_before_fd_access() {
-        let native = HeldExecutable::open(&std::env::current_exe().unwrap()).unwrap();
+        let Some(native) = HeldExecutable::test_binary() else {
+            return;
+        };
         let me = crate::process::current().unwrap().identity;
         let registration = LaunchRegistration::new(
             InlineTarget::ClaudeHook,

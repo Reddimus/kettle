@@ -442,6 +442,7 @@ pub struct Term<T> {
 
     /// Bounded, ordered terminal mutations consumed by graphics integrations.
     graphics_events: GraphicsEventJournal,
+    row_events: GraphicsEventJournal,
 }
 
 /// Maximum number of unconsumed graphics events retained by a terminal.
@@ -783,6 +784,7 @@ impl<T> Term<T> {
             title: Default::default(),
             mode,
             graphics_events: GraphicsEventJournal::new(),
+            row_events: GraphicsEventJournal::new(),
         }
     }
 
@@ -796,6 +798,19 @@ impl<T> Term<T> {
         self.grid
             .history_origin()
             .saturating_add(u64::try_from(self.grid.history_size()).unwrap_or(u64::MAX))
+    }
+
+    /// Drain row mutations independently of the graphics consumer, under the grid lock.
+    pub fn take_row_events(&mut self) -> GraphicsEventBatch {
+        self.row_events
+            .drain(self.mode.contains(TermMode::ALT_SCREEN))
+    }
+
+    fn record_graphics_event(&mut self, event: GraphicsEvent) {
+        self.graphics_events.push(event);
+        if !matches!(event, GraphicsEvent::SyncMarker { .. }) {
+            self.row_events.push(event);
+        }
     }
 
     /// Collect the information about the changes in the lines, which
@@ -1349,7 +1364,7 @@ impl<T> Term<T> {
                 cmp::max(line - lines, origin)
             };
         }
-        self.graphics_events.push(GraphicsEvent::PartialScroll {
+        self.record_graphics_event(GraphicsEvent::PartialScroll {
             direction: if down {
                 GraphicsScrollDirection::Down
             } else {
@@ -1408,7 +1423,7 @@ impl<T> Term<T> {
         self.grid.scroll_down(&region, lines);
         self.mark_fully_damaged();
         let new_screen_top = self.graphics_screen_top();
-        self.graphics_events.push(GraphicsEvent::Scroll {
+        self.record_graphics_event(GraphicsEvent::Scroll {
             columns: self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).then_some((
                 self.horizontal_margins.start.0,
                 self.horizontal_margins.end.0,
@@ -1474,7 +1489,7 @@ impl<T> Term<T> {
         }
         self.mark_fully_damaged();
         let new_screen_top = self.graphics_screen_top();
-        self.graphics_events.push(GraphicsEvent::Scroll {
+        self.record_graphics_event(GraphicsEvent::Scroll {
             columns: self.mode.contains(TermMode::LEFT_RIGHT_MARGIN).then_some((
                 self.horizontal_margins.start.0,
                 self.horizontal_margins.end.0,
@@ -1508,7 +1523,7 @@ impl<T> Term<T> {
                 .selection
                 .take()
                 .filter(|s| !s.intersects_range(Line(0)..));
-            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+            self.record_graphics_event(GraphicsEvent::EraseDisplay);
         }
         self.mark_fully_damaged();
     }
@@ -1816,7 +1831,7 @@ impl<T> Term<T> {
             .filter(|selection| !selection.intersects_range(first..=last));
         self.mark_fully_damaged();
         if matches!(mode, ansi::ClearMode::All) {
-            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+            self.record_graphics_event(GraphicsEvent::EraseDisplay);
         }
     }
 
@@ -2337,7 +2352,7 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     fn sync_marker(&mut self, id: u64) {
-        self.graphics_events.push(GraphicsEvent::SyncMarker { id });
+        self.record_graphics_event(GraphicsEvent::SyncMarker { id });
     }
 
     /// A character to be displayed.
@@ -3431,7 +3446,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.mark_fully_damaged();
         if erase_display {
-            self.graphics_events.push(GraphicsEvent::EraseDisplay);
+            self.record_graphics_event(GraphicsEvent::EraseDisplay);
         }
     }
 
@@ -3496,7 +3511,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
         self.mark_fully_damaged();
-        self.graphics_events.push(GraphicsEvent::Reset);
+        self.record_graphics_event(GraphicsEvent::Reset);
     }
 
     #[inline]
@@ -3650,8 +3665,10 @@ impl<T: EventListener> Handler for Term<T> {
                 trace!("Setting private mode: {mode}");
                 if !self.mode.contains(TermMode::ALT_SCREEN) {
                     self.swap_alt_preserving();
-                    self.graphics_events
-                        .push(GraphicsEvent::EnterAlternate { mode, clear: false });
+                    self.record_graphics_event(GraphicsEvent::EnterAlternate {
+                        mode,
+                        clear: false,
+                    });
                 }
                 return;
             }
@@ -3678,7 +3695,7 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if !self.mode.contains(TermMode::ALT_SCREEN) {
                     self.swap_alt();
-                    self.graphics_events.push(GraphicsEvent::EnterAlternate {
+                    self.record_graphics_event(GraphicsEvent::EnterAlternate {
                         mode: 1049,
                         clear: true,
                     });
@@ -3773,8 +3790,7 @@ impl<T: EventListener> Handler for Term<T> {
                         self.grid.reset_region(..);
                     }
                     self.swap_alt_preserving();
-                    self.graphics_events
-                        .push(GraphicsEvent::LeaveAlternate { mode, clear });
+                    self.record_graphics_event(GraphicsEvent::LeaveAlternate { mode, clear });
                 }
                 return;
             }
@@ -3801,7 +3817,7 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
                 if self.mode.contains(TermMode::ALT_SCREEN) {
                     self.swap_alt();
-                    self.graphics_events.push(GraphicsEvent::LeaveAlternate {
+                    self.record_graphics_event(GraphicsEvent::LeaveAlternate {
                         mode: 1049,
                         clear: false,
                     });

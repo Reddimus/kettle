@@ -160,17 +160,78 @@ pub(crate) struct ScreenshotCaptureTarget {
     padded_bytes_per_row: u32,
 }
 
+// Rejected jobs can follow submitted GPU work. Keep their charges until GPU
+// completion unless the worker has already observed retirement.
+pub(crate) struct ScreenshotGpuGuard<T> {
+    resources: Option<T>,
+    defer: Option<Box<dyn FnOnce(T) + Send>>,
+}
+
+impl<T> ScreenshotGpuGuard<T> {
+    pub(crate) fn new(resources: T, defer: impl FnOnce(T) + Send + 'static) -> Self {
+        Self {
+            resources: Some(resources),
+            defer: Some(Box::new(defer)),
+        }
+    }
+
+    pub(crate) fn retired(mut self) {
+        self.defer = None;
+    }
+}
+
+impl<T> Drop for ScreenshotGpuGuard<T> {
+    fn drop(&mut self) {
+        if let Some(resources) = self.resources.take()
+            && let Some(defer) = self.defer.take()
+        {
+            defer(resources);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ScreenshotRetirements(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ScreenshotRetirements {
+    pub(crate) fn track(&self) -> ScreenshotRetirement {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        ScreenshotRetirement(self.0.clone())
+    }
+
+    pub(crate) fn poll_with(&self, mut poll: impl FnMut()) -> Option<std::time::Duration> {
+        if self.0.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return None;
+        }
+        poll();
+        (self.0.load(std::sync::atomic::Ordering::Acquire) != 0)
+            .then_some(std::time::Duration::from_millis(50))
+    }
+}
+
+pub(crate) struct ScreenshotRetirement(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ScreenshotRetirement {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+struct ScreenshotReservations {
+    _capture_gpu: kettle_core::GraphicsReservation,
+    _staging_gpu: kettle_core::GraphicsReservation,
+    // Start tracking before dispatch: a worker can defer its charges after the
+    // UI has gone idle. Keep ticking until either it or the callback retires.
+    _retirement: ScreenshotRetirement,
+}
+
 pub(crate) struct PreparedScreenshot {
     staging: wgpu::Buffer,
     /// Keep the copy source and its transient reservation alive through the
     /// worker's bounded GPU wait. wgpu also retains the texture internally,
     /// but Kettle's accounting must cover the same lifetime.
     _capture_texture: wgpu::Texture,
-    _capture_gpu: kettle_core::GraphicsReservation,
-    /// The MAP_READ staging buffer is a second allocation, not part of the
-    /// capture texture. Charge it independently for the same in-flight
-    /// lifetime so the process GPU limit bounds actual screenshot resources.
-    _staging_gpu: kettle_core::GraphicsReservation,
+    gpu: ScreenshotGpuGuard<ScreenshotReservations>,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
@@ -475,8 +536,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
     let PreparedScreenshot {
         staging,
         _capture_texture: capture_texture,
-        _capture_gpu: capture_gpu,
-        _staging_gpu: staging_gpu,
+        gpu,
         width,
         height,
         unpadded_bytes_per_row,
@@ -574,8 +634,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
     // the actual device lifetime rather than the unrelated PNG lifetime.
     drop(staging);
     drop(capture_texture);
-    drop(capture_gpu);
-    drop(staging_gpu);
+    gpu.retired();
 
     if request.is_cancelled() {
         return Err("screenshot request was cancelled".to_string());
@@ -913,6 +972,14 @@ pub(crate) fn crop_screenshot(
 }
 
 impl Renderer {
+    /// Poll unretired screenshot work even when no frame or new capture can
+    /// be admitted. The caller must schedule the returned delay while idle.
+    pub fn poll_screenshot_retirements(&self) -> Option<std::time::Duration> {
+        self.screenshot_retirements.poll_with(|| {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        })
+    }
+
     /// Queue a screenshot request for the next frame. At most one capture may
     /// be pending or in flight; callers receive the original request back when
     /// the bounded worker is busy so they can report an explicit error.
@@ -1107,8 +1174,19 @@ impl Renderer {
         PreparedScreenshot {
             staging: capture.staging,
             _capture_texture: capture.texture,
-            _capture_gpu: capture.gpu,
-            _staging_gpu: capture.staging_gpu,
+            gpu: {
+                let queue = self.gpu.queue.clone();
+                ScreenshotGpuGuard::new(
+                    ScreenshotReservations {
+                        _capture_gpu: capture.gpu,
+                        _staging_gpu: capture.staging_gpu,
+                        _retirement: self.screenshot_retirements.track(),
+                    },
+                    move |reservations| {
+                        queue.on_submitted_work_done(move || drop(reservations));
+                    },
+                )
+            },
             width: capture.width,
             height: capture.height,
             unpadded_bytes_per_row: capture.unpadded_bytes_per_row,

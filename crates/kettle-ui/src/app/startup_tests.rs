@@ -727,17 +727,29 @@ fn cache_dir_from_env_probes_in_order() {
 
 #[test]
 fn relative_remote_spool_watch_is_normalized_before_parent_selection() {
-    let root = tempfile::Builder::new()
-        .prefix("kettle-remote-relative-")
-        .tempdir_in(".")
-        .unwrap();
-    let path = std::path::Path::new(".")
-        .join(root.path().file_name().unwrap())
-        .join("new-spool/remote.cmd");
-    assert!(path.is_relative());
+    // Pure: no directory is created, so the test does not depend on who owns
+    // the checkout's ancestors (a CI scratch drive may not be trusted).
+    let cwd = std::env::current_dir().unwrap();
+    let (parent, name) = super::remote_watch_parts(std::path::Path::new("remote.cmd")).unwrap();
+    assert_eq!(parent, cwd, "a bare file name selects the current directory");
+    assert_eq!(name, "remote.cmd");
+    let nested = std::path::Path::new(".").join("new-spool").join("remote.cmd");
+    assert!(nested.is_relative());
+    let (parent, name) = super::remote_watch_parts(&nested).unwrap();
+    assert!(parent.is_absolute());
+    assert!(parent.ends_with("new-spool"));
+    assert!(parent.starts_with(&cwd));
+    assert_eq!(name, "remote.cmd");
+}
+
+#[test]
+fn remote_spool_watch_creates_its_private_parent_but_not_the_spool() {
+    let root = kettle_test_support::private_tempdir("kettle-remote-parent-");
+    let path = root.path().join("new-spool").join("remote.cmd");
     let watched = super::remote_watch_path(&path).unwrap();
     assert!(watched.is_absolute());
     assert!(watched.parent().unwrap().is_dir());
+    assert_eq!(watched.file_name().unwrap(), "remote.cmd");
     assert!(!watched.exists(), "the spool need not exist yet");
 }
 

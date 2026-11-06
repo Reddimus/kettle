@@ -165,6 +165,14 @@ impl<'clipboard> Get<'clipboard> {
 		}
 	}
 
+	pub(crate) fn text_bounded(self, bounds: crate::common::ReadBounds) -> Result<String, Error> {
+		match self.clipboard {
+			Clipboard::X11(clipboard) => clipboard.get_text_bounded(self.selection, bounds),
+			#[cfg(feature = "wayland-data-control")]
+			Clipboard::WlDataControl(clipboard) => clipboard.get_text_bounded(self.selection, bounds),
+		}
+	}
+
 	#[cfg(feature = "image-data")]
 	pub(crate) fn image(self) -> Result<ImageData<'static>, Error> {
 		match self.clipboard {

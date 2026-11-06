@@ -18,6 +18,12 @@ use std::borrow::Cow;
 /// gives a more detailed explanation for each error kind.
 #[non_exhaustive]
 pub enum Error {
+	/// The clipboard transfer exceeded its byte budget.
+	LimitExceeded,
+
+	/// The clipboard transfer exceeded its absolute deadline.
+	Timeout,
+
 	/// The clipboard contents were not available in the requested format.
 	/// This could either be due to the clipboard being empty or the clipboard contents having
 	/// an incompatible format to the requested one (eg when calling `get_image` on text)
@@ -55,6 +61,8 @@ pub enum Error {
 impl std::fmt::Display for Error {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Error::LimitExceeded => f.write_str("Clipboard transfer exceeded its byte budget."),
+			Error::Timeout => f.write_str("Clipboard transfer exceeded its deadline."),
 			Error::ContentNotAvailable => f.write_str("The clipboard contents were not available in the requested format or the clipboard is empty."),
 			Error::ClipboardNotSupported => f.write_str("The selected clipboard is not supported with the current system configuration."),
 			Error::ClipboardOccupied => f.write_str("The native clipboard is not accessible due to being held by another party."),
@@ -79,6 +87,8 @@ impl std::fmt::Debug for Error {
 			}
 		}
 		let name = kind_to_str!(
+			LimitExceeded,
+			Timeout,
 			ContentNotAvailable,
 			ClipboardNotSupported,
 			ClipboardOccupied,
@@ -178,4 +188,22 @@ pub(crate) mod private {
 	impl Sealed for crate::Get<'_> {}
 	impl Sealed for crate::Set<'_> {}
 	impl Sealed for crate::Clear<'_> {}
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReadBounds {
+	pub(crate) max_bytes: usize,
+	pub(crate) deadline: std::time::Instant,
+}
+
+impl ReadBounds {
+	pub(crate) fn check(self, bytes: usize) -> Result<(), Error> {
+		if std::time::Instant::now() >= self.deadline {
+			return Err(Error::Timeout);
+		}
+		if bytes > self.max_bytes {
+			return Err(Error::LimitExceeded);
+		}
+		Ok(())
+	}
 }
