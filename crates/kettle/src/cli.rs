@@ -217,7 +217,8 @@ pub(crate) struct Cli {
 
     /// Restore the previous session (tabs, splits, working dirs) for this
     /// launch, regardless of the `restore-session` policy. The default `auto`
-    /// follows the macOS keep-windows setting and opens fresh on other platforms.
+    /// follows the macOS keep-windows setting, restores on Linux, and opens
+    /// fresh on Windows.
     /// Set `restore-session = true` to enable restore on every launch, or
     /// `restore-session = false` to open fresh unless this flag is passed.
     #[arg(long, verbatim_doc_comment)]
@@ -271,10 +272,12 @@ pub(crate) struct Cli {
     )]
     pub(crate) record_dir: Option<std::path::PathBuf>,
 
-    /// With --record, capture RAW typed characters instead of redacted key
-    /// tokens. WARNING: the trace can then contain typed passwords; leave it off
-    /// unless you need byte-exact input. The window title shows `[REC RAW]` while
-    /// active. Also honored via `KETTLE_RECORD_RAW_INPUT` / `record-raw-input`.
+    /// While recording is enabled by CLI, environment or config, capture RAW
+    /// printable key text instead of redacted tokens. WARNING: the trace can
+    /// then contain typed passwords; leave it off unless you need literal key
+    /// text. Named keys and modifier chords remain tokens. The window title
+    /// shows `[REC RAW]` while active. Also honored via
+    /// `KETTLE_RECORD_RAW_INPUT` / `record-raw-input`.
     #[arg(long, verbatim_doc_comment)]
     pub(crate) record_raw_input: bool,
 

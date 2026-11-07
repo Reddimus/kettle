@@ -1193,8 +1193,9 @@ python3 scripts/perf/macos-standing-publication.py factcheck \
   --sessions SESSION1 SESSION2 SESSION3 --aa CONTROL --document FILLED.md
 ```
 
-The [fixture template](macos-standing/publication-template.fixture) exercises
-an A/B cell. Final D1/D2 documents require real data and independent review.
+The [example template](macos-standing/publication-template.fixture) illustrates
+A/B cells. The automated self-test creates its own template rather than reading
+this example. Final D1/D2 documents require real data and independent review.
 Fixed historical numbers, release validation, narrative attribution and anchor
 checks remain separate evidence. This pipeline makes no numerical product
 claim.
