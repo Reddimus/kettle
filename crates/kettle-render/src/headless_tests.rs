@@ -5078,7 +5078,7 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
 }
 
 #[test]
-fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
+fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
     let _serialized = gpu_test_guard();
     let cfg = gpu_test_config();
     let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 400, 160, 1.0, false).unwrap()
@@ -5109,17 +5109,301 @@ fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
         terminal.rect = (0.0, 32.0, 400.0, 128.0);
         terminal.terminal = terminal.rect;
         capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
-        let text = renderer.tab_close_buffer.metrics().font_size;
-        for size in [
-            renderer.tabbar_buffer.metrics().font_size,
-            renderer.new_tab_arrow_buffer.metrics().font_size,
+        let text = renderer.tab_buffers[0].metrics().font_size;
+        for (glyph, size, scale) in [
+            ("+", renderer.tabbar_buffer.metrics().font_size, 1.8),
+            ("▾", renderer.new_tab_arrow_buffer.metrics().font_size, 1.8),
+            ("×", renderer.tab_close_buffer.metrics().font_size, 1.4),
         ] {
             assert!(
-                size > text * 1.3,
-                "titlebar={in_titlebar}: control glyph {size} vs tab text {text}"
+                size >= text * scale,
+                "titlebar={in_titlebar}: {glyph} glyph {size} vs tab text {text}"
             );
         }
     }
+}
+
+/// The brightest ink in `rect` against `background`, and the pixel box the
+/// ink spans. Ink is any pixel more than 24 levels from the background.
+fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<(Rect4, f64)> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    let mut ratio = 1.0_f64;
+    for y in rect.1.ceil() as u32..((rect.1 + rect.3).floor() as u32).min(frame.height()) {
+        for x in rect.0.ceil() as u32..((rect.0 + rect.2).floor() as u32).min(frame.width()) {
+            let p = frame.get_pixel(x, y);
+            let ink = Rgb::new(p[0], p[1], p[2]);
+            let distance = [
+                (ink.r, background.r),
+                (ink.g, background.g),
+                (ink.b, background.b),
+            ]
+            .map(|(a, b)| a.abs_diff(b))
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            if distance > 24 {
+                let b = bounds.get_or_insert((x, y, x, y));
+                *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+                ratio = ratio.max(color::contrast_ratio(ink, background));
+            }
+        }
+    }
+    bounds.map(|(x0, y0, x1, y1)| {
+        (
+            (
+                x0 as f32,
+                y0 as f32,
+                (x1 - x0 + 1) as f32,
+                (y1 - y0 + 1) as f32,
+            ),
+            ratio,
+        )
+    })
+}
+
+/// Inactive tab titles read faint and the strip's controls tiny. Inactive
+/// titles now read at AAA in a focused window, and the close, `+`, `▾`, `≡`
+/// and header-button glyphs are drawn large enough to find, at 3:1 or
+/// better, whole inside the button that takes their clicks.
+#[test]
+fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("tab strip legibility check skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let strip = resolve_chrome_bg(&cfg, theme, None);
+    let snap = snapshot_of(20, 2, b"");
+    let line = renderer.metrics.line_height;
+    for gnome_header in [false, true] {
+        let mut tabs = TabBar::hidden();
+        tabs.height = if gnome_header {
+            46.0
+        } else {
+            (renderer.cell_h + 12.0).max(28.0).round()
+        };
+        tabs.in_titlebar = gnome_header;
+        tabs.band = (0.0, 0.0, 480.0, tabs.height);
+        // GNOME's header centres 28 px buttons, the window's close last.
+        let (button_y, side) = if gnome_header {
+            (9.0, 28.0)
+        } else {
+            (0.0, tabs.height)
+        };
+        let plus_x = 480.0 - 8.0 - side - if gnome_header { 40.0 } else { 0.0 };
+        tabs.new_tab = (plus_x, button_y, side, side);
+        tabs.new_tab_menu = (plus_x - 4.0 - side, button_y, side, side);
+        if gnome_header {
+            tabs.window_controls = vec![WindowControlButton {
+                action: WindowControl::Close,
+                rect: (480.0 - 37.0, button_y, side, side),
+                label: String::new(),
+                hovered: false,
+                pressed: false,
+            }];
+        }
+        for idx in 0..2 {
+            let rect = (8.0 + idx as f32 * 160.0, 0.0, 160.0, tabs.height);
+            let content = horizontal_tab_content_layout(
+                rect,
+                true,
+                true,
+                false,
+                "shell",
+                None,
+                renderer.cell_w,
+            );
+            tabs.segments.push(TabSeg {
+                idx,
+                rect,
+                title_rect: content.title,
+                hint: None,
+                close: content.close,
+                title: "shell".into(),
+                path: None,
+                active: idx == 0,
+                activity: TabActivity::Normal,
+            });
+        }
+        let (inactive_title, inactive_close) =
+            (tabs.segments[1].title_rect, tabs.segments[1].close);
+        let mut rest_close = 0.0;
+        for (window_focused, hovered_close) in [(true, false), (false, false), (true, true)] {
+            tabs.hovered_close_idx = hovered_close.then_some(1);
+            let mut terminal = pane(&snap, 480, 160);
+            terminal.rect = (0.0, tabs.height, 480.0, 160.0 - tabs.height);
+            terminal.terminal = terminal.rect;
+            let overlay = Overlay {
+                window_focused,
+                ..Overlay::default()
+            };
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+            let case = format!("header={gnome_header} focused={window_focused}");
+            if hovered_close {
+                let chip = color::over(strip, theme.foreground, 0.06, false);
+                let (_, ratio) = glyph_ink(&frame, inactive_close, chip).expect("hovered ×");
+                assert!(
+                    ratio >= rest_close,
+                    "{case}: hovered × {ratio:.2}:1 < resting {rest_close:.2}:1"
+                );
+                continue;
+            }
+            let (_, title) = glyph_ink(&frame, inactive_title, strip).expect("title ink");
+            let floor = if window_focused { 6.5 } else { 2.98 };
+            assert!(title >= floor, "{case}: inactive title {title:.2}:1");
+            // Smallest ink side, with a pixel to spare for rasterizer edges.
+            // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
+            // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
+            let mut controls = vec![
+                ("×", inactive_close, 0.42 * line),
+                ("+", tabs.new_tab, 0.66 * line),
+                if gnome_header {
+                    ("≡", tabs.new_tab_menu, 0.66 * line)
+                } else {
+                    ("▾", tabs.new_tab_menu, 0.42 * line)
+                },
+            ];
+            if gnome_header {
+                controls.push(("window close", tabs.window_controls[0].rect, 13.0));
+            }
+            for (glyph, button, min_side) in controls {
+                let ((x, y, w, h), ratio) =
+                    glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
+                assert!(
+                    w >= min_side && h >= min_side,
+                    "{case}: {glyph} ink {w}x{h} < {min_side}"
+                );
+                assert!(ratio >= 2.98, "{case}: {glyph} {ratio:.2}:1");
+                // Nothing clipped: the button is larger than its glyph.
+                assert!(
+                    x >= button.0 + 2.0
+                        && y >= button.1 + 2.0
+                        && x + w <= button.0 + button.2 - 2.0
+                        && y + h <= button.1 + button.3 - 2.0,
+                    "{case}: {glyph} ink {:?} reaches the edge of {button:?}",
+                    (x, y, w, h)
+                );
+                if glyph == "×" && window_focused {
+                    rest_close = ratio;
+                }
+            }
+        }
+    }
+}
+
+/// A 40 px side bar splits its last row into 20 px `▾` and `+` buttons. At a
+/// large font the enlarged glyphs must fit those widths, not just the row's
+/// height, or the button clips them.
+#[test]
+fn narrow_side_bar_controls_fit_their_half_width_buttons() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 30.0;
+    cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+    cfg.tab_bar_width = 40.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+    else {
+        eprintln!("side bar control fit check skipped: no GPU adapter");
+        return;
+    };
+    let row = (renderer.cell_h + 8.0).round();
+    let mut tabs = TabBar::hidden();
+    tabs.height = row;
+    tabs.band = (0.0, 0.0, 40.0, 320.0);
+    tabs.new_tab_menu = (0.0, row, 20.0, row);
+    tabs.new_tab = (20.0, row, 20.0, row);
+    tabs.segments.push(TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 40.0, row),
+        title_rect: (4.0, 0.0, 32.0, row),
+        hint: None,
+        close: (0.0, 0.0, 0.0, 0.0),
+        title: "sh".into(),
+        path: None,
+        active: true,
+        activity: TabActivity::Normal,
+    });
+    let snap = snapshot_of(10, 4, b"");
+    let mut terminal = pane(&snap, 440, 320);
+    terminal.rect = (40.0, 0.0, 440.0, 320.0);
+    terminal.terminal = terminal.rect;
+    let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+    let strip = resolve_chrome_bg(&cfg, &cfg.theme, None);
+    // The `+` button's left two pixels are the bar's accent cap.
+    let (px, py, pw, ph) = tabs.new_tab;
+    for (glyph, content) in [
+        ("▾", tabs.new_tab_menu),
+        ("+", (px + 2.0, py, pw - 2.0, ph)),
+    ] {
+        let ((x, y, w, h), _) =
+            glyph_ink(&frame, content, strip).unwrap_or_else(|| panic!("{glyph} has no ink"));
+        assert!(
+            x >= content.0 + 1.0
+                && y >= content.1 + 1.0
+                && x + w <= content.0 + content.2 - 1.0
+                && y + h <= content.1 + content.3 - 1.0,
+            "{glyph} ink {:?} is clipped by {content:?}",
+            (x, y, w, h)
+        );
+    }
+}
+
+/// Shortcut hints in a menu read at AAA against the panel; a disabled row's
+/// hint stays as dim as its label.
+#[test]
+fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 200) else {
+        eprintln!("menu shortcut hint check skipped: no GPU adapter");
+        return;
+    };
+    let row = |label: &str, hint: &str, enabled| ContextMenuRow {
+        matched_chars: None,
+        label: label.into(),
+        separator: false,
+        enabled,
+        hint: hint.into(),
+    };
+    let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
+    let overlay = Overlay {
+        context_menu: Some(ContextMenu {
+            picker_header_height: 0.0,
+            anchor: (ax, ay),
+            rows: vec![
+                row("Copy", "Ctrl+Shift+C", true),
+                row("Paste", "", true),
+                row("Select All", "Ctrl+Shift+A", false),
+            ],
+            highlight: 1,
+            scroll_offset: 0,
+            panel_w_clamped: panel_w,
+            panel_h_clamped: 0.0,
+            a11y_label: None,
+        }),
+        ..focused(false)
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 200)], &overlay);
+    let row_h = renderer.cell_h + 12.0;
+    let panel = cfg.theme.background;
+    let ink = |row: f32, left: f32, right: f32| {
+        let y = ay + row * row_h;
+        glyph_ink(&frame, (left, y + 1.0, right - left, row_h - 2.0), panel)
+            .expect("menu text ink")
+            .1
+    };
+    let label = ink(0.0, ax + 2.0, ax + panel_w * 0.5);
+    let hint = ink(0.0, ax + panel_w * 0.5, ax + panel_w - 2.0);
+    let disabled_hint = ink(2.0, ax + panel_w * 0.5, ax + panel_w - 2.0);
+    assert!(hint >= 6.5, "enabled hint {hint:.2}:1");
+    assert!(label >= hint, "label {label:.2}:1 quieter than its hint");
+    assert!(
+        disabled_hint >= 4.4 && disabled_hint + 1.0 < hint,
+        "disabled hint {disabled_hint:.2}:1 vs enabled {hint:.2}:1"
+    );
 }
 
 #[test]

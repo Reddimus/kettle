@@ -99,8 +99,10 @@ use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
 use labels::{
     display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
 };
-/// Size of the strip's `+` and `▾` glyphs relative to tab text.
-pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 1.35;
+/// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
+pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
+/// Size of a tab's close `×` relative to its title.
+pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
 pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label};
 #[cfg(test)]
@@ -2453,17 +2455,26 @@ impl Renderer {
         } else {
             (metrics, self.overlay_text_cell_width(), ch)
         };
-        // `+` and `▾` are small shapes at text size; draw them larger so the
-        // strip's controls read as controls, capped to the strip height.
-        let control_metrics = {
-            let scale = (TAB_CONTROL_GLYPH_SCALE)
-                .min((tabbar.height / tab_metrics.line_height.max(1.0)).max(1.0));
-            Metrics::new(
-                tab_metrics.font_size * scale,
-                tab_metrics.line_height * scale,
-            )
-        };
+        // `+`, `▾`, `≡` and `×` are small shapes at text size; draw them
+        // larger so the strip's controls read as controls. `+` and `▾` share
+        // one size fitted to the smaller of their buttons: GNOME's header
+        // centres short buttons in a taller band, and a narrow side bar
+        // splits its last row in two.
+        let control_box = [tabbar.new_tab, tabbar.new_tab_menu]
+            .into_iter()
+            .filter(|button| button.2 > 0.0 && button.3 > 0.0)
+            .fold((tabbar.height, tabbar.height), |(w, h), button| {
+                (w.min(button.2), h.min(button.3))
+            });
+        let control_metrics =
+            tab_strip::control_glyph_metrics(tab_metrics, TAB_CONTROL_GLYPH_SCALE, control_box);
         let control_ch = control_metrics.line_height;
+        let close_metrics = tab_strip::control_glyph_metrics(
+            tab_metrics,
+            TAB_CLOSE_GLYPH_SCALE,
+            (tabbar.height, tabbar.height),
+        );
+        let close_ch = close_metrics.line_height;
         // Tab-bar text: one buffer per segment + the `+` button.
         let have_tabs = tabbar.height > 0.0 && !tabbar.segments.is_empty();
         if have_tabs {
@@ -2527,7 +2538,7 @@ impl Renderer {
             }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
-            self.tab_close_buffer.set_metrics(tab_metrics);
+            self.tab_close_buffer.set_metrics(close_metrics);
             self.tab_close_buffer
                 .set_size(Some(tabbar.height), Some(tabbar.height));
             // Constant glyph, shaped once per font family.
@@ -4078,6 +4089,11 @@ impl Renderer {
         if have_tabs {
             let ty = tabbar.y as i32;
             let tb = (tabbar.y + tabbar.height) as i32;
+            let close_w = self
+                .tab_close_buffer
+                .layout_runs()
+                .next()
+                .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
                 let tab_background = if s.active {
@@ -4090,7 +4106,7 @@ impl Renderer {
                 let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
                     self.chrome_colors.text(fg, tab_background)
                 } else {
-                    self.chrome_colors.muted(fg, tab_background)
+                    self.chrome_colors.secondary(fg, tab_background)
                 };
                 let title_fg =
                     self.chrome_colors
@@ -4200,19 +4216,20 @@ impl Renderer {
                 );
                 let (close_fg, close_background) = if cfg.tab_bar_pos.is_vertical() {
                     (close_fg, close_background)
+                } else if hovered {
+                    let background = color::over(tab_background, theme.foreground, 0.06, false);
+                    (self.chrome_colors.text(fg, background), background)
                 } else {
-                    let background = if hovered {
-                        color::over(tab_background, theme.foreground, 0.06, false)
-                    } else {
-                        tab_background
-                    };
-                    (self.chrome_colors.muted(fg, background), background)
+                    (
+                        self.chrome_colors.secondary(fg, tab_background),
+                        tab_background,
+                    )
                 };
                 let close_fg =
                     self.chrome_colors
                         .tab_text(close_fg, close_background, overlay.window_focused);
                 let (close_left, close_top) =
-                    centered_text_origin((cx, cy, ccw, cch), (tab_cw, tab_ch));
+                    centered_text_origin((cx, cy, ccw, cch), (close_w, close_ch));
                 areas.push(TextArea {
                     buffer: &self.tab_close_buffer,
                     left: close_left,
@@ -4535,9 +4552,14 @@ impl Renderer {
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
-                // Dropdown-parity: the right-aligned dimmed hint.
+                // Dropdown-parity: the right-aligned shortcut hint, quieter
+                // than its label; a disabled row's hint dims with it.
                 if !row.hint.is_empty() {
-                    let hint_fg = self.chrome_colors.muted(theme.foreground, background);
+                    let hint_fg = if row.enabled {
+                        self.chrome_colors.secondary(theme.foreground, background)
+                    } else {
+                        self.chrome_colors.muted(theme.foreground, background)
+                    };
                     let hint_w =
                         unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
                     menu_areas.push(TextArea {

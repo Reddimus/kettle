@@ -103,6 +103,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Tab strips and menus are easier to read. Inactive tab titles, resting tab
+  close buttons and menu shortcut hints reach 7:1 contrast where the theme's
+  own text does (they stopped at 4.5:1), and stay at least 3:1 in an
+  unfocused window. A disabled menu row's hint stays dim. The tab close ×, the
+  new-tab +, the options ▾, GNOME's header ≡ and its window buttons are drawn
+  larger, inside the same click targets.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 

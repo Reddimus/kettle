@@ -7,6 +7,28 @@ pub fn tab_text_scale(band_height: f32, line_height: f32) -> f32 {
     (band_height.max(1.0) / line_height.max(1.0)).min(1.0)
 }
 
+/// Tab text metrics grown by `scale` for a control glyph in a `(width,
+/// height)` button. The em stops at `CONTROL_GLYPH_FILL` of the button's
+/// shorter side and the line at its height, so the glyph stays centred and
+/// unclipped even in a side bar's half-width buttons; it is never drawn
+/// smaller than the tab text.
+pub(crate) fn control_glyph_metrics(
+    text: glyphon::Metrics,
+    scale: f32,
+    button: (f32, f32),
+) -> glyphon::Metrics {
+    let (width, height) = button;
+    let font_size = (text.font_size * scale)
+        .min(width.min(height) * CONTROL_GLYPH_FILL)
+        .max(text.font_size);
+    let line_height =
+        (text.line_height * font_size / text.font_size.max(1.0)).min(height.max(text.line_height));
+    glyphon::Metrics::new(font_size, line_height)
+}
+
+/// Largest control-glyph em, as a share of its button's shorter side.
+const CONTROL_GLYPH_FILL: f32 = 0.9;
+
 pub struct HorizontalTabContent {
     pub title: Rect4,
     pub close: Rect4,
@@ -241,6 +263,34 @@ mod tests {
     }
 
     #[test]
+    fn control_glyphs_grow_past_tab_text_but_fit_their_button() {
+        for font_size in [10.0_f32, 13.0, 20.0, 40.0] {
+            let text = glyphon::Metrics::new(font_size, font_size * 1.25);
+            // Square strip buttons, GNOME's header and a 40 px side bar's
+            // half-width `▾` and `+`.
+            for (width, height) in [
+                (20.0_f32, 20.0_f32),
+                (28.0, 28.0),
+                (46.0, 46.0),
+                (20.0, 45.5),
+            ] {
+                let side = width.min(height);
+                for scale in [1.5, 2.0] {
+                    let glyph = control_glyph_metrics(text, scale, (width, height));
+                    assert!(glyph.font_size >= text.font_size);
+                    assert!(glyph.font_size <= (text.font_size * scale).max(text.font_size));
+                    assert!(glyph.line_height <= height.max(text.line_height));
+                    if text.font_size * scale <= side * 0.9 {
+                        assert_eq!(glyph.font_size, text.font_size * scale);
+                    } else {
+                        assert!(glyph.font_size <= (side * 0.9).max(text.font_size));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn horizontal_single_tab_controls_render_from_shared_geometry() {
         let source = crate::production_source();
         let close = source
@@ -257,12 +307,12 @@ mod tests {
     #[test]
     fn horizontal_controls_keep_strip_text_metrics_and_contrast() {
         let source = crate::production_source();
-        // The close glyph shares the tab text size; + and ▾ draw larger
-        // (TAB_CONTROL_GLYPH_SCALE) because they are small shapes.
+        // The close ×, + and ▾ are small shapes, so they draw larger than tab
+        // text (TAB_CLOSE_GLYPH_SCALE, TAB_CONTROL_GLYPH_SCALE).
         for (buffer, metrics) in [
             ("tabbar_buffer", "control_metrics"),
             ("new_tab_arrow_buffer", "control_metrics"),
-            ("tab_close_buffer", "tab_metrics"),
+            ("tab_close_buffer", "close_metrics"),
         ] {
             assert!(source.contains(&format!("self.{buffer}.set_metrics({metrics});")));
             assert!(source.contains(&format!("buffer: &self.{buffer},")));
@@ -775,6 +825,9 @@ mod tooltip_tests {
     }
 }
 
+/// Logical side of a GNOME header button's minimize/maximize/close glyph.
+pub(crate) const WINDOW_CONTROL_GLYPH: f32 = 12.0;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn window_control_quads(
     quads: &mut Vec<QuadInstance>,
@@ -809,7 +862,7 @@ pub(crate) fn window_control_quads(
         }
         let cx = x + w * 0.5;
         let cy = y + h * 0.5;
-        let size = (10.0 * scale).min(diameter * 0.5);
+        let size = (WINDOW_CONTROL_GLYPH * scale).min(diameter * 0.5);
         let stroke = (1.5 * scale).max(1.0);
         let left = cx - size * 0.5;
         let top = cy - size * 0.5;
@@ -967,6 +1020,20 @@ mod window_control_tests {
                         &mut Default::default(),
                     );
                     assert!(!quads.is_empty());
+                    if !hovered {
+                        // Every quad is glyph ink: it spans at least 12
+                        // logical pixels (10 read as tiny in the header).
+                        let left = quads.iter().map(|q| q.pos[0]).fold(f32::MAX, f32::min);
+                        let right = quads
+                            .iter()
+                            .map(|q| q.pos[0] + q.size[0])
+                            .fold(f32::MIN, f32::max);
+                        assert!(
+                            right - left >= 12.0 * scale - 0.01,
+                            "{action:?} at {scale}x spans {}",
+                            right - left
+                        );
+                    }
                     for q in quads {
                         assert!(
                             q.pos[0] >= target.0
