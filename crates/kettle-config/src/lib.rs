@@ -75,6 +75,21 @@ const fn default_background_opacity(native_material_target: bool) -> f32 {
 pub const DEFAULT_BACKGROUND_OPACITY: f32 =
     default_background_opacity(cfg!(any(target_os = "macos", target_os = "windows")));
 
+/// Default `font-size`, in logical px, for macOS (`true`) or any other target.
+///
+/// macOS terminals size text in points that are already logical px, and 13 is
+/// the usual default there. GNOME Terminal and Windows Terminal size it in
+/// points at 96 DPI, so their 11 pt and 12 pt defaults are about 14.7 px and
+/// 16 px, and 13 px reads small beside them. 14 px keeps 149 columns on a
+/// maximized 1280 logical px display with the bundled font and default padding,
+/// past the 144 at which Claude Code's diff panel opens.
+pub const fn default_font_size(macos: bool) -> f32 {
+    if macos { 13.0 } else { 14.0 }
+}
+
+/// Default `font-size` for the current target; see [`default_font_size`].
+pub const DEFAULT_FONT_SIZE: f32 = default_font_size(cfg!(target_os = "macos"));
+
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
 /// keep accidental huge/silly configs diagnostic instead of silently spawning
 /// an unusable window.
@@ -1430,6 +1445,7 @@ pub struct Config {
     pub font_family_bold: Option<String>,
     pub font_family_italic: Option<String>,
     pub font_family_bold_italic: Option<String>,
+    /// Logical px; [`DEFAULT_FONT_SIZE`] when the config sets none.
     pub font_size: f32,
     pub theme_name: String,
     pub theme: Theme,
@@ -1945,6 +1961,13 @@ pub struct Config {
     /// `text-renderer`: cell-locked grid rendering (default) vs the
     /// legacy continuous glyphon layout. See [`TextRenderer`].
     pub text_renderer: TextRenderer,
+    /// `builtin-box-drawing`: Kettle draws box drawing (U+2500-U+257F),
+    /// block elements (U+2580-U+259F), Powerline separators
+    /// (U+E0B0-U+E0BF), the triangles U+25E2-U+25E5 and braille
+    /// (U+2800-U+28FF) from each cell's pixel rectangle instead of the
+    /// font's glyphs, so lines join across cells without seams. `false`
+    /// keeps the font's glyphs. Reloads live.
+    pub builtin_box_drawing: bool,
     /// Terminator parity (terminatorlib/config.py:117
     /// `background_image`): path to background image.
     pub background_image: String,
@@ -3260,7 +3283,7 @@ impl Default for Config {
             font_family_bold: None,
             font_family_italic: None,
             font_family_bold_italic: None,
-            font_size: 13.0,
+            font_size: DEFAULT_FONT_SIZE,
             // TokyoNight Night is the shipped default theme. An unknown theme
             // name falls back to Catppuccin Mocha (`Theme::default`) instead.
             theme_name: "TokyoNight Night".to_string(),
@@ -3401,6 +3424,7 @@ impl Default for Config {
             http_proxy: String::new(),
             background_type: BackgroundType::Solid,
             text_renderer: TextRenderer::default(),
+            builtin_box_drawing: true,
             background_animation: BackgroundAnimation::default(),
             chrome_background: ChromeBackground::default(),
             background_image: String::new(),
@@ -3951,6 +3975,8 @@ impl Config {
         "window_blur",
         "bold-is-bright",
         "bold_is_bright",
+        "builtin-box-drawing",
+        "builtin_box_drawing",
         "borderless",
         "check-for-updates",
         "clear-select-on-copy",
@@ -5243,6 +5269,11 @@ impl Config {
                 "bold-is-bright" | "bold_is_bright" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.bold_is_bright = b;
+                    }
+                }
+                "builtin-box-drawing" | "builtin_box_drawing" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.builtin_box_drawing = b;
                     }
                 }
                 "link-single-click" | "link_single_click" => {
@@ -8469,6 +8500,11 @@ cell-height = 1.2\n";
         // Bidi display is on unless turned off.
         assert!(d.bidi);
         assert!(!Config::parse_text("bidi = false").bidi);
+        // Kettle draws box drawing itself unless told to keep the font's.
+        assert!(d.builtin_box_drawing);
+        assert!(!Config::parse_text("builtin-box-drawing = false").builtin_box_drawing);
+        assert!(!Config::parse_text("builtin_box_drawing = off").builtin_box_drawing);
+        assert!(Config::parse_text("builtin-box-drawing = true").builtin_box_drawing);
         assert!(!Config::parse_text("allow_bold = false").allow_bold);
         assert!(Config::parse_text("bold-is-bright = true").bold_is_bright);
         assert!(Config::parse_text("bold_is_bright = true").bold_is_bright);
@@ -9681,6 +9717,55 @@ cell-height = 1.2\n";
                 "docs/kettle.example.config must show {key} = 12"
             );
         }
+    }
+
+    /// macOS keeps the 13 px its terminals use. Linux, the BSDs and Windows
+    /// size terminal text in points at 96 DPI (GNOME Terminal's 11 pt is about
+    /// 14.7 px, Windows Terminal's 12 pt is 16 px), where 13 px read small, so
+    /// they default to 14 px. Both values are checked on every host; the
+    /// running target's is the one a config without `font-size` gets.
+    #[test]
+    fn default_font_size_follows_the_platform() {
+        assert_eq!(default_font_size(true), 13.0);
+        assert_eq!(default_font_size(false), 14.0);
+        assert_eq!(
+            DEFAULT_FONT_SIZE,
+            default_font_size(cfg!(target_os = "macos"))
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(DEFAULT_FONT_SIZE, 13.0);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(DEFAULT_FONT_SIZE, 14.0);
+        assert_eq!(Config::default().font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(Config::parse_text("").font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(
+            Config::parse_text("font-size = big\n").font_size,
+            DEFAULT_FONT_SIZE,
+            "a malformed size keeps the platform default"
+        );
+    }
+
+    /// The reference and the example config state both defaults, so a reader
+    /// on either platform finds the size they will get.
+    #[test]
+    fn default_font_size_is_documented_for_each_platform() {
+        let (macos, other) = (default_font_size(true), default_font_size(false));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let reference = std::fs::read_to_string(root.join("docs/CONFIG.md")).expect("CONFIG.md");
+        let row = format!("| `font-size` | float | `{macos}` macOS; `{other}` elsewhere |");
+        assert!(
+            reference.lines().any(|line| line.starts_with(&row)),
+            "docs/CONFIG.md must document both font-size defaults: {row}"
+        );
+        let example = std::fs::read_to_string(root.join("docs/kettle.example.config"))
+            .expect("example config");
+        let note = format!(
+            "# Logical px. Defaults: {macos} on macOS; {other} on Linux, the BSDs and Windows."
+        );
+        assert!(
+            example.lines().any(|line| line == note),
+            "docs/kettle.example.config must state both font-size defaults: {note}"
+        );
     }
 
     /// A NUL in a value would end the string a platform API reads: in a

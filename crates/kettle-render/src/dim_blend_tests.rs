@@ -124,3 +124,60 @@ fn regression_cell_decorations_paint_after_the_dimmer() {
         "inactive decorations need the foreground draw list"
     );
 }
+
+#[test]
+fn inactive_bundled_text_retains_contrast_after_raster_coverage() {
+    use super::{Attrs, Family, Shaping, StartupFonts, SwashCache, TextBuffer};
+    let mut checked = 0;
+    for size in [13.0, 14.0, 15.0] {
+        let cfg = kettle_config::Config {
+            font_size: size,
+            ..Default::default()
+        };
+        let mut fonts = StartupFonts::load(&cfg, 1.0);
+        let mut buf = TextBuffer::new(&mut fonts.font_system, super::metrics_for(size, 1.0));
+        buf.set_size(Some(400.0), Some(100.0));
+        buf.set_text(
+            "M",
+            &Attrs::new().family(Family::Name(&cfg.font_family)),
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut fonts.font_system, false);
+        let mut cache = SwashCache::new();
+        for run in buf.layout_runs() {
+            for glyph in run.glyphs {
+                for x in [0.0, 0.25, 0.5, 0.75] {
+                    let image = cache
+                        .get_image_uncached(
+                            &mut fonts.font_system,
+                            glyph.physical((x, 0.0), 1.0).cache_key,
+                        )
+                        .unwrap();
+                    assert_eq!(image.content, glyphon::cosmic_text::SwashContent::Mask);
+                    let coverage = *image.data.iter().max().unwrap();
+                    let black = Rgb::new(0, 0, 0);
+                    let white = Rgb::new(255, 255, 255);
+                    for (fg, bg) in [(white, black), (black, white)] {
+                        for linear in [false, true] {
+                            checked += 1;
+                            let ink =
+                                crate::chrome::Colors::default().inactive(fg, bg, bg, 0.9, linear);
+                            let painted =
+                                crate::color::over(bg, ink, f64::from(coverage) / 255.0, linear);
+                            let ratio = contrast_ratio(painted, bg);
+                            assert!(
+                                ratio >= 4.5,
+                                "{size} px, phase {x}, coverage {coverage}, {bg:?}, linear={linear}: {ratio:.3}:1"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        checked, 48,
+        "all sizes, phases, polarities and blend modes must render"
+    );
+}

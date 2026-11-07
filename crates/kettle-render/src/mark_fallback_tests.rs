@@ -406,3 +406,70 @@ fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
         }
     }
 }
+
+/// Switching cursor pipelines must discard the previous cell's moved-mark
+/// bounds, or a nearby built-in cursor can acquire an oversized patch.
+#[test]
+fn moved_mark_and_builtin_cursor_transitions_keep_the_current_patch() {
+    let _serial = gpu_test_guard();
+    for allow_mapping in [false, true] {
+        let cfg = Config {
+            background_opacity: 1.0,
+            ..crate::gpu_tests::gpu_test_config()
+        };
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with_mapping(&cfg, W, H, 1.0, false, allow_mapping)
+                .expect("headless renderer builds")
+        else {
+            eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
+            return;
+        };
+        eprintln!(
+            "MARK_BUILTIN_GPU: mapping={allow_mapping}, mapped={}, {:?}",
+            renderer.gpu.mapped_uploads(),
+            renderer.gpu.adapter_info()
+        );
+        let mut snap = snapshot_of(32, 3, "#\u{301}\x1b[1;21H\u{2592}\x1b[1;1H".as_bytes());
+        frame_of_snapshot(&mut renderer, &cfg, &snap);
+        assert!(
+            !renderer.cursor_mark_images.is_empty(),
+            "bundled mark must move"
+        );
+        let whole = PatchRect {
+            x: 0,
+            y: 0,
+            width: W,
+            height: H,
+        };
+        for column in [20, 0, 20, 0] {
+            snap.cursor.point.column = kettle_core::Column(column);
+            frame_of_snapshot(&mut renderer, &cfg, &snap);
+            let (patch, _) = renderer
+                .plan_cursor_patch(&cfg)
+                .expect("only the current cursor contributes patch bounds");
+            let cursor = renderer
+                .pending_cursor_glyph
+                .as_ref()
+                .expect("block cursor");
+            if column == 20 {
+                assert!(cursor.builtin.is_some());
+                assert!(renderer.cursor_mark_images.is_empty());
+                assert!(renderer.glyph_pipeline.cursor_clip.is_some());
+            } else {
+                assert!(!cursor.marks.is_empty());
+                assert!(!renderer.cursor_mark_images.is_empty());
+                assert!(renderer.glyph_pipeline.cursor_clip.is_none());
+            }
+            for phase in [true, false, true] {
+                let full = renderer.scene_window_for_tests(&cfg, whole, phase);
+                let cropped = renderer.scene_window_for_tests(&cfg, patch, phase);
+                assert_eq!(
+                    cropped,
+                    image::imageops::crop_imm(&full, patch.x, patch.y, patch.width, patch.height,)
+                        .to_image(),
+                    "cursor crop: col={column}, phase={phase}"
+                );
+            }
+        }
+    }
+}

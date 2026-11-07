@@ -1435,6 +1435,19 @@ skips separately from pixel acceptance. Picker interaction tests exercise
 all four modal projections without a native window.
 The emoji pixel cases also skip explicitly when no color emoji font is available.
 
+Font defaults are exercised for both platform choices on every host: 13 px
+on macOS and 14 px elsewhere. Startup tests load the bundled font to check
+fresh and maximized grids, including 1280-logical-pixel displays and the
+1440x900 non-macOS default-window smoke guard. The card-hover outline,
+inactive emoji/text and tab-control pixel tests run explicitly at both 13 px
+and 14 px even on macOS. `inactive_bundled_text_retains_contrast_after_raster_coverage`
+checks the real bundled mask at four subpixel phases without a GPU, on black
+and white backgrounds in both blend modes. The painted stems must retain
+4.5:1 contrast after coverage and output rounding. A separate headless test
+draws dark text after four spaces on white in Grid and Legacy at both sizes,
+including Legacy's half-pixel placement at 14 px. The portable check does not
+replace these readbacks.
+
 Portable renderer checks cover color-glyph dimming material, shader inputs and
 cache invalidation on focus or dimming changes. Animation stills tests use
 distinct APNG frame colors and fractional delays to verify that selection keeps
@@ -1689,7 +1702,10 @@ diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
 must be pixel-identical with fallback placement removed, a steady frame or
 zoom must reuse the cached placement, a row laid out late must still be
 placed, and a focused block cursor must cover a moved mark with its inverted
-copy. `cursor_marks` tests grow the cursor's own atlas past its first texture
+copy. Switching between a moved-mark cell and a built-in shade also checks
+that only the current cell contributes cursor patch bounds, with queue and
+mapped uploads and pixel-identical crops in both blink phases. `cursor_marks`
+tests grow the cursor's own atlas past its first texture
 across several cells and check when it must be replaced. The bundled cases
 run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and a tall stack
 need a host fallback face and report `MARK_FONT_SKIP` without one. Without an

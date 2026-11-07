@@ -2,9 +2,9 @@ use super::{
     Arc, Attrs, Cache, Config, DisplayHandle, GlyphPipeline, HandleError, HasDisplayHandle,
     HasWindowHandle, MinimumContrastCache, OutlinePipeline, Renderer, Result, SEARCH_SEGMENTS,
     ScreenshotRecoveryWake, ScreenshotRequest, Shaping, SharedPipelines, StartupFonts, SwashCache,
-    TextAtlas, TextBuffer, TextRenderer, Viewport, Weight, Wrap, anyhow, card_scene, chrome,
-    clamp_font_size, confirm, desired_alpha_mode, live_surface_dimensions, metrics_for, present,
-    rounded_surface, starfield, upload,
+    TextAtlas, TextBuffer, TextRenderer, Viewport, Weight, Wrap, anyhow, builtin_glyphs,
+    card_scene, chrome, clamp_font_size, confirm, desired_alpha_mode, fonts,
+    live_surface_dimensions, metrics_for, present, rounded_surface, starfield, upload,
 };
 
 /// The swapchain present mode for a window surface.
@@ -698,6 +698,10 @@ impl Renderer {
         let font_size = clamp_font_size(cfg.font_size);
         // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
+        let builtin_strokes = builtin_glyphs::Strokes::new(
+            fonts::underline_em(&mut font_system, &cfg.font_family),
+            metrics.font_size,
+        );
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_tooltip_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -846,6 +850,10 @@ impl Renderer {
             pane_bidi: Vec::new(),
             pane_mark_shifts: Vec::new(),
             mark_cache: Default::default(),
+            pane_builtins: Vec::new(),
+            pane_builtin_keys: Vec::new(),
+            builtin_strokes,
+            builtin_mask: Vec::new(),
             drawn_bidi: Vec::new(),
             painted_bidi: Vec::new(),
             line_text_scratch: String::new(),

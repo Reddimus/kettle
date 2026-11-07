@@ -8,6 +8,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Kettle draws box drawing, block elements, Powerline separators, the
+  triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
+  and kitty do. Lines are whole pixels sized from the font's underline, so
+  boxes, tables and tree views join across cells and rows without soft edges
+  or brighter dots at the joins, at any scale. Rounded corners, diagonals
+  and Powerline curves are smooth, shades are even tones instead of the
+  font's dither, and Powerline separators fill the row with no seam against
+  the next segment. `builtin-box-drawing = false`, or the new Text /
+  Rendering switch in Settings, keeps the font's glyphs.
+
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
   Konsole: brackets inside right-to-left text are mirrored and Arabic letters
@@ -121,10 +131,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   chip), the new-tab +, the options ▾, GNOME's header ≡ and its window buttons
   are drawn larger, inside the same click targets.
 
+- Text is larger by default on Linux, the BSDs and Windows: `font-size` is
+  14 px there (was 13), close to GNOME Terminal's 11 pt and Windows
+  Terminal's 12 pt. macOS keeps 13 px. A fresh window grows with the font to
+  keep about 164x44 cells on a 1080p monitor. A maximized window on a 1366 px
+  wide laptop fits 159 columns, past the 144 at which Claude Code's diff
+  panel opens; a fresh window there stays within 90 % of the screen and fits
+  143. A 1280-logical-pixel display gets 149 columns maximized. Reset font size
+  returns to the platform default, or to the configured `font-size`. Settings
+  and `--check-config` label font sizes in logical px.
+
+- Inactive-pane text reserves contrast for antialiased glyph coverage, so
+  bundled-font stems remain readable instead of falling just below 4.5:1.
+
 - The terminal is inset 12 px from the window edge by default (was 8).
   `window-padding-x` and `window-padding-y` still set it. A fresh window
   grows by the extra padding to keep its grid where the monitor has room:
-  about 164 columns on a 1080p monitor and 154 on a 1366 px wide laptop.
+  about 164 columns on a 1080p monitor and, at macOS's 13 px font, 154 on a
+  1366 px wide laptop.
 
 - Detected URLs and paths are underlined only while hovered, as in most
   terminals, so a screen of links no longer looks busy, competes with a

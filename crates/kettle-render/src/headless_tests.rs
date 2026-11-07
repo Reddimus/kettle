@@ -2480,9 +2480,19 @@ fn a_hint_chip_stays_inside_its_pane() {
 /// only while the UI names it.
 #[test]
 fn a_hovered_card_is_outlined_in_the_accent() {
+    for font_size in [13.0, 14.0] {
+        hovered_card_outline_at(font_size);
+    }
+}
+
+fn hovered_card_outline_at(font_size: f32) {
     let _serialized = gpu_test_guard();
-    let Some((mut renderer, cfg)) = renderer(1200, 400) else {
-        eprintln!("no GPU adapter on this host; skipped");
+    let cfg = Config {
+        font_size,
+        ..gpu_test_config()
+    };
+    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 1200, 400).unwrap() else {
+        eprintln!("card outline at {font_size} px skipped: no GPU adapter");
         return;
     };
     let (mut cards, snap, nonce) = crate::inline_cards::tests::fixture();
@@ -3613,18 +3623,67 @@ fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
 }
 
 #[test]
+fn inactive_dark_text_on_white_retains_contrast_at_the_shipped_sizes() {
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for size in [13.0, 14.0] {
+            let mut cfg = gpu_test_config();
+            cfg.font_size = size;
+            cfg.text_renderer = mode;
+            cfg.show_titlebar = false;
+            cfg.theme.background = Rgb::new(255, 255, 255);
+            cfg.theme.foreground = Rgb::new(0, 0, 0);
+            cfg.unfocused_split_opacity = 0.1;
+            cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
+            let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
+                eprintln!("inactive light {mode:?} at {size} px skipped: no GPU adapter");
+                return;
+            };
+            let snap = snapshot_of(20, 4, b"    M");
+            let other = snapshot_of(20, 4, b"");
+            let mut view = pane(&snap, 200, 160);
+            view.focused = false;
+            let mut second = pane(&other, 200, 160);
+            second.id = 2;
+            second.rect.0 = 200.0;
+            second.terminal.0 = 200.0;
+            let shot = capture(&mut renderer, &cfg, &[view, second], &focused(false));
+            let (ox, oy) =
+                pane_grid_origin((0.0, 0.0, 200.0, 160.0), (cfg.padding_x, cfg.padding_y));
+            let best = (oy as u32..(oy + renderer.cell_h).ceil() as u32)
+                .flat_map(|y| {
+                    ((ox + 3.0 * renderer.cell_w) as u32
+                        ..(ox + 6.0 * renderer.cell_w).ceil() as u32)
+                        .map(move |x| (x, y))
+                })
+                .map(|(x, y)| {
+                    let p = shot.get_pixel(x, y);
+                    color::contrast_ratio(Rgb::new(p[0], p[1], p[2]), cfg.theme.background)
+                })
+                .fold(1.0_f64, f64::max);
+            assert!(best >= 4.5, "{mode:?} at {size} px: {best:.3}:1");
+        }
+    }
+}
+
+#[test]
 fn regression_inactive_color_emoji_dim_grid() {
-    inactive_color_emoji_dim(TextRendererMode::Grid);
+    for size in [13.0, 14.0] {
+        inactive_color_emoji_dim(TextRendererMode::Grid, size);
+    }
 }
 
 #[test]
 fn regression_inactive_color_emoji_dim_legacy() {
-    inactive_color_emoji_dim(TextRendererMode::Legacy);
+    for size in [13.0, 14.0] {
+        inactive_color_emoji_dim(TextRendererMode::Legacy, size);
+    }
 }
 
-fn inactive_color_emoji_dim(mode: TextRendererMode) {
+fn inactive_color_emoji_dim(mode: TextRendererMode, font_size: f32) {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
+    cfg.font_size = font_size;
     cfg.text_renderer = mode;
     // Per-pane titlebars sit over the first row and change color with focus.
     cfg.show_titlebar = false;
@@ -3636,7 +3695,7 @@ fn inactive_color_emoji_dim(mode: TextRendererMode) {
     // Compare text dimming only: unfocused panes otherwise draw a hollow cursor.
     cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
     let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("inactive {mode:?} text at {font_size} px skipped: no GPU adapter");
         return;
     };
     let snap = snapshot_of(20, 4, "\u{1f600}  M".as_bytes());
@@ -5269,11 +5328,20 @@ const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.95..=1.05;
 /// better, whole inside the button that takes their clicks.
 #[test]
 fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
+    for font_size in [13.0, 14.0] {
+        tab_strip_legibility_at(font_size);
+    }
+}
+
+fn tab_strip_legibility_at(font_size: f32) {
     let _serialized = gpu_test_guard();
-    let cfg = gpu_test_config();
+    let cfg = Config {
+        font_size,
+        ..gpu_test_config()
+    };
     let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
     else {
-        eprintln!("tab strip legibility check skipped: no GPU adapter");
+        eprintln!("tab strip legibility at {font_size} px skipped: no GPU adapter");
         return;
     };
     let theme = &cfg.theme;

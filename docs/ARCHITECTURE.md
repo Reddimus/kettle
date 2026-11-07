@@ -1912,12 +1912,18 @@ Both window constructors measure the font before creating the window
 (`StartupFonts` in `kettle-render`) and size a fresh window through one rule
 (`startup_surface` in `app.rs`). An explicit `window-width`/`window-height`
 opens at exactly that grid. An unset axis keeps the 160×45 default grid's pixel
-size, converted with an 8×16 px baseline in **logical** pixels
-(`startup_inner_size`) so HiDPI gets the same grid; with neither set, the
-default grid is fitted to the
+size, converted with a baseline cell in **logical** pixels
+(`startup_inner_size`) so HiDPI gets the same grid. The cell is 8×16 px at
+macOS's 13 px default font and scales with the 14 px default elsewhere
+(`startup_geometry_cell`), so the larger font keeps the grid. With neither set,
+the default grid is fitted to the
 primary monitor, or the largest one on Wayland, at 90 % × 85 %
-(`default_startup_inner_size`), so a fresh window clears the ~144 columns agent
-TUIs want without becoming a screen-wide canvas on an ultrawide. The restore
+(`default_startup_inner_size`), so a fresh window on a 1080p monitor clears the
+~144 columns agent TUIs want without becoming a screen-wide canvas on an
+ultrawide. On a 1366 px wide laptop the fit leaves 154 columns at macOS's
+13 px font but 143 at the 14 px default elsewhere, which needs the window
+maximized (159 columns). At 1280 logical px, 14 px gives 134 columns fresh
+and 149 maximized. The restore
 planner's fallback surface for a saved window without geometry is the same rule
 in physical pixels. Restored geometry and explicit new-window geometry are
 applied after these attributes and still win.
@@ -3290,6 +3296,7 @@ moving existing items.
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
 | `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
 | `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
 | `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
@@ -3319,7 +3326,10 @@ warm-up frame.
 Each frame uses the same wgpu render-pass encoder. Quads cover earlier
 text; later text covers their pixels. Pane dimming covers cell backgrounds,
 inline images and complete cards before terminal glyphs and decorations,
-whose inactive colours already include the text contrast floor. Active-pane
+whose inactive colours already include the text contrast floor. The cached
+inactive ink resolver checks partial glyph coverage in the surface's blend
+mode, including output rounding, while retaining the original contrast cap
+for intentionally faint program text. Active-pane
 decorations stay in the cell pass below cursor quads. Color glyphs blend their
 bitmap RGB toward the pane dimming backdrop in their shader, preserving bitmap
 alpha. Preview lanes receive
@@ -3446,6 +3456,55 @@ grows only in its own prepare, which keeps every mask it handed out, and is
 replaced by a fresh one, ids and masks included, once it holds 4,096 rasters.
 The images join the cursor glyph's damage key, and the cursor patch takes its
 ink from them.
+
+**Built-in box drawing.** With `builtin-box-drawing` on (the default), Kettle
+draws box drawing (U+2500–U+257F), block elements (U+2580–U+259F), the
+Powerline separators U+E0B0–U+E0BF, the triangles U+25E2–U+25E5 and braille
+(U+2800–U+28FF) itself, as Ghostty, WezTerm, kitty and Alacritty do, instead of
+taking them from the font, whose outlines overlap their neighbours at joins,
+fall short of tall rows and dither shades. `build_pane` records each such cell
+(its glyph, its colour after bold, dim, selection, search, contrast and
+unfocused-cursor resolution, and its device-pixel rectangle) and gives the
+shaper a blank in its place, so the font's glyph is never drawn, never joins a
+ligature and never chooses a fallback face for the row. A cell with combining
+marks or two columns keeps the font. `crates/kettle-render/src/builtin_glyphs.rs`
+rasterizes a coverage mask exactly the size of the cell's pixel rectangle, whose
+edges are snapped the way the rasterizer fills the cell's background quad
+(`pixel_edge`): first to the rasterizer's 1/256 px vertex grid, then to the
+pixels whose centres it covers. Neighbouring cells therefore tile at any
+fractional cell size, including edges just past a pixel centre. Light
+strokes are the face's underline thickness rounded up to whole device pixels
+(at least one) and heavy strokes twice that; each is placed by one integer rule
+from the cell's width or height alone, so lines in a column or a row land on
+the same pixels in every cell and join without seams or doubled antialiasing.
+Double lines are two light strokes with a light gap. Arcs, diagonals and
+Powerline curves are antialiased, and arcs meet their straight arms on pixel
+centres where the curve has the line's full coverage. Shades are even
+25/50/75% coverage. The masks share the glyph pipeline's mask atlas and its LRU
+slot cache under a `SlotKey::Builtin` key (glyph, cell pixel size, stroke
+widths), so steady frames rasterize nothing and a font, size, scale or
+cell-size change clears them with every other slot. `emit_pane_glyphs` emits
+them in both text renderer modes; Legacy panes otherwise drawn by glyphon get a
+glyph range of their own for them. A per-pane hash of the recorded cells joins
+the pane's text damage, since a change to them reshapes nothing. Under a focused
+block cursor the cell's glyph is drawn again in the cursor text colour from a
+one-instance cursor buffer in the glyph pipeline, at the place in the pass
+order where the glyphon cursor glyph would be, and only in the blink's on
+phase. During that phase, with no IME preedit, the normal pane instance for
+the cursor cell is omitted and disjoint scissors exclude its pixel rectangle
+from normal Grid and Legacy text, including neighbouring font overhang.
+The mask, cursor instance and exclusion share the same quantized cell bounds.
+Partly covered pixels (a shade, an arc's edge) therefore show only cursor
+colours, while decorations, images and pane outlines keep their original pass
+order. The off phase and IME restore normal pane ink. The cursor instance only
+looks up the slot the pane resolved for the same cell and never allocates: it
+is resolved after the pane instances are uploaded, when an allocation could
+evict a slot they still draw from. Built-in masks do not use glyphon 0.12's
+custom glyphs: a growing glyphon atlas re-rasterizes every cached custom glyph
+through whichever `prepare` grew it,
+and panics when that prepare has no rasterizer, and Kettle's chrome renderers
+share one atlas. Moved-mark cursor images instead use the dedicated atlas
+described above.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's
