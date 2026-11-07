@@ -13,7 +13,7 @@ fn review_quick_cold_startup_hook_preserves_normal_session() {
     };
     let model = Model::for_startup(startup.quick_terminal, 1);
     assert!(Model::for_startup(false, 1).window.is_none());
-    let dir = tempfile::tempdir().unwrap();
+    let dir = kettle_test_support::private_tempdir("kettle-quick-startup-session-");
     let path = dir.path().join("session.json");
     let (normal_mux, _) = tests::title_test_tab_mux(1);
     let normal = WindowState::new(9, normal_mux);

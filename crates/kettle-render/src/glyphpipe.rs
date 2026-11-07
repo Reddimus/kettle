@@ -26,15 +26,39 @@
 //! no-op for ordinary ASCII and a fix purely where drift occurred.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use bytemuck::{Pod, Zeroable};
 use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
+use crate::builtin_glyphs::BuiltinKey;
+
 use crate::upload::{
     MappedRing, RetainedBytes, UploadCounters, UploadCounts, mapped_uploads, write_buffer_counted,
     write_buffer_if_changed, write_texture_counted,
 };
+
+/// What an atlas slot holds: a font glyph, or a mask Kettle drew itself for
+/// a box-drawing, block, Powerline or braille cell (see `builtin_glyphs`).
+/// Both share the atlases, the slot cache and its eviction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SlotKey {
+    Font(CacheKey),
+    Builtin(BuiltinKey),
+}
+
+impl From<CacheKey> for SlotKey {
+    fn from(key: CacheKey) -> Self {
+        Self::Font(key)
+    }
+}
+
+impl From<BuiltinKey> for SlotKey {
+    fn from(key: BuiltinKey) -> Self {
+        Self::Builtin(key)
+    }
+}
 
 /// One pinned glyph quad. `kind` selects the atlas: 0 = color, 1 = mask.
 #[repr(C)]
@@ -146,6 +170,32 @@ fn window_scissor(scissor: [u32; 4], window: [u32; 4]) -> Option<[u32; 4]> {
     (x1 > x0 && y1 > y0).then(|| [x0 - window[0], y0 - window[1], x1 - x0, y1 - y0])
 }
 
+/// Disjoint scissor strips outside an optional excluded rectangle.
+pub(crate) fn scissors_without(
+    scissor: [u32; 4],
+    excluded: Option<[u32; 4]>,
+) -> [Option<[u32; 4]>; 4] {
+    let [x, y, w, h] = scissor;
+    let Some([ex, ey, ew, eh]) = excluded else {
+        return [Some(scissor), None, None, None];
+    };
+    let (right, bottom) = (x.saturating_add(w), y.saturating_add(h));
+    let (left, top) = (x.max(ex), y.max(ey));
+    let (eright, ebottom) = (
+        right.min(ex.saturating_add(ew)),
+        bottom.min(ey.saturating_add(eh)),
+    );
+    if left >= eright || top >= ebottom {
+        return [Some(scissor), None, None, None];
+    }
+    [
+        (top > y).then_some([x, y, w, top - y]),
+        (ebottom < bottom).then_some([x, ebottom, w, bottom - ebottom]),
+        (left > x).then_some([x, top, left - x, ebottom - top]),
+        (eright < right).then_some([eright, top, right - eright, ebottom - top]),
+    ]
+}
+
 /// Where a glyph lives in the atlas + the bearings needed to place its quad.
 #[derive(Clone, Copy)]
 pub struct GlyphSlot {
@@ -182,9 +232,9 @@ enum CacheOutcome {
     AtlasFull,
 }
 
-fn remember_glyph_outcome(
-    slots: &mut HashMap<CacheKey, CachedSlot>,
-    key: CacheKey,
+fn remember_glyph_outcome<K: Hash + Eq>(
+    slots: &mut HashMap<K, CachedSlot>,
+    key: K,
     epoch: u64,
     outcome: CacheOutcome,
     complete: &mut bool,
@@ -812,7 +862,8 @@ fn glyph_instance_capacity(required: usize, max_buffer_size: u64) -> Option<(usi
 }
 
 /// The instanced glyph renderer: two atlases (color + mask), one pipeline, a
-/// per-`CacheKey` slot cache, and a growable instance buffer.
+/// per-`SlotKey` slot cache, a growable instance buffer, and a one-instance
+/// buffer for a built-in glyph under the block cursor.
 pub struct GlyphPipeline {
     pipeline: wgpu::RenderPipeline,
     atlas_bgl: wgpu::BindGroupLayout,
@@ -823,7 +874,7 @@ pub struct GlyphPipeline {
     bind_group: wgpu::BindGroup,
     bg_dirty: bool,
     glyphs_complete: bool,
-    slots: HashMap<CacheKey, CachedSlot>,
+    slots: HashMap<SlotKey, CachedSlot>,
     /// Frame counter bumped once per `upload`. Stamped onto a slot on every
     /// `ensure_glyph` touch (hit or miss) so `evict_lru` can tell which slots
     /// are cold once the cache needs to make room.
@@ -843,6 +894,17 @@ pub struct GlyphPipeline {
     /// `instances`, each charged to `budget` (see `upload.rs`).
     ring: Option<MappedRing>,
     counters: UploadCounters,
+    /// The built-in glyph drawn over a focused block cursor, in the cursor
+    /// text colour, and the pane rect that clips it. Pane text draws below
+    /// the cursor block; this one instance draws above it, in the slot the
+    /// glyphon cursor pass uses for font glyphs, and only in the blink's on
+    /// phase. Uploaded only when it changes.
+    cursor: wgpu::Buffer,
+    cursor_held: RetainedBytes,
+    pub(crate) cursor_clip: Option<[f32; 4]>,
+    cursor_pane_index: Option<u32>,
+    cursor_bounds: Option<[f32; 4]>,
+    _cursor_gpu: GraphicsReservation,
 }
 
 impl GlyphPipeline {
@@ -1008,6 +1070,13 @@ impl GlyphPipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let cursor_gpu = budget.reserve_gpu(std::mem::size_of::<GlyphInstance>())?;
+        let cursor = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-glyph-cursor"),
+            size: std::mem::size_of::<GlyphInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Some(Self {
             pipeline,
             atlas_bgl,
@@ -1031,6 +1100,12 @@ impl GlyphPipeline {
             screen_held: RetainedBytes::default(),
             ring,
             counters: UploadCounters::default(),
+            cursor,
+            cursor_held: RetainedBytes::default(),
+            cursor_clip: None,
+            cursor_pane_index: None,
+            cursor_bounds: None,
+            _cursor_gpu: cursor_gpu,
         })
     }
 
@@ -1079,9 +1154,10 @@ impl GlyphPipeline {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        key: CacheKey,
+        key: impl Into<SlotKey>,
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
     ) -> Option<GlyphSlot> {
+        let key = key.into();
         if let Some(cached) = self.slots.get_mut(&key) {
             if let Some(slot) = cached.for_epoch(self.epoch) {
                 cached.last_used = self.epoch;
@@ -1126,10 +1202,17 @@ impl GlyphPipeline {
         )
     }
 
+    /// The slot `key` already holds, if any, without rasterizing, allocating
+    /// or evicting anything, so no instance already uploaded can lose its
+    /// atlas pixels to this lookup.
+    pub fn resident(&self, key: impl Into<SlotKey>) -> Option<GlyphSlot> {
+        self.slots.get(&key.into())?.slot
+    }
+
     /// Evict the `n` coldest slots (smallest `last_used` epoch), returning
     /// their atlas rectangles to the appropriate free list.
     fn evict_lru(&mut self, n: usize) {
-        let victims: Vec<CacheKey> = lru_victims(
+        let victims: Vec<SlotKey> = lru_victims(
             self.slots
                 .iter()
                 .filter(|(_, cached)| cached.last_used < self.epoch)
@@ -1294,17 +1377,7 @@ impl GlyphPipeline {
         self.epoch = self.epoch.saturating_add(1);
         self.exhausted_kinds = [false; 2];
         let glyphs_complete = std::mem::replace(&mut self.glyphs_complete, true);
-        if self.bg_dirty {
-            self.bind_group = Self::make_bg(
-                device,
-                &self.atlas_bgl,
-                &self.screen_buf,
-                &self.color.view,
-                &self.mask.view,
-                &self.sampler,
-            );
-            self.bg_dirty = false;
-        }
+        self.refresh_bind_group(device);
         write_buffer_if_changed(
             queue,
             &self.screen_buf,
@@ -1358,6 +1431,86 @@ impl GlyphPipeline {
         glyphs_complete
     }
 
+    /// Rebuild the atlas bind group if a glyph upload grew a texture.
+    fn refresh_bind_group(&mut self, device: &wgpu::Device) {
+        if self.bg_dirty {
+            self.bind_group = Self::make_bg(
+                device,
+                &self.atlas_bgl,
+                &self.screen_buf,
+                &self.color.view,
+                &self.mask.view,
+                &self.sampler,
+            );
+            self.bg_dirty = false;
+        }
+    }
+
+    /// Set the built-in glyph drawn over the block cursor, clipped to the
+    /// pane rect `clip` (`[x, y, w, h]`), or none. Call after this frame's
+    /// pane glyphs were resolved: the instance points at a slot that the
+    /// same frame's `ensure_glyph` returned. Writes the GPU buffer only when
+    /// the instance changed.
+    pub fn set_cursor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        glyph: Option<(GlyphInstance, [f32; 4], u32)>,
+    ) {
+        // Resolving the cursor's slot can itself grow an atlas.
+        self.refresh_bind_group(device);
+        self.cursor_bounds = glyph.map(|(g, _, _)| [g.pos[0], g.pos[1], g.size[0], g.size[1]]);
+        self.cursor_clip = glyph.map(|(_, clip, _)| clip);
+        self.cursor_pane_index = glyph.map(|(_, _, index)| index);
+        if let Some((instance, _, _)) = glyph {
+            write_buffer_if_changed(
+                queue,
+                &self.cursor,
+                &mut self.cursor_held,
+                bytemuck::bytes_of(&instance),
+                &self.counters,
+            );
+        }
+    }
+
+    /// The built-in cursor cell, clipped to its pane and moved into the
+    /// render window. Normal text from either renderer must leave it clear.
+    pub(crate) fn cursor_exclusion(
+        &self,
+        target_size: [u32; 2],
+        window: [u32; 4],
+    ) -> Option<[u32; 4]> {
+        let pane = pane_scissor(self.cursor_clip?, target_size)?;
+        let cell = pane_scissor(self.cursor_bounds?, target_size)?;
+        let [x, y, w, h] = window_scissor(cell, pane)?;
+        window_scissor([x + pane[0], y + pane[1], w, h], window)
+    }
+
+    /// Draw the cursor's built-in glyph set by [`Self::set_cursor`], if any,
+    /// into a target holding `window` (`[x, y, w, h]`) of a `target_size`
+    /// scene, as [`Self::draw_in_window`] does.
+    pub fn draw_cursor(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        target_size: [u32; 2],
+        window: [u32; 4],
+    ) {
+        let Some(clip) = self.cursor_clip else {
+            return;
+        };
+        let Some([x, y, w, h]) =
+            pane_scissor(clip, target_size).and_then(|s| window_scissor(s, window))
+        else {
+            return;
+        };
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.cursor.slice(..));
+        pass.set_scissor_rect(x, y, w, h);
+        pass.draw(0..4, 0..1);
+        pass.set_scissor_rect(0, 0, window[2], window[3]);
+    }
+
     /// Draw the uploaded instances, each pane's contiguous range clipped to its
     /// pane rect via a scissor (so glyphs can't bleed across panes / into chrome).
     /// An empty `clips` draws everything unclipped (used when there's a single
@@ -1369,7 +1522,7 @@ impl GlyphPipeline {
         target_size: [u32; 2],
     ) {
         let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
-        self.draw_in_window(pass, clips, target_size, whole);
+        self.draw_in_window(pass, clips, target_size, whole, false);
     }
 
     /// [`Self::draw`] into a target that holds only `window` (`[x, y, w, h]`
@@ -1382,6 +1535,7 @@ impl GlyphPipeline {
         clips: &[GlyphClip],
         target_size: [u32; 2],
         window: [u32; 4],
+        hide_cursor: bool,
     ) {
         if self.count == 0 {
             return;
@@ -1396,8 +1550,27 @@ impl GlyphPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, instances.slice(..));
+        let hidden = self.cursor_pane_index.filter(|_| hide_cursor);
+        let excluded = hide_cursor
+            .then(|| self.cursor_exclusion(target_size, window))
+            .flatten();
+        let draw_range = |pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>| {
+            if let Some(index) = hidden.filter(|index| range.contains(index)) {
+                pass.draw(0..4, range.start..index);
+                pass.draw(0..4, index + 1..range.end);
+            } else {
+                pass.draw(0..4, range);
+            }
+        };
         if clips.is_empty() {
-            pass.draw(0..4, 0..self.count);
+            for [x, y, w, h] in scissors_without([0, 0, window[2], window[3]], excluded)
+                .into_iter()
+                .flatten()
+            {
+                pass.set_scissor_rect(x, y, w, h);
+                draw_range(pass, 0..self.count);
+            }
+            pass.set_scissor_rect(0, 0, window[2], window[3]);
             return;
         }
         for c in clips {
@@ -1409,8 +1582,13 @@ impl GlyphPipeline {
             else {
                 continue;
             };
-            pass.set_scissor_rect(x, y, w, h);
-            pass.draw(0..4, c.start..c.start + c.count);
+            for [x, y, w, h] in scissors_without([x, y, w, h], excluded)
+                .into_iter()
+                .flatten()
+            {
+                pass.set_scissor_rect(x, y, w, h);
+                draw_range(pass, c.start..c.start + c.count);
+            }
         }
         // Restore the whole-target scissor so the following passes (chrome text,
         // menus, the cursor glyph) aren't clipped by the last pane's rect.
@@ -1431,6 +1609,11 @@ impl GlyphPipeline {
         self.mask.allocator = AtlasAllocator::new(self.mask.width, self.mask.height);
         self.slot_limit_epoch = None;
         self.exhausted_kinds = [false; 2];
+        // The cursor instance points into the atlas too.
+        self.cursor_clip = None;
+        self.cursor_pane_index = None;
+        self.cursor_bounds = None;
+        self.cursor_held.invalidate();
     }
 }
 
@@ -1535,7 +1718,7 @@ mod tests {
         const LIMIT: usize = 131_072;
         for index in 0..LIMIT {
             pipeline.slots.insert(
-                key(index),
+                key(index).into(),
                 CachedSlot {
                     slot: None,
                     last_used: pipeline.epoch,
@@ -1601,7 +1784,8 @@ mod tests {
             .expect("glyph pipeline");
             let charged = pipeline.color._gpu.bytes()
                 + pipeline.mask._gpu.bytes()
-                + pipeline.instance_gpu.bytes();
+                + pipeline.instance_gpu.bytes()
+                + pipeline._cursor_gpu.bytes();
             renderer.glyph_pipeline = pipeline;
             let mut remaining = budget.limits().retained_bytes - charged;
             let mut pressure = Vec::new();
@@ -1660,6 +1844,36 @@ mod tests {
         );
         assert_eq!(pane_scissor([320.0, 0.0, 10.0, 10.0], [320, 120]), None);
         assert_eq!(pane_scissor([0.0, 0.0, 0.5, 10.0], [320, 120]), None);
+    }
+
+    #[test]
+    fn cursor_exclusion_scissors_cover_each_remaining_pixel_once() {
+        let pane = [3, 5, 8, 6];
+        for excluded in [
+            None,
+            Some([5, 7, 3, 2]),
+            Some([0, 0, 6, 8]),
+            Some([9, 9, 9, 9]),
+            Some([0, 0, 20, 20]),
+            Some([11, 5, 1, 6]),
+            Some([5, 7, 0, 2]),
+        ] {
+            let strips = scissors_without(pane, excluded);
+            assert!(strips.iter().flatten().all(|r| r[2] > 0 && r[3] > 0));
+            for y in 0..20 {
+                for x in 0..20 {
+                    let contains =
+                        |r: [u32; 4]| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+                    let expected = contains(pane) && !excluded.is_some_and(contains);
+                    let count = strips.iter().flatten().filter(|r| contains(**r)).count();
+                    assert_eq!(
+                        count,
+                        usize::from(expected),
+                        "{x},{y}, excluded={excluded:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Drawing into a window of the scene sets the scissors the whole scene
@@ -1928,7 +2142,8 @@ mod tests {
             );
             let charged = pipeline.color._gpu.bytes()
                 + pipeline.mask._gpu.bytes()
-                + pipeline.instance_gpu.bytes();
+                + pipeline.instance_gpu.bytes()
+                + pipeline._cursor_gpu.bytes();
             renderer.glyph_pipeline = pipeline;
             let mut remaining = budget.limits().retained_bytes - charged;
             let mut pressure = Vec::new();

@@ -568,7 +568,7 @@ fi
                 mode=0o755,
                 kind=tarfile.DIRTYPE,
             )
-            for relative_root in ("packaging/linux", "shell-integration"):
+            for relative_root in ("packaging/linux", "shell-integration", "docs/licenses/tokyonight.nvim"):
                 for source in sorted((ROOT / relative_root).iterdir()):
                     if source.is_file():
                         self._add(
@@ -794,6 +794,12 @@ fi
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("same-origin checksum only", result.stdout)
         self.assertTrue((self.root / "prefix" / "bin" / "kettle").is_file())
+        for name in ("LICENSE", "README.md"):
+            relative = Path("docs/licenses/tokyonight.nvim") / name
+            self.assertEqual(
+                (self.root / "prefix/share/doc/kettle" / relative).read_bytes(),
+                (ROOT / relative).read_bytes(),
+            )
         calls = self.curl_log.read_text(encoding="ascii")
         common = (
             "config=1",

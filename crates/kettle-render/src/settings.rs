@@ -563,13 +563,13 @@ pub(crate) fn settings_text_items(
             SettingsTextKind::Label(row.index),
         );
         let mut value_rect = inset(row.chip_rect, 4.0);
-        // An off switch keeps its knob at the left; the label starts after it.
-        if matches!(data.control, SettingsControl::Toggle(_))
-            && (data.control == SettingsControl::Toggle(false) || data.disabled)
-        {
-            let knob = settings_toggle_knob(row.chip_rect.3) + 2.0;
-            value_rect.0 += knob;
-            value_rect.2 = (value_rect.2 - knob).max(0.0);
+        // Reserve the knob after chip-width clamping, on either end of the switch.
+        if matches!(data.control, SettingsControl::Toggle(_)) {
+            let knob = (settings_toggle_knob(row.chip_rect.3) + 2.0).min(value_rect.2);
+            if data.control == SettingsControl::Toggle(false) || data.disabled {
+                value_rect.0 += knob;
+            }
+            value_rect.2 -= knob;
         }
         let cols = (value_rect.2 / cw.max(1.0)).floor().max(0.0) as usize;
         let value =

@@ -225,7 +225,7 @@ fn saved_layout_is_listed_by_picker_in_an_isolated_config_directory() {
         assert_eq!(launches, ["home", "Work"]);
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = kettle_test_support::private_tempdir("kettle-layout-picker-");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "app::menu_text_tests::saved_layout_is_listed_by_picker_in_an_isolated_config_directory", "--nocapture"])
         .env(CHILD, "1").env("XDG_CONFIG_HOME", dir.path()).output().unwrap();

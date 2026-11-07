@@ -35,6 +35,10 @@ jobs:
         run: >-
           nix build .#checks.x86_64-linux.package-contents
           --no-link --no-update-lock-file --print-build-logs
+      - name: Verify installed TokyoNight license bytes
+        run: >-
+          nix build .#checks.x86_64-linux.tokyonight-license
+          --no-link --no-update-lock-file --print-build-logs
       - name: Launch installed package under Xvfb
         run: >-
           nix build .#checks.x86_64-linux.runtime-smoke
