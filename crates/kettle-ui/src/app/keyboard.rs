@@ -1555,14 +1555,19 @@ impl App {
                 ws.terminal_key_recipients
                     .entry(event.physical_key)
                     .or_default()
-                    .extend(recipients);
+                    .extend(recipients.iter().copied());
                 if scroll_to_bottom
                     && foreign.accepted
                     && let Some(window) = &other.window
                 {
                     window.request_redraw();
                 }
-                Self::dismiss_media_paste_receipt_after_delivery(other, foreign);
+                Self::finish_foreign_key_delivery(
+                    other,
+                    foreign,
+                    &recipients,
+                    (&event.logical_key, event.text.as_deref()),
+                );
                 if let Some(input_time) = input_time {
                     stamp_accepted_input(&mut other.last_typed, foreign, input_time);
                 }
@@ -1571,6 +1576,18 @@ impl App {
             }
         }
         self.report_input_result(delivery.result);
+    }
+
+    pub(super) fn finish_foreign_key_delivery(
+        receiver: &mut WindowState,
+        delivery: PaneInputDelivery,
+        recipients: &[u64],
+        input: (&winit::keyboard::Key, Option<&str>),
+    ) {
+        if delivery.accepted {
+            Self::note_accessibility_input(receiver, recipients, input.0, input.1);
+        }
+        Self::dismiss_media_paste_receipt_after_delivery(receiver, delivery);
     }
 
     /// The one routing decision shared by real keyboard input and the
