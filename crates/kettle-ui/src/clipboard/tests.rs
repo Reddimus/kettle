@@ -210,3 +210,181 @@ fn native_worker_refuses_a_full_queue_without_spawning_more_readers() {
     release.send(()).unwrap();
     assert_eq!(first.join().unwrap().unwrap(), "first");
 }
+
+struct ClipboardOnly(Provider);
+
+impl TextProvider for ClipboardOnly {
+    fn supports_primary(&self) -> bool {
+        false
+    }
+
+    fn load(
+        &mut self,
+        primary: bool,
+        max: usize,
+        deadline: Instant,
+    ) -> Result<String, arboard::Error> {
+        if primary {
+            return Err(arboard::Error::ContentNotAvailable);
+        }
+        TextProvider::load(&mut self.0, primary, max, deadline)
+    }
+
+    fn store(
+        &mut self,
+        primary: bool,
+        text: String,
+        deadline: Instant,
+    ) -> Result<(), arboard::Error> {
+        if primary {
+            return Err(arboard::Error::ClipboardNotSupported);
+        }
+        TextProvider::store(&mut self.0, primary, text, deadline)
+    }
+}
+
+impl SelectionFallback for Provider {
+    fn store(&mut self, primary: bool, text: String) -> Result<(), arboard::Error> {
+        self.selections[usize::from(primary)] = text;
+        Ok(())
+    }
+
+    fn load(
+        &mut self,
+        primary: bool,
+        max: usize,
+        deadline: Instant,
+    ) -> Result<String, arboard::Error> {
+        let text = &self.selections[usize::from(primary)];
+        if Instant::now() >= deadline {
+            Err(arboard::Error::Timeout)
+        } else if text.len() > max {
+            Err(arboard::Error::LimitExceeded)
+        } else {
+            Ok(text.clone())
+        }
+    }
+}
+
+fn clipboard_only_with_fallback() -> Clipboard<Provider> {
+    Clipboard {
+        arboard: Some(Provider {
+            selections: ["fallback clipboard".into(), "external primary".into()],
+            ..Default::default()
+        }),
+        wayland: Some(
+            TextWorker::start(|| {
+                Ok(ClipboardOnly(Provider {
+                    selections: ["native clipboard".into(), String::new()],
+                    ..Default::default()
+                }))
+            })
+            .unwrap(),
+        ),
+    }
+}
+
+#[test]
+fn unsupported_primary_reads_use_fallback_and_keep_native_clipboard() {
+    let mut clipboard = clipboard_only_with_fallback();
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT)
+            .ok()
+            .as_deref(),
+        Some("external primary"),
+        "PRIMARY read must reach the fallback"
+    );
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "native clipboard"
+    );
+    assert!(matches!(
+        clipboard.get_selection_bounded(true, 3, Instant::now() + worker::READ_TIMEOUT),
+        Err(arboard::Error::LimitExceeded)
+    ));
+    assert!(matches!(
+        clipboard.get_selection_bounded(true, 100, Instant::now()),
+        Err(arboard::Error::Timeout)
+    ));
+    clipboard.arboard = None;
+    assert!(matches!(
+        clipboard.get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT),
+        Err(arboard::Error::ContentNotAvailable)
+    ));
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "native clipboard",
+        "missing PRIMARY must not alias CLIPBOARD"
+    );
+}
+
+#[test]
+fn unsupported_primary_writes_use_fallback_and_keep_native_clipboard() {
+    let mut clipboard = clipboard_only_with_fallback();
+    assert!(
+        clipboard
+            .set_selection(true, "selected text".into())
+            .is_ok(),
+        "PRIMARY write must reach the fallback"
+    );
+    clipboard.set_text("copied text".into()).unwrap();
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "selected text"
+    );
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "copied text"
+    );
+    // Observe each backend independently so routing both channels to the
+    // fallback cannot pass by reading its own misplaced writes.
+    let native = clipboard.wayland.take();
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "fallback clipboard"
+    );
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "selected text"
+    );
+    clipboard.set_selection(true, "x11 primary".into()).unwrap();
+    clipboard.set_text("x11 clipboard".into()).unwrap();
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "x11 primary"
+    );
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "x11 clipboard"
+    );
+    clipboard.wayland = native;
+    clipboard.arboard = None;
+    assert!(matches!(
+        clipboard.set_selection(true, "unavailable".into()),
+        Err(arboard::Error::ContentNotAvailable)
+    ));
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "copied text",
+        "failed PRIMARY writes must not overwrite native CLIPBOARD"
+    );
+}

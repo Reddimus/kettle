@@ -325,6 +325,8 @@ impl App {
     /// Returns whether the configured font size changed, which controls whether
     /// each window keeps its session-local zoom.
     pub(super) fn load_reloaded_config(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        self.profile_inventory.refresh();
         self.refresh_config_watcher();
         let previous_config_font_size = self.cfg.font_size;
         let path = self.config_path.clone().or_else(Config::default_path);

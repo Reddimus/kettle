@@ -99,6 +99,7 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
     let queued = |content| super::QueuedPaste {
         key_presses: Vec::new(),
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
         window: 1,
         target: Some(target),
         receipt_pane: Some(target),
@@ -153,7 +154,14 @@ fn image_paste_holds_enter_and_keeps_its_original_recipient() {
     else {
         panic!("Enter must follow the image path");
     };
-    let result = App::deliver_deferred_input(&mut ws, &targets, &[], prepare_input, false);
+    let result = App::deliver_deferred_input(
+        &mut ws,
+        &targets,
+        &[],
+        prepare_input,
+        false,
+        Default::default(),
+    );
     let after_enter = ws.mux.panes[&target].input_generation();
     let focused_after = ws.mux.panes[&focused].input_generation();
     ws.mux.kill_children();
@@ -173,6 +181,7 @@ fn held_keys_behind_an_encoding_paste_join_one_queue_entry() {
     let queued = |content| super::QueuedPaste {
         key_presses: Vec::new(),
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
         window: 1,
         target: Some(1),
         receipt_pane: Some(1),
@@ -424,6 +433,7 @@ fn deferred_authored_input_obeys_the_existing_queue_byte_limit() {
     let queued = |content| super::QueuedPaste {
         key_presses: Vec::new(),
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
         window: 1,
         target: Some(1),
         receipt_pane: Some(1),
@@ -808,8 +818,7 @@ fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         .and_then(|rest| rest.split("\n    }\n").next())
         .expect("ctl perform-action body");
     assert!(
-        action.contains("name == \"focus_window\"")
-            && action.contains("self.reveal_window(ws);"),
+        action.contains("name == \"focus_window\"") && action.contains("self.reveal_window(ws);"),
         "live UI automation needs an idempotent focus action that never hides its target"
     );
     assert!(
@@ -1035,6 +1044,7 @@ fn deferred_key_releases_fence_later_authored_input() {
         },
         key_presses: Vec::new(),
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
     };
     let mut press = queued(b"\x1b[1;1A");
     let key = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::ArrowUp);
@@ -1097,8 +1107,16 @@ fn deferred_key_releases_only_follow_accepted_presses() {
         ws.mux.panes[&accepted].input_generation(),
         other.mux.panes[&foreign].input_generation(),
     ];
-    let local_result = App::deliver_deferred_input(&mut ws, &targets, &presses, true, false);
-    let foreign_result = App::deliver_deferred_input(&mut other, &targets, &presses, true, false);
+    let local_result =
+        App::deliver_deferred_input(&mut ws, &targets, &presses, true, false, Default::default());
+    let foreign_result = App::deliver_deferred_input(
+        &mut other,
+        &targets,
+        &presses,
+        true,
+        false,
+        Default::default(),
+    );
     // Physical release may arrive after replay, or wait on a later paste.
     let releases: Vec<_> = presses
         .into_iter()
@@ -1146,12 +1164,26 @@ fn deferred_key_releases_keep_an_accepted_press_when_a_repeat_is_rejected() {
             );
         } else {
             assert_eq!(
-                App::deliver_deferred_input(&mut ws, &targets, &presses, true, false),
+                App::deliver_deferred_input(
+                    &mut ws,
+                    &targets,
+                    &presses,
+                    true,
+                    false,
+                    Default::default()
+                ),
                 PaneInputResult::Queued
             );
         }
         ws.mux.panes.get_mut(&pane).unwrap().read_only = true;
-        let repeat_result = App::deliver_deferred_input(&mut ws, &targets, &presses, true, false);
+        let repeat_result = App::deliver_deferred_input(
+            &mut ws,
+            &targets,
+            &presses,
+            true,
+            false,
+            Default::default(),
+        );
         ws.terminal_key_release_bytes.insert((key, pane), release);
         let mut releases = Vec::new();
         super::release_terminal_owned_keys(&mut ws, |id, key, release| {
@@ -1188,6 +1220,7 @@ fn deferred_key_releases_remember_rejection_after_read_only_ends() {
         &[(pane, release.clone())],
         true,
         false,
+        Default::default(),
     );
     ws.mux.panes.get_mut(&pane).unwrap().read_only = false;
     let before = ws.mux.panes[&pane].input_generation();
@@ -1223,6 +1256,7 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
         content,
         key_presses,
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
     };
     let mut queue = std::collections::VecDeque::from([queued(
         QueuedPasteContent::Text("paste".into()),
@@ -1273,7 +1307,14 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
     other.mux.attach_tab(tab, None);
     let before = other.mux.panes[&pane].input_generation();
     assert_eq!(
-        App::deliver_deferred_input(&mut ws, &targets, &input.key_presses, prepare_input, false),
+        App::deliver_deferred_input(
+            &mut ws,
+            &targets,
+            &input.key_presses,
+            prepare_input,
+            false,
+            Default::default()
+        ),
         PaneInputResult::Queued
     );
     assert_eq!(
@@ -1282,7 +1323,8 @@ fn deferred_key_releases_survive_coalesced_presses_and_pane_migration() {
             &targets,
             &input.key_presses,
             prepare_input,
-            false
+            false,
+            Default::default()
         ),
         PaneInputResult::Queued
     );

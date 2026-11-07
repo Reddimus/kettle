@@ -1295,6 +1295,7 @@ fn screenshot_grid_emits_cell_locked_glyphs() {
         emit_cell_locked_glyphs(
             &mut instances,
             &buf,
+            &[],
             (12.0, 12.0),
             cw,
             GlyphPositioning::Grid(cw),
@@ -1494,6 +1495,7 @@ fn grid_prompt_blink_frames_for(
         emit_cell_locked_glyphs(
             &mut instances,
             &buf,
+            &[],
             origin,
             cw,
             GlyphPositioning::Grid(cw),

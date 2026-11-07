@@ -8,6 +8,9 @@ type Result<T> = std::result::Result<T, arboard::Error>;
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) trait TextProvider: Send + 'static {
+    fn supports_primary(&self) -> bool {
+        true
+    }
     fn load(&mut self, primary: bool, max: usize, deadline: Instant) -> Result<String>;
     fn store(&mut self, primary: bool, text: String, deadline: Instant) -> Result<()>;
 }
@@ -24,7 +27,10 @@ struct Request {
 }
 
 #[derive(Clone)]
-pub(super) struct TextWorker(Sender<Request>);
+pub(super) struct TextWorker {
+    requests: Sender<Request>,
+    primary: bool,
+}
 
 impl TextWorker {
     pub(super) fn start<P: TextProvider>(
@@ -42,7 +48,7 @@ impl TextWorker {
                         return;
                     }
                 };
-                if ready.send(Ok(())).is_err() {
+                if ready.send(Ok(provider.supports_primary())).is_err() {
                     return;
                 }
                 for request in incoming {
@@ -70,15 +76,15 @@ impl TextWorker {
                 }
             })
             .map_err(|_| arboard::Error::ClipboardNotSupported)?;
-        initialized
+        let primary = initialized
             .recv_timeout(READ_TIMEOUT)
             .map_err(|_| arboard::Error::Timeout)??;
-        Ok(Self(requests))
+        Ok(Self { requests, primary })
     }
 
     fn request(&self, operation: Operation, deadline: Instant) -> Result<String> {
         let (reply, result) = bounded(1);
-        self.0
+        self.requests
             .try_send(Request {
                 operation,
                 deadline,
@@ -93,6 +99,10 @@ impl TextWorker {
         result
             .recv_deadline(deadline)
             .map_err(|_| arboard::Error::Timeout)?
+    }
+
+    pub(super) fn supports_primary(&self) -> bool {
+        self.primary
     }
 
     pub(super) fn load(&self, primary: bool, max: usize, deadline: Instant) -> Result<String> {

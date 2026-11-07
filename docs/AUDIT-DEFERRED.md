@@ -39,7 +39,9 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   normal exit deliberately leaves detached daemons running. Deferred until a
   macOS supervisor can track descendants across session changes. Close with
   native macOS timeout, cancellation and concurrent-command isolation tests.
-- **D-Bus messages sized before they are read.** `zbus` 5.19 resizes its
+- **D-Bus messages sized before they are read.** Kettle's receiver is now in
+  `crates/kettle-ui/src/portal_settings.rs`; its body check runs after transport
+  allocation. `zbus` 5.19 resizes its
   receive buffer to a message's declared length (up to 128 MiB) before
   reading the body, and the settings-portal subscription keeps the default
   64-message queue whatever `max_queued` asks, so a hostile session-bus peer
@@ -177,13 +179,15 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   proving bounded resource use and UI wait time without reordering OSC 52.
 
 - **Descriptor sweep on generic Unix.** On Unix systems other than Linux and
-  macOS, the media worker's close-on-exec sweep stops at the current
-  `RLIMIT_NOFILE`, so a descriptor opened above a later-lowered limit is
-  missed (`vendor` sandbox helper, `unix.rs`). Kettle ships for Linux, macOS
-  and Windows only. Sweeping to the hard limit is not enough either, and
-  `closefrom` in `pre_exec` would close the standard library's exec-error
-  pipe. Close with a per-platform descriptor enumeration (`/dev/fd` or
-  `kinfo_file`) run before `fork` on each supported BSD.
+  macOS, `vendor/portable-pty-0.9.0/src/unix.rs` sweeps to a finite hard
+  `RLIMIT_NOFILE` within its cap, otherwise to the capped soft limit. An open
+  descriptor above subsequently lowered limits is missed. Kettle ships for
+  Linux, macOS and Windows only. `closefrom` in `pre_exec` would also close
+  the standard library's exec-error pipe. Close with complete per-platform
+  descriptor enumeration or a close-on-exec mechanism that covers the fork
+  window, or fail spawning where completeness cannot be guaranteed. Validate
+  on the intended BSD with a descriptor above lowered hard and soft limits
+  and a failing-exec control; a parent-only snapshot can miss later opens.
 
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write

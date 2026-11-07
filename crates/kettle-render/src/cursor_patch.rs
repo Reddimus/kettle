@@ -931,8 +931,27 @@ impl Renderer {
     /// The pixels the inverted cursor glyph inks, placed and clipped as
     /// glyphon's `prepare_glyph` places them, or `None` for no glyph.
     fn cursor_glyph_ink(&mut self, target_size: [u32; 2]) -> Option<PixelBox> {
+        let cursor = self.pending_cursor_glyph.as_ref()?;
+        if !self.cursor_mark_images.is_empty() {
+            // The glyph is drawn as these images; its shaped text is clear.
+            let bounds = glyphon_bounds(cursor.clip, target_size);
+            return self
+                .cursor_mark_images
+                .iter()
+                .map(|&[x, y, width, height]| {
+                    PixelBox {
+                        x0: i64::from(x),
+                        y0: i64::from(y),
+                        x1: i64::from(x) + i64::from(width),
+                        y1: i64::from(y) + i64::from(height),
+                    }
+                    .intersect(bounds)
+                })
+                .filter(|quad| !quad.is_empty())
+                .reduce(PixelBox::union);
+        }
         cursor_glyph_ink(
-            self.pending_cursor_glyph.as_ref()?,
+            cursor,
             &self.cursor_glyph_buffer,
             &mut self.font_system,
             &mut self.swash,
@@ -1359,6 +1378,7 @@ mod tests {
             attrs: AttrsOwned::new(&attrs),
             color: Rgb::new(255, 255, 255),
             clip: (0.0, 0.0, 200.0, 200.0),
+            marks: Vec::new(),
             builtin: None,
         };
         let mut swash = SwashCache::new();
