@@ -121,7 +121,10 @@ date. Recheck that before upgrading a crate or dropping a patch.
   Emoji_Presentation classifier so rendering and cell widths share a table.
   DECNKM (66) aliases the existing keypad state, including mode reports and
   save/restore. DECBKM (67) exposes negotiated Backarrow state to key encoders;
-  RIS and DECSTR clear that negotiation. VT level 5 DECNCSM (95) preserves
+  its bounded save/restore snapshot retains both the mode value and negotiation
+  flag, including an untouched startup state. MoreFix retains its optional
+  negotiation state in the same cache. RIS and DECSTR clear the saved snapshots
+  and Backarrow negotiation. VT level 5 DECNCSM (95) preserves
   text, selections and graphics across DECCOLM. Otherwise DECCOLM clears
   visible selections and emits the retained-graphics erase event. Its margin
   reset homes the cursor even in a one-row pane; it never resizes the window.

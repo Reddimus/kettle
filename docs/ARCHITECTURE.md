@@ -2478,7 +2478,7 @@ The blink attribute is retained by SGR, attribute operations, copies and
 reports; text continues to render steadily. Slow and fast blink share this
 protocol attribute. RIS and DECSTR reset the selected attribute extent.
 
-XTSAVE and XTRESTORE retain one value per implemented private mode. Unknown
+XTSAVE and XTRESTORE retain one snapshot per implemented private mode. Unknown
 modes, fixed modes, cursor-save actions and parser-owned synchronized updates
 are excluded. Repeated saves replace the prior value and resets clear the
 cache. Mode 41 explicitly negotiates the MoreFix tab rule: enabled wraps then
@@ -2489,7 +2489,11 @@ DECNKM (66) and DECKPAM/DECKPNM operate on the same keypad flag. DECBKM
 (67) selects BS or DEL for legacy Backarrow input, for both native keys and
 `send_keys`. Its explicit negotiation overrides the configured startup
 Backspace binding until RIS or DECSTR; Kitty and modifyOtherKeys sequences
-retain their protocol encodings. Mode save/restore uses the live state.
+retain their protocol encodings. Mode save/restore retains both the live
+Backarrow value and its negotiation flag. Saving and immediately restoring an
+unnegotiated terminal preserves the configured startup binding. The bounded
+mode cache stores Backarrow's two flags and MoreFix's optional negotiation
+state alongside ordinary boolean mode snapshots; RIS and DECSTR clear it.
 
 DECNCSM (95) is available at VT level 5. It suppresses the display-clear
 side effect of DECCOLM while retaining its cursor home and full-width/full-

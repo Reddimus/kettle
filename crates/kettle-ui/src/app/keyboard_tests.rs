@@ -766,3 +766,60 @@ fn dec_backarrow_controls_legacy_keys_until_reset_without_rewriting_kitty() {
         }
     }
 }
+
+#[test]
+fn backarrow_save_restore_preserves_control_h_encoding() {
+    assert_backarrow_binding_survives_save_restore("backspace-binding = control-h", vec![8]);
+}
+
+#[test]
+fn backarrow_save_restore_preserves_escape_sequence_encoding() {
+    assert_backarrow_binding_survives_save_restore(
+        "backspace-binding = escape-sequence",
+        b"\x1b[3~".to_vec(),
+    );
+}
+
+fn assert_backarrow_binding_survives_save_restore(setting: &str, startup: Vec<u8>) {
+    use alacritty_terminal::{
+        Term, event::VoidListener, term::Config as TermConfig, vte::ansi::Processor,
+    };
+    use kettle_config::Config;
+    use kettle_core::TermMode;
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    let size = kettle_core::term::TermSize::new(8, 3);
+    let key = Key::Named(NamedKey::Backspace);
+    let cfg = Config::parse_text(setting);
+    let encode = |mode, mods| {
+        let bytes = crate::input::encode_key_press(&key, mods, mode).unwrap();
+        apply_bs_del_binding(&cfg, &key, mode, bytes)
+    };
+    for (initial, expected, alt_code) in [
+        ("", startup.clone(), 0x7f),
+        ("\x1b[?67h", vec![8], 8),
+        ("\x1b[?67l", vec![0x7f], 0x7f),
+    ] {
+        for change in ["", "\x1b[?67h", "\x1b[?67l"] {
+            let mut term = Term::new(TermConfig::default(), &size, VoidListener);
+            let mut parser: Processor = Processor::new();
+            parser.advance(&mut term, initial.as_bytes());
+            assert_eq!(encode(*term.mode(), ModifiersState::empty()), expected);
+            parser.advance(&mut term, format!("\x1b[?67s{change}\x1b[?67r").as_bytes());
+            assert_eq!(encode(*term.mode(), ModifiersState::empty()), expected);
+            assert_eq!(
+                encode(*term.mode(), ModifiersState::ALT),
+                vec![0x1b, alt_code]
+            );
+            assert_eq!(encode(*term.mode(), ModifiersState::CONTROL), vec![8]);
+            let kitty = *term.mode() | TermMode::DISAMBIGUATE_ESC_CODES;
+            assert_eq!(encode(kitty, ModifiersState::ALT), b"\x1b[127;3u");
+            for reset in [b"\x1b[!p".as_slice(), b"\x1bc"] {
+                parser.advance(&mut term, b"\x1b[?67h\x1b[?67s");
+                parser.advance(&mut term, reset);
+                parser.advance(&mut term, b"\x1b[?67r");
+                assert_eq!(encode(*term.mode(), ModifiersState::empty()), startup);
+            }
+        }
+    }
+}

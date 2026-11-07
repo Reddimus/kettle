@@ -1728,7 +1728,11 @@ Portable cases cover every split of the no-clear sequence, VT4 versus VT5,
 mode save/restore, cursor homing in one-row panes, wide cells, selections,
 retained-graphics events, alternate screens, RIS and DECSTR. Backarrow tests
 exercise configured startup bindings, explicit BS/DEL negotiation, modifiers,
-Kitty precedence and reset. Removing the negotiated-key binding override
+Kitty precedence and reset. Save/restore regressions retain both Backarrow
+flags, cover every control-sequence split, replacement saves and reset-cleared
+snapshots, and assert actual key bytes from parsed Control-H and EscapeSequence
+settings. Immediate save/restore before negotiation preserves each startup
+binding; explicitly negotiated BS and DEL survive intervening changes. Removing the negotiated-key binding override
 makes the keyboard regression fail; removing the modes makes the core
 regressions fail.
 

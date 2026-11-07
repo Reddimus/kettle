@@ -355,6 +355,14 @@ struct GraphemeAnchor {
     has_cell: bool,
 }
 
+/// Mode snapshots retain negotiation metadata as well as the reported value.
+#[derive(Clone, Copy)]
+enum SavedPrivateMode {
+    Boolean(bool),
+    MoreFix(Option<bool>),
+    Backarrow(TermMode),
+}
+
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
@@ -417,7 +425,7 @@ pub struct Term<T> {
     #[cfg(test)]
     ascii_runs: bool,
     attribute_extent: u8,
-    saved_private_modes: Vec<(u16, Option<bool>)>,
+    saved_private_modes: Vec<(u16, SavedPrivateMode)>,
 
     /// Modified terminal colors.
     colors: Colors,
@@ -4110,16 +4118,18 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
         let state = match self.private_mode_state(mode) {
-            ModeState::Set => Some(true),
-            ModeState::Reset => Some(false),
+            ModeState::Set => true,
+            ModeState::Reset => false,
             ModeState::NotSupported | ModeState::PermanentlySet | ModeState::PermanentlyReset => {
                 return;
             }
         };
-        let state = if mode == PrivateMode::Unknown(41) {
-            self.morefix
-        } else {
-            state
+        let state = match mode {
+            PrivateMode::Unknown(41) => SavedPrivateMode::MoreFix(self.morefix),
+            PrivateMode::Named(NamedPrivateMode::Backarrow) => SavedPrivateMode::Backarrow(
+                self.mode & (TermMode::BACKARROW | TermMode::BACKARROW_NEGOTIATED),
+            ),
+            _ => SavedPrivateMode::Boolean(state),
         };
         if let Some(saved) = self
             .saved_private_modes
@@ -4140,9 +4150,14 @@ impl<T: EventListener> Handler for Term<T> {
             .find(|saved| saved.0 == mode.raw())
             .copied();
         match saved {
-            Some((41, state)) => self.morefix = state,
-            Some((_, Some(true))) => self.set_private_mode(mode),
-            Some((_, Some(false))) => self.unset_private_mode(mode),
+            Some((_, SavedPrivateMode::MoreFix(state))) => self.morefix = state,
+            Some((_, SavedPrivateMode::Backarrow(state))) => {
+                self.mode
+                    .remove(TermMode::BACKARROW | TermMode::BACKARROW_NEGOTIATED);
+                self.mode.insert(state);
+            }
+            Some((_, SavedPrivateMode::Boolean(true))) => self.set_private_mode(mode),
+            Some((_, SavedPrivateMode::Boolean(false))) => self.unset_private_mode(mode),
             _ => (),
         }
     }
@@ -4866,6 +4881,26 @@ mod tests {
         assert_eq!(term.grid.history_size(), 1);
         assert_eq!(term.grid[Line(4)][Column(19)].c, 'A');
         assert_eq!(term.grid[Line(5)][Column(0)].c, 'B');
+    }
+
+    #[test]
+    fn backarrow_save_restore_retains_both_live_flags() {
+        for backarrow in [false, true] {
+            for negotiated in [false, true] {
+                for change in ["", "\x1b[?67h", "\x1b[?67l"] {
+                    let mut term = Term::new(Config::default(), &TermSize::new(8, 3), VoidListener);
+                    term.mode.set(TermMode::BACKARROW, backarrow);
+                    term.mode.set(TermMode::BACKARROW_NEGOTIATED, negotiated);
+                    let mut parser: Processor = Processor::new();
+                    parser.advance(&mut term, format!("\x1b[?67s{change}\x1b[?67r").as_bytes());
+                    assert_eq!(term.mode().contains(TermMode::BACKARROW), backarrow);
+                    assert_eq!(
+                        term.mode().contains(TermMode::BACKARROW_NEGOTIATED),
+                        negotiated
+                    );
+                }
+            }
+        }
     }
 
     #[test]
