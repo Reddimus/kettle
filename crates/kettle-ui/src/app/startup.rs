@@ -64,17 +64,18 @@ const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// value a half-specified `window-width`/`window-height` fills its other axis
 /// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
-/// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
-/// default font) left every fresh window too narrow for the tools Kettle
-/// targets. 160x45 baseline cells are 1296x764 logical px with the default
-/// chrome: about 152x41 real cells at the 14 px font on a 1080p monitor.
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at the
+/// default font and padding) left every fresh window too narrow for the tools
+/// Kettle targets. 160x45 baseline cells and the default 12 px padding are 1304x744
+/// logical px, 1304x772 under macOS's titlebar tab band: about 164x44 real
+/// cells at the default 13 px font (7.8x16.25 px) on a 1080p monitor.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
 pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
 /// The default window never covers more of the monitor than this: a fixed
 /// target rather than a monitor fraction keeps a 3440-wide ultrawide from
 /// opening a 285-column canvas, and the fit keeps a 1366x768 laptop honest
-/// (its 90 % is 1229 px, about 144 columns at the default font). There is no
-/// floor on purpose: a monitor smaller than the target wins.
+/// (its 90 % is 1229 px, 154 columns at the default font and padding). There
+/// is no floor on purpose: a monitor smaller than the target wins.
 pub(super) const STARTUP_MONITOR_WIDTH_FRACTION: f64 = 0.90;
 pub(super) const STARTUP_MONITOR_HEIGHT_FRACTION: f64 = 0.85;
 

@@ -85,7 +85,7 @@ def write_config(path: Path, language: str, theme: str, shell: Path) -> None:
         "restore-session = false",
         "check-for-updates = false",
         f"language = {language}",
-        "theme = TokyoNight Day" if theme == "light" else "theme = TokyoNight Night",
+        "theme = Kettle Day" if theme == "light" else "theme = TokyoNight Night",
         "cursor-blink = false",
         "window-title-format = {title}",
         # Every tab and split runs the same plain shell (see capture_state).

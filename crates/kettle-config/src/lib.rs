@@ -1181,6 +1181,29 @@ pub enum PreviewLaneSide {
     Right,
 }
 
+/// When a detected link (a URL or path Kettle found in the output) is
+/// underlined (`link-underline`). OSC 8 links keep their dotted resting
+/// underline either way, since their text need not look like a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkUnderline {
+    /// Only while the pointer is over it.
+    #[default]
+    Hover,
+    /// At rest too, as a thin dim line.
+    Always,
+}
+
+impl LinkUnderline {
+    /// The documented spelling of a value, case-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hover" => Some(Self::Hover),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 /// Whether Kettle avoids motion it would start on its own (`reduce-motion`).
 /// Today that is a video's preview looping while the pointer rests on its
 /// lane; a preview the user starts plays either way.
@@ -1416,11 +1439,12 @@ pub struct Config {
     pub padding_x: f32,
     pub padding_y: f32,
     pub background_opacity: f32,
-    /// Ask the window system to blur content behind Kettle. Unsupported Linux
-    /// sessions use a live-only 99% opaque underlay instead of leaving sharp
-    /// alpha transparency visible. A window only receives an alpha-capable
-    /// surface when this or a sub-1.0 composed background alpha asks for one,
-    /// so turning it on takes full effect in windows opened afterwards.
+    /// Ask the window system to blur content behind Kettle. Where it cannot
+    /// (X11, Wayland without KWin's blur protocol, Windows without its system
+    /// backdrop), the window keeps the configured opacity without blur. A
+    /// window only receives an alpha-capable surface when this or a sub-1.0
+    /// composed background alpha asks for one, so turning it on takes full
+    /// effect in windows opened afterwards.
     pub window_blur: bool,
     pub completion_overlay: CompletionOverlayMode,
     pub cursor_style: CursorStyle,
@@ -1514,6 +1538,10 @@ pub struct Config {
     /// `link_single_click`): when true, single-click on a URL
     /// opens it (kettle default: Ctrl+click). PuTTY/iTerm2-style.
     pub link_single_click: bool,
+    /// `link-underline`: `hover` (default) underlines a detected URL or path
+    /// only while it is hovered; `always` also draws a thin dim line at
+    /// rest. OSC 8 links rest dotted in both modes.
+    pub link_underline: LinkUnderline,
     /// Terminator parity (terminatorlib/config.py:91
     /// `clear_select_on_copy`): when true, the selection is
     /// deselected after Copy (default: keep selected, so user can
@@ -3240,11 +3268,11 @@ impl Default for Config {
             theme_overrides: ThemeOverrides::default(),
             scrollback: 10_000,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
-            padding_x: 8.0,
-            padding_y: 8.0,
+            padding_x: 12.0,
+            padding_y: 12.0,
             // Native material is the product default. Linux stays at 99%
-            // whether compositor blur is available or not; the live floor
-            // still protects explicit lower values on unsupported sessions.
+            // whether compositor blur is available or not, so text stays
+            // readable over sharp transparency until a user lowers it.
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             window_blur: true,
             completion_overlay: CompletionOverlayMode::Auto,
@@ -3281,6 +3309,7 @@ impl Default for Config {
             allow_bold: true,
             bold_is_bright: false,
             link_single_click: false,
+            link_underline: LinkUnderline::Hover,
             clear_select_on_copy: false,
             disable_mousewheel_zoom: false,
             disable_mouse_paste: false,
@@ -3352,7 +3381,8 @@ impl Default for Config {
             theme_schedule_lat: None,
             theme_schedule_long: None,
             tab_bar_width: 180.0,
-            light_theme: "TokyoNight Day".into(),
+            // TokyoNight Day with darker text (assets/themes/Kettle Day).
+            light_theme: "Kettle Day".into(),
             dark_theme: "TokyoNight Night".into(),
             icon_bell: true,
             show_titlebar: true,
@@ -4530,6 +4560,7 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
                 ),
+                "link-underline" | "link_underline" => LinkUnderline::parse(v).is_some(),
                 "media-open-mode" | "media_open_mode" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
                     "overlay" | "lane"
@@ -5217,6 +5248,11 @@ impl Config {
                 "link-single-click" | "link_single_click" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.link_single_click = b;
+                    }
+                }
+                "link-underline" | "link_underline" => {
+                    if let Some(mode) = LinkUnderline::parse(&e.value) {
+                        cfg.link_underline = mode;
                     }
                 }
                 "clear-select-on-copy" | "clear_select_on_copy" => {
@@ -9142,6 +9178,45 @@ cell-height = 1.2\n";
         }
     }
 
+    /// Detected links are underlined on hover unless `link-underline =
+    /// always` asks for the resting line back. A typo is reported and leaves
+    /// the default.
+    #[test]
+    fn link_underline_defaults_to_hover_and_accepts_always() {
+        assert_eq!(Config::default().link_underline, LinkUnderline::Hover);
+        for (text, expected) in [
+            ("link-underline = always", LinkUnderline::Always),
+            ("link_underline = ALWAYS", LinkUnderline::Always),
+            ("link-underline = Hover", LinkUnderline::Hover),
+            (
+                "link-underline = always\nlink-underline = hover",
+                LinkUnderline::Hover,
+            ),
+        ] {
+            let (cfg, unknown) = Config::parse_collect(text);
+            assert_eq!(cfg.link_underline, expected, "{text}");
+            assert!(unknown.is_empty(), "{text}: {unknown:?}");
+            assert!(Config::detect_malformed_values(text).is_empty(), "{text}");
+        }
+        for typo in ["never", "on", "true", "hovered"] {
+            let text = format!("link-underline = {typo}");
+            assert_eq!(
+                Config::detect_malformed_values(&text),
+                [format!("link-underline = {typo:?}")],
+                "{text}"
+            );
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty(), "{text}: {unknown:?}");
+            assert_eq!(cfg.link_underline, LinkUnderline::Hover, "{text}");
+        }
+        let text = "link-underline = always\nlink-underline = sometimes";
+        assert_eq!(
+            Config::parse_text(text).link_underline,
+            LinkUnderline::Always,
+            "an unknown value keeps the value before it"
+        );
+    }
+
     #[test]
     fn media_open_mode_reports_typos_and_keeps_the_default() {
         let text = "media-open-mode = full-screen";
@@ -9555,8 +9630,8 @@ cell-height = 1.2\n";
     /// nothing.
     #[test]
     fn bare_padding_aliases_apply_and_are_known() {
-        let (cfg, unknown) = Config::parse_collect("padding-x = 12\npadding-y = 5\n");
-        assert_eq!(cfg.padding_x, 12.0);
+        let (cfg, unknown) = Config::parse_collect("padding-x = 14\npadding-y = 5\n");
+        assert_eq!(cfg.padding_x, 14.0);
         assert_eq!(cfg.padding_y, 5.0);
         assert!(
             unknown.is_empty(),
@@ -9579,6 +9654,33 @@ cell-height = 1.2\n";
             }
         }
         assert_eq!(Config::parse_text("padding-x = 0\n").padding_x, 0.0);
+    }
+
+    /// At 8 px the prompt sat close to the window edge. The default inset is
+    /// 12 px on both axes (the Settings control writes one value to both),
+    /// and the reference and example config say so.
+    #[test]
+    fn default_window_padding_is_a_generous_even_inset_and_documented() {
+        let cfg = Config::default();
+        assert_eq!((cfg.padding_x, cfg.padding_y), (12.0, 12.0));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let reference = std::fs::read_to_string(root.join("docs/CONFIG.md")).expect("CONFIG.md");
+        assert!(
+            reference.lines().any(|line| line
+                .starts_with("| `window-padding-x` / `window-padding-y` | float | `12` |")),
+            "docs/CONFIG.md must document the 12 px padding default"
+        );
+        let example = std::fs::read_to_string(root.join("docs/kettle.example.config"))
+            .expect("example config");
+        for key in ["window-padding-x", "window-padding-y"] {
+            assert!(
+                example
+                    .lines()
+                    .any(|line| line.starts_with(&format!("# {key}"))
+                        && line.trim_end().ends_with("= 12")),
+                "docs/kettle.example.config must show {key} = 12"
+            );
+        }
     }
 
     /// A NUL in a value would end the string a platform API reads: in a
@@ -11801,10 +11903,10 @@ split_horiz = <Control><Shift>j
             Config::parse_text("font-size = 16"),
         ] {
             assert_eq!(cfg.theme_mode, ThemeMode::Auto);
-            assert_eq!(cfg.light_theme, "TokyoNight Day");
+            assert_eq!(cfg.light_theme, "Kettle Day");
             assert_eq!(cfg.dark_theme, "TokyoNight Night");
             for (os, expected) in [
-                (Some(false), "TokyoNight Day"),
+                (Some(false), "Kettle Day"),
                 (Some(true), "TokyoNight Night"),
                 (None, "TokyoNight Night"),
             ] {
@@ -11835,7 +11937,7 @@ split_horiz = <Control><Shift>j
             let mut cfg = Config::parse_text(text);
             assert_eq!(cfg.theme_mode, ThemeMode::Auto);
             cfg.resolve_theme_mode(Some(false));
-            assert_eq!(cfg.theme_name, "TokyoNight Day");
+            assert_eq!(cfg.theme_name, "Kettle Day");
         }
     }
 

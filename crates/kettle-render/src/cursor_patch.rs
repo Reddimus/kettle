@@ -200,8 +200,6 @@ fn measured_layer_adapter(name: &str, backend: wgpu::Backend) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SceneFacts {
     pub(crate) target_size: [u32; 2],
-    /// The flag that pass ran with: the live pass, or the headless capture.
-    pub(crate) live_window: bool,
     /// Whether that pass drew the cursor.
     pub(crate) cursor_on: bool,
     /// Whether the frame's pixels can be translucent on screen.
@@ -916,7 +914,7 @@ impl Renderer {
         if self.inexact_draws_touch(near) {
             return Err(Why::Overlap);
         }
-        if !self.quads_are_snap_stable_near(near, facts.live_window) {
+        if !self.quads_are_snap_stable_near(near) {
             return Err(Why::SnapBoundary);
         }
         Ok((
@@ -1000,17 +998,12 @@ impl Renderer {
 
     /// Whether every flat quad the scene pass draws rasterizes the same inside
     /// `near` in a patch target as in the full frame.
-    fn quads_are_snap_stable_near(&self, near: PixelBox, live_window: bool) -> bool {
-        let bases = if crate::use_live_pane_bases(live_window, self.live_background_opacity_floor) {
-            &self.live_pane_bases
-        } else {
-            &self.pane_bases
-        };
+    fn quads_are_snap_stable_near(&self, near: PixelBox) -> bool {
         self.quad_scratch
             .iter()
             .all(|quad| quad_is_snap_stable_near(quad, near))
             && [
-                bases,
+                &self.pane_bases,
                 &self.card_base,
                 &self.card_cursors,
                 &self.card_decoration,
@@ -1057,19 +1050,11 @@ impl Renderer {
             return Err(CursorPatchFailure::Budget);
         };
         for (view, cursor_on) in [(&targets.on_view, true), (&targets.off_view, false)] {
-            self.encode_scene_pass(
-                view,
-                facts.target_size,
-                cfg,
-                facts.live_window,
-                cursor_on,
-                Some(rect),
-                encoder,
-            )
-            .map_err(|error| {
-                log::warn!("cursor patch pass failed: {error}");
-                CursorPatchFailure::Validation
-            })?;
+            self.encode_scene_pass(view, facts.target_size, cfg, cursor_on, Some(rect), encoder)
+                .map_err(|error| {
+                    log::warn!("cursor patch pass failed: {error}");
+                    CursorPatchFailure::Validation
+                })?;
         }
         patch.encode_combine(encoder, target, format, &targets.bind_group)
     }
@@ -1142,7 +1127,6 @@ impl Renderer {
             &view,
             facts.target_size,
             cfg,
-            facts.live_window,
             cursor_on,
             window,
             &mut encoder,
@@ -1175,7 +1159,6 @@ impl Renderer {
                     presentation.scene_view().expect("presentation target"),
                     facts.target_size,
                     cfg,
-                    facts.live_window,
                     cursor_on,
                     None,
                     &mut encoder,
@@ -1620,15 +1603,17 @@ mod tests {
         let reset = frame.find("self.last_scene = None;").expect("frame reset");
         let upload = frame.find(".upload(").expect("first upload");
         assert!(reset < upload, "reset must precede uploads");
+        // Two records of the same facts: the headless capture's, then the
+        // presented frame's.
         assert_eq!(frame.matches("self.last_scene = Some(").count(), 2);
         assert_eq!(
             frame
                 .matches("self.last_scene = Some(scene_facts);")
                 .count(),
-            1
+            2
         );
         let record = frame
-            .find("self.last_scene = Some(scene_facts);")
+            .rfind("self.last_scene = Some(scene_facts);")
             .expect("record");
         let present = frame
             .find("self.gpu.queue.present(frame);")
@@ -1636,7 +1621,7 @@ mod tests {
         let outcome = frame.find("Ok(FrameOutcome::Presented)").expect("outcome");
         assert!(present < record && record < outcome);
         let headless = frame
-            .find("self.last_scene = Some(cursor_patch::SceneFacts {")
+            .find("self.last_scene = Some(scene_facts);")
             .expect("headless record");
         let headless_branch = frame.find("let Some(acquired)").expect("acquire branch");
         let acquire_match = frame.find("match acquired").expect("acquire outcomes");
@@ -1747,7 +1732,7 @@ mod tests {
         };
         let snap = snapshot_of(20, 4, b"hello");
         let state = renderer.recovery_state();
-        for change in 0..8 {
+        for change in 0..7 {
             capture(
                 &mut renderer,
                 &cfg,
@@ -1764,8 +1749,7 @@ mod tests {
                 2 => renderer.set_font_size(15.0),
                 3 => renderer.set_font_family("monospace".into()),
                 4 => renderer.set_cell_scale(1.07, 1.0),
-                5 => renderer.set_live_background_opacity_floor(Some(1.0)),
-                6 => renderer.restore_recovery_state(&state),
+                5 => renderer.restore_recovery_state(&state),
                 _ => {
                     // Force an alpha-mode transition even on an opaque-only fixture.
                     renderer.config.alpha_mode = wgpu::CompositeAlphaMode::PostMultiplied;
@@ -1860,7 +1844,6 @@ mod tests {
         translucent_surface: bool,
         surface_mode: Option<wgpu::CompositeAlphaMode>,
         opacity: Option<f32>,
-        live_floor: Option<f32>,
         split: bool,
         /// Size the grid to the pane and park the cursor on its last column,
         /// under the scrollbar's gutter.
@@ -1939,7 +1922,6 @@ mod tests {
             translucent_surface: false,
             surface_mode: None,
             opacity: None,
-            live_floor: None,
             split: false,
             last_column: false,
         };
@@ -2027,22 +2009,18 @@ mod tests {
             wgpu::CompositeAlphaMode::PostMultiplied,
         ] {
             for opacity in [0.0, 0.86, 1.0] {
-                for live_floor in [None, Some(0.99)] {
+                cases.push(Case {
+                    surface_mode: Some(mode),
+                    opacity: Some(opacity),
+                    ..case("live surface modes", "hello\x1b[2G")
+                });
+                if mode == wgpu::CompositeAlphaMode::Opaque || opacity == 1.0 {
                     cases.push(Case {
+                        configure: |cfg| cfg.cell_width = 0.6,
                         surface_mode: Some(mode),
                         opacity: Some(opacity),
-                        live_floor,
-                        ..case("live surface modes", "hello\x1b[2G")
+                        ..case("live overhang", "WWWW\x1b[2G")
                     });
-                    if mode == wgpu::CompositeAlphaMode::Opaque || opacity == 1.0 {
-                        cases.push(Case {
-                            configure: |cfg| cfg.cell_width = 0.6,
-                            surface_mode: Some(mode),
-                            opacity: Some(opacity),
-                            live_floor,
-                            ..case("live overhang", "WWWW\x1b[2G")
-                        });
-                    }
                 }
             }
         }
@@ -2080,7 +2058,6 @@ mod tests {
             if let Some(mode) = case.surface_mode {
                 renderer.supported_alpha_modes = vec![mode];
             }
-            renderer.set_live_background_opacity_floor(case.live_floor);
             let (cols, bytes) = if case.last_column {
                 cfg.scrollbar_width = 40.0;
                 let cols = ((width as f32 - 2.0 * cfg.padding_x - 40.0) / renderer.cell_w) as usize;
@@ -2122,10 +2099,8 @@ mod tests {
                 vec![pane(&snap, width, height)]
             };
             capture(&mut renderer, &cfg, &views, &focused(true));
-            renderer.last_scene.as_mut().expect("on frame").live_window = true;
             let on = renderer.displayed_frame_for_tests(&cfg, true);
             capture(&mut renderer, &cfg, &views, &focused(false));
-            renderer.last_scene.as_mut().expect("off frame").live_window = true;
             let off = renderer.displayed_frame_for_tests(&cfg, false);
             assert_cursor_edges_are_stable(&renderer);
             if matches!(
@@ -2167,11 +2142,10 @@ mod tests {
             );
             assert!(
                 composite(&off, &patch) == on,
-                "{}: the patch over the displayed off frame is not the displayed on frame ({:?}, opacity {}, floor {:?})",
+                "{}: the patch over the displayed off frame is not the displayed on frame ({:?}, opacity {})",
                 case.name,
                 renderer.config.alpha_mode,
-                cfg.background_opacity,
-                case.live_floor
+                cfg.background_opacity
             );
         }
     }
@@ -2267,6 +2241,48 @@ mod tests {
                 Some(CursorPatchIneligible::TranslucentOverhang),
                 "{mode:?} must reject a changed pixel outside the opaque block"
             );
+        }
+    }
+
+    /// The live window shows the configured background opacity, as an
+    /// offscreen capture of the same frame does: no live-only layer raises
+    /// it, whether or not the window system can blur behind it.
+    #[test]
+    fn a_live_frame_keeps_the_configured_background_alpha() {
+        let _serialized = gpu_test_guard();
+        let mut cfg = gpu_test_config();
+        cfg.background_opacity = 0.6;
+        let expected = i16::from((0.6_f32 * 255.0).round() as u8);
+        for mode in [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ] {
+            let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 320, 120, 1.0, true)
+                .expect("headless renderer builds")
+            else {
+                eprintln!("no GPU adapter on this host; skipped");
+                return;
+            };
+            renderer.supported_alpha_modes = vec![mode];
+            let snap = snapshot_of(20, 4, b"hello");
+            let captured = capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&snap, 320, 120)],
+                &focused(false),
+            );
+            assert_eq!(renderer.config.alpha_mode, mode);
+            let live = renderer.displayed_frame_for_tests(&cfg, false);
+            // An empty cell, away from the text, the cursor and the edges.
+            let x = (cfg.padding_x + 15.5 * renderer.cell_w) as u32;
+            let y = (cfg.padding_y + 2.5 * renderer.cell_h) as u32;
+            for (what, frame) in [("live", &live), ("captured", &captured)] {
+                let alpha = i16::from(frame.get_pixel(x, y)[3]);
+                assert!(
+                    (alpha - expected).abs() <= 1,
+                    "{mode:?}: the {what} frame's alpha is {alpha}, configured {expected}"
+                );
+            }
         }
     }
 

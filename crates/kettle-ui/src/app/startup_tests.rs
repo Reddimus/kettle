@@ -382,7 +382,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     };
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((976, 656)),
+        Some((984, 664)),
         "120x40 cells + default padding; the auto tab bar is hidden"
     );
 
@@ -390,7 +390,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.status_bar = kettle_config::StatusBarMode::Bottom;
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((976, 678)),
+        Some((984, 686)),
         "auto tab bar is hidden for a one-tab startup; status bar reserves its strip"
     );
 
@@ -399,7 +399,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((1156, 758)),
+        Some((1164, 766)),
         "missing height comes from the 45-row default grid; vertical tabs reserve width"
     );
     cfg.window_width = None;
@@ -407,7 +407,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
     assert_eq!(
         startup_inner_size_px(&cfg),
-        Some((1296, 546)),
+        Some((1304, 554)),
         "missing width comes from the 160-column default grid"
     );
     cfg.window_height = None;
@@ -426,17 +426,17 @@ fn startup_titlebar_tabs_reserve_the_single_tab_band() {
         status_bar: kettle_config::StatusBarMode::Bottom,
         ..Default::default()
     };
-    assert_eq!(startup_inner_size_px(&cfg), Some((976,
-        if cfg!(target_os = "macos") { 706 } else { 678 })));
+    assert_eq!(startup_inner_size_px(&cfg), Some((984,
+        if cfg!(target_os = "macos") { 714 } else { 686 })));
     cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Native;
-    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+    assert_eq!(startup_inner_size_px(&cfg), Some((984, 686)));
     cfg.borderless = true;
     cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Tabs;
-    assert_eq!(startup_inner_size_px(&cfg), Some((976, 678)));
+    assert_eq!(startup_inner_size_px(&cfg), Some((984, 686)));
 }
 
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1296x736 logical px with a native titlebar and the single-tab strip
+/// grid (1304x744 logical px with a native titlebar and the single-tab strip
 /// hidden), fitted to 90 % x 85 % of the monitor. The numbers below are the
 /// ones the docs quote; the macOS titlebar-tabs band is covered by
 /// `startup_titlebar_tabs_reserve_the_single_tab_band`.
@@ -453,22 +453,22 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
         default_startup_inner_size(&cfg, None),
-        (1296.0, 736.0),
-        "160x45 cells + 8 px padding with the single-tab strip hidden, no monitor known"
+        (1304.0, 744.0),
+        "160x45 cells + 12 px padding with the single-tab strip hidden, no monitor known"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
-        (1296.0, 736.0),
-        "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
+        (1304.0, 744.0),
+        "a 1080p monitor fits the whole target (164x44 cells at the default font)"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((1366.0, 768.0))),
         (1229.0, 652.0),
-        "a 1366x768 laptop clamps both axes: about 144 columns at the default font"
+        "a 1366x768 laptop clamps both axes: 154 columns at the default font"
     );
     assert_eq!(
         default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
-        (1296.0, 736.0),
+        (1304.0, 744.0),
         "an ultrawide gets the same terminal-sized window, not a monitor fraction"
     );
     assert_eq!(
@@ -485,7 +485,7 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
-    assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3216.0));
+    assert_eq!(startup_inner_size(&explicit, tiny), (3224.0, 3224.0));
     assert_eq!(
         startup_inner_size(&cfg, tiny),
         (576.0, 408.0),
@@ -514,6 +514,51 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
         degenerate.scale, 1.0,
         "a bogus scale factor falls back to 1x"
     );
+}
+
+/// The grids the docs quote for a fresh window, measured with the shipped
+/// font and padding rather than the 8x16 sizing baseline: 164x44 cells on a
+/// 1080p monitor and 154 columns on a 1366x768 laptop, past the 144 at which
+/// Claude Code's diff panel opens. A change to the default font or padding
+/// fails here, so the docs move with it; at 14 px with 12 px padding the
+/// laptop would get 143 columns and lose the panel.
+#[test]
+fn a_default_window_at_the_shipped_font_holds_the_documented_grid() {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
+        startup_surface_for,
+    };
+    let cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
+    let grid = |monitor: (f64, f64), scale: f64| {
+        let cell = kettle_render::StartupFonts::load(&cfg, scale as f32).cell;
+        let monitor = StartupMonitor::from_physical(
+            (monitor.0 * scale) as u32,
+            (monitor.1 * scale) as u32,
+            scale,
+        );
+        let bands = ContentBands::default();
+        let surface = startup_surface_for(&cfg, cell, bands, Some(monitor));
+        let area = content_rect_for_with_strip(
+            surface,
+            bands,
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y))
+    };
+    assert_eq!(grid((1920.0, 1080.0), 1.0), (164, 44));
+    assert_eq!(grid((1366.0, 768.0), 1.0), (154, 38));
+    for scale in [1.25, 2.0] {
+        let (cols, rows) = grid((1366.0, 768.0), scale);
+        assert!(
+            cols >= 144 && rows >= 33,
+            "{cols}x{rows} on a 1366x768 laptop at {scale}x"
+        );
+    }
 }
 
 /// Both window constructors must size through the shared startup rule in

@@ -778,6 +778,10 @@ impl App {
         let tr = &self.ui_text;
         let (label_cols, value_cols) = crate::settings::column_widths(&self.cfg, &cats, tr);
         let fld = nav.field.min(active.fields.len().saturating_sub(1));
+        let blur_unavailable = ws
+            .native_material
+            .as_ref()
+            .is_some_and(|material| material.blur_unavailable());
         Some(kettle_render::SettingsOverlay {
             categories: cats.iter().map(|c| tr.text(c.name).to_string()).collect(),
             label_cols,
@@ -814,7 +818,9 @@ impl App {
                     };
                     kettle_render::SettingsRow {
                         label: tr.text(f.label).to_string(),
-                        description: tr.text(crate::settings::description(f)).to_string(),
+                        description: tr
+                            .text(crate::settings::row_description(f, blur_unavailable))
+                            .to_string(),
                         category,
                         control: match f.kind {
                             crate::settings::FieldKind::Toggle => {
@@ -867,6 +873,7 @@ impl App {
                     tr,
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
+                    blur_unavailable,
                     ws.settings_restart_pending,
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {

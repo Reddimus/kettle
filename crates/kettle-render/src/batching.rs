@@ -4,7 +4,7 @@ use super::{
     Config, ContextMenu, FontSystem, GColor, GlyphInstance, GlyphPipeline, OutlineInstance,
     Overlay, PaneView, PatchRect, QuadInstance, RasterGlyph, Rect4, RenderUploads, Renderer,
     Result, Rgb, SwashCache, TextArea, TextBounds, TextBuffer, TextRendererMode, UploadCounts,
-    cell_locked_pen_x, imgpipe, live_underlay_clear_color, quad, use_live_pane_bases,
+    cell_locked_pen_x, imgpipe, quad,
 };
 
 /// Text/layout damage key for the context-menu renderer.
@@ -169,7 +169,6 @@ impl Renderer {
         let counts: UploadCounts = [
             self.glyph_pipeline.upload_counts(),
             self.pane_bases.upload_counts(),
-            self.live_pane_bases.upload_counts(),
             self.quads.upload_counts(),
             self.pane_dimming.upload_counts(),
             self.text_decorations.upload_counts(),
@@ -216,31 +215,24 @@ impl Renderer {
     /// Encode the whole scene into `target`. With a `window`, `target` holds
     /// only that rect of the `target_size` scene (a cursor patch pass): the
     /// viewport maps the scene 1:1 with the window's top-left at the origin,
-    /// so every pipeline keeps its full-size screen uniform.
-    #[allow(clippy::too_many_arguments)]
+    /// so every pipeline keeps its full-size screen uniform. The live window
+    /// and an offscreen capture draw the same pass, configured alpha included.
     pub(crate) fn encode_scene_pass(
         &self,
         target: &wgpu::TextureView,
         target_size: [u32; 2],
         cfg: &Config,
-        live_window: bool,
         cursor_on: bool,
         window: Option<PatchRect>,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
-        let clear = live_underlay_clear_color(
-            cfg.theme.background,
-            self.live_background_opacity_floor,
-            self.config.alpha_mode,
-            live_window,
-        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("kettle-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -275,11 +267,7 @@ impl Renderer {
         } else {
             self.bg_imgs.draw(&mut pass);
         }
-        if use_live_pane_bases(live_window, self.live_background_opacity_floor) {
-            self.live_pane_bases.draw(&mut pass);
-        } else {
-            self.pane_bases.draw(&mut pass);
-        }
+        self.pane_bases.draw(&mut pass);
         // The blink's off phase skips the cursor's quads; the same instances
         // stay uploaded, and the blend order of everything else is unchanged.
         let hidden_cursor = if cursor_on && !self.ime_prepared {
@@ -443,13 +431,6 @@ pub(crate) fn pane_outline(
         corner_radius: corner_radius.max(0.0),
         corner_mask,
         _pad: 0,
-    }
-}
-
-pub(crate) fn apply_quad_alpha_floor(quads: &mut [QuadInstance], floor: f32) {
-    let floor = floor.clamp(0.0, 1.0);
-    for quad in quads {
-        quad.color[3] = quad.color[3].max(floor);
     }
 }
 

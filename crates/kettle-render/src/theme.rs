@@ -116,11 +116,6 @@ impl Renderer {
         self.accent_override = accent;
     }
 
-    pub fn set_live_background_opacity_floor(&mut self, floor: Option<f32>) {
-        self.last_scene = None;
-        self.live_background_opacity_floor = floor.map(|value| value.clamp(0.0, 1.0));
-    }
-
     /// The accent every LIVE chrome element uses (focused-pane border,
     /// active-tab strip, drag ghost, context-menu + settings highlights,
     /// pane titlebars): the per-window override when the App resolved one,
@@ -279,24 +274,6 @@ pub(crate) fn surface_clear_color(
     }
 }
 
-pub(crate) fn live_underlay_clear_color(
-    bg: Rgb,
-    floor: Option<f32>,
-    mode: wgpu::CompositeAlphaMode,
-    live_window: bool,
-) -> wgpu::Color {
-    if !live_window {
-        return wgpu::Color::TRANSPARENT;
-    }
-    floor.map_or(wgpu::Color::TRANSPARENT, |alpha| {
-        surface_clear_color(bg, f64::from(alpha), mode)
-    })
-}
-
-pub(crate) fn use_live_pane_bases(live_window: bool, floor: Option<f32>) -> bool {
-    live_window && floor.is_some()
-}
-
 pub(crate) fn inactive_pane_amount(cfg: &Config) -> f32 {
     (1.0 - cfg.inactive_color_offset)
         .clamp(0.0, 0.95)
@@ -346,6 +323,7 @@ pub(crate) struct MinimumContrastCache {
     pub(crate) entries: std::collections::HashMap<(u32, u32, u64), Rgb>,
     pub(crate) misses: usize,
     highlight_ink: std::collections::HashMap<[u32; 6], Rgb>,
+    active_fills: std::collections::HashMap<(u32, u32), Rgb>,
     inactive_fills: std::collections::HashMap<(u32, u32), Rgb>,
 }
 
@@ -371,6 +349,7 @@ impl MinimumContrastCache {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.highlight_ink.clear();
+        self.active_fills.clear();
         self.inactive_fills.clear();
         self.misses = 0;
     }
@@ -402,18 +381,36 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
     )
 }
 
+/// The contrast a focused selection keeps against the cell background: WCAG's
+/// 3:1 for a state a reader must tell apart from its surroundings.
+pub(crate) const SELECTION_CONTRAST: f64 = 3.0;
+
 /// The contrast an unfocused window's selection keeps against the background:
 /// quieter than the focused fill's 3:1, yet still plainly a selection.
 pub(crate) const INACTIVE_SELECTION_CONTRAST: f64 = 2.0;
 
-/// Move the active fill toward the background while retaining visible separation.
+/// The theme's selection colour where it stands out from `background`;
+/// otherwise a stronger tint of the same hue that does. Blending toward white
+/// or black instead reached 3:1 by greying the tint, which left a muted fill.
+/// The unfocused fill then moves back toward the background, retaining visible
+/// separation.
 pub(crate) fn selection_fill(
     theme: &kettle_config::Theme,
     background: Rgb,
     focused: bool,
     cache: &mut MinimumContrastCache,
 ) -> Rgb {
-    let active = cache.resolve(theme.selection_background, background, 3.0);
+    let key = (
+        MinimumContrastCache::color_key(theme.selection_background),
+        MinimumContrastCache::color_key(background),
+    );
+    let active = *cache.active_fills.entry(key).or_insert_with(|| {
+        color::with_min_contrast_same_hue(
+            theme.selection_background,
+            background,
+            SELECTION_CONTRAST,
+        )
+    });
     if focused {
         return active;
     }
@@ -432,6 +429,79 @@ pub(crate) fn selection_fill(
     fill
 }
 
+/// A pane's selection fills for one frame, resolved against its default
+/// background as the pane shows it.
+///
+/// A selected cell keeps the pane's fill wherever that fill already stands out
+/// from the cell's own background, so one selection across a status line or a
+/// powerline prompt keeps one colour. Only a cell the fill does not separate
+/// from, such as one whose program-set background matches it, gets a fill
+/// resolved against its own background. Resolving every cell against its own
+/// background instead turned such a selection into a patchwork: a theme colour
+/// that already separates from a light cell is kept there as is, so light and
+/// bright cells dropped back to the raw, darker theme colour.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PaneSelectionFills {
+    background: Rgb,
+    active: Rgb,
+    inactive: Rgb,
+}
+
+impl PaneSelectionFills {
+    pub(crate) fn new(
+        theme: &kettle_config::Theme,
+        background: Rgb,
+        cache: &mut MinimumContrastCache,
+    ) -> Self {
+        Self {
+            background,
+            active: selection_fill(theme, background, true, cache),
+            inactive: selection_fill(theme, background, false, cache),
+        }
+    }
+
+    /// The fill a selection row paints, for a focused or unfocused window.
+    pub(crate) fn row(&self, focused: bool) -> Rgb {
+        if focused { self.active } else { self.inactive }
+    }
+
+    /// The fill under a `highlight`ed cell whose background shows as
+    /// `background`. The current search match keeps its search fill.
+    pub(crate) fn cell(
+        &self,
+        highlight: CellHighlight,
+        cfg: &kettle_config::Config,
+        theme: &kettle_config::Theme,
+        background: Rgb,
+        cache: &mut MinimumContrastCache,
+    ) -> Rgb {
+        let focused = match highlight {
+            CellHighlight::None => return background,
+            CellHighlight::Search(true) => return search_fill(cfg, theme),
+            CellHighlight::Search(false) | CellHighlight::Selection => true,
+            CellHighlight::InactiveSelection => false,
+        };
+        let row = self.row(focused);
+        let minimum = if focused {
+            SELECTION_CONTRAST
+        } else {
+            INACTIVE_SELECTION_CONTRAST
+        };
+        if background == self.background || color::contrast_ratio(row, background) >= minimum {
+            row
+        } else {
+            selection_fill(theme, background, focused, cache)
+        }
+    }
+}
+
+/// The current search match's fill.
+fn search_fill(cfg: &kettle_config::Config, theme: &kettle_config::Theme) -> Rgb {
+    cfg.search_background.unwrap_or(theme.palette[3])
+}
+
+/// The fill a `highlight` paints over `background` and its text colour, with
+/// the fill resolved against `background` alone.
 pub(crate) fn highlight_colors_cached(
     highlight: CellHighlight,
     cfg: &kettle_config::Config,
@@ -440,25 +510,36 @@ pub(crate) fn highlight_colors_cached(
     background: Rgb,
     cache: &mut MinimumContrastCache,
 ) -> (Rgb, Rgb) {
-    let (explicit, bg) = match highlight {
-        CellHighlight::Search(true) => (
-            cfg.search_foreground,
-            cfg.search_background.unwrap_or(theme.palette[3]),
+    let bg = match highlight {
+        CellHighlight::Search(true) => search_fill(cfg, theme),
+        _ => selection_fill(
+            theme,
+            background,
+            !matches!(highlight, CellHighlight::InactiveSelection),
+            cache,
         ),
-        _ => {
-            let bg = selection_fill(
-                theme,
-                background,
-                !matches!(highlight, CellHighlight::InactiveSelection),
-                cache,
-            );
-            (
-                theme
-                    .selection_foreground_user
-                    .then_some(theme.selection_foreground),
-                bg,
-            )
-        }
+    };
+    (
+        highlight_ink_cached(highlight, cfg, theme, foreground, bg, cache),
+        bg,
+    )
+}
+
+/// The text colour of a `highlight`ed cell whose ink is `foreground`, on the
+/// `fill` painted under it.
+pub(crate) fn highlight_ink_cached(
+    highlight: CellHighlight,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    foreground: Rgb,
+    bg: Rgb,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    let explicit = match highlight {
+        CellHighlight::Search(true) => cfg.search_foreground,
+        _ => theme
+            .selection_foreground_user
+            .then_some(theme.selection_foreground),
     };
     let key = [
         MinimumContrastCache::color_key(foreground),
@@ -471,14 +552,14 @@ pub(crate) fn highlight_colors_cached(
         MinimumContrastCache::color_key(theme.background),
     ];
     if let Some(fg) = cache.highlight_ink.get(&key) {
-        return (*fg, bg);
+        return *fg;
     }
     // User colours have precedence when readable, followed by the cell's ink.
     // If neither passes, choose the strongest neutral instead of barely AA ink.
     for fg in explicit.into_iter().chain([foreground]) {
         if color::contrast_ratio(fg, bg) >= 4.5 {
             cache.highlight_ink.insert(key, fg);
-            return (fg, bg);
+            return fg;
         }
     }
     let fg = [
@@ -492,7 +573,7 @@ pub(crate) fn highlight_colors_cached(
     .max_by(|a, b| color::contrast_ratio(*a, bg).total_cmp(&color::contrast_ratio(*b, bg)))
     .expect("highlight candidates");
     cache.highlight_ink.insert(key, fg);
-    (fg, bg)
+    fg
 }
 
 #[cfg(test)]
@@ -526,15 +607,30 @@ pub(crate) fn resolved_cell_foreground_cached(
     cache: &mut MinimumContrastCache,
 ) -> Rgb {
     let (dim, _) = attributes;
-    let (fg, bg, dim) = match highlight {
-        CellHighlight::None => (fg, bg, dim),
-        _ => {
-            let (fg, bg) = highlight_colors_cached(highlight, cfg, theme, fg, bg, cache);
-            (fg, bg, false)
+    match highlight {
+        CellHighlight::None => {
+            let fg = transformed_foreground(fg, bg, dim);
+            cache.resolve(fg, bg, cfg.minimum_contrast as f64)
         }
-    };
-    let fg = transformed_foreground(fg, bg, dim);
-    cache.resolve(fg, bg, cfg.minimum_contrast as f64)
+        _ => {
+            let (_, fill) = highlight_colors_cached(highlight, cfg, theme, fg, bg, cache);
+            resolved_highlight_foreground_cached(fg, fill, highlight, cfg, theme, cache)
+        }
+    }
+}
+
+/// The final colour of ink `fg` in a `highlight`ed cell painted with `fill`:
+/// highlight text ignores SGR dim, and `minimum-contrast` applies after it.
+pub(crate) fn resolved_highlight_foreground_cached(
+    fg: Rgb,
+    fill: Rgb,
+    highlight: CellHighlight,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    let fg = highlight_ink_cached(highlight, cfg, theme, fg, fill, cache);
+    cache.resolve(fg, fill, cfg.minimum_contrast as f64)
 }
 
 /// Terminator parity, terminatorlib/config.py:106 + 117: compose the kettle

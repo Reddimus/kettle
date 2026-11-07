@@ -223,6 +223,56 @@ pub fn append_row_text(grid: &Grid<Cell>, line: i32, cols: usize, out: &mut Stri
     append_row(grid, line, cols, out, &mut |_| {});
 }
 
+/// The viewport's text as assistive technology reads it: rows joined by
+/// `\n`, trailing blank rows dropped, each row right-trimmed except that the
+/// row holding a visible cursor keeps the blanks before it.
+///
+/// A screen reader echoes typing by matching each text insertion to the key
+/// just pressed. With every row trimmed, a typed space changed nothing until
+/// the next character arrived with it (`" e"`), so the reader took both for
+/// program output and read fragments aloud. Keeping the cursor row's blanks
+/// makes a typed space its own one-character insertion, as other Linux
+/// terminals report it. A hidden cursor (full-screen programs) or one
+/// scrolled out of view leaves every row trimmed.
+pub fn accessible_viewport_text(grid: &Grid<Cell>, cursor_visible: bool) -> String {
+    let cols = grid.columns();
+    let rows = grid.screen_lines() as i32;
+    let offset = grid.display_offset() as i32;
+    let cursor = grid.cursor.point;
+    let cursor_row =
+        Some(cursor.line.0 + offset).filter(|row| cursor_visible && (0..rows).contains(row));
+    let mut text = String::with_capacity(rows.max(0) as usize * (cols + 1));
+    let mut columns = Vec::with_capacity(cols);
+    // Bytes through the last row that has anything to read.
+    let mut kept = 0;
+    for row in 0..rows {
+        if row > 0 {
+            text.push('\n');
+        }
+        let start = text.len();
+        columns.clear();
+        append_row(grid, row - offset, cols, &mut text, &mut |c| {
+            columns.push(c)
+        });
+        let trimmed = start + text[start..].trim_end().len();
+        let before_cursor = if cursor_row == Some(row) {
+            start
+                + columns
+                    .iter()
+                    .position(|&column| column >= cursor.column.0)
+                    .unwrap_or(columns.len())
+        } else {
+            start
+        };
+        text.truncate(trimmed.max(before_cursor));
+        if text.len() > start {
+            kept = text.len();
+        }
+    }
+    text.truncate(kept);
+    text
+}
+
 /// Right-trimmed grid rows in [first, end), joined within a UTF-8 byte cap.
 /// Returns a retained prefix and whether any non-trailing content was omitted.
 pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) -> (String, bool) {
@@ -265,6 +315,73 @@ pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each typed character, a space included, reaches a screen reader as
+    /// its own insertion at the end of the cursor's row; rows the cursor
+    /// left, a hidden cursor and a cursor scrolled out of view keep the
+    /// trimmed text.
+    #[test]
+    fn accessible_text_keeps_the_blanks_typed_before_the_cursor() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::term::{Config, Term, test::TermSize};
+        use alacritty_terminal::vte::ansi::Processor;
+        let mut term = Term::new(Config::default(), &TermSize::new(20, 4), VoidListener);
+        let mut parser: Processor = Processor::new();
+        let mut feed =
+            |term: &mut Term<VoidListener>, bytes: &str| parser.advance(term, bytes.as_bytes());
+        let text = |term: &Term<VoidListener>| accessible_viewport_text(term.grid(), true);
+
+        assert_eq!(text(&term), "", "an empty screen");
+        feed(&mut term, "$ ");
+        assert_eq!(text(&term), "$ ", "the prompt's trailing blank");
+        let mut heard = text(&term);
+        for key in ["e", "c", "h", "o", " ", "h", "i", " "] {
+            feed(&mut term, key);
+            let now = text(&term);
+            assert_eq!(
+                now.strip_prefix(heard.as_str()),
+                Some(key),
+                "typing {key:?} inserts exactly it after {heard:?}"
+            );
+            heard = now;
+        }
+
+        feed(&mut term, "\r\nhi\r\n$ ");
+        assert_eq!(
+            text(&term),
+            "$ echo hi\nhi\n$ ",
+            "rows the cursor left are trimmed"
+        );
+        assert_eq!(
+            accessible_viewport_text(term.grid(), false),
+            "$ echo hi\nhi\n$",
+            "a hidden cursor keeps no blanks"
+        );
+
+        feed(&mut term, "\r\n");
+        assert_eq!(
+            text(&term),
+            "$ echo hi\nhi\n$",
+            "a blank cursor row at column 0 adds nothing"
+        );
+
+        feed(&mut term, "世 ");
+        assert_eq!(
+            text(&term),
+            "$ echo hi\nhi\n$\n世 ",
+            "a wide glyph's spacer is no blank"
+        );
+
+        feed(&mut term, "\r\n1\r\n2\r\n$ ");
+        assert_eq!(text(&term), "世\n1\n2\n$ ");
+        term.scroll_display(Scroll::Delta(1));
+        assert_eq!(
+            text(&term),
+            "$\n世\n1\n2",
+            "a cursor scrolled out of view keeps no blanks"
+        );
+    }
 
     /// A screen reader hears output once, as the cursor leaves it: never the
     /// prompt row it is on, never what was typed there before Enter, and a

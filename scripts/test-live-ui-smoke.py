@@ -196,6 +196,22 @@ class LiveUiTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs['extra_args'][2:],
                          ['-e', 'bash', '--noprofile', '--norc'])
 
+    def test_underline_fixture_keeps_resting_link_underlines(self):
+        # The path overlay checks measure resting detected-link underlines,
+        # which only `link-underline = always` draws.
+        class StopFixture(Exception):
+            pass
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(checker, 'make_git_fixture', side_effect=lambda path: path.mkdir(parents=True)),
+            patch.object(checker, 'make_svn_fixture', return_value=False),
+            patch.object(checker, 'LiveKettle', side_effect=StopFixture) as launch,
+        ):
+            with self.assertRaises(StopFixture):
+                checker.run_underline('fixture', Path(directory))
+            config = Path(launch.call_args.args[1]).read_text()
+        self.assertIn('link-underline = always\n', config)
+
     def test_underline_requires_visible_delta_output_before_claiming_coverage(self):
         function = ast.parse(inspect.getsource(checker.run_underline)).body[0]
         capture = next(node for node in function.body if isinstance(node, ast.With))
