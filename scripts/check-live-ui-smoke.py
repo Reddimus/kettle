@@ -8882,13 +8882,23 @@ def live_helper_selftest() -> None:
     for scale in (1.0, 1.25, 2.0):
         geometry = {
             "scale_factor": scale,
-            "surface": {"width": 1296.0 * scale},
-            "cell": {"width": 8.4 * scale},
+            "surface": {"width": 1304.0 * scale},
+            "cell": {"width": 7.8 * scale},
+            "padding": {"x": 12.0, "y": 12.0},
         }
         width, cols = startup_geometry_metrics(geometry)
-        assert width == 1296.0 and cols == 95
+        assert width == 1304.0 and cols == 102
+        assert default_startup_target_width(geometry) == 1304.0
         geometry["surface"]["width"] += 2.0 * scale
-        assert startup_geometry_metrics(geometry)[0] > 1297.0
+        assert startup_geometry_metrics(geometry)[0] > 1305.0
+    assert default_startup_target_width({"padding": {"x": 8}}) == 1296.0
+    for padding in (-1.0, float("nan")):
+        try:
+            default_startup_target_width({"padding": {"x": padding}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"padding {padding} must be rejected")
 
     with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
         fixture = Path(temp) / "fixture.png"
@@ -16000,6 +16010,20 @@ def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
     return float(geometry["surface"]["width"]) / scale, int(800.0 * scale / cell_w)
 
 
+# kettle-ui's STARTUP_DEFAULT_COLS and STARTUP_GEOMETRY_CELL_W: a fresh window
+# with no size set is 160 baseline cells of 8 logical px, plus its padding.
+STARTUP_DEFAULT_COLS = 160
+STARTUP_BASELINE_CELL_W = 8.0
+
+
+def default_startup_target_width(geometry: Dict[str, object]) -> float:
+    """The logical width a fresh window aims for before the monitor fit."""
+    padding = float(geometry["padding"]["x"])
+    if not math.isfinite(padding) or padding < 0:
+        raise ValueError("invalid window padding")
+    return STARTUP_DEFAULT_COLS * STARTUP_BASELINE_CELL_W + 2.0 * padding
+
+
 
 def startup_evidence_helpers():
     import importlib.util
@@ -16030,16 +16054,15 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
     else:
         out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
         out.mkdir(parents=True, exist_ok=True)
+    # Only what the harness needs: the control server, and no restored
+    # session, update check or recording. The font, padding, tab bar and
+    # status bar stay at the shipped defaults, so the 144-column check
+    # measures the window a new user gets, whatever those defaults become.
     base = [
         "agent-server = full",
-        "tab-bar = always",
-        "status-bar = off",
         "restore-session = false",
         "update-check = false",
         "record = off",
-        "font-size = 14",
-        "window-padding-x = 8",
-        "window-padding-y = 8",
     ]
 
     def launch(label: str, extra: List[str]) -> Dict[str, object]:
@@ -16118,14 +16141,19 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
             f"monitor >= 1366x768 logical px (got {default['cols']}x{default['rows']})"
         )
     surface_w, _ = startup_geometry_metrics(default)
-    if surface_w > 1296.0 + 1.0:
+    target_w = default_startup_target_width(default)
+    default["target_width"] = target_w
+    if surface_w > target_w + 1.0:
         raise SystemExit(
-            f"default-window-size smoke: the default surface exceeds the 1296 px target ({surface_w})"
+            "default-window-size smoke: the default surface exceeds the "
+            f"{target_w:g} px target ({surface_w})"
         )
 
     # The fonts are measured before the window, so a configured grid opens
-    # exactly, tab bar and padding included.
-    explicit = launch("explicit", ["window-width = 100", "window-height = 30"])
+    # exactly, padding and an always-shown tab bar included.
+    explicit = launch(
+        "explicit", ["tab-bar = always", "window-width = 100", "window-height = 30"]
+    )
     if (explicit["cols"], explicit["rows"]) != (100, 30):
         raise SystemExit(
             "default-window-size smoke: window-width = 100 and window-height = 30 must open "
