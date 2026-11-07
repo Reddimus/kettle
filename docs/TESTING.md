@@ -113,6 +113,15 @@ gaps, AccessKit bounds and the production `ui_geometry` serializer.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
+The `kettle-ui` `scrollback_receipt_hit` regressions exercise pill hit detection
+and pane scroll actions with PTY-backed `WindowState` fixtures and the shared
+receipt placement inputs. They cover a notice shifting an expanded receipt over
+the pill, collapsed and nonoverlapping receipts, secondary and outside presses,
+and independent panes and windows. Run
+`cargo test --locked --offline -j 2 -p kettle-ui --lib scrollback_receipt_hit`.
+These fixtures create no App, native window, renderer, clipboard or global UI
+services. Native and control event dispatch still require a live integration pass.
+
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
 `python3 scripts/test-install-media.py` interrupts uninstall after each recovery
