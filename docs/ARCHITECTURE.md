@@ -3404,7 +3404,9 @@ ligature and never chooses a fallback face for the row. A cell with combining
 marks or two columns keeps the font. `crates/kettle-render/src/builtin_glyphs.rs`
 rasterizes a coverage mask exactly the size of the cell's pixel rectangle, whose
 edges are snapped the way the rasterizer fills the cell's background quad
-(`pixel_edge`), so neighbouring cells tile at any fractional cell size. Light
+(`pixel_edge`): first to the rasterizer's 1/256 px vertex grid, then to the
+pixels whose centres it covers. Neighbouring cells therefore tile at any
+fractional cell size, including edges just past a pixel centre. Light
 strokes are the face's underline thickness rounded up to whole device pixels
 (at least one) and heavy strokes twice that; each is placed by one integer rule
 from the cell's width or height alone, so lines in a column or a row land on
@@ -3422,11 +3424,15 @@ the pane's text damage, since a change to them reshapes nothing. Under a focused
 block cursor the cell's glyph is drawn again in the cursor text colour from a
 one-instance cursor buffer in the glyph pipeline, at the place in the pass
 order where the glyphon cursor glyph would be, and only in the blink's on
-phase. The cursor block quad is drawn again just before it, so the pane's
-copy in the cell's own colour cannot show through partly covered pixels (a
-shade, an arc's edge). The cursor instance only looks up the slot the pane
-resolved for the same cell and never allocates: it is resolved after the
-pane instances are uploaded, when an allocation could evict a slot they
+phase. During that phase, with no IME preedit, the normal pane instance for
+the cursor cell is omitted and disjoint scissors exclude its pixel rectangle
+from normal Grid and Legacy text, including neighbouring font overhang.
+The mask, cursor instance and exclusion share the same quantized cell bounds.
+Partly covered pixels (a shade, an arc's edge) therefore show only cursor
+colours, while decorations, images and pane outlines keep their original pass
+order. The off phase and IME restore normal pane ink. The cursor instance only
+looks up the slot the pane resolved for the same cell and never allocates: it
+is resolved after the pane instances are uploaded, when an allocation could evict a slot they
 still draw from. glyphon 0.12's own custom glyphs are not used: a growing glyphon atlas
 re-rasterizes every cached custom glyph through whichever `prepare` grew it,
 and panics when that prepare has no rasterizer, and Kettle's chrome renderers

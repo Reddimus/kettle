@@ -245,6 +245,279 @@ fn a_full_block_fills_its_whole_cell() {
     }
 }
 
+/// Use a real white background quad as the coverage oracle, independently
+/// of the CPU mask bounds. Probe both ends of a cell on either side of the
+/// rasterizer's half-pixel boundary, including its subpixel snap band.
+#[test]
+fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
+    let _serialized = gpu_test_guard();
+    fn view(snap: &PaneSnapshot, pane_offset: f32) -> PaneView<'_> {
+        PaneView {
+            terminal: (pane_offset, pane_offset, 319.0, 119.0),
+            ..pane(snap, 320, 120)
+        }
+    }
+    let mut failures = Vec::new();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for (scale, width, pane_offset) in [
+            (1.0, 1.0, 0.0),
+            (1.0, 1.07, 0.25),
+            (2.0, 1.07, 0.25),
+            (1.25, 0.5, 0.25),
+        ] {
+            let mut cfg = Config {
+                text_renderer: mode,
+                cell_width: width,
+                background_opacity: 1.0,
+                ..gpu_test_config()
+            };
+            cfg.theme.background = Rgb::new(0, 0, 0);
+            let mut renderer = frame_or_skip!(
+                Renderer::headless_for_tests_with(&cfg, 320, 120, scale, false)
+                    .expect("headless renderer builds")
+            );
+            eprintln!(
+                "PIXEL_EDGE_GPU: {mode:?}, scale={scale}, width={width}, {:?}",
+                renderer.gpu.adapter_info()
+            );
+            let (cw, ch) = (renderer.cell_w, renderer.cell_h);
+            for end in [false, true] {
+                for delta in [-0.004, -0.0001, 0.0, 0.0001, 0.004] {
+                    let edge = if end { (40.5, 60.5) } else { (12.5, 12.5) };
+                    cfg.padding_x = edge.0 + delta - pane_offset - if end { cw } else { 0.0 };
+                    cfg.padding_y = edge.1 + delta - pane_offset - if end { ch } else { 0.0 };
+                    let reference = snapshot_of(20, 4, b"\x1b[?25l\x1b[48;2;255;255;255m \x1b[0m");
+                    let background = capture(
+                        &mut renderer,
+                        &cfg,
+                        &[view(&reference, pane_offset)],
+                        &focused(false),
+                    );
+                    let covered: Vec<_> = background
+                        .enumerate_pixels()
+                        .filter_map(|(x, y, p)| (p[0] == 255).then_some((x, y)))
+                        .collect();
+                    assert!(
+                        !covered.is_empty(),
+                        "the reference must draw a cell background"
+                    );
+                    let x0 = covered.iter().map(|p| p.0).min().unwrap();
+                    let y0 = covered.iter().map(|p| p.1).min().unwrap();
+                    let x1 = covered.iter().map(|p| p.0).max().unwrap() + 1;
+                    let y1 = covered.iter().map(|p| p.1).max().unwrap() + 1;
+                    assert_eq!(covered.len(), ((x1 - x0) * (y1 - y0)) as usize);
+                    let context = format!(
+                        "{mode:?} scale={scale} width={width} end={end} delta={delta} origin=({},{}) cell=({cw},{ch}) background=[{x0},{y0},{x1},{y1}]",
+                        pane_offset + cfg.padding_x,
+                        pane_offset + cfg.padding_y
+                    );
+                    for glyph in ['\u{2588}', '\u{2592}'] {
+                        let snap = snapshot_of(20, 4, format!("{INK}{glyph}").as_bytes());
+                        let image = capture(
+                            &mut renderer,
+                            &cfg,
+                            &[view(&snap, pane_offset)],
+                            &focused(false),
+                        );
+                        let ink = image.get_pixel((x0 + x1) / 2, (y0 + y1) / 2).0;
+                        assert!(ink[0] > 0, "the glyph must draw: {context}");
+                        let wrong: Vec<_> = image
+                            .enumerate_pixels()
+                            .filter_map(|(x, y, p)| {
+                                let expected = if background.get_pixel(x, y)[0] == 255 {
+                                    ink
+                                } else {
+                                    [0, 0, 0, 255]
+                                };
+                                (p.0 != expected).then_some((x, y, p.0, expected))
+                            })
+                            .collect();
+                        if !wrong.is_empty() {
+                            failures.push(format!(
+                                "mask {glyph:?}: {context}; {} wrong pixels, first={:?}",
+                                wrong.len(),
+                                wrong[0]
+                            ));
+                        }
+                    }
+                    // A shade's normal ink must not affect either edge of the
+                    // focused block. Compare two actual scenes, then crop the
+                    // retained buffers in both blink phases without uploads.
+                    let mut cursor_reference = None;
+                    for fg in ["255;0;0", "0;255;0"] {
+                        let snap = snapshot_of(
+                            20,
+                            4,
+                            format!("\x1b[38;2;{fg};48;2;0;0;0m\u{2592}\x1b[D").as_bytes(),
+                        );
+                        let image = capture(
+                            &mut renderer,
+                            &cfg,
+                            &[view(&snap, pane_offset)],
+                            &focused(true),
+                        );
+                        if let Some(reference) = &cursor_reference {
+                            if &image != reference {
+                                failures.push(format!("cursor normal ink leaked: {context}"));
+                            }
+                        } else {
+                            cursor_reference = Some(image);
+                        }
+                        let whole = PatchRect {
+                            x: 0,
+                            y: 0,
+                            width: 320,
+                            height: 120,
+                        };
+                        for phase in [true, false] {
+                            let full = renderer.scene_window_for_tests(&cfg, whole, phase);
+                            if phase {
+                                let ink = full.get_pixel((x0 + x1) / 2, (y0 + y1) / 2);
+                                let wrong: Vec<_> = covered
+                                    .iter()
+                                    .filter(|&&(x, y)| full.get_pixel(x, y) != ink)
+                                    .collect();
+                                if !wrong.is_empty() {
+                                    let (x, y) = *wrong[0];
+                                    failures.push(format!("cursor uneven: {context}; {} wrong pixels, first=({x},{y}) {:?}, interior={ink:?}", wrong.len(), full.get_pixel(x, y)));
+                                }
+                            }
+                            for rect in [
+                                PatchRect {
+                                    x: x0,
+                                    y: y0,
+                                    width: x1 - x0,
+                                    height: y1 - y0,
+                                },
+                                PatchRect {
+                                    x: x0 + 1,
+                                    y: y0 + 1,
+                                    width: x1 - x0 - 2,
+                                    height: y1 - y0 - 2,
+                                },
+                                PatchRect {
+                                    x: x0 - 2,
+                                    y: y0 - 2,
+                                    width: x1 - x0 + 4,
+                                    height: y1 - y0 + 4,
+                                },
+                            ] {
+                                let cropped = renderer.scene_window_for_tests(&cfg, rect, phase);
+                                let expected = image::imageops::crop_imm(
+                                    &full,
+                                    rect.x,
+                                    rect.y,
+                                    rect.width,
+                                    rect.height,
+                                )
+                                .to_image();
+                                if cropped != expected {
+                                    failures.push(format!("cursor crop mismatch: {context}; phase={phase} rect={rect:?}"));
+                                }
+                            }
+                        }
+                    }
+                    eprintln!("PIXEL_EDGE_CASE: {context}");
+                }
+            }
+        }
+    }
+    for failure in &failures {
+        eprintln!("PIXEL_EDGE_FAILURE: {failure}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} pixel-edge failures",
+        failures.len()
+    );
+}
+
+#[test]
+fn builtin_cursor_excludes_neighboring_ink_at_half_pixel_edges() {
+    let _serialized = gpu_test_guard();
+    let mut failures = Vec::new();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for scale in [1.0, 2.0] {
+            let mut cfg = Config {
+                text_renderer: mode,
+                cell_width: 0.5,
+                background_opacity: 1.0,
+                ..gpu_test_config()
+            };
+            cfg.theme.background = Rgb::new(0, 0, 0);
+            let mut renderer = frame_or_skip!(
+                Renderer::headless_for_tests_with(&cfg, 320, 120, scale, false)
+                    .expect("headless renderer builds")
+            );
+            eprintln!(
+                "PIXEL_EDGE_NEIGHBOR_GPU: {mode:?}, scale={scale}, {:?}",
+                renderer.gpu.adapter_info()
+            );
+            for delta in [-0.0001, 0.0, 0.0001] {
+                cfg.padding_x = 12.5 + delta - renderer.cell_w;
+                let reference =
+                    snapshot_of(20, 4, b"\x1b[?25l\x1b[2G\x1b[48;2;255;255;255m \x1b[0m");
+                let background = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&reference, 320, 120)],
+                    &focused(false),
+                );
+                let covered: Vec<_> = background
+                    .enumerate_pixels()
+                    .filter_map(|(x, y, p)| (p[0] == 255).then_some((x, y)))
+                    .collect();
+                assert!(!covered.is_empty());
+                let mut phases = Vec::new();
+                for prefix in [" ", "W"] {
+                    let snap = snapshot_of(
+                        20,
+                        4,
+                        format!("\x1b[38;2;255;0;0;48;2;0;0;0m{prefix}\u{2592}\x1b[D").as_bytes(),
+                    );
+                    let mut pixels = Vec::new();
+                    for phase in [true, false] {
+                        let image = capture(
+                            &mut renderer,
+                            &cfg,
+                            &[pane(&snap, 320, 120)],
+                            &focused(phase),
+                        );
+                        pixels.push(
+                            covered
+                                .iter()
+                                .map(|&(x, y)| image.get_pixel(x, y).0)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    phases.push(pixels);
+                }
+                let wrong: Vec<_> = phases[0][0]
+                    .iter()
+                    .zip(&phases[1][0])
+                    .enumerate()
+                    .filter_map(|(i, (a, b))| (a != b).then_some((covered[i], a, b)))
+                    .collect();
+                if !wrong.is_empty() {
+                    failures.push(format!("{mode:?} scale={scale} delta={delta}: {} contaminated cursor pixels, first={:?}", wrong.len(), wrong[0]));
+                }
+                assert_ne!(
+                    phases[0][1], phases[1][1],
+                    "the off phase must expose real neighboring ink: {mode:?}, scale={scale}, delta={delta}"
+                );
+            }
+        }
+    }
+    for failure in &failures {
+        eprintln!("PIXEL_EDGE_NEIGHBOR_FAILURE: {failure}");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} neighboring-ink failures",
+        failures.len()
+    );
+}
+
 /// `░ ▒ ▓` are three even tones, light to dark, not the font's dither.
 #[test]
 fn shades_are_three_distinct_even_tones() {

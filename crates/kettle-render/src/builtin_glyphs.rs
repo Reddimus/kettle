@@ -73,15 +73,17 @@ impl Default for Strokes {
     }
 }
 
-/// The first device pixel whose centre lies at or past `x`.
+/// The first device pixel whose centre lies at or past the quantized `x`.
 ///
-/// The rasteriser fills a pixel when its centre is inside a quad, so a
-/// solid cell background whose edge is at `x` starts on this pixel. A glyph
+/// Quad vertices snap to 1/256 px before the rasteriser tests pixel centres.
+/// Apply that snap here too: an edge just past a centre can still cover that
+/// pixel. A solid cell background whose edge is at `x` starts here. A glyph
 /// spanning `pixel_edge(left)..pixel_edge(right)` covers exactly the pixels
 /// its background does, and neighbouring cells share their boundary pixel
 /// edge, so they tile with no gap and no overlap at any fractional cell size.
 pub(crate) fn pixel_edge(x: f32) -> i32 {
-    (x - 0.5).ceil() as i32
+    let quantized = (x * 256.0).round() / 256.0;
+    (quantized - 0.5).ceil() as i32
 }
 
 /// What one rasterized mask depends on: the glyph, its cell in device
@@ -920,6 +922,39 @@ mod tests {
                 "{cell}: {widths:?}"
             );
         }
+    }
+
+    #[test]
+    fn cell_edges_include_the_rasterizers_subpixel_snap_band() {
+        // Both ends of a cell use this rule, including the cursor mask and
+        // the normal-text exclusion derived from its bounds.
+        for (edge, expected) in [
+            (12.496, 12),
+            (12.4999, 12),
+            (12.5, 12),
+            (12.5001, 12),
+            (12.5019, 12),
+            (12.5021, 13),
+            (12.504, 13),
+            (-0.5001, -1),
+            (-0.5, -1),
+            (-0.4999, -1),
+            (-0.4979, 0),
+        ] {
+            assert_eq!(pixel_edge(edge), expected, "edge {edge}");
+        }
+        let left = BuiltinCell::new(
+            '\u{2588}',
+            (12.5001, 8.0, 20.5001, 24.0),
+            kettle_config::Rgb::new(255, 255, 255),
+        );
+        let right = BuiltinCell::new(
+            '\u{2588}',
+            (20.5001, 8.0, 28.5001, 24.0),
+            kettle_config::Rgb::new(255, 255, 255),
+        );
+        assert_eq!(left.rect, [12, 8, 20, 24]);
+        assert_eq!(right.rect, [20, 8, 28, 24]);
     }
 
     #[test]
