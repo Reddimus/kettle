@@ -49,6 +49,37 @@ pub(crate) mod fuzzing;
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+#[cfg(test)]
+mod test_input {
+    pub(super) type Sender = crossbeam_channel::Sender<Option<(u64, Vec<u8>, usize)>>;
+
+    std::thread_local! {
+        static INPUT: std::cell::RefCell<Option<crossbeam_channel::Sender<Sender>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn with_input<T>(
+        input: Option<crossbeam_channel::Sender<Sender>>,
+        create: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INPUT.with_borrow_mut(Option::take);
+            }
+        }
+        INPUT.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "nested test input override");
+            *slot = input;
+        });
+        let _reset = Reset;
+        create()
+    }
+
+    pub(super) fn take() -> Option<crossbeam_channel::Sender<Sender>> {
+        INPUT.with_borrow_mut(Option::take)
+    }
+}
 /// Pending [`Terminal::apply_local_output`] requests per pane.
 const LOCAL_OUTPUT_QUEUE_DEPTH: usize = 4;
 /// One bounded user input, including bracketed-paste framing.
@@ -2067,9 +2098,13 @@ fn apply_graphics_batch(
 enum DeferredOutput {
     Graphics(DeferredGraphics),
     Command(command_correlation::CommandMarker),
+    CommandMark(command_marks::Boundary),
 }
 
 struct DeferredGraphicsJournal {
+    // Observe the same drains at sync markers, timeout flushes and ordinary
+    // commits without consuming the UI's independent row-event journal.
+    command_marks: Option<Arc<Mutex<command_marks::CommandMarks>>>,
     entries: VecDeque<(u64, DeferredOutput)>,
     next_id: u64,
     overflowed: bool,
@@ -2078,9 +2113,49 @@ struct DeferredGraphicsJournal {
 impl DeferredGraphicsJournal {
     fn new() -> Self {
         Self {
+            command_marks: None,
             entries: VecDeque::with_capacity(SYNC_MARKER_CAPACITY),
             next_id: 0,
             overflowed: false,
+        }
+    }
+
+    fn apply_command_mark_events(&self, batch: &GraphicsEventBatch) {
+        if let Some(marks) = &self.command_marks
+            && let Ok(mut marks) = marks.lock()
+        {
+            marks.apply_batch(batch);
+        }
+    }
+
+    fn record_command_mark(
+        &mut self,
+        boundary: command_marks::Boundary,
+        processor: &mut Processor,
+        term: &SharedTerm,
+    ) {
+        if processor.sync_timeout().sync_timeout().is_some() {
+            self.defer_output(processor, DeferredOutput::CommandMark(boundary));
+        } else if let Ok(term) = term.lock() {
+            self.apply_command_mark(boundary, &term);
+        }
+    }
+
+    fn apply_command_mark(&self, boundary: command_marks::Boundary, term: &Term<EventProxy>) {
+        if let Some(marks) = &self.command_marks
+            && let Ok(mut marks) = marks.lock()
+        {
+            marks.apply_boundary(boundary, term);
+        }
+    }
+
+    fn discard_command_mark_boundaries(&self) {
+        if let Some(marks) = &self.command_marks
+            && let Ok(mut marks) = marks.lock()
+        {
+            // Losing a marker does not lose the row journal. Keep completed
+            // results that still follow known scrolls, but reject stale C/D.
+            marks.discard_boundaries();
         }
     }
 
@@ -2118,12 +2193,16 @@ impl DeferredGraphicsJournal {
     }
 
     fn fail_closed(&mut self) {
+        self.discard_command_mark_boundaries();
         self.entries.clear();
         self.overflowed = true;
     }
 
     fn finish_sync(&mut self) -> bool {
         let consistent = !self.overflowed && self.entries.is_empty();
+        if !consistent {
+            self.discard_command_mark_boundaries();
+        }
         self.entries.clear();
         self.overflowed = false;
         consistent
@@ -2151,6 +2230,7 @@ fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
             | Chunk::RelativePlacement { .. }
             | Chunk::Animation { .. }
             | Chunk::DeferredGraphics(_)
+            | Chunk::Prompt(_)
     )
 }
 
@@ -2765,6 +2845,7 @@ fn apply_sync_marker(
     extractor: &mut Extractor,
 ) {
     let mut batch = term.take_graphics_events();
+    deferred.apply_command_mark_events(&batch);
     let marker_matches = matches!(batch.events.pop(), Some(GraphicsEvent::SyncMarker { id: marker_id }) if marker_id == id);
     if deferred.overflowed || batch.overflowed || !marker_matches {
         *active_alternate = batch.alternate_screen;
@@ -2783,6 +2864,10 @@ fn apply_sync_marker(
     let graphics = match output {
         DeferredOutput::Command(marker) => {
             marker.apply(term, actions.proxy);
+            return;
+        }
+        DeferredOutput::CommandMark(boundary) => {
+            deferred.apply_command_mark(boundary, term);
             return;
         }
         DeferredOutput::Graphics(graphics) => graphics,
@@ -2838,6 +2923,7 @@ fn apply_sync_dispatch(dispatch: SyncGraphicsDispatch<'_>, context: &mut SyncGra
             context.extractor,
         ),
         SyncGraphicsDispatch::Batch(batch) => {
+            context.deferred.apply_command_mark_events(&batch);
             if (batch.overflowed
                 || !batch.events.is_empty()
                 || batch.alternate_screen != *context.active_alternate)
@@ -5938,6 +6024,8 @@ impl Terminal {
         let (local_output, local_output_rx) =
             crossbeam_channel::bounded::<LocalOutput>(LOCAL_OUTPUT_QUEUE_DEPTH);
 
+        #[cfg(test)]
+        let test_input = test_input::take();
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
@@ -5996,6 +6084,13 @@ impl Terminal {
                     >(PTY_PUMP_QUEUE_DEPTH);
                     let (recycle_tx, recycle_rx) =
                         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
+                    #[cfg(test)]
+                    if let Some(test_input) = test_input {
+                        // Keep draining native output for ConPTY close, but give the
+                        // parser only the test's exact bytes and explicit EOF.
+                        drain_output.store(true, Ordering::Release);
+                        test_input.send(raw_tx.clone()).expect("test input receiver");
+                    }
                     {
                         let pump_stop = stop.clone();
                         let pump_drain_output = drain_output.clone();
@@ -6207,6 +6302,7 @@ impl Terminal {
                     }
                     let mut image_pruner = ImageHistoryPruner::default();
                     let mut deferred_graphics = DeferredGraphicsJournal::new();
+                    deferred_graphics.command_marks = Some(command_marks.clone());
                     let mut local_output_rx = local_output_rx;
                     let mut pending_local = None;
                     let mut handled_generation = 0;
@@ -6476,6 +6572,7 @@ impl Terminal {
                                                 reconcile_named_placement(&images, &virtuals, &relatives, key, PlacementForm::Physical);
                                             }
                                             if let Ok(Some(batch)) = result {
+                                                deferred_graphics.apply_command_mark_events(&batch);
                                                 apply_graphics_batch(
                                                     batch,
                                                     &mut active_alternate,
@@ -6785,9 +6882,9 @@ impl Terminal {
                                             );
                                         }
                                         Chunk::Prompt(kind @ (PromptKind::PromptStart | PromptKind::IntegratedPromptStart(_) | PromptKind::CorrelationDisabledPromptStart)) => {
-                                            if let Ok(mut marks) = command_marks.lock() {
-                                                marks.cancel_pending();
-                                            }
+                                            deferred_graphics.record_command_mark(
+                                                command_marks::Boundary::PromptStart, &mut processor, &term,
+                                            );
                                             command_shell.announce(kind);
                                             let prompt_row = if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
@@ -6858,13 +6955,9 @@ impl Terminal {
                                                 *t = Some(std::time::Instant::now());
                                                 command_shell.command_started();
                                             }
-                                            if let Ok(t) = term.lock()
-                                                && !t.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
-                                                && let Ok(prompts) = prompts.lock()
-                                                && let Ok(mut marks) = command_marks.lock()
-                                            {
-                                                marks.begin(prompts.back().copied());
-                                            }
+                                            deferred_graphics.record_command_mark(
+                                                command_marks::Boundary::Begin, &mut processor, &term,
+                                            );
                                             // `shell_idle` needs a REAL OutputStart source.
                                             // Prompt marks alone never authorize a
                                             // close-confirm skip, or an A/B/D-only
@@ -6894,9 +6987,9 @@ impl Terminal {
                                                     &mut deferred_graphics, &proxy,
                                                 );
                                             }
-                                            if let Ok(mut marks) = command_marks.lock() {
-                                                marks.end(code);
-                                            }
+                                            deferred_graphics.record_command_mark(
+                                                command_marks::Boundary::End(code), &mut processor, &term,
+                                            );
                                             let started = output_started_at.lock().ok().and_then(|mut t| t.take());
                                             if let Some(started) = started
                                                 && let Ok(mut q) = command_finished.lock() {
@@ -6922,9 +7015,9 @@ impl Terminal {
                                         // close-confirm skip never applies. B is not a
                                         // command end, so no CommandFinished is pushed.
                                         Chunk::Prompt(PromptKind::CommandStart) => {
-                                            if let Ok(mut marks) = command_marks.lock() {
-                                                marks.cancel_pending();
-                                            }
+                                            deferred_graphics.record_command_mark(
+                                                command_marks::Boundary::Cancel, &mut processor, &term,
+                                            );
                                             if let Ok(mut completion) = completion_cell.lock() {
                                                 hide_completion_view_slot(&mut completion);
                                             }
@@ -7908,6 +8001,10 @@ impl Terminal {
 
     /// Known completed-command outcomes. Alternate screens never show shell marks.
     pub fn command_marks(&self) -> Vec<CommandMark> {
+        let _graphics_guard = self
+            .graphics_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Ok(term) = self.term.lock() else {
             return Vec::new();
         };
