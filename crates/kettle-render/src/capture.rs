@@ -533,9 +533,12 @@ pub fn capture_png_with_annotation(
                 (&right, right_origin, right_clip),
             ] {
                 let start = grid_instances.len() as u32;
+                let marks =
+                    super::mark_fallback::buffer_shifts(buf_ref, &mut font_system, &mut swash);
                 emit_cell_locked_glyphs(
                     &mut grid_instances,
                     buf_ref,
+                    &marks,
                     origin,
                     cw,
                     super::GlyphPositioning::Grid(cw),

@@ -19,6 +19,10 @@ pub(super) fn clipboard() -> Option<TextWorker> {
 struct Native;
 
 impl TextProvider for Native {
+    fn supports_primary(&self) -> bool {
+        false
+    }
+
     fn load(
         &mut self,
         primary: bool,
