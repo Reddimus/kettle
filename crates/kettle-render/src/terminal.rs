@@ -1450,6 +1450,7 @@ impl Renderer {
                     line.text(),
                     &mut self.font_system,
                     &mut self.swash,
+                    &mut self.mark_cache,
                 ),
                 None => Box::default(),
             };

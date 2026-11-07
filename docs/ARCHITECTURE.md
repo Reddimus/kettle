@@ -3394,7 +3394,9 @@ substituted by GSUB, emoji clusters and inkless bases such as a space are
 left alone, and a mark anchored to a mark that moved moves with it. The
 offsets are stored in ems per row in `pane_mark_shifts`, beside the row keys,
 so steady frames and zooms reuse them and only a reshaped row recomputes
-them. The grid emit applies them: the horizontal offset through the glyph's
+them; outline bounds and GPOS answers are kept per glyph in a bounded
+`MarkCache`, so rows of the same marks ask each question once. The grid emit
+applies them: the horizontal offset through the glyph's
 `x_offset` before cell locking, the vertical one to the rasterized image in
 whole pixels rounded away from the base, and never more than a quarter line
 past the row, so a long stack cannot cover the rows around it. Legacy panes

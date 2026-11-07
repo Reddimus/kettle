@@ -500,6 +500,7 @@ impl Renderer {
             load_bundled_font(&mut self.font_system, face);
         }
         self.grapheme_text_cache.clear();
+        self.mark_cache.clear();
         self.bundled_style_faces_loaded = true;
         self.pane_style_keys.fill(0);
         self.pane_line_keys.iter_mut().for_each(Vec::clear);

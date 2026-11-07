@@ -435,6 +435,8 @@ pub struct Renderer {
     /// (`mark_fallback::line_shifts`), recomputed only when a row reshapes and
     /// kept in step with `pane_line_keys`.
     pane_mark_shifts: Vec<Vec<Box<[mark_fallback::MarkShift]>>>,
+    /// Glyph bounds and GPOS answers behind `pane_mark_shifts`.
+    mark_cache: mark_fallback::MarkCache,
     /// The row layouts the last frame drew, and those of the last frame
     /// presented, for pointer hit tests.
     drawn_bidi: Vec<PaintedBidi>,

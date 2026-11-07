@@ -17,7 +17,11 @@
 //! [`MarkShift::raise_px`], and the block cursor redraws a cell with a moved
 //! mark from that emit (`batching::moved_cell_images`).
 
-use glyphon::cosmic_text::{CacheKeyFlags, Command, FontSystem, LayoutGlyph, SwashCache};
+use std::collections::HashMap;
+
+use glyphon::cosmic_text::{
+    CacheKey, CacheKeyFlags, Command, FontSystem, LayoutGlyph, SubpixelBin, SwashCache, fontdb,
+};
 use read_fonts::TableProvider;
 use read_fonts::tables::gpos::PositionSubtables;
 use read_fonts::types::GlyphId16;
@@ -111,12 +115,13 @@ pub(crate) fn buffer_shifts(
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
 ) -> Vec<Box<[MarkShift]>> {
+    let mut cache = MarkCache::default();
     buffer
         .lines
         .iter()
         .map(
             |line| match line.layout_opt().and_then(|layout| layout.first()) {
-                Some(layout) => line_shifts(&layout.glyphs, line.text(), fonts, swash),
+                Some(layout) => line_shifts(&layout.glyphs, line.text(), fonts, swash, &mut cache),
                 None => Box::default(),
             },
         )
@@ -129,6 +134,7 @@ pub(crate) fn line_shifts(
     text: &str,
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
+    cache: &mut MarkCache,
 ) -> Box<[MarkShift]> {
     let mut shifts = Vec::new();
     let mut first = 0;
@@ -147,9 +153,103 @@ pub(crate) fn line_shifts(
         if super::fonts::emoji_text(cluster_text) {
             continue;
         }
-        place_cluster(cluster, start, cluster_text, fonts, swash, &mut shifts);
+        place_cluster(
+            cluster,
+            start,
+            cluster_text,
+            fonts,
+            swash,
+            cache,
+            &mut shifts,
+        );
     }
     shifts.into_boxed_slice()
+}
+
+/// Entries each map of a [`MarkCache`] holds before it starts over.
+const MARK_CACHE_LIMIT: usize = 4096;
+
+/// Outline bounds and GPOS answers by glyph. Rows of the same marks ask the
+/// same questions, and a screen of tall stacks would otherwise redo them for
+/// every reshaped row.
+#[derive(Default)]
+pub(crate) struct MarkCache {
+    /// Outline bounds from the pen, by unhinted raster key.
+    bounds: HashMap<CacheKey, Option<Ink>>,
+    /// `None` when the font's GPOS could not be read.
+    anchors: HashMap<Anchor, Option<bool>>,
+}
+
+/// Whether the font anchors `mark` to `to`, a base or an earlier mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Anchor {
+    font: fontdb::ID,
+    to: u16,
+    mark: u16,
+    to_mark: bool,
+}
+
+impl MarkCache {
+    pub(crate) fn clear(&mut self) {
+        self.bounds.clear();
+        self.anchors.clear();
+    }
+
+    /// The glyph's outline bounds in its line, or `None` for no outline.
+    /// Hinting is off so the bounds scale with the font size.
+    fn ink(
+        &mut self,
+        glyph: &LayoutGlyph,
+        fonts: &mut FontSystem,
+        swash: &mut SwashCache,
+    ) -> Option<Ink> {
+        let mut key = glyph.physical((0.0, 0.0), 1.0).cache_key;
+        key.flags |= CacheKeyFlags::DISABLE_HINTING;
+        key.x_bin = SubpixelBin::Zero;
+        key.y_bin = SubpixelBin::Zero;
+        if self.bounds.len() >= MARK_CACHE_LIMIT && !self.bounds.contains_key(&key) {
+            self.bounds.clear();
+        }
+        let bounds = *self
+            .bounds
+            .entry(key)
+            .or_insert_with(|| outline_bounds(key, fonts, swash));
+        let (x, y) = pen(glyph);
+        bounds.map(|ink| Ink {
+            left: ink.left + x,
+            right: ink.right + x,
+            bottom: ink.bottom + y,
+            top: ink.top + y,
+        })
+    }
+
+    /// Whether any mark-to-base or mark-to-ligature lookup (`to_mark` false)
+    /// or mark-to-mark lookup (`to_mark` true) in the glyph's font anchors it
+    /// to glyph `to`, whatever feature enables the lookup. `None` when the
+    /// font's GPOS cannot be read.
+    fn anchored(
+        &mut self,
+        fonts: &mut FontSystem,
+        glyph: &LayoutGlyph,
+        to: u16,
+        to_mark: bool,
+    ) -> Option<bool> {
+        let question = Anchor {
+            font: glyph.font_id,
+            to,
+            mark: glyph.glyph_id,
+            to_mark,
+        };
+        if let Some(&answer) = self.anchors.get(&question) {
+            return answer;
+        }
+        if self.anchors.len() >= MARK_CACHE_LIMIT {
+            self.anchors.clear();
+        }
+        let answer = ask_gpos(fonts, glyph, question);
+        self.anchors.insert(question, answer);
+        answer
+    }
 }
 
 /// Ink bounds, in pixels, `y` upward.
@@ -258,6 +358,7 @@ fn place_cluster(
     text: &str,
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
+    cache: &mut MarkCache,
     shifts: &mut Vec<MarkShift>,
 ) {
     let ccc = icu_normalizer::properties::CanonicalCombiningClassMapBorrowed::new();
@@ -288,7 +389,9 @@ fn place_cluster(
             // A base: the cluster's first glyph or one with an advance (a
             // ligature component). A base without ink, such as a space,
             // keeps the marks drawn on it.
-            base = ink(glyph, fonts, swash).map(|ink| (i, ink, pen(glyph).0 + glyph.w));
+            base = cache
+                .ink(glyph, fonts, swash)
+                .map(|ink| (i, ink, pen(glyph).0 + glyph.w));
             if let Some((_, ink, _)) = base {
                 stack = ink;
             }
@@ -319,7 +422,7 @@ fn place_cluster(
         let Some(class) = mark_class(class_id) else {
             continue;
         };
-        let Some(mark_ink) = ink(glyph, fonts, swash) else {
+        let Some(mark_ink) = cache.ink(glyph, fonts, swash) else {
             continue;
         };
         let size = glyph.font_size;
@@ -330,22 +433,7 @@ fn place_cluster(
         let attachment = if shaper_moved && moved.iter().all(Option::is_none) {
             Attachment::Base
         } else {
-            let Some(index) = fonts.db().face(glyph.font_id).map(|face| face.index) else {
-                continue;
-            };
-            let base_glyph = &cluster[base_index];
-            let earlier: Vec<(usize, u16)> = (base_index + 1..i)
-                .rev()
-                .filter(|&j| cluster[j].font_id == glyph.font_id)
-                .map(|j| (j, cluster[j].glyph_id))
-                .collect();
-            gpos_attachment(
-                font.data(),
-                index,
-                (base_glyph.font_id == glyph.font_id).then_some(base_glyph.glyph_id),
-                glyph.glyph_id,
-                &earlier,
-            )
+            attachment(cache, fonts, cluster, base_index, i)
         };
         let (dx, dy) = match attachment {
             Attachment::None if !shaper_moved => place(
@@ -380,6 +468,36 @@ fn place_cluster(
     }
 }
 
+/// How the font anchors the mark at `index` in `cluster`, whose base is at
+/// `base`. Mark-to-mark lookups run after mark-to-base ones, so an anchor to
+/// the nearest earlier mark wins. When in doubt the mark keeps its place.
+fn attachment(
+    cache: &mut MarkCache,
+    fonts: &mut FontSystem,
+    cluster: &[LayoutGlyph],
+    base: usize,
+    index: usize,
+) -> Attachment {
+    let glyph = &cluster[index];
+    for earlier in (base + 1..index).rev() {
+        if cluster[earlier].font_id != glyph.font_id {
+            continue;
+        }
+        match cache.anchored(fonts, glyph, cluster[earlier].glyph_id, true) {
+            Some(true) => return Attachment::Mark(earlier),
+            Some(false) => {}
+            None => return Attachment::Base,
+        }
+    }
+    if cluster[base].font_id != glyph.font_id {
+        return Attachment::None;
+    }
+    match cache.anchored(fonts, glyph, cluster[base].glyph_id, false) {
+        Some(false) => Attachment::None,
+        Some(true) | None => Attachment::Base,
+    }
+}
+
 /// Grows `stack` by a mark that keeps its place (raised by `dy`), so a later
 /// fallback mark of its class stacks beyond it.
 fn grow(stack: &mut Ink, class: MarkClass, mark: Ink, dy: f32) {
@@ -398,11 +516,9 @@ fn pen(glyph: &LayoutGlyph) -> (f32, f32) {
     )
 }
 
-/// The glyph's outline bounds in its line, or `None` for no outline. Hinting
-/// is off so the bounds scale with the font size.
-fn ink(glyph: &LayoutGlyph, fonts: &mut FontSystem, swash: &mut SwashCache) -> Option<Ink> {
-    let mut key = glyph.physical((0.0, 0.0), 1.0).cache_key;
-    key.flags |= CacheKeyFlags::DISABLE_HINTING;
+/// The outline bounds of the glyph `key` names, from its pen, or `None` for
+/// no outline.
+fn outline_bounds(key: CacheKey, fonts: &mut FontSystem, swash: &mut SwashCache) -> Option<Ink> {
     let commands = swash.get_outline_commands_uncached(fonts, key)?;
     let mut bounds: Option<Ink> = None;
     let mut add = |x: f32, y: f32| {
@@ -432,66 +548,48 @@ fn ink(glyph: &LayoutGlyph, fonts: &mut FontSystem, swash: &mut SwashCache) -> O
             Command::Close => {}
         }
     }
-    let ink = bounds.filter(|ink| ink.right > ink.left && ink.top > ink.bottom)?;
-    let (x, y) = pen(glyph);
-    Some(Ink {
-        left: ink.left + x,
-        right: ink.right + x,
-        bottom: ink.bottom + y,
-        top: ink.top + y,
-    })
+    bounds.filter(|ink| ink.right > ink.left && ink.top > ink.bottom)
 }
 
-/// Whether the font's GPOS anchors `mark` to `base` (mark-to-base or
-/// mark-to-ligature) or to one of `earlier`, the cluster's preceding marks
-/// nearest first (mark-to-mark).
-///
-/// Every mark lookup counts, whatever feature or script enables it: when in
-/// doubt the mark keeps the font's placement.
-fn gpos_attachment(
-    data: &[u8],
-    index: u32,
-    base: Option<u16>,
-    mark: u16,
-    earlier: &[(usize, u16)],
-) -> Attachment {
-    let Ok(font) = read_fonts::FontRef::from_index(data, index) else {
-        return Attachment::Base;
-    };
+/// Answers `question` from the GPOS of `glyph`'s font: `Some(false)` for a
+/// font without GPOS, `None` for one that cannot be read.
+fn ask_gpos(fonts: &mut FontSystem, glyph: &LayoutGlyph, question: Anchor) -> Option<bool> {
+    let index = fonts.db().face(glyph.font_id)?.index;
+    let font = fonts.get_font(glyph.font_id, glyph.font_weight)?;
+    let font = read_fonts::FontRef::from_index(font.data(), index).ok()?;
     let gpos = match font.gpos() {
         Ok(gpos) => gpos,
-        Err(read_fonts::ReadError::TableIsMissing(_)) => return Attachment::None,
-        Err(_) => return Attachment::Base,
+        Err(read_fonts::ReadError::TableIsMissing(_)) => return Some(false),
+        Err(_) => return None,
     };
-    match anchored(&gpos, base, mark, earlier) {
-        Ok(attachment) => attachment,
-        Err(_) => Attachment::Base,
+    let (to, mark) = (GlyphId16::new(question.to), GlyphId16::new(question.mark));
+    if question.to_mark {
+        anchored_to_mark(&gpos, to, mark).ok()
+    } else {
+        anchored_to_base(&gpos, to, mark).ok()
     }
 }
 
-fn anchored(
+type Anchors =
+    [read_fonts::types::BigEndian<read_fonts::types::Nullable<read_fonts::types::Offset16>>];
+
+/// Whether `anchors`, one per mark class, has one for `class`.
+fn has_anchor(anchors: &Anchors, class: u16) -> bool {
+    anchors
+        .get(usize::from(class))
+        .is_some_and(|anchor| !anchor.get().is_null())
+}
+
+/// Whether a mark-to-base or mark-to-ligature lookup anchors `mark` to
+/// `base`.
+fn anchored_to_base(
     gpos: &read_fonts::tables::gpos::Gpos<'_>,
-    base: Option<u16>,
-    mark: u16,
-    earlier: &[(usize, u16)],
-) -> Result<Attachment, read_fonts::ReadError> {
-    type Anchors =
-        [read_fonts::types::BigEndian<read_fonts::types::Nullable<read_fonts::types::Offset16>>];
-    let has = |anchors: &Anchors, class: u16| {
-        anchors
-            .get(usize::from(class))
-            .is_some_and(|anchor| !anchor.get().is_null())
-    };
-    let mark = GlyphId16::new(mark);
-    let base = base.map(GlyphId16::new);
-    let mut to_base = false;
-    // The nearest earlier mark with an anchor, as a position in `earlier`.
-    // Mark-to-mark lookups run after mark-to-base ones, so it wins.
-    let mut to_mark: Option<usize> = None;
+    base: GlyphId16,
+    mark: GlyphId16,
+) -> Result<bool, read_fonts::ReadError> {
     for lookup in gpos.lookup_list()?.lookups().iter() {
         match lookup?.subtables()? {
             PositionSubtables::MarkToBase(subtables) => {
-                let Some(base) = base else { continue };
                 for subtable in subtables.iter() {
                     let subtable = subtable?;
                     let (Some(mark_index), Some(base_index)) = (
@@ -505,11 +603,12 @@ fn anchored(
                         .base_array()?
                         .base_records()
                         .get(usize::from(base_index))?;
-                    to_base |= has(record.base_anchor_offsets(), class);
+                    if has_anchor(record.base_anchor_offsets(), class) {
+                        return Ok(true);
+                    }
                 }
             }
             PositionSubtables::MarkToLig(subtables) => {
-                let Some(base) = base else { continue };
                 for subtable in subtables.iter() {
                     let subtable = subtable?;
                     let (Some(mark_index), Some(ligature_index)) = (
@@ -524,28 +623,8 @@ fn anchored(
                         .ligature_attaches()
                         .get(usize::from(ligature_index))?;
                     for component in attach.component_records().iter() {
-                        to_base |= has(component?.ligature_anchor_offsets(), class);
-                    }
-                }
-            }
-            PositionSubtables::MarkToMark(subtables) => {
-                for subtable in subtables.iter() {
-                    let subtable = subtable?;
-                    let Some(mark_index) = subtable.mark1_coverage()?.get(mark) else {
-                        continue;
-                    };
-                    let class = mark_class_of(&subtable.mark1_array()?, mark_index)?;
-                    let coverage = subtable.mark2_coverage()?;
-                    let records = subtable.mark2_array()?.mark2_records();
-                    let nearer = to_mark.unwrap_or(earlier.len());
-                    for (position, &(_, previous)) in earlier[..nearer].iter().enumerate() {
-                        let Some(previous_index) = coverage.get(GlyphId16::new(previous)) else {
-                            continue;
-                        };
-                        let record = records.get(usize::from(previous_index))?;
-                        if has(record.mark2_anchor_offsets(), class) {
-                            to_mark = Some(position);
-                            break;
+                        if has_anchor(component?.ligature_anchor_offsets(), class) {
+                            return Ok(true);
                         }
                     }
                 }
@@ -553,11 +632,38 @@ fn anchored(
             _ => {}
         }
     }
-    Ok(match to_mark {
-        Some(position) => Attachment::Mark(earlier[position].0),
-        None if to_base => Attachment::Base,
-        None => Attachment::None,
-    })
+    Ok(false)
+}
+
+/// Whether a mark-to-mark lookup anchors `mark` to the earlier `previous`.
+fn anchored_to_mark(
+    gpos: &read_fonts::tables::gpos::Gpos<'_>,
+    previous: GlyphId16,
+    mark: GlyphId16,
+) -> Result<bool, read_fonts::ReadError> {
+    for lookup in gpos.lookup_list()?.lookups().iter() {
+        let PositionSubtables::MarkToMark(subtables) = lookup?.subtables()? else {
+            continue;
+        };
+        for subtable in subtables.iter() {
+            let subtable = subtable?;
+            let (Some(mark_index), Some(previous_index)) = (
+                subtable.mark1_coverage()?.get(mark),
+                subtable.mark2_coverage()?.get(previous),
+            ) else {
+                continue;
+            };
+            let class = mark_class_of(&subtable.mark1_array()?, mark_index)?;
+            let record = subtable
+                .mark2_array()?
+                .mark2_records()
+                .get(usize::from(previous_index))?;
+            if has_anchor(record.mark2_anchor_offsets(), class) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn mark_class_of(
@@ -781,14 +887,12 @@ mod tests {
         assert!(shift_for(&shifts, &mut next, 6, 7).is_none());
     }
 
-    /// Shapes `text` in the bundled JetBrains Mono alone and returns its
-    /// glyphs and fallback shifts.
-    fn bundled(text: &str) -> (Vec<LayoutGlyph>, Box<[MarkShift]>) {
+    /// Shapes `text` in the bundled JetBrains Mono alone, at 26 px.
+    fn shape_bundled(text: &str) -> (FontSystem, Vec<LayoutGlyph>) {
         use glyphon::cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Wrap};
         let mut fonts =
             FontSystem::new_with_locale_and_db("en-US".into(), glyphon::fontdb::Database::new());
         super::super::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
-        let mut swash = SwashCache::new();
         let mut buffer = Buffer::new(&mut fonts, Metrics::new(26.0, 32.0));
         buffer.set_wrap(Wrap::None);
         buffer.set_text(
@@ -798,10 +902,49 @@ mod tests {
             None,
         );
         buffer.shape_until_scroll(&mut fonts, false);
-        let run = buffer.layout_runs().next().expect("one line");
-        let glyphs = run.glyphs.to_vec();
-        let shifts = line_shifts(&glyphs, run.text, &mut fonts, &mut swash);
+        let glyphs = buffer
+            .layout_runs()
+            .next()
+            .expect("one line")
+            .glyphs
+            .to_vec();
+        (fonts, glyphs)
+    }
+
+    /// The glyphs and fallback shifts of `text` in the bundled font alone.
+    fn bundled(text: &str) -> (Vec<LayoutGlyph>, Box<[MarkShift]>) {
+        let (mut fonts, glyphs) = shape_bundled(text);
+        let shifts = line_shifts(
+            &glyphs,
+            text,
+            &mut fonts,
+            &mut SwashCache::new(),
+            &mut MarkCache::default(),
+        );
         (glyphs, shifts)
+    }
+
+    #[test]
+    fn the_mark_cache_answers_repeats_and_stays_bounded() {
+        let text = "#\u{301}#\u{301}#\u{301}";
+        let (mut fonts, glyphs) = shape_bundled(text);
+        let (mut swash, mut cache) = (SwashCache::new(), MarkCache::default());
+        let shifts = line_shifts(&glyphs, text, &mut fonts, &mut swash, &mut cache);
+        assert_eq!(shifts.len(), 3, "each accent is placed");
+        assert_eq!(
+            (cache.bounds.len(), cache.anchors.len()),
+            (2, 1),
+            "one bounds per glyph and one GPOS answer, however often they repeat"
+        );
+
+        cache.clear();
+        let mut key = glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
+        for glyph_id in 0..MARK_CACHE_LIMIT as u16 {
+            key.glyph_id = glyph_id + 1000;
+            cache.bounds.insert(key, None);
+        }
+        assert!(cache.ink(&glyphs[0], &mut fonts, &mut swash).is_some());
+        assert_eq!(cache.bounds.len(), 1, "a full cache starts over");
     }
 
     #[test]
@@ -821,20 +964,15 @@ mod tests {
     fn marks_without_an_anchor_clear_their_base() {
         let gap = 26.0 * GAP_EM;
         for (text, above) in [("#\u{301}", true), ("1\u{301}", true), ("@\u{323}", false)] {
-            let (glyphs, shifts) = bundled(text);
+            let (mut fonts, glyphs) = shape_bundled(text);
+            let (mut swash, mut cache) = (SwashCache::new(), MarkCache::default());
+            let shifts = line_shifts(&glyphs, text, &mut fonts, &mut swash, &mut cache);
             assert_eq!(glyphs.len(), 2, "{text:?}");
             assert_eq!(shifts.len(), 1, "{text:?}");
             let shift = shifts[0];
             assert_eq!((shift.index, shift.glyph_id), (1, glyphs[1].glyph_id));
             assert_eq!(shift.above, above, "{text:?}");
-            let base_ink = {
-                let mut fonts = FontSystem::new_with_locale_and_db(
-                    "en-US".into(),
-                    glyphon::fontdb::Database::new(),
-                );
-                super::super::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
-                super::ink(&glyphs[0], &mut fonts, &mut SwashCache::new()).unwrap()
-            };
+            let base_ink = cache.ink(&glyphs[0], &mut fonts, &mut swash).unwrap();
             let (top, bottom) = (shift.top * 26.0, shift.bottom * 26.0);
             if above {
                 assert!(

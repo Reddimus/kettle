@@ -846,6 +846,7 @@ impl Renderer {
             pane_style_keys: Vec::new(),
             pane_bidi: Vec::new(),
             pane_mark_shifts: Vec::new(),
+            mark_cache: Default::default(),
             drawn_bidi: Vec::new(),
             painted_bidi: Vec::new(),
             line_text_scratch: String::new(),
