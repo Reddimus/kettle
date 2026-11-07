@@ -170,6 +170,32 @@ fn window_scissor(scissor: [u32; 4], window: [u32; 4]) -> Option<[u32; 4]> {
     (x1 > x0 && y1 > y0).then(|| [x0 - window[0], y0 - window[1], x1 - x0, y1 - y0])
 }
 
+/// Disjoint scissor strips outside an optional excluded rectangle.
+pub(crate) fn scissors_without(
+    scissor: [u32; 4],
+    excluded: Option<[u32; 4]>,
+) -> [Option<[u32; 4]>; 4] {
+    let [x, y, w, h] = scissor;
+    let Some([ex, ey, ew, eh]) = excluded else {
+        return [Some(scissor), None, None, None];
+    };
+    let (right, bottom) = (x.saturating_add(w), y.saturating_add(h));
+    let (left, top) = (x.max(ex), y.max(ey));
+    let (eright, ebottom) = (
+        right.min(ex.saturating_add(ew)),
+        bottom.min(ey.saturating_add(eh)),
+    );
+    if left >= eright || top >= ebottom {
+        return [Some(scissor), None, None, None];
+    }
+    [
+        (top > y).then_some([x, y, w, top - y]),
+        (ebottom < bottom).then_some([x, ebottom, w, bottom - ebottom]),
+        (left > x).then_some([x, top, left - x, ebottom - top]),
+        (eright < right).then_some([eright, top, right - eright, ebottom - top]),
+    ]
+}
+
 /// Where a glyph lives in the atlas + the bearings needed to place its quad.
 #[derive(Clone, Copy)]
 pub struct GlyphSlot {
@@ -876,6 +902,8 @@ pub struct GlyphPipeline {
     cursor: wgpu::Buffer,
     cursor_held: RetainedBytes,
     pub(crate) cursor_clip: Option<[f32; 4]>,
+    cursor_pane_index: Option<u32>,
+    cursor_bounds: Option<[f32; 4]>,
     _cursor_gpu: GraphicsReservation,
 }
 
@@ -1075,6 +1103,8 @@ impl GlyphPipeline {
             cursor,
             cursor_held: RetainedBytes::default(),
             cursor_clip: None,
+            cursor_pane_index: None,
+            cursor_bounds: None,
             _cursor_gpu: cursor_gpu,
         })
     }
@@ -1425,12 +1455,14 @@ impl GlyphPipeline {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        glyph: Option<(GlyphInstance, [f32; 4])>,
+        glyph: Option<(GlyphInstance, [f32; 4], u32)>,
     ) {
         // Resolving the cursor's slot can itself grow an atlas.
         self.refresh_bind_group(device);
-        self.cursor_clip = glyph.map(|(_, clip)| clip);
-        if let Some((instance, _)) = glyph {
+        self.cursor_bounds = glyph.map(|(g, _, _)| [g.pos[0], g.pos[1], g.size[0], g.size[1]]);
+        self.cursor_clip = glyph.map(|(_, clip, _)| clip);
+        self.cursor_pane_index = glyph.map(|(_, _, index)| index);
+        if let Some((instance, _, _)) = glyph {
             write_buffer_if_changed(
                 queue,
                 &self.cursor,
@@ -1439,6 +1471,19 @@ impl GlyphPipeline {
                 &self.counters,
             );
         }
+    }
+
+    /// The built-in cursor cell, clipped to its pane and moved into the
+    /// render window. Normal text from either renderer must leave it clear.
+    pub(crate) fn cursor_exclusion(
+        &self,
+        target_size: [u32; 2],
+        window: [u32; 4],
+    ) -> Option<[u32; 4]> {
+        let pane = pane_scissor(self.cursor_clip?, target_size)?;
+        let cell = pane_scissor(self.cursor_bounds?, target_size)?;
+        let [x, y, w, h] = window_scissor(cell, pane)?;
+        window_scissor([x + pane[0], y + pane[1], w, h], window)
     }
 
     /// Draw the cursor's built-in glyph set by [`Self::set_cursor`], if any,
@@ -1477,7 +1522,7 @@ impl GlyphPipeline {
         target_size: [u32; 2],
     ) {
         let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
-        self.draw_in_window(pass, clips, target_size, whole);
+        self.draw_in_window(pass, clips, target_size, whole, false);
     }
 
     /// [`Self::draw`] into a target that holds only `window` (`[x, y, w, h]`
@@ -1490,6 +1535,7 @@ impl GlyphPipeline {
         clips: &[GlyphClip],
         target_size: [u32; 2],
         window: [u32; 4],
+        hide_cursor: bool,
     ) {
         if self.count == 0 {
             return;
@@ -1504,8 +1550,27 @@ impl GlyphPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, instances.slice(..));
+        let hidden = self.cursor_pane_index.filter(|_| hide_cursor);
+        let excluded = hide_cursor
+            .then(|| self.cursor_exclusion(target_size, window))
+            .flatten();
+        let draw_range = |pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>| {
+            if let Some(index) = hidden.filter(|index| range.contains(index)) {
+                pass.draw(0..4, range.start..index);
+                pass.draw(0..4, index + 1..range.end);
+            } else {
+                pass.draw(0..4, range);
+            }
+        };
         if clips.is_empty() {
-            pass.draw(0..4, 0..self.count);
+            for [x, y, w, h] in scissors_without([0, 0, window[2], window[3]], excluded)
+                .into_iter()
+                .flatten()
+            {
+                pass.set_scissor_rect(x, y, w, h);
+                draw_range(pass, 0..self.count);
+            }
+            pass.set_scissor_rect(0, 0, window[2], window[3]);
             return;
         }
         for c in clips {
@@ -1517,8 +1582,13 @@ impl GlyphPipeline {
             else {
                 continue;
             };
-            pass.set_scissor_rect(x, y, w, h);
-            pass.draw(0..4, c.start..c.start + c.count);
+            for [x, y, w, h] in scissors_without([x, y, w, h], excluded)
+                .into_iter()
+                .flatten()
+            {
+                pass.set_scissor_rect(x, y, w, h);
+                draw_range(pass, c.start..c.start + c.count);
+            }
         }
         // Restore the whole-target scissor so the following passes (chrome text,
         // menus, the cursor glyph) aren't clipped by the last pane's rect.
@@ -1541,6 +1611,8 @@ impl GlyphPipeline {
         self.exhausted_kinds = [false; 2];
         // The cursor instance points into the atlas too.
         self.cursor_clip = None;
+        self.cursor_pane_index = None;
+        self.cursor_bounds = None;
         self.cursor_held.invalidate();
     }
 }
@@ -1772,6 +1844,36 @@ mod tests {
         );
         assert_eq!(pane_scissor([320.0, 0.0, 10.0, 10.0], [320, 120]), None);
         assert_eq!(pane_scissor([0.0, 0.0, 0.5, 10.0], [320, 120]), None);
+    }
+
+    #[test]
+    fn cursor_exclusion_scissors_cover_each_remaining_pixel_once() {
+        let pane = [3, 5, 8, 6];
+        for excluded in [
+            None,
+            Some([5, 7, 3, 2]),
+            Some([0, 0, 6, 8]),
+            Some([9, 9, 9, 9]),
+            Some([0, 0, 20, 20]),
+            Some([11, 5, 1, 6]),
+            Some([5, 7, 0, 2]),
+        ] {
+            let strips = scissors_without(pane, excluded);
+            assert!(strips.iter().flatten().all(|r| r[2] > 0 && r[3] > 0));
+            for y in 0..20 {
+                for x in 0..20 {
+                    let contains =
+                        |r: [u32; 4]| x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+                    let expected = contains(pane) && !excluded.is_some_and(contains);
+                    let count = strips.iter().flatten().filter(|r| contains(**r)).count();
+                    assert_eq!(
+                        count,
+                        usize::from(expected),
+                        "{x},{y}, excluded={excluded:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Drawing into a window of the scene sets the scissors the whole scene

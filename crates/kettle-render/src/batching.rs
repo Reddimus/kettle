@@ -301,20 +301,33 @@ impl Renderer {
         // Pane text sits above backgrounds + images and below chrome and the
         // cursor glyph. Grid pins cells; inactive Legacy retains continuous
         // positions. Other Legacy pane text rides glyphon below.
-        match window {
-            None => {
+        let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
+        let glyph_window = window.map_or(whole, |w| [w.x, w.y, w.width, w.height]);
+        self.glyph_pipeline.draw_in_window(
+            &mut pass,
+            &self.glyph_clips,
+            target_size,
+            glyph_window,
+            cursor_on && !self.ime_prepared,
+        );
+        // Legacy pane text uses glyphon. Clip its normal ink as well as
+        // Grid instances: neighboring raster glyphs can overhang this cell.
+        let excluded = (cursor_on && !self.ime_prepared)
+            .then(|| {
                 self.glyph_pipeline
-                    .draw(&mut pass, &self.glyph_clips, target_size);
-            }
-            Some(window) => self.glyph_pipeline.draw_in_window(
-                &mut pass,
-                &self.glyph_clips,
-                target_size,
-                [window.x, window.y, window.width, window.height],
-            ),
+                    .cursor_exclusion(target_size, glyph_window)
+            })
+            .flatten();
+        for [x, y, w, h] in
+            super::glyphpipe::scissors_without([0, 0, glyph_window[2], glyph_window[3]], excluded)
+                .into_iter()
+                .flatten()
+        {
+            pass.set_scissor_rect(x, y, w, h);
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
         }
-        self.text_renderer
-            .render(&self.atlas, &self.viewport, &mut pass)?;
+        pass.set_scissor_rect(0, 0, glyph_window[2], glyph_window[3]);
         self.card_cursors.draw_hiding(
             &mut pass,
             if cursor_on && !self.ime_prepared {
@@ -353,17 +366,10 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
         if cursor_on && builtin_cursor && !self.ime_prepared {
-            // The pane drew this cell's glyph in its own colour over the
-            // block. Put the block back first, so a glyph that only partly
-            // covers a pixel (a shade, an arc's edge) shows the cursor's two
-            // colours and nothing of the cell's.
-            if let Some(range) = self.cursor_quad_range.clone() {
-                self.quads.draw_range(&mut pass, range);
-            }
-            let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
-            let window = window.map_or(whole, |w| [w.x, w.y, w.width, w.height]);
+            // Normal pane ink was excluded, so partial coverage shows only
+            // cursor colours without repainting over decorations or images.
             self.glyph_pipeline
-                .draw_cursor(&mut pass, target_size, window);
+                .draw_cursor(&mut pass, target_size, glyph_window);
         }
         // Preview lanes sit above the terminal and below its dimming,
         // scrollbar and every overlay: menus and dialogs cover them whole.

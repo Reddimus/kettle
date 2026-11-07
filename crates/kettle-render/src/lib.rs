@@ -5278,10 +5278,19 @@ impl Renderer {
             let slot = self
                 .glyph_pipeline
                 .resident(cell.key(self.builtin_strokes)?)?;
-            Some((
-                builtin_glyph_at(&cell, slot),
-                [clip.0, clip.1, clip.2, clip.3],
-            ))
+            let instance = builtin_glyph_at(&cell, slot);
+            let rect = [clip.0, clip.1, clip.2, clip.3];
+            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
+            // Retain the uploaded index across visibility changes and cursor moves;
+            // only the pane's copy is omitted while its cursor copy draws.
+            let index = (pane.start..pane.start + pane.count).find(|&index| {
+                let glyph = &self.glyph_instances[index as usize];
+                glyph.pos == instance.pos
+                    && glyph.size == instance.size
+                    && glyph.uv == instance.uv
+                    && glyph.kind == instance.kind
+            })?;
+            Some((instance, rect, index))
         });
         self.glyph_pipeline
             .set_cursor(&self.gpu.device, &self.gpu.queue, cursor_glyph);

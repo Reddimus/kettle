@@ -502,6 +502,327 @@ fn a_shade_under_the_cursor_shows_only_the_cursor_colours() {
     assert_ne!(cells[0], [block.r, block.g, block.b], "the shade is drawn");
 }
 
+#[test]
+fn a_builtin_block_cursor_excludes_neighboring_text_overhang() {
+    let _serialized = gpu_test_guard();
+    let whole = PatchRect {
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 120,
+    };
+    let crop = |image: &image::RgbaImage, rect: PatchRect| {
+        image::imageops::crop_imm(image, rect.x, rect.y, rect.width, rect.height).to_image()
+    };
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        for allow_mapping in [false, true] {
+            let cfg = Config {
+                text_renderer: mode,
+                cell_width: 0.5,
+                background_opacity: 1.0,
+                ..gpu_test_config()
+            };
+            let mut renderer = frame_or_skip!(
+                Renderer::headless_for_tests_with_mapping(
+                    &cfg,
+                    320,
+                    120,
+                    1.0,
+                    false,
+                    allow_mapping
+                )
+                .expect("headless renderer builds")
+            );
+            eprintln!(
+                "OVERHANG_GPU: {mode:?}, allow_mapping={allow_mapping}, mapped={}, {:?}",
+                renderer.gpu.mapped_uploads(),
+                renderer.gpu.adapter_info()
+            );
+            let mut reference = Vec::new();
+            for prefix in [" ", "W"] {
+                let mut snap = snapshot_of(
+                    20,
+                    4,
+                    format!("\x1b[38;2;255;0;0;48;2;0;0;0m{prefix}\u{2592}{prefix}\u{2592}")
+                        .as_bytes(),
+                );
+                let mut retained = None;
+                for (step, col) in [1, 3, 1].into_iter().enumerate() {
+                    snap.cursor.point.column = kettle_core::Column(col);
+                    let initial = capture(
+                        &mut renderer,
+                        &cfg,
+                        &[pane(&snap, 320, 120)],
+                        &focused(true),
+                    );
+                    assert!(renderer.glyph_pipeline.cursor_clip.is_some());
+                    let instances =
+                        bytemuck::cast_slice::<_, u8>(&renderer.glyph_instances).to_vec();
+                    if let Some(previous) = &retained {
+                        assert_eq!(
+                            &instances, previous,
+                            "cursor moves retain normal pane instances"
+                        );
+                    }
+                    retained = Some(instances);
+                    let frame = Frame::of(initial.clone(), &renderer, &cfg);
+                    let [x0, y0, x1, y1] = frame.cell(col, 0);
+                    let cell = PatchRect {
+                        x: x0,
+                        y: y0,
+                        width: x1 - x0,
+                        height: y1 - y0,
+                    };
+                    let windows = [
+                        cell,
+                        PatchRect {
+                            x: x0 + 1,
+                            y: y0 + 1,
+                            width: x1 - x0 - 2,
+                            height: y1 - y0 - 2,
+                        },
+                        PatchRect {
+                            x: x0 - 2,
+                            y: y0 - 2,
+                            width: x1 - x0 + 4,
+                            height: y1 - y0 + 4,
+                        },
+                    ];
+                    let mut phases = Vec::new();
+                    // Draw directly from the retained buffers: no frame preparation
+                    // or instance uploads occur between these blink phases.
+                    for phase in [true, false, true] {
+                        let image = renderer.scene_window_for_tests(&cfg, whole, phase);
+                        if phase {
+                            assert!(image == initial, "on phase restores the complete scene");
+                        } else {
+                            for (x, y, pixel) in image.enumerate_pixels() {
+                                if x < x0 || x >= x1 || y < y0 || y >= y1 {
+                                    assert_eq!(
+                                        pixel,
+                                        initial.get_pixel(x, y),
+                                        "blink changed text outside cursor at {x},{y} in {mode:?}"
+                                    );
+                                }
+                            }
+                        }
+                        for rect in windows {
+                            assert_eq!(
+                                renderer.scene_window_for_tests(&cfg, rect, phase),
+                                crop(&image, rect),
+                                "cropped pass: {mode:?}, mapping={allow_mapping}, col={col}, phase={phase}"
+                            );
+                        }
+                        phases.push(crop(&image, cell));
+                    }
+                    if prefix == " " {
+                        reference.push(phases.clone());
+                    } else {
+                        assert_eq!(
+                            phases[0], reference[step][0],
+                            "neighboring W contaminated cursor: {mode:?}, mapping={allow_mapping}, col={col}"
+                        );
+                        assert_ne!(
+                            phases[1], reference[step][1],
+                            "off phase must expose real neighboring overhang: {mode:?}"
+                        );
+                    }
+                    // Put preedit on another row so it cannot mask a stale text
+                    // exclusion in the old cursor cell. Closing it restores the block.
+                    let mut overlay = focused(true);
+                    overlay.ime_preedit = Some(ImePreedit {
+                        text: "a".into(),
+                        row: 1,
+                        col,
+                    });
+                    capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+                    assert!(renderer.ime_prepared);
+                    let composing = renderer.scene_window_for_tests(&cfg, whole, false);
+                    assert_eq!(
+                        crop(&composing, cell),
+                        phases[1],
+                        "IME must show normal text in the old block cell: {mode:?}"
+                    );
+                    assert_eq!(
+                        renderer.scene_window_for_tests(&cfg, cell, false),
+                        phases[1],
+                        "IME cropped pass"
+                    );
+                    let closed = capture(
+                        &mut renderer,
+                        &cfg,
+                        &[pane(&snap, 320, 120)],
+                        &focused(true),
+                    );
+                    assert!(!renderer.ime_prepared);
+                    assert!(closed == initial, "closing IME restores the block cursor");
+                }
+            }
+            eprintln!("OVERHANG_MATRIX_PASS: {mode:?}, allow_mapping={allow_mapping}");
+        }
+    }
+}
+
+#[test]
+fn a_builtin_block_cursor_preserves_highlight_decorations() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+
+    let _serialized = gpu_test_guard();
+    for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+        let cfg = Config {
+            text_renderer: mode,
+            ..gpu_test_config()
+        };
+        let mut renderer = frame_or_skip!(
+            Renderer::headless_for_tests(&cfg, 320, 120).expect("headless renderer builds")
+        );
+        for search in [false, true] {
+            for style in ["4", "9", "0"] {
+                let mut snap =
+                    snapshot_of(20, 4, format!("\x1b[{style}m\u{2502}\u{2502}\r").as_bytes());
+                let mut overlay = focused(true);
+                if search {
+                    overlay.highlights.push(HighlightRect {
+                        col: 0,
+                        row: 0,
+                        width: 2,
+                        active: true,
+                    });
+                } else {
+                    snap.selection = Some(SelectionRange::new(
+                        Point::new(Line(0), Column(0)),
+                        Point::new(Line(0), Column(1)),
+                        false,
+                    ));
+                }
+                if style == "0" {
+                    overlay.links.push(LinkRect {
+                        col: 0,
+                        row: 0,
+                        width: 2,
+                        hover: true,
+                        explicit: true,
+                    });
+                }
+                // Move across the retained pane instances, then blink both
+                // ways: only the current cursor cell may be omitted.
+                for col in [0, 1, 0] {
+                    snap.cursor.point.column = Column(col);
+                    for phase in [true, false, true] {
+                        overlay.cursor_visible = phase;
+                        let image =
+                            capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+                        assert!(renderer.glyph_pipeline.cursor_clip.is_some());
+                        let frame = Frame::of(image, &renderer, &cfg);
+                        let [x0, y0, x1, y1] = frame.cell(col, 0);
+                        let [rx0, _, rx1, _] = frame.cell(1 - col, 0);
+                        let x = x0 + (x1 - x0) / 4;
+                        let rx = rx0 + (rx1 - rx0) / 4;
+                        let y = match style {
+                            "4" => pixel_edge(frame.origin.1 + frame.cell.1 - 2.0) as u32,
+                            "9" => pixel_edge(frame.origin.1 + frame.cell.1 * 0.5) as u32,
+                            _ => y1 - 1,
+                        };
+                        let expected = frame.rgb(rx, y);
+                        assert_ne!(expected, frame.rgb(rx, y0 + 2), "decoration is visible");
+                        assert_eq!(
+                            frame.rgb(x, y),
+                            expected,
+                            "{mode:?}, search={search}, SGR={style}, col={col}, phase={phase}"
+                        );
+                        let rect = PatchRect {
+                            x: x0,
+                            y: y0,
+                            width: x1 - x0,
+                            height: y1 - y0,
+                        };
+                        let window = renderer.scene_window_for_tests(&cfg, rect, phase);
+                        assert_eq!(
+                            window,
+                            image::imageops::crop_imm(
+                                &frame.image,
+                                x0,
+                                y0,
+                                rect.width,
+                                rect.height
+                            )
+                            .to_image(),
+                            "cursor window matches the full scene"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_builtin_block_cursor_preserves_inline_images_and_pane_outlines() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, "\u{2500}\r".as_bytes());
+    let images = [kettle_core::Placement {
+        abs_line: snap.history_origin,
+        col: 0,
+        cell_cols: 1,
+        cell_rows: 1,
+        x_offset_cells: 0.0,
+        y_offset_cells: 0.0,
+        display_cols: 1.0,
+        display_rows: 1.0,
+        img: kettle_core::ImageData::new(1, 1, vec![0, 255, 0, 255]).unwrap(),
+        source_rect: None,
+        source_crop: None,
+        id: None,
+        placement_id: 0,
+        kitty_params: None,
+        z: 0,
+    }];
+    for outline in [false, true] {
+        let mut view = pane(&snap, 320, 120);
+        if !outline {
+            view.images = &images;
+        }
+        let image = capture(&mut renderer, &cfg, &[view], &focused(true));
+        let frame = Frame::of(image, &renderer, &cfg);
+        let [x0, y0, x1, y1] = frame.cell(0, 0);
+        if outline {
+            // Exercise the actual outline pipeline over the cursor cell,
+            // independently of native window corner and split layout policy.
+            renderer.pane_outlines.upload(
+                &renderer.gpu.device,
+                &renderer.gpu.queue,
+                [320.0, 120.0],
+                &[pane_outline(
+                    (x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32),
+                    Rgb::new(0, 255, 0),
+                    2.0,
+                    0.0,
+                    0,
+                )],
+            );
+        }
+        let rect = PatchRect {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        };
+        for phase in [true, false, true] {
+            let window = renderer.scene_window_for_tests(&cfg, rect, phase);
+            assert_eq!(
+                window.get_pixel(2, 0).0,
+                [0, 255, 0, 255],
+                "overlay survives: outline={outline}, phase={phase}"
+            );
+        }
+    }
+}
+
 /// The cursor's built-in glyph reuses the slot the pane resolved for the
 /// same cell and never allocates one itself: it is resolved after the pane
 /// instances are uploaded, and an allocation then could evict a slot they
