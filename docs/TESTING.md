@@ -733,7 +733,8 @@ owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
 clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
-contents, cap/deadline errors, stale-reply isolation, initialization failure and
+contents, PRIMARY routing with an injected clipboard-only provider and platform
+fallback, cap/deadline errors, stale-reply isolation, initialization failure and
 image/file fallback without arboard, and that the Wayland text path adds no
 dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
 and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
@@ -741,12 +742,13 @@ tests do not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
-and paste in both directions with another native application, middle-click
-PRIMARY, OSC 52 CLIPBOARD and PRIMARY policy and ordering, and search/modal
-paste. Check large and stalled selections, and verify that image/file clipboard
-paste logs its limitation and falls through without a crash. Repeat on X11 to
-check arboard and in a compositor offering primary-selection support. No live
-Wayland result can be inferred from a macOS suite pass.
+and paste in both directions with another native application, OSC 52 CLIPBOARD
+policy and ordering, and search/modal paste. Check large and stalled selections,
+and verify that image/file clipboard paste logs its limitation and falls through
+without a crash. Repeat on private X11 and XWayland to check automatic selection
+copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
+XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
+No live Wayland result can be inferred from a macOS suite pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
