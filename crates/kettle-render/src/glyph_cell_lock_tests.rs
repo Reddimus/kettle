@@ -71,7 +71,9 @@ fn grid_path_wiring_is_present() {
         src.contains("let target_size = [self.config.width.max(1), self.config.height.max(1)];")
             && src.contains("fn encode_scene_pass(")
             && src.contains("self.glyph_pipeline")
-            && src.contains(".draw(&mut pass, &self.glyph_clips, target_size);"),
+            && src.split_whitespace().collect::<String>().contains(
+                "self.glyph_pipeline.draw_in_window(&mutpass,&self.glyph_clips,target_size,glyph_window,cursor_on&&!self.ime_prepared,);"
+            ),
         "the cell-locked glyph pipeline must draw against the live target size"
     );
     assert!(

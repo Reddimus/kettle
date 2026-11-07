@@ -1239,10 +1239,11 @@ bell-flash-smoke:
 
 # Prove a fresh window is sized for agent TUIs at the shipped font, padding and
 # tab bar: with no window-width/height a pane must report at least 144x33
-# cells (needs a monitor >= 1366x768 logical px) and the surface must not
-# exceed the 160x45 target (1304 px wide with the default 12 px padding), while
-# window-width = 100 / window-height = 30 with an always-shown tab bar opens at
-# exactly 100x30. Captures geometry/PNG under
+# cells (checked on a monitor >= 1366x768 logical px at macOS's 13 px font,
+# >= 1440x900 at the 14 px default elsewhere) and the surface must not exceed
+# the 160x45 target (1304 px wide on macOS and 1403 px elsewhere with the
+# default 12 px padding), while window-width = 100 / window-height = 30 with an
+# always-shown tab bar opens at exactly 100x30. Captures geometry/PNG under
 # target/diagnostics/default-window-size-*.
 [unix]
 default-window-size-smoke:

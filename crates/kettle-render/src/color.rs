@@ -389,6 +389,22 @@ pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     min_contrast_along(fg, bg, min_ratio, |target, t| blend(fg, target, t))
 }
 
+/// Resolve ink against its partially covered pixel, including output rounding.
+pub(crate) fn with_min_contrast_at_coverage(
+    fg: Rgb,
+    bg: Rgb,
+    min_ratio: f64,
+    coverage: f64,
+    linear: bool,
+) -> Rgb {
+    min_contrast_measured(
+        fg,
+        min_ratio,
+        |target, t| blend(fg, target, t),
+        |ink| contrast_ratio(over(bg, ink, coverage, linear), bg),
+    )
+}
+
 /// [`with_min_contrast`] for a tint: only `fg`'s HSL lightness moves, so its
 /// hue and saturation survive and a faint colour becomes a stronger tint of
 /// itself instead of a greyer one. Lightness ends at white and black, so this
@@ -447,7 +463,16 @@ fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> Rgb {
 /// reaches `min_ratio` against `bg`; `toward` must brighten or darken
 /// monotonically in `t`.
 fn min_contrast_along(fg: Rgb, bg: Rgb, min_ratio: f64, toward: impl Fn(Rgb, f64) -> Rgb) -> Rgb {
-    if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
+    min_contrast_measured(fg, min_ratio, toward, |ink| contrast_ratio(ink, bg))
+}
+
+fn min_contrast_measured(
+    fg: Rgb,
+    min_ratio: f64,
+    toward: impl Fn(Rgb, f64) -> Rgb,
+    ratio: impl Fn(Rgb) -> f64,
+) -> Rgb {
+    if min_ratio <= 1.0 || ratio(fg) >= min_ratio {
         return fg;
     }
     let white = Rgb::new(255, 255, 255);
@@ -459,7 +484,7 @@ fn min_contrast_along(fg: Rgb, bg: Rgb, min_ratio: f64, toward: impl Fn(Rgb, f64
         let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
         for _ in 0..14 {
             let mid = (lo + hi) / 2.0;
-            if contrast_ratio(toward(target, mid), bg) >= min_ratio {
+            if ratio(toward(target, mid)) >= min_ratio {
                 hi = mid;
             } else {
                 lo = mid;
@@ -488,8 +513,8 @@ fn min_contrast_along(fg: Rgb, bg: Rgb, min_ratio: f64, toward: impl Fn(Rgb, f64
     //
     // If neither end can reach the target, return the better of the two and
     // let the caller have the closest thing available.
-    let white_ok = contrast_ratio(white, bg) >= min_ratio;
-    let black_ok = contrast_ratio(black, bg) >= min_ratio;
+    let white_ok = ratio(white) >= min_ratio;
+    let black_ok = ratio(black) >= min_ratio;
     match (white_ok, black_ok) {
         (true, true) => {
             let toward_white = approach(white);
@@ -506,7 +531,7 @@ fn min_contrast_along(fg: Rgb, bg: Rgb, min_ratio: f64, toward: impl Fn(Rgb, f64
         (true, false) => approach(white),
         (false, true) => approach(black),
         (false, false) => {
-            if contrast_ratio(white, bg) >= contrast_ratio(black, bg) {
+            if ratio(white) >= ratio(black) {
                 white
             } else {
                 black

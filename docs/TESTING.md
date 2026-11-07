@@ -733,7 +733,8 @@ owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
 clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
-contents, cap/deadline errors, stale-reply isolation, initialization failure and
+contents, PRIMARY routing with an injected clipboard-only provider and platform
+fallback, cap/deadline errors, stale-reply isolation, initialization failure and
 image/file fallback without arboard, and that the Wayland text path adds no
 dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
 and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
@@ -741,12 +742,13 @@ tests do not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
-and paste in both directions with another native application, middle-click
-PRIMARY, OSC 52 CLIPBOARD and PRIMARY policy and ordering, and search/modal
-paste. Check large and stalled selections, and verify that image/file clipboard
-paste logs its limitation and falls through without a crash. Repeat on X11 to
-check arboard and in a compositor offering primary-selection support. No live
-Wayland result can be inferred from a macOS suite pass.
+and paste in both directions with another native application, OSC 52 CLIPBOARD
+policy and ordering, and search/modal paste. Check large and stalled selections,
+and verify that image/file clipboard paste logs its limitation and falls through
+without a crash. Repeat on private X11 and XWayland to check automatic selection
+copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
+XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
+No live Wayland result can be inferred from a macOS suite pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
@@ -1168,6 +1170,15 @@ A not-yet-published asset can skip that online part.
 Record that separately from the local install/uninstall result.
 
 `just package-templates` checks source rendering on a feature branch.
+Its hermetic tests compare installed TokyoNight license bytes for Homebrew,
+Arch, and the common Nix install hook. Nix's `tokyonight-license` flake check
+compares the final store files on both supported platforms. A Linux packaging
+fixture checks that NOTICE includes the complete license for existing updaters.
+Installer tests cover recorded license replacement and removal, and reject
+linked sources and destinations. The Linux updater transaction test compares
+installed license bytes with the verified archive and checks their provenance;
+a portable map test keeps the Linux document destinations and modes covered on
+other CI hosts.
 At an exact clean release tag, auto mode also checks published assets.
 The underlying script's `--require-release` makes that check mandatory:
 
@@ -1538,6 +1549,19 @@ skips separately from pixel acceptance. Picker interaction tests exercise
 all four modal projections without a native window.
 The emoji pixel cases also skip explicitly when no color emoji font is available.
 
+Font defaults are exercised for both platform choices on every host: 13 px
+on macOS and 14 px elsewhere. Startup tests load the bundled font to check
+fresh and maximized grids, including 1280-logical-pixel displays and the
+1440x900 non-macOS default-window smoke guard. The card-hover outline,
+inactive emoji/text and tab-control pixel tests run explicitly at both 13 px
+and 14 px even on macOS. `inactive_bundled_text_retains_contrast_after_raster_coverage`
+checks the real bundled mask at four subpixel phases without a GPU, on black
+and white backgrounds in both blend modes. The painted stems must retain
+4.5:1 contrast after coverage and output rounding. A separate headless test
+draws dark text after four spaces on white in Grid and Legacy at both sizes,
+including Legacy's half-pixel placement at 14 px. The portable check does not
+replace these readbacks.
+
 Portable renderer checks cover color-glyph dimming material, shader inputs and
 cache invalidation on focus or dimming changes. Animation stills tests use
 distinct APNG frame colors and fractional delays to verify that selection keeps
@@ -1779,6 +1803,31 @@ test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
+
+`kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
+combining-class table, the placement maths (gaps, stacking, below marks that
+never rise, above marks that sink halfway, aligned and double classes), whole
+pixel rounding, the quarter-line overflow limit and the bounded cache. With
+the bundled JetBrains Mono alone, anchored marks (`Z\u{308}`, `q\u{323}` and
+mark-to-mark stacks) keep their place; unanchored ones (`#\u{301}`,
+`@\u{323}`), `.case` substitutes and a dot after a composed `Aacute` clear
+their base; and with `mkmk` turned off a stacked acute no longer follows the
+diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
+use an isolated database of bundled JetBrains Mono and Fira Sans and must be
+pixel-identical with fallback placement removed. Portable fixture checks verify
+the selected glyphs and faces, zero-offset anchors, and the shaped offsets
+controlled by `mark` and `mkmk`; Fira Sans anchors the grave below that
+JetBrains Mono lacks. A steady frame or zoom must reuse the cached placement,
+a row laid out late must still be placed, and a focused block cursor must
+cover a moved mark with its inverted
+copy. Switching between a moved-mark cell and a built-in shade also checks
+that only the current cell contributes cursor patch bounds, with queue and
+mapped uploads and pixel-identical crops in both blink phases. `cursor_marks`
+tests grow the cursor's own atlas past its first texture
+across several cells and check when it must be replaced. The bundled cases
+run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and a tall stack
+need a host fallback face and report `MARK_FONT_SKIP` without one. Without an
+adapter the tests report `MARK_GPU_SKIP`.
 
 Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
 DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and
@@ -3117,6 +3166,30 @@ smaller bands, either explicit grid axis, and default monitor fitting at 1x and
 2x. A source guard requires both window constructors to correct once before
 renderer sizing and the first reveal. Run them offline with
 `cargo test -j 2 --locked --offline -p kettle-ui measured_startup_titlebar_`.
+The portable `queued_macos_startup_resizes_preserve_the_corrected_grid` and
+`macos_resize_filter_accepts_live_changes_and_precedes_layout` tests replay
+queued sizes after the native window has already changed. They cover the
+100x30 to 100x29 to 100x30 startup reflow at 1x, 1.5x and 2x, and require
+current native resize events to remain eligible for layout. On macOS, the
+default-window-size smoke must still report an initial and final 100x30 PTY,
+no corrective grid changes and zero child-observed SIGWINCH signals; the
+portable replay does not replace that native acceptance.
+`macos_native_tab_resize_matches_live_view_instead_of_window_rectangle` also
+covers automatic AppKit tabs, where the window-derived content rectangle is
+taller than the live NSView frame. It requires the final view-sized event to
+pass and stale view-sized events to fail at 1x, 1.25x, 1.5x and 2x, using winit's
+logical-to-physical rounding and the native window's backing scale. Source
+guards pin the live view query to the existing main-thread native borrow helper.
+This portable check does not replace live native-tab, grow/shrink, minimize,
+fullscreen or DPI acceptance.
+`native_tab_exit_completion_resumes_without_a_later_frame_notification` replays
+a held final resize and fullscreen completion after AppKit already restored the
+saved frame, so no later frame notification is available. It covers differing
+window/view rectangles at four backing scales, pending DPI changes and a missing
+view. The old window-sized event leaves the surface suspended; the live-view
+completion commits one layout and releases suspension. A source guard connects
+the replay to the completion producer and its platform fallbacks. Native
+fullscreen exit without a later resize remains a required live acceptance check.
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.

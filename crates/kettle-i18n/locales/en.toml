@@ -801,7 +801,7 @@ settings_description_field_cursor_blink_timeout = "Stop blinking after idle seco
 settings_description_field_cursor_shape = "Choose the terminal cursor shape."
 settings_description_field_detachable_tabs = "Allow dragging a tab into its own window."
 settings_description_field_focus = "Choose how a pane receives keyboard focus."
-settings_description_field_font_size = "Set the terminal font size in points."
+settings_description_field_font_size = "Set the terminal font size in logical pixels."
 settings_description_field_gpu_backend = "Choose the graphics API used on the next launch."
 settings_description_field_gpu_device = "Pin a detected GPU for the next launch."
 settings_description_field_gpu_force_software = "Use software rendering on the next launch."
@@ -890,6 +890,10 @@ settings_category_text_rendering = "Text / Rendering"
 settings_field_grapheme_clustering = "Grapheme clustering"
 
 settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
+
+settings_field_builtin_box_drawing = "Built-in box drawing"
+
+settings_description_field_builtin_box_drawing = "Draw lines, blocks and Powerline separators to fit each cell."
 
 
 tab_new_options = "New Tab Options"
