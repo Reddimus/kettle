@@ -55,13 +55,13 @@ fn zoom_all_shares_the_font_size_arm() {
 
 /// Reset font size (Cmd/Ctrl+0) and zoom-normal-all return to the config's
 /// `font-size`, which is the platform default when the config sets none:
-/// 13 px on macOS and 15 px elsewhere, never a fixed 13. Both platforms'
+/// 13 px on macOS and 14 px elsewhere, never a fixed 13. Both platforms'
 /// defaults are checked on every host.
 #[test]
 fn font_reset_returns_to_the_platform_default() {
     use super::font_size_after;
     use kettle_config::{Config, DEFAULT_FONT_SIZE, default_font_size};
-    for (macos, expected) in [(true, 13.0), (false, 15.0)] {
+    for (macos, expected) in [(true, 13.0), (false, 14.0)] {
         for reset in [Action::ResetFontSize, Action::ZoomNormalAll] {
             assert_eq!(
                 font_size_after(&reset, 24.0, default_font_size(macos)),

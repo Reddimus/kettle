@@ -581,8 +581,8 @@ column count of the pane it runs in:
 
 Kettle's default fresh window is sized for this: about 164 columns on a 1080p
 monitor at the default font. On a 1366 px wide laptop a fresh window has 154
-columns at macOS's 13 px font; at the 15 px default elsewhere it has 133, and
-the panel opens once the window is maximized (149 columns). See
+columns at macOS's 13 px font; at the 14 px default elsewhere it has 143, and
+the panel opens once the window is maximized (159 columns). See
 `window-width` in [CONFIG.md](CONFIG.md).
 A split pane is narrower than the window, so zoom the pane running Claude
 (`Ctrl+Shift+X`) when the panel matters; `Alt+Arrow` still reaches the client

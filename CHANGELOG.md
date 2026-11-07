@@ -122,13 +122,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   are drawn larger, inside the same click targets.
 
 - Text is larger by default on Linux, the BSDs and Windows: `font-size` is
-  15 px there (was 13), close to GNOME Terminal's 11 pt and Windows
+  14 px there (was 13), close to GNOME Terminal's 11 pt and Windows
   Terminal's 12 pt. macOS keeps 13 px. A fresh window grows with the font to
   keep about 164x44 cells on a 1080p monitor. A maximized window on a 1366 px
-  wide laptop fits 149 columns, past the 144 at which Claude Code's diff
+  wide laptop fits 159 columns, past the 144 at which Claude Code's diff
   panel opens; a fresh window there stays within 90 % of the screen and fits
-  133. Reset font size returns to the platform default, or to the configured
-  `font-size`.
+  143. A 1280-logical-pixel display gets 149 columns maximized. Reset font size
+  returns to the platform default, or to the configured `font-size`. Settings
+  and `--check-config` label font sizes in logical px.
+
+- Inactive-pane text reserves contrast for antialiased glyph coverage, so
+  bundled-font stems remain readable instead of falling just below 4.5:1.
 
 - The terminal is inset 12 px from the window edge by default (was 8).
   `window-padding-x` and `window-padding-y` still set it. A fresh window

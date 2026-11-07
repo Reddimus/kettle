@@ -81,7 +81,7 @@ pub(super) fn broadcast_scope_for_default(
 /// The logical font size a font-size action moves the window to from
 /// `current`: a step up or down, or back to `configured`, the config's
 /// `font-size`. A config without one carries the platform default, so
-/// Cmd/Ctrl+0 returns to 13 px on macOS and 15 px elsewhere. Any other action
+/// Cmd/Ctrl+0 returns to 13 px on macOS and 14 px elsewhere. Any other action
 /// keeps `current`. `set_font_size` clamps the result.
 pub(super) fn font_size_after(action: &Action, current: f32, configured: f32) -> f32 {
     match action {

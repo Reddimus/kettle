@@ -42,8 +42,9 @@ pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
 ///
 /// The font stays at 13 px on every target: the frames these tests check
 /// were laid out at that size, and their pixel rings and ink floors assume
-/// its 7.8x16.25 px cell. The 15 px default off macOS moves those edges by
-/// fractions of a pixel. A test about another size sets `font_size` itself.
+/// its 7.8x16.25 px cell. The card outline, inactive text and tab-control
+/// regressions also run explicitly at the 14 px non-macOS default, including
+/// on macOS. A test about another size sets `font_size` itself.
 pub(crate) fn gpu_test_config() -> Config {
     Config {
         gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),

@@ -1435,6 +1435,19 @@ skips separately from pixel acceptance. Picker interaction tests exercise
 all four modal projections without a native window.
 The emoji pixel cases also skip explicitly when no color emoji font is available.
 
+Font defaults are exercised for both platform choices on every host: 13 px
+on macOS and 14 px elsewhere. Startup tests load the bundled font to check
+fresh and maximized grids, including 1280-logical-pixel displays and the
+1440x900 non-macOS default-window smoke guard. The card-hover outline,
+inactive emoji/text and tab-control pixel tests run explicitly at both 13 px
+and 14 px even on macOS. `inactive_bundled_text_retains_contrast_after_raster_coverage`
+checks the real bundled mask at four subpixel phases without a GPU, on black
+and white backgrounds in both blend modes. The painted stems must retain
+4.5:1 contrast after coverage and output rounding. A separate headless test
+draws dark text after four spaces on white in Grid and Legacy at both sizes,
+including Legacy's half-pixel placement at 14 px. The portable check does not
+replace these readbacks.
+
 Portable renderer checks cover color-glyph dimming material, shader inputs and
 cache invalidation on focus or dimming changes. Animation stills tests use
 distinct APNG frame colors and fractional delays to verify that selection keeps

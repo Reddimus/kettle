@@ -80,12 +80,11 @@ pub const DEFAULT_BACKGROUND_OPACITY: f32 =
 /// macOS terminals size text in points that are already logical px, and 13 is
 /// the usual default there. GNOME Terminal and Windows Terminal size it in
 /// points at 96 DPI, so their 11 pt and 12 pt defaults are about 14.7 px and
-/// 16 px, and 13 px reads small beside them. 15 px is the largest whole-pixel
-/// size whose cell (9 px wide in the bundled font) still fits 144 columns, the
-/// width at which Claude Code's diff panel opens, across a 1366 px wide screen
-/// with the default padding.
+/// 16 px, and 13 px reads small beside them. 14 px keeps 149 columns on a
+/// maximized 1280 logical px display with the bundled font and default padding,
+/// past the 144 at which Claude Code's diff panel opens.
 pub const fn default_font_size(macos: bool) -> f32 {
-    if macos { 13.0 } else { 15.0 }
+    if macos { 13.0 } else { 14.0 }
 }
 
 /// Default `font-size` for the current target; see [`default_font_size`].
@@ -9703,12 +9702,12 @@ cell-height = 1.2\n";
     /// macOS keeps the 13 px its terminals use. Linux, the BSDs and Windows
     /// size terminal text in points at 96 DPI (GNOME Terminal's 11 pt is about
     /// 14.7 px, Windows Terminal's 12 pt is 16 px), where 13 px read small, so
-    /// they default to 15 px. Both values are checked on every host; the
+    /// they default to 14 px. Both values are checked on every host; the
     /// running target's is the one a config without `font-size` gets.
     #[test]
     fn default_font_size_follows_the_platform() {
         assert_eq!(default_font_size(true), 13.0);
-        assert_eq!(default_font_size(false), 15.0);
+        assert_eq!(default_font_size(false), 14.0);
         assert_eq!(
             DEFAULT_FONT_SIZE,
             default_font_size(cfg!(target_os = "macos"))
@@ -9716,7 +9715,7 @@ cell-height = 1.2\n";
         #[cfg(target_os = "macos")]
         assert_eq!(DEFAULT_FONT_SIZE, 13.0);
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(DEFAULT_FONT_SIZE, 15.0);
+        assert_eq!(DEFAULT_FONT_SIZE, 14.0);
         assert_eq!(Config::default().font_size, DEFAULT_FONT_SIZE);
         assert_eq!(Config::parse_text("").font_size, DEFAULT_FONT_SIZE);
         assert_eq!(

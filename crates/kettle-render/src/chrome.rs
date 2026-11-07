@@ -177,8 +177,18 @@ impl Colors {
         // Dimming must not take text below the floor, but it must not lift
         // text a program drew fainter than that either: an inactive pane
         // would then show it more clearly than the active one does.
-        let floor = TEXT_CONTRAST.min(color::contrast_ratio(fg, bg));
-        let resolved = self.resolve(muted, background, floor);
+        // The bundled M's least-covered stem phase peaks at 248/255.
+        // Resolve against that painted pixel: light and dark backgrounds
+        // need different reserves, and output rounding matters too.
+        let original_contrast = color::contrast_ratio(fg, bg);
+        let floor = TEXT_CONTRAST.min(original_contrast);
+        let covered =
+            color::with_min_contrast_at_coverage(muted, background, floor, 248.0 / 255.0, linear);
+        let resolved = if color::contrast_ratio(covered, background) > original_contrast {
+            self.resolve(muted, background, original_contrast)
+        } else {
+            covered
+        };
         if self.inactive.len() >= 4096 {
             self.inactive.clear();
         }
@@ -447,7 +457,8 @@ mod tests {
                 true,
             );
         }
-        assert_eq!(colors.cache.misses, 3);
+        // Covered ink uses the inactive cache; muted and icon share this one.
+        assert_eq!(colors.cache.misses, 2);
         assert_eq!(colors.inactive.len(), 1);
         let program = Rgb::new(254, 1, 32);
         assert_eq!(

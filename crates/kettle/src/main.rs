@@ -1036,7 +1036,7 @@ fn main() -> anyhow::Result<()> {
             None => println!("config:  (no path resolvable — using defaults)"),
         }
         println!("theme:   {}", cfg.theme_name);
-        println!("font:    {} {}pt", cfg.font_family, cfg.font_size);
+        println!("font:    {} {}px", cfg.font_family, cfg.font_size);
         println!("scrollback: {}", cfg.scrollback);
         println!("keybinds: {} bound", cfg.keybinds.len());
         // Echo the resolved per-feature config gates so users can verify

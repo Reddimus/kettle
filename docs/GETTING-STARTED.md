@@ -111,8 +111,9 @@ A fresh window opens at about 164 columns on a 1080p monitor (a `160x45`
 baseline fitted to your monitor). That is on purpose: agent TUIs
 lay out side panels above ~110 columns, and Claude Code's fullscreen diff panel
 auto-opens at 144. On a 1366 px wide laptop a fresh window has about 154
-columns at macOS's 13 px font, or 133 at the 15 px default on Linux and
-Windows, where maximizing the window gives 149. Set `window-width` / `window-height` for a different size,
+columns at macOS's 13 px font, or 143 at the 14 px default on Linux and
+Windows, where maximizing the window gives 159. A 1280-logical-pixel
+display gets 134 columns fresh and 149 maximized at 14 px. Set `window-width` / `window-height` for a different size,
 or `window-state = maximise`. A split pane is narrower than the window; zoom it (`Ctrl+Shift+X`)
 when a tool wants the full width. See
 [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)

@@ -8895,14 +8895,14 @@ def live_helper_selftest() -> None:
         geometry["surface"]["width"] += 2.0 * scale
         assert startup_geometry_metrics(geometry)[0] > 1305.0
     assert default_startup_target_width({"padding": {"x": 8}}, "Darwin") == 1296.0
-    # The 15 px default elsewhere scales the 8 px cell; kettle-ui ceils the
-    # 1500.92 px target to a 1501 px window, inside the 1 px tolerance.
-    for system in ("Linux", "FreeBSD"):
+    # The 14 px default elsewhere scales the 8 px cell; kettle-ui ceils the
+    # 1402.46 px target to a 1403 px window, inside the 1 px tolerance.
+    for system in ("Linux", "FreeBSD", "Windows"):
         target = default_startup_target_width({"padding": {"x": 12.0}}, system)
-        assert math.ceil(target) == 1501 and target + 1.0 > 1501, target
-    assert default_font_size("Darwin") == 13.0 and default_font_size("Linux") == 15.0
+        assert math.ceil(target) == 1403 and target + 1.0 > 1403, target
+    assert default_font_size("Darwin") == 13.0 and default_font_size("Linux") == 14.0
     assert agent_grid_monitor("Darwin") == (1366, 768)
-    assert agent_grid_monitor("Linux") == (1600, 900)
+    assert agent_grid_monitor("Linux") == (1440, 900)
     for padding in (-1.0, float("nan")):
         try:
             default_startup_target_width({"padding": {"x": padding}})
@@ -16023,14 +16023,14 @@ def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
 
 # kettle-ui's STARTUP_DEFAULT_COLS and STARTUP_GEOMETRY_CELL: a fresh window
 # with no size set is 160 baseline cells plus its padding. The cell is 8
-# logical px wide at macOS's 13 px default font and scales with the 15 px
+# logical px wide at macOS's 13 px default font and scales with the 14 px
 # default elsewhere (kettle_config::default_font_size).
 STARTUP_DEFAULT_COLS = 160
 
 
 def default_font_size(system: str) -> float:
     """kettle_config::default_font_size for a platform.system() name."""
-    return 13.0 if system == "Darwin" else 15.0
+    return 13.0 if system == "Darwin" else 14.0
 
 
 def default_startup_target_width(
@@ -16046,15 +16046,15 @@ def default_startup_target_width(
 
 
 def agent_grid_monitor(system: Optional[str] = None) -> Tuple[int, int]:
-    """The smallest monitor, in logical px, whose 90 % x 85 % fresh window
+    """The monitor class, in logical px, whose 90 % x 85 % fresh window
     must hold the 144x33 cells agent TUIs want at the shipped font.
 
-    At macOS's 13 px a 1366x768 laptop gets 154x38. At the 15 px default
-    elsewhere its 1229 px leave 133 columns; 1600x900 gives 157x37, with
+    At macOS's 13 px a 1366x768 laptop gets 154x38. At the 14 px default
+    elsewhere its 1229 px leave 143 columns; 1440x900 gives 151x39, with
     GNOME's header band.
     """
     system = platform.system() if system is None else system
-    return (1366, 768) if system == "Darwin" else (1600, 900)
+    return (1366, 768) if system == "Darwin" else (1440, 900)
 
 
 
