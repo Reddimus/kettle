@@ -891,6 +891,10 @@ settings_field_grapheme_clustering = "Agrupación de grafemas"
 
 settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
 
+settings_field_builtin_box_drawing = "Dibujo de recuadros integrado"
+
+settings_description_field_builtin_box_drawing = "Ajustar líneas, bloques y separadores de Powerline a cada celda."
+
 
 tab_new_options = "Opciones de nueva pestaña"
 

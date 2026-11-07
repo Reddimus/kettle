@@ -15,7 +15,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   or brighter dots at the joins, at any scale. Rounded corners, diagonals
   and Powerline curves are smooth, shades are even tones instead of the
   font's dither, and Powerline separators fill the row with no seam against
-  the next segment. `builtin-box-drawing = false` keeps the font's glyphs.
+  the next segment. `builtin-box-drawing = false`, or the new Text /
+  Rendering switch in Settings, keeps the font's glyphs.
 
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
