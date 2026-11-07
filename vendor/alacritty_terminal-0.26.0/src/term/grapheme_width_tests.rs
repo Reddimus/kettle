@@ -359,3 +359,187 @@ fn grapheme_prepended_concatenation_marks_take_their_own_cell() {
     assert_cluster(&term, 0, 0, "\u{601}\u{6f1}", 2);
     assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(2)));
 }
+
+#[test]
+fn grapheme_selectors_require_an_adjacent_contributing_base() {
+    for (text, width) in [
+        ("*\u{301}\u{fe0f}", 1),
+        ("*\u{200d}\u{fe0f}", 1),
+        ("*\u{fe0e}\u{fe0f}", 1),
+        ("\u{2764}\u{301}\u{fe0f}", 1),
+        ("\u{231a}\u{301}\u{fe0e}", 2),
+        ("*\u{fe0f}", 2),
+        ("\u{2764}\u{200d}\u{1f525}\u{fe0f}", 1),
+    ] {
+        for split in 0..=text.len() {
+            let (mut term, mut parser) = terminal();
+            parser.advance(&mut term, b"\x1b[?2027h");
+            parser.advance(&mut term, &text.as_bytes()[..split]);
+            parser.advance(&mut term, &text.as_bytes()[split..]);
+            assert_cluster(&term, 0, 0, text, width);
+            assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(width)));
+            assert!(!term.grid.cursor.input_needs_wrap);
+            parser.advance(&mut term, b"X");
+            assert_eq!(term.grid[Line(0)][Column(width)].c, 'X');
+        }
+    }
+}
+
+#[test]
+fn grapheme_interrupted_vs16_keeps_the_right_edge_narrow() {
+    for margins in [false, true] {
+        for wrap in [false, true] {
+            for insert in [false, true] {
+                for text in ["*\u{301}\u{fe0f}", "*\u{200d}\u{fe0f}"] {
+                    let (mut term, mut parser) = terminal();
+                    parser.advance(&mut term, b"\x1b[?2027habcdefgh");
+                    let (left, edge) = if margins {
+                        parser.advance(&mut term, b"\x1b[?69h\x1b[3;6s\x1b[1;6H");
+                        (2, 5)
+                    } else {
+                        parser.advance(&mut term, b"\x1b[1;8H");
+                        (0, 7)
+                    };
+                    if !wrap {
+                        parser.advance(&mut term, b"\x1b[?7l");
+                    }
+                    if insert {
+                        parser.advance(&mut term, b"\x1b[4h");
+                    }
+                    parser.advance(&mut term, text.as_bytes());
+                    assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(edge)));
+                    assert!(term.grid.cursor.input_needs_wrap);
+                    let cell = &term.grid[Line(0)][Column(edge)];
+                    assert_eq!(cell.c, '*');
+                    assert_eq!(
+                        cell.zerowidth().unwrap_or_default(),
+                        &text.chars().skip(1).collect::<Vec<_>>()
+                    );
+                    assert!(!cell.flags.intersects(
+                        Flags::WIDE_CHAR
+                            | Flags::WIDE_CHAR_SPACER
+                            | Flags::LEADING_WIDE_CHAR_SPACER
+                            | Flags::WRAPLINE
+                            | Flags::PARTIAL_WRAPLINE
+                    ));
+                    assert_eq!(term.grid[Line(1)][Column(left)].c, ' ');
+                    parser.advance(&mut term, b"X");
+                    let (line, col) = if wrap { (1, left) } else { (0, edge) };
+                    assert_eq!(term.grid[Line(line)][Column(col)].c, 'X');
+                    assert_eq!(
+                        term.grid.cursor.point,
+                        Point::new(Line(line), Column(if wrap { left + 1 } else { edge }))
+                    );
+                    assert_eq!(term.grid.cursor.input_needs_wrap, !wrap);
+                    assert_eq!(
+                        term.grid[Line(0)][Column(edge)].flags.contains(if margins {
+                            Flags::PARTIAL_WRAPLINE
+                        } else {
+                            Flags::WRAPLINE
+                        }),
+                        wrap
+                    );
+                    if margins {
+                        assert_eq!(term.grid[Line(0)][Column(6)].c, 'g');
+                        assert_eq!(term.grid[Line(0)][Column(7)].c, 'h');
+                    }
+                    assert_eq!(term.mode.contains(TermMode::INSERT), insert);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grapheme_prepend_vs15_preserves_width_spacer_and_inserted_suffix() {
+    for margins in [false, true] {
+        for wrap in [false, true] {
+            for insert in [false, true] {
+                for at_edge in [false, true] {
+                    let (mut term, mut parser) = terminal();
+                    parser.advance(&mut term, b"\x1b[?2027habcdefgh");
+                    let (left, edge) = if margins {
+                        parser.advance(&mut term, b"\x1b[?69h\x1b[3;6s");
+                        (2, 5)
+                    } else {
+                        (0, 7)
+                    };
+                    let col = if at_edge { edge - 1 } else { left };
+                    parser.advance(&mut term, format!("\x1b[1;{}H", col + 1).as_bytes());
+                    if !wrap {
+                        parser.advance(&mut term, b"\x1b[?7l");
+                    }
+                    if insert {
+                        parser.advance(&mut term, b"\x1b[4h");
+                    }
+                    parser.advance(&mut term, "\u{600}\u{231a}".as_bytes());
+                    let before = term.grid.cursor.point;
+                    assert_eq!(term.grid.cursor.input_needs_wrap, at_edge);
+                    parser.advance(&mut term, "\u{fe0e}".as_bytes());
+                    assert_cluster(&term, 0, col, "\u{600}\u{231a}\u{fe0e}", 2);
+                    assert_eq!(term.grid.cursor.point, before);
+                    assert_eq!(term.grid.cursor.input_needs_wrap, at_edge);
+                    if !at_edge {
+                        assert_eq!(
+                            term.grid[Line(0)][Column(col + 2)].c,
+                            if insert {
+                                (b'a' + col as u8) as char
+                            } else {
+                                (b'a' + col as u8 + 2) as char
+                            }
+                        );
+                    }
+                    parser.advance(&mut term, b"X");
+                    let (line, next) = if at_edge && wrap {
+                        (1, left)
+                    } else {
+                        (0, if at_edge { edge } else { col + 2 })
+                    };
+                    assert_eq!(term.grid[Line(line)][Column(next)].c, 'X');
+                    assert_eq!(
+                        term.grid.cursor.point,
+                        Point::new(
+                            Line(line),
+                            Column(if at_edge && !wrap { edge } else { next + 1 })
+                        )
+                    );
+                    assert_eq!(term.grid.cursor.input_needs_wrap, at_edge && !wrap);
+                    if margins {
+                        assert_eq!(term.grid[Line(0)][Column(6)].c, 'g');
+                        assert_eq!(term.grid[Line(0)][Column(7)].c, 'h');
+                    }
+                    assert_eq!(term.mode.contains(TermMode::INSERT), insert);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grapheme_selector_context_survives_discarded_scalars() {
+    for (prefix, selector, width) in [
+        (format!("*{}", "\u{301}".repeat(100)), '\u{fe0f}', 1),
+        (format!("{}\u{231a}", "\u{600}".repeat(100)), '\u{fe0e}', 2),
+    ] {
+        let (mut term, mut parser) = terminal();
+        parser.advance(&mut term, b"\x1b[?2027h");
+        parser.advance(&mut term, prefix.as_bytes());
+        parser.advance(&mut term, selector.to_string().as_bytes());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(width)));
+        let cell = &term.grid[Line(0)][Column(0)];
+        assert_eq!(cell.flags.contains(Flags::WIDE_CHAR), width == 2);
+        assert_eq!(
+            cell.zerowidth().unwrap().len(),
+            cell::MAX_ZEROWIDTH_PER_CELL
+        );
+        assert_eq!(cell.zerowidth().unwrap().last(), Some(&selector));
+        assert_eq!(
+            term.grid[Line(0)][Column(1)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER),
+            width == 2
+        );
+        parser.advance(&mut term, b"X");
+        assert_eq!(term.grid[Line(0)][Column(width)].c, 'X');
+    }
+}

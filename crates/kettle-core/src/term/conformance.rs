@@ -2480,6 +2480,92 @@ fn dec_column_change_homes_even_in_a_single_row_pane() {
 }
 
 #[test]
+fn grapheme_ascii_accent_survives_insertion_and_utf8_splits() {
+    let text = "e\u{301}X".as_bytes();
+    for margins in [false, true] {
+        for split in 0..=text.len() {
+            let (mut term, mut parser) = harness(8, 3);
+            feed(&mut term, &mut parser, b"\x1b[?2027habcdefgh");
+            if margins {
+                feed(&mut term, &mut parser, b"\x1b[?69h\x1b[2;7s");
+            }
+            feed(&mut term, &mut parser, b"\x1b[1;2H\x1b[4h");
+            term.take_graphics_events();
+            feed(&mut term, &mut parser, &text[..split]);
+            feed(&mut term, &mut parser, &text[split..]);
+            let row: String = (0..8)
+                .map(|col| term.grid()[Line(0)][Column(col)].c)
+                .collect();
+            assert_eq!(row, if margins { "aeXbcdeh" } else { "aeXbcdef" });
+            let cell = &term.grid()[Line(0)][Column(1)];
+            assert_eq!(cell.zerowidth(), Some(&['\u{301}'][..]));
+            assert!(cell.flags.contains(Flags::GRAPHEME));
+            assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(3)));
+            assert!(!term.grid().cursor.input_needs_wrap);
+            assert_eq!(term.history_size(), 0);
+            assert!(term.take_graphics_events().events.is_empty());
+            for col in 0..8 {
+                assert!(!term.grid()[Line(0)][Column(col)].flags.intersects(
+                    Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn grapheme_ascii_accent_survives_bottom_margin_autowrap() {
+    use alacritty_terminal::term::{GraphicsEvent, GraphicsScrollDirection};
+    let text = "e\u{301}X".as_bytes();
+    for margins in [false, true] {
+        for split in 0..=text.len() {
+            let (mut term, mut parser) = harness(4, 3);
+            feed(&mut term, &mut parser, b"\x1b[?2027hTOP!\x1b[2;1Habcd");
+            if margins {
+                feed(&mut term, &mut parser, b"\x1b[2;3r");
+            }
+            feed(&mut term, &mut parser, b"\x1b[3;1Hwxyz");
+            assert!(term.grid().cursor.input_needs_wrap);
+            term.take_graphics_events();
+            feed(&mut term, &mut parser, &text[..split]);
+            feed(&mut term, &mut parser, &text[split..]);
+            for (line, expected) in [
+                (0, if margins { "TOP!" } else { "abcd" }),
+                (1, "wxyz"),
+                (2, "eX  "),
+            ] {
+                let row: String = (0..4)
+                    .map(|col| term.grid()[Line(line)][Column(col)].c)
+                    .collect();
+                assert_eq!(row, expected);
+                for col in 0..4 {
+                    assert!(!term.grid()[Line(line)][Column(col)].flags.intersects(
+                        Flags::WIDE_CHAR
+                            | Flags::WIDE_CHAR_SPACER
+                            | Flags::LEADING_WIDE_CHAR_SPACER
+                    ));
+                }
+            }
+            let cell = &term.grid()[Line(2)][Column(0)];
+            assert_eq!(cell.zerowidth(), Some(&['\u{301}'][..]));
+            assert!(cell.flags.contains(Flags::GRAPHEME));
+            assert!(
+                term.grid()[Line(1)][Column(3)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+            );
+            assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(2)));
+            assert!(!term.grid().cursor.input_needs_wrap);
+            assert_eq!(term.history_size(), usize::from(!margins));
+            let events = term.take_graphics_events().events;
+            assert!(matches!(events.as_slice(), [GraphicsEvent::Scroll {
+                direction: GraphicsScrollDirection::Up, lines: 1, top, bottom: 3, ..
+            }] if *top == usize::from(margins)));
+        }
+    }
+}
+
+#[test]
 fn grapheme_mode_2027_scalar_opt_out_keeps_emoji_in_separate_cells() {
     let sequence = "\u{1f469}\u{200d}\u{1f4bb}";
     let (mut legacy, mut lp) = harness(12, 3);
@@ -2749,10 +2835,32 @@ fn grapheme_full_cells_still_apply_variation_selectors() {
         feed(&mut term, &mut parser, "\u{301}".as_bytes());
     }
     feed(&mut term, &mut parser, "\u{fe0f}\u{fe0e}".as_bytes());
-    assert_eq!(term.grid().cursor.point.column, Column(2));
+    // Discarded marks still interrupt selector adjacency to the heart.
+    assert_eq!(term.grid().cursor.point.column, Column(1));
     let cell = &term.grid()[Line(0)][Column(0)];
+    assert!(!cell.flags.contains(Flags::WIDE_CHAR));
     assert_eq!(cell.zerowidth().unwrap().len(), 30);
     assert_eq!(cell.zerowidth().unwrap().last(), Some(&'\u{fe0e}'));
+    feed(&mut term, &mut parser, b"X");
+    assert_eq!(term.grid()[Line(0)][Column(1)].c, 'X');
+
+    let (mut term, mut parser) = harness(12, 3);
+    feed(&mut term, &mut parser, b"\x1b[?2027h");
+    feed(&mut term, &mut parser, "\u{600}".repeat(100).as_bytes());
+    // VS15 is adjacent to its watch even after storage and width saturate.
+    feed(&mut term, &mut parser, "\u{231a}\u{fe0e}".as_bytes());
+    assert_eq!(term.grid().cursor.point.column, Column(2));
+    let cell = &term.grid()[Line(0)][Column(0)];
+    assert!(cell.flags.contains(Flags::WIDE_CHAR));
+    assert_eq!(cell.zerowidth().unwrap().len(), 30);
+    assert_eq!(cell.zerowidth().unwrap().last(), Some(&'\u{fe0e}'));
+    assert!(
+        term.grid()[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER)
+    );
+    feed(&mut term, &mut parser, b"X");
+    assert_eq!(term.grid()[Line(0)][Column(2)].c, 'X');
 }
 
 #[test]
@@ -3138,6 +3246,9 @@ fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() 
         ("\u{e01}\u{e33}", 2),
         ("\u{e81}\u{eb3}", 2),
         ("\u{231a}\u{fe0e}", 1),
+        ("*\u{301}\u{fe0f}", 1),
+        ("*\u{200d}\u{fe0f}", 1),
+        ("\u{600}\u{231a}\u{fe0e}", 2),
     ] {
         let (mut term, mut parser) = harness(12, 3);
         feed(
@@ -3175,6 +3286,75 @@ fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() 
         assert!(cell.flags.contains(Flags::GRAPHEME));
         let next = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col + width)];
         assert_eq!(next.c, 'B');
+    }
+}
+
+#[test]
+fn grapheme_selector_adjacency_and_prepend_width_keep_edge_wrap_columns() {
+    for (text, width) in [
+        ("*\u{301}\u{fe0f}", 1),
+        ("*\u{200d}\u{fe0f}", 1),
+        ("\u{600}\u{231a}\u{fe0e}", 2),
+    ] {
+        for split in 0..=text.len() {
+            let (mut term, mut parser) = harness(8, 3);
+            let col = 8 - width;
+            feed(
+                &mut term,
+                &mut parser,
+                format!("\x1b[?2027h\x1b[1;{}H", col + 1).as_bytes(),
+            );
+            feed(&mut term, &mut parser, &text.as_bytes()[..split]);
+            feed(&mut term, &mut parser, &text.as_bytes()[split..]);
+            assert_eq!(
+                term.grid().cursor.point,
+                Point::new(Line(0), Column(7)),
+                "{text:?} split {split}"
+            );
+            assert!(term.grid().cursor.input_needs_wrap);
+            let cell = &term.grid()[Line(0)][Column(col)];
+            assert!(cell.flags.contains(Flags::GRAPHEME));
+            assert_eq!(cell.flags.contains(Flags::WIDE_CHAR), width == 2);
+            assert!(!cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER));
+            assert_eq!(
+                term.grid()[Line(0)][Column(7)]
+                    .flags
+                    .contains(Flags::WIDE_CHAR_SPACER),
+                width == 2
+            );
+            let mut selection = Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(0), Column(col)),
+                Side::Left,
+            );
+            selection.update(Point::new(Line(0), Column(7)), Side::Right);
+            term.selection = Some(selection);
+            assert_eq!(term.selection_to_string().as_deref(), Some(text));
+            feed(&mut term, &mut parser, b"X");
+            assert_eq!(term.grid()[Line(1)][Column(0)].c, 'X');
+            assert_eq!(term.grid().cursor.point, Point::new(Line(1), Column(1)));
+            assert!(!term.grid().cursor.input_needs_wrap);
+            assert!(
+                term.grid()[Line(0)][Column(7)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+            );
+        }
+    }
+    for interruption in ["\0", "\u{2060}"] {
+        let (mut term, mut parser) = harness(8, 3);
+        feed(
+            &mut term,
+            &mut parser,
+            format!("\x1b[?2027h*{interruption}\u{fe0f}X").as_bytes(),
+        );
+        assert_eq!(term.grid()[Line(0)][Column(1)].c, 'X');
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(2)));
+        assert!(
+            !term.grid()[Line(0)][Column(0)]
+                .flags
+                .contains(Flags::WIDE_CHAR)
+        );
     }
 }
 

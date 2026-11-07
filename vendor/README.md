@@ -242,7 +242,11 @@ date. Recheck that before upgrading a crate or dropping a patch.
   and fuzz width data at Unicode 18. These are local additions to the pinned package.
   - Cluster widths share a pure calculator and bounded streaming accumulator:
     Mc spacing marks, Indic conjuncts and positive-width joined scalars reserve
-    up to two cells; VS15 narrows registered default-emoji text variants, and
+    up to two cells; adjacent VS16 widens a contributing registered variation
+    base, while adjacent VS15 narrows a contributing two-cell variation base.
+    A second capped total preserves preceding contributions (including Prepend
+    number signs) when VS15 narrows a base after width saturation. Intervening
+    scalars clear selector eligibility even beyond the retained-text cap, and
     unattached skin-tone modifiers start their own two-cell clusters. Emoji
     ZWJ sequences, regional pairs and scalar mode retain their width rules.
     Late widening/shrinking reuses cell flags and spacers, respects autowrap,
@@ -258,8 +262,11 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Printable ASCII that begins its own cluster (anything but a Prepend
     before it) takes a shortcut that sets the state, width and anchor the full
     path would, without the property tables; a test checks the two agree for
-    every printable ASCII scalar after a range of preceding text. Printing a
-    cluster no longer clones its retained scalars.
+    every printable ASCII scalar after a range of preceding text. Boundary
+    and width state are committed after the base write, preserving a following
+    accent when insertion or bottom-margin autowrap clears the prior context.
+    Expected-cell parser regressions cover both cases. Printing a cluster no
+    longer clones its retained scalars.
   - `Term::input_ascii` writes a run of printable ASCII straight into the
     cursor's row up to the right edge, leaving the cells, cursor and grapheme
     state the per-character path would. A pending wrap, insert mode, a

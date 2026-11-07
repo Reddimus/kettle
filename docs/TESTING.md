@@ -1665,8 +1665,17 @@ check Mc marks (including GCB=Extend), Indic conjuncts, the Sinhala ZWJ
 tailoring, Thai/Lao spacing vowels, standalone modifiers, VS15 spacer cleanup,
 and scalar-mode preservation. Their edge, DECSLRM, autowrap and insertion
 matrices check cursor columns and cell flags; UTF-8 split and storage-cap
-cases check streaming state. Core regressions check resized cluster columns
-through copying, search and reflow. Renderer tests exercise shaping metadata and row
+cases check streaming state. ASCII accent regressions assert the actual cells,
+cursor, spacer flags and rows after insertion and bottom-margin autowrap;
+core cases also cover UTF-8 splits, margins, history and the scroll journal.
+They fail on the old production shortcut, independently of the ASCII run
+comparison. Core regressions check resized cluster columns
+through copying, search and reflow. Selector regressions check interrupted VS16
+after combining marks, ZWJ and VS15, and Prepend plus VS15 after width saturation.
+They exercise mode 2027, UTF-8 splits, cursor and spacer state, screen and DECSLRM
+edges, autowrap, insertion, ignored-control interruptions and discarded scalars.
+Core cases also check edge wrapping and selection, search and reflow columns.
+Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does

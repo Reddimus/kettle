@@ -86,6 +86,9 @@ pub(super) fn cluster_width(codepoints: &[char]) -> usize {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct GraphemeWidth {
     cells: usize,
+    // Both totals stay capped at two; only the immediately preceding
+    // contribution can be narrowed by a selector.
+    cells_before_previous: usize,
     base: Option<char>,
     previous: Option<char>,
     previous_measured: bool,
@@ -99,6 +102,7 @@ impl GraphemeWidth {
         debug_assert!(matches!(c, ' '..='~'));
         Self {
             cells: 1,
+            cells_before_previous: 0,
             base: Some(c),
             previous: Some(c),
             previous_measured: true,
@@ -139,10 +143,11 @@ impl GraphemeWidth {
                     && (emoji_presentation(base) || base.width() == Some(2))
             })
         {
-            self.cells = self.cells.saturating_sub(1);
+            self.cells = (self.cells_before_previous + 1).min(2);
         } else if (c == '\u{fe0f}'
+            && self.previous_measured
             && self
-                .base
+                .previous
                 .is_some_and(|base| property(base, tables::EMOJI_VARIATION_BASE)))
             || (self.base.is_some() && property(c, tables::SPACING_MARK))
         {
@@ -154,6 +159,7 @@ impl GraphemeWidth {
                 && self.base.is_some_and(pictographic)
                 && pictographic(c);
             if !joined_emoji {
+                self.cells_before_previous = self.cells;
                 self.cells = (self.cells + width).min(2);
             }
             self.base.get_or_insert(c);
@@ -329,6 +335,24 @@ mod tests {
             ("\u{ad}", 1),
             ("\u{1100}\u{1161}\u{11a8}", 2),
             ("e\u{301}", 1),
+        ] {
+            assert_eq!(
+                cluster_width(&text.chars().collect::<Vec<_>>()),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn selector_width_keeps_adjacent_contribution_before_capping() {
+        for (text, expected) in [
+            ("*\u{301}\u{fe0f}", 1),
+            ("*\u{200d}\u{fe0f}", 1),
+            ("\u{600}\u{231a}\u{fe0e}", 2),
+            ("\u{600}\u{600}\u{231a}\u{fe0e}", 2),
+            ("\u{600}*\u{fe0f}", 2),
+            ("\u{231a}\u{fe0e}", 1),
         ] {
             assert_eq!(
                 cluster_width(&text.chars().collect::<Vec<_>>()),
