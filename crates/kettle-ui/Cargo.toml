@@ -132,8 +132,8 @@ libc = "0.2"
 x11rb = "0.13"
 
 # Winit's Wayland blur hint is implemented only through KWin's private blur
-# protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
-# near-opaque fallback instead of silently showing sharp, washed-out alpha.
+# protocol. Probe the compositor registry once so Kettle asks for blur only
+# where that protocol exists, and Settings can say when blur is unavailable.
 [target.'cfg(target_os = "linux")'.dependencies]
 async-channel = "2.5"
 async-io = "2.6"

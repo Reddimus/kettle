@@ -87,7 +87,8 @@ fn macos_backdrop_status(
     } else {
         // Reduce Transparency deliberately replaces material with an opaque
         // surface, while borderless windows deliberately retain sharp alpha.
-        // Neither is a compositor failure and neither needs Linux's fallback.
+        // Neither is a compositor failure, so Settings does not call blur
+        // unavailable for either.
         BackdropStatus::Disabled
     }
 }
@@ -808,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn stalled_blur_discovery_keeps_install_responsive_and_fallback_active() {
+    fn stalled_blur_discovery_keeps_install_responsive_and_settles_on_no_blur() {
         let _serial = BLUR_PROBE_TEST_LOCK.lock().unwrap();
         let discovery = super::BlurDiscovery::default();
         discovery.request(
