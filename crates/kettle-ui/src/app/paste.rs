@@ -462,6 +462,12 @@ impl App {
             })
             .collect();
         let paste = QueuedPaste {
+            accessibility_input: event
+                .filter(|_| prepare_input)
+                .map(|event| {
+                    AccessibilityInput::from_key(&event.logical_key, event.text.as_deref())
+                })
+                .unwrap_or_default(),
             key_presses: release_bytes
                 .iter()
                 .map(|((_, id), release)| (*id, release.clone()))
@@ -517,6 +523,7 @@ impl App {
         key_presses: &[(u64, TerminalKeyRelease)],
         prepare_input: bool,
         scroll_to_bottom: bool,
+        accessibility_input: AccessibilityInput,
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
         for (id, bytes) in targets {
@@ -527,6 +534,9 @@ impl App {
             if delivered.is_queued() && !bytes.is_empty() {
                 for (_, release) in key_presses.iter().filter(|(pane, _)| pane == id) {
                     release.mark_accepted();
+                }
+                if prepare_input {
+                    Self::apply_accessibility_input(ws, &[*id], accessibility_input);
                 }
             }
             if delivered.is_queued() && prepare_input {
@@ -565,6 +575,7 @@ impl App {
         }
         let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
+            accessibility_input: AccessibilityInput::default(),
             key_presses: Vec::new(),
             key_releases: Vec::new(),
             window: ws.seq,
@@ -624,6 +635,7 @@ impl App {
 
     pub(super) fn deliver_queued_paste(&mut self, el: &ActiveEventLoop, paste: QueuedPaste) {
         let QueuedPaste {
+            accessibility_input,
             window,
             target,
             receipt_pane,
@@ -689,6 +701,7 @@ impl App {
                     &key_presses,
                     prepare_input,
                     self.cfg.scroll_on_keystroke,
+                    accessibility_input,
                 );
                 for other in self.windows.values_mut() {
                     result = result.merge(Self::deliver_deferred_input(
@@ -697,6 +710,7 @@ impl App {
                         &key_presses,
                         prepare_input,
                         self.cfg.scroll_on_keystroke,
+                        accessibility_input,
                     ));
                 }
                 self.report_input_result(result);
@@ -1373,6 +1387,7 @@ pub(super) fn defer_authored_input(
                 },
             key_presses,
             key_releases,
+            accessibility_input,
             ..
         }),
         QueuedPasteContent::Input {
@@ -1396,6 +1411,7 @@ pub(super) fn defer_authored_input(
                 key_presses.push((*id, press.clone()));
             }
         }
+        accessibility_input.append(input.accessibility_input);
         for ((_, queued), (_, bytes)) in queued.iter_mut().zip(targets) {
             queued.extend_from_slice(bytes);
         }
@@ -1437,6 +1453,7 @@ pub(super) fn pop_ready_paste(
 /// A paste made while a clipboard image was still being encoded. It waits
 /// its turn so pastes land in the order they were made.
 pub(super) struct QueuedPaste {
+    pub(super) accessibility_input: AccessibilityInput,
     pub(super) window: u64,
     pub(super) target: Option<u64>,
     pub(super) receipt_pane: Option<u64>,
