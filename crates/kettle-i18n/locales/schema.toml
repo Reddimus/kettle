@@ -2571,6 +2571,12 @@ context = "crates/kettle-ui/src/settings.rs: Settings toggle for Unicode graphem
 [messages.settings_description_field_grapheme_clustering]
 context = "crates/kettle-ui/src/settings.rs: One-line Settings description. Joining includes families, skin tones and flags. Applies only to new terminals. English budget 70 characters."
 
+[messages.settings_field_builtin_box_drawing]
+context = "crates/kettle-ui/src/settings.rs: Settings toggle (config key builtin-box-drawing). On, Kettle draws box-drawing lines, block elements, Powerline separators and braille itself instead of using the font's glyphs. Applies immediately."
+
+[messages.settings_description_field_builtin_box_drawing]
+context = "crates/kettle-ui/src/settings.rs: One-line Settings description for the built-in box drawing toggle. Powerline is a product name for a style of shell prompt and stays as is. English budget 70 characters."
+
 [messages.settings_field_restore_session]
 context = "crates/kettle-ui/src/settings.rs: label of the three-choice session restore policy."
 

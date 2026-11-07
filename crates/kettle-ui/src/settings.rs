@@ -179,6 +179,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldDetachableTabs => Text::SettingsDescriptionFieldDetachableTabs,
         Text::SettingsFieldFocus => Text::SettingsDescriptionFieldFocus,
         Text::SettingsFieldGraphemeClustering => Text::SettingsDescriptionFieldGraphemeClustering,
+        Text::SettingsFieldBuiltinBoxDrawing => Text::SettingsDescriptionFieldBuiltinBoxDrawing,
         Text::SettingsFieldFontSize => Text::SettingsDescriptionFieldFontSize,
         Text::SettingsFieldGpuBackend => Text::SettingsDescriptionFieldGpuBackend,
         Text::SettingsFieldGpuDevice => Text::SettingsDescriptionFieldGpuDevice,
@@ -684,10 +685,10 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         },
         Category {
             name: T::SettingsCategoryTextRendering,
-            fields: vec![toggle(
-                T::SettingsFieldGraphemeClustering,
-                "grapheme-clustering",
-            )],
+            fields: vec![
+                toggle(T::SettingsFieldGraphemeClustering, "grapheme-clustering"),
+                toggle(T::SettingsFieldBuiltinBoxDrawing, "builtin-box-drawing"),
+            ],
         },
         // The Background page. `starfield` is a zero-config animated
         // background; `image` takes a file path (edited inline here).
@@ -1373,6 +1374,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
         "quick-terminal-animation" => cfg.quick_terminal_animation,
         "quick-terminal-autohide" => cfg.quick_terminal_autohide,
         "grapheme-clustering" => cfg.grapheme_clustering,
+        "builtin-box-drawing" => cfg.builtin_box_drawing,
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
@@ -1680,6 +1682,32 @@ mod tests {
         assert_eq!(next_value(&cfg, field, 1), "false");
         let off = Config::parse_text("grapheme-clustering = false");
         assert!(!read_bool(&off, field.key));
+        assert_eq!(next_value(&off, field, 1), "true");
+    }
+
+    #[test]
+    fn builtin_box_drawing_setting_round_trips_in_both_languages() {
+        let cats = categories(&[]);
+        let cat = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryTextRendering)
+            .expect("Text / Rendering group");
+        let field = cat
+            .fields
+            .iter()
+            .find(|f| f.key == "builtin-box-drawing")
+            .expect("Text / Rendering exposes built-in box drawing");
+        assert!(matches!(field.kind, FieldKind::Toggle));
+        assert_eq!(EN.text(field.label), "Built-in box drawing");
+        assert_ne!(EN.text(field.label), ES.text(field.label));
+        assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        let cfg = Config::default();
+        assert!(read_bool(&cfg, field.key));
+        assert!(holds_default(&cfg, field));
+        assert_eq!(next_value(&cfg, field, 1), "false");
+        let off = Config::parse_text("builtin-box-drawing = false");
+        assert!(!read_bool(&off, field.key));
+        assert!(!holds_default(&off, field));
         assert_eq!(next_value(&off, field, 1), "true");
     }
 
