@@ -209,11 +209,7 @@ impl App {
                 pane.title.clone()
             };
             node.set_label(label);
-            let text = pane
-                .term
-                .screen_text(0)
-                .map(|screen| screen.text.trim_end().to_string())
-                .unwrap_or_default();
+            let text = pane.term.accessible_text().unwrap_or_default();
             let mut text_rows = ws.accessibility_text_rows.borrow_mut();
             let ids = text_rows
                 .entry(pane_id)
