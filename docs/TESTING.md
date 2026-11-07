@@ -921,7 +921,10 @@ version, a GL llvmpipe CPU adapter with driver details from `kettle --gpu-info`,
 and matching adapter selection in every live fixture log before and after
 screenshot. Fontdb's system-directory fallback also fails the run.
 An unknown or different adapter fails the run. The private GPU config requests
-GL/software for both diagnostics and live fixtures.
+GL/software for both diagnostics and live fixtures. Diagnostic parsers accept
+LF and CRLF line endings while retaining strict adapter/backend checks and
+the original raw diagnostic files. Portable regressions force CRLF input on
+every host; Windows CI also exercises the complete fixture path.
 
 Startup defaults to 20 seconds (`--startup-timeout`, maximum 60); the matrix
 defaults to 900 seconds (`--run-timeout`, maximum 900). Native queries have
