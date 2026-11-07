@@ -1,22 +1,25 @@
+# Kettle's default light theme. Text colours are darkened along their own
+# hue from upstream TokyoNight Day: foreground 7:1 and ANSI text 4.5:1 against
+# the background. Slots 0 and 8 and both backgrounds are upstream's.
 palette = 0=#e9e9ed
-palette = 1=#f52a65
-palette = 2=#587539
-palette = 3=#8c6c3e
-palette = 4=#2e7de9
-palette = 5=#9854f1
-palette = 6=#007197
-palette = 7=#6172b0
+palette = 1=#c6024b
+palette = 2=#506c30
+palette = 3=#7d5e30
+palette = 4=#0660c9
+palette = 5=#8239d7
+palette = 6=#016b90
+palette = 7=#50609d
 palette = 8=#a1a6c5
-palette = 9=#f52a65
-palette = 10=#587539
-palette = 11=#8c6c3e
-palette = 12=#2e7de9
-palette = 13=#9854f1
-palette = 14=#007197
-palette = 15=#3760bf
+palette = 9=#c6024b
+palette = 10=#506c30
+palette = 11=#7d5e30
+palette = 12=#0660c9
+palette = 13=#8239d7
+palette = 14=#016b90
+palette = 15=#1c419e
 background = #e1e2e7
-foreground = #3760bf
-cursor-color = #3760bf
+foreground = #1c419e
+cursor-color = #1c419e
 cursor-text = #e1e2e7
 selection-background = #99a7df
-selection-foreground = #3760bf
+selection-foreground = #1c419e

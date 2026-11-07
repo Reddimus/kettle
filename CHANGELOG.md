@@ -130,6 +130,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   99%. Settings says when blur is unavailable under the Window blur switch, in
   English and Spanish.
 
+- The default light theme, TokyoNight Day, has darker text. Body text reaches
+  7:1 contrast with the background (was 4.5:1), and the red, green, yellow,
+  blue, magenta, cyan and white that prompts use reach at least 4.5:1 (some
+  were 3:1), as does the accent drawn from its blue. Each colour keeps its
+  hue. The background, the two background-tone slots (0 and 8) and every other
+  bundled theme are unchanged, and `palette = N=#hex` or `foreground` lines
+  still override it.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 

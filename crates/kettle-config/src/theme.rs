@@ -482,6 +482,44 @@ mod tests {
         );
     }
 
+    /// WCAG 2.x contrast ratio between two sRGB colours.
+    fn contrast(a: Rgb, b: Rgb) -> f64 {
+        fn luminance(c: Rgb) -> f64 {
+            let linear = |channel: u8| {
+                let c = f64::from(channel) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+        }
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Every light desktop that follows the system starts on this theme.
+    /// Body text meets WCAG AAA (7:1) and the ANSI colours prompts and tools
+    /// write in meet AA (4.5:1) against its background. Slots 0 and 8 are
+    /// this theme's background tones (8 is also Kettle's chrome surface), not
+    /// text colours, so they are not held to a text ratio.
+    #[test]
+    fn default_light_theme_text_meets_wcag_contrast() {
+        let name = crate::Config::default().light_theme;
+        let theme = Theme::by_name(&name);
+        assert!(!theme.is_dark(), "{name} is the light side");
+        let bg = theme.background;
+        let foreground = contrast(theme.foreground, bg);
+        assert!(foreground >= 7.0, "{name} foreground: {foreground:.2}:1");
+        let cursor = contrast(theme.cursor, bg);
+        assert!(cursor >= 4.5, "{name} cursor: {cursor:.2}:1");
+        for slot in (1..=7).chain(9..=15) {
+            let ratio = contrast(theme.palette[slot], bg);
+            assert!(ratio >= 4.5, "{name} palette {slot}: {ratio:.2}:1");
+        }
+    }
+
     #[test]
     fn by_name_and_find_name_are_case_and_pad_insensitive() {
         let first = Theme::list()[0];
