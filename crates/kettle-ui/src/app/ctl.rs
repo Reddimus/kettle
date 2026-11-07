@@ -1008,7 +1008,8 @@ impl App {
                 serde_json::json!({
                     "width": 8.0,
                     "height": 16.0,
-                    "font_size": 13.0,
+                    // The size the renderer will start at, not a fixed 13.
+                    "font_size": self.cfg.font_size,
                 })
             });
         let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);

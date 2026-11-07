@@ -57,35 +57,59 @@ pub(super) fn cache_dir_from_env<F: Fn(&str) -> Option<String>>(
     }
 }
 
-const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
-const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
+/// The font size the 8x16 logical px sizing cell was drawn for. The bundled
+/// font measures 7.8x16.25 px there, so the cell is a little wide and short.
+const STARTUP_GEOMETRY_FONT_SIZE: f64 = 13.0;
+
+/// The cell a fresh window is sized with before any font is measured, in
+/// logical px, when the default font is `font_size` px: 8x16 at 13 px, and
+/// scaled with a larger default font. A fixed cell would give the window the
+/// same pixels whatever the font, so a bigger default would open it with
+/// fewer columns than the grid it aims for.
+pub(super) const fn startup_geometry_cell(font_size: f32) -> (f64, f64) {
+    let scale = font_size as f64 / STARTUP_GEOMETRY_FONT_SIZE;
+    (8.0 * scale, 16.0 * scale)
+}
+
+/// The sizing cell for this target's default font.
+pub(super) const STARTUP_GEOMETRY_CELL: (f64, f64) =
+    startup_geometry_cell(kettle_config::DEFAULT_FONT_SIZE);
 const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// The grid a fresh window aims for when the config sets no size, and the
 /// value a half-specified `window-width`/`window-height` fills its other axis
 /// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
-/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at the
-/// default font and padding) left every fresh window too narrow for the tools
-/// Kettle targets. 160x45 baseline cells and the default 12 px padding are 1304x744
-/// logical px, 1304x772 under macOS's titlebar tab band: about 164x44 real
-/// cells at the default 13 px font (7.8x16.25 px) on a 1080p monitor.
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at
+/// macOS's default font and padding) left every fresh window too narrow for
+/// the tools Kettle targets. On macOS, 160x45 baseline cells and the default
+/// 12 px padding are 1304x744 logical px, 1304x772 under the titlebar tab
+/// band: about 164x44 real cells at the 13 px font (7.8x16.25 px) on a 1080p
+/// monitor. Elsewhere the 14 px default (8.4x17.5 px cells) scales the
+/// baseline to 1403x800 px, the same 164x44 cells.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
 pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
 /// The default window never covers more of the monitor than this: a fixed
 /// target rather than a monitor fraction keeps a 3440-wide ultrawide from
 /// opening a 285-column canvas, and the fit keeps a 1366x768 laptop honest
-/// (its 90 % is 1229 px, 154 columns at the default font and padding). There
-/// is no floor on purpose: a monitor smaller than the target wins.
+/// (its 90 % is 1229 px: 154 columns at macOS's 13 px font and padding, 143
+/// at the 14 px default elsewhere, which needs a maximized window for 144).
+/// There is no floor on purpose: a monitor smaller than the target wins.
 pub(super) const STARTUP_MONITOR_WIDTH_FRACTION: f64 = 0.90;
 pub(super) const STARTUP_MONITOR_HEIGHT_FRACTION: f64 = 0.85;
 
-/// Convert a startup grid into an inner-window size in **logical** pixels.
-/// This runs before renderer/font metrics exist, so it intentionally uses the
-/// same conservative 8x16 baseline as `geometry-hinting`; the first normal
-/// layout pass reconciles exact metrics after the renderer starts. Logical
-/// rather than physical so a HiDPI display gets the same grid as a 1x one; a
-/// physical conversion would give a 2x display half the requested columns.
-fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64) {
+/// Convert a startup grid into an inner-window size in **logical** pixels,
+/// with `baseline` as the cell ([`STARTUP_GEOMETRY_CELL`] for this target).
+/// This runs before renderer/font metrics exist, so it uses that baseline
+/// rather than a measured cell; the first normal layout pass reconciles exact
+/// metrics after the renderer starts. Logical rather than physical so a HiDPI
+/// display gets the same grid as a 1x one; a physical conversion would give a
+/// 2x display half the requested columns.
+fn startup_cells_to_logical_px(
+    cfg: &Config,
+    cols: u32,
+    rows: u32,
+    baseline: (f64, f64),
+) -> (f64, f64) {
     let cols = cols.clamp(
         kettle_config::WINDOW_WIDTH_MIN,
         kettle_config::WINDOW_WIDTH_MAX,
@@ -95,8 +119,9 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
         kettle_config::WINDOW_HEIGHT_MAX,
     );
 
-    let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
-    let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
+    let (cell_w, cell_h) = baseline;
+    let mut width = f64::from(cols) * cell_w + f64::from(cfg.padding_x) * 2.0;
+    let mut height = f64::from(rows) * cell_h + f64::from(cfg.padding_y) * 2.0;
 
     let titlebar_tabs = cfg!(target_os = "macos")
         && !cfg.borderless
@@ -108,10 +133,7 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
     } else if matches!(cfg.tab_bar, TabBarMode::Always) {
         match cfg.tab_bar_pos {
             TabBarPos::Top | TabBarPos::Bottom => {
-                height += f64::from(tab_bar_height(
-                    STARTUP_GEOMETRY_CELL_H as f32,
-                    cfg.tab_bar_pos,
-                ))
+                height += f64::from(tab_bar_height(cell_h as f32, cfg.tab_bar_pos))
             }
             TabBarPos::Left | TabBarPos::Right => {
                 width += f64::from(cfg.tab_bar_width.clamp(40.0, 600.0));
@@ -131,7 +153,7 @@ fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64)
 /// comes from the default grid so `window-width = 200` alone still opens
 /// tall enough for an agent TUI. Explicit values are honoured as typed: the
 /// monitor fit below applies to the default only.
-pub(super) fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
+pub(super) fn startup_inner_size_px(cfg: &Config, baseline: (f64, f64)) -> Option<(u32, u32)> {
     if cfg.window_width.is_none() && cfg.window_height.is_none() {
         return None;
     }
@@ -139,6 +161,7 @@ pub(super) fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
         cfg,
         cfg.window_width.unwrap_or(STARTUP_DEFAULT_COLS),
         cfg.window_height.unwrap_or(STARTUP_DEFAULT_ROWS),
+        baseline,
     );
     Some((width as u32, height as u32))
 }
@@ -150,9 +173,10 @@ pub(super) fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
 pub(super) fn default_startup_inner_size(
     cfg: &Config,
     monitor_logical: Option<(f64, f64)>,
+    baseline: (f64, f64),
 ) -> (f64, f64) {
     let (width, height) =
-        startup_cells_to_logical_px(cfg, STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS);
+        startup_cells_to_logical_px(cfg, STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, baseline);
     let Some((monitor_w, monitor_h)) = monitor_logical else {
         return (width, height);
     };
@@ -168,9 +192,9 @@ pub(super) fn default_startup_inner_size(
 /// The one startup size both window constructors use, in logical pixels:
 /// the configured grid when the user set one, else the monitor-fitted default.
 pub(super) fn startup_inner_size(cfg: &Config, monitor: Option<StartupMonitor>) -> (f64, f64) {
-    match startup_inner_size_px(cfg) {
+    match startup_inner_size_px(cfg, STARTUP_GEOMETRY_CELL) {
         Some((w, h)) => (f64::from(w), f64::from(h)),
-        None => default_startup_inner_size(cfg, monitor.map(|m| m.logical)),
+        None => default_startup_inner_size(cfg, monitor.map(|m| m.logical), STARTUP_GEOMETRY_CELL),
     }
 }
 

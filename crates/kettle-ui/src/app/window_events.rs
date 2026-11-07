@@ -1,5 +1,13 @@
 use super::*;
 
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_resize_event_is_current(
+    reported: winit::dpi::PhysicalSize<u32>,
+    current: winit::dpi::PhysicalSize<u32>,
+) -> bool {
+    reported == current
+}
+
 impl App {
     pub(super) fn window_event_inner(
         &mut self,
@@ -75,6 +83,21 @@ impl App {
                     .is_some_and(|native| native.pending())
                 {
                     ws.dpi_resize_surface_suspended = true;
+                    return;
+                }
+                // AppKit changes the native size synchronously, but winit
+                // queues frame notifications during callbacks. Startup's
+                // hidden titlebar correction can already be in the renderer
+                // before an older size arrives. Never reflow PTYs to that size.
+                // Match winit's NSView frame and backing scale: NSWindow's
+                // content rectangle can include a native AppKit tab band.
+                #[cfg(target_os = "macos")]
+                if ws
+                    .window
+                    .as_ref()
+                    .and_then(|window| titlebar::macos_view_size(window))
+                    .is_some_and(|current| !macos_resize_event_is_current(size, current))
+                {
                     return;
                 }
                 ws.dpi_resize_surface_suspended = false;
