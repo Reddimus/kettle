@@ -100,13 +100,16 @@ pub struct LinkRect {
     pub explicit: bool,
 }
 
+/// A resting link underline's thickness, in pixels.
+pub(crate) const LINK_REST_THICKNESS: f32 = 1.0;
+
 /// Detected links rest as a dim thin line; OSC 8 rests dotted. Hover wins
 /// over either source and uses the accent at full opacity.
 pub(crate) fn link_decoration(link: &LinkRect) -> (bool, f32, f32) {
     if link.hover {
         (false, 1.5, 1.0)
     } else {
-        (link.explicit, 1.0, 0.55)
+        (link.explicit, LINK_REST_THICKNESS, 0.55)
     }
 }
 
@@ -967,7 +970,7 @@ impl Renderer {
                 fg,
                 line_color,
             );
-            // Resolve link decoration ink before painting it over a highlight.
+            // The link underline under this cell, if any.
             let link_index =
                 links.partition_point(|link| (link.row as i32, link.col) <= (vrow, col));
             if let Some(link) = link_index.checked_sub(1).map(|index| links[index])
@@ -977,36 +980,20 @@ impl Renderer {
                 // Detected links rest thin and dim, OSC 8 links rest dotted, and
                 // the hovered link is a solid accent line (`link_decoration`).
                 let (dotted, thickness, rest_alpha) = link_decoration(link);
-                let ink = if link.hover {
-                    self.ui_accent(cfg, theme)
+                // Over a highlight the line keeps its shape but is drawn at the
+                // resting weight in the cell's text colour at full strength, as
+                // an SGR underline under that text would: link blue, the hover
+                // accent or a heavier line would compete with the fill. It stays
+                // drawn because an OSC 8 link's text need not look like a link.
+                let (ink, alpha, thickness, target) = if matches!(highlight, CellHighlight::None) {
+                    let ink = if link.hover {
+                        self.ui_accent(cfg, theme)
+                    } else {
+                        theme.palette[4]
+                    };
+                    (ink, rest_alpha, thickness, &mut *quads)
                 } else {
-                    theme.palette[4]
-                };
-                let ink = if matches!(highlight, CellHighlight::None) {
-                    ink
-                } else {
-                    resolved_cell_foreground_cached(
-                        ink,
-                        highlight_bg,
-                        highlight,
-                        (false, false),
-                        cfg,
-                        theme,
-                        &mut self.minimum_contrast_cache,
-                    )
-                };
-                let target = if matches!(highlight, CellHighlight::None) {
-                    &mut *quads
-                } else {
-                    &mut highlight_decorations
-                };
-                // Over a highlight the line keeps full strength and the full
-                // 1.5 px weight: its ink was resolved against the fill above,
-                // and a thinner line would blend into it.
-                let (thickness, alpha) = if matches!(highlight, CellHighlight::None) {
-                    (thickness, rest_alpha)
-                } else {
-                    (thickness.max(1.5), 1.0)
+                    (fg, 1.0, LINK_REST_THICKNESS, &mut highlight_decorations)
                 };
                 let cell_x = ox + vcol as f32 * cw;
                 let y = oy + (vrow + 1) as f32 * ch - thickness;

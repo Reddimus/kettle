@@ -127,7 +127,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   white or black: the default TokyoNight Night selection is a clear blue
   (`#4d64a6`) instead of slate (`#5d6781`). A selected cell that a program gave
   its own background gets a fill that stands out from that background, so the
-  selection no longer vanishes where the two match.
+  selection no longer vanishes where the two match. Link underlines inside a
+  selection or search match, hovered or not, are drawn at their 1 px resting
+  weight in the colour of the text above them, not link blue or the hover
+  accent.
 
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel

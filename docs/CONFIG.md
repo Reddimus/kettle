@@ -559,7 +559,9 @@ against its effective fill, including dim, ANSI, indexed and truecolour text.
 A user `selection-foreground` has first priority when it meets that ratio,
 followed by the cell's own ink. Otherwise Kettle chooses the highest contrast
 among the theme selection foreground, theme foreground, theme background, white
-and black. An unreadable user colour also falls back. Non-current search
+and black. An unreadable user colour also falls back. A link underline on a
+highlight, hovered or not, keeps its dotted or solid shape but is drawn 1 px
+thick in the colour of the text above it, not link blue or the accent. Non-current search
 matches use the active selection rules with fills meeting 3:1 against each
 cell background. The current match uses its search fill and gives a readable
 `search-foreground` first priority, then the same cell/fallback rule. The

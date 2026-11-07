@@ -5801,6 +5801,121 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     }
 }
 
+/// Over a selection a link underline is drawn like an underline of the
+/// selected text: in its colour, at the resting 1 px weight, hovered or not.
+/// Link blue, the hover accent and the 1.5 px line competed with the fill.
+#[test]
+fn link_underlines_over_a_selection_take_the_selected_text_colour() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("C09_GPU_SKIP: link underlines over a selection, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    // A fill the theme already separates, so it is used as is, with white
+    // text on it. Link blue and the accent are readable on that fill too, so
+    // only the drawing rule decides which colour an underline over it takes.
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.selection_background = Rgb::new(60, 90, 190);
+    cfg.theme.palette[4] = Rgb::new(255, 230, 0);
+    let accent = Rgb::new(0, 255, 170);
+    renderer.set_accent_override(Some(accent));
+    let mut cache = MinimumContrastCache::default();
+    let fill = super::theme::selection_fill(&cfg.theme, cfg.theme.background, true, &mut cache);
+    let (text, _) = super::theme::highlight_colors_cached(
+        CellHighlight::Selection,
+        &cfg,
+        &cfg.theme,
+        cfg.theme.foreground,
+        cfg.theme.background,
+        &mut cache,
+    );
+    assert_eq!(fill, cfg.theme.selection_background);
+    assert_eq!(text, cfg.theme.foreground);
+    for ink in [cfg.theme.palette[4], accent] {
+        assert!(color::contrast_ratio(ink, fill) >= 4.5);
+    }
+
+    // Blank cells, so the lower half of each holds only fill and underline.
+    let mut snap = snapshot_of(20, 2, b"\x1b[?25l");
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |c: Rgb, want: Rgb| {
+        [(c.r, want.r), (c.g, want.g), (c.b, want.b)]
+            .iter()
+            .all(|&(a, b)| a.abs_diff(b) <= 2)
+    };
+    let centre_rows = |from: f32, to: f32| (from - 0.5).ceil() as u32..(to - 0.5).ceil() as u32;
+    // The pixel rows in the lower half of a link's cells that hold a colour
+    // other than `base`, with those colours.
+    let line_rows = |frame: &image::RgbaImage, top: f32, base: Rgb| -> Vec<Vec<Rgb>> {
+        centre_rows(top + cell_h * 0.5, top + cell_h)
+            .map(|y| {
+                centre_rows(cfg.padding_x + 2.0 * cell_w, cfg.padding_x + 10.0 * cell_w)
+                    .map(|x| {
+                        let pixel = frame.get_pixel(x, y);
+                        Rgb::new(pixel[0], pixel[1], pixel[2])
+                    })
+                    .filter(|&c| !near(c, base))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|inks| !inks.is_empty())
+            .collect()
+    };
+    // The selected row's bottom edge three quarters into a pixel, where a
+    // 1 px line covers one pixel row and a 1.5 px line two.
+    let shift = (0.75 - (cfg.padding_y + cell_h).fract()).rem_euclid(1.0);
+    for (label, hover, explicit) in [
+        ("detected", false, false),
+        ("OSC 8", false, true),
+        ("hovered", true, false),
+    ] {
+        let link = |row| LinkRect {
+            col: 2,
+            row,
+            width: 8,
+            hover,
+            explicit,
+        };
+        let overlay = Overlay {
+            window_focused: true,
+            cursor_visible: false,
+            links: vec![link(0), link(1)],
+            ..Overlay::default()
+        };
+        let mut view = pane(&snap, 320, 120);
+        view.rect.1 += shift;
+        view.terminal.1 += shift;
+        let frame = capture(&mut renderer, &cfg, &[view], &overlay);
+        let top = cfg.padding_y + shift;
+
+        let rows = line_rows(&frame, top, fill);
+        assert!(!rows.is_empty(), "{label}: the underline stays drawn");
+        assert_eq!(rows.len(), 1, "{label}: a 1 px line covers one pixel row");
+        for ink in rows.iter().flatten() {
+            assert!(
+                near(*ink, text),
+                "{label}: underline {ink:?} over the selection, selected text is {text:?}"
+            );
+        }
+        // Off the selection the link keeps its own ink.
+        let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
+        assert!(!unselected.is_empty(), "{label}: unselected link drawn");
+        assert!(
+            unselected.iter().flatten().all(|&ink| !near(ink, text)),
+            "{label}: unselected link ink"
+        );
+    }
+}
+
 /// A selected cell keeps the selection visible against the background it
 /// shows when unselected, including a program-set background and a dimmed
 /// split. The row's fill was resolved against the undimmed default background
