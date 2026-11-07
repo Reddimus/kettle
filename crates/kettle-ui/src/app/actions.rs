@@ -78,6 +78,22 @@ pub(super) fn broadcast_scope_for_default(
     }
 }
 
+/// The logical font size a font-size action moves the window to from
+/// `current`: a step up or down, or back to `configured`, the config's
+/// `font-size`. A config without one carries the platform default, so
+/// Cmd/Ctrl+0 returns to 13 px on macOS and 14 px elsewhere. Any other action
+/// keeps `current`. `set_font_size` clamps the result.
+pub(super) fn font_size_after(action: &Action, current: f32, configured: f32) -> f32 {
+    match action {
+        Action::IncreaseFontSize | Action::ZoomInAll => current + 1.0,
+        // A floor of 6 here turned "decrease" at a configured 5 into an
+        // increase; the renderer's 5..=72 clamp is the only bound.
+        Action::DecreaseFontSize | Action::ZoomOutAll => current - 1.0,
+        Action::ResetFontSize | Action::ZoomNormalAll => configured,
+        _ => current,
+    }
+}
+
 /// A split that cannot spawn leaves the layout exactly as it was, so all the
 /// user sees is a keystroke that did nothing. That is indistinguishable from a
 /// split that appeared and never drew, and a `warn!` line is invisible at the
@@ -668,15 +684,7 @@ impl App {
                     // Step the logical font size directly. Back-deriving it
                     // from `r.cell_h` (physical px) would double-apply the
                     // scale factor on HiDPI.
-                    let new = match action {
-                        Action::IncreaseFontSize | Action::ZoomInAll => r.font_size() + 1.0,
-                        // `set_font_size` clamps to the renderer's 5..=72
-                        // range; a floor of 6 here turned "decrease" at a
-                        // configured 5 into an increase.
-                        Action::DecreaseFontSize | Action::ZoomOutAll => r.font_size() - 1.0,
-                        _ => self.cfg.font_size,
-                    };
-                    r.set_font_size(new);
+                    r.set_font_size(font_size_after(&action, r.font_size(), self.cfg.font_size));
                 }
                 // The user changed the font OUTSIDE a scaled-zoom
                 // enter/exit, so the saved pre-zoom size is now stale — drop it

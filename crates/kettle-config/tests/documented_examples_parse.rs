@@ -7,7 +7,7 @@
 //! `#` opens a comment only at the start of a line, so a `#` inside a value is
 //! literal (that is what makes `background = #1a1b26` work). So a trailing
 //! `value  # explanation` comment becomes part of the value, and
-//! `font-size = 20  # bigger` yields 13pt, the default, because "20  # bigger"
+//! `font-size = 20  # bigger` yields the default size, because "20  # bigger"
 //! is not a number.
 //!
 //! The guard is deliberately mechanical. It extracts every line that looks

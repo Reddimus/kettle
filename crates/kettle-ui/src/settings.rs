@@ -625,7 +625,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                         labels: None,
                     },
                 },
-                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt"),
+                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
                 number(
                     T::SettingsFieldBackgroundOpacity,
                     "background-opacity",
@@ -1035,7 +1035,7 @@ fn owned_choice_index(cfg: &Config, key: &str, values: &[String]) -> Option<usiz
 }
 
 /// Read a field's current value from `cfg`, formatted for display next to its
-/// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
+/// label (e.g. `"14 px"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
 /// best-effort string; an unknown key (catalogue/Config drift) yields a
 /// fallback such as `"Off"`, `""`, or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
@@ -1925,7 +1925,6 @@ mod tests {
     #[test]
     fn display_units_have_spaces_and_keep_config_serialization() {
         for (suffix, expected) in [
-            ("pt", "13 pt"),
             ("px", "13 px"),
             ("MB", "13 MB"),
             ("h", "13 h"),
@@ -1982,7 +1981,17 @@ mod tests {
         cfg.scrollback_bytes = 120_000_000;
         cfg.cursor_blink_timeout = 10;
         cfg.update_check_interval_hours = 24;
-        assert_eq!(read(&cfg, field("font-size"), &EN), "13 pt");
+        for tr in [&EN, &ES] {
+            assert_eq!(read(&cfg, field("font-size"), tr), "13 px");
+        }
+        assert_eq!(
+            EN.text(description(field("font-size"))),
+            "Set the terminal font size in logical pixels."
+        );
+        assert_eq!(
+            ES.text(description(field("font-size"))),
+            "Ajustar el tamaño de la fuente de la terminal en píxeles lógicos."
+        );
         assert_eq!(read(&cfg, field("background-opacity"), &EN), "99%");
         assert_eq!(read(&cfg, field("scrollback-bytes"), &EN), "120 MB");
         assert_eq!(read(&cfg, field("cursor-blink-timeout"), &EN), "10 s");
@@ -2491,7 +2500,7 @@ mod tests {
                 6,
                 72,
                 1,
-                "pt"
+                "px"
             )),
             None
         );
@@ -2671,10 +2680,10 @@ mod tests {
     fn number_steps_and_clamps() {
         let mut cfg = Config::default();
         cfg.font_size = 14.0;
-        let f = number(Text::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt");
+        let f = number(Text::SettingsFieldFontSize, "font-size", 6, 72, 1, "px");
         assert_eq!(next_value(&cfg, &f, 1), "15");
         assert_eq!(next_value(&cfg, &f, -1), "13");
-        assert_eq!(read(&cfg, &f, &EN), "14 pt");
+        assert_eq!(read(&cfg, &f, &EN), "14 px");
         // clamp at ceiling
         cfg.font_size = 72.0;
         assert_eq!(next_value(&cfg, &f, 1), "72");

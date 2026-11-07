@@ -16,14 +16,13 @@ fn inline_placement_classes_are_interleaved_before_frame_budget() {
 /// configured 5 into an increase.
 #[test]
 fn font_decrease_uses_the_renderer_floor() {
+    // The keyboard step asks for one point less with no floor of its own;
+    // the renderer's clamp keeps 5.
+    for step in [Action::DecreaseFontSize, Action::ZoomOutAll] {
+        assert_eq!(super::font_size_after(&step, 5.0, 5.0), 4.0, "{step:?}");
+        assert_eq!(super::font_size_after(&step, 6.0, 13.0), 5.0, "{step:?}");
+    }
     let src = production_source();
-    let arm = src
-        .split("Action::DecreaseFontSize | Action::ZoomOutAll =>")
-        .nth(1)
-        .and_then(|s| s.split("_ => self.cfg.font_size").next())
-        .expect("font step arm present");
-    assert!(arm.contains("r.font_size() - 1.0"), "steps by one point");
-    assert!(!arm.contains(".max("), "no floor above the renderer's own");
 
     let wheel = src
         .split("fn dispatch_wheel(")
