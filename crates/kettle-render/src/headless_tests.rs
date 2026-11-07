@@ -5123,11 +5123,10 @@ fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
     }
 }
 
-/// The brightest ink in `rect` against `background`, and the pixel box the
-/// ink spans. Ink is any pixel more than 24 levels from the background.
-fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<(Rect4, f64)> {
+/// The pixel box the ink in `rect` spans against `background`. Ink is any
+/// pixel more than 24 levels from the background.
+fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<Rect4> {
     let mut bounds: Option<(u32, u32, u32, u32)> = None;
-    let mut ratio = 1.0_f64;
     for y in rect.1.ceil() as u32..((rect.1 + rect.3).floor() as u32).min(frame.height()) {
         for x in rect.0.ceil() as u32..((rect.0 + rect.2).floor() as u32).min(frame.width()) {
             let p = frame.get_pixel(x, y);
@@ -5144,11 +5143,10 @@ fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<(
             if distance > 24 {
                 let b = bounds.get_or_insert((x, y, x, y));
                 *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
-                ratio = ratio.max(color::contrast_ratio(ink, background));
             }
         }
     }
-    bounds.map(|(x0, y0, x1, y1)| (pixel_box(x0, y0, x1, y1), ratio))
+    bounds.map(|(x0, y0, x1, y1)| pixel_box(x0, y0, x1, y1))
 }
 
 fn pixel_box(x0: u32, y0: u32, x1: u32, y1: u32) -> Rect4 {
@@ -5224,22 +5222,27 @@ fn assert_glyph_painted(
     );
 }
 
-/// A tab close button's chip is its square less 5 px a side. Only the square
-/// clips the glyph, so a glyph larger than the chip shows as ink on the
-/// chip's edge pixels: a pixel of chip must stay clear on each side. Ink is
-/// any pixel a third of the way or more from the chip to the glyph colour.
+/// A tab close button's chip: its square less 5 px a side.
+fn close_chip(button: Rect4) -> Rect4 {
+    (
+        button.0 + 5.0,
+        button.1 + 5.0,
+        button.2 - 10.0,
+        button.3 - 10.0,
+    )
+}
+
+/// Only a close button's square clips its glyph, so a glyph larger than the
+/// chip shows as ink on the chip's edge pixels: a pixel of chip must stay
+/// clear on each side. Ink is any pixel a third of the way or more from the
+/// chip to the glyph colour.
 fn assert_glyph_inside_chip(
     frame: &image::RgbaImage,
     button: Rect4,
     (chip_color, ink): (Rgb, Rgb),
     what: &str,
 ) {
-    let chip = (
-        button.0 + 5.0,
-        button.1 + 5.0,
-        button.2 - 10.0,
-        button.3 - 10.0,
-    );
+    let chip = close_chip(button);
     let (_, ink_box) = glyph_reach(frame, chip, chip_color, ink, 0.34);
     let (x, y, w, h) = ink_box.unwrap_or_else(|| panic!("{what}: no glyph on its chip"));
     let (left, top) = (chip.0.ceil(), chip.1.ceil());
@@ -5357,9 +5360,10 @@ fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
                 let lifted = colors.text(fg, chip);
                 let hovered = colors.tab_text(lifted, chip, true);
                 let floor = color::contrast_ratio(rest_close, strip).max(chrome::TEXT_CONTRAST);
+                // Judged on the chip alone: around it is the strip.
                 assert_glyph_painted(
                     &frame,
-                    inactive_close,
+                    close_chip(inactive_close),
                     (chip, hovered),
                     floor,
                     &format!("{case}: hovered ×"),
@@ -5414,7 +5418,7 @@ fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
                 ));
             }
             for (glyph, button, min_side, ink, floor) in controls {
-                let ((x, y, w, h), _) =
+                let (x, y, w, h) =
                     glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
                 assert!(
                     w >= min_side && h >= min_side,
@@ -5517,9 +5521,11 @@ fn side_bar_close_glyph_stays_inside_its_chip() {
                     theme.palette[8]
                 };
                 let ink = colors.tab_text(glyph, chip_color, true);
+                // Judged on the chip alone: around it the row's own
+                // background can sit as dark as a hovered glyph.
                 assert_glyph_painted(
                     &frame,
-                    seg.close,
+                    close_chip(seg.close),
                     (chip_color, ink),
                     chrome::TEXT_CONTRAST,
                     &case,
@@ -5574,7 +5580,7 @@ fn narrow_side_bar_controls_fit_their_half_width_buttons() {
         ("▾", tabs.new_tab_menu),
         ("+", (px + 2.0, py, pw - 2.0, ph)),
     ] {
-        let ((x, y, w, h), _) =
+        let (x, y, w, h) =
             glyph_ink(&frame, content, strip).unwrap_or_else(|| panic!("{glyph} has no ink"));
         assert!(
             x >= content.0 + 1.0
