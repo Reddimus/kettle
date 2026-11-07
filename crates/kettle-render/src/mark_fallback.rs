@@ -9,7 +9,7 @@
 //! both marks hang from the base's right edge.
 //!
 //! [`line_shifts`] finds those marks once per shaped row and places them as
-//! hb-ot-shape-fallback does: above classes stack upward from the top of the
+//! HarfBuzz's fallback does: above classes stack upward from the top of the
 //! base's ink, below classes stack downward from its bottom, each with a gap
 //! of 1/16 em, centred on (or aligned to) the base's ink. A mark the font
 //! attaches, or one the shaper already moved, keeps its position. The grid
@@ -392,7 +392,7 @@ pub(crate) struct MarkClass {
 }
 
 /// The placement of canonical combining class `ccc`, for the positional
-/// classes hb-ot-shape-fallback places. Overlays (1), nukta (7), virama (9),
+/// classes HarfBuzz's fallback places. Overlays (1), nukta (7), virama (9),
 /// the fixed-position classes (10..=199) and the left and right classes
 /// (224, 226) stay where the font drew them.
 pub(crate) fn mark_class(ccc: u8) -> Option<MarkClass> {
@@ -421,7 +421,7 @@ pub(crate) fn mark_class(ccc: u8) -> Option<MarkClass> {
 /// Places `mark` on `stack`, the base's ink grown by the marks already
 /// placed in this class, and grows the stack by it. Returns the move.
 ///
-/// This is hb-ot-shape-fallback's `position_mark`, aligned on the base's ink
+/// This is `position_mark` from HarfBuzz's fallback, aligned on the base's ink
 /// rather than its advance: a below mark is never moved up, and an above
 /// mark that sits higher than it needs to moves only half the way down.
 pub(crate) fn place(

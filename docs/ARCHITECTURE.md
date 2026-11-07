@@ -3392,7 +3392,7 @@ the font's cmap or, for marks GSUB replaced one for one (JetBrains Mono's
 shaper composed into the base (`A\u{301}` drawn as `Aacute`) are found by
 recomposing as harfrust does and are not counted. Its canonical
 combining class (from `icu_normalizer`) decides its place, as in
-hb-ot-shape-fallback: above classes stack upward from the top of the base's
+HarfBuzz's fallback: above classes stack upward from the top of the base's
 ink, below classes downward from its bottom, 1/16 em apart except the
 attached classes, centred on the base's ink or aligned to its left or right
 edge, double marks centred on the end of its advance. A below mark never
