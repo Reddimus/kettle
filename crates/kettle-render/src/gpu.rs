@@ -749,7 +749,6 @@ impl Renderer {
 
         let shared = SharedPipelines::new(&device, format);
         let pane_bases = shared.quads.replace(&device);
-        let live_pane_bases = shared.quads.replace(&device);
         let quads = shared.quads.blend(&device);
         let pane_outlines = OutlinePipeline::new(&device, format);
         let pane_dimming = shared.quads.blend(&device);
@@ -926,7 +925,6 @@ impl Renderer {
             search_editor_rtl: false,
             status_bar_buffer,
             pane_bases,
-            live_pane_bases,
             quads,
             pane_outlines,
             pane_dimming,
@@ -983,7 +981,6 @@ impl Renderer {
             scale,
             accent_override: None,
             rounded_window_corners: false,
-            live_background_opacity_floor: None,
             pending_screenshot: None,
             screenshot_worker: None,
             screenshot_retirements: Default::default(),

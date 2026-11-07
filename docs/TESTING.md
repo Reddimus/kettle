@@ -3022,9 +3022,15 @@ it requires an unlocked desktop and cannot run in the sandbox.
 
 `kettle-render` covers 4.5:1 highlight ink, maximum-contrast fallbacks,
 readable user-foreground precedence, dim/link/ANSI/indexed/truecolour text,
-and inactive fills across bundled themes. Offscreen tests cover link and SGR
-decorations over selected fills, inactive split dimming, steady hollow cursors
-and DEC cursor hiding; they report `C09_GPU_SKIP` without an adapter.
+same-hue 3:1 focused fills on the default dark and light themes and every
+bundled theme, and inactive fills across bundled themes. Offscreen tests cover
+link and SGR decorations over selected fills; link underlines over a focused
+or unfocused selection and over a search match, drawn in the highlighted text
+colour at their resting weight; selected cells with their own background; one
+selection fill kept across TokyoNight Night program backgrounds it separates
+from, with fills of their own only where it does not; inactive split dimming;
+steady hollow cursors and DEC cursor hiding. They report `C09_GPU_SKIP`
+without an adapter.
 `kettle-core` tests both copy policies against printed spaces, blank padding,
 blocks, blank rows, wraps, tabs, wide cells, combining marks and byte caps.
 `kettle-ui` and `kettle-config` cover selection modifiers, cursor live reload,
@@ -3062,10 +3068,13 @@ cannot be established by the portable model tests alone.
 
 
 Link and hint UX has portable coverage in `kettle-core` (path context and
-prefix-free codes), `kettle-render` (rest/hover/OSC 8 decoration, destination
-pill avoidance and elision, legend bounds), and `kettle-ui` (hover invalidation,
-translated gestures and legend actions, label placement, OSC 8 targets,
-AccessKit nodes, context menus, native menu model and palette shortcuts).
+prefix-free codes), `kettle-render` (rest/hover/OSC 8 decoration in both
+`link-underline` modes, including a mode change on a live renderer,
+destination pill avoidance and elision, legend bounds), `kettle-config`
+(`link-underline` default, values and typo report), and `kettle-ui` (hover
+invalidation, translated gestures and legend actions, label placement, OSC 8
+targets, AccessKit nodes, context menus, native menu model and palette
+shortcuts).
 `ui_geometry` reports `pane_statuses` and `hint_labels` with the projected
 bounds; destination text is omitted from diagnostics. These overlays reserve
 no terminal cells and leave pointer cell mapping and terminal IME geometry
@@ -3089,12 +3098,30 @@ fresh prompt, and confirm geometry/IME and screen-reader positions agree.
 
 System appearance regression coverage lives in kettle-config's default and
 legacy-theme tests and kettle-ui's appearance, picker, Settings and native
-material tests. Portable tests cover portal value/filter policy and macOS
-appearance selection; Linux private-bus tests cover color-scheme snapshots,
+material tests. kettle-config also holds the default light theme's foreground
+to 7:1 and its ANSI text colours (slots 1–7 and 9–15) to 4.5:1 against its
+background, pins the bundled TokyoNight Day to upstream's colours, and checks
+that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
+without turning its hue, and credits its sources in its header. Portable
+tests cover portal value/filter policy and macOS appearance selection; Linux
+private-bus tests cover color-scheme snapshots,
 SettingChanged and owner loss using the shared reduced-motion transport.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
+
+kettle-render checks that a live frame shows the configured background alpha,
+as an offscreen capture of the same frame does, on PreMultiplied and
+PostMultiplied surfaces. kettle-ui's native material tests check that blur
+counts as unavailable only on a settled answer: not while a Wayland probe runs
+or waits to retry, and not once it has found blur. Settings tests pin the
+Window blur row's unavailable note in English and Spanish and check that the footer drops
+the blur hint on the Window blur and Background opacity rows while blur is
+unavailable; a source guard checks that the Settings projection passes the
+window's blur state to both. Live acceptance still needs GNOME Wayland and X11
+at 60% opacity with blur on, where the desktop shows through sharply and the
+note appears, KDE Plasma on X11 and Windows 10, where the note appears, and
+KDE Plasma on Wayland, where blur works without the note.
 
 ### Linux header bar
 

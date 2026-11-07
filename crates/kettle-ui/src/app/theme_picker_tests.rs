@@ -668,12 +668,13 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
                 ThemeMode::Light
             };
             reloaded.resolve_theme_mode(None);
+            let defaults = Config::default();
             assert_eq!(
                 reloaded.theme_name,
                 if other_dark {
-                    "TokyoNight Night"
+                    defaults.dark_theme
                 } else {
-                    "TokyoNight Day"
+                    defaults.light_theme
                 }
             );
         }

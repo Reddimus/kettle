@@ -73,10 +73,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   settings control how much output survives; private storage is bounded to
   8 MiB, and remote output requires opting in.
 
-- Follow the system light/dark appearance by default with TokyoNight Day/Night,
-  including live Linux portal changes. Existing fixed-theme configs keep their
-  look. Settings adds an Appearance choice; theme picks customize the active
-  side while following the system. macOS material matches the active palette.
+- Follow the system light/dark appearance by default with Kettle Day and
+  TokyoNight Night, including live Linux portal changes. Existing fixed-theme
+  configs keep their look. Settings adds an Appearance choice; theme picks
+  customize the active side while following the system. macOS material
+  matches the active palette.
+
+- Kettle Day, the default light theme: TokyoNight Day with darker text. Body
+  text reaches 7:1 contrast with the background (TokyoNight Day's is 4.5:1),
+  and the red, green, yellow, blue, magenta, cyan and white that prompts use
+  reach at least 4.5:1 (some were 3:1), as does the accent drawn from its
+  blue. Each colour keeps its hue; the background, selection background and
+  the two background-tone slots (0 and 8) are TokyoNight Day's. Settings'
+  Theme row lists it. `TokyoNight Day` itself keeps upstream's colours, so a
+  config or picker choice that names it is unchanged.
 
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
@@ -113,11 +123,55 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Tab strips and menus are easier to read. Inactive tab titles and resting
+  tab close buttons in a top or bottom tab bar, and menu shortcut hints, reach
+  7:1 contrast where the theme's own text does (they stopped at 4.5:1); tab
+  text still stays at least 3:1 in an unfocused window. A disabled menu row's
+  hint stays dim. The tab close × (✕ in a side tab bar, still inside its
+  chip), the new-tab +, the options ▾, GNOME's header ≡ and its window buttons
+  are drawn larger, inside the same click targets.
+
+- The terminal is inset 12 px from the window edge by default (was 8).
+  `window-padding-x` and `window-padding-y` still set it. A fresh window
+  grows by the extra padding to keep its grid where the monitor has room:
+  about 164 columns on a 1080p monitor and 154 on a 1366 px wide laptop.
+
+- Detected URLs and paths are underlined only while hovered, as in most
+  terminals, so a screen of links no longer looks busy, competes with a
+  selection or hides which link is under the pointer. The new `link-underline`
+  key's `always` value brings back the thin, dim resting line. OSC 8 links
+  keep their dotted resting underline; hover, the destination pill,
+  Cmd/Ctrl-click and quick-select hints are unchanged.
+
+- Background opacity now works on GNOME, X11 and other Linux sessions that
+  cannot blur windows. With window blur on, Kettle used to raise the opacity to
+  99% there, so the Settings slider seemed to do nothing; the window now keeps
+  the configured opacity, as it does with blur off. The Linux default stays
+  99%. Wherever the session cannot blur (those Linux sessions, KDE Plasma on
+  X11 included, and Windows without its system backdrop, such as Windows 10),
+  Settings says "Not available in this session; opacity still applies." under
+  the Window blur switch, in English and Spanish, and the footer of the
+  Window blur and Background opacity rows drops its hint about what blur
+  needs.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
+
+- A theme selection colour too faint for 3:1 against the background is now
+  strengthened as a deeper or lighter tint of its own hue, not greyed toward
+  white or black: the default TokyoNight Night selection is a clear blue
+  (`#4d64a6`) instead of slate (`#5d6781`). A selection across a status line or
+  prompt keeps that one fill over every program-set background it stands out
+  from. A cell whose background it does not stand out from, such as one that
+  matches it, gets a fill of its own, so the selection no longer vanishes
+  there. The ratios are measured against the opaque background colour: in a
+  translucent window, the macOS and Windows default, the desktop behind the
+  window changes the contrast you see. Link underlines inside a selection or
+  search match, hovered or not, are drawn at their 1 px resting weight in the
+  colour of the text above them, not link blue or the hover accent.
 
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel
@@ -237,6 +291,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- Screen readers echo typed words in the terminal again. A typed space used to
+  reach them only with the next character, so Orca read fragments such as
+  " e" aloud instead of the word. The cursor's row now keeps the blanks
+  before the cursor, so each typed character is its own text insertion.
 
 - A config notice no longer takes Enter and Escape from the terminal under
   it: a command typed while the notice is up runs, and Escape reaches the

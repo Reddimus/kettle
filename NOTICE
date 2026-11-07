@@ -105,6 +105,10 @@ Bundled assets:
 * iTerm2-Color-Schemes (Ghostty theme set) — MIT
   See assets/themes/LICENSE
   https://github.com/mbadolato/iTerm2-Color-Schemes
+  assets/themes/Kettle Day is Kettle's change to that set's TokyoNight Day,
+  whose palette comes from tokyonight.nvim (Apache-2.0,
+  https://github.com/folke/tokyonight.nvim): darker text colours, the same
+  background. Its header records the change.
 
 * Fira Sans 4.301 - SIL Open Font License 1.1
   Digitized data copyright 2012-2018, The Mozilla Foundation and Telefonica S.A.,

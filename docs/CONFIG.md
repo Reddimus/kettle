@@ -82,16 +82,16 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background; unfocused windows use a subdued fill at least 1.5:1 against it. Text and decorations meet 4.5:1 against the fill. A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
+| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background: a theme colour short of that becomes a stronger tint of the same hue. A selected cell with a program-set background keeps that fill where it also meets 3:1 there, and gets one worked out against its own background where it does not. Unfocused windows use a subdued fill at least 2:1 against the background. Text and decorations meet 4.5:1 against the fill. Ratios are measured against the opaque background colour; a translucent window, the macOS and Windows default, shows the desktop through the background, so the contrast on screen varies (see [Selection and history controls](#selection-and-history-controls)). A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Search text follows the selection contrast rule: a readable explicit foreground has priority, then readable cell ink, then the strongest fallback. Quick-select labels default to the theme background |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `64000000` | Per-pane scrollback memory budget (64 MB by default; the 10,000-line cap still applies). Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
-| `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px), `0` or more |
-| `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 150 columns at the default font) fitted to 90 % × 85 % of the monitor, which is about 144 columns on a 1366 px wide laptop: the width Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. The font is measured before the window opens, so a set dimension opens at exactly that many cells. An unset dimension keeps the `160x45` baseline's pixel size, converted with an 8×16 px cell in logical pixels, so a HiDPI display gets the same grid and the default window holds about 152x41 cells at the default font. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` |
+| `window-padding-x` / `window-padding-y` | float | `12` | Inner padding (px), `0` or more |
+| `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 164 columns at the default font and padding) fitted to 90 % × 85 % of the monitor, which still leaves about 154 columns on a 1366 px wide laptop, past the 144 Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. The font is measured before the window opens, so a set dimension opens at exactly that many cells. An unset dimension keeps the `160x45` baseline's pixel size, converted with an 8×16 px cell in logical pixels, so a HiDPI display gets the same grid and the default window holds about 164x44 cells at the default font and padding. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
-| `background-opacity` | float | `0.86` macOS/Windows; `0.99` elsewhere | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. macOS and Windows default to visible native material; other targets stay at 99% whether compositor blur is available or not. Set this to `1.0` and `window-blur = false` for a fully opaque window. On macOS, the titlebar tab strip is opaque theme chrome; `macos-titlebar-style = native` keeps AppKit's opaque caption following the selected light or dark appearance |
-| `window-blur` | bool | `true` | Ask the window system to blur content behind Kettle. macOS keeps material behind the content and an opaque theme-matched titlebar band, follows the selected light or dark appearance, and becomes opaque when Reduce Transparency is enabled. Windows requests the system backdrop and palette-matches its DWM caption. Other targets default to 99% opacity. Linux enables blur only when the active Wayland compositor advertises KWin's blur protocol; X11 and unsupported Wayland sessions also apply a 99% live-opacity safety floor to explicit lower values. Screenshots and the saved opacity are unchanged. A newly opened window is required when changing from an opaque startup surface |
+| `background-opacity` | float | `0.86` macOS/Windows; `0.99` elsewhere | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. macOS and Windows default to visible native material; other targets stay at 99% whether compositor blur is available or not. A lower value applies with or without blur, so GNOME and X11 show the transparency you set. Set this to `1.0` and `window-blur = false` for a fully opaque window. On macOS, the titlebar tab strip is opaque theme chrome; `macos-titlebar-style = native` keeps AppKit's opaque caption following the selected light or dark appearance |
+| `window-blur` | bool | `true` | Ask the window system to blur content behind Kettle. macOS keeps material behind the content and an opaque theme-matched titlebar band, follows the selected light or dark appearance, and becomes opaque when Reduce Transparency is enabled. Windows requests the system backdrop and palette-matches its DWM caption; without that backdrop (Windows 10, for one) the window keeps the configured opacity without blur. Other targets default to 99% opacity. Linux enables blur only when the active Wayland compositor advertises KWin's blur protocol; X11 (KDE Plasma's included) and other Wayland sessions, GNOME's included, keep the configured opacity without blur. Wherever blur is unavailable, Settings says so under the switch. A newly opened window is required when changing from an opaque startup surface |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` is an alias for `bar` |
 | `cursor-unfocused-style` | `hollow`\|`hidden`\|`unchanged` | `hollow` | Steady cursor in unfocused windows and split panes: hollow block, hidden, or the terminal-selected shape. Respects DEC cursor hiding and cursor colour. Applies live |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
@@ -171,7 +171,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `trigger` | regex \[`:: cmd args`\] | — | Repeatable. Triggers run only while the window is unfocused: a match against any of its panes' output then requests attention. `^` and `$` anchor to each row of output. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
 | `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing. `after-first` skips the initial window placement; `never` disables it |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `auto` (or `explicit` when `theme` is set without a mode) | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference (XDG Settings portal on Linux, native appearance on macOS/Windows); no preference or unavailable detection selects dark. If `theme-schedule` is set, the schedule owns the switch instead |
-| `light-theme` / `dark-theme` | string | `TokyoNight Day` / `TokyoNight Night` | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`) |
+| `light-theme` / `dark-theme` | string | `Kettle Day` / `TokyoNight Night` | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`). Kettle Day is TokyoNight Day with darker text: foreground 7:1 and ANSI colours 1–7 and 9–15 at least 4.5:1 against its background. `TokyoNight Day` itself keeps upstream's colours |
 | `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries in local time (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
 | `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
 | `grapheme-clustering` | bool | `true` | Start new terminals with Unicode grapheme cells (mode 2027): joined emoji, skin tones, flags and VS16 sequences share a cluster. Indic spacing marks and conjuncts, plus Thai/Lao spacing vowels, reserve two cells; registered VS15 text sequences narrow default emoji to one. Unattached skin-tone modifiers occupy two cells. `false` keeps scalar cells. Applications can toggle mode 2027; RIS and DECSTR restore the startup default. Reload affects only terminals created afterwards |
@@ -299,8 +299,14 @@ cutting the query.
 ### Auto light/dark theme switching
 
 With neither `theme` nor `theme-mode` set, Kettle follows the system appearance
-using `TokyoNight Day` for light and `TokyoNight Night` for dark. No preference
-or unavailable detection selects the dark side. Existing configs that set
+using `Kettle Day` for light and `TokyoNight Night` for dark. No preference
+or unavailable detection selects the dark side. Kettle Day is a bundled theme
+derived from TokyoNight Day: it keeps that theme's background, selection
+background and background-tone slots (0 and 8) but darkens its text colours,
+selected text included, along their own hue, so body text reaches 7:1 and the
+ANSI colours prompts use reach 4.5:1 (WCAG AA). `TokyoNight Day` and every
+other bundled theme keep upstream's colours, and `palette = N=#hex` and
+`foreground` lines still override any of them. Existing configs that set
 `theme` without `theme-mode` keep their fixed theme, including named `palette`
 presets. An explicit mode always wins, regardless of line order.
 
@@ -323,7 +329,7 @@ an existing fixed-theme config, and optionally customize the pair:
 
 ```ini
 theme-mode  = auto
-light-theme = TokyoNight Day
+light-theme = Kettle Day
 dark-theme  = TokyoNight Night
 ```
 
@@ -332,7 +338,7 @@ switch by time instead:
 
 ```ini
 theme-mode     = auto
-light-theme    = TokyoNight Day
+light-theme    = Kettle Day
 dark-theme     = TokyoNight Night
 # dark at 19:00, light at 07:00
 theme-schedule = 19:00 dark,07:00 light
@@ -342,7 +348,7 @@ theme-schedule = 19:00 dark,07:00 light
 
 ```ini
 theme-mode          = auto
-light-theme         = TokyoNight Day
+light-theme         = Kettle Day
 dark-theme          = TokyoNight Night
 theme-schedule      = auto
 # e.g. Long Beach, CA
@@ -427,7 +433,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `window-state` | enum | `normal` | Launch state: `normal` \| `maximise` (`maximize`) \| `fullscreen` \| `hidden`. Honored by winit's `with_maximized` / `with_fullscreen` / `set_visible(false)` |
-| `window-width` / `window-height` | int cells | unset | Fresh-window startup grid size. Width is clamped `[20, 400]`, height `[8, 200]`; unset, a fresh window opens at a `160x45` baseline fitted to 90 % × 85 % of the monitor (about 152 columns on a 1080p monitor at the default font), and if one side is omitted the other comes from that baseline. Logical pixels, so HiDPI gets the same grid. Session restore and explicit new-window geometry override this seed |
+| `window-width` / `window-height` | int cells | unset | Fresh-window startup grid size. Width is clamped `[20, 400]`, height `[8, 200]`; unset, a fresh window opens at a `160x45` baseline fitted to 90 % × 85 % of the monitor (about 164 columns on a 1080p monitor at the default font and padding, 154 on a 1366 px wide laptop), and if one side is omitted the other comes from that baseline. Logical pixels, so HiDPI gets the same grid. Session restore and explicit new-window geometry override this seed |
 | `window-position-x` / `window-position-y` | int px | unset | Fresh-window startup position in physical pixels. Negative values support multi-monitor layouts. Session restore and explicit new-window placement override this seed |
 | `gpu-power-preference` | enum | `auto` | GPU preference at startup: `auto` (surface/platform preference — **default**) \| `low` (low-power / usually integrated) \| `high` (high-performance / often discrete). Used when no specific GPU is pinned (`gpu-device-id` below). Auto uses deterministic native backend order: DX12 first on Windows, Metal on macOS, Vulkan elsewhere. Explicit `low`/`high` ranks the requested physical GPU class before backend, so a lower-ranked backend cannot make the opposite GPU class win; equal-class ties preserve the platform-preferred adapter. On a dual-GPU laptop `high` may wake the discrete GPU; use it only when you want that render headroom. Also surfaced in Settings → Graphics |
 | `gpu-device-id` / `gpu-vendor-id` | hex u32 | `0` / `0` | Pin a *specific* adapter by its PCI device + vendor id (e.g. `0x2191` / `0x10de`). Both ids at `0` plus an empty `gpu-name` means use `gpu-power-preference`. Easiest set via Settings → Graphics → GPU device; detected software adapters with zero PCI ids remain pinnable by `gpu-name`. The resolver falls back to the power-preference policy if the pin is absent (eGPU unplugged, driver swap) so a stale pin never fails startup. **Applies on next launch** |
@@ -463,9 +469,10 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `force-no-bell` | bool | `false` | Silence every bell path regardless of `bell`: visual flash, window attention, and the tab activity dot |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Legacy aliases for the unified `bell` key. Together they map to `both`; individually they map to `visual` or `attention`. An explicit `bell = …` setting wins regardless of file order |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
-| `light-theme` / `dark-theme` | theme name | `TokyoNight Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
+| `light-theme` / `dark-theme` | theme name | `Kettle Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click). Hover shows the destination and the current opening gesture; the pill clears on pointer exit, scrolling, typing or focus loss |
+| `link-underline` (alias `link_underline`) | `hover`\|`always` | `hover` | When detected URLs and paths are underlined. `hover` draws no line at rest and the solid accent line while the pointer is over the link; `always` also draws a thin, dim line at rest. Explicit OSC 8 links keep their dotted resting line in both modes, since their text need not look like a link. Hover, the destination pill, the opening gesture and quick-select hints are the same in both modes. Applies live |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `paste-protection` | enum | `auto` | `auto` confirms text containing CR/LF, C0 controls other than TAB, DEL or C1 controls when any writable recipient has not enabled bracketed paste, and text carrying a bracketed-paste end marker (`ESC [ 201 ~`) in any mode. `always` confirms every multi-line paste, including bracketed mode, and the same marker. `off` never confirms. The dialog reports line and control counts with a visible-control preview. It offers Paste, Paste as one line, Paste Without Controls (only when controls exist; removes whole escape sequences and controls while preserving TAB/CR/LF), and Cancel (focused initially). All modes remove embedded ESC bytes in bracketed paste. See [Pasting](../README.md#pasting) |
 | `clipboard-paste-protection` | bool | — | Retired legacy key; accepted and ignored. Use `paste-protection` for the current policy |
@@ -546,21 +553,39 @@ moves a key into the main table without changing its parser arm.
 
 ### Selection and history controls
 
-Active selection fills are strengthened to at least 3:1 against the terminal
-background. When the window loses focus the fill moves toward the background,
-retaining at least 1.5:1 separation. Focus changes repaint both selection and
-cursor without changing terminal state.
+The theme's selection colour is used as the active fill when it has at least
+3:1 contrast against the terminal background. Otherwise Kettle lightens or
+darkens it, keeping its hue and saturation, until it does. When the window
+loses focus the fill moves toward the background, retaining at least 2:1
+separation. A selected cell that a program gave its own background keeps the
+same fill where it also has that contrast against the cell's background, so
+one selection across a status line or a powerline prompt stays one colour.
+Where it does not, as where the program's background matches the fill, that
+cell gets a fill worked out the same way against its own background. An
+unfocused split's fills are worked out against its dimmed backgrounds. Focus
+changes repaint both selection and cursor without changing terminal state.
+
+These ratios are measured against opaque colours: the background colour, not
+what a translucent window shows. With `background-opacity` below `1.0` (the
+macOS and Windows default is `0.86`) the terminal background is blended with
+whatever is behind the window, so the contrast you see between a selection
+and the background around it changes with the desktop. Set
+`background-opacity = 1.0` for an opaque window that shows the stated ratios.
 
 Text, underlines, strikeouts and link decorations on a highlight meet 4.5:1
 against its effective fill, including dim, ANSI, indexed and truecolour text.
 A user `selection-foreground` has first priority when it meets that ratio,
 followed by the cell's own ink. Otherwise Kettle chooses the highest contrast
 among the theme selection foreground, theme foreground, theme background, white
-and black. An unreadable user colour also falls back. Non-current search
-matches use the active selection rules with fills meeting 3:1 against each
-cell background. The current match uses its search fill and gives a readable
-`search-foreground` first priority, then the same cell/fallback rule. The
-optional `minimum-contrast` setting still applies after highlight resolution.
+and black. An unreadable user colour also falls back. A link underline on a
+highlight, hovered or not, keeps its dotted or solid shape but is drawn 1 px
+thick in the colour of the text above it, not link blue or the accent.
+Non-current search matches use the active selection fill by the same rule:
+it is kept where it meets 3:1 against a cell's background and worked out
+against that background where it does not. The current match uses its search
+fill and gives a readable `search-foreground` first priority, then the same
+cell/fallback rule. The optional `minimum-contrast` setting still applies
+after highlight resolution.
 
 Copy drops trailing whitespace at the end of each copied line by default.
 `copy-trim-whitespace = false` includes every selected cell, trailing spaces

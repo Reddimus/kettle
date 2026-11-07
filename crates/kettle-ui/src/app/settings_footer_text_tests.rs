@@ -87,7 +87,16 @@ fn gpu_kinds_translate_and_unknown_kinds_pass_through() {
 #[test]
 fn notes_follow_the_ui_language() {
     assert_eq!(
-        settings_footer_note(&ES, None, Some("completion-overlay"), false, false, None).as_deref(),
+        settings_footer_note(
+            &ES,
+            None,
+            Some("completion-overlay"),
+            false,
+            false,
+            false,
+            None
+        )
+        .as_deref(),
         Some("Se aplica a las shells nuevas.")
     );
 }
@@ -155,6 +164,7 @@ fn agent_previews_note_explains_the_effective_policy() {
             Some("agent-display"),
             false,
             false,
+            false,
             Some(Text::SettingsNoteAgentPreviews)
         )
         .as_deref(),
@@ -166,6 +176,7 @@ fn agent_previews_note_explains_the_effective_policy() {
             &EN,
             None,
             Some("font-size"),
+            false,
             false,
             false,
             Some(Text::SettingsNoteAgentPreviews)
@@ -216,6 +227,7 @@ fn claude_code_note_names_why_new_panes_get_no_plugin() {
             Some("agent-display-claude-code"),
             false,
             false,
+            false,
             Some(Text::SettingsNoteClaudeCodeForbidden)
         )
         .as_deref(),
@@ -256,6 +268,7 @@ fn codex_note_names_why_new_panes_get_no_codex() {
             &EN,
             None,
             Some("agent-display-codex"),
+            false,
             false,
             false,
             Some(Text::SettingsNoteCodexNewPanes)
@@ -457,15 +470,24 @@ fn agent_display_reloads_widen_the_live_policy_once() {
 #[test]
 fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
     assert_eq!(
-        settings_footer_note(&EN, None, Some("font-size"), false, false, None),
+        settings_footer_note(&EN, None, Some("font-size"), false, false, false, None),
         None
     );
     assert_eq!(
-        settings_footer_note(&EN, None, Some("completion-overlay"), false, false, None).as_deref(),
+        settings_footer_note(
+            &EN,
+            None,
+            Some("completion-overlay"),
+            false,
+            false,
+            false,
+            None
+        )
+        .as_deref(),
         Some("Applies to new shells.")
     );
     assert_eq!(
-        settings_footer_note(&EN, None, Some("window-blur"), false, false, None).as_deref(),
+        settings_footer_note(&EN, None, Some("window-blur"), false, false, false, None).as_deref(),
         Some("Blur requires background opacity below 100%. Applies to new windows.")
     );
 }
@@ -474,7 +496,7 @@ fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
 fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
     let pending = "Restart Kettle or open a new window to apply pending changes.";
     for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
-        let note = settings_footer_note(&EN, None, Some(key), true, false, None).unwrap();
+        let note = settings_footer_note(&EN, None, Some(key), false, true, false, None).unwrap();
         assert_eq!(note.lines().last(), Some(pending));
         // A blur/opacity edit followed by a switch to Graphics has the
         // same pending flag; an active adapter does not identify its cause.
@@ -482,6 +504,7 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
             &EN,
             Some("Active GPU: Test (Integrated, Vulkan)"),
             Some(key),
+            false,
             true,
             false,
             None,
@@ -497,6 +520,7 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
             Some("gpu"),
             false,
             false,
+            false,
             None
         )
         .as_deref(),
@@ -506,13 +530,15 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
 
 #[test]
 fn pending_changes_are_never_hidden_by_an_appearance_hint() {
-    let note = settings_footer_note(&EN, None, Some("window-blur"), true, false, None).unwrap();
+    let note =
+        settings_footer_note(&EN, None, Some("window-blur"), false, true, false, None).unwrap();
     assert!(note.contains("below 100%"));
     assert!(note.contains("pending changes"));
     let note = settings_footer_note(
         &EN,
         Some("Active GPU: Test (Integrated, Vulkan)"),
         Some("gpu"),
+        false,
         true,
         false,
         None,
@@ -541,14 +567,14 @@ fn the_settings_hints_fit_a_default_window_in_every_language() {
 #[test]
 fn a_language_change_waits_for_a_restart() {
     assert_eq!(
-        settings_footer_note(&EN, None, Some("language"), false, false, None).as_deref(),
+        settings_footer_note(&EN, None, Some("language"), false, false, false, None).as_deref(),
         Some("Applies when Kettle restarts.")
     );
     assert_eq!(
-        settings_footer_note(&ES, None, Some("language"), false, true, None).as_deref(),
+        settings_footer_note(&ES, None, Some("language"), false, false, true, None).as_deref(),
         Some("Reiniciar Kettle para cambiar el idioma.")
     );
-    let note = settings_footer_note(&EN, None, Some("font-size"), true, true, None).unwrap();
+    let note = settings_footer_note(&EN, None, Some("font-size"), false, true, true, None).unwrap();
     assert_eq!(
         note.lines().collect::<Vec<_>>(),
         [
@@ -587,4 +613,78 @@ fn a_saved_language_is_pending_only_when_it_would_change_the_language() {
         spanish_os
     ));
     assert!(!language_change_pending(Pref::Auto, Language::En, || None));
+}
+
+/// Where the session cannot blur, the Window blur row says so; the footer
+/// on that row and on Background opacity drops the hint about what blur
+/// needs, which would contradict it. Pending changes and other rows' notes
+/// still show.
+#[test]
+fn unavailable_blur_drops_the_blur_hint() {
+    use kettle_i18n::Text;
+    for tr in [EN, ES] {
+        for key in ["window-blur", "background-opacity"] {
+            assert_eq!(
+                settings_footer_note(&tr, None, Some(key), false, false, false, None).as_deref(),
+                Some(tr.text(Text::SettingsNoteBlur)),
+                "{key}"
+            );
+            assert_eq!(
+                settings_footer_note(&tr, None, Some(key), true, false, false, None),
+                None,
+                "{key}"
+            );
+            assert_eq!(
+                settings_footer_note(&tr, None, Some(key), true, true, false, None).as_deref(),
+                Some(tr.text(Text::SettingsNoteRestart)),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            settings_footer_note(
+                &tr,
+                None,
+                Some("completion-overlay"),
+                true,
+                false,
+                false,
+                None
+            )
+            .as_deref(),
+            Some(tr.text(Text::SettingsNoteNewShells))
+        );
+    }
+}
+
+/// The Settings projection, which paint, pointer hits and screen readers
+/// all read, takes the Window blur row's description and the footer from
+/// the window's own blur state. No App can be built in a test, so this
+/// guards the wiring in the source.
+#[test]
+fn the_settings_projection_follows_the_windows_blur_state() {
+    let src = super::production_source();
+    let projection = src
+        .split_once("fn settings_overlay_projection(")
+        .expect("settings_overlay_projection")
+        .1
+        .split_once("fn settings_mouse(")
+        .expect("end of settings_overlay_projection")
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for wiring in [
+        "let blur_unavailable = ws .native_material .as_ref() \
+         .is_some_and(|material| material.blur_unavailable());",
+        "description: tr .text(crate::settings::row_description(f, blur_unavailable)) \
+         .to_string(),",
+        "settings_footer_note( tr, active_gpu.as_deref(), \
+         active.fields.get(fld).map(|f| f.key), blur_unavailable,",
+    ] {
+        assert!(projection.contains(wiring), "{wiring}");
+    }
+    assert!(
+        !projection.contains("crate::settings::description("),
+        "rows describe themselves through row_description"
+    );
 }
