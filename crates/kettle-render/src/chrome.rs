@@ -225,13 +225,19 @@ mod tests {
                 let selected = color::over(bg, theme.accent, 0.18, linear);
                 let mut roles = vec![
                     (
-                        "menu information/empty state",
+                        "menu information/empty state/disabled row",
                         colors.muted(fg, bg),
                         bg,
                         TEXT_CONTRAST,
                     ),
                     (
-                        "menu shortcut/type/check",
+                        "selected menu row shortcut/type/check",
+                        colors.secondary(fg, selected),
+                        selected,
+                        TEXT_CONTRAST,
+                    ),
+                    (
+                        "settings focused-row description",
                         colors.muted(fg, selected),
                         selected,
                         TEXT_CONTRAST,
@@ -606,22 +612,37 @@ mod tab_chrome_tests {
             let fg = theme.foreground;
             let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
             let mut colors = Colors::default();
-            for (role, bg) in [
+            let mut backgrounds = vec![
                 ("inactive tab", strip),
                 ("hovered inactive tab", tab_detail(strip, fg, false)),
                 ("menu row", theme.background),
-                (
-                    "selected menu row",
-                    color::over(theme.background, theme.accent, 0.18, false),
-                ),
-            ] {
+            ];
+            // The renderer tints a selected menu row with the window's accent
+            // (the config's resolved one unless a window picked its own), in
+            // linear light on an sRGB surface and in sRGB on any other.
+            for accent in [cfg.resolved_accent(&theme), theme.accent] {
+                for linear in [false, true] {
+                    backgrounds.push((
+                        "selected menu row",
+                        colors.surface(theme.background, accent, 0.18, linear),
+                    ));
+                }
+            }
+            for (role, bg) in backgrounds {
                 let own = color::contrast_ratio(fg, bg);
                 let primary = color::contrast_ratio(colors.text(fg, bg), bg);
+                let muted = color::contrast_ratio(colors.muted(fg, bg), bg);
                 let secondary = colors.secondary(fg, bg);
                 let ratio = color::contrast_ratio(secondary, bg);
                 let floor = SECONDARY_TEXT_CONTRAST.min(own).max(TEXT_CONTRAST);
-                if ratio + 1e-6 < floor || ratio > primary + 1e-6 {
-                    failures.push(format!("{name}: {role} {ratio:.3}:1 (theme {own:.3}:1)"));
+                // Where the theme's text is under AA, muted and secondary are
+                // both lifted onto the 4.5:1 floor and land within a rounding
+                // step of it, either one a little higher.
+                let quieter_than_muted = ratio + 0.05 < muted;
+                if ratio + 1e-6 < floor || ratio > primary + 1e-6 || quieter_than_muted {
+                    failures.push(format!(
+                        "{name}: {role} {ratio:.3}:1 (theme {own:.3}:1, muted {muted:.3}:1)"
+                    ));
                 }
                 // An unfocused window dims it, but not below the icon floor.
                 let dimmed = color::contrast_ratio(colors.tab_text(secondary, bg, false), bg);

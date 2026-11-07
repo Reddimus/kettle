@@ -5148,18 +5148,118 @@ fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<(
             }
         }
     }
-    bounds.map(|(x0, y0, x1, y1)| {
-        (
-            (
-                x0 as f32,
-                y0 as f32,
-                (x1 - x0 + 1) as f32,
-                (y1 - y0 + 1) as f32,
-            ),
-            ratio,
-        )
-    })
+    bounds.map(|(x0, y0, x1, y1)| (pixel_box(x0, y0, x1, y1), ratio))
 }
+
+fn pixel_box(x0: u32, y0: u32, x1: u32, y1: u32) -> Rect4 {
+    (
+        x0 as f32,
+        y0 as f32,
+        (x1 - x0 + 1) as f32,
+        (y1 - y0 + 1) as f32,
+    )
+}
+
+/// How far the pixels in `rect` move from `background` toward `ink`, the
+/// colour the renderer resolved for the glyph drawn there, in linear light:
+/// 0 is bare background and 1 a fully covered pixel. The headless target is
+/// sRGB and glyphon decodes its colours before blending, so a pixel's share
+/// is the glyph's coverage there, however a rasterizer rounds the edges.
+/// Returns the largest share and the box of the pixels that reach `edge`.
+fn glyph_reach(
+    frame: &image::RgbaImage,
+    rect: Rect4,
+    background: Rgb,
+    ink: Rgb,
+    edge: f64,
+) -> (f64, Option<Rect4>) {
+    let from = color::relative_luminance(background);
+    let span = color::relative_luminance(ink) - from;
+    assert!(
+        span.abs() > 1e-3,
+        "glyph colour {ink:?} is its background {background:?}"
+    );
+    let mut reach = f64::MIN;
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in rect.1.ceil() as u32..((rect.1 + rect.3).floor() as u32).min(frame.height()) {
+        for x in rect.0.ceil() as u32..((rect.0 + rect.2).floor() as u32).min(frame.width()) {
+            let p = frame.get_pixel(x, y);
+            let share = (color::relative_luminance(Rgb::new(p[0], p[1], p[2])) - from) / span;
+            reach = reach.max(share);
+            if share >= edge {
+                let b = bounds.get_or_insert((x, y, x, y));
+                *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+        }
+    }
+    (
+        reach,
+        bounds.map(|(x0, y0, x1, y1)| pixel_box(x0, y0, x1, y1)),
+    )
+}
+
+/// A glyph the renderer resolved to `ink` over `background`: that colour
+/// meets `floor` (WCAG rates the colour text is drawn in, not its
+/// antialiased edges), and the frame shows the glyph painted in it, solid
+/// somewhere and nowhere stronger. Judging the resolved colour keeps a
+/// colour that sits on a floor from failing by a rounding step on another
+/// GPU's blending; the reach check still catches a glyph drawn in any other
+/// role's colour.
+fn assert_glyph_painted(
+    frame: &image::RgbaImage,
+    rect: Rect4,
+    (background, ink): (Rgb, Rgb),
+    floor: f64,
+    what: &str,
+) {
+    let ratio = color::contrast_ratio(ink, background);
+    assert!(
+        ratio + 1e-9 >= floor,
+        "{what}: resolved {ink:?} reads {ratio:.3}:1 on {background:?}, under {floor}:1"
+    );
+    let (reach, _) = glyph_reach(frame, rect, background, ink, 1.0);
+    assert!(
+        GLYPH_SOLID_REACH.contains(&reach),
+        "{what}: the strongest pixel reaches {reach:.3} of the way to {ink:?}"
+    );
+}
+
+/// A tab close button's chip is its square less 5 px a side. Only the square
+/// clips the glyph, so a glyph larger than the chip shows as ink on the
+/// chip's edge pixels: a pixel of chip must stay clear on each side. Ink is
+/// any pixel a third of the way or more from the chip to the glyph colour.
+fn assert_glyph_inside_chip(
+    frame: &image::RgbaImage,
+    button: Rect4,
+    (chip_color, ink): (Rgb, Rgb),
+    what: &str,
+) {
+    let chip = (
+        button.0 + 5.0,
+        button.1 + 5.0,
+        button.2 - 10.0,
+        button.3 - 10.0,
+    );
+    let (_, ink_box) = glyph_reach(frame, chip, chip_color, ink, 0.34);
+    let (x, y, w, h) = ink_box.unwrap_or_else(|| panic!("{what}: no glyph on its chip"));
+    let (left, top) = (chip.0.ceil(), chip.1.ceil());
+    let (right, bottom) = ((chip.0 + chip.2).floor(), (chip.1 + chip.3).floor());
+    assert!(
+        x > left && y > top && x + w < right && y + h < bottom,
+        "{what}: glyph ink {:?} reaches the edge of its chip {chip:?}",
+        (x, y, w, h)
+    );
+}
+
+/// Where a glyph's most covered pixel lands, as a share of its colour. The
+/// CPU rasterizes the bundled font, so coverage is the same on every host
+/// and these glyphs all have solid pixels (1.0); GPUs differ only in
+/// rounding the blend, a step or two of 8-bit sRGB, at most a few hundredths
+/// at the darkest colours here. A glyph drawn in another role's colour, at
+/// ratio `r` where `e` belongs, lands at `(r - 1) / (e - 1)`: muted text
+/// where secondary belongs at 0.58 on a tab and 0.84 on the selected menu
+/// row, an unfocused window's primary text where secondary belongs at 1.35.
+const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.9..=1.1;
 
 /// Inactive tab titles read faint and the strip's controls tiny. Inactive
 /// titles now read at AAA in a focused window, and the close, `+`, `▾`, `≡`
@@ -5230,7 +5330,15 @@ fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
         }
         let (inactive_title, inactive_close) =
             (tabs.segments[1].title_rect, tabs.segments[1].close);
-        let mut rest_close = 0.0;
+        let fg = theme.foreground;
+        // The renderer's roles: inactive titles and resting close glyphs are
+        // secondary text, the strip's controls primary, and an unfocused
+        // window dims both toward the 3:1 floor.
+        let mut colors = chrome::Colors::default();
+        let secondary_floor = chrome::SECONDARY_TEXT_CONTRAST
+            .min(color::contrast_ratio(fg, strip))
+            .max(chrome::TEXT_CONTRAST);
+        let rest_close = colors.secondary(fg, strip);
         for (window_focused, hovered_close) in [(true, false), (false, false), (true, true)] {
             tabs.hovered_close_idx = hovered_close.then_some(1);
             let mut terminal = pane(&snap, 480, 160);
@@ -5243,40 +5351,82 @@ fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
             let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
             let case = format!("header={gnome_header} focused={window_focused}");
             if hovered_close {
-                let chip = color::over(strip, theme.foreground, 0.06, false);
-                let (_, ratio) = glyph_ink(&frame, inactive_close, chip).expect("hovered ×");
-                assert!(
-                    ratio >= rest_close,
-                    "{case}: hovered × {ratio:.2}:1 < resting {rest_close:.2}:1"
+                // Hovering lifts the close glyph to full text contrast on its
+                // chip, never quieter than at rest.
+                let chip = color::over(strip, fg, 0.06, false);
+                let lifted = colors.text(fg, chip);
+                let hovered = colors.tab_text(lifted, chip, true);
+                let floor = color::contrast_ratio(rest_close, strip).max(chrome::TEXT_CONTRAST);
+                assert_glyph_painted(
+                    &frame,
+                    inactive_close,
+                    (chip, hovered),
+                    floor,
+                    &format!("{case}: hovered ×"),
+                );
+                assert_glyph_inside_chip(
+                    &frame,
+                    inactive_close,
+                    (chip, hovered),
+                    &format!("{case}: hovered ×"),
                 );
                 continue;
             }
-            let (_, title) = glyph_ink(&frame, inactive_title, strip).expect("title ink");
-            let floor = if window_focused { 6.5 } else { 2.98 };
-            assert!(title >= floor, "{case}: inactive title {title:.2}:1");
+            let (secondary, control, floors) = if window_focused {
+                (
+                    colors.secondary(fg, strip),
+                    colors.text(fg, strip),
+                    (secondary_floor, chrome::TEXT_CONTRAST),
+                )
+            } else {
+                (
+                    colors.tab_text(rest_close, strip, false),
+                    colors.tab_text(fg, strip, false),
+                    (chrome::ICON_CONTRAST, chrome::ICON_CONTRAST),
+                )
+            };
+            assert_glyph_painted(
+                &frame,
+                inactive_title,
+                (strip, secondary),
+                floors.0,
+                &format!("{case}: inactive title"),
+            );
             // Smallest ink side, with a pixel to spare for rasterizer edges.
             // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
             // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
             let mut controls = vec![
-                ("×", inactive_close, 0.42 * line),
-                ("+", tabs.new_tab, 0.66 * line),
+                ("×", inactive_close, 0.42 * line, secondary, floors.0),
+                ("+", tabs.new_tab, 0.66 * line, control, floors.1),
                 if gnome_header {
-                    ("≡", tabs.new_tab_menu, 0.66 * line)
+                    ("≡", tabs.new_tab_menu, 0.66 * line, control, floors.1)
                 } else {
-                    ("▾", tabs.new_tab_menu, 0.42 * line)
+                    ("▾", tabs.new_tab_menu, 0.42 * line, control, floors.1)
                 },
             ];
             if gnome_header {
-                controls.push(("window close", tabs.window_controls[0].rect, 13.0));
+                controls.push((
+                    "window close",
+                    tabs.window_controls[0].rect,
+                    13.0,
+                    control,
+                    floors.1,
+                ));
             }
-            for (glyph, button, min_side) in controls {
-                let ((x, y, w, h), ratio) =
+            for (glyph, button, min_side, ink, floor) in controls {
+                let ((x, y, w, h), _) =
                     glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
                 assert!(
                     w >= min_side && h >= min_side,
                     "{case}: {glyph} ink {w}x{h} < {min_side}"
                 );
-                assert!(ratio >= 2.98, "{case}: {glyph} {ratio:.2}:1");
+                assert_glyph_painted(
+                    &frame,
+                    button,
+                    (strip, ink),
+                    floor,
+                    &format!("{case}: {glyph}"),
+                );
                 // Nothing clipped: the button is larger than its glyph.
                 assert!(
                     x >= button.0 + 2.0
@@ -5286,9 +5436,95 @@ fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
                     "{case}: {glyph} ink {:?} reaches the edge of {button:?}",
                     (x, y, w, h)
                 );
-                if glyph == "×" && window_focused {
-                    rest_close = ratio;
-                }
+            }
+        }
+    }
+}
+
+/// A side bar draws its tabs' close glyph from the same enlarged buffer as a
+/// top bar, so it grew too. At the default font and a large one the `✕`
+/// must stay inside the chip that shows the button (its square less 5 px a
+/// side), at rest and hovered, on the active row and an inactive one.
+#[test]
+fn side_bar_close_glyph_stays_inside_its_chip() {
+    let _serialized = gpu_test_guard();
+    for font_size in [Config::default().font_size, 20.0] {
+        let mut cfg = gpu_test_config();
+        cfg.font_size = font_size;
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+        else {
+            eprintln!("side bar close glyph check skipped: no GPU adapter");
+            return;
+        };
+        let theme = &cfg.theme;
+        let strip = resolve_chrome_bg(&cfg, theme, None);
+        let strip_w = cfg.tab_bar_width;
+        // kettle-ui's side bar row (`tab_bar_height`), its close button the
+        // row's trailing square.
+        let row = renderer.cell_h + 8.0;
+        let mut tabs = TabBar::hidden();
+        tabs.height = row;
+        tabs.band = (0.0, 0.0, strip_w, 320.0);
+        tabs.new_tab = (0.0, 2.0 * row, strip_w, row);
+        for idx in 0..2 {
+            let y = idx as f32 * row;
+            tabs.segments.push(TabSeg {
+                idx,
+                rect: (0.0, y, strip_w, row),
+                title_rect: (8.0, y, strip_w - row - 8.0, row),
+                hint: None,
+                close: (strip_w - row, y, row, row),
+                title: "shell".into(),
+                path: None,
+                active: idx == 0,
+                activity: TabActivity::Normal,
+            });
+        }
+        let snap = snapshot_of(10, 4, b"");
+        for hovered in [None, Some(0), Some(1)] {
+            tabs.hovered_close_idx = hovered;
+            let mut terminal = pane(&snap, 480 - strip_w as u32, 320);
+            terminal.rect = (strip_w, 0.0, 480.0 - strip_w, 320.0);
+            terminal.terminal = terminal.rect;
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+            let em = renderer.tab_close_buffer.metrics().font_size;
+            assert!(
+                em >= font_size * 1.4,
+                "font {font_size}: the side bar's ✕ is drawn at {em} px"
+            );
+            for seg in &tabs.segments {
+                let is_hovered = hovered == Some(seg.idx);
+                let case = format!(
+                    "font {font_size}, tab {} {}",
+                    seg.idx,
+                    if is_hovered { "hovered" } else { "at rest" }
+                );
+                // The side bar's colours: a dim glyph on a quiet chip at
+                // rest, a dark one on the theme red when hovered.
+                let mut colors = chrome::Colors::default();
+                let chip_color = colors.close_background(
+                    theme,
+                    theme.background,
+                    strip,
+                    (seg.active, is_hovered),
+                    true,
+                );
+                let glyph = if is_hovered {
+                    theme.cursor_text
+                } else {
+                    theme.palette[8]
+                };
+                let ink = colors.tab_text(glyph, chip_color, true);
+                assert_glyph_painted(
+                    &frame,
+                    seg.close,
+                    (chip_color, ink),
+                    chrome::TEXT_CONTRAST,
+                    &case,
+                );
+                assert_glyph_inside_chip(&frame, seg.close, (chip_color, ink), &case);
             }
         }
     }
@@ -5351,8 +5587,9 @@ fn narrow_side_bar_controls_fit_their_half_width_buttons() {
     }
 }
 
-/// Shortcut hints in a menu read at AAA against the panel; a disabled row's
-/// hint stays as dim as its label.
+/// Shortcut hints in a menu read at AAA where the theme's text does, on the
+/// panel and on the selected row, never clearer than their labels; a
+/// disabled row's hint stays as dim as its label.
 #[test]
 fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let _serialized = gpu_test_guard();
@@ -5375,9 +5612,10 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
             rows: vec![
                 row("Copy", "Ctrl+Shift+C", true),
                 row("Paste", "", true),
+                row("Find", "Ctrl+Shift+F", true),
                 row("Select All", "Ctrl+Shift+A", false),
             ],
-            highlight: 1,
+            highlight: 0,
             scroll_offset: 0,
             panel_w_clamped: panel_w,
             panel_h_clamped: 0.0,
@@ -5388,21 +5626,73 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let snap = snapshot_of(20, 4, b"");
     let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 200)], &overlay);
     let row_h = renderer.cell_h + 12.0;
-    let panel = cfg.theme.background;
-    let ink = |row: f32, left: f32, right: f32| {
+    let theme = &cfg.theme;
+    let fg = theme.foreground;
+    let mut colors = chrome::Colors::default();
+    // The renderer tints the selected row with the accent in linear light,
+    // as the sRGB target blends.
+    let selected = colors.surface(theme.background, cfg.resolved_accent(theme), 0.18, true);
+    // Labels start right of the selected row's accent rail.
+    let lane = |row: f32, left: f32, right: f32| {
         let y = ay + row * row_h;
-        glyph_ink(&frame, (left, y + 1.0, right - left, row_h - 2.0), panel)
-            .expect("menu text ink")
-            .1
+        (left, y + 1.0, right - left, row_h - 2.0)
     };
-    let label = ink(0.0, ax + 2.0, ax + panel_w * 0.5);
-    let hint = ink(0.0, ax + panel_w * 0.5, ax + panel_w - 2.0);
-    let disabled_hint = ink(2.0, ax + panel_w * 0.5, ax + panel_w - 2.0);
-    assert!(hint >= 6.5, "enabled hint {hint:.2}:1");
-    assert!(label >= hint, "label {label:.2}:1 quieter than its hint");
+    let (label_lane, hint_lane) = (
+        (ax + 12.0, ax + panel_w * 0.5),
+        (ax + panel_w * 0.5, ax + panel_w - 2.0),
+    );
+    for (what, index, background, enabled) in [
+        ("selected row", 0.0, selected, true),
+        ("enabled row", 2.0, theme.background, true),
+        ("disabled row", 3.0, theme.background, false),
+    ] {
+        let (label, hint) = if enabled {
+            (
+                colors.text(fg, background),
+                colors.secondary(fg, background),
+            )
+        } else {
+            let muted = colors.muted(fg, background);
+            (muted, muted)
+        };
+        let hint_floor = if enabled {
+            chrome::SECONDARY_TEXT_CONTRAST
+                .min(color::contrast_ratio(fg, background))
+                .max(chrome::TEXT_CONTRAST)
+        } else {
+            chrome::TEXT_CONTRAST
+        };
+        assert_glyph_painted(
+            &frame,
+            lane(index, label_lane.0, label_lane.1),
+            (background, label),
+            chrome::TEXT_CONTRAST,
+            &format!("{what} label"),
+        );
+        assert_glyph_painted(
+            &frame,
+            lane(index, hint_lane.0, hint_lane.1),
+            (background, hint),
+            hint_floor,
+            &format!("{what} hint"),
+        );
+        let (label, hint) = (
+            color::contrast_ratio(label, background),
+            color::contrast_ratio(hint, background),
+        );
+        assert!(
+            label >= hint,
+            "{what}: label {label:.2}:1 quieter than its hint {hint:.2}:1"
+        );
+    }
+    // On the same panel a disabled row's hint stays well below an enabled
+    // one; the loop proved both are drawn in these colours.
+    let panel = theme.background;
+    let enabled = color::contrast_ratio(colors.secondary(fg, panel), panel);
+    let disabled = color::contrast_ratio(colors.muted(fg, panel), panel);
     assert!(
-        disabled_hint >= 4.4 && disabled_hint + 1.0 < hint,
-        "disabled hint {disabled_hint:.2}:1 vs enabled {hint:.2}:1"
+        disabled + 1.0 < enabled,
+        "disabled hint {disabled:.2}:1 vs enabled {enabled:.2}:1"
     );
 }
 
