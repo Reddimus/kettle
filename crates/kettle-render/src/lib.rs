@@ -627,6 +627,8 @@ pub struct Renderer {
     /// for tab labels. Stays at length 0 when the status bar is off.
     status_bar_buffer: TextBuffer,
 
+    /// Pane interiors, drawn with replace blending so overlapping panes do
+    /// not compound their configured transparency.
     pane_bases: QuadPipeline,
     quads: QuadPipeline,
     /// Rounded pane outlines used only where a decorated native window clips
