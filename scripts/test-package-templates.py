@@ -17,6 +17,53 @@ ROOT = SCRIPT.parent.parent
 
 
 class PackageTemplateTests(unittest.TestCase):
+    def test_linux_archive_notice_carries_license_for_existing_updaters(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        package = workflow.split("- name: Package (Linux)", 1)[1]
+        docs = package.split("cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/", 1)[1]
+        docs = docs.split("# Desktop integration assets", 1)[0]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "dist/kettle/docs").mkdir(parents=True)
+            shutil.copy2(ROOT / "NOTICE", root / "dist/kettle/NOTICE")
+            # Use the actual document sources without copying the repository.
+            shutil.copytree(ROOT / "docs/changelog", root / "docs/changelog")
+            shutil.copytree(ROOT / "docs/licenses", root / "docs/licenses")
+            result = subprocess.run(
+                ["bash", "-e", "-c", docs], cwd=root,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            expected = (ROOT / "docs/licenses/tokyonight.nvim/LICENSE").read_bytes()
+            self.assertTrue((root / "dist/kettle/NOTICE").read_bytes().endswith(expected))
+            for name in ("LICENSE", "README.md"):
+                relative = Path("docs/licenses/tokyonight.nvim") / name
+                self.assertEqual((root / "dist/kettle" / relative).read_bytes(),
+                                 (ROOT / relative).read_bytes())
+
+    def test_nix_installs_tokyonight_license_bytes_on_both_platforms(self) -> None:
+        install = shutil.which("ginstall") or shutil.which("install")
+        if not install or sys.platform == "win32" or (sys.platform == "darwin" and not shutil.which("ginstall")):
+            self.skipTest("GNU install is required to execute the Nix install hook")
+        flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
+        hook = flake.split("postInstall = ", 1)[1]
+        # Only the unconditional part runs on Darwin as well as Linux.
+        common = hook.split("''", 2)[1] if hook.startswith("''") else ""
+        with tempfile.TemporaryDirectory() as raw:
+            prefix = Path(raw) / "out"
+            result = subprocess.run(
+                ["bash", "-e", "-c", 'out=$1; install_tool=$2\n'
+                 'install() { command "$install_tool" "$@"; }\n' + common,
+                 "bash", str(prefix), install],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in ("LICENSE", "README.md"):
+                relative = Path("docs/licenses/tokyonight.nvim") / name
+                installed = prefix / "share/doc/kettle" / relative
+                self.assertEqual(installed.read_bytes(), (ROOT / relative).read_bytes())
+                self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
+
     def test_update_manual_describes_supported_layouts(self) -> None:
         manual = (ROOT / "packaging/linux/kettle.1").read_text(encoding="utf-8")
         update = manual.rsplit(".B kettle update", 1)[1].split(".SH KEY BINDINGS", 1)[0]

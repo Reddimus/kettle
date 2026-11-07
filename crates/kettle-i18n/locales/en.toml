@@ -891,6 +891,10 @@ settings_field_grapheme_clustering = "Grapheme clustering"
 
 settings_description_field_grapheme_clustering = "Join emoji and Unicode clusters in new terminals."
 
+settings_field_builtin_box_drawing = "Built-in box drawing"
+
+settings_description_field_builtin_box_drawing = "Draw lines, blocks and Powerline separators to fit each cell."
+
 
 tab_new_options = "New Tab Options"
 
