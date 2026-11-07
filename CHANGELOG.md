@@ -199,9 +199,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   extension.
 
 - `restore-session` now defaults to `auto`: on macOS it follows "Close windows
-  when quitting an application" and restores when unchecked. Other platforms
-  still open fresh. `true`, `false` and legacy boolean spellings remain valid,
-  and Settings offers all three choices.
+  when quitting an application" and restores when unchecked. Windows
+  still opens fresh; Linux restores the previous session. `true`, `false` and
+  legacy boolean spellings remain valid, and Settings offers all three choices.
 
 - Automatic selection and search text colours meet 4.5:1 contrast against
   their highlight, including dim text and underlined links, while preserving

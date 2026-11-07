@@ -186,11 +186,11 @@ by default:
 - **Keystrokes are redacted to tokens.** A typed password is recorded as its
   length + timing (`······`), never the characters. `--record-raw-input`
   or `KETTLE_RECORD_RAW_INPUT=1` opts into literal capture of printable key
-  text only when a recording target is also supplied through the CLI or
-  environment (`--record`, `--record-dir`, `KETTLE_RECORD` or
-  `KETTLE_RECORD_DIR`). For config-enabled recording without such a target,
-  use `record-raw-input = on` in the config instead. ⚠ The trace can then
-  contain typed secrets.
+  text while recording is enabled. These overrides also apply when
+  `record = on` selects the recording target from the config; no CLI or
+  environment target is required. Use `record-raw-input = on` for a persistent
+  opt-in with a config-selected target. ⚠ The trace can then contain typed
+  secrets.
   Named keys and modifier chords remain tokens (for example `Enter` and
   `Ctrl+c`), so this is not a byte-exact PTY input stream. Leave it off unless
   you need unredacted printable key text. The window title shows **`[REC RAW]`**

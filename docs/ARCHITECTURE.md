@@ -3248,8 +3248,8 @@ child. Executable and npm metadata checks inspect access ACLs through the
 open descriptor before accepting private-group write bits. Named users other
 than the owner or root, and named groups other than that private group, must
 have no effective write grant. The primary-group scan requires an exhaustive
-local passwd database: every `passwd:` NSS source must be `files`, `compat`,
-`systemd`, `altfiles`, or `extrausers`. Missing `nsswitch.conf` uses glibc's
+local passwd database: every `passwd:` NSS source must be `files`, `systemd`,
+`altfiles`, or `extrausers`; delegated `compat` enumeration is refused. Missing `nsswitch.conf` uses glibc's
 `files` default; unknown sources, duplicate passwd rules, malformed or
 unreadable configuration, and files over 64 KiB refuse the exception. A clean
 `getpwent` EOF alone cannot establish that NSS enumerated every account.
@@ -5013,8 +5013,9 @@ text renderer or font dependency is added.
 Empty-space primary presses call `drag_window`; a second nearby press within
 400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
 presses are consumed. The 6 logical pixel inner resize band takes priority over
-header input and uses `drag_resize_window`, except when maximized, tiled,
-fullscreen or non-resizable. Native window controls activate on release over
+header input and uses `drag_resize_window`, except when maximized, fullscreen
+or non-resizable. Tiled windows retain the band because tiled state is not
+available. Native window controls activate on release over
 the originally pressed control. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.

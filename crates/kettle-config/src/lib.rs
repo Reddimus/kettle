@@ -1237,7 +1237,8 @@ pub enum ScrollbarMode {
 /// Policy for loading and saving the default last session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreSession {
-    /// Follow macOS window persistence; open fresh on other platforms.
+    /// Follow macOS window persistence, restore on Linux, and open fresh
+    /// on Windows.
     Auto,
     Always,
     Never,
@@ -2114,8 +2115,9 @@ pub struct Config {
     /// `update-policy = off` disables checking entirely regardless of this.
     pub update_check_interval_hours: u32,
     /// Restore the previous session's windows, tabs, splits and working dirs.
-    /// Auto follows macOS window persistence and is false elsewhere. The
-    /// resolved policy gates both loading and saving the default session.
+    /// Auto follows macOS window persistence, restores on Linux, and opens
+    /// fresh on Windows. The resolved policy gates both loading and saving
+    /// the default session.
     pub restore_session: RestoreSession,
     /// Recent primary-screen rows persisted per pane; zero disables content restore.
     pub restore_scrollback_lines: usize,

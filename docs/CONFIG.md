@@ -1007,7 +1007,7 @@ GPU device labels resolve ID-only and name-only pins against detected adapters;
 **Automatic** means no adapter is pinned.
 `scrollback-bytes = 120MB` displays as **120 MB** under **Scrollback memory**.
 **Update check interval** displays hours as **24 h**. The panel also displays
-`13 pt`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).
+`13 px`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).
 
 Unknown keys, invalid values and malformed lines at startup and reload also
 appear in a dismissible in-window notice. It names the config filename, source
@@ -1019,9 +1019,11 @@ Values are omitted, including environment values. Filenames and keys have
 control characters removed and are limited to 64 characters each.
 
 **Open Config** opens the file named by the notice with the operating system's
-default app, using the same mechanism as **Advanced…**. While the notice is
-visible, Enter opens the file and Escape dismisses it; both buttons are also
-available to screen readers. The terminal grid and IME cursor do not move.
+default app, using the same mechanism as **Advanced…**. If a screen reader
+moves focus to the notice, Enter opens the file and Escape dismisses it. While
+the terminal retains focus, those keys go to the running shell or program. Both
+buttons remain available to screen readers. The terminal grid and IME cursor
+do not move.
 Valid settings still apply. Dismissing a notice keeps it hidden until the
 diagnostics change. Use `kettle --check-config` for the complete diagnostics.
 
