@@ -1369,6 +1369,19 @@ pub(crate) struct MovedPasteState {
 }
 
 impl WindowState {
+    /// Window-local lifecycle cleanup, even when the mux has no close events
+    /// (a detached pane left this window without ending its process).
+    pub(crate) fn take_closed_panes(&mut self) -> Vec<u64> {
+        let panes = &self.mux.panes;
+        self.accessibility_output
+            .get_mut()
+            .retain(|pane, _| panes.contains_key(pane));
+        self.accessibility_text_rows
+            .get_mut()
+            .retain(|pane, _| panes.contains_key(pane));
+        self.mux.take_closed_panes()
+    }
+
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
         self.preview_overlay = Some(overlay);

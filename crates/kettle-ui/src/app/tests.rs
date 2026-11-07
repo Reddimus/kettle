@@ -10,6 +10,7 @@ fn key_release_test_paste(pane: u64, content: super::QueuedPasteContent) -> supe
         content,
         key_presses: Vec::new(),
         key_releases: Vec::new(),
+        accessibility_input: Default::default(),
     }
 }
 
@@ -25,7 +26,14 @@ fn replay_key_release_test_queue(
         } = paste.content
         {
             assert_eq!(
-                App::deliver_deferred_input(ws, &targets, &paste.key_presses, prepare_input, false),
+                App::deliver_deferred_input(
+                    ws,
+                    &targets,
+                    &paste.key_presses,
+                    prepare_input,
+                    false,
+                    Default::default()
+                ),
                 PaneInputResult::Queued
             );
             delivered.extend(targets.into_iter().flat_map(|(_, bytes)| bytes));
@@ -365,6 +373,7 @@ include!("focus_tests.rs");
 include!("gpu_recovery_tests.rs");
 include!("ime_tests.rs");
 include!("keyboard_tests.rs");
+include!("foreign_key_accessibility_tests.rs");
 include!("keyboard_chords_tests.rs");
 include!("layout_tests.rs");
 include!("links_tests.rs");
@@ -422,3 +431,7 @@ fn settings_gpu_row_projects_translated_pending_value_and_disables_edits() {
         "Detectando..."
     );
 }
+
+include!("deferred_foreign_key_accessibility_tests.rs");
+
+include!("deferred_foreign_key_accessibility_controls_tests.rs");

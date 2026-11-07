@@ -2338,12 +2338,13 @@ impl<T: EventListener> Term<T> {
     /// `input_grapheme` would leave, without its table lookups. The grapheme
     /// tests check the two agree for every printable ASCII scalar.
     fn input_ascii_grapheme(&mut self, c: char) {
-        self.grapheme_state = grapheme::GraphemeState::after_ascii();
-        self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
         self.last_grapheme.clear();
         self.last_grapheme.push(c);
         self.grapheme_template = self.grid.cursor.template.clone();
         let point = self.input_char(c, 1);
+        // Insertion and bottom-margin wrapping can clear the previous cluster.
+        self.grapheme_state = grapheme::GraphemeState::after_ascii();
+        self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
         self.grapheme_anchor = point.map(|point| {
             self.grid[point].flags.insert(Flags::GRAPHEME);
             GraphemeAnchor {

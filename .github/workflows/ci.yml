@@ -39,7 +39,7 @@ jobs:
       - name: Run native shell integration fixtures
         run: |
           python3 scripts/check-shell-integration.py
-          python3 scripts/perf/macos-compare-score-self-test.py ApplePayloadTests
+          python3 scripts/perf/macos-compare-score-self-test.py ApplePayloadTests AppleWindowCleanupTests
       - name: Run Fish 4 compatibility fixtures
         run: |
           install_fish() {
@@ -110,7 +110,8 @@ jobs:
         run: |
           scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core fish xclip x11-utils xdotool libxtst6 dbus-daemon ffmpeg
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core fish xclip x11-utils xdotool libxtst6 dbus-daemon ffmpeg \
+            weston fontconfig libgl1-mesa-dri libegl-mesa0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Validate this host's recipe graph before expensive Rust builds. Run on
       # all matrix hosts: a common recipe cannot depend on a Unix-only recipe.
@@ -173,6 +174,8 @@ jobs:
       - name: Live UI helper self-test (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/check-live-ui-smoke.py self-test
+      - name: UI regression gate headless fixtures
+        run: just ui-states-self-test
       - name: Qualification supervisor fixtures (Unix)
         if: runner.os != 'Windows'
         run: python3 scripts/test-qualify-live-ui.py
@@ -740,21 +743,40 @@ jobs:
         # fresh isolated Kettle each, so a pull request that changes the UI
         # carries its images. Committed baselines under tests/ui-states/linux
         # are compared when present.
-        timeout-minutes: 15
-        env:
-          LIBGL_ALWAYS_SOFTWARE: "1"
+        timeout-minutes: 20
         run: |
           compare=()
-          if [ -d tests/ui-states/linux ]; then compare=(--compare tests/ui-states/linux); fi
-          xvfb-run -a -s "-screen 0 1600x1000x24" python3 scripts/capture-ui-states.py \
+          if [ -d tests/ui-states/linux ]; then
+            compare=(--compare tests/ui-states/linux)
+          else
+            echo 'UI states: capture only; final merged-build Linux baselines are still required.'
+          fi
+          python3 scripts/run-ui-states-wayland.py \
             --kettle ./target/release/kettle --out target/ui-states \
-            --languages en,es "${compare[@]}"
+            --diagnostics target/ui-wayland-environment "${compare[@]}"
       - name: Upload UI states
         if: runner.os == 'Linux' && always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-states-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ui-states
+          path: |
+            target/ui-states
+            target/ui-wayland-environment
+          if-no-files-found: warn
+          retention-days: 14
+      - name: UI state geometry (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 20
+        run: |
+          launchctl asuser "$(id -u)" python3 scripts/capture-ui-states.py \
+            --kettle ./target/release/kettle --out target/ui-state-geometry \
+            --geometry-only --languages en,es --themes dark,light --sizes default,narrow
+      - name: Upload UI state geometry
+        if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-state-geometry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ui-state-geometry
           if-no-files-found: warn
           retention-days: 14
       - name: --gpu-info diagnostic smoke (Linux/macOS)

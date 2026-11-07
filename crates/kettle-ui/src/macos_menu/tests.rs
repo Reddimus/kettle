@@ -1,3 +1,7 @@
+fn empty_menu_model(tr: &Translator, bindings: &Bindings, context: Context) -> Vec<Menu> {
+    menu_model_with_profiles(tr, bindings, context, &[])
+}
+
 use super::*;
 use kettle_i18n::Language;
 
@@ -34,8 +38,8 @@ fn titles(model: &[Menu]) -> Vec<Vec<&str>> {
 
 #[test]
 fn complete_structure_in_english_and_spanish() {
-    let en = menu_model(&Translator::new(Language::En), &Bindings::new(), ready());
-    let es = menu_model(&Translator::new(Language::Es), &Bindings::new(), ready());
+    let en = empty_menu_model(&Translator::new(Language::En), &Bindings::new(), ready());
+    let es = empty_menu_model(&Translator::new(Language::Es), &Bindings::new(), ready());
     assert_eq!(
         en.iter().map(|menu| menu.title).collect::<Vec<_>>(),
         ["Kettle", "Shell", "Edit", "View", "Window"]
@@ -231,7 +235,7 @@ fn shortcuts_follow_config_overrides_unbinds_and_command_filter() {
     let ctrl = Trigger::new(Mods::CTRL, Key::Char('t'));
     let mut bindings = Bindings::from([(original, Action::NewTab), (ctrl, Action::NewTab)]);
     let shortcut = |bindings: &Bindings| {
-        menu_model(&tr, bindings, ready())
+        empty_menu_model(&tr, bindings, ready())
             .into_iter()
             .flat_map(|menu| menu.rows)
             .find_map(|row| match row {
@@ -270,7 +274,7 @@ fn enabled_state_follows_existing_action_semantics() {
         writable: false,
         ..ready()
     };
-    let model = menu_model(&Translator::new(Language::En), &Bindings::new(), one);
+    let model = empty_menu_model(&Translator::new(Language::En), &Bindings::new(), one);
     for row in model.into_iter().flat_map(|menu| menu.rows) {
         if let Row::Item {
             command: Command::Kettle(action),
@@ -308,7 +312,7 @@ fn enabled_state_follows_existing_action_semantics() {
     );
     assert!(one.enables(&Action::ClosePane)); // closes the tab with one pane
     assert!(one.enables(&Action::StartSearch));
-    for row in menu_model(
+    for row in empty_menu_model(
         &Translator::new(Language::En),
         &Bindings::new(),
         Context::default(),
@@ -331,7 +335,7 @@ fn enabled_state_follows_existing_action_semantics() {
 fn native_equivalents_cannot_shadow_configured_chords() {
     let trigger = Trigger::new(Mods::SUPER, Key::Char('q'));
     let bindings = Bindings::from([(trigger, Action::NewTab)]);
-    let menu = menu_model(&Translator::new(Language::En), &bindings, ready());
+    let menu = empty_menu_model(&Translator::new(Language::En), &bindings, ready());
     assert!(menu[0].rows.iter().any(|row| matches!(
         row,
         Row::Item {
@@ -446,7 +450,7 @@ fn edit_menu_hints_follow_rebinding_and_require_a_pane() {
             ..ready()
         },
     ] {
-        let model = menu_model(&Translator::new(Language::En), &bindings, context);
+        let model = empty_menu_model(&Translator::new(Language::En), &bindings, context);
         let row = model[2]
             .rows
             .iter()
@@ -474,8 +478,104 @@ fn edit_menu_hints_follow_rebinding_and_require_a_pane() {
 fn hint_menu_displays_its_control_shortcut_when_no_command_binding_exists() {
     let trigger = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('h'));
     let bindings = [(trigger, Action::HintMode)].into_iter().collect();
-    let model = menu_model(&Translator::new(Language::En), &bindings, ready());
+    let model = empty_menu_model(&Translator::new(Language::En), &bindings, ready());
     assert!(model[2].rows.iter().any(|row| matches!(row,Row::Item {
         command:Command::Kettle(Action::HintMode), shortcut:Some(found), ..
     } if *found == trigger)));
+}
+
+#[test]
+fn profile_inventory_dispatch_stays_cached_during_blocked_refresh() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, releases) = mpsc::channel();
+    let releases = std::sync::Mutex::new(releases);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let completed = Arc::new(AtomicUsize::new(0));
+    let finished = completed.clone();
+    let (wakes, wake) = mpsc::channel();
+    let mut inventory = ProfileInventory::with_enumerator(
+        move || {
+            let call = count.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(call).unwrap();
+            let _ = releases
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+            finished.fetch_add(1, Ordering::SeqCst);
+            vec![format!("profile{call}")]
+        },
+        move || {
+            let _ = wakes.send(());
+        },
+    )
+    .unwrap();
+    assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+    // A blocked filesystem must not prevent dispatch using the empty startup cache.
+    for _ in 0..30 {
+        let model = menu_model(
+            &Translator::new(Language::En),
+            &Bindings::new(),
+            ready(),
+            &inventory,
+        );
+        assert!(
+            !model
+                .iter()
+                .flat_map(|m| kettle_actions(&m.rows))
+                .any(|a| matches!(a, Action::LaunchProfile(_)))
+        );
+    }
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        0,
+        "dispatch must return while the startup enumerator is still blocked"
+    );
+    release.send(()).unwrap();
+    wake.recv_timeout(Duration::from_secs(5)).unwrap();
+    inventory.complete();
+    assert_eq!(inventory.profiles(), ["profile0"]);
+    inventory.refresh();
+    assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    for _ in 0..100 {
+        inventory.refresh();
+    }
+    for _ in 0..30 {
+        let model = menu_model(
+            &Translator::new(Language::En),
+            &Bindings::new(),
+            ready(),
+            &inventory,
+        );
+        assert!(
+            model
+                .iter()
+                .flat_map(|m| kettle_actions(&m.rows))
+                .any(|a| *a == Action::LaunchProfile("profile0".into()))
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        1,
+        "dispatch must return while the refresh enumerator is still blocked"
+    );
+    release.send(()).unwrap();
+    assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    wake.recv_timeout(Duration::from_secs(5)).unwrap();
+    inventory.complete();
+    release.send(()).unwrap();
+    wake.recv_timeout(Duration::from_secs(5)).unwrap();
+    inventory.complete();
+    assert_eq!(inventory.profiles(), ["profile2"]);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let worker = inventory.worker.take().unwrap();
+    drop(inventory);
+    worker.join().unwrap();
 }

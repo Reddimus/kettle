@@ -806,6 +806,13 @@ impl App {
             system_motion: std::sync::OnceLock::new(),
             #[cfg(target_os = "linux")]
             agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
+            #[cfg(target_os = "macos")]
+            profile_inventory: {
+                let proxy = proxy.clone();
+                crate::macos_menu::ProfileInventory::new(move || {
+                    let _ = proxy.send_event(UserEvent::ProfilesReady);
+                })?
+            },
             proxy,
             activation,
             quick_terminal: crate::quick_terminal::Runtime {
