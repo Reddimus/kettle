@@ -1699,9 +1699,13 @@ mark-to-mark stacks) keep their place; unanchored ones (`#\u{301}`,
 `@\u{323}`), `.case` substitutes and a dot after a composed `Aacute` clear
 their base; and with `mkmk` turned off a stacked acute no longer follows the
 diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
-must be pixel-identical with fallback placement removed, a steady frame or
-zoom must reuse the cached placement, a row laid out late must still be
-placed, and a focused block cursor must cover a moved mark with its inverted
+use an isolated database of bundled JetBrains Mono and Fira Sans and must be
+pixel-identical with fallback placement removed. Portable fixture checks verify
+the selected glyphs and faces, zero-offset anchors, and the shaped offsets
+controlled by `mark` and `mkmk`; Fira Sans anchors the grave below that
+JetBrains Mono lacks. A steady frame or zoom must reuse the cached placement,
+a row laid out late must still be placed, and a focused block cursor must
+cover a moved mark with its inverted
 copy. Switching between a moved-mark cell and a built-in shade also checks
 that only the current cell contributes cursor patch bounds, with queue and
 mapped uploads and pixel-identical crops in both blink phases. `cursor_marks`

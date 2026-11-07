@@ -144,6 +144,131 @@ fn a_grave_stack_keeps_ink_above_and_below() {
     assert!((centre(&below) - centre(&base)).abs() <= 1.5);
 }
 
+/// The original mixed input includes U+0316, which JetBrains Mono lacks.
+/// Fira Sans supplies an anchored grave below; host fallbacks need not do so.
+const PLACED_TEXT: &str =
+    "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}";
+
+fn anchored_fonts() -> FontSystem {
+    let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
+    load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    load_bundled_font(
+        &mut fonts,
+        include_bytes!("../../../assets/fonts/fira-sans/FiraSans-Regular.ttf"),
+    );
+    fonts
+}
+
+fn shape_anchored(
+    text: &str,
+    features: FontFeatures,
+) -> (FontSystem, Vec<glyphon::cosmic_text::LayoutGlyph>) {
+    let mut fonts = anchored_fonts();
+    let mut buffer = TextBuffer::new(&mut fonts, Metrics::new(26.0, 32.5));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_text(
+        text,
+        &Attrs::new()
+            .family(Family::Name(kettle_config::font::FAMILY))
+            .font_features(features),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let glyphs = buffer
+        .layout_runs()
+        .next()
+        .expect("one line")
+        .glyphs
+        .to_vec();
+    (fonts, glyphs)
+}
+
+/// Portable checks keep the pixel fixture's composition, zero-offset anchors,
+/// offset mark-to-base anchors and mark-to-mark attachment from disappearing.
+#[test]
+fn anchored_fixture_covers_the_intended_shaping_cases() {
+    for (text, ids, face) in [
+        ("e\u{301}", &[172][..], "JetBrainsMonoNF-Regular"),
+        ("Z\u{308}", &[62, 12082][..], "JetBrainsMonoNF-Regular"),
+        (
+            "x\u{308}\u{301}",
+            &[92, 12082, 12085][..],
+            "JetBrainsMonoNF-Regular",
+        ),
+        ("q\u{323}", &[85, 385][..], "JetBrainsMonoNF-Regular"),
+        (
+            "s\u{323}\u{307}",
+            &[87, 12098, 12083][..],
+            "JetBrainsMonoNF-Regular",
+        ),
+        ("a\u{300}\u{316}", &[370, 2679][..], "FiraSans-Regular"),
+    ] {
+        assert!(PLACED_TEXT.contains(text));
+        let (mut fonts, glyphs) = shape_anchored(text, FontFeatures::new());
+        assert_eq!(
+            glyphs.iter().map(|g| g.glyph_id).collect::<Vec<_>>(),
+            ids,
+            "{text:?}"
+        );
+        for glyph in &glyphs {
+            assert_eq!(
+                fonts.db().face(glyph.font_id).unwrap().post_script_name,
+                face
+            );
+        }
+        assert!(glyphs[1..].iter().all(|g| g.w == 0.0));
+        assert!(
+            mark_fallback::line_shifts(
+                &glyphs,
+                text,
+                &mut fonts,
+                &mut SwashCache::new(),
+                &mut mark_fallback::MarkCache::default(),
+            )
+            .is_empty(),
+            "{text:?}"
+        );
+    }
+    for (text, tag, index, zero_offset) in [
+        ("Z\u{308}", b"mark", 1, true),
+        ("q\u{323}", b"mark", 1, true),
+        ("x\u{308}\u{301}", b"mark", 1, false),
+        ("x\u{308}\u{301}", b"mkmk", 2, false),
+        ("a\u{300}\u{316}", b"mark", 1, false),
+    ] {
+        let (_, placed) = shape_anchored(text, FontFeatures::new());
+        let mut features = FontFeatures::new();
+        features.disable(FeatureTag::new(tag));
+        let (mut fonts, unplaced) = shape_anchored(text, features.clone());
+        let offsets = |g: &glyphon::cosmic_text::LayoutGlyph| (g.x_offset, g.y_offset);
+        if zero_offset {
+            assert_eq!(offsets(&placed[index]), (0.0, 0.0), "{text:?}");
+            assert_eq!(offsets(&unplaced[index]), (0.0, 0.0), "{text:?}");
+            let mut cache = mark_fallback::MarkCache::default();
+            cache.use_features(&features);
+            let shifts = mark_fallback::line_shifts(
+                &unplaced,
+                text,
+                &mut fonts,
+                &mut SwashCache::new(),
+                &mut cache,
+            );
+            assert_eq!(
+                shifts.len(),
+                1,
+                "disabling the zero-offset anchor must expose {text:?}"
+            );
+        } else {
+            assert_ne!(
+                offsets(&placed[index]),
+                offsets(&unplaced[index]),
+                "{text:?}: {tag:?}"
+            );
+        }
+    }
+}
+
 /// Marks the font anchors (mark-to-base with a zero offset, mark-to-base and
 /// mark-to-mark with offsets) or the shaper placed draw exactly as they did
 /// before fallback placement existed.
@@ -154,11 +279,11 @@ fn marks_the_font_places_render_exactly_as_before() {
         eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
-    let (placed, _) = frame_of(
-        &mut renderer,
-        &cfg,
-        "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}",
-    );
+    renderer.font_system = anchored_fonts();
+    renderer.text_symbol_family = None;
+    renderer.emoji_family = None;
+    renderer.remeasure_cell();
+    let (placed, placed_images) = frame_of(&mut renderer, &cfg, PLACED_TEXT);
     assert!(
         (0..3).all(|row| row_shifts(&renderer, row).is_empty()),
         "no mark here is the fallback's to move: {:?}",
@@ -167,13 +292,11 @@ fn marks_the_font_places_render_exactly_as_before() {
     // The same rows emitted with no fallback placement at all.
     renderer.pane_mark_shifts[0].fill(Some(Box::default()));
     renderer.grid_glyphs_dirty = true;
-    let snap = snapshot_of(
-        16,
-        3,
-        "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}\x1b[?25l"
-            .as_bytes(),
+    let (unplaced, unplaced_images) = frame_of(&mut renderer, &cfg, PLACED_TEXT);
+    assert_eq!(
+        placed_images, unplaced_images,
+        "font-placed glyph rectangles must not move"
     );
-    let unplaced = capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
     assert!(placed == unplaced, "font-placed marks must not move");
 }
 
