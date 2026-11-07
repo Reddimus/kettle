@@ -1232,10 +1232,12 @@ search-selection-smoke *ARGS:
 bell-flash-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release bell-flash
 
-# Prove a fresh window is sized for agent TUIs: with no window-width/height a
-# pane must report at least 144x33 cells (needs a monitor >= 1366 px wide) and
-# the surface must not exceed the 1296 px target, while window-width = 100
-# still follows the 8 px startup baseline. Captures geometry/PNG under
+# Prove a fresh window is sized for agent TUIs at the shipped font, padding and
+# tab bar: with no window-width/height a pane must report at least 144x33
+# cells (needs a monitor >= 1366x768 logical px) and the surface must not
+# exceed the 160x45 target (1304 px wide with the default 12 px padding), while
+# window-width = 100 / window-height = 30 with an always-shown tab bar opens at
+# exactly 100x30. Captures geometry/PNG under
 # target/diagnostics/default-window-size-*.
 [unix]
 default-window-size-smoke:

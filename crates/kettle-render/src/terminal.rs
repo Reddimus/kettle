@@ -6,8 +6,8 @@ use super::{
     Translator, Weight, Wrap, background_has_wallpaper, card_scene, clip_quads, color,
     composed_bg_alpha, cursor_policy, emit_cell_locked_glyphs, font_features, inline_cards,
     inline_image_clip, pane_backdrop_rect, pane_grid_origin, pane_metrics, rect,
-    resolved_cell_foreground_cached, selection_row_span, single_column_text_presentation,
-    visible_selection_rows,
+    resolved_cell_foreground_cached, resolved_highlight_foreground_cached, selection_row_span,
+    single_column_text_presentation, visible_selection_rows,
 };
 
 /// A card a frame drew: its pane, its nonce, and the part of it inside its
@@ -100,19 +100,33 @@ pub struct LinkRect {
     pub explicit: bool,
 }
 
-/// Detected links rest as a dim thin line; OSC 8 rests dotted. Hover wins
-/// over either source and uses the accent at full opacity.
-pub(crate) fn link_decoration(link: &LinkRect) -> (bool, f32, f32) {
+/// A resting link underline's thickness, in pixels.
+pub(crate) const LINK_REST_THICKNESS: f32 = 1.0;
+
+/// A link's underline as `(dotted, thickness, alpha)`, or `None` for none.
+///
+/// The hovered link is a solid accent line at full opacity, whatever its
+/// source. At rest an OSC 8 link is dotted: its text need not look like a
+/// link, so the line is its only cue. A detected URL or path rests with no
+/// line unless `link-underline = always`, which draws a thin dim one, so a
+/// screen full of URLs stays quiet and the hovered link stands out.
+pub(crate) fn link_decoration(
+    link: &LinkRect,
+    mode: kettle_config::LinkUnderline,
+) -> Option<(bool, f32, f32)> {
     if link.hover {
-        (false, 1.5, 1.0)
+        Some((false, 1.5, 1.0))
+    } else if link.explicit || mode == kettle_config::LinkUnderline::Always {
+        Some((link.explicit, LINK_REST_THICKNESS, 0.55))
     } else {
-        (link.explicit, 1.0, 0.55)
+        None
     }
 }
 
 #[cfg(test)]
 mod link_decoration_tests {
     use super::*;
+    use kettle_config::LinkUnderline;
     #[test]
     fn detected_explicit_and_hovered_links_have_distinct_decorations() {
         let mut link = LinkRect {
@@ -122,13 +136,23 @@ mod link_decoration_tests {
             hover: false,
             explicit: false,
         };
-        assert_eq!(link_decoration(&link), (false, 1.0, 0.55));
+        assert_eq!(link_decoration(&link, LinkUnderline::Hover), None);
+        assert_eq!(
+            link_decoration(&link, LinkUnderline::Always),
+            Some((false, 1.0, 0.55))
+        );
         link.explicit = true;
-        assert_eq!(link_decoration(&link), (true, 1.0, 0.55));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((true, 1.0, 0.55)));
+        }
         link.hover = true;
-        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((false, 1.5, 1.0)));
+        }
         link.explicit = false;
-        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((false, 1.5, 1.0)));
+        }
     }
 }
 
@@ -458,12 +482,23 @@ impl Renderer {
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
         let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
-        let selection_bg = super::theme::selection_fill(
+        // A dimmed split's cell backgrounds show through the pane dimmer, while
+        // its highlight fills are painted above it: highlights resolve against
+        // the background as shown.
+        let linear = self.config.format.is_srgb();
+        let shown = |bg: Rgb| {
+            if inactive > 0.0 {
+                color::over(bg, theme.background, f64::from(inactive), linear)
+            } else {
+                bg
+            }
+        };
+        let selection_fills = super::theme::PaneSelectionFills::new(
             theme,
-            default_bg,
-            window_focused,
+            shown(default_bg),
             &mut self.minimum_contrast_cache,
         );
+        let selection_bg = selection_fills.row(window_focused);
         let mut links: Vec<_> = links.iter().collect();
         links.sort_unstable_by_key(|link| (link.row, link.col));
         let dim_bg = if term_colors.reverse_video() {
@@ -610,6 +645,7 @@ impl Renderer {
         let mut fallback_run = None;
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
+        let mut selection_cell_fills = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -739,32 +775,25 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
+            let highlight_bg = if matches!(highlight, CellHighlight::None) {
+                bg
+            } else {
+                shown(bg)
+            };
+            let cell_background = selection_fills.cell(
+                highlight,
+                cfg,
+                theme,
+                highlight_bg,
+                &mut self.minimum_contrast_cache,
+            );
             if matches!(
                 card_cell,
                 inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
             ) {
                 let backdrop = match highlight {
-                    CellHighlight::Search(true) => {
-                        cfg.search_background.unwrap_or(theme.palette[3])
-                    }
-                    CellHighlight::Search(false)
-                    | CellHighlight::Selection
-                    | CellHighlight::InactiveSelection => {
-                        super::theme::highlight_colors_cached(
-                            highlight,
-                            cfg,
-                            theme,
-                            fg,
-                            if selected && search.is_none() {
-                                default_bg
-                            } else {
-                                bg
-                            },
-                            &mut self.minimum_contrast_cache,
-                        )
-                        .1
-                    }
                     CellHighlight::None => theme.background,
+                    _ => cell_background,
                 };
                 if let Some(clip) = fallback_clip {
                     card_scene::append_fallback_background(
@@ -778,27 +807,26 @@ impl Renderer {
                     );
                 }
             }
-            fg = resolved_cell_foreground_cached(
-                fg,
-                if selected && search.is_none() {
-                    default_bg
-                } else {
-                    bg
-                },
-                highlight,
-                (flags.contains(Flags::DIM), bold),
-                cfg,
-                theme,
-                &mut self.minimum_contrast_cache,
-            );
-            let cell_background = match highlight {
-                CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
-                CellHighlight::Search(false) => {
-                    self.minimum_contrast_cache
-                        .resolve(theme.selection_background, bg, 3.0)
-                }
-                CellHighlight::Selection | CellHighlight::InactiveSelection => selection_bg,
-                CellHighlight::None => bg,
+            // Highlight ink resolves against the fill painted under it.
+            fg = if matches!(highlight, CellHighlight::None) {
+                resolved_cell_foreground_cached(
+                    fg,
+                    bg,
+                    highlight,
+                    (flags.contains(Flags::DIM), bold),
+                    cfg,
+                    theme,
+                    &mut self.minimum_contrast_cache,
+                )
+            } else {
+                resolved_highlight_foreground_cached(
+                    fg,
+                    cell_background,
+                    highlight,
+                    cfg,
+                    theme,
+                    &mut self.minimum_contrast_cache,
+                )
             };
             if inactive > 0.0 && matches!(highlight, CellHighlight::None) {
                 fg = self.chrome_colors.inactive(
@@ -857,22 +885,30 @@ impl Renderer {
                     1.0,
                 ));
             }
-            if let Some(active) = search {
-                let fill = super::theme::highlight_colors_cached(
-                    CellHighlight::Search(active),
-                    cfg,
-                    theme,
-                    fg,
-                    bg,
-                    &mut self.minimum_contrast_cache,
-                )
-                .1;
+            // The row's selection quad carries the pane's fill. A selected cell
+            // that fill does not stand out from gets its own on top
+            // (`PaneSelectionFills::cell`).
+            if matches!(
+                highlight,
+                CellHighlight::Selection | CellHighlight::InactiveSelection
+            ) && cell_background != selection_bg
+            {
+                selection_cell_fills.push(rect(
+                    ox + vcol as f32 * cw,
+                    oy + vrow as f32 * ch,
+                    cw,
+                    ch,
+                    cell_background,
+                    1.0,
+                ));
+            }
+            if search.is_some() {
                 search_quads.push(rect(
                     ox + vcol as f32 * cw,
                     oy + vrow as f32 * ch,
                     cw,
                     ch,
-                    fill,
+                    cell_background,
                     1.0,
                 ));
             }
@@ -905,15 +941,10 @@ impl Renderer {
                             self.config.format.is_srgb(),
                         )
                     } else {
-                        resolved_cell_foreground_cached(
+                        resolved_highlight_foreground_cached(
                             line,
-                            if selected && search.is_none() {
-                                default_bg
-                            } else {
-                                bg
-                            },
+                            cell_background,
                             highlight,
-                            (false, false),
                             cfg,
                             theme,
                             &mut self.minimum_contrast_cache,
@@ -936,50 +967,32 @@ impl Renderer {
                 fg,
                 line_color,
             );
-            // Resolve link decoration ink before painting it over a highlight.
+            // The link underline under this cell, if any.
             let link_index =
                 links.partition_point(|link| (link.row as i32, link.col) <= (vrow, col));
             if let Some(link) = link_index.checked_sub(1).map(|index| links[index])
                 && link.row as i32 == vrow
                 && col < link.col.saturating_add(link.width)
+                // OSC 8 links rest dotted, detected links rest with no line
+                // unless `link-underline = always` draws a thin dim one, and the
+                // hovered link is a solid accent line (`link_decoration`).
+                && let Some((dotted, thickness, rest_alpha)) =
+                    link_decoration(link, cfg.link_underline)
             {
-                // Detected links rest thin and dim, OSC 8 links rest dotted, and
-                // the hovered link is a solid accent line (`link_decoration`).
-                let (dotted, thickness, rest_alpha) = link_decoration(link);
-                let ink = if link.hover {
-                    self.ui_accent(cfg, theme)
+                // Over a highlight the line keeps its shape but is drawn at the
+                // resting weight in the cell's text colour at full strength, as
+                // an SGR underline under that text would: link blue, the hover
+                // accent or a heavier line would compete with the fill. It stays
+                // drawn because an OSC 8 link's text need not look like a link.
+                let (ink, alpha, thickness, target) = if matches!(highlight, CellHighlight::None) {
+                    let ink = if link.hover {
+                        self.ui_accent(cfg, theme)
+                    } else {
+                        theme.palette[4]
+                    };
+                    (ink, rest_alpha, thickness, &mut *quads)
                 } else {
-                    theme.palette[4]
-                };
-                let ink = if matches!(highlight, CellHighlight::None) {
-                    ink
-                } else {
-                    resolved_cell_foreground_cached(
-                        ink,
-                        if selected && search.is_none() {
-                            default_bg
-                        } else {
-                            bg
-                        },
-                        highlight,
-                        (false, false),
-                        cfg,
-                        theme,
-                        &mut self.minimum_contrast_cache,
-                    )
-                };
-                let target = if matches!(highlight, CellHighlight::None) {
-                    &mut *quads
-                } else {
-                    &mut highlight_decorations
-                };
-                // Over a highlight the line keeps full strength and the full
-                // 1.5 px weight: its ink was resolved against the fill above,
-                // and a thinner line would blend into it.
-                let (thickness, alpha) = if matches!(highlight, CellHighlight::None) {
-                    (thickness, rest_alpha)
-                } else {
-                    (thickness.max(1.5), 1.0)
+                    (fg, 1.0, LINK_REST_THICKNESS, &mut highlight_decorations)
                 };
                 let cell_x = ox + vcol as f32 * cw;
                 let y = oy + (vrow + 1) as f32 * ch - thickness;
@@ -1091,8 +1104,10 @@ impl Renderer {
         }
 
         if inactive > 0.0 {
+            decorations.extend(selection_cell_fills);
             decorations.extend(search_quads);
         } else {
+            quads.extend(selection_cell_fills);
             quads.extend(search_quads);
         }
         decorations.extend(highlight_decorations);

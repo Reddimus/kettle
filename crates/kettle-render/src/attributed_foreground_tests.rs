@@ -550,6 +550,99 @@ fn inactive_selection_moves_toward_background_and_keeps_aa_ink() {
     }
 }
 
+/// Hue distance in sextants, the unit `color::hsl` reports.
+fn hue_distance(a: f64, b: f64) -> f64 {
+    let d = (a - b).abs();
+    d.min(6.0 - d)
+}
+
+/// Neither default theme's selection colour reaches 3:1 on its background.
+/// Blending it toward white or black got there by greying it (TokyoNight
+/// Night's `#283457` became a slate `#5d6781`), the muted fill a UX panel
+/// found hard to pick out; the fill is now a stronger tint of the same hue.
+#[test]
+fn default_theme_selections_become_stronger_tints_with_readable_text() {
+    let cfg = Config::default();
+    for name in [cfg.dark_theme.as_str(), cfg.light_theme.as_str()] {
+        let theme = cfg.theme_by_name(name);
+        let background = theme.background;
+        assert!(
+            color::contrast_ratio(theme.selection_background, background) < 3.0,
+            "{name}: the fixture must need strengthening"
+        );
+        let mut cache = MinimumContrastCache::default();
+        let fill = super::theme::selection_fill(&theme, background, true, &mut cache);
+        assert!(
+            color::contrast_ratio(fill, background) >= 3.0,
+            "{name}: {fill:?} has {:.2}:1",
+            color::contrast_ratio(fill, background)
+        );
+        let (hue, saturation, _) = color::hsl(theme.selection_background);
+        let (fill_hue, fill_saturation, _) = color::hsl(fill);
+        assert!(
+            hue_distance(hue, fill_hue) < 0.05,
+            "{name}: {fill:?} drifted from the theme's hue"
+        );
+        assert!(
+            fill_saturation >= saturation - 0.02,
+            "{name}: {fill:?} greyed the tint ({fill_saturation:.2} < {saturation:.2})"
+        );
+        for ink in [theme.foreground, theme.palette[4], theme.palette[8]] {
+            let text = resolved_cell_foreground(
+                ink,
+                background,
+                CellHighlight::Selection,
+                false,
+                false,
+                &cfg,
+                &theme,
+            );
+            assert!(
+                color::contrast_ratio(text, fill) >= 4.5,
+                "{name}: {text:?} on {fill:?}"
+            );
+        }
+        let inactive = super::theme::selection_fill(&theme, background, false, &mut cache);
+        let inactive_contrast = color::contrast_ratio(inactive, background);
+        assert!(inactive_contrast >= 2.0, "{name}: {inactive_contrast:.2}");
+        assert!(
+            inactive_contrast < color::contrast_ratio(fill, background),
+            "{name}: the unfocused fill must stay weaker"
+        );
+    }
+}
+
+#[test]
+fn every_bundled_selection_keeps_its_hue_or_its_colour() {
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let selection = theme.selection_background;
+        let fill = super::theme::selection_fill(
+            &theme,
+            theme.background,
+            true,
+            &mut MinimumContrastCache::default(),
+        );
+        if color::contrast_ratio(selection, theme.background) >= 3.0 {
+            assert_eq!(fill, selection, "{name}: a separate colour is kept");
+            continue;
+        }
+        assert!(
+            color::contrast_ratio(fill, theme.background) >= 3.0,
+            "{name}"
+        );
+        let channels = [selection.r, selection.g, selection.b];
+        // A near-grey's hue is rounding noise.
+        if channels.iter().max().unwrap() - channels.iter().min().unwrap() < 16 {
+            continue;
+        }
+        let (hue, saturation, _) = color::hsl(selection);
+        let (fill_hue, fill_saturation, _) = color::hsl(fill);
+        assert!(hue_distance(hue, fill_hue) < 0.05, "{name}: {fill:?}");
+        assert!(fill_saturation >= saturation - 0.02, "{name}: {fill:?}");
+    }
+}
+
 #[test]
 fn selected_ansi_indexed_truecolour_link_and_decoration_ink_meets_aa() {
     let cfg = Config::default();

@@ -5250,8 +5250,8 @@ class S3Evidence(unittest.TestCase):
             def __exit__(self, *args): pass
             def json_ctl(self, name):
                 if name == "list_panes":
-                    return {"panes": [{"id": 1, "focused": True, "cols": 100 if self.env else 150, "rows": 30 if self.env else 40}]}
-                return {"surface": {"width": 1296}, "cell": {"width": 8.4}, "padding": {},
+                    return {"panes": [{"id": 1, "focused": True, "cols": 100 if self.env else 164, "rows": 30 if self.env else 44}]}
+                return {"surface": {"width": 1304}, "cell": {"width": 7.8}, "padding": {"x": 12.0, "y": 12.0},
                         "scale_factor": 1., "monitor": {"width": 1920, "height": 1080}}
             def screenshot(self, path): pass
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module, "LiveKettle", Live), mock.patch.object(module.platform, "system", return_value="Darwin"), mock.patch.object(module.subprocess, "run", side_effect=lambda args, **kw: Path(args[args.index("-o") + 1]).touch()), mock.patch.object(module.time, "clock_gettime_ns", return_value=10), mock.patch.object(module.time, "CLOCK_UPTIME_RAW", 1, create=True):
@@ -5264,6 +5264,10 @@ class S3Evidence(unittest.TestCase):
             self.assertIn("KETTLE_SMOKE_REAL_SHELL", calls[1].env)
             self.assertIn("login-shell = false", calls[1].cfg.read_text())
             self.assertIn("shell-integration = false", calls[1].cfg.read_text())
+            # The default launch keeps the shipped font, padding and tab bar.
+            for key in ("font-size", "window-padding", "tab-bar", "status-bar"):
+                self.assertNotIn(key, calls[0].cfg.read_text())
+            self.assertIn("tab-bar = always", calls[1].cfg.read_text())
         ci = (HERE.parents[1] / ".github/workflows/ci.yml").read_text()
         ci = ci.split("Unix job-control compatibility (macOS)")[1].split("Preserve offline")[0]
         self.assertEqual(ci.count("--expect-startup-path pre_launch --allow-fit-decline"), 3)

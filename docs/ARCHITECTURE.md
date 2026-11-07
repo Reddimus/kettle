@@ -1825,10 +1825,25 @@ reorder/tear-off/re-dock gestures.
 Solid tab/status chrome derives from `theme.background` (24% darker for dark
 backgrounds, 6% for light ones); wallpaper modes still resolve through
 `chrome-background`. Horizontal inactive separators and rounded hover/pressed
-fills derive from strip and foreground with a 1.5:1 floor. Window focus from
-`Overlay::window_focused` dims tab text and controls with a 3:1 floor (4.5:1
-when focused), and replaces the active accent with a neutral line. The existing
-focus-event redraw and retained text-area damage keys repaint both transitions.
+fills derive from strip and foreground with a 1.5:1 floor. Chrome text has
+three roles in `chrome::Colors`: primary (`text`, at least 4.5:1), secondary
+(`secondary`) and muted (`muted`: the foreground mixed 55% toward the
+background, lifted back to 4.5:1). Secondary text moves the foreground toward
+the background only until it reaches 7:1 (WCAG AAA), never below 4.5:1 and
+never clearer than the foreground itself, so a theme whose own text is under
+7:1 shows it undimmed. Inactive top and bottom tab titles, the resting close
+glyph on those tabs and enabled menu shortcut, type and check hints are
+secondary; a disabled menu row's hint stays muted, and a hovered close glyph
+is primary on its chip. When `Overlay::window_focused` is false, tab text and
+controls, secondary text included, dim to a 3:1 floor and the active accent
+becomes a neutral line; a focused window keeps each role's own floor. The
+existing focus-event redraw and retained text-area damage keys repaint both
+transitions. The tab close glyph draws at 1.5 times the tab text
+(`TAB_CLOSE_GLYPH_SCALE`; `✕` in side bars, `×` elsewhere), and `+`, `▾` and
+GNOME's `≡` at 2 times (`TAB_CONTROL_GLYPH_SCALE`).
+`tab_strip::control_glyph_metrics` caps each em at 90% of its button's shorter
+side and its line at the button's height, so a glyph stays centred and
+unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
 square (growing with the band height), a 4 pt
 inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
@@ -1849,10 +1864,14 @@ transparent titlebar instead of restoring an opaque AppKit caption.
 Windows applies the same raised surface and a contrast-checked text color
 through DWM while requesting its system backdrop. Linux probes the live
 Wayland registry before enabling Winit's KWin blur path. X11 and Wayland
-compositors without that protocol get a 99% opacity floor on the live underlay
-and replacing pane-base pass. That floor is applied only to the swapchain
-render, so offscreen screenshots retain the configured alpha and config files
-are never rewritten.
+compositors without that protocol keep the configured opacity without blur,
+as Windows does without its backdrop; Kettle's 99% Linux default keeps text
+readable until a user lowers it. The live window and an offscreen capture draw
+the same scene pass over a transparent clear, so no live-only layer changes
+the configured alpha. Settings replaces the Window blur description
+with an unavailable note once the probe has answered, and drops the footer's
+blur hint on the Window blur and Background opacity rows, in the projection
+that paint, hit tests and accessibility share.
 
 The shared tab band supplies painting, pointer hit tests, accessibility, ctl
 geometry, IME placement, docking and tear-off placement. Content and status
@@ -3427,14 +3446,15 @@ about 3.6 MiB for the previous single glyph buffer. The 120x36 gate grid does
 not measure this large-window cost. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
-The pane and chrome quad layers (`pane_bases`, `live_pane_bases`, `quads`,
-`pane_dimming`, `text_decorations`, `overlay_quads` and `menu_quads`) differ
-only in blending, and the three image
+The pane and chrome quad layers (`pane_bases`, `quads`, `pane_dimming`,
+`text_decorations`, `overlay_quads` and `menu_quads`) differ only in
+blending, and the three image
 layers (`bg_imgs`, `imgs` and `media_receipt_img`) not at all. A renderer
 therefore compiles one replacing and one blending quad pipeline and one image
 pipeline (`SharedPipelines`), and each layer keeps only its own uniform, bind
 group, instance buffer and, for images, texture cache and budget
-reservations. That is 3 quad and image pipelines per window instead of 8. The
+reservations. That is 3 quad and image pipelines per window instead of one
+per layer. The
 offscreen self-test and `--screenshot`, which draw one frame, keep the
 standalone constructors. glyphon already shares one pipeline between the
 three text renderers through its `Cache`.
@@ -3504,10 +3524,24 @@ text, so its bitmap is already resident).
 Terminal highlight ink resolves after ANSI, hyperlink and dim attributes,
 against the opaque fill actually painted. Readable user ink precedes readable
 cell ink; automatic fallback chooses the highest contrast of the theme's
-selection foreground and neutrals plus white and black. Per-frame colour caches
-include this decision and inactive selection fills. Highlight fills in dimmed
-splits and highlight decorations use the post-dimmer decoration pass, with
-fills before underlines and strikeouts. Unfocused cursors use steady quads
+selection foreground and neutrals plus white and black. A focused selection
+fill short of 3:1 moves only in HSL lightness
+(`color::with_min_contrast_same_hue`). `theme::PaneSelectionFills` resolves
+the focused and unfocused fills once per pane frame against the default
+background, and the row's selection quad paints that fill. A selected cell or
+non-current search match keeps it wherever it meets the fill's ratio (3:1, or
+2:1 unfocused) against the cell's own background; only a cell it does not
+separate from resolves a fill against that background, painted over the row
+quad, and its ink resolves against that fill. A selection over a status line
+therefore stays one colour, and a plain selection draws one quad per row.
+Contrast is computed from opaque colours; a translucent window's composite
+with the desktop is not known to the renderer. In a dimmed split, highlights
+resolve against backgrounds as the pane dimmer shows them, because highlight
+fills paint above the dimmer. A link underline on a highlight reuses the
+cell's resolved text ink. Per-frame colour caches include these decisions and
+both selection fills. Highlight fills in dimmed splits and highlight
+decorations use the post-dimmer decoration pass, with fills before underlines
+and strikeouts. Unfocused cursors use steady quads
 outside the focused cursor's blink range; `unchanged` solid cursors recolour
 their pane glyph directly. Only the focused blinking block uses the separate
 cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay
@@ -4909,7 +4943,10 @@ do not change pointer grid mapping or terminal IME placement. A hover records
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. Hint actions and their legend share `hint_action`; OSC 8
-captions use the URI rather than their displayed text.
+captions use the URI rather than their displayed text. The underlines
+themselves are pane quads: `terminal::link_decoration` picks each line from
+the link's hover state, its source and `link-underline`, and pane quads are
+rebuilt every frame, so a reloaded mode repaints without a cache key.
 
 ## Disposable session content
 
@@ -4958,10 +4995,10 @@ to painting, pointer routing, AccessKit and
 and IME candidate positioning continue to use the shared content area. Startup
 size correction adds the header before renderer creation, preserving explicit
 grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
-28-point targets, rounded `chrome::tab_detail` hover/pressed fills and
-`Colors::tab_text` unfocused dimming, like the current New Tab controls. Glyphs
-retain 4.5:1 contrast when focused and 3:1 when dimmed. Outer corners remain
-square.
+28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
+hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
+New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
+dimmed. Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`

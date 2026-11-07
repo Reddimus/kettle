@@ -107,11 +107,11 @@ Kettle starts with these pane and tab keys:
 See the full list any time with `kettle --list-keybinds`, or press
 `Ctrl+Shift+K` and type what you want.
 
-A fresh window opens at about 150 columns (a `160x45` baseline fitted to your
-monitor). That is on purpose: agent TUIs lay out side panels above ~110
-columns, and Claude Code's fullscreen diff panel auto-opens at 144. Set
-`window-width` / `window-height` for a different size, or `window-state =
-maximise`. A split pane is narrower than the window; zoom it (`Ctrl+Shift+X`)
+A fresh window opens at about 164 columns (a `160x45` baseline fitted to your
+monitor; about 154 on a 1366 px wide laptop). That is on purpose: agent TUIs
+lay out side panels above ~110 columns, and Claude Code's fullscreen diff panel
+auto-opens at 144. Set `window-width` / `window-height` for a different size,
+or `window-state = maximise`. A split pane is narrower than the window; zoom it (`Ctrl+Shift+X`)
 when a tool wants the full width. See
 [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)
 for the panel's exact requirements.

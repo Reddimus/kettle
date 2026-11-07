@@ -352,7 +352,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         Some(card)
     );
     assert_eq!(renderer.card_at(x - 1.0, y), None);
-    let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
+    let replacing = [&renderer.pane_bases];
     let blending = [
         &renderer.quads,
         &renderer.overlay_quads,
@@ -369,7 +369,6 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     quads.sort();
     quads.dedup();
     assert_eq!(quads.len(), 2, "all quad layers share two blend modes");
-    assert_eq!(replacing[0].pipeline(), replacing[1].pipeline());
     assert!(
         blending
             .iter()
@@ -5078,7 +5077,7 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
 }
 
 #[test]
-fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
+fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
     let _serialized = gpu_test_guard();
     let cfg = gpu_test_config();
     let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 400, 160, 1.0, false).unwrap()
@@ -5109,17 +5108,597 @@ fn strip_add_and_dropdown_glyphs_draw_larger_than_tab_text() {
         terminal.rect = (0.0, 32.0, 400.0, 128.0);
         terminal.terminal = terminal.rect;
         capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
-        let text = renderer.tab_close_buffer.metrics().font_size;
-        for size in [
-            renderer.tabbar_buffer.metrics().font_size,
-            renderer.new_tab_arrow_buffer.metrics().font_size,
+        let text = renderer.tab_buffers[0].metrics().font_size;
+        for (glyph, size, scale) in [
+            ("+", renderer.tabbar_buffer.metrics().font_size, 1.8),
+            ("▾", renderer.new_tab_arrow_buffer.metrics().font_size, 1.8),
+            ("×", renderer.tab_close_buffer.metrics().font_size, 1.4),
         ] {
             assert!(
-                size > text * 1.3,
-                "titlebar={in_titlebar}: control glyph {size} vs tab text {text}"
+                size >= text * scale,
+                "titlebar={in_titlebar}: {glyph} glyph {size} vs tab text {text}"
             );
         }
     }
+}
+
+/// The pixel box the ink in `rect` spans against `background`. Ink is any
+/// pixel more than 24 levels from the background.
+fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<Rect4> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in rect.1.ceil() as u32..((rect.1 + rect.3).floor() as u32).min(frame.height()) {
+        for x in rect.0.ceil() as u32..((rect.0 + rect.2).floor() as u32).min(frame.width()) {
+            let p = frame.get_pixel(x, y);
+            let ink = Rgb::new(p[0], p[1], p[2]);
+            let distance = [
+                (ink.r, background.r),
+                (ink.g, background.g),
+                (ink.b, background.b),
+            ]
+            .map(|(a, b)| a.abs_diff(b))
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+            if distance > 24 {
+                let b = bounds.get_or_insert((x, y, x, y));
+                *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+        }
+    }
+    bounds.map(|(x0, y0, x1, y1)| pixel_box(x0, y0, x1, y1))
+}
+
+fn pixel_box(x0: u32, y0: u32, x1: u32, y1: u32) -> Rect4 {
+    (
+        x0 as f32,
+        y0 as f32,
+        (x1 - x0 + 1) as f32,
+        (y1 - y0 + 1) as f32,
+    )
+}
+
+/// How far the pixels in `rect` move from `background` toward `ink`, the
+/// colour the renderer resolved for the glyph drawn there, in linear light:
+/// 0 is bare background and 1 a fully covered pixel. The headless target is
+/// sRGB and glyphon decodes its colours before blending, so a pixel's share
+/// is the glyph's coverage there, however a rasterizer rounds the edges.
+/// Returns the largest share and the box of the pixels that reach `edge`.
+fn glyph_reach(
+    frame: &image::RgbaImage,
+    rect: Rect4,
+    background: Rgb,
+    ink: Rgb,
+    edge: f64,
+) -> (f64, Option<Rect4>) {
+    let from = color::relative_luminance(background);
+    let span = color::relative_luminance(ink) - from;
+    assert!(
+        span.abs() > 1e-3,
+        "glyph colour {ink:?} is its background {background:?}"
+    );
+    let mut reach = f64::MIN;
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for y in rect.1.ceil() as u32..((rect.1 + rect.3).floor() as u32).min(frame.height()) {
+        for x in rect.0.ceil() as u32..((rect.0 + rect.2).floor() as u32).min(frame.width()) {
+            let p = frame.get_pixel(x, y);
+            let share = (color::relative_luminance(Rgb::new(p[0], p[1], p[2])) - from) / span;
+            reach = reach.max(share);
+            if share >= edge {
+                let b = bounds.get_or_insert((x, y, x, y));
+                *b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+        }
+    }
+    (
+        reach,
+        bounds.map(|(x0, y0, x1, y1)| pixel_box(x0, y0, x1, y1)),
+    )
+}
+
+/// A glyph the renderer resolved to `ink` over `background`: that colour
+/// meets `floor` (WCAG rates the colour text is drawn in, not its
+/// antialiased edges), and the frame shows the glyph painted in it, solid
+/// somewhere and nowhere stronger. Judging the resolved colour keeps a
+/// colour that sits on a floor from failing by a rounding step on another
+/// GPU's blending; the reach check still catches a glyph drawn in any other
+/// role's colour.
+fn assert_glyph_painted(
+    frame: &image::RgbaImage,
+    rect: Rect4,
+    (background, ink): (Rgb, Rgb),
+    floor: f64,
+    what: &str,
+) {
+    let ratio = color::contrast_ratio(ink, background);
+    assert!(
+        ratio + 1e-9 >= floor,
+        "{what}: resolved {ink:?} reads {ratio:.3}:1 on {background:?}, under {floor}:1"
+    );
+    let (reach, _) = glyph_reach(frame, rect, background, ink, 1.0);
+    assert!(
+        GLYPH_SOLID_REACH.contains(&reach),
+        "{what}: the strongest pixel reaches {reach:.3} of the way to {ink:?}"
+    );
+}
+
+/// A tab close button's chip: its square less 5 px a side.
+fn close_chip(button: Rect4) -> Rect4 {
+    (
+        button.0 + 5.0,
+        button.1 + 5.0,
+        button.2 - 10.0,
+        button.3 - 10.0,
+    )
+}
+
+/// Only a close button's square clips its glyph, so a glyph larger than the
+/// chip shows as ink on the chip's edge pixels: a pixel of chip must stay
+/// clear on each side. Ink is any pixel a third of the way or more from the
+/// chip to the glyph colour.
+fn assert_glyph_inside_chip(
+    frame: &image::RgbaImage,
+    button: Rect4,
+    (chip_color, ink): (Rgb, Rgb),
+    what: &str,
+) {
+    let chip = close_chip(button);
+    let (_, ink_box) = glyph_reach(frame, chip, chip_color, ink, 0.34);
+    let (x, y, w, h) = ink_box.unwrap_or_else(|| panic!("{what}: no glyph on its chip"));
+    let (left, top) = (chip.0.ceil(), chip.1.ceil());
+    let (right, bottom) = ((chip.0 + chip.2).floor(), (chip.1 + chip.3).floor());
+    assert!(
+        x > left && y > top && x + w < right && y + h < bottom,
+        "{what}: glyph ink {:?} reaches the edge of its chip {chip:?}",
+        (x, y, w, h)
+    );
+}
+
+/// Where a glyph's most covered pixel lands, as a share of its colour. The
+/// CPU rasterizes the bundled font, so coverage is the same on every host
+/// and these glyphs all have solid pixels (1.0); GPUs differ only in
+/// rounding the blend, a step or two of 8-bit sRGB, at most a few hundredths
+/// at the darkest colours here. A glyph drawn in another role's colour, at
+/// ratio `r` where `e` belongs, lands at `(r - 1) / (e - 1)`: muted text
+/// where secondary belongs at 0.58 on a tab and 0.84 on the selected menu
+/// row, an unfocused window's primary text where secondary belongs at 1.35.
+const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.95..=1.05;
+
+/// Inactive tab titles read faint and the strip's controls tiny. Inactive
+/// titles now read at AAA in a focused window, and the close, `+`, `▾`, `≡`
+/// and header-button glyphs are drawn large enough to find, at 3:1 or
+/// better, whole inside the button that takes their clicks.
+#[test]
+fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("tab strip legibility check skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let strip = resolve_chrome_bg(&cfg, theme, None);
+    let snap = snapshot_of(20, 2, b"");
+    let line = renderer.metrics.line_height;
+    for gnome_header in [false, true] {
+        let mut tabs = TabBar::hidden();
+        tabs.height = if gnome_header {
+            46.0
+        } else {
+            (renderer.cell_h + 12.0).max(28.0).round()
+        };
+        tabs.in_titlebar = gnome_header;
+        tabs.band = (0.0, 0.0, 480.0, tabs.height);
+        // GNOME's header centres 28 px buttons, the window's close last.
+        let (button_y, side) = if gnome_header {
+            (9.0, 28.0)
+        } else {
+            (0.0, tabs.height)
+        };
+        let plus_x = 480.0 - 8.0 - side - if gnome_header { 40.0 } else { 0.0 };
+        tabs.new_tab = (plus_x, button_y, side, side);
+        tabs.new_tab_menu = (plus_x - 4.0 - side, button_y, side, side);
+        if gnome_header {
+            tabs.window_controls = vec![WindowControlButton {
+                action: WindowControl::Close,
+                rect: (480.0 - 37.0, button_y, side, side),
+                label: String::new(),
+                hovered: false,
+                pressed: false,
+            }];
+        }
+        for idx in 0..2 {
+            let rect = (8.0 + idx as f32 * 160.0, 0.0, 160.0, tabs.height);
+            let content = horizontal_tab_content_layout(
+                rect,
+                true,
+                true,
+                false,
+                "shell",
+                None,
+                renderer.cell_w,
+            );
+            tabs.segments.push(TabSeg {
+                idx,
+                rect,
+                title_rect: content.title,
+                hint: None,
+                close: content.close,
+                title: "shell".into(),
+                path: None,
+                active: idx == 0,
+                activity: TabActivity::Normal,
+            });
+        }
+        let (inactive_title, inactive_close) =
+            (tabs.segments[1].title_rect, tabs.segments[1].close);
+        let fg = theme.foreground;
+        // The renderer's roles: inactive titles and resting close glyphs are
+        // secondary text, the strip's controls primary, and an unfocused
+        // window dims both toward the 3:1 floor.
+        let mut colors = chrome::Colors::default();
+        let secondary_floor = chrome::SECONDARY_TEXT_CONTRAST
+            .min(color::contrast_ratio(fg, strip))
+            .max(chrome::TEXT_CONTRAST);
+        let rest_close = colors.secondary(fg, strip);
+        for (window_focused, hovered_close) in [(true, false), (false, false), (true, true)] {
+            tabs.hovered_close_idx = hovered_close.then_some(1);
+            let mut terminal = pane(&snap, 480, 160);
+            terminal.rect = (0.0, tabs.height, 480.0, 160.0 - tabs.height);
+            terminal.terminal = terminal.rect;
+            let overlay = Overlay {
+                window_focused,
+                ..Overlay::default()
+            };
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+            let case = format!("header={gnome_header} focused={window_focused}");
+            if hovered_close {
+                // Hovering lifts the close glyph to full text contrast on its
+                // chip, never quieter than at rest.
+                let chip = color::over(strip, fg, 0.06, false);
+                let lifted = colors.text(fg, chip);
+                let hovered = colors.tab_text(lifted, chip, true);
+                let floor = color::contrast_ratio(rest_close, strip).max(chrome::TEXT_CONTRAST);
+                // Judged on the chip alone: around it is the strip.
+                assert_glyph_painted(
+                    &frame,
+                    close_chip(inactive_close),
+                    (chip, hovered),
+                    floor,
+                    &format!("{case}: hovered ×"),
+                );
+                assert_glyph_inside_chip(
+                    &frame,
+                    inactive_close,
+                    (chip, hovered),
+                    &format!("{case}: hovered ×"),
+                );
+                continue;
+            }
+            let (secondary, control, floors) = if window_focused {
+                (
+                    colors.secondary(fg, strip),
+                    colors.text(fg, strip),
+                    (secondary_floor, chrome::TEXT_CONTRAST),
+                )
+            } else {
+                (
+                    colors.tab_text(rest_close, strip, false),
+                    colors.tab_text(fg, strip, false),
+                    (chrome::ICON_CONTRAST, chrome::ICON_CONTRAST),
+                )
+            };
+            assert_glyph_painted(
+                &frame,
+                inactive_title,
+                (strip, secondary),
+                floors.0,
+                &format!("{case}: inactive title"),
+            );
+            // Smallest ink side, with a pixel to spare for rasterizer edges.
+            // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
+            // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
+            let mut controls = vec![
+                ("×", inactive_close, 0.42 * line, secondary, floors.0),
+                ("+", tabs.new_tab, 0.66 * line, control, floors.1),
+                if gnome_header {
+                    ("≡", tabs.new_tab_menu, 0.66 * line, control, floors.1)
+                } else {
+                    ("▾", tabs.new_tab_menu, 0.42 * line, control, floors.1)
+                },
+            ];
+            if gnome_header {
+                controls.push((
+                    "window close",
+                    tabs.window_controls[0].rect,
+                    13.0,
+                    control,
+                    floors.1,
+                ));
+            }
+            for (glyph, button, min_side, ink, floor) in controls {
+                let (x, y, w, h) =
+                    glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
+                assert!(
+                    w >= min_side && h >= min_side,
+                    "{case}: {glyph} ink {w}x{h} < {min_side}"
+                );
+                assert_glyph_painted(
+                    &frame,
+                    button,
+                    (strip, ink),
+                    floor,
+                    &format!("{case}: {glyph}"),
+                );
+                // Nothing clipped: the button is larger than its glyph.
+                assert!(
+                    x >= button.0 + 2.0
+                        && y >= button.1 + 2.0
+                        && x + w <= button.0 + button.2 - 2.0
+                        && y + h <= button.1 + button.3 - 2.0,
+                    "{case}: {glyph} ink {:?} reaches the edge of {button:?}",
+                    (x, y, w, h)
+                );
+            }
+        }
+    }
+}
+
+/// A side bar draws its tabs' close glyph from the same enlarged buffer as a
+/// top bar, so it grew too. At the default font and a large one the `✕`
+/// must stay inside the chip that shows the button (its square less 5 px a
+/// side), at rest and hovered, on the active row and an inactive one.
+#[test]
+fn side_bar_close_glyph_stays_inside_its_chip() {
+    let _serialized = gpu_test_guard();
+    for font_size in [Config::default().font_size, 20.0] {
+        let mut cfg = gpu_test_config();
+        cfg.font_size = font_size;
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+        else {
+            eprintln!("side bar close glyph check skipped: no GPU adapter");
+            return;
+        };
+        let theme = &cfg.theme;
+        let strip = resolve_chrome_bg(&cfg, theme, None);
+        let strip_w = cfg.tab_bar_width;
+        // kettle-ui's side bar row (`tab_bar_height`), its close button the
+        // row's trailing square.
+        let row = renderer.cell_h + 8.0;
+        let mut tabs = TabBar::hidden();
+        tabs.height = row;
+        tabs.band = (0.0, 0.0, strip_w, 320.0);
+        tabs.new_tab = (0.0, 2.0 * row, strip_w, row);
+        for idx in 0..2 {
+            let y = idx as f32 * row;
+            tabs.segments.push(TabSeg {
+                idx,
+                rect: (0.0, y, strip_w, row),
+                title_rect: (8.0, y, strip_w - row - 8.0, row),
+                hint: None,
+                close: (strip_w - row, y, row, row),
+                title: "shell".into(),
+                path: None,
+                active: idx == 0,
+                activity: TabActivity::Normal,
+            });
+        }
+        let snap = snapshot_of(10, 4, b"");
+        for hovered in [None, Some(0), Some(1)] {
+            tabs.hovered_close_idx = hovered;
+            let mut terminal = pane(&snap, 480 - strip_w as u32, 320);
+            terminal.rect = (strip_w, 0.0, 480.0 - strip_w, 320.0);
+            terminal.terminal = terminal.rect;
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+            let em = renderer.tab_close_buffer.metrics().font_size;
+            assert!(
+                em >= font_size * 1.4,
+                "font {font_size}: the side bar's ✕ is drawn at {em} px"
+            );
+            for seg in &tabs.segments {
+                let is_hovered = hovered == Some(seg.idx);
+                let case = format!(
+                    "font {font_size}, tab {} {}",
+                    seg.idx,
+                    if is_hovered { "hovered" } else { "at rest" }
+                );
+                // The side bar's colours: a dim glyph on a quiet chip at
+                // rest, a dark one on the theme red when hovered.
+                let mut colors = chrome::Colors::default();
+                let chip_color = colors.close_background(
+                    theme,
+                    theme.background,
+                    strip,
+                    (seg.active, is_hovered),
+                    true,
+                );
+                let glyph = if is_hovered {
+                    theme.cursor_text
+                } else {
+                    theme.palette[8]
+                };
+                let ink = colors.tab_text(glyph, chip_color, true);
+                // Judged on the chip alone: around it the row's own
+                // background can sit as dark as a hovered glyph.
+                assert_glyph_painted(
+                    &frame,
+                    close_chip(seg.close),
+                    (chip_color, ink),
+                    chrome::TEXT_CONTRAST,
+                    &case,
+                );
+                assert_glyph_inside_chip(&frame, seg.close, (chip_color, ink), &case);
+            }
+        }
+    }
+}
+
+/// A 40 px side bar splits its last row into 20 px `▾` and `+` buttons. At a
+/// large font the enlarged glyphs must fit those widths, not just the row's
+/// height, or the button clips them.
+#[test]
+fn narrow_side_bar_controls_fit_their_half_width_buttons() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 30.0;
+    cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+    cfg.tab_bar_width = 40.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+    else {
+        eprintln!("side bar control fit check skipped: no GPU adapter");
+        return;
+    };
+    let row = (renderer.cell_h + 8.0).round();
+    let mut tabs = TabBar::hidden();
+    tabs.height = row;
+    tabs.band = (0.0, 0.0, 40.0, 320.0);
+    tabs.new_tab_menu = (0.0, row, 20.0, row);
+    tabs.new_tab = (20.0, row, 20.0, row);
+    tabs.segments.push(TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 40.0, row),
+        title_rect: (4.0, 0.0, 32.0, row),
+        hint: None,
+        close: (0.0, 0.0, 0.0, 0.0),
+        title: "sh".into(),
+        path: None,
+        active: true,
+        activity: TabActivity::Normal,
+    });
+    let snap = snapshot_of(10, 4, b"");
+    let mut terminal = pane(&snap, 440, 320);
+    terminal.rect = (40.0, 0.0, 440.0, 320.0);
+    terminal.terminal = terminal.rect;
+    let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+    let strip = resolve_chrome_bg(&cfg, &cfg.theme, None);
+    // The `+` button's left two pixels are the bar's accent cap.
+    let (px, py, pw, ph) = tabs.new_tab;
+    for (glyph, content) in [
+        ("▾", tabs.new_tab_menu),
+        ("+", (px + 2.0, py, pw - 2.0, ph)),
+    ] {
+        let (x, y, w, h) =
+            glyph_ink(&frame, content, strip).unwrap_or_else(|| panic!("{glyph} has no ink"));
+        assert!(
+            x >= content.0 + 1.0
+                && y >= content.1 + 1.0
+                && x + w <= content.0 + content.2 - 1.0
+                && y + h <= content.1 + content.3 - 1.0,
+            "{glyph} ink {:?} is clipped by {content:?}",
+            (x, y, w, h)
+        );
+    }
+}
+
+/// Shortcut hints in a menu read at AAA where the theme's text does, on the
+/// panel and on the selected row, never clearer than their labels; a
+/// disabled row's hint stays as dim as its label.
+#[test]
+fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 200) else {
+        eprintln!("menu shortcut hint check skipped: no GPU adapter");
+        return;
+    };
+    let row = |label: &str, hint: &str, enabled| ContextMenuRow {
+        matched_chars: None,
+        label: label.into(),
+        separator: false,
+        enabled,
+        hint: hint.into(),
+    };
+    let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
+    let overlay = Overlay {
+        context_menu: Some(ContextMenu {
+            picker_header_height: 0.0,
+            anchor: (ax, ay),
+            rows: vec![
+                row("Copy", "Ctrl+Shift+C", true),
+                row("Paste", "", true),
+                row("Find", "Ctrl+Shift+F", true),
+                row("Select All", "Ctrl+Shift+A", false),
+            ],
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: panel_w,
+            panel_h_clamped: 0.0,
+            a11y_label: None,
+        }),
+        ..focused(false)
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 200)], &overlay);
+    let row_h = renderer.cell_h + 12.0;
+    let theme = &cfg.theme;
+    let fg = theme.foreground;
+    let mut colors = chrome::Colors::default();
+    // The renderer tints the selected row with the accent in linear light,
+    // as the sRGB target blends.
+    let selected = colors.surface(theme.background, cfg.resolved_accent(theme), 0.18, true);
+    // Labels start right of the selected row's accent rail.
+    let lane = |row: f32, left: f32, right: f32| {
+        let y = ay + row * row_h;
+        (left, y + 1.0, right - left, row_h - 2.0)
+    };
+    let (label_lane, hint_lane) = (
+        (ax + 12.0, ax + panel_w * 0.5),
+        (ax + panel_w * 0.5, ax + panel_w - 2.0),
+    );
+    for (what, index, background, enabled) in [
+        ("selected row", 0.0, selected, true),
+        ("enabled row", 2.0, theme.background, true),
+        ("disabled row", 3.0, theme.background, false),
+    ] {
+        let (label, hint) = if enabled {
+            (
+                colors.text(fg, background),
+                colors.secondary(fg, background),
+            )
+        } else {
+            let muted = colors.muted(fg, background);
+            (muted, muted)
+        };
+        let hint_floor = if enabled {
+            chrome::SECONDARY_TEXT_CONTRAST
+                .min(color::contrast_ratio(fg, background))
+                .max(chrome::TEXT_CONTRAST)
+        } else {
+            chrome::TEXT_CONTRAST
+        };
+        assert_glyph_painted(
+            &frame,
+            lane(index, label_lane.0, label_lane.1),
+            (background, label),
+            chrome::TEXT_CONTRAST,
+            &format!("{what} label"),
+        );
+        assert_glyph_painted(
+            &frame,
+            lane(index, hint_lane.0, hint_lane.1),
+            (background, hint),
+            hint_floor,
+            &format!("{what} hint"),
+        );
+        let (label, hint) = (
+            color::contrast_ratio(label, background),
+            color::contrast_ratio(hint, background),
+        );
+        assert!(
+            label >= hint,
+            "{what}: label {label:.2}:1 quieter than its hint {hint:.2}:1"
+        );
+    }
+    // On the same panel a disabled row's hint stays well below an enabled
+    // one; the loop proved both are drawn in these colours.
+    let panel = theme.background;
+    let enabled = color::contrast_ratio(colors.secondary(fg, panel), panel);
+    let disabled = color::contrast_ratio(colors.muted(fg, panel), panel);
+    assert!(
+        disabled + 1.0 < enabled,
+        "disabled hint {disabled:.2}:1 vs enabled {enabled:.2}:1"
+    );
 }
 
 #[test]
@@ -5144,6 +5723,9 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     let other = snapshot_of(30, 4, b"\x1b[?25l");
     cfg.show_titlebar = false;
     cfg.unfocused_split_opacity = 0.1;
+    // The resting detected-link line is one of the decorations under test,
+    // and only `link-underline = always` draws it.
+    cfg.link_underline = kettle_config::LinkUnderline::Always;
     for window_focused in [true, false] {
         for split_focused in [true, false] {
             let mut view = pane(&snap, 320, 180);
@@ -5216,6 +5798,480 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
             assert!(
                 color::contrast_ratio(ink, fill) >= 4.5,
                 "{window_focused}/{split_focused}: {ink:?} on {fill:?}"
+            );
+        }
+    }
+}
+
+/// Over a highlight a link underline is drawn like an underline of the
+/// highlighted text: in its colour, at the resting 1 px weight, hovered or
+/// not. Link blue, the hover accent and the 1.5 px line competed with the
+/// fill. The same holds for a focused selection, an unfocused window's
+/// selection and a search match, and in both `link-underline` modes; a
+/// resting detected link that draws no line off a highlight draws none on
+/// one either.
+#[test]
+fn link_underlines_over_a_selection_take_the_selected_text_colour() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("C09_GPU_SKIP: link underlines over a selection, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    // A fill the theme already separates, so it is used as is, with white
+    // text on it. Link blue and the accent are readable on every fill below
+    // too, so only the drawing rule decides which colour an underline over
+    // it takes.
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.selection_background = Rgb::new(60, 90, 190);
+    cfg.theme.palette[4] = Rgb::new(255, 230, 0);
+    let accent = Rgb::new(0, 255, 170);
+    renderer.set_accent_override(Some(accent));
+    let mut cache = MinimumContrastCache::default();
+    assert_eq!(
+        super::theme::selection_fill(&cfg.theme, cfg.theme.background, true, &mut cache),
+        cfg.theme.selection_background
+    );
+
+    // Blank cells, so the lower half of each holds only fill and underline.
+    let blank = snapshot_of(20, 2, b"\x1b[?25l");
+    let mut selected = snapshot_of(20, 2, b"\x1b[?25l");
+    selected.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let match_row = HighlightRect {
+        col: 0,
+        row: 0,
+        width: 20,
+        active: false,
+    };
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |c: Rgb, want: Rgb| {
+        [(c.r, want.r), (c.g, want.g), (c.b, want.b)]
+            .iter()
+            .all(|&(a, b)| a.abs_diff(b) <= 2)
+    };
+    let centre_rows = |from: f32, to: f32| (from - 0.5).ceil() as u32..(to - 0.5).ceil() as u32;
+    // The pixel rows in the lower half of a link's cells that hold a colour
+    // other than `base`, with those colours.
+    let line_rows = |frame: &image::RgbaImage, top: f32, base: Rgb| -> Vec<Vec<Rgb>> {
+        centre_rows(top + cell_h * 0.5, top + cell_h)
+            .map(|y| {
+                centre_rows(cfg.padding_x + 2.0 * cell_w, cfg.padding_x + 10.0 * cell_w)
+                    .map(|x| {
+                        let pixel = frame.get_pixel(x, y);
+                        Rgb::new(pixel[0], pixel[1], pixel[2])
+                    })
+                    .filter(|&c| !near(c, base))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|inks| !inks.is_empty())
+            .collect()
+    };
+    // The highlighted row's bottom edge three quarters into a pixel, where a
+    // 1 px line covers one pixel row and a 1.5 px line two.
+    let shift = (0.75 - (cfg.padding_y + cell_h).fract()).rem_euclid(1.0);
+    for (highlight_label, highlight, window_focused) in [
+        ("focused selection", CellHighlight::Selection, true),
+        (
+            "unfocused selection",
+            CellHighlight::InactiveSelection,
+            false,
+        ),
+        ("search match", CellHighlight::Search(false), true),
+    ] {
+        let search = matches!(highlight, CellHighlight::Search(_));
+        let snap = if search { &blank } else { &selected };
+        let (text, fill) = super::theme::highlight_colors_cached(
+            highlight,
+            &cfg,
+            &cfg.theme,
+            cfg.theme.foreground,
+            cfg.theme.background,
+            &mut cache,
+        );
+        assert_eq!(text, cfg.theme.foreground, "{highlight_label}");
+        for ink in [cfg.theme.palette[4], accent] {
+            assert!(
+                color::contrast_ratio(ink, fill) >= 4.5,
+                "{highlight_label}: {ink:?} on {fill:?}"
+            );
+        }
+        for (mode, (label, hover, explicit)) in [
+            kettle_config::LinkUnderline::Always,
+            kettle_config::LinkUnderline::Hover,
+        ]
+        .into_iter()
+        .flat_map(|mode| {
+            [
+                ("detected", false, false),
+                ("OSC 8", false, true),
+                ("hovered", true, false),
+            ]
+            .map(|case| (mode, case))
+        }) {
+            let label = format!("{highlight_label}, {mode:?}, {label}");
+            cfg.link_underline = mode;
+            let link = |row| LinkRect {
+                col: 2,
+                row,
+                width: 8,
+                hover,
+                explicit,
+            };
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                links: vec![link(0), link(1)],
+                highlights: if search { vec![match_row] } else { Vec::new() },
+                ..Overlay::default()
+            };
+            let mut view = pane(snap, 320, 120);
+            view.rect.1 += shift;
+            view.terminal.1 += shift;
+            let frame = capture(&mut renderer, &cfg, &[view], &overlay);
+            let top = cfg.padding_y + shift;
+
+            let rows = line_rows(&frame, top, fill);
+            if !hover && !explicit && mode == kettle_config::LinkUnderline::Hover {
+                assert!(rows.is_empty(), "{label}: no resting line: {rows:?}");
+                let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
+                assert!(unselected.is_empty(), "{label}: {unselected:?}");
+                continue;
+            }
+            assert!(!rows.is_empty(), "{label}: the underline stays drawn");
+            assert_eq!(rows.len(), 1, "{label}: a 1 px line covers one pixel row");
+            for ink in rows.iter().flatten() {
+                assert!(
+                    near(*ink, text),
+                    "{label}: underline {ink:?} over the highlight, its text is {text:?}"
+                );
+            }
+            // Off the highlight the link keeps its own ink.
+            let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
+            assert!(!unselected.is_empty(), "{label}: unselected link drawn");
+            assert!(
+                unselected.iter().flatten().all(|&ink| !near(ink, text)),
+                "{label}: unselected link ink"
+            );
+        }
+    }
+}
+
+/// Detected links (URLs and paths) rest without an underline by default, so
+/// a screen of them stays quiet and the hovered link stands out; a UX panel
+/// found the always-on lines busy and competing with selections.
+/// `link-underline = always` brings the thin dim resting line back. An OSC 8
+/// link rests dotted and a hovered link is a solid accent line in both modes,
+/// and a reload that changes the mode repaints with no cached line left.
+#[test]
+fn detected_links_are_underlined_on_hover_unless_link_underline_is_always() {
+    use kettle_config::LinkUnderline;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 80) else {
+        eprintln!("C12_GPU_SKIP: link underline modes, no adapter");
+        return;
+    };
+    assert_eq!(cfg.link_underline, LinkUnderline::Hover);
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    let accent = Rgb::new(0, 255, 170);
+    renderer.set_accent_override(Some(accent));
+    let background = cfg.theme.background;
+    // Blank cells, so the lower half of each holds only background and line.
+    let snap = snapshot_of(20, 1, b"\x1b[?25l");
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |c: Rgb, want: Rgb| {
+        [(c.r, want.r), (c.g, want.g), (c.b, want.b)]
+            .iter()
+            .all(|&(a, b)| a.abs_diff(b) <= 2)
+    };
+    let centres = |from: f32, to: f32| (from - 0.5).ceil() as u32..(to - 0.5).ceil() as u32;
+    // The bottom edge three quarters into a pixel, where a 1 px line covers
+    // one pixel row and the 1.5 px hover line two.
+    let shift = (0.75 - (cfg.padding_y + cell_h).fract()).rem_euclid(1.0);
+    let top = cfg.padding_y + shift;
+    let columns = centres(cfg.padding_x + 2.0 * cell_w, cfg.padding_x + 10.0 * cell_w);
+    // Each pixel row in the lower half of the link's cells that holds a line,
+    // with the colours and the share of the link's width it covers.
+    let mut lines = |cfg: &Config, hover: bool, explicit: bool| -> Vec<(Vec<Rgb>, f32)> {
+        let overlay = Overlay {
+            window_focused: true,
+            cursor_visible: false,
+            links: vec![LinkRect {
+                col: 2,
+                row: 0,
+                width: 8,
+                hover,
+                explicit,
+            }],
+            ..Overlay::default()
+        };
+        let mut view = pane(&snap, 320, 80);
+        view.rect.1 += shift;
+        view.terminal.1 += shift;
+        let frame = capture(&mut renderer, cfg, &[view], &overlay);
+        centres(top + cell_h * 0.5, top + cell_h)
+            .filter_map(|y| {
+                let inks: Vec<Rgb> = columns
+                    .clone()
+                    .map(|x| {
+                        let pixel = frame.get_pixel(x, y);
+                        Rgb::new(pixel[0], pixel[1], pixel[2])
+                    })
+                    .filter(|&c| !near(c, background))
+                    .collect();
+                let share = inks.len() as f32 / columns.len() as f32;
+                (!inks.is_empty()).then_some((inks, share))
+            })
+            .collect()
+    };
+    let solid = |rows: &[(Vec<Rgb>, f32)]| rows.iter().all(|(_, share)| *share > 0.9);
+    let dotted =
+        |rows: &[(Vec<Rgb>, f32)]| rows.iter().all(|(_, share)| (0.15..0.6).contains(share));
+
+    // A reload flips the mode on the same renderer, so each frame also shows
+    // that nothing of the previous mode's line is kept.
+    for mode in [
+        LinkUnderline::Hover,
+        LinkUnderline::Always,
+        LinkUnderline::Hover,
+    ] {
+        cfg.link_underline = mode;
+        let resting = lines(&cfg, false, false);
+        if mode == LinkUnderline::Always {
+            assert_eq!(resting.len(), 1, "{mode:?}: a thin resting line");
+            assert!(solid(&resting), "{mode:?}: the resting line is solid");
+            assert!(
+                resting[0].0.iter().all(|&ink| !near(ink, accent)),
+                "{mode:?}: the resting line is not the hover accent"
+            );
+        } else {
+            assert!(
+                resting.is_empty(),
+                "{mode:?}: a resting detected link drew {resting:?}"
+            );
+        }
+
+        let osc8 = lines(&cfg, false, true);
+        assert_eq!(osc8.len(), 1, "{mode:?}: OSC 8 rests as a thin line");
+        assert!(dotted(&osc8), "{mode:?}: OSC 8 rests dotted: {osc8:?}");
+
+        for explicit in [false, true] {
+            let hovered = lines(&cfg, true, explicit);
+            assert_eq!(
+                hovered.len(),
+                2,
+                "{mode:?}, {explicit}: the 1.5 px hover line"
+            );
+            assert!(solid(&hovered), "{mode:?}, {explicit}: hover is solid");
+            // The lower row is fully covered, so it carries the accent itself.
+            assert!(
+                hovered[1].0.iter().all(|&ink| near(ink, accent)),
+                "{mode:?}, {explicit}: hover takes the accent: {hovered:?}"
+            );
+        }
+    }
+}
+
+/// A selected cell keeps the selection visible against the background it
+/// shows when unselected, including a program-set background and a dimmed
+/// split. The row's fill was resolved against the undimmed default background
+/// only, so a cell whose SGR background happened to be that fill lost the
+/// selection (1:1).
+#[test]
+fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 120) else {
+        eprintln!("C09_GPU_SKIP: selection over cell backgrounds, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    cfg.unfocused_split_opacity = 0.1;
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    // Cells 0..5 of both rows carry the default selection fill as their own
+    // background; only row 0 is selected, so row 1 shows what row 0 would.
+    let own = super::theme::selection_fill(
+        &cfg.theme,
+        cfg.theme.background,
+        true,
+        &mut MinimumContrastCache::default(),
+    );
+    let sgr = format!("\x1b[48;2;{};{};{}m", own.r, own.g, own.b);
+    let mut snap = snapshot_of(
+        20,
+        2,
+        format!("{sgr}  X  \x1b[0m\r\n{sgr}     \x1b[0m\x1b[?25l").as_bytes(),
+    );
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let other = snapshot_of(20, 2, b"\x1b[?25l");
+    for window_focused in [true, false] {
+        for split_focused in [true, false] {
+            let mut view = pane(&snap, 320, 120);
+            view.focused = split_focused;
+            let mut sibling = pane(&other, 320, 120);
+            sibling.id = 2;
+            sibling.focused = !split_focused;
+            sibling.rect.0 = 320.0;
+            sibling.terminal.0 = 320.0;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                ..Overlay::default()
+            };
+            let frame = capture(&mut renderer, &cfg, &[view, sibling], &overlay);
+            let pixel = |col: f32, row: f32| {
+                let p = frame.get_pixel(
+                    (cfg.padding_x + (col + 0.5) * cell_w) as u32,
+                    (cfg.padding_y + (row + 0.5) * cell_h) as u32,
+                );
+                Rgb::new(p[0], p[1], p[2])
+            };
+            let case = format!("window {window_focused}, split {split_focused}");
+            // Rounding in the GPU's blend and the colour math.
+            let floor = (if window_focused { 3.0 } else { 2.0 }) - 0.1;
+            for (col, label) in [(0.0, "own background"), (10.0, "default background")] {
+                let (selected, shown) = (pixel(col, 0.0), pixel(col, 1.0));
+                assert!(
+                    color::contrast_ratio(selected, shown) >= floor,
+                    "{case}, {label}: fill {selected:?} beside {shown:?}"
+                );
+            }
+            let attrs = renderer.pane_buffers[0].lines[0].attrs_list().get_span(2);
+            let ink = attrs.color_opt.expect("selected text has a colour");
+            let ink = Rgb::new(ink.r(), ink.g(), ink.b());
+            assert!(
+                color::contrast_ratio(ink, pixel(0.0, 0.0)) >= 4.5 - 0.1,
+                "{case}: text {ink:?} on {:?}",
+                pixel(0.0, 0.0)
+            );
+        }
+    }
+}
+
+/// One selection across program-set backgrounds keeps one fill wherever that
+/// fill stands out from the cell's background. Resolving every cell against
+/// its own background made a patchwork in TokyoNight Night: an inverse status
+/// bar (`#c0caf5`) or a green segment (`#9ece6a`) dropped back to the raw
+/// `#283457`, which already separates from them, beside the `#4d64a6` row.
+/// A cell the row's fill does not stand out from (`#565f89`, or the fill
+/// itself) still gets a fill of its own, and its text follows that fill.
+#[test]
+fn a_selection_over_program_backgrounds_keeps_one_fill_where_it_separates() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 80) else {
+        eprintln!("C09_GPU_SKIP: one selection fill across backgrounds, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    cfg.theme = cfg.theme_by_name("TokyoNight Night");
+    let theme = cfg.theme.clone();
+    let mut cache = MinimumContrastCache::default();
+    let row_fill = |focused: bool, cache: &mut MinimumContrastCache| {
+        super::theme::selection_fill(&theme, theme.background, focused, cache)
+    };
+    assert_eq!(row_fill(true, &mut cache), Rgb::new(0x4d, 0x64, 0xa6));
+    // Segments of four cells: the default background, then program-set ones.
+    let segments = [
+        None,
+        Some(Rgb::new(0xc0, 0xca, 0xf5)),
+        Some(Rgb::new(0x9e, 0xce, 0x6a)),
+        Some(Rgb::new(0x56, 0x5f, 0x89)),
+        Some(row_fill(true, &mut cache)),
+    ];
+    let mut text = String::new();
+    for background in segments {
+        if let Some(c) = background {
+            text.push_str(&format!("\x1b[48;2;{};{};{}m", c.r, c.g, c.b));
+        }
+        text.push_str(" X  \x1b[0m");
+    }
+    text.push_str("\x1b[?25l");
+    let mut snap = snapshot_of(20, 2, text.as_bytes());
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |a: Rgb, b: Rgb| {
+        [(a.r, b.r), (a.g, b.g), (a.b, b.b)]
+            .iter()
+            .all(|&(x, y)| x.abs_diff(y) <= 2)
+    };
+    for window_focused in [true, false] {
+        let overlay = Overlay {
+            window_focused,
+            cursor_visible: false,
+            ..Overlay::default()
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 400, 80)], &overlay);
+        let pixel = |col: usize| {
+            let p = frame.get_pixel(
+                (cfg.padding_x + (col as f32 + 0.5) * cell_w) as u32,
+                (cfg.padding_y + 0.5 * cell_h) as u32,
+            );
+            Rgb::new(p[0], p[1], p[2])
+        };
+        let row = row_fill(window_focused, &mut cache);
+        let minimum = if window_focused { 3.0 } else { 2.0 };
+        let case = if window_focused {
+            "focused"
+        } else {
+            "unfocused"
+        };
+        for (index, background) in segments.iter().enumerate() {
+            let background = background.unwrap_or(theme.background);
+            let separates = color::contrast_ratio(row, background) >= minimum;
+            // The reviewed cases: the light and bright segments separate from
+            // the row's fill, the mid-tone and the fill itself do not.
+            assert_eq!(
+                separates,
+                index < 3,
+                "{case}: segment {index} {background:?}"
+            );
+            // Cells 2 and 3 of a segment are blank: only the fill shows there.
+            let fill = pixel(index * 4 + 2);
+            assert!(
+                near(fill, pixel(index * 4 + 3)),
+                "{case}: segment {index} is one fill"
+            );
+            if separates {
+                assert!(
+                    near(fill, row),
+                    "{case}: {fill:?} over {background:?}, the row's fill is {row:?}"
+                );
+            } else {
+                assert!(!near(fill, row), "{case}: {fill:?} over {background:?}");
+                assert!(
+                    color::contrast_ratio(fill, background) >= minimum - 0.1,
+                    "{case}: {fill:?} over {background:?}"
+                );
+            }
+            let attrs = renderer.pane_buffers[0].lines[0]
+                .attrs_list()
+                .get_span(index * 4 + 1);
+            let ink = attrs.color_opt.expect("selected text has a colour");
+            let ink = Rgb::new(ink.r(), ink.g(), ink.b());
+            assert!(
+                color::contrast_ratio(ink, fill) >= 4.5 - 0.1,
+                "{case}: text {ink:?} on {fill:?} over {background:?}"
             );
         }
     }

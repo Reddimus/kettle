@@ -2017,7 +2017,9 @@ underline analysis. The smoke parses the PNGs with Python stdlib, records which
 delta fixtures were active, and records per-row pixel hit counts for SGR
 underlined rows, neighboring plain rows, and autodetected `/` and `\` path
 overlay underlines, so a delayed underline draw fails as an alignment/leak
-error, not just as a missing terminal attribute.
+error, not just as a missing terminal attribute. Its config sets
+`link-underline = always`, because detected paths draw no resting underline
+by default.
 `just tabbar-click-smoke` runs `scripts/check-tabbar-click-smoke.sh` and
 `just underline-scroll-smoke` runs `scripts/check-live-ui-smoke.py`. Both
 recipes are Unix-only, so WSL runs them and native Windows has neither.

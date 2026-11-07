@@ -294,11 +294,15 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 ## Links and quick-select hints
 
 Hover a link to highlight it and see its destination and opening gesture.
-Detected URLs and paths have a thin, dim underline; explicit OSC 8 links have
-a dotted underline. The hovered link uses a solid accent underline and a hand
-cursor. The destination pill moves away from the link and disappears when you
-leave, scroll, type, or change focus. `link-single-click` changes its gesture
-from Cmd-click (macOS) or Ctrl-click to a plain click.
+The hovered link uses a solid accent underline and a hand cursor. At rest,
+detected URLs and paths have no underline, so a screen full of them stays
+quiet; `link-underline = always` gives them a thin, dim one. Explicit OSC 8
+links always rest with a dotted underline. Inside a selection or search match
+an underline keeps its shape but is drawn thin in the colour of the text above
+it, so it does not compete with the highlight. The destination pill moves away
+from the link and disappears when you leave, scroll, type, or change focus.
+`link-single-click` changes its gesture from Cmd-click (macOS) or Ctrl-click
+to a plain click.
 
 Press **Ctrl+Shift+H**, choose **Quick-select hints** in the command palette or
 macOS Edit menu, or use that entry in the terminal context menu when links or
@@ -310,17 +314,19 @@ They sit in blank cells before matches when possible. At column zero they use
 blank cells after the match when available; otherwise they overlay its start.
 Paths need path context: progress counters such as `158/158`, ratios such as
 `a/b` and slash-joined words such as `read/write` stay plain text; a relative
-path is underlined when its last part has an extension or it has three parts. Remote or unresolved paths are copied; see
-[configuration and hint actions](docs/CONFIG.md).
+path counts as a link (shown on hover and offered as a hint) when its last part
+has an extension or it has three parts. Remote or unresolved paths are copied;
+see [configuration and hint actions](docs/CONFIG.md).
 
 ## Themes
 
-Kettle follows the system's light/dark appearance by default, with TokyoNight
-Day and TokyoNight Night. Existing configs with `theme` and no `theme-mode`
-keep their fixed theme. Settings → Appearance offers Follow system, Light,
-Dark and Fixed theme. Choosing a theme while following the system saves it
-for the active appearance. Linux uses the XDG Settings portal; if appearance
-is unavailable or has no preference, Kettle uses dark.
+Kettle follows the system's light/dark appearance by default, with Kettle Day
+(TokyoNight Day with darker text) and TokyoNight Night. Existing configs with
+`theme` and no `theme-mode` keep their fixed theme. Settings → Appearance
+offers Follow system, Light, Dark and Fixed theme. Choosing a theme while
+following the system saves it for the active appearance. Linux uses the XDG
+Settings portal; if appearance is unavailable or has no preference, Kettle
+uses dark.
 See [theme configuration](docs/CONFIG.md#auto-lightdark-theme-switching).
 
 ## Privacy

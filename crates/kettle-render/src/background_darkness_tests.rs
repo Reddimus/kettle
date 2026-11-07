@@ -1,61 +1,8 @@
 use super::{
-    QuadInstance, apply_quad_alpha_floor, composed_bg_alpha, desired_alpha_mode,
-    final_scene_is_uniformly_opaque, live_underlay_clear_color, needs_postmultiplied_presentation,
-    use_live_pane_bases, window_requires_alpha_surface,
+    composed_bg_alpha, desired_alpha_mode, final_scene_is_uniformly_opaque,
+    needs_postmultiplied_presentation, window_requires_alpha_surface,
 };
 use kettle_config::{BackgroundType, Config};
-
-#[test]
-fn unsupported_blur_floor_applies_only_to_the_live_window_underlay() {
-    let background = kettle_config::Rgb::new(26, 27, 38);
-    let live = live_underlay_clear_color(
-        background,
-        Some(0.99),
-        wgpu::CompositeAlphaMode::PreMultiplied,
-        true,
-    );
-    assert!((live.a - 0.99).abs() < 1e-6);
-    assert!(live.r > 0.0 && live.g > 0.0 && live.b > 0.0);
-
-    for offscreen in [
-        live_underlay_clear_color(
-            background,
-            Some(0.99),
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            false,
-        ),
-        live_underlay_clear_color(
-            background,
-            None,
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            true,
-        ),
-    ] {
-        assert_eq!(offscreen.a, 0.0);
-        assert_eq!(offscreen.r, 0.0);
-        assert_eq!(offscreen.g, 0.0);
-        assert_eq!(offscreen.b, 0.0);
-    }
-}
-
-#[test]
-fn unsupported_blur_floor_survives_the_replacing_pane_base_pass() {
-    let mut bases = [QuadInstance {
-        pos: [0.0, 0.0],
-        size: [100.0, 100.0],
-        color: [0.1, 0.2, 0.3, 0.55],
-    }];
-    apply_quad_alpha_floor(&mut bases, 0.99);
-    assert!((bases[0].color[3] - 0.99).abs() < f32::EPSILON);
-
-    bases[0].color[3] = 1.0;
-    apply_quad_alpha_floor(&mut bases, 0.99);
-    assert_eq!(bases[0].color[3], 1.0, "the floor must never reduce alpha");
-
-    assert!(use_live_pane_bases(true, Some(0.99)));
-    assert!(!use_live_pane_bases(false, Some(0.99)));
-    assert!(!use_live_pane_bases(true, None));
-}
 
 /// `background-darkness` runs see-through → covered, and the docs must say
 /// so.

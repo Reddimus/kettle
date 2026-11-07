@@ -4,11 +4,15 @@ use kettle_config::Rgb;
 // WCAG 2.2 AA: 1.4.3 (normal text) and 1.4.11 (non-text controls).
 pub(crate) const TEXT_CONTRAST: f64 = 4.5;
 pub(crate) const ICON_CONTRAST: f64 = 3.0;
+// WCAG 2.2 AAA 1.4.6, for secondary chrome text people read while scanning:
+// inactive tab titles, tab close glyphs and menu shortcut hints.
+pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 
 #[derive(Default)]
 pub(crate) struct Colors {
     cache: MinimumContrastCache,
     muted: std::collections::HashMap<(u32, u32), Rgb>,
+    secondary: std::collections::HashMap<(u32, u32), Rgb>,
     surfaces: std::collections::HashMap<([u32; 2], u64, bool), Rgb>,
     completion: Option<([u32; 5], crate::CompletionPalette)>,
     inactive: std::collections::HashMap<([u32; 3], u32, bool), Rgb>,
@@ -64,6 +68,47 @@ impl Colors {
             self.muted.clear();
         }
         self.muted.insert(key, color);
+        color
+    }
+
+    /// Quieter than `fg` but clearer than `muted`: `fg` moved toward `bg`
+    /// only until it reaches `SECONDARY_TEXT_CONTRAST`, so it keeps the
+    /// theme's hue. A theme whose own foreground is weaker stays undimmed,
+    /// and nothing goes below `TEXT_CONTRAST`.
+    pub(crate) fn secondary(&mut self, fg: Rgb, bg: Rgb) -> Rgb {
+        let key = (
+            MinimumContrastCache::color_key(fg),
+            MinimumContrastCache::color_key(bg),
+        );
+        if let Some(color) = self.secondary.get(&key) {
+            return *color;
+        }
+        let reaches = |t: f64| {
+            color::contrast_ratio(color::over(fg, bg, t, false), bg) >= SECONDARY_TEXT_CONTRAST
+        };
+        // How far toward the background: none when `fg` is already at or
+        // below the target, never further than `muted` goes (55%).
+        let mut dim = 0.0_f64;
+        if reaches(0.0) {
+            let (mut lo, mut hi) = (0.0_f64, 0.55_f64);
+            if reaches(hi) {
+                lo = hi;
+            }
+            while hi - lo > 1.0 / 16384.0 {
+                let mid = (lo + hi) / 2.0;
+                if reaches(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            dim = lo;
+        }
+        let color = self.text(color::over(fg, bg, dim, false), bg);
+        if self.secondary.len() >= 4096 {
+            self.secondary.clear();
+        }
+        self.secondary.insert(key, color);
         color
     }
 
@@ -167,6 +212,7 @@ mod tests {
     fn bundled_chrome_roles_meet_contrast_floors() {
         assert_eq!(TEXT_CONTRAST, 4.5);
         assert_eq!(ICON_CONTRAST, 3.0);
+        assert_eq!(SECONDARY_TEXT_CONTRAST, 7.0);
         let mut failures = Vec::new();
         let names = Theme::list();
         for name in &names {
@@ -179,13 +225,19 @@ mod tests {
                 let selected = color::over(bg, theme.accent, 0.18, linear);
                 let mut roles = vec![
                     (
-                        "menu information/empty state",
+                        "menu information/empty state/disabled row",
                         colors.muted(fg, bg),
                         bg,
                         TEXT_CONTRAST,
                     ),
                     (
-                        "menu shortcut/type/check",
+                        "selected menu row shortcut/type/check",
+                        colors.secondary(fg, selected),
+                        selected,
+                        TEXT_CONTRAST,
+                    ),
+                    (
+                        "settings focused-row description",
                         colors.muted(fg, selected),
                         selected,
                         TEXT_CONTRAST,
@@ -343,12 +395,15 @@ mod tests {
                                 "{name}: tab control"
                             );
                         }
-                        for role in ["Cmd+N hint", "inactive tab title"] {
+                        for (role, ink) in [
+                            ("Cmd+N hint", colors.muted(theme.foreground, background)),
+                            (
+                                "inactive tab title",
+                                colors.secondary(theme.foreground, background),
+                            ),
+                        ] {
                             assert!(
-                                color::contrast_ratio(
-                                    colors.muted(theme.foreground, background),
-                                    background
-                                ) >= TEXT_CONTRAST,
+                                color::contrast_ratio(ink, background) >= TEXT_CONTRAST,
                                 "{name}: {role}"
                             );
                         }
@@ -543,5 +598,69 @@ mod tab_chrome_tests {
                 tab_detail(strip, theme.foreground, false)
             );
         }
+    }
+
+    /// Inactive tab titles, resting close glyphs and menu shortcut hints sit
+    /// between primary and disabled text: AAA where the theme's foreground
+    /// reaches it, never clearer than that foreground, never below AA.
+    #[test]
+    fn secondary_chrome_text_is_clearer_than_muted_and_quieter_than_primary() {
+        let cfg = kettle_config::Config::default();
+        let mut failures = Vec::new();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let fg = theme.foreground;
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let mut colors = Colors::default();
+            let mut backgrounds = vec![
+                ("inactive tab", strip),
+                ("hovered inactive tab", tab_detail(strip, fg, false)),
+                ("menu row", theme.background),
+            ];
+            // The renderer tints a selected menu row with the window's accent
+            // (the config's resolved one unless a window picked its own), in
+            // linear light on an sRGB surface and in sRGB on any other.
+            for accent in [cfg.resolved_accent(&theme), theme.accent] {
+                for linear in [false, true] {
+                    backgrounds.push((
+                        "selected menu row",
+                        colors.surface(theme.background, accent, 0.18, linear),
+                    ));
+                }
+            }
+            for (role, bg) in backgrounds {
+                let own = color::contrast_ratio(fg, bg);
+                let primary = color::contrast_ratio(colors.text(fg, bg), bg);
+                let muted = color::contrast_ratio(colors.muted(fg, bg), bg);
+                let secondary = colors.secondary(fg, bg);
+                let ratio = color::contrast_ratio(secondary, bg);
+                let floor = SECONDARY_TEXT_CONTRAST.min(own).max(TEXT_CONTRAST);
+                // Where the theme's text is under AA, muted and secondary are
+                // both lifted onto the 4.5:1 floor and land within a rounding
+                // step of it, either one a little higher.
+                let quieter_than_muted = ratio + 0.05 < muted;
+                if ratio + 1e-6 < floor || ratio > primary + 1e-6 || quieter_than_muted {
+                    failures.push(format!(
+                        "{name}: {role} {ratio:.3}:1 (theme {own:.3}:1, muted {muted:.3}:1)"
+                    ));
+                }
+                // An unfocused window dims it, but not below the icon floor.
+                let dimmed = color::contrast_ratio(colors.tab_text(secondary, bg, false), bg);
+                if dimmed + 1e-6 < ICON_CONTRAST || dimmed > ratio + 1e-6 {
+                    failures.push(format!("{name}: unfocused {role} {dimmed:.3}:1"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failing theme/roles: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
 }

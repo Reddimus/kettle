@@ -386,25 +386,86 @@ pub fn dim(fg: Rgb, bg: Rgb) -> Rgb {
 /// `min_ratio <= 1.0` is a no-op. Pure; binary-searches the blend parameter to
 /// keep as much of the theme tint as possible.
 pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
+    min_contrast_along(fg, bg, min_ratio, |target, t| blend(fg, target, t))
+}
+
+/// [`with_min_contrast`] for a tint: only `fg`'s HSL lightness moves, so its
+/// hue and saturation survive and a faint colour becomes a stronger tint of
+/// itself instead of a greyer one. Lightness ends at white and black, so this
+/// reaches every ratio `with_min_contrast` reaches.
+pub(crate) fn with_min_contrast_same_hue(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
+    let (hue, saturation, lightness) = hsl(fg);
+    min_contrast_along(fg, bg, min_ratio, |target, t| {
+        let end = if target == Rgb::new(255, 255, 255) {
+            1.0
+        } else {
+            0.0
+        };
+        from_hsl(hue, saturation, lightness + (end - lightness) * t)
+    })
+}
+
+/// Hue in sextants (`0.0..6.0`), saturation and lightness (`0.0..=1.0`).
+pub(crate) fn hsl(c: Rgb) -> (f64, f64, f64) {
+    let [r, g, b] = [c.r, c.g, c.b].map(|v| f64::from(v) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) / 2.0;
+    let chroma = max - min;
+    if chroma <= 0.0 {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = (chroma / (1.0 - (2.0 * lightness - 1.0).abs())).min(1.0);
+    let hue = if max == r {
+        ((g - b) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / chroma + 2.0
+    } else {
+        (r - g) / chroma + 4.0
+    };
+    (hue, saturation, lightness)
+}
+
+fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> Rgb {
+    let lightness = lightness.clamp(0.0, 1.0);
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation.clamp(0.0, 1.0);
+    let hue = hue.rem_euclid(6.0);
+    let x = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hue as u8 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = lightness - chroma / 2.0;
+    let channel = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb::new(channel(r), channel(g), channel(b))
+}
+
+/// Move `fg` along `toward(endpoint, t)` (`t = 1` is the endpoint) until it
+/// reaches `min_ratio` against `bg`; `toward` must brighten or darken
+/// monotonically in `t`.
+fn min_contrast_along(fg: Rgb, bg: Rgb, min_ratio: f64, toward: impl Fn(Rgb, f64) -> Rgb) -> Rgb {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
     }
     let white = Rgb::new(255, 255, 255);
     let black = Rgb::new(0, 0, 0);
 
-    // Blend `fg` toward `target` just far enough to reach `min_ratio`.
+    // Move `fg` toward `target` just far enough to reach `min_ratio`.
     // 14 iterations resolves t to ~1/16384 — pixel-imperceptible.
     let approach = |target: Rgb| -> Rgb {
         let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
         for _ in 0..14 {
             let mid = (lo + hi) / 2.0;
-            if contrast_ratio(blend(fg, target, mid), bg) >= min_ratio {
+            if contrast_ratio(toward(target, mid), bg) >= min_ratio {
                 hi = mid;
             } else {
                 lo = mid;
             }
         }
-        blend(fg, target, hi)
+        toward(target, hi)
     };
 
     // Which endpoint to head for. Two rules, in order:
@@ -1102,6 +1163,41 @@ mod tests {
         );
         // Direction: dark bg ⇒ lifted toward white (out is brighter).
         assert!(relative_luminance(out) > relative_luminance(fg));
+    }
+
+    #[test]
+    fn same_hue_contrast_moves_only_lightness() {
+        for c in [
+            Rgb::new(0x28, 0x34, 0x57),
+            Rgb::new(0x99, 0xa7, 0xdf),
+            Rgb::new(200, 30, 90),
+            Rgb::new(90, 90, 90),
+        ] {
+            let (h, s, l) = hsl(c);
+            assert_eq!(from_hsl(h, s, l), c, "{c:?} round-trips");
+        }
+        let (dark, light) = (Rgb::new(0x1a, 0x1b, 0x26), Rgb::new(0xe1, 0xe2, 0xe7));
+        for (tint, bg) in [
+            (Rgb::new(0x28, 0x34, 0x57), dark),
+            (Rgb::new(0x99, 0xa7, 0xdf), light),
+            (Rgb::new(200, 30, 90), Rgb::new(190, 40, 80)),
+        ] {
+            let out = with_min_contrast_same_hue(tint, bg, 3.0);
+            assert!(
+                contrast_ratio(out, bg) >= 3.0,
+                "{tint:?} on {bg:?}: {out:?}"
+            );
+            let ((h0, s0, _), (h1, s1, _)) = (hsl(tint), hsl(out));
+            let dh = (h0 - h1).abs();
+            assert!(dh.min(6.0 - dh) < 0.05, "{tint:?} -> {out:?}");
+            assert!(s1 >= s0 - 0.02, "{tint:?} -> {out:?}");
+        }
+        let met = Rgb::new(0x7a, 0xa2, 0xf7);
+        assert_eq!(with_min_contrast_same_hue(met, dark, 3.0), met);
+        // Grey has no hue to keep; it still reaches the ratio.
+        let grey = with_min_contrast_same_hue(Rgb::new(40, 40, 40), dark, 3.0);
+        assert!(contrast_ratio(grey, dark) >= 3.0);
+        assert_eq!((grey.r, grey.g), (grey.g, grey.b));
     }
 }
 

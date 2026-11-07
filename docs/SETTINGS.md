@@ -79,10 +79,10 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 | Option | Config key | Notes |
 |---|---|---|
 | Appearance | `theme-mode` | Follow system (default), Light, Dark or Fixed theme. Fixed theme keeps the current palette; existing configs with `theme` alone remain fixed |
-| Theme | `theme`, `light-theme` or `dark-theme` | curated list of the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
+| Theme | `theme`, `light-theme` or `dark-theme` | curated list: Kettle's default pair (TokyoNight Night, Kettle Day) and the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the row says "Not available in this session; opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works |
 | Window padding | `window-padding-x` | 0–40 px |
 | Cursor shape | `cursor-style` | Block · Bar · Underline; applies to running panes immediately |
 | Unfocused cursor | `cursor-unfocused-style` | Hollow (default) · Hidden · Unchanged; windows and inactive split panes; applies live |
