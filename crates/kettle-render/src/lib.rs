@@ -44,10 +44,10 @@ use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
 use batching::cell_locked_glyph_offset;
 use batching::{
-    GlyphPositioning, SharedPipelines, clip_quads, completion_text_damage_key,
-    context_menu_text_damage_key, emit_cell_locked_glyphs, pane_outline,
-    prepared_text_areas_damage_key, push_ime_preedit_quads, rect, text_bounds_for_rect,
-    text_layout_damage_key, text_overlay_requires_continuous_prepare,
+    GlyphPositioning, SharedPipelines, builtin_glyph_at, builtin_glyph_instance, clip_quads,
+    completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
+    pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads, rect,
+    text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
 };
 pub use capture::{
     DebugScene, capture_png, capture_png_with, capture_png_with_annotation, offscreen_selftest,
@@ -212,6 +212,8 @@ pub use confirm::ConfirmDialogLayout;
 mod cursor_patch;
 
 mod cursor_policy;
+
+mod builtin_glyphs;
 
 mod glyphpipe;
 
@@ -432,6 +434,16 @@ pub struct Renderer {
     pane_style_keys: Vec<u64>,
     /// Each pane's row bidi layouts, grown and truncated with `pane_buffers`.
     pane_bidi: Vec<bidi_rows::PaneBidi>,
+    /// Each pane's cells that Kettle draws itself this frame (box drawing,
+    /// blocks, Powerline, braille; see `builtin_glyphs`), and a hash of them
+    /// so that a change to them alone re-emits the glyph instances. Grown and
+    /// truncated with `pane_buffers`.
+    pane_builtins: Vec<Vec<builtin_glyphs::BuiltinCell>>,
+    pane_builtin_keys: Vec<u64>,
+    /// Line widths for those glyphs at the current face, size and scale.
+    builtin_strokes: builtin_glyphs::Strokes,
+    /// The one buffer every built-in mask cache miss is drawn into.
+    builtin_mask: Vec<u8>,
     /// The row layouts the last frame drew, and those of the last frame
     /// presented, for pointer hit tests.
     drawn_bidi: Vec<PaintedBidi>,
@@ -949,6 +961,12 @@ impl Renderer {
         while self.pane_bidi.len() < panes.len() {
             self.pane_bidi.push(bidi_rows::PaneBidi::default());
         }
+        while self.pane_builtins.len() < panes.len() {
+            self.pane_builtins.push(Vec::new());
+        }
+        while self.pane_builtin_keys.len() < panes.len() {
+            self.pane_builtin_keys.push(0);
+        }
         // Parallel grow for per-pane titlebar buffers.
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -973,6 +991,8 @@ impl Renderer {
                 self.pane_line_keys.swap(i, j);
                 self.pane_style_keys.swap(i, j);
                 self.pane_bidi.swap(i, j);
+                self.pane_builtins.swap(i, j);
+                self.pane_builtin_keys.swap(i, j);
                 self.pane_titlebar_buffers.swap(i, j);
                 self.pane_titlebar_texts.swap(i, j);
             } else {
@@ -980,6 +1000,8 @@ impl Renderer {
                 self.pane_line_keys[i].clear();
                 self.pane_style_keys[i] = 0;
                 self.pane_bidi[i].clear();
+                self.pane_builtins[i].clear();
+                self.pane_builtin_keys[i] = 0;
                 self.pane_titlebar_texts[i].clear();
             }
         }
@@ -994,6 +1016,8 @@ impl Renderer {
         self.pane_line_keys.truncate(panes.len());
         self.pane_style_keys.truncate(panes.len());
         self.pane_bidi.truncate(panes.len());
+        self.pane_builtins.truncate(panes.len());
+        self.pane_builtin_keys.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
         self.pane_titlebar_texts.truncate(panes.len());
         // Write each pane's title into its titlebar
@@ -5098,11 +5122,13 @@ impl Renderer {
         let cursor_glyph_key =
             cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), cursor_metrics, &family);
         let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        // A built-in cursor glyph is drawn from the glyph pipeline's atlas,
+        // so it cannot grow glyphon's.
         let cursor_char_changed = cursor_glyph_changed
             && self
                 .pending_cursor_glyph
                 .as_ref()
-                .is_some_and(|c| c.text != " " && c.text != "\0");
+                .is_some_and(|c| c.builtin.is_none() && c.text != " " && c.text != "\0");
         // The frame an overlay CLOSES (`overlay_open` flips true→false) must
         // still prepare once, or the closed panel's cached text vertices keep
         // rendering until the next keystroke. Open overlays are covered above;
@@ -5122,9 +5148,16 @@ impl Renderer {
             || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
-        let need_cursor_prepare =
-            self.pending_cursor_glyph.is_some() && (need_prepare || cursor_glyph_changed);
-        if cursor_glyph_key.is_none() {
+        let builtin_cursor = self
+            .pending_cursor_glyph
+            .as_ref()
+            .and_then(|cursor| cursor.builtin);
+        let need_cursor_prepare = self.pending_cursor_glyph.is_some()
+            && builtin_cursor.is_none()
+            && (need_prepare || cursor_glyph_changed);
+        // The glyphon cursor vertices are not refreshed while the cursor sits
+        // on a built-in glyph, so they must not be trusted afterwards.
+        if cursor_glyph_key.is_none() || builtin_cursor.is_some() {
             self.last_cursor_glyph_key = None;
         }
         let preparing_text = need_prepare || need_cursor_prepare;
@@ -5251,6 +5284,31 @@ impl Renderer {
             self.glyph_instances = gi;
             self.glyph_clips = gc;
         }
+        // A built-in glyph under the block cursor. The pane emits the same
+        // cell with the same mask, so the cursor only looks up the slot the
+        // pane resolved and never allocates: an allocation here, after the
+        // upload, could evict a slot the uploaded pane instances still draw.
+        let cursor_glyph = builtin_cursor.and_then(|cell| {
+            let clip = self.pending_cursor_glyph.as_ref()?.clip;
+            let slot = self
+                .glyph_pipeline
+                .resident(cell.key(self.builtin_strokes)?)?;
+            let instance = builtin_glyph_at(&cell, slot);
+            let rect = [clip.0, clip.1, clip.2, clip.3];
+            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
+            // Retain the uploaded index across visibility changes and cursor moves;
+            // only the pane's copy is omitted while its cursor copy draws.
+            let index = (pane.start..pane.start + pane.count).find(|&index| {
+                let glyph = &self.glyph_instances[index as usize];
+                glyph.pos == instance.pos
+                    && glyph.size == instance.size
+                    && glyph.uv == instance.uv
+                    && glyph.kind == instance.kind
+            })?;
+            Some((instance, rect, index))
+        });
+        self.glyph_pipeline
+            .set_cursor(&self.gpu.device, &self.gpu.queue, cursor_glyph);
         // Prepare the focused solid-block cursor's inverted glyph only when its
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
@@ -5700,6 +5758,9 @@ mod present_mode_tests;
 
 #[cfg(test)]
 mod bidi_render_tests;
+
+#[cfg(test)]
+mod builtin_glyph_render_tests;
 
 #[cfg(test)]
 mod screenshot_demo_tests;

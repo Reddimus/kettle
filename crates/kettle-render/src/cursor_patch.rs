@@ -1286,6 +1286,18 @@ fn cursor_glyph_ink(
     swash: &mut SwashCache,
     target_size: [u32; 2],
 ) -> Option<PixelBox> {
+    // A glyph Kettle draws itself fills its cell's pixel rect.
+    if let Some(cell) = cursor.builtin {
+        let [x0, y0, x1, y1] = cell.rect;
+        let ink = PixelBox {
+            x0: x0.into(),
+            y0: y0.into(),
+            x1: x1.into(),
+            y1: y1.into(),
+        }
+        .intersect(PixelBox::surface(target_size));
+        return (!ink.is_empty()).then_some(ink);
+    }
     let left = cursor.x;
     let top = cursor_glyph_top(cursor.y, cursor.row_baseline, buffer);
     let bounds = glyphon_bounds(cursor.clip, target_size);
@@ -1347,6 +1359,7 @@ mod tests {
             attrs: AttrsOwned::new(&attrs),
             color: Rgb::new(255, 255, 255),
             clip: (0.0, 0.0, 200.0, 200.0),
+            builtin: None,
         };
         let mut swash = SwashCache::new();
         let original =

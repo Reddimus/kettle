@@ -461,6 +461,10 @@ impl Renderer {
         // size change preserves the user's chosen scale.
         self.cell_w = cw * self.cell_scale_w.max(0.01);
         self.cell_h = ch * self.cell_scale_h.max(0.01);
+        self.builtin_strokes = super::builtin_glyphs::Strokes::new(
+            underline_em(&mut self.font_system, &family),
+            m.font_size,
+        );
         // The cell-locked glyph cache keys bake in the physical font size; a
         // size / scale / family change makes every cached slot stale, so drop
         // them (the atlas textures keep their allocation; the packer resets).
@@ -732,6 +736,20 @@ impl StartupFonts {
     pub fn matches(&self, cfg: &Config, scale: f32) -> bool {
         self.key == StartupFontsKey::new(cfg, scale)
     }
+}
+
+/// The underline thickness of `family`'s regular face as a fraction of its
+/// em, or `None` when no installed face matches or it reports none. Built-in
+/// box drawing sizes its strokes from it.
+pub(crate) fn underline_em(font_system: &mut FontSystem, family: &str) -> Option<f32> {
+    let id = font_system.db().query(&fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        ..Default::default()
+    })?;
+    let font = font_system.get_font(id, fontdb::Weight::NORMAL)?;
+    let metrics = font.metrics();
+    let underline = metrics.underline?;
+    (metrics.units_per_em > 0).then(|| underline.thickness / f32::from(metrics.units_per_em))
 }
 
 pub(crate) fn measure_cell(

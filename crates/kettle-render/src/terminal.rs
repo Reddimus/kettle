@@ -1,11 +1,12 @@
+use super::builtin_glyphs::{self, BuiltinCell};
 use super::theme::pane_inactive_amount;
 use super::{
     Attrs, AttrsList, AttrsOwned, BufferLine, CellHighlight, Config, Family, Flags, FontFeatures,
     GColor, GlyphClip, GlyphInstance, GlyphPositioning, InlineCards, LineEnding, Metrics,
     PaneSnapshot, QuadInstance, Rect4, Renderer, Rgb, Shaping, Style, TextBuffer, TextRendererMode,
-    Translator, Weight, Wrap, background_has_wallpaper, card_scene, clip_quads, color,
-    composed_bg_alpha, cursor_policy, emit_cell_locked_glyphs, font_features, inline_cards,
-    inline_image_clip, pane_backdrop_rect, pane_grid_origin, pane_metrics, rect,
+    Translator, Weight, Wrap, background_has_wallpaper, builtin_glyph_instance, card_scene,
+    clip_quads, color, composed_bg_alpha, cursor_policy, emit_cell_locked_glyphs, font_features,
+    inline_cards, inline_image_clip, pane_backdrop_rect, pane_grid_origin, pane_metrics, rect,
     resolved_cell_foreground_cached, resolved_highlight_foreground_cached, selection_row_span,
     single_column_text_presentation, visible_selection_rows,
 };
@@ -274,6 +275,11 @@ pub(crate) struct PendingCursorGlyph {
     pub(crate) color: Rgb,
     /// Pane rect `(x, y, w, h)`, narrowed to the cell for clustered text.
     pub(crate) clip: (f32, f32, f32, f32),
+    /// The cell's glyph when Kettle draws it itself (box drawing, blocks,
+    /// Powerline, braille), in `color`. The glyph pipeline draws it from the
+    /// same mask as the pane, so this pass prepares no glyphon text for it;
+    /// `ch` and `text` name it for the damage key.
+    pub(crate) builtin: Option<BuiltinCell>,
 }
 
 pub(crate) fn invalidate_pane_titlebar_texts(texts: &mut [String]) {
@@ -642,6 +648,11 @@ impl Renderer {
         // re-prepare. This way the buffer stays byte-identical across a blink,
         // so the prepare is skipped.
         let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
+        let mut cursor_builtin: Option<BuiltinCell> = None;
+        // This pane's built-in glyph cells, refilled every frame into last
+        // frame's allocation.
+        let mut builtins = std::mem::take(&mut self.pane_builtins[idx]);
+        builtins.clear();
         let mut fallback_run = None;
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
@@ -738,6 +749,30 @@ impl Renderer {
             } else {
                 None
             };
+            // Box drawing, blocks, Powerline and braille are drawn from the
+            // cell's own rectangle (see `builtin_glyphs`), so the shaper gets
+            // a blank in their place: the font's glyph is never drawn, never
+            // joins a ligature and never picks a fallback face for the row.
+            // A cell with marks or two columns keeps the font, which composes
+            // them.
+            let builtin = (cfg.builtin_box_drawing
+                && !owned_cell
+                && !hidden
+                && marks.is_empty()
+                && !flags.contains(Flags::WIDE_CHAR)
+                && builtin_glyphs::is_builtin(dc))
+            .then(|| {
+                let edges = (
+                    ox + vcol as f32 * cw,
+                    oy + vrow as f32 * ch,
+                    ox + (vcol + 1) as f32 * cw,
+                    oy + (vrow + 1) as f32 * ch,
+                );
+                (dc, edges)
+            });
+            if builtin.is_some() {
+                dc = ' ';
+            }
             if let Ok(row) = usize::try_from(vrow)
                 && let Some(Some(positions)) = cell_positions.get_mut(row)
             {
@@ -870,6 +905,8 @@ impl Renderer {
                 }
                 if cursor_focused {
                     cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
+                    cursor_builtin =
+                        builtin.map(|(glyph, edges)| BuiltinCell::new(glyph, edges, cursor_fg));
                 } else {
                     fg = cursor_fg;
                 }
@@ -1016,6 +1053,9 @@ impl Renderer {
                     target.push(rect(cell_x, y, cw, thickness, ink, alpha));
                 }
             }
+            if let Some((glyph, edges)) = builtin {
+                builtins.push(BuiltinCell::new(glyph, edges, fg));
+            }
             // Combining (zero-width) marks layered on this cell — a decomposed
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
             // Append them right after the base char so the shaper composes the
@@ -1061,6 +1101,20 @@ impl Renderer {
         if saw_styled_text {
             self.ensure_bundled_style_faces();
         }
+        // A built-in cell holds a blank in the shaped text, so a change to
+        // its glyph, colour or place reshapes nothing; it still has to
+        // re-emit the pane's glyph instances.
+        let builtin_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            builtins.hash(&mut h);
+            h.finish()
+        };
+        if self.pane_builtin_keys[idx] != builtin_key {
+            self.pane_builtin_keys[idx] = builtin_key;
+            text_changed = true;
+        }
+        self.pane_builtins[idx] = builtins;
 
         // Selection. A block (Alt+drag) selection draws a per-row COLUMN
         // rectangle so the highlight matches the rectangular text that's copied;
@@ -1197,8 +1251,11 @@ impl Renderer {
                         x: bx,
                         y: by,
                         row_baseline: 0.0,
-                        ch: gch,
-                        text: std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
+                        ch: cursor_builtin.map_or(gch, |cell| cell.ch),
+                        text: match cursor_builtin {
+                            Some(cell) => cell.ch.to_string(),
+                            None => std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
+                        },
                         emoji_qualified: gmarks.contains(&'\u{FE0F}'),
                         attrs: gattrs,
                         color: gcolor,
@@ -1209,6 +1266,7 @@ impl Renderer {
                         } else {
                             pv.terminal
                         },
+                        builtin: cursor_builtin,
                     });
                 }
             }
@@ -1274,6 +1332,7 @@ impl Renderer {
             }
             cfg.font_ligatures.hash(&mut h);
             cfg.bidi.hash(&mut h);
+            cfg.builtin_box_drawing.hash(&mut h);
             for f in &cfg.font_features {
                 f.tag.hash(&mut h);
                 f.value.hash(&mut h);
@@ -1444,6 +1503,7 @@ impl Renderer {
         if cursor_focused
             && recolor_cursor_cell.is_some()
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()
+            && cursor.builtin.is_none()
             && let Some(line) = usize::try_from(cvrow)
                 .ok()
                 .and_then(|row| buf.lines.get(row))
@@ -1536,6 +1596,9 @@ impl Renderer {
             gpu,
             cell_w,
             pane_bidi,
+            pane_builtins,
+            builtin_strokes,
+            builtin_mask,
             ..
         } = self;
         let cw = *cell_w;
@@ -1548,11 +1611,14 @@ impl Renderer {
             // rows, so Legacy mode cell-locks them too.
             let graphemes =
                 pv.snap.has_graphemes() || pane_bidi.get(i).is_some_and(|bidi| bidi.any());
-            if cfg.text_renderer == TextRendererMode::Legacy
+            // Other Legacy panes ride glyphon, but their built-in cells are
+            // drawn here in every mode: the pane text holds blanks there.
+            let font_glyphs = !(cfg.text_renderer == TextRendererMode::Legacy
                 && inactive == 0.0
                 && !graphemes
-                && !pv.snap.has_emoji()
-            {
+                && !pv.snap.has_emoji());
+            let builtins = pane_builtins.get(i).map_or(&[][..], Vec::as_slice);
+            if !font_glyphs && builtins.is_empty() {
                 continue;
             }
             let (rx, ry, rw, rh) = pv.terminal;
@@ -1576,26 +1642,40 @@ impl Renderer {
             let buf = &pane_buffers[i];
             // Each cell contributes a base scalar and any attached marks.
             // The shared emit keeps those marks on their base cell's column.
-            emit_cell_locked_glyphs(
-                out,
-                buf,
-                (ox, oy),
-                cw,
-                if cfg.text_renderer == TextRendererMode::Grid {
-                    GlyphPositioning::Grid(cw)
-                } else if graphemes {
-                    GlyphPositioning::GraphemeRows(cw)
-                } else {
-                    GlyphPositioning::Continuous
-                },
-                default_color,
-                glyph_pipeline,
-                swash,
-                font_system,
-                device,
-                queue,
-                glyph_char_starts,
-            );
+            if font_glyphs {
+                emit_cell_locked_glyphs(
+                    out,
+                    buf,
+                    (ox, oy),
+                    cw,
+                    if cfg.text_renderer == TextRendererMode::Grid {
+                        GlyphPositioning::Grid(cw)
+                    } else if graphemes {
+                        GlyphPositioning::GraphemeRows(cw)
+                    } else {
+                        GlyphPositioning::Continuous
+                    },
+                    default_color,
+                    glyph_pipeline,
+                    swash,
+                    font_system,
+                    device,
+                    queue,
+                    glyph_char_starts,
+                );
+            }
+            for cell in builtins {
+                if let Some(glyph) = builtin_glyph_instance(
+                    cell,
+                    *builtin_strokes,
+                    glyph_pipeline,
+                    device,
+                    queue,
+                    builtin_mask,
+                ) {
+                    out.push(glyph);
+                }
+            }
             for glyph in &mut out[clip_start as usize..] {
                 glyph.dim_color(dim_bg, inactive);
             }
