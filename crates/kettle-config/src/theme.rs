@@ -74,10 +74,12 @@ impl Theme {
     /// (rough popularity order), surfaced as the Settings → Appearance → Theme
     /// list of options — cycling them with ←/→ live-previews each. Every entry
     /// MUST be a bundled theme name (`popular_names_are_all_bundled` guards it).
-    /// The full 500+ bundle stays reachable via the theme picker,
-    /// the `NextTheme`/`PrevTheme` actions, and the `theme =` config line.
+    /// Kettle's default dark and light themes lead, so ←/→ can always step
+    /// back to them. The full 500+ bundle stays reachable via the theme
+    /// picker, the `NextTheme`/`PrevTheme` actions, and the `theme =` line.
     pub const POPULAR: &'static [&'static str] = &[
         "TokyoNight Night",
+        "Kettle Day",
         "TokyoNight Storm",
         "TokyoNight Moon",
         "TokyoNight Day",
@@ -507,6 +509,7 @@ mod tests {
     #[test]
     fn default_light_theme_text_meets_wcag_contrast() {
         let name = crate::Config::default().light_theme;
+        assert_eq!(Theme::find_name(&name), Some(name.as_str()), "bundled");
         let theme = Theme::by_name(&name);
         assert!(!theme.is_dark(), "{name} is the light side");
         let bg = theme.background;
@@ -517,6 +520,107 @@ mod tests {
         for slot in (1..=7).chain(9..=15) {
             let ratio = contrast(theme.palette[slot], bg);
             assert!(ratio >= 4.5, "{name} palette {slot}: {ratio:.2}:1");
+        }
+    }
+
+    /// A theme picked by its upstream name keeps upstream's colours: someone
+    /// who chose TokyoNight Day gets TokyoNight Day. Kettle's darker variant
+    /// ships under its own name.
+    #[test]
+    fn tokyonight_day_keeps_upstream_colours() {
+        let (_, body) = super::BUNDLED_THEMES
+            .iter()
+            .find(|(name, _)| *name == "TokyoNight Day")
+            .expect("bundled");
+        assert!(
+            !body.lines().any(|line| line.starts_with('#')),
+            "upstream's file carries no Kettle header"
+        );
+        let theme = Theme::parse(body);
+        let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+        let palette: Vec<String> = theme.palette.iter().copied().map(hex).collect();
+        assert_eq!(
+            palette,
+            [
+                "#e9e9ed", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1", "#007197",
+                "#6172b0", "#a1a6c5", "#f52a65", "#587539", "#8c6c3e", "#2e7de9", "#9854f1",
+                "#007197", "#3760bf",
+            ]
+        );
+        assert_eq!(
+            [
+                theme.background,
+                theme.foreground,
+                theme.cursor,
+                theme.cursor_text,
+                theme.selection_background,
+                theme.selection_foreground,
+            ]
+            .map(hex),
+            [
+                "#e1e2e7", "#3760bf", "#3760bf", "#e1e2e7", "#99a7df", "#3760bf"
+            ]
+        );
+    }
+
+    /// Kettle Day is TokyoNight Day with darker text: the same surfaces,
+    /// and every text colour darker along its own hue. Its header names
+    /// where it came from and under which licences.
+    #[test]
+    fn kettle_day_is_tokyonight_day_with_darker_text() {
+        let (_, body) = super::BUNDLED_THEMES
+            .iter()
+            .find(|(name, _)| *name == "Kettle Day")
+            .expect("Kettle Day is bundled");
+        for credit in [
+            "\"TokyoNight Day\"",
+            "iTerm2-Color-Schemes",
+            "MIT License",
+            "see LICENSE",
+            "tokyonight.nvim",
+            "Apache License 2.0",
+            "Changed by Kettle",
+        ] {
+            assert!(body.contains(credit), "header names {credit}");
+        }
+        let ours = Theme::parse(body);
+        let upstream = Theme::by_name("TokyoNight Day");
+        for (what, a, b) in [
+            ("background", ours.background, upstream.background),
+            ("cursor text", ours.cursor_text, upstream.cursor_text),
+            (
+                "selection background",
+                ours.selection_background,
+                upstream.selection_background,
+            ),
+            ("palette 0", ours.palette[0], upstream.palette[0]),
+            ("palette 8", ours.palette[8], upstream.palette[8]),
+        ] {
+            assert_eq!(a, b, "{what} is TokyoNight Day's");
+        }
+        let hue = |c: Rgb| {
+            let [_, a, b] = super::oklab(c);
+            b.atan2(a).to_degrees()
+        };
+        let mut text = vec![
+            ("foreground", ours.foreground, upstream.foreground),
+            ("cursor", ours.cursor, upstream.cursor),
+            (
+                "selection foreground",
+                ours.selection_foreground,
+                upstream.selection_foreground,
+            ),
+        ];
+        for slot in (1..=7).chain(9..=15) {
+            text.push(("palette", ours.palette[slot], upstream.palette[slot]));
+        }
+        for (what, ours, upstream) in text {
+            assert!(
+                super::oklab(ours)[0] < super::oklab(upstream)[0],
+                "{what} {ours:?} is darker than {upstream:?}"
+            );
+            let turn = (hue(ours) - hue(upstream) + 540.0) % 360.0 - 180.0;
+            assert!(turn.abs() < 2.0, "{what} keeps its hue: {turn:.2} degrees");
         }
     }
 
@@ -658,6 +762,16 @@ mod tests {
             .find(|n| !Theme::POPULAR.contains(n))
             .unwrap();
         assert!(Theme::POPULAR.contains(&Theme::cycle_popular_by_look(outside, true)));
+    }
+
+    /// The Settings Theme row steps through POPULAR only, so the default
+    /// pair must be in it or a user who steps away cannot step back.
+    #[test]
+    fn popular_themes_include_the_default_pair() {
+        let defaults = crate::Config::default();
+        for name in [&defaults.light_theme, &defaults.dark_theme] {
+            assert!(Theme::POPULAR.contains(&name.as_str()), "{name}");
+        }
     }
 
     #[test]

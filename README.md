@@ -320,12 +320,13 @@ see [configuration and hint actions](docs/CONFIG.md).
 
 ## Themes
 
-Kettle follows the system's light/dark appearance by default, with TokyoNight
-Day and TokyoNight Night. Existing configs with `theme` and no `theme-mode`
-keep their fixed theme. Settings → Appearance offers Follow system, Light,
-Dark and Fixed theme. Choosing a theme while following the system saves it
-for the active appearance. Linux uses the XDG Settings portal; if appearance
-is unavailable or has no preference, Kettle uses dark.
+Kettle follows the system's light/dark appearance by default, with Kettle Day
+(TokyoNight Day with darker text) and TokyoNight Night. Existing configs with
+`theme` and no `theme-mode` keep their fixed theme. Settings → Appearance
+offers Follow system, Light, Dark and Fixed theme. Choosing a theme while
+following the system saves it for the active appearance. Linux uses the XDG
+Settings portal; if appearance is unavailable or has no preference, Kettle
+uses dark.
 See [theme configuration](docs/CONFIG.md#auto-lightdark-theme-switching).
 
 ## Privacy

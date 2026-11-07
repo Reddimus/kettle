@@ -3380,7 +3380,8 @@ impl Default for Config {
             theme_schedule_lat: None,
             theme_schedule_long: None,
             tab_bar_width: 180.0,
-            light_theme: "TokyoNight Day".into(),
+            // TokyoNight Day with darker text (assets/themes/Kettle Day).
+            light_theme: "Kettle Day".into(),
             dark_theme: "TokyoNight Night".into(),
             icon_bell: true,
             show_titlebar: true,
@@ -11901,10 +11902,10 @@ split_horiz = <Control><Shift>j
             Config::parse_text("font-size = 16"),
         ] {
             assert_eq!(cfg.theme_mode, ThemeMode::Auto);
-            assert_eq!(cfg.light_theme, "TokyoNight Day");
+            assert_eq!(cfg.light_theme, "Kettle Day");
             assert_eq!(cfg.dark_theme, "TokyoNight Night");
             for (os, expected) in [
-                (Some(false), "TokyoNight Day"),
+                (Some(false), "Kettle Day"),
                 (Some(true), "TokyoNight Night"),
                 (None, "TokyoNight Night"),
             ] {
@@ -11935,7 +11936,7 @@ split_horiz = <Control><Shift>j
             let mut cfg = Config::parse_text(text);
             assert_eq!(cfg.theme_mode, ThemeMode::Auto);
             cfg.resolve_theme_mode(Some(false));
-            assert_eq!(cfg.theme_name, "TokyoNight Day");
+            assert_eq!(cfg.theme_name, "Kettle Day");
         }
     }
 

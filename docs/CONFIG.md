@@ -170,7 +170,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `trigger` | regex \[`:: cmd args`\] | — | Repeatable. Triggers run only while the window is unfocused: a match against any of its panes' output then requests attention. `^` and `$` anchor to each row of output. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
 | `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing. `after-first` skips the initial window placement; `never` disables it |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `auto` (or `explicit` when `theme` is set without a mode) | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference (XDG Settings portal on Linux, native appearance on macOS/Windows); no preference or unavailable detection selects dark. If `theme-schedule` is set, the schedule owns the switch instead |
-| `light-theme` / `dark-theme` | string | `TokyoNight Day` / `TokyoNight Night` | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`). Kettle's TokyoNight Day darkens upstream's text colours for contrast: foreground 7:1 and ANSI colours 1–7 and 9–15 at least 4.5:1 against its background |
+| `light-theme` / `dark-theme` | string | `Kettle Day` / `TokyoNight Night` | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`). Kettle Day is TokyoNight Day with darker text: foreground 7:1 and ANSI colours 1–7 and 9–15 at least 4.5:1 against its background. `TokyoNight Day` itself keeps upstream's colours |
 | `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries in local time (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
 | `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
 | `grapheme-clustering` | bool | `true` | Start new terminals with Unicode grapheme cells (mode 2027): joined emoji, skin tones, flags and VS16 sequences share a cluster. Indic spacing marks and conjuncts, plus Thai/Lao spacing vowels, reserve two cells; registered VS15 text sequences narrow default emoji to one. Unattached skin-tone modifiers occupy two cells. `false` keeps scalar cells. Applications can toggle mode 2027; RIS and DECSTR restore the startup default. Reload affects only terminals created afterwards |
@@ -298,14 +298,15 @@ cutting the query.
 ### Auto light/dark theme switching
 
 With neither `theme` nor `theme-mode` set, Kettle follows the system appearance
-using `TokyoNight Day` for light and `TokyoNight Night` for dark. No preference
-or unavailable detection selects the dark side. Kettle's `TokyoNight Day` keeps
-upstream's background but darkens its text colours along their own hue, so body
-text reaches 7:1 and the ANSI colours prompts use reach 4.5:1 (WCAG AA). No
-other theme changes, and `palette = N=#hex` and `foreground` lines still
-override any of them. Existing configs that set
-`theme` without `theme-mode` keep their fixed theme, including named `palette`
-presets. An explicit mode always wins, regardless of line order.
+using `Kettle Day` for light and `TokyoNight Night` for dark. No preference
+or unavailable detection selects the dark side. Kettle Day is a bundled theme
+derived from TokyoNight Day: it keeps that theme's background, selection and
+background-tone slots (0 and 8) but darkens its text colours along their own
+hue, so body text reaches 7:1 and the ANSI colours prompts use reach 4.5:1
+(WCAG AA). `TokyoNight Day` and every other bundled theme keep upstream's
+colours, and `palette = N=#hex` and `foreground` lines still override any of
+them. Existing configs that set `theme` without `theme-mode` keep their fixed
+theme, including named `palette` presets. An explicit mode always wins, regardless of line order.
 
 Settings → Appearance → Appearance offers **Follow system**, **Light**, **Dark**
 and **Fixed theme**, mapped to `theme-mode = auto | light | dark | explicit`.
@@ -326,7 +327,7 @@ an existing fixed-theme config, and optionally customize the pair:
 
 ```ini
 theme-mode  = auto
-light-theme = TokyoNight Day
+light-theme = Kettle Day
 dark-theme  = TokyoNight Night
 ```
 
@@ -335,7 +336,7 @@ switch by time instead:
 
 ```ini
 theme-mode     = auto
-light-theme    = TokyoNight Day
+light-theme    = Kettle Day
 dark-theme     = TokyoNight Night
 # dark at 19:00, light at 07:00
 theme-schedule = 19:00 dark,07:00 light
@@ -345,7 +346,7 @@ theme-schedule = 19:00 dark,07:00 light
 
 ```ini
 theme-mode          = auto
-light-theme         = TokyoNight Day
+light-theme         = Kettle Day
 dark-theme          = TokyoNight Night
 theme-schedule      = auto
 # e.g. Long Beach, CA
@@ -466,7 +467,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `force-no-bell` | bool | `false` | Silence every bell path regardless of `bell`: visual flash, window attention, and the tab activity dot |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Legacy aliases for the unified `bell` key. Together they map to `both`; individually they map to `visual` or `attention`. An explicit `bell = …` setting wins regardless of file order |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
-| `light-theme` / `dark-theme` | theme name | `TokyoNight Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
+| `light-theme` / `dark-theme` | theme name | `Kettle Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click). Hover shows the destination and the current opening gesture; the pill clears on pointer exit, scrolling, typing or focus loss |
 | `link-underline` (alias `link_underline`) | `hover`\|`always` | `hover` | When detected URLs and paths are underlined. `hover` draws no line at rest and the solid accent line while the pointer is over the link; `always` also draws a thin, dim line at rest. Explicit OSC 8 links keep their dotted resting line in both modes, since their text need not look like a link. Hover, the destination pill, the opening gesture and quick-select hints are the same in both modes. Applies live |

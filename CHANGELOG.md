@@ -63,10 +63,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   settings control how much output survives; private storage is bounded to
   8 MiB, and remote output requires opting in.
 
-- Follow the system light/dark appearance by default with TokyoNight Day/Night,
-  including live Linux portal changes. Existing fixed-theme configs keep their
-  look. Settings adds an Appearance choice; theme picks customize the active
-  side while following the system. macOS material matches the active palette.
+- Follow the system light/dark appearance by default with Kettle Day and
+  TokyoNight Night, including live Linux portal changes. Existing fixed-theme
+  configs keep their look. Settings adds an Appearance choice; theme picks
+  customize the active side while following the system. macOS material
+  matches the active palette.
+
+- Kettle Day, the default light theme: TokyoNight Day with darker text. Body
+  text reaches 7:1 contrast with the background (TokyoNight Day's is 4.5:1),
+  and the red, green, yellow, blue, magenta, cyan and white that prompts use
+  reach at least 4.5:1 (some were 3:1), as does the accent drawn from its
+  blue. Each colour keeps its hue; the background, selection background and
+  the two background-tone slots (0 and 8) are TokyoNight Day's. Settings'
+  Theme row lists it. `TokyoNight Day` itself keeps upstream's colours, so a
+  config or picker choice that names it is unchanged.
 
 - A quick terminal: `kettle quick-terminal`, a palette/menu/keybind action, or
   `quick-terminal-hotkey` (registered natively on macOS and X11) slides a
@@ -129,14 +139,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the configured opacity, as it does with blur off. The Linux default stays
   99%. Settings says when blur is unavailable under the Window blur switch, in
   English and Spanish.
-
-- The default light theme, TokyoNight Day, has darker text. Body text reaches
-  7:1 contrast with the background (was 4.5:1), and the red, green, yellow,
-  blue, magenta, cyan and white that prompts use reach at least 4.5:1 (some
-  were 3:1), as does the accent drawn from its blue. Each colour keeps its
-  hue. The background, the two background-tone slots (0 and 8) and every other
-  bundled theme are unchanged, and `palette = N=#hex` or `foreground` lines
-  still override it.
 
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
