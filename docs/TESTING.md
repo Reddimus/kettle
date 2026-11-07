@@ -467,6 +467,18 @@ Use an init process for container runs so killed fixture children get reaped.
 Linux portal tests require `dbus-daemon`; their private-bus fixture waits for
 a successful socket connection, since a socket pathname can exist before the
 daemon starts accepting connections.
+
+The `term::command_marks::tests` fixtures feed the original OSC 133/CSI wire
+through the terminal's bounded pump queue and real extractor, VT parser,
+mutation journal and synchronized-update path. A test-only launch hook drains
+native output separately; a raw-output tap verifies exact input bytes. On Unix,
+the same wires also run through a native PTY and must produce the same visible
+text and relative command rows. ConPTY interprets child output and emits its own
+VT stream, so its native fixtures check text/outcomes and reply forwarding,
+without treating that stream as a byte-preserving scroll oracle. Native Windows
+CI is required to accept this fixture change; portable passes alone do not prove
+ConPTY behavior.
+
 Native PTY tests need permission to create Unix PTYs or Windows ConPTYs.
 Restricted sandboxes can skip those tests.
 
