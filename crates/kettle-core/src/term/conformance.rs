@@ -2467,6 +2467,55 @@ fn dec_backarrow_reports_negotiation_and_restores_its_saved_state() {
 }
 
 #[test]
+fn dec_backarrow_save_restore_preserves_negotiation_across_parser_splits_and_resets() {
+    for (initial, backarrow, negotiated, report) in [
+        ("", false, false, "\x1b[?67;2$y"),
+        ("\x1b[?67h", true, true, "\x1b[?67;1$y"),
+        ("\x1b[?67l", false, true, "\x1b[?67;2$y"),
+    ] {
+        for change in ["", "\x1b[?67h", "\x1b[?67l"] {
+            let text = format!("{initial}\x1b[?67s{change}\x1b[?67r\x1b[?67$p");
+            for split in 0..=text.len() {
+                let (mut term, mut parser, rx) = harness_rx(8, 3);
+                feed(&mut term, &mut parser, b"\x1b[?67r");
+                assert!(
+                    !term
+                        .mode()
+                        .intersects(TermMode::BACKARROW | TermMode::BACKARROW_NEGOTIATED)
+                );
+                feed(&mut term, &mut parser, &text.as_bytes()[..split]);
+                feed(&mut term, &mut parser, &text.as_bytes()[split..]);
+                assert_eq!(term.mode().contains(TermMode::BACKARROW), backarrow);
+                assert_eq!(
+                    term.mode().contains(TermMode::BACKARROW_NEGOTIATED),
+                    negotiated
+                );
+                assert_eq!(drain_pty(&rx), report);
+                // A second save replaces the first snapshot of mode 67.
+                feed(
+                    &mut term,
+                    &mut parser,
+                    b"\x1b[?67h\x1b[?67s\x1b[?67l\x1b[?67s\x1b[?67h\x1b[?67r",
+                );
+                assert!(!term.mode().contains(TermMode::BACKARROW));
+                assert!(term.mode().contains(TermMode::BACKARROW_NEGOTIATED));
+                for reset in [b"\x1b[!p".as_slice(), b"\x1bc"] {
+                    feed(&mut term, &mut parser, b"\x1b[?67h\x1b[?67s");
+                    feed(&mut term, &mut parser, reset);
+                    feed(&mut term, &mut parser, b"\x1b[?67r\x1b[?67$p");
+                    assert!(
+                        !term
+                            .mode()
+                            .intersects(TermMode::BACKARROW | TermMode::BACKARROW_NEGOTIATED)
+                    );
+                    assert_eq!(drain_pty(&rx), "\x1b[?67;2$y");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn dec_column_change_homes_even_in_a_single_row_pane() {
     for keep in [false, true] {
         let (mut term, mut parser) = harness(8, 1);
