@@ -149,6 +149,13 @@ probes to time out during registration and after successful registration. It
 verifies that the benchmark wrapper reaps a child that ignores SIGTERM on
 timeout, payload completion, and a shutdown signal, preserving exit statuses
 and removing the registry entry and completion marker.
+Its `AppleWindowCleanupTests` executes the embedded AppleScript runner with all
+native calls mocked. It checks that a returned window ID is logged and closed
+when the post-launch PID query times out or fails, while a failed initial query
+prevents launch. It also covers successful completion, malformed launch output,
+and retained cleanup logs after a close failure. Run that class alone for a
+process-free check; the full suite includes real child-process fixtures. The
+Linux Fish CI job runs it alongside `ApplePayloadTests`.
 
 `cargo test -j 2 --locked --offline -p kettle-core
 search_tolerates_grid_commit_before_output_publication` uses the terminal's
