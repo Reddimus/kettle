@@ -323,7 +323,31 @@ mod tests {
     }
 
     fn pane(wire: &str, history: usize) -> super::super::Terminal {
-        pane_observed(wire, history, std::sync::Arc::new(|| {}), |_, _| {})
+        let raw = pane_observed(wire, history, std::sync::Arc::new(|| {}), |_, _| {});
+        // Unix PTYs preserve the wire. ConPTY renders it into a new VT stream;
+        // its native contract is covered separately below.
+        #[cfg(unix)]
+        {
+            let native = native_pane(wire, history);
+            assert_eq!(relative_rows(&raw), relative_rows(&native));
+            use alacritty_terminal::index::{Column, Line};
+            let raw_term = raw.term.lock().unwrap();
+            let native_term = native.term.lock().unwrap();
+            for row in 0..6 {
+                for col in 0..80 {
+                    assert_eq!(
+                        raw_term.grid()[Line(row)][Column(col)].c,
+                        native_term.grid()[Line(row)][Column(col)].c,
+                        "raw/Unix PTY text at row {row}, column {col}"
+                    );
+                }
+            }
+        }
+        raw
+    }
+
+    fn native_pane(wire: &str, history: usize) -> super::super::Terminal {
+        fixture(wire, history, std::sync::Arc::new(|| {}), |_, _| {}, false)
     }
 
     fn pane_observed(
@@ -335,66 +359,128 @@ mod tests {
             &crossbeam_channel::Receiver<super::super::TermEvent>,
         ),
     ) -> super::super::Terminal {
-        use super::super::{CursorShape, Terminal};
+        fixture(wire, history, waker, observe, true)
+    }
+
+    fn fixture(
+        wire: &str,
+        history: usize,
+        waker: crate::Waker,
+        observe: impl FnOnce(
+            &super::super::Terminal,
+            &crossbeam_channel::Receiver<super::super::TermEvent>,
+        ),
+        raw: bool,
+    ) -> super::super::Terminal {
+        use super::super::{
+            CursorShape, LaunchOverrides, PtyGeometry, PtyOutputSender, Terminal,
+            TerminalCapabilities, WorkingDirectoryPolicy,
+        };
         use std::time::{Duration, Instant};
         let (tx, rx) = crossbeam_channel::unbounded();
+        let (input_tx, input_rx) = crossbeam_channel::bounded(1);
+        let (output_tx, output_rx) = crossbeam_channel::bounded(2);
         if wire == "REPLY_FIXTURE" {
             tx.send(super::super::TermEvent::PtyWrite("REPLY\r\n".into()))
                 .unwrap();
         }
-        let pane = Terminal::new_with_env_and_output(
-            &[
-                std::env::current_exe().unwrap().to_str().unwrap().into(),
-                "--exact".into(),
-                "term::command_marks::tests::command_mark_wire_child".into(),
-                "--nocapture".into(),
-                "--quiet".into(),
-            ],
-            None,
-            history,
-            0,
-            80,
-            6,
-            8,
-            16,
-            false,
-            CursorShape::Block,
-            None,
-            "xterm-256color",
-            "truecolor",
-            &[(FIXTURE_ENV.into(), wire.into())],
-            false,
-            false,
-            tx,
-            waker,
-            None,
-        )
-        .expect("command-mark PTY fixture");
+        let pane = super::super::test_input::with_input(raw.then_some(input_tx), || {
+            Terminal::new_with_launch_environment(
+                &[
+                    std::env::current_exe().unwrap().to_str().unwrap().into(),
+                    "--exact".into(),
+                    "term::command_marks::tests::command_mark_wire_child".into(),
+                    "--nocapture".into(),
+                    "--quiet".into(),
+                ],
+                None,
+                history,
+                0,
+                PtyGeometry::from_cell_size(80, 6, 8, 16),
+                false,
+                CursorShape::Block,
+                None,
+                "xterm-256color",
+                "truecolor",
+                &[(FIXTURE_ENV.into(), if raw { "" } else { wire }.into())],
+                &LaunchOverrides::default(),
+                false,
+                false,
+                &crate::shell_startup::ShellStartup::default(),
+                TerminalCapabilities::default(),
+                WorkingDirectoryPolicy::FallbackToHome,
+                tx,
+                waker,
+                raw.then(|| PtyOutputSender::lossless(output_tx)),
+            )
+        });
+        let pane = pane.expect("command-mark fixture");
         #[cfg(windows)]
         let mut pane = pane;
-        eprintln!("command-mark fixture started PID {:?}", pane.child_pid());
-        let observed =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observe(&pane, &rx)));
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !pane.take_exited() {
-            forward_replies(&pane, &rx);
-            #[cfg(windows)]
-            if pane.child_exit_code().is_some() {
-                pane.begin_pty_output_close().expect("close fixture ConPTY");
+        eprintln!(
+            "command-mark fixture owner={} started PID {:?}, raw={raw}",
+            std::process::id(),
+            pane.child_pid()
+        );
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let bytes = [b"\x1b[H\x1b[2J".as_slice(), wire.as_bytes()].concat();
+            if raw {
+                assert!(bytes.len() <= super::super::PTY_READ_BUFFER_BYTES);
+                let input = input_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                let generation = pane.pty_read_progress.mark_chunk_read();
+                input
+                    .send_timeout(
+                        Some((generation, bytes.clone(), bytes.len())),
+                        Duration::from_secs(2),
+                    )
+                    .unwrap();
+                input.send_timeout(None, Duration::from_secs(2)).unwrap();
+                drop(input);
+                // Native output is drained independently. Answer ConPTY's
+                // inherited-cursor query even though its bytes bypass this parser.
+                #[cfg(windows)]
+                pane.write(b"\x1b[1;1R");
             }
-            assert!(
-                Instant::now() < deadline,
-                "command-mark reader did not reach EOF"
-            );
-            std::thread::sleep(Duration::from_millis(5));
+            observe(&pane, &rx);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !pane.take_exited() {
+                forward_replies(&pane, &rx);
+                #[cfg(windows)]
+                if !raw && pane.child_exit_code().is_some() {
+                    pane.begin_pty_output_close().expect("close fixture ConPTY");
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "command-mark reader did not reach EOF"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            while pane.child_exit_code().is_none() {
+                forward_replies(&pane, &rx);
+                assert!(Instant::now() < deadline, "command-mark child did not exit");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(pane.child_exit_code(), Some(0));
+            if raw {
+                let captured: Vec<_> = output_rx.try_iter().flatten().collect();
+                assert_eq!(captured, bytes, "raw fixture changed the original wire");
+            }
+        }));
+        if observed.is_err() && pane.child_exit_code().is_none() {
+            pane.kill().expect("kill owned command-mark fixture");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while pane.child_exit_code().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
-        while pane.child_exit_code().is_none() {
-            forward_replies(&pane, &rx);
-            assert!(Instant::now() < deadline, "command-mark child did not exit");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        eprintln!("command-mark fixture reaped PID {:?}", pane.child_pid());
-        assert_eq!(pane.child_exit_code(), Some(0));
+        #[cfg(windows)]
+        pane.begin_pty_output_close().expect("close fixture ConPTY");
+        let code = pane.child_exit_code();
+        eprintln!(
+            "command-mark fixture reaped PID {:?}, code={code:?}",
+            pane.child_pid()
+        );
+        assert!(code.is_some(), "owned command-mark child was not reaped");
         if let Err(panic) = observed {
             std::panic::resume_unwind(panic);
         }
@@ -410,6 +496,37 @@ mod tests {
                 pane.write(reply.as_bytes());
             }
         }
+    }
+
+    #[test]
+    fn command_mark_raw_input_preserves_wire_and_scroll_semantics() {
+        let mut wire = setup(false);
+        wire.push_str("\x1b[2;5r\x1b[S");
+        let pane = pane_observed(&wire, 4, std::sync::Arc::new(|| {}), |_, _| {});
+        assert_text(&pane, 1, "TARGET");
+        assert_rows(&pane, &[(0, 11), (5, 66), (1, 7)]);
+    }
+
+    #[test]
+    fn command_mark_native_transport_delivers_text_and_outcome() {
+        let pane = native_pane(&command(3, "TARGET", 7), 4);
+        assert_text(&pane, 2, "TARGET");
+        assert_rows(&pane, &[(2, 7)]);
+    }
+
+    #[test]
+    fn command_mark_fixture_reaps_child_after_observer_panics() {
+        let panic = std::panic::catch_unwind(|| {
+            fixture(
+                "REPLY_FIXTURE",
+                4,
+                std::sync::Arc::new(|| {}),
+                |_, _| panic!("observer sentinel"),
+                false,
+            );
+        })
+        .expect_err("fixture must resume the observer panic after reaping");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"observer sentinel"));
     }
 
     fn command(row: usize, text: &str, code: i32) -> String {
@@ -432,24 +549,27 @@ mod tests {
         }
     }
 
-    fn assert_rows(pane: &super::super::Terminal, rows: &[(i64, i32)]) {
+    fn relative_rows(pane: &super::super::Terminal) -> Vec<(i128, i32)> {
         use alacritty_terminal::grid::Dimensions;
         let screen_top = {
             let term = pane.term.lock().unwrap();
             term.grid().history_origin() + term.grid().history_size() as u64
         };
-        let actual: Vec<_> = pane
-            .command_marks()
+        pane.command_marks()
             .iter()
             .map(|m| (i128::from(m.row) - i128::from(screen_top), m.exit_code))
-            .collect();
+            .collect()
+    }
+
+    fn assert_rows(pane: &super::super::Terminal, rows: &[(i64, i32)]) {
+        let actual = relative_rows(pane);
         let expected: Vec<_> = rows
             .iter()
             .map(|&(row, code)| (i128::from(row), code))
             .collect();
         assert_eq!(
             actual, expected,
-            "command rows relative to active screen top {screen_top}"
+            "command rows relative to active screen top"
         );
     }
 
@@ -697,11 +817,17 @@ mod tests {
 
     #[test]
     fn r2_native_fixture_forwards_replies_to_a_waiting_child() {
-        pane("REPLY_FIXTURE", 4);
+        native_pane("REPLY_FIXTURE", 4);
     }
 
     #[test]
     fn r2_sync_marks_and_text_stay_invisible_until_commit() {
+        sync_marks_and_text_stay_invisible_until_commit(true);
+        #[cfg(unix)]
+        sync_marks_and_text_stay_invisible_until_commit(false);
+    }
+
+    fn sync_marks_and_text_stay_invisible_until_commit(raw: bool) {
         use std::time::Duration;
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let (resume_tx, resume_rx) = crossbeam_channel::bounded(1);
@@ -726,24 +852,30 @@ mod tests {
         let wire = "\x1b[2;5r\x1b[3;1H\x1b[?2026h\x1b[S\x1b]133;A\x07NEW\x1b]133;C\x07\x1b]133;D;7\x07\x1b]9;HOLD\x07\x1b[?2026l";
         // Stop the reader at the notification wake, before it can parse ESU
         // or service a timeout. This makes the mid-update observation atomic.
-        let pane = pane_observed(wire, 4, waker, |pane, rx| {
-            loop {
-                wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-                forward_replies(pane, rx);
-                let held = pane
-                    .drain_protocol_notifications()
-                    .iter()
-                    .any(|n| n.title == "HOLD");
-                if held {
-                    let resume = Resume(resume_tx.clone(), armed.clone());
-                    assert_text(pane, 2, "   ");
-                    assert_rows(pane, &[]);
-                    drop(resume);
-                    break;
+        let pane = fixture(
+            wire,
+            4,
+            waker,
+            |pane, rx| {
+                loop {
+                    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    forward_replies(pane, rx);
+                    let held = pane
+                        .drain_protocol_notifications()
+                        .iter()
+                        .any(|n| n.title == "HOLD");
+                    if held {
+                        let resume = Resume(resume_tx.clone(), armed.clone());
+                        assert_text(pane, 2, "   ");
+                        assert_rows(pane, &[]);
+                        drop(resume);
+                        break;
+                    }
+                    resume_tx.send(()).unwrap();
                 }
-                resume_tx.send(()).unwrap();
-            }
-        });
+            },
+            raw,
+        );
         assert_text(&pane, 2, "NEW");
         assert_rows(&pane, &[(2, 7)]);
     }
