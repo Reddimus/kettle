@@ -63,8 +63,10 @@ Kettle reloads its `key = value` config when you save it.
 and `kettle --check-config` validates it. [Configuration](docs/CONFIG.md)
 lists every setting. Config problems appear in a translated notice with source
 lines, reasons and spelling suggestions, without showing values. Choose
-**Open Config** (or press Enter while the notice is visible) to edit that file;
-Escape dismisses the notice.
+**Open Config** to edit that file, or use the notice's dismiss button. If a
+screen reader moves focus to the notice, Enter opens the config and Escape
+dismisses it. While the terminal retains focus, those keys go to the running
+shell or program.
 
 ## Common keys
 

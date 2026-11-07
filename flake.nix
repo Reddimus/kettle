@@ -157,11 +157,14 @@
               --profile media-worker -p kettle-media-worker
           '';
 
-          # Keep the Nix Linux package at feature parity with Kettle's other
-          # Linux distribution channels. These assets are intentionally
-          # omitted from Darwin outputs, where a Linux Desktop Entry and
-          # hicolor icon hierarchy would be inert and misleading.
-          postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+          # Both platforms embed the TokyoNight palettes in the executable.
+          postInstall = ''
+            for name in LICENSE README.md; do
+              install -Dm644 "docs/licenses/tokyonight.nvim/$name" \
+                "$out/share/doc/kettle/docs/licenses/tokyonight.nvim/$name"
+            done
+          '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            # Linux-only desktop assets and media worker.
             install -Dm755 target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/media-worker/kettle-media-worker \
               "$out/bin/kettle-media-worker"
             install -Dm644 packaging/linux/kettle.desktop \
@@ -267,6 +270,15 @@
         # under Xvfb without LD_LIBRARY_PATH so its RUNPATH is tested.
         checks = {
           cargo-test = self.packages.${system}.default;
+          tokyonight-license = pkgs.runCommand "kettle-tokyonight-license" {} ''
+            for name in LICENSE README.md; do
+              installed="${self.packages.${system}.default}/share/doc/kettle/docs/licenses/tokyonight.nvim/$name"
+              test -f "$installed"
+              test ! -L "$installed"
+              cmp "${./docs/licenses/tokyonight.nvim}/$name" "$installed"
+            done
+            touch "$out"
+          '';
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           package-contents = pkgs.runCommand "kettle-linux-package-contents" {
             nativeBuildInputs = [
@@ -337,8 +349,8 @@
               find "$package/share" \
                 -mindepth 1 ! -type d ! -type f -print -quit
             )"
-            test "$(find "$package/share" -mindepth 1 -type d | wc -l)" -eq 23
-            test "$(find "$package/share" -type f | wc -l)" -eq 14
+            test "$(find "$package/share" -mindepth 1 -type d | wc -l)" -eq 28
+            test "$(find "$package/share" -type f | wc -l)" -eq 16
 
             touch "$out"
           '';

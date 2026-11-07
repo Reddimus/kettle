@@ -14,6 +14,10 @@ profile lists including empty, native submenu dispatch order, and the shared
 Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
 saves and reloads a split layout, checks picker discovery and validates the
 palette's profile discovery without changing the real config directory.
+The portable profile inventory regression blocks an injected enumerator while
+menu dispatch uses the empty startup cache and then the last completed cache.
+It checks coalesced refreshes and eventual latest results without reading owner
+profiles. Existing menu-model tests pass an explicit empty profile list.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
@@ -23,6 +27,13 @@ It closes split panes/tabs, reaps panes repeatedly, moves a tab between windows
 in both directions, and checks that retained announcement text, output cursor,
 serial, typing/input-row state and row IDs survive. Departed records are removed
 by live pane ID even when cache and pane counts happen to be equal.
+
+Portable Wayland tear-off geometry coverage exercises the same horizontal
+strip layout used by painting, including centered single-tab custom headers,
+window-button reservations, narrow/wide surfaces, non-default padding and tab
+minimum widths, and fractional/double scales. Ordinary top/bottom/side grips
+retain their offsets. These tests do not exercise a compositor grab; native
+Wayland interaction remains a separate private-session check.
 
 ## Run it
 
@@ -119,6 +130,15 @@ gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
+
+The `kettle-ui` `scrollback_receipt_hit` regressions exercise pill hit detection
+and pane scroll actions with PTY-backed `WindowState` fixtures and the shared
+receipt placement inputs. They cover a notice shifting an expanded receipt over
+the pill, collapsed and nonoverlapping receipts, secondary and outside presses,
+and independent panes and windows. Run
+`cargo test --locked --offline -j 2 -p kettle-ui --lib scrollback_receipt_hit`.
+These fixtures create no App, native window, renderer, clipboard or global UI
+services. Native and control event dispatch still require a live integration pass.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
@@ -426,7 +446,7 @@ Do not run every interactive smoke for a documentation-only edit.
 
 ### What strict and full mean
 
-`gauntlet` is the core Rust gate. It also runs the live-helper, titlebar,
+`gauntlet` is the core Rust gate. It also runs the live-helper, UI-state, titlebar,
 Wayland-trace, shell, VM-launcher, and fuzz-workspace checks.
 Its media subgate enables `test-worker` and `test-faults`, which ordinary
 workspace tests do not enable.
@@ -740,7 +760,8 @@ owner; run it with `KETTLE_X11_CLIPBOARD_TEST=1` on a private X server. The
 clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
-contents, cap/deadline errors, stale-reply isolation, initialization failure and
+contents, PRIMARY routing with an injected clipboard-only provider and platform
+fallback, cap/deadline errors, stale-reply isolation, initialization failure and
 image/file fallback without arboard, and that the Wayland text path adds no
 dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
 and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
@@ -748,12 +769,13 @@ tests do not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
-and paste in both directions with another native application, middle-click
-PRIMARY, OSC 52 CLIPBOARD and PRIMARY policy and ordering, and search/modal
-paste. Check large and stalled selections, and verify that image/file clipboard
-paste logs its limitation and falls through without a crash. Repeat on X11 to
-check arboard and in a compositor offering primary-selection support. No live
-Wayland result can be inferred from a macOS suite pass.
+and paste in both directions with another native application, OSC 52 CLIPBOARD
+policy and ordering, and search/modal paste. Check large and stalled selections,
+and verify that image/file clipboard paste logs its limitation and falls through
+without a crash. Repeat on private X11 and XWayland to check automatic selection
+copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
+XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
+No live Wayland result can be inferred from a macOS suite pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
@@ -865,10 +887,116 @@ the full matrix; files are named `state.language.theme.size.png` under
 percent (0.5) of its pixels differ or its size changed. A missing baseline is
 reported, never created. A change to a baseline belongs in the pull request
 that changes the UI, with the before and after images in its description.
+The resolved `--out` and `--compare` directories must be disjoint. Equality,
+ancestor/descendant paths, and symlink aliases are rejected before deleting
+output or loading the live helper. Use a separate capture directory when
+comparing; `--compare target/ui-states` overlaps the default output and fails.
+The final component of `--out` must not be a symlink, even without `--compare`
+or with a disjoint baseline directory. Rejection preserves the symlink and its
+target before any output deletion or live-helper loading.
 
-CI runs the English and Spanish matrix on Linux under Xvfb with software
-rendering and uploads the images as the `ui-states-*` artifact; when
-`tests/ui-states/linux` exists, it compares against those baselines.
+`just ui-states-self-test` runs stdlib-only headless regression tests, including
+baseline preservation and injected geometry fixtures at 1x/2x backing scales
+and default/narrow widths. It also tests the private Linux environment with
+injected process/system boundaries: inherited desktop/config removal, socket
+survival across fixture runtime overrides, font/GPU/compositor rejection,
+startup/run failures, retained diagnostics, and identity-checked cleanup.
+The real runner lifecycle also handles 240 synthetic adopted PTY exits across
+80 cases, bursts above 32, failure cleanup, and nested subreaper scopes.
+It runs in `gauntlet` and the CI matrix without starting Kettle or Weston.
+
+On macOS CI, `--geometry-only` runs all ten states in English/Spanish,
+dark/light and default/narrow sizes, saving `*.geometry.json` and
+`ui-states.json` under `target/ui-state-geometry`. It asserts positive in-bounds
+content and terminal rectangles, pane count/focus and split separation, tab
+count/active state and titlebar clearance, the expected modal, picker rows and
+no-match state, Settings rows/search bounds, and Search controls, match state
+and reserved space. Geometry failures return nonzero and retain the offending
+JSON. This mode needs a native graphical session and the built Kettle, but
+does not capture PNGs or require Pillow. It cannot use `--compare`. The existing
+native caption/fullscreen and other UI smoke assertions remain separate gates.
+
+Linux CI calls `scripts/run-ui-states-wayland.py` for the same 80-state matrix.
+The hosted Linux dependency step installs Weston, Fontconfig and Mesa through
+the existing dependency installer. Other Xvfb smoke checks keep their existing
+environment. To run the private matrix on a prepared Linux host with an already
+built Kettle:
+
+```sh
+python3 scripts/run-ui-states-wayland.py --kettle ./target/release/kettle \
+  --out target/ui-states --diagnostics target/ui-wayland-environment
+```
+
+The runner rejects other platforms before creating directories or processes.
+It starts a private headless Weston with the GL renderer and a 1600x1000,
+scale-1 output, plus a private D-Bus daemon without service activation paths.
+Both session and system bus addresses point into this private session; extra
+XDG config/data search directories are private and empty.
+It removes inherited desktop, shell, agent and Kettle config overrides, uses
+private HOME/XDG directories, removes `DISPLAY` and `WAYLAND_SOCKET`, and gives
+clients an absolute private `WAYLAND_DISPLAY`. That socket remains reachable
+when each fixture supplies its own 0700 `XDG_RUNTIME_DIR`. The existing helper
+still owns Kettle, its explicit control-server launch and PTY cleanup; fixture
+configs retain `record = false`. No global desktop input or socket is used.
+
+Private Fontconfig configuration includes only `assets/fonts`, with no system
+config includes. The runner verifies `fc-list` against the repository TTF set
+and records every hash, including all four JetBrains Mono faces and the four
+bundled Fira Sans faces. Software-rendering environment settings are requests:
+the runner additionally requires Weston's actual headless/GL/llvmpipe log and
+version, a GL llvmpipe CPU adapter with driver details from `kettle --gpu-info`,
+and matching adapter selection in every live fixture log before and after
+screenshot. Fontdb's system-directory fallback also fails the run.
+An unknown or different adapter fails the run. The private GPU config requests
+GL/software for both diagnostics and live fixtures. Diagnostic parsers accept
+LF and CRLF line endings while retaining strict adapter/backend checks and
+the original raw diagnostic files. Portable regressions force CRLF input on
+every host; Windows CI also exercises the complete fixture path.
+
+Startup defaults to 20 seconds (`--startup-timeout`, maximum 60); the matrix
+defaults to 900 seconds (`--run-timeout`, maximum 900). Native queries have
+20-second limits, `ps` has a 2-second limit, and process termination uses
+3-second TERM/KILL waits. A run timeout unwinds the live helper so it can clean
+up its PTYs. Weston and D-Bus use recorded direct PIDs and stable pidfd handles;
+Weston's own desktop-shell child is recorded by direct parent and executable,
+and a child-subreaper scope permits waiting if it outlives Weston. Signals
+require an identity check. Failure to verify identity or finish cleanup fails
+the run and preserves diagnostics. Child logs have a 16 MiB file limit.
+The helper freezes Kettle before killing PTYs, so their unreaped exits can pass
+to the outer subreaper when Kettle exits. After every fixture teardown, including
+failed startup, the runner drains these newly adopted direct children while
+excluding baseline children, recorded services and Weston's recorded clients
+by stable identity. It tries `waitpid` before signaling and retains each PID,
+identity, wait PID/status and post-wait diagnostic. Final cleanup uses the same
+drain after stopping the services and cleaning Weston's clients. Each drain
+retains at most 32 adopted handles per batch, processes at most 32 batches, and
+shares a 30-second wait/inventory budget; inventory reads are capped at 64 KiB.
+Each post-wait `ps` probe retains its separate 2-second limit. Exhaustion or
+cleanup errors fail the run and retain receipts; they do not waive ownership
+checks or accept surviving children. Nested scopes keep subreaping enabled
+until the final owner closes.
+
+The `ui-states-*` CI artifact includes captures and separate
+`ui-wayland-environment/run-*` diagnostics even on failure: a native manifest
+with source HEAD/diff digest, untracked-source and binary hashes, OS/Python and
+package versions, private environment, font inventory/hashes, GPU diagnostics,
+Weston backend/renderer/version, fixture logs and PID/wait/ps receipts. Private
+scratch directories are removed after success and retained on failure; their
+paths are in the manifest. Output, baseline and diagnostics directories must
+be disjoint. When `tests/ui-states/linux` exists, CI compares against it;
+otherwise it explicitly reports capture-only operation. Do not mix baselines
+from different compositors/font environments.
+
+The initial Linux pixel gate remains pending until the final merged build,
+after the font and C08 changes land. Capture its full matrix in the final CI
+environment, retain the build/commit and font/environment identity, and review
+all 80 PNGs before adding them under `tests/ui-states/linux` in an explained PR
+with before/after artifacts. Re-run CI with those baselines to establish the
+pixel gate. This environment preparation has not run Weston or captured pixels
+on native Linux; the first hosted Linux execution, artifact inspection and
+baseline promotion remain pending. No baseline is generated or accepted by
+headless fixture tests; capture-only CI does not prove pixel equality. Native
+geometry evidence must also identify the exact capture script/build used.
 
 ## Diagram gate
 
@@ -1072,6 +1200,15 @@ A not-yet-published asset can skip that online part.
 Record that separately from the local install/uninstall result.
 
 `just package-templates` checks source rendering on a feature branch.
+Its hermetic tests compare installed TokyoNight license bytes for Homebrew,
+Arch, and the common Nix install hook. Nix's `tokyonight-license` flake check
+compares the final store files on both supported platforms. A Linux packaging
+fixture checks that NOTICE includes the complete license for existing updaters.
+Installer tests cover recorded license replacement and removal, and reject
+linked sources and destinations. The Linux updater transaction test compares
+installed license bytes with the verified archive and checks their provenance;
+a portable map test keeps the Linux document destinations and modes covered on
+other CI hosts.
 At an exact clean release tag, auto mode also checks published assets.
 The underlying script's `--require-release` makes that check mandatory:
 
@@ -1696,6 +1833,31 @@ test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
+
+`kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
+combining-class table, the placement maths (gaps, stacking, below marks that
+never rise, above marks that sink halfway, aligned and double classes), whole
+pixel rounding, the quarter-line overflow limit and the bounded cache. With
+the bundled JetBrains Mono alone, anchored marks (`Z\u{308}`, `q\u{323}` and
+mark-to-mark stacks) keep their place; unanchored ones (`#\u{301}`,
+`@\u{323}`), `.case` substitutes and a dot after a composed `Aacute` clear
+their base; and with `mkmk` turned off a stacked acute no longer follows the
+diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
+use an isolated database of bundled JetBrains Mono and Fira Sans and must be
+pixel-identical with fallback placement removed. Portable fixture checks verify
+the selected glyphs and faces, zero-offset anchors, and the shaped offsets
+controlled by `mark` and `mkmk`; Fira Sans anchors the grave below that
+JetBrains Mono lacks. A steady frame or zoom must reuse the cached placement,
+a row laid out late must still be placed, and a focused block cursor must
+cover a moved mark with its inverted
+copy. Switching between a moved-mark cell and a built-in shade also checks
+that only the current cell contributes cursor patch bounds, with queue and
+mapped uploads and pixel-identical crops in both blink phases. `cursor_marks`
+tests grow the cursor's own atlas past its first texture
+across several cells and check when it must be replaced. The bundled cases
+run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and a tall stack
+need a host fallback face and report `MARK_FONT_SKIP` without one. Without an
+adapter the tests report `MARK_GPU_SKIP`.
 
 Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
 DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and
