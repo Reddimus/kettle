@@ -177,8 +177,9 @@ use theme::{
     completion_palette_with_colors, composed_bg_alpha, confirm_dialog_border_color,
     desired_alpha_mode, dim_blend, final_scene_is_uniformly_opaque, gc, inactive_pane_amount,
     live_underlay_clear_color, needs_postmultiplied_presentation, pane_inactive_amount,
-    pick_titlebar_bg, resolve_chrome_bg, resolved_cell_foreground_cached, srgb, srgb_encode,
-    surface_clear_color, use_live_pane_bases,
+    pick_titlebar_bg, resolve_chrome_bg, resolved_cell_foreground_cached,
+    resolved_highlight_foreground_cached, srgb, srgb_encode, surface_clear_color,
+    use_live_pane_bases,
 };
 #[cfg(test)]
 use theme::{attributed_foreground, completion_palette, resolved_cell_foreground};

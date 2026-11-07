@@ -3024,10 +3024,12 @@ it requires an unlocked desktop and cannot run in the sandbox.
 readable user-foreground precedence, dim/link/ANSI/indexed/truecolour text,
 same-hue 3:1 focused fills on the default dark and light themes and every
 bundled theme, and inactive fills across bundled themes. Offscreen tests cover
-link and SGR decorations over selected fills, link underlines over a selection
-drawn in the selected text colour at their resting weight, selected cells with
-their own background, inactive split dimming, steady hollow cursors and DEC cursor hiding; they report
-`C09_GPU_SKIP` without an adapter.
+link and SGR decorations over selected fills; link underlines over a selection
+drawn in the selected text colour at their resting weight; selected cells with
+their own background; one selection fill kept across TokyoNight Night program
+backgrounds it separates from, with fills of their own only where it does not;
+inactive split dimming; steady hollow cursors and DEC cursor hiding. They
+report `C09_GPU_SKIP` without an adapter.
 `kettle-core` tests both copy policies against printed spaces, blank padding,
 blocks, blank rows, wraps, tabs, wide cells, combining marks and byte caps.
 `kettle-ui` and `kettle-config` cover selection modifiers, cursor live reload,

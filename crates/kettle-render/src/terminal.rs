@@ -6,8 +6,8 @@ use super::{
     Translator, Weight, Wrap, background_has_wallpaper, card_scene, clip_quads, color,
     composed_bg_alpha, cursor_policy, emit_cell_locked_glyphs, font_features, inline_cards,
     inline_image_clip, pane_backdrop_rect, pane_grid_origin, pane_metrics, rect,
-    resolved_cell_foreground_cached, selection_row_span, single_column_text_presentation,
-    visible_selection_rows,
+    resolved_cell_foreground_cached, resolved_highlight_foreground_cached, selection_row_span,
+    single_column_text_presentation, visible_selection_rows,
 };
 
 /// A card a frame drew: its pane, its nonce, and the part of it inside its
@@ -472,12 +472,12 @@ impl Renderer {
                 bg
             }
         };
-        let selection_bg = super::theme::selection_fill(
+        let selection_fills = super::theme::PaneSelectionFills::new(
             theme,
             shown(default_bg),
-            window_focused,
             &mut self.minimum_contrast_cache,
         );
+        let selection_bg = selection_fills.row(window_focused);
         let mut links: Vec<_> = links.iter().collect();
         links.sort_unstable_by_key(|link| (link.row, link.col));
         let dim_bg = if term_colors.reverse_video() {
@@ -754,28 +754,25 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
+            let highlight_bg = if matches!(highlight, CellHighlight::None) {
+                bg
+            } else {
+                shown(bg)
+            };
+            let cell_background = selection_fills.cell(
+                highlight,
+                cfg,
+                theme,
+                highlight_bg,
+                &mut self.minimum_contrast_cache,
+            );
             if matches!(
                 card_cell,
                 inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
             ) {
                 let backdrop = match highlight {
-                    CellHighlight::Search(true) => {
-                        cfg.search_background.unwrap_or(theme.palette[3])
-                    }
-                    CellHighlight::Search(false)
-                    | CellHighlight::Selection
-                    | CellHighlight::InactiveSelection => {
-                        super::theme::highlight_colors_cached(
-                            highlight,
-                            cfg,
-                            theme,
-                            fg,
-                            bg,
-                            &mut self.minimum_contrast_cache,
-                        )
-                        .1
-                    }
                     CellHighlight::None => theme.background,
+                    _ => cell_background,
                 };
                 if let Some(clip) = fallback_clip {
                     card_scene::append_fallback_background(
@@ -789,37 +786,26 @@ impl Renderer {
                     );
                 }
             }
-            let highlight_bg = if matches!(highlight, CellHighlight::None) {
-                bg
-            } else {
-                shown(bg)
-            };
-            fg = resolved_cell_foreground_cached(
-                fg,
-                highlight_bg,
-                highlight,
-                (flags.contains(Flags::DIM), bold),
-                cfg,
-                theme,
-                &mut self.minimum_contrast_cache,
-            );
-            let cell_background = match highlight {
-                CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
-                CellHighlight::Search(false) | CellHighlight::Selection => {
-                    super::theme::selection_fill(
-                        theme,
-                        highlight_bg,
-                        true,
-                        &mut self.minimum_contrast_cache,
-                    )
-                }
-                CellHighlight::InactiveSelection => super::theme::selection_fill(
+            // Highlight ink resolves against the fill painted under it.
+            fg = if matches!(highlight, CellHighlight::None) {
+                resolved_cell_foreground_cached(
+                    fg,
+                    bg,
+                    highlight,
+                    (flags.contains(Flags::DIM), bold),
+                    cfg,
                     theme,
-                    highlight_bg,
-                    false,
                     &mut self.minimum_contrast_cache,
-                ),
-                CellHighlight::None => bg,
+                )
+            } else {
+                resolved_highlight_foreground_cached(
+                    fg,
+                    cell_background,
+                    highlight,
+                    cfg,
+                    theme,
+                    &mut self.minimum_contrast_cache,
+                )
             };
             if inactive > 0.0 && matches!(highlight, CellHighlight::None) {
                 fg = self.chrome_colors.inactive(
@@ -878,9 +864,9 @@ impl Renderer {
                     1.0,
                 ));
             }
-            // The row's selection fill is resolved against the default
-            // background. A selected cell with its own background gets the fill
-            // resolved against that one, which its text ink was resolved on.
+            // The row's selection quad carries the pane's fill. A selected cell
+            // that fill does not stand out from gets its own on top
+            // (`PaneSelectionFills::cell`).
             if matches!(
                 highlight,
                 CellHighlight::Selection | CellHighlight::InactiveSelection
@@ -895,22 +881,13 @@ impl Renderer {
                     1.0,
                 ));
             }
-            if let Some(active) = search {
-                let fill = super::theme::highlight_colors_cached(
-                    CellHighlight::Search(active),
-                    cfg,
-                    theme,
-                    fg,
-                    highlight_bg,
-                    &mut self.minimum_contrast_cache,
-                )
-                .1;
+            if search.is_some() {
                 search_quads.push(rect(
                     ox + vcol as f32 * cw,
                     oy + vrow as f32 * ch,
                     cw,
                     ch,
-                    fill,
+                    cell_background,
                     1.0,
                 ));
             }
@@ -943,11 +920,10 @@ impl Renderer {
                             self.config.format.is_srgb(),
                         )
                     } else {
-                        resolved_cell_foreground_cached(
+                        resolved_highlight_foreground_cached(
                             line,
-                            highlight_bg,
+                            cell_background,
                             highlight,
-                            (false, false),
                             cfg,
                             theme,
                             &mut self.minimum_contrast_cache,

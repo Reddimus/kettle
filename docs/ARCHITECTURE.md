@@ -3521,15 +3521,22 @@ against the opaque fill actually painted. Readable user ink precedes readable
 cell ink; automatic fallback chooses the highest contrast of the theme's
 selection foreground and neutrals plus white and black. A focused selection
 fill short of 3:1 moves only in HSL lightness
-(`color::with_min_contrast_same_hue`). Each selected cell resolves its fill
-and ink against its own background; a cell whose background is not the
-default paints that fill over the row's selection quad. In a dimmed split,
-highlights resolve against backgrounds as the pane dimmer shows them, because
-highlight fills paint above the dimmer. A link underline on a
-highlight reuses the cell's resolved text ink. Per-frame colour caches include these
-decisions and both selection fills. Highlight fills in dimmed
-splits and highlight decorations use the post-dimmer decoration pass, with
-fills before underlines and strikeouts. Unfocused cursors use steady quads
+(`color::with_min_contrast_same_hue`). `theme::PaneSelectionFills` resolves
+the focused and unfocused fills once per pane frame against the default
+background, and the row's selection quad paints that fill. A selected cell or
+non-current search match keeps it wherever it meets the fill's ratio (3:1, or
+2:1 unfocused) against the cell's own background; only a cell it does not
+separate from resolves a fill against that background, painted over the row
+quad, and its ink resolves against that fill. A selection over a status line
+therefore stays one colour, and a plain selection draws one quad per row.
+Contrast is computed from opaque colours; a translucent window's composite
+with the desktop is not known to the renderer. In a dimmed split, highlights
+resolve against backgrounds as the pane dimmer shows them, because highlight
+fills paint above the dimmer. A link underline on a highlight reuses the
+cell's resolved text ink. Per-frame colour caches include these decisions and
+both selection fills. Highlight fills in dimmed splits and highlight
+decorations use the post-dimmer decoration pass, with fills before underlines
+and strikeouts. Unfocused cursors use steady quads
 outside the focused cursor's blink range; `unchanged` solid cursors recolour
 their pane glyph directly. Only the focused blinking block uses the separate
 cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay

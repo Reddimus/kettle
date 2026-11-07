@@ -125,12 +125,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A theme selection colour too faint for 3:1 against the background is now
   strengthened as a deeper or lighter tint of its own hue, not greyed toward
   white or black: the default TokyoNight Night selection is a clear blue
-  (`#4d64a6`) instead of slate (`#5d6781`). A selected cell that a program gave
-  its own background gets a fill that stands out from that background, so the
-  selection no longer vanishes where the two match. Link underlines inside a
-  selection or search match, hovered or not, are drawn at their 1 px resting
-  weight in the colour of the text above them, not link blue or the hover
-  accent.
+  (`#4d64a6`) instead of slate (`#5d6781`). A selection across a status line or
+  prompt keeps that one fill over every program-set background it stands out
+  from. A cell whose background it does not stand out from, such as one that
+  matches it, gets a fill of its own, so the selection no longer vanishes
+  there. The ratios are measured against the opaque background colour: in a
+  translucent window, the macOS and Windows default, the desktop behind the
+  window changes the contrast you see. Link underlines inside a selection or
+  search match, hovered or not, are drawn at their 1 px resting weight in the
+  colour of the text above them, not link blue or the hover accent.
 
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel

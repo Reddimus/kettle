@@ -5998,6 +5998,121 @@ fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() 
     }
 }
 
+/// One selection across program-set backgrounds keeps one fill wherever that
+/// fill stands out from the cell's background. Resolving every cell against
+/// its own background made a patchwork in TokyoNight Night: an inverse status
+/// bar (`#c0caf5`) or a green segment (`#9ece6a`) dropped back to the raw
+/// `#283457`, which already separates from them, beside the `#4d64a6` row.
+/// A cell the row's fill does not stand out from (`#565f89`, or the fill
+/// itself) still gets a fill of its own, and its text follows that fill.
+#[test]
+fn a_selection_over_program_backgrounds_keeps_one_fill_where_it_separates() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(400, 80) else {
+        eprintln!("C09_GPU_SKIP: one selection fill across backgrounds, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    cfg.theme = cfg.theme_by_name("TokyoNight Night");
+    let theme = cfg.theme.clone();
+    let mut cache = MinimumContrastCache::default();
+    let row_fill = |focused: bool, cache: &mut MinimumContrastCache| {
+        super::theme::selection_fill(&theme, theme.background, focused, cache)
+    };
+    assert_eq!(row_fill(true, &mut cache), Rgb::new(0x4d, 0x64, 0xa6));
+    // Segments of four cells: the default background, then program-set ones.
+    let segments = [
+        None,
+        Some(Rgb::new(0xc0, 0xca, 0xf5)),
+        Some(Rgb::new(0x9e, 0xce, 0x6a)),
+        Some(Rgb::new(0x56, 0x5f, 0x89)),
+        Some(row_fill(true, &mut cache)),
+    ];
+    let mut text = String::new();
+    for background in segments {
+        if let Some(c) = background {
+            text.push_str(&format!("\x1b[48;2;{};{};{}m", c.r, c.g, c.b));
+        }
+        text.push_str(" X  \x1b[0m");
+    }
+    text.push_str("\x1b[?25l");
+    let mut snap = snapshot_of(20, 2, text.as_bytes());
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |a: Rgb, b: Rgb| {
+        [(a.r, b.r), (a.g, b.g), (a.b, b.b)]
+            .iter()
+            .all(|&(x, y)| x.abs_diff(y) <= 2)
+    };
+    for window_focused in [true, false] {
+        let overlay = Overlay {
+            window_focused,
+            cursor_visible: false,
+            ..Overlay::default()
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 400, 80)], &overlay);
+        let pixel = |col: usize| {
+            let p = frame.get_pixel(
+                (cfg.padding_x + (col as f32 + 0.5) * cell_w) as u32,
+                (cfg.padding_y + 0.5 * cell_h) as u32,
+            );
+            Rgb::new(p[0], p[1], p[2])
+        };
+        let row = row_fill(window_focused, &mut cache);
+        let minimum = if window_focused { 3.0 } else { 2.0 };
+        let case = if window_focused {
+            "focused"
+        } else {
+            "unfocused"
+        };
+        for (index, background) in segments.iter().enumerate() {
+            let background = background.unwrap_or(theme.background);
+            let separates = color::contrast_ratio(row, background) >= minimum;
+            // The reviewed cases: the light and bright segments separate from
+            // the row's fill, the mid-tone and the fill itself do not.
+            assert_eq!(
+                separates,
+                index < 3,
+                "{case}: segment {index} {background:?}"
+            );
+            // Cells 2 and 3 of a segment are blank: only the fill shows there.
+            let fill = pixel(index * 4 + 2);
+            assert!(
+                near(fill, pixel(index * 4 + 3)),
+                "{case}: segment {index} is one fill"
+            );
+            if separates {
+                assert!(
+                    near(fill, row),
+                    "{case}: {fill:?} over {background:?}, the row's fill is {row:?}"
+                );
+            } else {
+                assert!(!near(fill, row), "{case}: {fill:?} over {background:?}");
+                assert!(
+                    color::contrast_ratio(fill, background) >= minimum - 0.1,
+                    "{case}: {fill:?} over {background:?}"
+                );
+            }
+            let attrs = renderer.pane_buffers[0].lines[0]
+                .attrs_list()
+                .get_span(index * 4 + 1);
+            let ink = attrs.color_opt.expect("selected text has a colour");
+            let ink = Rgb::new(ink.r(), ink.g(), ink.b());
+            assert!(
+                color::contrast_ratio(ink, fill) >= 4.5 - 0.1,
+                "{case}: text {ink:?} on {fill:?} over {background:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
     use alacritty_terminal::vte::ansi::CursorShape;
