@@ -781,9 +781,10 @@ pub struct Renderer {
     /// Whether the current OS window has rounded content corners. The UI owns
     /// fullscreen/decorations state and refreshes this before every frame.
     rounded_window_corners: bool,
-    /// Live-only base alpha supplied when the OS cannot provide requested
-    /// behind-window blur. The scene is rendered over this near-opaque clear;
-    /// offscreen screenshots deliberately keep their configured alpha.
+    /// Live-only minimum base alpha, when a caller sets one. The scene is
+    /// rendered over this clear; offscreen screenshots deliberately keep their
+    /// configured alpha. Kettle sets none when blur is unavailable: the window
+    /// keeps the configured opacity.
     live_background_opacity_floor: Option<f32>,
     /// Pending live-scene screenshot request; completion runs through the bounded
     /// capture worker.
@@ -5343,8 +5344,8 @@ impl Renderer {
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
         // `pane_bases` deliberately uses replace blending so overlapping pane
         // interiors do not compound their configured transparency. That pass
-        // would also erase the unsupported-blur underlay floor, leaving Linux
-        // at the user's raw opacity instead of the advertised 99% fallback.
+        // would also erase a live opacity floor's underlay, leaving the window
+        // at the raw opacity the floor exists to raise.
         // Upload a live-only copy with its final alpha clamped; offscreen
         // screenshots continue to draw the unmodified buffer above.
         if let Some(floor) = self.live_background_opacity_floor {

@@ -1439,9 +1439,9 @@ pub struct Config {
     pub padding_x: f32,
     pub padding_y: f32,
     pub background_opacity: f32,
-    /// Ask the window system to blur content behind Kettle. Unsupported Linux
-    /// sessions use a live-only 99% opaque underlay instead of leaving sharp
-    /// alpha transparency visible. A window only receives an alpha-capable
+    /// Ask the window system to blur content behind Kettle. Where it cannot
+    /// (X11, Wayland without KWin's blur protocol), the window keeps the
+    /// configured opacity without blur. A window only receives an alpha-capable
     /// surface when this or a sub-1.0 composed background alpha asks for one,
     /// so turning it on takes full effect in windows opened afterwards.
     pub window_blur: bool,
@@ -3270,8 +3270,8 @@ impl Default for Config {
             padding_x: 12.0,
             padding_y: 12.0,
             // Native material is the product default. Linux stays at 99%
-            // whether compositor blur is available or not; the live floor
-            // still protects explicit lower values on unsupported sessions.
+            // whether compositor blur is available or not, so text stays
+            // readable over sharp transparency until a user lowers it.
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             window_blur: true,
             completion_overlay: CompletionOverlayMode::Auto,

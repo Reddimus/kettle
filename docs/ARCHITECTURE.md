@@ -1864,10 +1864,11 @@ transparent titlebar instead of restoring an opaque AppKit caption.
 Windows applies the same raised surface and a contrast-checked text color
 through DWM while requesting its system backdrop. Linux probes the live
 Wayland registry before enabling Winit's KWin blur path. X11 and Wayland
-compositors without that protocol get a 99% opacity floor on the live underlay
-and replacing pane-base pass. That floor is applied only to the swapchain
-render, so offscreen screenshots retain the configured alpha and config files
-are never rewritten.
+compositors without that protocol keep the configured opacity without blur,
+as Windows does without its backdrop; Kettle's 99% Linux default keeps text
+readable until a user lowers it. Settings replaces the Window blur description
+with an unavailable note once the probe has answered, in the projection that
+paint, hit tests and accessibility share.
 
 The shared tab band supplies painting, pointer hit tests, accessibility, ctl
 geometry, IME placement, docking and tear-off placement. Content and status

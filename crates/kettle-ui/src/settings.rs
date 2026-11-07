@@ -230,6 +230,17 @@ pub fn description(field: &Field) -> Text {
     }
 }
 
+/// What a row shows under its label. While the window system cannot blur
+/// (`blur_unavailable`), the Window blur row says so instead of describing
+/// an effect the window will not show. Search still matches the field's own
+/// description.
+pub fn row_description(field: &Field, blur_unavailable: bool) -> Text {
+    match field.key {
+        "window-blur" if blur_unavailable => Text::SettingsNoteBlurUnavailable,
+        _ => description(field),
+    }
+}
+
 /// Live navigation state while the settings overlay is open
 /// (`WindowState::settings_nav`). Indices into `categories()`; values are
 /// always read fresh from `Config`, so the overlay reflects external config
@@ -3025,6 +3036,31 @@ mod search_tests {
                 assert!(en.chars().count() <= 70, "{}: {en}", field.key);
                 assert_ne!(en, es, "{}", field.key);
             }
+        }
+    }
+
+    /// GNOME and X11 cannot blur a window. The Window blur row says so
+    /// beside its switch, and that opacity still works, while every other
+    /// row keeps its own description.
+    #[test]
+    fn unavailable_blur_is_explained_beside_its_switch() {
+        let cats = categories(&[]);
+        let fields: Vec<&Field> = cats.iter().flat_map(|c| &c.fields).collect();
+        let blur = fields.iter().find(|f| f.key == "window-blur").unwrap();
+        assert_eq!(row_description(blur, false), description(blur));
+        let note = row_description(blur, true);
+        assert_ne!(note, description(blur));
+        assert!(EN.text(note).contains("opacity"), "{}", EN.text(note));
+        assert!(ES.text(note).contains("opacidad"), "{}", ES.text(note));
+        assert!(EN.text(note).chars().count() <= 70);
+        assert_ne!(EN.text(note), ES.text(note));
+        for field in fields.iter().filter(|f| f.key != "window-blur") {
+            assert_eq!(
+                row_description(field, true),
+                description(field),
+                "{}",
+                field.key
+            );
         }
     }
 }

@@ -98,8 +98,11 @@ fn macos_native_blur_allowed(borderless: bool) -> bool {
     !borderless
 }
 
-fn live_opacity_floor_for_status(status: BackdropStatus, linux_fallback: bool) -> Option<f32> {
-    (linux_fallback && status == BackdropStatus::Unavailable).then_some(0.99)
+/// Settings calls blur unavailable only on a settled "no". The status comes
+/// from the last sync, and a Wayland probe may since have found blur, still
+/// be running or be waiting to retry, so `blur_possible` overrides it.
+fn blur_unavailable_for(status: BackdropStatus, blur_possible: bool) -> bool {
+    status == BackdropStatus::Unavailable && !blur_possible
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -110,6 +113,13 @@ struct BlurDiscovery(Arc<std::sync::Mutex<(u64, u8)>>);
 impl BlurDiscovery {
     fn supported(&self) -> bool {
         self.0.lock().is_ok_and(|state| state.1 == 3)
+    }
+
+    /// Anything but a settled "no": idle or waiting to retry after a busy
+    /// probe slot, running, or found blur. Only meaningful on Wayland, where
+    /// discovery probes; X11 never does.
+    fn blur_possible(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.1 != 2)
     }
 
     fn reset(&self) {
@@ -372,15 +382,21 @@ impl NativeMaterial {
         };
         self.status.set(status);
         if status == BackdropStatus::Unavailable && !self.reported_unavailable.replace(true) {
-            #[cfg(target_os = "linux")]
-            log::warn!("native window blur is unavailable; using Kettle's 99% opacity fallback");
-            #[cfg(not(target_os = "linux"))]
+            // Missing blur leaves the configured opacity alone, as blur off
+            // does, so GNOME and X11 still show the transparency a user set.
+            // Kettle's own Linux default (99%) is what keeps text readable.
             log::warn!("native window backdrop is unavailable; continuing without native blur");
         }
     }
 
-    pub(crate) fn live_opacity_floor(&self) -> Option<f32> {
-        live_opacity_floor_for_status(self.status.get(), cfg!(target_os = "linux"))
+    /// Whether this window asked for blur that the window system cannot
+    /// give (GNOME and X11 on Linux, Windows without its backdrop).
+    pub(crate) fn blur_unavailable(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        let blur_possible = self.linux_wayland && self.blur_discovery.blur_possible();
+        #[cfg(not(target_os = "linux"))]
+        let blur_possible = false;
+        blur_unavailable_for(self.status.get(), blur_possible)
     }
 
     #[cfg(target_os = "macos")]
@@ -729,9 +745,9 @@ fn probe_wayland_kwin_blur() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackdropStatus, MacosMaterialPolicy, caption_colors, colorref, contrast_ratio,
-        linux_blur_policy, live_opacity_floor_for_status, macos_backdrop_status,
-        macos_material_policy, macos_native_blur_allowed,
+        BackdropStatus, MacosMaterialPolicy, blur_unavailable_for, caption_colors, colorref,
+        contrast_ratio, linux_blur_policy, macos_backdrop_status, macos_material_policy,
+        macos_native_blur_allowed,
     };
     use kettle_config::{BackgroundType, Config};
 
@@ -773,6 +789,10 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap();
         }
+        assert!(
+            !blur_unavailable_for(BackdropStatus::Unavailable, discovery.blur_possible()),
+            "a busy probe slot is a retry, not a Settings answer"
+        );
         release.send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !discovery.supported() && std::time::Instant::now() < deadline {
@@ -841,6 +861,53 @@ mod tests {
         );
         discovery.reset();
         assert!(!discovery.supported());
+    }
+
+    /// Settings says blur is unavailable only on a settled "no": not while
+    /// the Wayland probe runs (turning blur on under KWin must not flash the
+    /// note), and not once it has found blur, even before the next sync
+    /// replaces the previous status. A busy retry is covered above.
+    #[test]
+    fn blur_is_unavailable_only_after_the_probe_answers_no() {
+        let _serial = BLUR_PROBE_TEST_LOCK.lock().unwrap();
+        let discovery = super::BlurDiscovery::default();
+        assert!(
+            blur_unavailable_for(BackdropStatus::Unavailable, false),
+            "X11 never probes, so its answer is no"
+        );
+        let unavailable =
+            || blur_unavailable_for(BackdropStatus::Unavailable, discovery.blur_possible());
+        assert!(!unavailable(), "Wayland has not asked yet");
+        for found in [false, true] {
+            discovery.reset();
+            let (entered, started) = std::sync::mpsc::channel();
+            let (release, waiting) = std::sync::mpsc::channel::<()>();
+            let (wake, woken) = std::sync::mpsc::channel();
+            discovery.request(
+                true,
+                move || {
+                    entered.send(()).unwrap();
+                    let _ = waiting.recv();
+                    found
+                },
+                std::time::Duration::from_secs(30),
+                std::sync::Arc::new(move || {
+                    let _ = wake.send(());
+                }),
+            );
+            started
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert!(!unavailable(), "a running probe is not an answer");
+            release.send(()).unwrap();
+            woken
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(discovery.supported(), found);
+            assert_eq!(unavailable(), !found, "probe found blur: {found}");
+        }
+        assert!(!blur_unavailable_for(BackdropStatus::Active, false));
+        assert!(!blur_unavailable_for(BackdropStatus::Disabled, false));
     }
 
     #[test]
@@ -1045,21 +1112,23 @@ mod tests {
         assert!(!linux_blur_policy(false, true));
     }
 
+    /// GNOME and X11 offer no blur protocol. Their windows keep the
+    /// configured opacity, as a window with blur off does and as Windows does
+    /// without its backdrop: nothing raises it while the window is live.
+    /// Kettle's own Linux default stays 99% (kettle-config pins it).
     #[test]
-    fn near_opaque_fallback_is_linux_only() {
-        assert_eq!(
-            live_opacity_floor_for_status(BackdropStatus::Unavailable, true),
-            Some(0.99)
-        );
-        assert_eq!(
-            live_opacity_floor_for_status(BackdropStatus::Unavailable, false),
-            None,
-            "Windows must retain ordinary alpha when its optional backdrop is unavailable"
-        );
-        assert_eq!(
-            live_opacity_floor_for_status(BackdropStatus::Active, true),
-            None
-        );
+    fn unavailable_blur_keeps_the_configured_opacity() {
+        for (name, source) in [
+            ("native_material.rs", include_str!("native_material.rs")),
+            ("app/redraw.rs", include_str!("app/redraw.rs")),
+        ] {
+            let code =
+                kettle_test_support::code_only(&kettle_test_support::production_source(source));
+            assert!(
+                !code.contains("opacity_floor"),
+                "{name} must not raise the configured opacity when blur is unavailable"
+            );
+        }
     }
 
     #[test]

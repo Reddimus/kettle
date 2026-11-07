@@ -1012,14 +1012,10 @@ impl App {
                 },
             )
             .collect();
-        let live_opacity_floor = ws
-            .native_material
-            .as_ref()
-            .and_then(|material| material.live_opacity_floor());
         // Whether anything covers the cards, for the tip: no dialog, menu or
         // viewer over them.
         let cards_uncovered = !self.pointer_modal_open(ws);
-        // Status bar and native fallback state are built BEFORE the &mut
+        // Status bar state is built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
             drop(panes);
@@ -1044,7 +1040,6 @@ impl App {
             live_decorated,
             live_fullscreen,
         ));
-        renderer.set_live_background_opacity_floor(live_opacity_floor);
         // Any frame while the window server blinks the cursor ends that blink.
         // The frame presents in one Core Animation transaction with hiding the
         // layer, so the screen never shows new content under a stale cursor,

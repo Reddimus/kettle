@@ -123,6 +123,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   keep their dotted resting underline; hover, the destination pill,
   Cmd/Ctrl-click and quick-select hints are unchanged.
 
+- Background opacity now works on GNOME, X11 and other Linux sessions that
+  cannot blur windows. With window blur on, Kettle used to raise the opacity to
+  99% there, so the Settings slider seemed to do nothing; the window now keeps
+  the configured opacity, as it does with blur off. The Linux default stays
+  99%. Settings says when blur is unavailable under the Window blur switch, in
+  English and Spanish.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 
