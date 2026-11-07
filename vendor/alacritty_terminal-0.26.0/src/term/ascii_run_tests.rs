@@ -108,3 +108,58 @@ fn ascii_runs_match_character_at_a_time_printing() {
         }
     }
 }
+
+#[test]
+fn ascii_grapheme_survives_insertion() {
+    for runs in [true, false] {
+        let mut term = term(true, runs);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[?2027h\x1b[4h");
+        parser.advance(&mut term, "e\u{301}X".as_bytes());
+        let cell = &term.grid[Line(0)][Column(0)];
+        assert_eq!(cell.c, 'e');
+        assert_eq!(cell.zerowidth(), Some(&['\u{301}'][..]));
+        assert!(cell.flags.contains(Flags::GRAPHEME));
+        assert_eq!(term.grid[Line(0)][Column(1)].c, 'X');
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(2)));
+        assert!(!term.grid.cursor.input_needs_wrap);
+        assert_eq!(term.grid.history_size(), 0);
+        for col in 0..17 {
+            assert!(!term.grid[Line(0)][Column(col)].flags.intersects(
+                Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+            ));
+        }
+    }
+}
+
+#[test]
+fn ascii_grapheme_survives_bottom_margin_autowrap() {
+    for runs in [true, false] {
+        let mut term = term(true, runs);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[?2027h\x1b[5;1H0123456789abcdefg");
+        parser.advance(&mut term, "e\u{301}X".as_bytes());
+        let cell = &term.grid[Line(4)][Column(0)];
+        assert_eq!(cell.c, 'e');
+        assert_eq!(cell.zerowidth(), Some(&['\u{301}'][..]));
+        assert!(cell.flags.contains(Flags::GRAPHEME));
+        assert_eq!(term.grid[Line(4)][Column(1)].c, 'X');
+        assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(2)));
+        assert!(!term.grid.cursor.input_needs_wrap);
+        assert_eq!(term.grid.history_size(), 1);
+        assert!(
+            term.grid[Line(3)][Column(16)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        );
+        let row: String = (0..17)
+            .map(|col| term.grid[Line(3)][Column(col)].c)
+            .collect();
+        assert_eq!(row, "0123456789abcdefg");
+        for col in 0..17 {
+            assert!(!term.grid[Line(4)][Column(col)].flags.intersects(
+                Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+            ));
+        }
+    }
+}

@@ -2588,8 +2588,13 @@ General_Category=Mc mark after a measured base makes the cluster two cells;
 other positive-width scalars add their widths, capped at two, including Indic
 consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
 keep the first emoji's width, and regional-indicator pairs remain two cells.
-VS16 widens registered emoji sequences. An immediately following VS15 narrows
-a default emoji only if it has a registered text variation sequence.
+VS16 widens a registered variation base only when it immediately follows that
+base and the base contributes to the cluster width. An immediately following
+VS15 narrows a contributing two-cell registered variation base to one cell,
+including East Asian Wide bases. The accumulator retains the preceding width,
+also capped at two, so narrowing preserves other contributions such as Prepend
+number signs before applying the cluster's two-cell cap. Intervening scalars
+end selector eligibility even when they exceed the retained-text limit.
 
 An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
 the boundary context. Emoji modifier bases and Extended_Pictographic bases
@@ -2606,7 +2611,9 @@ text, without a synthetic selector or an orphan wide cell. Narrowing clears
 the spacer, backs up the cursor, cancels pending wrap and removes only the
 extra inserted cell in insertion mode. DECSLRM bounds all these operations.
 Cursor/grid edits and ignored Unicode controls end
-the append context; REP repeats
+the append context. The ASCII cluster shortcut commits its boundary and width
+state after writing the base, so insertion and bottom-margin scrolling cannot
+clear the newly opened cluster. REP repeats
 the complete retained cluster and leaves its final cell open to combining input.
 
 The `GRAPHEME` cell flag survives copying and reflow without enlarging the cell.
