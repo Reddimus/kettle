@@ -49,6 +49,37 @@ pub(crate) mod fuzzing;
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+#[cfg(test)]
+mod test_input {
+    pub(super) type Sender = crossbeam_channel::Sender<Option<(u64, Vec<u8>, usize)>>;
+
+    std::thread_local! {
+        static INPUT: std::cell::RefCell<Option<crossbeam_channel::Sender<Sender>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn with_input<T>(
+        input: Option<crossbeam_channel::Sender<Sender>>,
+        create: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                INPUT.with_borrow_mut(Option::take);
+            }
+        }
+        INPUT.with_borrow_mut(|slot| {
+            assert!(slot.is_none(), "nested test input override");
+            *slot = input;
+        });
+        let _reset = Reset;
+        create()
+    }
+
+    pub(super) fn take() -> Option<crossbeam_channel::Sender<Sender>> {
+        INPUT.with_borrow_mut(Option::take)
+    }
+}
 /// Pending [`Terminal::apply_local_output`] requests per pane.
 const LOCAL_OUTPUT_QUEUE_DEPTH: usize = 4;
 /// One bounded user input, including bracketed-paste framing.
@@ -5993,6 +6024,8 @@ impl Terminal {
         let (local_output, local_output_rx) =
             crossbeam_channel::bounded::<LocalOutput>(LOCAL_OUTPUT_QUEUE_DEPTH);
 
+        #[cfg(test)]
+        let test_input = test_input::take();
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
@@ -6051,6 +6084,13 @@ impl Terminal {
                     >(PTY_PUMP_QUEUE_DEPTH);
                     let (recycle_tx, recycle_rx) =
                         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
+                    #[cfg(test)]
+                    if let Some(test_input) = test_input {
+                        // Keep draining native output for ConPTY close, but give the
+                        // parser only the test's exact bytes and explicit EOF.
+                        drain_output.store(true, Ordering::Release);
+                        test_input.send(raw_tx.clone()).expect("test input receiver");
+                    }
                     {
                         let pump_stop = stop.clone();
                         let pump_drain_output = drain_output.clone();
