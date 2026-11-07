@@ -20,7 +20,9 @@ impl Drop for ForeignKeyFixture {
                 // Keep ConPTY startup/teardown moving, including its CPR query.
                 for event in pane.rx.try_iter() {
                     if let kettle_core::TermEvent::PtyWrite(reply) = event {
-                        let _ = pane.queue_protocol_reply(reply.as_bytes());
+                        // Rejection cases deliberately break the pane input queue.
+                        // Keep ConPTY replies moving through the retained terminal.
+                        pane.term.write(reply.as_bytes());
                     }
                 }
                 let code = pane.term.child_exit_code();
