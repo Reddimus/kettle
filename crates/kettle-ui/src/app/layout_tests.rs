@@ -53,6 +53,55 @@ fn zoom_all_shares_the_font_size_arm() {
     );
 }
 
+/// Reset font size (Cmd/Ctrl+0) and zoom-normal-all return to the config's
+/// `font-size`, which is the platform default when the config sets none:
+/// 13 px on macOS and 15 px elsewhere, never a fixed 13. Both platforms'
+/// defaults are checked on every host.
+#[test]
+fn font_reset_returns_to_the_platform_default() {
+    use super::font_size_after;
+    use kettle_config::{Config, DEFAULT_FONT_SIZE, default_font_size};
+    for (macos, expected) in [(true, 13.0), (false, 15.0)] {
+        for reset in [Action::ResetFontSize, Action::ZoomNormalAll] {
+            assert_eq!(
+                font_size_after(&reset, 24.0, default_font_size(macos)),
+                expected,
+                "{reset:?} with macos={macos}"
+            );
+        }
+    }
+    let unset = Config::parse_text("");
+    assert_eq!(
+        font_size_after(&Action::ResetFontSize, 24.0, unset.font_size),
+        DEFAULT_FONT_SIZE
+    );
+    let set = Config::parse_text("font-size = 18\n");
+    assert_eq!(
+        font_size_after(&Action::ResetFontSize, 24.0, set.font_size),
+        18.0
+    );
+    for (step, expected) in [
+        (Action::IncreaseFontSize, 25.0),
+        (Action::ZoomInAll, 25.0),
+        (Action::DecreaseFontSize, 23.0),
+        (Action::ZoomOutAll, 23.0),
+        (Action::Copy, 24.0),
+    ] {
+        assert_eq!(font_size_after(&step, 24.0, 15.0), expected, "{step:?}");
+    }
+
+    // The window's font-size arm resets to the config, through this helper.
+    let src = production_source();
+    let arm = src
+        .split_once("| Action::ZoomNormalAll => {")
+        .expect("font-size arm")
+        .1
+        .split_once("Action::StartSearch =>")
+        .expect("end of the font-size arm")
+        .0;
+    assert!(arm.contains("font_size_after(&action, r.font_size(), self.cfg.font_size)"));
+}
+
 /// PTY rows, columns, and CSI 14 t pixels must be recomputed from the font
 /// metrics selected by the zoom transition, not the metrics that preceded
 /// it. A live renderer is too heavyweight for this unit suite, so pin the
