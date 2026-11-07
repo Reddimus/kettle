@@ -352,7 +352,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         Some(card)
     );
     assert_eq!(renderer.card_at(x - 1.0, y), None);
-    let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
+    let replacing = [&renderer.pane_bases];
     let blending = [
         &renderer.quads,
         &renderer.overlay_quads,
@@ -369,7 +369,6 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     quads.sort();
     quads.dedup();
     assert_eq!(quads.len(), 2, "all quad layers share two blend modes");
-    assert_eq!(replacing[0].pipeline(), replacing[1].pipeline());
     assert!(
         blending
             .iter()

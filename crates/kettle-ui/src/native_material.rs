@@ -1112,25 +1112,6 @@ mod tests {
         assert!(!linux_blur_policy(false, true));
     }
 
-    /// GNOME and X11 offer no blur protocol. Their windows keep the
-    /// configured opacity, as a window with blur off does and as Windows does
-    /// without its backdrop: nothing raises it while the window is live.
-    /// Kettle's own Linux default stays 99% (kettle-config pins it).
-    #[test]
-    fn unavailable_blur_keeps_the_configured_opacity() {
-        for (name, source) in [
-            ("native_material.rs", include_str!("native_material.rs")),
-            ("app/redraw.rs", include_str!("app/redraw.rs")),
-        ] {
-            let code =
-                kettle_test_support::code_only(&kettle_test_support::production_source(source));
-            assert!(
-                !code.contains("opacity_floor"),
-                "{name} must not raise the configured opacity when blur is unavailable"
-            );
-        }
-    }
-
     #[test]
     fn wayland_registry_discovery_is_shared_and_never_round_trips_on_install() {
         let source = kettle_test_support::production_source(include_str!("native_material.rs"));

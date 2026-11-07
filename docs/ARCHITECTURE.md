@@ -1866,7 +1866,9 @@ through DWM while requesting its system backdrop. Linux probes the live
 Wayland registry before enabling Winit's KWin blur path. X11 and Wayland
 compositors without that protocol keep the configured opacity without blur,
 as Windows does without its backdrop; Kettle's 99% Linux default keeps text
-readable until a user lowers it. Settings replaces the Window blur description
+readable until a user lowers it. The live window and an offscreen capture draw
+the same scene pass over a transparent clear, so no live-only layer changes
+the configured alpha. Settings replaces the Window blur description
 with an unavailable note once the probe has answered, in the projection that
 paint, hit tests and accessibility share.
 
@@ -3443,14 +3445,15 @@ about 3.6 MiB for the previous single glyph buffer. The 120x36 gate grid does
 not measure this large-window cost. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
-The pane and chrome quad layers (`pane_bases`, `live_pane_bases`, `quads`,
-`pane_dimming`, `text_decorations`, `overlay_quads` and `menu_quads`) differ
-only in blending, and the three image
+The pane and chrome quad layers (`pane_bases`, `quads`, `pane_dimming`,
+`text_decorations`, `overlay_quads` and `menu_quads`) differ only in
+blending, and the three image
 layers (`bg_imgs`, `imgs` and `media_receipt_img`) not at all. A renderer
 therefore compiles one replacing and one blending quad pipeline and one image
 pipeline (`SharedPipelines`), and each layer keeps only its own uniform, bind
 group, instance buffer and, for images, texture cache and budget
-reservations. That is 3 quad and image pipelines per window instead of 8. The
+reservations. That is 3 quad and image pipelines per window instead of one
+per layer. The
 offscreen self-test and `--screenshot`, which draw one frame, keep the
 standalone constructors. glyphon already shares one pipeline between the
 three text renderers through its `Cache`.

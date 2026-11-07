@@ -3109,10 +3109,12 @@ Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
 
-Unavailable blur is covered by kettle-ui's native material tests: no live path
-raises the configured opacity, and a Wayland probe still waiting for an answer
-is not reported as unavailable. Settings tests cover the Window blur row's
-unavailable note in English and Spanish. Live acceptance still needs GNOME
+kettle-render checks that a live frame shows the configured background alpha,
+as an offscreen capture of the same frame does, on PreMultiplied and
+PostMultiplied surfaces. kettle-ui's native material tests report blur as
+unavailable only on a settled answer: not while a Wayland probe runs or waits
+to retry, and not once it has found blur. Settings tests cover the Window blur
+row's unavailable note in English and Spanish. Live acceptance still needs GNOME
 Wayland and X11 at 60% opacity with blur on, where the desktop shows through
 sharply and the note appears, and KDE/KWin, where blur works without the note.
 

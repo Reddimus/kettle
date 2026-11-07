@@ -116,11 +116,6 @@ impl Renderer {
         self.accent_override = accent;
     }
 
-    pub fn set_live_background_opacity_floor(&mut self, floor: Option<f32>) {
-        self.last_scene = None;
-        self.live_background_opacity_floor = floor.map(|value| value.clamp(0.0, 1.0));
-    }
-
     /// The accent every LIVE chrome element uses (focused-pane border,
     /// active-tab strip, drag ghost, context-menu + settings highlights,
     /// pane titlebars): the per-window override when the App resolved one,
@@ -277,24 +272,6 @@ pub(crate) fn surface_clear_color(
         b: srgb(bg.b) * scale,
         a: alpha,
     }
-}
-
-pub(crate) fn live_underlay_clear_color(
-    bg: Rgb,
-    floor: Option<f32>,
-    mode: wgpu::CompositeAlphaMode,
-    live_window: bool,
-) -> wgpu::Color {
-    if !live_window {
-        return wgpu::Color::TRANSPARENT;
-    }
-    floor.map_or(wgpu::Color::TRANSPARENT, |alpha| {
-        surface_clear_color(bg, f64::from(alpha), mode)
-    })
-}
-
-pub(crate) fn use_live_pane_bases(live_window: bool, floor: Option<f32>) -> bool {
-    live_window && floor.is_some()
 }
 
 pub(crate) fn inactive_pane_amount(cfg: &Config) -> f32 {

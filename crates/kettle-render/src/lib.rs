@@ -44,10 +44,10 @@ use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
 use batching::cell_locked_glyph_offset;
 use batching::{
-    GlyphPositioning, SharedPipelines, apply_quad_alpha_floor, clip_quads,
-    completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
-    pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads, rect,
-    text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
+    GlyphPositioning, SharedPipelines, clip_quads, completion_text_damage_key,
+    context_menu_text_damage_key, emit_cell_locked_glyphs, pane_outline,
+    prepared_text_areas_damage_key, push_ime_preedit_quads, rect, text_bounds_for_rect,
+    text_layout_damage_key, text_overlay_requires_continuous_prepare,
 };
 pub use capture::{
     DebugScene, capture_png, capture_png_with, capture_png_with_annotation, offscreen_selftest,
@@ -176,10 +176,9 @@ use theme::{
     CellHighlight, CompletionPalette, MinimumContrastCache, background_has_wallpaper,
     completion_palette_with_colors, composed_bg_alpha, confirm_dialog_border_color,
     desired_alpha_mode, dim_blend, final_scene_is_uniformly_opaque, gc, inactive_pane_amount,
-    live_underlay_clear_color, needs_postmultiplied_presentation, pane_inactive_amount,
-    pick_titlebar_bg, resolve_chrome_bg, resolved_cell_foreground_cached,
-    resolved_highlight_foreground_cached, srgb, srgb_encode, surface_clear_color,
-    use_live_pane_bases,
+    needs_postmultiplied_presentation, pane_inactive_amount, pick_titlebar_bg, resolve_chrome_bg,
+    resolved_cell_foreground_cached, resolved_highlight_foreground_cached, srgb, srgb_encode,
+    surface_clear_color,
 };
 #[cfg(test)]
 use theme::{attributed_foreground, completion_palette, resolved_cell_foreground};
@@ -629,11 +628,6 @@ pub struct Renderer {
     status_bar_buffer: TextBuffer,
 
     pane_bases: QuadPipeline,
-    /// Live-window copy of `pane_bases` with the compositor fallback opacity
-    /// applied. Screenshots keep using `pane_bases`, so an unsupported native
-    /// blur backend cannot silently change the alpha the user configured in a
-    /// captured PNG.
-    live_pane_bases: QuadPipeline,
     quads: QuadPipeline,
     /// Rounded pane outlines used only where a decorated native window clips
     /// an outer pane corner. Kept out of `QuadInstance`: cell backgrounds
@@ -781,11 +775,6 @@ pub struct Renderer {
     /// Whether the current OS window has rounded content corners. The UI owns
     /// fullscreen/decorations state and refreshes this before every frame.
     rounded_window_corners: bool,
-    /// Live-only minimum base alpha, when a caller sets one. The scene is
-    /// rendered over this clear; offscreen screenshots deliberately keep their
-    /// configured alpha. Kettle sets none when blur is unavailable: the window
-    /// keeps the configured opacity.
-    live_background_opacity_floor: Option<f32>,
     /// Pending live-scene screenshot request; completion runs through the bounded
     /// capture worker.
     /// When `Some`, the next `render_frame` call renders the prepared scene to
@@ -5342,17 +5331,6 @@ impl Renderer {
         }
         self.pane_bases
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
-        // `pane_bases` deliberately uses replace blending so overlapping pane
-        // interiors do not compound their configured transparency. That pass
-        // would also erase a live opacity floor's underlay, leaving the window
-        // at the raw opacity the floor exists to raise.
-        // Upload a live-only copy with its final alpha clamped; offscreen
-        // screenshots continue to draw the unmodified buffer above.
-        if let Some(floor) = self.live_background_opacity_floor {
-            apply_quad_alpha_floor(&mut pane_bases, floor);
-            self.live_pane_bases
-                .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
-        }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
         self.pane_dimming
@@ -5477,7 +5455,6 @@ impl Renderer {
         // for a cursor-layer hand-off (`present_cursor_patch`).
         let scene_facts = cursor_patch::SceneFacts {
             target_size,
-            live_window: true,
             cursor_on: overlay.cursor_visible,
             translucent: self.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque
                 && !scene_is_opaque,
@@ -5521,7 +5498,6 @@ impl Renderer {
                         &capture.view,
                         target_size,
                         cfg,
-                        false,
                         overlay.cursor_visible,
                         None,
                         &mut encoder,
@@ -5560,10 +5536,7 @@ impl Renderer {
             }
             // Test-only: a headless capture substitutes for a presented frame.
             // A production Occluded frame never grants a hand-off.
-            self.last_scene = Some(cursor_patch::SceneFacts {
-                live_window: false,
-                ..scene_facts
-            });
+            self.last_scene = Some(scene_facts);
             self.commit_painted_cards();
             return Ok(FrameOutcome::Occluded);
         };
@@ -5662,7 +5635,6 @@ impl Renderer {
             scene_view,
             target_size,
             cfg,
-            true,
             overlay.cursor_visible,
             None,
             &mut encoder,
