@@ -2,26 +2,62 @@
 
 use super::*;
 
+/// Placement inputs shared by receipt activation and scrollback-pill precedence.
+pub(super) struct MediaPasteReceiptPlacement {
+    pub toast: Option<kettle_render::UpdateToastGeometry>,
+    pub notices: Vec<kettle_render::UpdateToastOverlay>,
+    pub receipt: kettle_render::MediaPasteReceiptOverlay,
+    pub completion: Option<kettle_render::CompletionOverlay>,
+    pub cell: (f32, f32),
+    pub text_cell: (f32, f32),
+}
+
+impl MediaPasteReceiptPlacement {
+    pub(super) fn geometry(&self) -> Option<kettle_render::MediaPasteReceiptGeometry> {
+        kettle_render::notification_geometry_with_notices(
+            self.toast,
+            &self.notices,
+            Some(&self.receipt),
+            self.completion.as_ref(),
+            self.cell,
+            self.text_cell.0,
+            self.text_cell.1,
+        )
+        .receipt
+    }
+}
+
 impl App {
     pub(super) fn media_paste_receipt_geometry(
         &self,
         ws: &WindowState,
     ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
         let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
-        kettle_render::notification_geometry_with_notices(
-            self.update_toast_projection(ws).map(|toast| toast.geometry),
-            &self
+        self.media_paste_receipt_placement(ws, receipt, completion)
+            .geometry()
+    }
+
+    pub(super) fn media_paste_receipt_placement(
+        &self,
+        ws: &WindowState,
+        receipt: kettle_render::MediaPasteReceiptOverlay,
+        completion: Option<kettle_render::CompletionOverlay>,
+    ) -> MediaPasteReceiptPlacement {
+        MediaPasteReceiptPlacement {
+            toast: self.update_toast_projection(ws).map(|toast| toast.geometry),
+            notices: self
                 .persistent_notices(ws)
                 .into_iter()
                 .map(|(_, notice)| notice)
-                .collect::<Vec<_>>(),
-            Some(&receipt),
-            completion.as_ref(),
-            self.menu_cell(ws),
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        )
-        .receipt
+                .collect(),
+            receipt,
+            completion,
+            cell: self.menu_cell(ws),
+            text_cell: (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+        }
     }
 
     pub(super) fn media_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
@@ -69,20 +105,9 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::notification_geometry_with_notices(
-            self.update_toast_projection(ws).map(|toast| toast.geometry),
-            &self
-                .persistent_notices(ws)
-                .into_iter()
-                .map(|(_, notice)| notice)
-                .collect::<Vec<_>>(),
-            Some(&receipt),
-            completion.as_ref(),
-            self.menu_cell(ws),
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        )
-        .receipt
+        let Some(geometry) = self
+            .media_paste_receipt_placement(ws, receipt, completion)
+            .geometry()
         else {
             return false;
         };
