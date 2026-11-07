@@ -3068,10 +3068,13 @@ cannot be established by the portable model tests alone.
 
 
 Link and hint UX has portable coverage in `kettle-core` (path context and
-prefix-free codes), `kettle-render` (rest/hover/OSC 8 decoration, destination
-pill avoidance and elision, legend bounds), and `kettle-ui` (hover invalidation,
-translated gestures and legend actions, label placement, OSC 8 targets,
-AccessKit nodes, context menus, native menu model and palette shortcuts).
+prefix-free codes), `kettle-render` (rest/hover/OSC 8 decoration in both
+`link-underline` modes, including a mode change on a live renderer,
+destination pill avoidance and elision, legend bounds), `kettle-config`
+(`link-underline` default, values and typo report), and `kettle-ui` (hover
+invalidation, translated gestures and legend actions, label placement, OSC 8
+targets, AccessKit nodes, context menus, native menu model and palette
+shortcuts).
 `ui_geometry` reports `pane_statuses` and `hint_labels` with the projected
 bounds; destination text is omitted from diagnostics. These overlays reserve
 no terminal cells and leave pointer cell mapping and terminal IME geometry

@@ -7468,6 +7468,9 @@ def run_underline(kettle: str, root: Path) -> Path:
                 "background = #080808",
                 "foreground = #f8f8f8",
                 "minimum-contrast = 0",
+                # The path overlay checks below measure resting detected-link
+                # underlines, which are drawn only on hover by default.
+                "link-underline = always",
                 "window-padding-x = 0",
                 "window-padding-y = 0",
                 "window-width = 100",

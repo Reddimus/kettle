@@ -5724,6 +5724,9 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     let other = snapshot_of(30, 4, b"\x1b[?25l");
     cfg.show_titlebar = false;
     cfg.unfocused_split_opacity = 0.1;
+    // The resting detected-link line is one of the decorations under test,
+    // and only `link-underline = always` draws it.
+    cfg.link_underline = kettle_config::LinkUnderline::Always;
     for window_focused in [true, false] {
         for split_focused in [true, false] {
             let mut view = pane(&snap, 320, 180);
@@ -5805,7 +5808,9 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
 /// highlighted text: in its colour, at the resting 1 px weight, hovered or
 /// not. Link blue, the hover accent and the 1.5 px line competed with the
 /// fill. The same holds for a focused selection, an unfocused window's
-/// selection and a search match.
+/// selection and a search match, and in both `link-underline` modes; a
+/// resting detected link that draws no line off a highlight draws none on
+/// one either.
 #[test]
 fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     use alacritty_terminal::selection::SelectionRange;
@@ -5899,12 +5904,21 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
                 "{highlight_label}: {ink:?} on {fill:?}"
             );
         }
-        for (label, hover, explicit) in [
-            ("detected", false, false),
-            ("OSC 8", false, true),
-            ("hovered", true, false),
-        ] {
-            let label = format!("{highlight_label}, {label}");
+        for (mode, (label, hover, explicit)) in [
+            kettle_config::LinkUnderline::Always,
+            kettle_config::LinkUnderline::Hover,
+        ]
+        .into_iter()
+        .flat_map(|mode| {
+            [
+                ("detected", false, false),
+                ("OSC 8", false, true),
+                ("hovered", true, false),
+            ]
+            .map(|case| (mode, case))
+        }) {
+            let label = format!("{highlight_label}, {mode:?}, {label}");
+            cfg.link_underline = mode;
             let link = |row| LinkRect {
                 col: 2,
                 row,
@@ -5926,6 +5940,12 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
             let top = cfg.padding_y + shift;
 
             let rows = line_rows(&frame, top, fill);
+            if !hover && !explicit && mode == kettle_config::LinkUnderline::Hover {
+                assert!(rows.is_empty(), "{label}: no resting line: {rows:?}");
+                let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
+                assert!(unselected.is_empty(), "{label}: {unselected:?}");
+                continue;
+            }
             assert!(!rows.is_empty(), "{label}: the underline stays drawn");
             assert_eq!(rows.len(), 1, "{label}: a 1 px line covers one pixel row");
             for ink in rows.iter().flatten() {
@@ -5940,6 +5960,122 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
             assert!(
                 unselected.iter().flatten().all(|&ink| !near(ink, text)),
                 "{label}: unselected link ink"
+            );
+        }
+    }
+}
+
+/// Detected links (URLs and paths) rest without an underline by default, so
+/// a screen of them stays quiet and the hovered link stands out; a UX panel
+/// found the always-on lines busy and competing with selections.
+/// `link-underline = always` brings the thin dim resting line back. An OSC 8
+/// link rests dotted and a hovered link is a solid accent line in both modes,
+/// and a reload that changes the mode repaints with no cached line left.
+#[test]
+fn detected_links_are_underlined_on_hover_unless_link_underline_is_always() {
+    use kettle_config::LinkUnderline;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 80) else {
+        eprintln!("C12_GPU_SKIP: link underline modes, no adapter");
+        return;
+    };
+    assert_eq!(cfg.link_underline, LinkUnderline::Hover);
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    let accent = Rgb::new(0, 255, 170);
+    renderer.set_accent_override(Some(accent));
+    let background = cfg.theme.background;
+    // Blank cells, so the lower half of each holds only background and line.
+    let snap = snapshot_of(20, 1, b"\x1b[?25l");
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    let near = |c: Rgb, want: Rgb| {
+        [(c.r, want.r), (c.g, want.g), (c.b, want.b)]
+            .iter()
+            .all(|&(a, b)| a.abs_diff(b) <= 2)
+    };
+    let centres = |from: f32, to: f32| (from - 0.5).ceil() as u32..(to - 0.5).ceil() as u32;
+    // The bottom edge three quarters into a pixel, where a 1 px line covers
+    // one pixel row and the 1.5 px hover line two.
+    let shift = (0.75 - (cfg.padding_y + cell_h).fract()).rem_euclid(1.0);
+    let top = cfg.padding_y + shift;
+    let columns = centres(cfg.padding_x + 2.0 * cell_w, cfg.padding_x + 10.0 * cell_w);
+    // Each pixel row in the lower half of the link's cells that holds a line,
+    // with the colours and the share of the link's width it covers.
+    let mut lines = |cfg: &Config, hover: bool, explicit: bool| -> Vec<(Vec<Rgb>, f32)> {
+        let overlay = Overlay {
+            window_focused: true,
+            cursor_visible: false,
+            links: vec![LinkRect {
+                col: 2,
+                row: 0,
+                width: 8,
+                hover,
+                explicit,
+            }],
+            ..Overlay::default()
+        };
+        let mut view = pane(&snap, 320, 80);
+        view.rect.1 += shift;
+        view.terminal.1 += shift;
+        let frame = capture(&mut renderer, cfg, &[view], &overlay);
+        centres(top + cell_h * 0.5, top + cell_h)
+            .filter_map(|y| {
+                let inks: Vec<Rgb> = columns
+                    .clone()
+                    .map(|x| {
+                        let pixel = frame.get_pixel(x, y);
+                        Rgb::new(pixel[0], pixel[1], pixel[2])
+                    })
+                    .filter(|&c| !near(c, background))
+                    .collect();
+                let share = inks.len() as f32 / columns.len() as f32;
+                (!inks.is_empty()).then_some((inks, share))
+            })
+            .collect()
+    };
+    let solid = |rows: &[(Vec<Rgb>, f32)]| rows.iter().all(|(_, share)| *share > 0.9);
+    let dotted =
+        |rows: &[(Vec<Rgb>, f32)]| rows.iter().all(|(_, share)| (0.15..0.6).contains(share));
+
+    // A reload flips the mode on the same renderer, so each frame also shows
+    // that nothing of the previous mode's line is kept.
+    for mode in [
+        LinkUnderline::Hover,
+        LinkUnderline::Always,
+        LinkUnderline::Hover,
+    ] {
+        cfg.link_underline = mode;
+        let resting = lines(&cfg, false, false);
+        if mode == LinkUnderline::Always {
+            assert_eq!(resting.len(), 1, "{mode:?}: a thin resting line");
+            assert!(solid(&resting), "{mode:?}: the resting line is solid");
+            assert!(
+                resting[0].0.iter().all(|&ink| !near(ink, accent)),
+                "{mode:?}: the resting line is not the hover accent"
+            );
+        } else {
+            assert!(
+                resting.is_empty(),
+                "{mode:?}: a resting detected link drew {resting:?}"
+            );
+        }
+
+        let osc8 = lines(&cfg, false, true);
+        assert_eq!(osc8.len(), 1, "{mode:?}: OSC 8 rests as a thin line");
+        assert!(dotted(&osc8), "{mode:?}: OSC 8 rests dotted: {osc8:?}");
+
+        for explicit in [false, true] {
+            let hovered = lines(&cfg, true, explicit);
+            assert_eq!(
+                hovered.len(),
+                2,
+                "{mode:?}, {explicit}: the 1.5 px hover line"
+            );
+            assert!(solid(&hovered), "{mode:?}, {explicit}: hover is solid");
+            // The lower row is fully covered, so it carries the accent itself.
+            assert!(
+                hovered[1].0.iter().all(|&ink| near(ink, accent)),
+                "{mode:?}, {explicit}: hover takes the accent: {hovered:?}"
             );
         }
     }

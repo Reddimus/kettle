@@ -294,13 +294,15 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 ## Links and quick-select hints
 
 Hover a link to highlight it and see its destination and opening gesture.
-Detected URLs and paths have a thin, dim underline; explicit OSC 8 links have
-a dotted underline. The hovered link uses a solid accent underline and a hand
-cursor. Inside a selection or search match an underline keeps its shape but is
-drawn thin in the colour of the text above it, so it does not compete with the
-highlight. The destination pill moves away from the link and disappears when
-you leave, scroll, type, or change focus. `link-single-click` changes its
-gesture from Cmd-click (macOS) or Ctrl-click to a plain click.
+The hovered link uses a solid accent underline and a hand cursor. At rest,
+detected URLs and paths have no underline, so a screen full of them stays
+quiet; `link-underline = always` gives them a thin, dim one. Explicit OSC 8
+links always rest with a dotted underline. Inside a selection or search match
+an underline keeps its shape but is drawn thin in the colour of the text above
+it, so it does not compete with the highlight. The destination pill moves away
+from the link and disappears when you leave, scroll, type, or change focus.
+`link-single-click` changes its gesture from Cmd-click (macOS) or Ctrl-click
+to a plain click.
 
 Press **Ctrl+Shift+H**, choose **Quick-select hints** in the command palette or
 macOS Edit menu, or use that entry in the terminal context menu when links or

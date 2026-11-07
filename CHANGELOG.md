@@ -116,6 +116,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   grows by the extra padding to keep its grid where the monitor has room:
   about 164 columns on a 1080p monitor and 154 on a 1366 px wide laptop.
 
+- Detected URLs and paths are underlined only while hovered, as in most
+  terminals, so a screen of links no longer looks busy, competes with a
+  selection or hides which link is under the pointer. The new `link-underline`
+  key's `always` value brings back the thin, dim resting line. OSC 8 links
+  keep their dotted resting underline; hover, the destination pill,
+  Cmd/Ctrl-click and quick-select hints are unchanged.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 

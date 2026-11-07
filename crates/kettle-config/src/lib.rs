@@ -1181,6 +1181,29 @@ pub enum PreviewLaneSide {
     Right,
 }
 
+/// When a detected link (a URL or path Kettle found in the output) is
+/// underlined (`link-underline`). OSC 8 links keep their dotted resting
+/// underline either way, since their text need not look like a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkUnderline {
+    /// Only while the pointer is over it.
+    #[default]
+    Hover,
+    /// At rest too, as a thin dim line.
+    Always,
+}
+
+impl LinkUnderline {
+    /// The documented spelling of a value, case-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hover" => Some(Self::Hover),
+            "always" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 /// Whether Kettle avoids motion it would start on its own (`reduce-motion`).
 /// Today that is a video's preview looping while the pointer rests on its
 /// lane; a preview the user starts plays either way.
@@ -1514,6 +1537,10 @@ pub struct Config {
     /// `link_single_click`): when true, single-click on a URL
     /// opens it (kettle default: Ctrl+click). PuTTY/iTerm2-style.
     pub link_single_click: bool,
+    /// `link-underline`: `hover` (default) underlines a detected URL or path
+    /// only while it is hovered; `always` also draws a thin dim line at
+    /// rest. OSC 8 links rest dotted in both modes.
+    pub link_underline: LinkUnderline,
     /// Terminator parity (terminatorlib/config.py:91
     /// `clear_select_on_copy`): when true, the selection is
     /// deselected after Copy (default: keep selected, so user can
@@ -3281,6 +3308,7 @@ impl Default for Config {
             allow_bold: true,
             bold_is_bright: false,
             link_single_click: false,
+            link_underline: LinkUnderline::Hover,
             clear_select_on_copy: false,
             disable_mousewheel_zoom: false,
             disable_mouse_paste: false,
@@ -4530,6 +4558,7 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "never" | "off" | "false" | "auto" | "always"
                 ),
+                "link-underline" | "link_underline" => LinkUnderline::parse(v).is_some(),
                 "media-open-mode" | "media_open_mode" => matches!(
                     v.trim().to_ascii_lowercase().as_str(),
                     "overlay" | "lane"
@@ -5217,6 +5246,11 @@ impl Config {
                 "link-single-click" | "link_single_click" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.link_single_click = b;
+                    }
+                }
+                "link-underline" | "link_underline" => {
+                    if let Some(mode) = LinkUnderline::parse(&e.value) {
+                        cfg.link_underline = mode;
                     }
                 }
                 "clear-select-on-copy" | "clear_select_on_copy" => {
@@ -9140,6 +9174,45 @@ cell-height = 1.2\n";
                 assert!(guide.contains(claim), "missing preview guidance: {claim}");
             }
         }
+    }
+
+    /// Detected links are underlined on hover unless `link-underline =
+    /// always` asks for the resting line back. A typo is reported and leaves
+    /// the default.
+    #[test]
+    fn link_underline_defaults_to_hover_and_accepts_always() {
+        assert_eq!(Config::default().link_underline, LinkUnderline::Hover);
+        for (text, expected) in [
+            ("link-underline = always", LinkUnderline::Always),
+            ("link_underline = ALWAYS", LinkUnderline::Always),
+            ("link-underline = Hover", LinkUnderline::Hover),
+            (
+                "link-underline = always\nlink-underline = hover",
+                LinkUnderline::Hover,
+            ),
+        ] {
+            let (cfg, unknown) = Config::parse_collect(text);
+            assert_eq!(cfg.link_underline, expected, "{text}");
+            assert!(unknown.is_empty(), "{text}: {unknown:?}");
+            assert!(Config::detect_malformed_values(text).is_empty(), "{text}");
+        }
+        for typo in ["never", "on", "true", "hovered"] {
+            let text = format!("link-underline = {typo}");
+            assert_eq!(
+                Config::detect_malformed_values(&text),
+                [format!("link-underline = {typo:?}")],
+                "{text}"
+            );
+            let (cfg, unknown) = Config::parse_collect(&text);
+            assert!(unknown.is_empty(), "{text}: {unknown:?}");
+            assert_eq!(cfg.link_underline, LinkUnderline::Hover, "{text}");
+        }
+        let text = "link-underline = always\nlink-underline = sometimes";
+        assert_eq!(
+            Config::parse_text(text).link_underline,
+            LinkUnderline::Always,
+            "an unknown value keeps the value before it"
+        );
     }
 
     #[test]

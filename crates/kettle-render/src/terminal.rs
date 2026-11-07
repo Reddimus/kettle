@@ -103,19 +103,30 @@ pub struct LinkRect {
 /// A resting link underline's thickness, in pixels.
 pub(crate) const LINK_REST_THICKNESS: f32 = 1.0;
 
-/// Detected links rest as a dim thin line; OSC 8 rests dotted. Hover wins
-/// over either source and uses the accent at full opacity.
-pub(crate) fn link_decoration(link: &LinkRect) -> (bool, f32, f32) {
+/// A link's underline as `(dotted, thickness, alpha)`, or `None` for none.
+///
+/// The hovered link is a solid accent line at full opacity, whatever its
+/// source. At rest an OSC 8 link is dotted: its text need not look like a
+/// link, so the line is its only cue. A detected URL or path rests with no
+/// line unless `link-underline = always`, which draws a thin dim one, so a
+/// screen full of URLs stays quiet and the hovered link stands out.
+pub(crate) fn link_decoration(
+    link: &LinkRect,
+    mode: kettle_config::LinkUnderline,
+) -> Option<(bool, f32, f32)> {
     if link.hover {
-        (false, 1.5, 1.0)
+        Some((false, 1.5, 1.0))
+    } else if link.explicit || mode == kettle_config::LinkUnderline::Always {
+        Some((link.explicit, LINK_REST_THICKNESS, 0.55))
     } else {
-        (link.explicit, LINK_REST_THICKNESS, 0.55)
+        None
     }
 }
 
 #[cfg(test)]
 mod link_decoration_tests {
     use super::*;
+    use kettle_config::LinkUnderline;
     #[test]
     fn detected_explicit_and_hovered_links_have_distinct_decorations() {
         let mut link = LinkRect {
@@ -125,13 +136,23 @@ mod link_decoration_tests {
             hover: false,
             explicit: false,
         };
-        assert_eq!(link_decoration(&link), (false, 1.0, 0.55));
+        assert_eq!(link_decoration(&link, LinkUnderline::Hover), None);
+        assert_eq!(
+            link_decoration(&link, LinkUnderline::Always),
+            Some((false, 1.0, 0.55))
+        );
         link.explicit = true;
-        assert_eq!(link_decoration(&link), (true, 1.0, 0.55));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((true, 1.0, 0.55)));
+        }
         link.hover = true;
-        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((false, 1.5, 1.0)));
+        }
         link.explicit = false;
-        assert_eq!(link_decoration(&link), (false, 1.5, 1.0));
+        for mode in [LinkUnderline::Hover, LinkUnderline::Always] {
+            assert_eq!(link_decoration(&link, mode), Some((false, 1.5, 1.0)));
+        }
     }
 }
 
@@ -952,10 +973,12 @@ impl Renderer {
             if let Some(link) = link_index.checked_sub(1).map(|index| links[index])
                 && link.row as i32 == vrow
                 && col < link.col.saturating_add(link.width)
+                // OSC 8 links rest dotted, detected links rest with no line
+                // unless `link-underline = always` draws a thin dim one, and the
+                // hovered link is a solid accent line (`link_decoration`).
+                && let Some((dotted, thickness, rest_alpha)) =
+                    link_decoration(link, cfg.link_underline)
             {
-                // Detected links rest thin and dim, OSC 8 links rest dotted, and
-                // the hovered link is a solid accent line (`link_decoration`).
-                let (dotted, thickness, rest_alpha) = link_decoration(link);
                 // Over a highlight the line keeps its shape but is drawn at the
                 // resting weight in the cell's text colour at full strength, as
                 // an SGR underline under that text would: link blue, the hover

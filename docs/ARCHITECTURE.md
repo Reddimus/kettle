@@ -4938,7 +4938,10 @@ do not change pointer grid mapping or terminal IME placement. A hover records
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. Hint actions and their legend share `hint_action`; OSC 8
-captions use the URI rather than their displayed text.
+captions use the URI rather than their displayed text. The underlines
+themselves are pane quads: `terminal::link_decoration` picks each line from
+the link's hover state, its source and `link-underline`, and pane quads are
+rebuilt every frame, so a reloaded mode repaints without a cache key.
 
 ## Disposable session content
 
