@@ -494,8 +494,9 @@ mod tests {
         let ready = directory.path().join("ready");
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
-        let mut command =
-            shell("head -c 2100000 /dev/zero >&2; trap '' TERM; : > \"$1\"; while :; do :; done");
+        // Publish readiness after installing TERM handling, without unrelated
+        // pipe pressure; supervisor_drains_both_pipes_with_bounded_tails covers it.
+        let mut command = shell("trap '' TERM; : > \"$1\"; while :; do :; done");
         command.arg("fixture").arg(&ready);
         let trigger = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(2);

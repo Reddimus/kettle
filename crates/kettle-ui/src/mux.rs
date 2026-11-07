@@ -10790,6 +10790,17 @@ mod node_tests {
                 mux.panes[&mux.active_focus().unwrap()].argv[3],
                 expected.to_string()
             );
+            assert_eq!(
+                mux.panes.len(),
+                1,
+                "history fixture must not accumulate live PTY-owning panes"
+            );
+            assert_eq!(mux.tabs.len(), 1);
+            // Drop panes without adding the restored snapshot back to the ring.
+            assert!(mux.close_window());
+            assert!(mux.panes.is_empty());
+            assert!(mux.tabs.is_empty());
+            assert_eq!(mux.closed_tabs.len(), expected - 3);
         }
         assert!(
             !mux.undo_close_tab_geometry(&cfg, geometry, Arc::new(|| {}))
