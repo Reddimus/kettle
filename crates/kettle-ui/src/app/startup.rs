@@ -64,9 +64,9 @@ const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// value a half-specified `window-width`/`window-height` fills its other axis
 /// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
-/// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
-/// default font) left every fresh window too narrow for the tools Kettle
-/// targets. 160x45 baseline cells and the default 12 px padding are 1304x744
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at the
+/// default font and padding) left every fresh window too narrow for the tools
+/// Kettle targets. 160x45 baseline cells and the default 12 px padding are 1304x744
 /// logical px, 1304x772 under macOS's titlebar tab band: about 164x44 real
 /// cells at the default 13 px font (7.8x16.25 px) on a 1080p monitor.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;

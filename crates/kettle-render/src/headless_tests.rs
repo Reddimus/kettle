@@ -5262,7 +5262,7 @@ fn assert_glyph_inside_chip(
 /// ratio `r` where `e` belongs, lands at `(r - 1) / (e - 1)`: muted text
 /// where secondary belongs at 0.58 on a tab and 0.84 on the selected menu
 /// row, an unfocused window's primary text where secondary belongs at 1.35.
-const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.9..=1.1;
+const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.95..=1.05;
 
 /// Inactive tab titles read faint and the strip's controls tiny. Inactive
 /// titles now read at AAA in a focused window, and the close, `+`, `▾`, `≡`
