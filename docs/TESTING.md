@@ -21,6 +21,13 @@ profiles. Existing menu-model tests pass an explicit empty profile list.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
+The portable accessibility pane-lifetime regression uses window-less mux
+fixtures and the production lifecycle drain with the accessibility adapter absent.
+It closes split panes/tabs, reaps panes repeatedly, moves a tab between windows
+in both directions, and checks that retained announcement text, output cursor,
+serial, typing/input-row state and row IDs survive. Departed records are removed
+by live pane ID even when cache and pane counts happen to be equal.
+
 Portable Wayland tear-off geometry coverage exercises the same horizontal
 strip layout used by painting, including centered single-tab custom headers,
 window-button reservations, narrow/wide surfaces, non-default padding and tab

@@ -592,7 +592,7 @@ impl App {
     /// tab's, and ones reaped after their shell exited. Plugins that keep
     /// per-pane state rely on seeing every pane end.
     pub(super) fn fire_closed_pane_events(&mut self, ws: &mut WindowState) {
-        for pane_id in ws.mux.take_closed_panes() {
+        for pane_id in ws.take_closed_panes() {
             self.fire_pane_close_event(ws, pane_id);
         }
     }
