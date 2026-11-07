@@ -200,6 +200,8 @@ INSTALL_FILES=(
   --file "bin/kettle-media-worker" "0755" "${WORKER_SRC}"
   --file "share/kettle/install.sh" "0755" "${SCRIPT_DIR}/install.sh"
   --file "share/kettle/install-unix.py" "0755" "${HELPER_SRC}"
+  --file "share/doc/kettle/docs/licenses/tokyonight.nvim/LICENSE" "0644" "${REPO_ROOT}/docs/licenses/tokyonight.nvim/LICENSE"
+  --file "share/doc/kettle/docs/licenses/tokyonight.nvim/README.md" "0644" "${REPO_ROOT}/docs/licenses/tokyonight.nvim/README.md"
   --file "share/icons/hicolor/scalable/apps/kettle.svg" "0644" "${REPO_ROOT}/packaging/linux/kettle.svg"
 )
 for size in 16 24 32 48 64 128 256; do

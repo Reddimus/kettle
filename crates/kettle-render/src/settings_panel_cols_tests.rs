@@ -107,3 +107,98 @@ fn switch_labels_clear_the_knob() {
         );
     }
 }
+
+#[test]
+fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
+    use super::{SettingsControl, SettingsHit, SettingsTextKind, display_width};
+    for language in [Language::Es, Language::En] {
+        let tr = Translator::new(language);
+        for on in [true, false] {
+            for disabled in [false, true] {
+                let text = tr.text(if on {
+                    Text::SettingsValueOn
+                } else {
+                    Text::SettingsValueOff
+                });
+                let set = SettingsOverlay {
+                    rows: vec![SettingsRow {
+                        label: tr.text(Text::SettingsFieldCursorBlink).into(),
+                        value: text.into(),
+                        control: SettingsControl::Toggle(on),
+                        disabled,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                for (surface, cell, text_cw, full_label) in [
+                    ((360.0, 600.0), (24.0, 48.0), 24.0, false),
+                    ((1280.0, 820.0), (8.0, 16.0), 8.0, true),
+                    ((2000.0, 1200.0), (24.0, 48.0), 24.0, true),
+                    ((360.0, 600.0), (48.0, 48.0), 24.0, false),
+                    ((360.0, 600.0), (6.0, 48.0), 24.0, false),
+                    ((720.0, 1200.0), (48.0, 96.0), 48.0, false),
+                    ((120.0, 120.0), (8.0, 16.0), 24.0, false),
+                    ((56.0, 120.0), (8.0, 16.0), 24.0, false),
+                ] {
+                    let layout = settings_layout(&set, cell, surface, text_cw);
+                    let row = &layout.rows[0];
+                    let chip = row.chip_rect;
+                    let diameter = super::settings::settings_toggle_knob(chip.3);
+                    let items = super::settings::settings_text_items(&set, &layout, text_cw);
+                    let value = items
+                        .iter()
+                        .find(|item| item.kind == SettingsTextKind::Value(0))
+                        .unwrap();
+                    let context = format!(
+                        "{language:?} on={on} disabled={disabled} surface={surface:?} cell={cell:?} text_cw={text_cw}: {:?} {:?} in {chip:?}",
+                        value.text, value.rect
+                    );
+                    assert!(
+                        value.rect.2 >= 0.0
+                            && value.rect.0 >= chip.0
+                            && value.rect.0 + value.rect.2 <= chip.0 + chip.2 + 0.1,
+                        "{context}"
+                    );
+                    let advance = display_width(&value.text) as f32 * text_cw;
+                    assert!(advance <= value.rect.2 + 0.1, "{context}");
+                    let knob_left = if on && !disabled {
+                        chip.0 + chip.2 - diameter - 3.0
+                    } else {
+                        chip.0 + 3.0
+                    };
+                    if !value.text.is_empty() {
+                        assert!(
+                            value.rect.0 + advance <= knob_left
+                                || value.rect.0 >= knob_left + diameter,
+                            "painted label overlaps knob: {context}"
+                        );
+                        assert!(
+                            value.rect.0 + value.rect.2 <= knob_left
+                                || value.rect.0 >= knob_left + diameter,
+                            "label bounds overlap knob: {context}"
+                        );
+                    }
+                    if full_label {
+                        assert_eq!(value.text, text, "{context}");
+                    }
+                    if surface.0 == 360.0 && language == Language::Es && on && !disabled {
+                        assert!((chip.2 - 145.92).abs() < 0.01);
+                        assert_eq!(diameter, 50.0);
+                        assert!(
+                            !value.text.is_empty(),
+                            "a clamped switch must retain a fitted label"
+                        );
+                    }
+                    for x in [chip.0 + chip.2 * 0.5, knob_left + diameter * 0.5] {
+                        if x >= chip.0 && x < chip.0 + chip.2 {
+                            assert_eq!(
+                                layout.pointer_hit((x, chip.1 + chip.3 * 0.5), None),
+                                SettingsHit::Field(0)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

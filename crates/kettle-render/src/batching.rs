@@ -1,3 +1,4 @@
+use super::mark_fallback::{LineShifts, MarkShift, shift_for, shifts_of};
 use super::theme::pane_inactive_amount;
 use super::{
     Config, ContextMenu, FontSystem, GColor, GlyphInstance, GlyphPipeline, OutlineInstance,
@@ -352,6 +353,9 @@ impl Renderer {
         {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+            if let Some(marks) = &self.cursor_marks {
+                marks.render(&self.viewport, &mut pass)?;
+            }
         }
         if cursor_on && builtin_cursor && !self.ime_prepared {
             // Normal pane ink was excluded, so partial coverage shows only
@@ -490,10 +494,14 @@ pub(crate) enum GlyphPositioning {
 /// `default_color`). `char_starts` is a scratch buffer reused across runs to
 /// avoid per-line allocation. Glyphs are appended in buffer order, so the
 /// caller can wrap the appended range in one `GlyphClip` for scissor clipping.
+/// `marks` holds each buffer line's fallback mark placements
+/// (`mark_fallback::line_shifts`); only `Grid` applies them, since Legacy
+/// text that glyphon draws cannot follow them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
+    marks: &[LineShifts],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
@@ -508,9 +516,11 @@ pub(crate) fn emit_cell_locked_glyphs(
     emit_positioned_glyphs(
         out,
         buf,
+        marks,
         origin,
         cell_width,
         positioning,
+        None,
         default_color,
         char_starts,
         |key| {
@@ -574,18 +584,32 @@ pub(crate) fn builtin_glyph_at(
     }
 }
 
+/// The emit behind [`emit_cell_locked_glyphs`]. With `only`, a buffer line and
+/// grid column, it emits that cell's glyphs alone, placed exactly as in the
+/// full emit.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_positioned_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
+    marks: &[LineShifts],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
+    only: Option<(usize, usize)>,
     default_color: GColor,
     char_starts: &mut Vec<u32>,
     mut glyph_slot: impl FnMut(glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>,
 ) {
     for run in buf.layout_runs() {
+        if only.is_some_and(|(line, _)| line != run.line_i) {
+            continue;
+        }
+        let shifts: &[MarkShift] = match positioning {
+            GlyphPositioning::Grid(_) => shifts_of(marks, run.line_i),
+            GlyphPositioning::Continuous | GlyphPositioning::GraphemeRows(_) => &[],
+        };
+        let mut next_shift = 0;
+        let mut index = 0;
         let cell_w = match positioning {
             GlyphPositioning::Continuous => None,
             GlyphPositioning::Grid(width) => Some(width),
@@ -652,6 +676,24 @@ pub(crate) fn emit_positioned_glyphs(
             let cluster = emoji_cluster(first);
             let start = out.len();
             for glyph in glyphs {
+                let shift = shift_for(shifts, &mut next_shift, index, glyph.glyph_id);
+                index += 1;
+                let moved;
+                let (glyph, raise) = match shift {
+                    Some(shift) => {
+                        moved = shift.moved(glyph);
+                        (
+                            &moved,
+                            shift.raise_px(
+                                glyph.font_size,
+                                run.line_top,
+                                run.line_height,
+                                run.line_y,
+                            ),
+                        )
+                    }
+                    None => (glyph, 0),
+                };
                 let col = super::geometry::glyph_grid_col_with_metadata(
                     char_starts,
                     glyph.start,
@@ -663,6 +705,9 @@ pub(crate) fn emit_positioned_glyphs(
                         .get(&glyph.metadata)
                         .copied()
                         .unwrap_or(glyph.x);
+                }
+                if only.is_some_and(|(_, column)| column != col) {
+                    continue;
                 }
                 // Keep the shaped offsets until every image in the cluster
                 // has been rasterized, so fitting uses their combined ink.
@@ -678,7 +723,7 @@ pub(crate) fn emit_positioned_glyphs(
                 out.push(GlyphInstance {
                     pos: [
                         (phys.x + slot.left) as f32,
-                        (line_y.round() as i32 + phys.y - slot.top) as f32,
+                        (line_y.round() as i32 + phys.y - slot.top - raise) as f32,
                     ],
                     size: [slot.w, slot.h],
                     uv: [slot.atlas_x, slot.atlas_y],
@@ -752,6 +797,111 @@ pub(crate) fn emit_positioned_glyphs(
             }
         }
     }
+}
+
+/// One glyph image the grid emit draws: its surface rectangle, raster key and
+/// coverage mask.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CellImage {
+    pub(crate) key: glyphon::cosmic_text::CacheKey,
+    /// `x, y, width, height`, in surface pixels.
+    pub(crate) rect: [i32; 4],
+    pub(crate) mask: Vec<u8>,
+}
+
+/// The images the grid emit draws for `cell` (a buffer line and grid column)
+/// of `buf` when fallback placement in `marks` moved one of its glyphs;
+/// empty when it moved none, or when one is not a plain coverage mask.
+///
+/// The block cursor's inverted glyph draws these, so it lands on the pane's
+/// copy pixel for pixel: glyphon can only place a whole shaped buffer, and
+/// over a moved mark the pane's copy would show beside the inverted one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moved_cell_images(
+    buf: &TextBuffer,
+    marks: &[LineShifts],
+    cell: (usize, usize),
+    origin: (f32, f32),
+    cell_width: f32,
+    fonts: &mut FontSystem,
+    swash: &mut SwashCache,
+    char_starts: &mut Vec<u32>,
+) -> Vec<CellImage> {
+    let (line, column) = cell;
+    let shifts = shifts_of(marks, line);
+    if shifts.is_empty() {
+        return Vec::new();
+    };
+    let Some(run) = buf.layout_runs().find(|run| run.line_i == line) else {
+        return Vec::new();
+    };
+    char_starts.clear();
+    for (b, ch) in run.text.char_indices() {
+        if unicode_width::UnicodeWidthChar::width(ch) != Some(0) {
+            char_starts.push(b as u32);
+        }
+    }
+    let moved = shifts.iter().any(|shift| {
+        run.glyphs.get(shift.index as usize).is_some_and(|glyph| {
+            glyph.glyph_id == shift.glyph_id
+                && super::geometry::glyph_grid_col_with_metadata(
+                    char_starts,
+                    glyph.start,
+                    glyph.metadata,
+                ) == column
+        })
+    });
+    if !moved {
+        return Vec::new();
+    }
+    let mut masks = Vec::new();
+    let mut plain = true;
+    let mut out = Vec::new();
+    emit_positioned_glyphs(
+        &mut out,
+        buf,
+        marks,
+        origin,
+        cell_width,
+        GlyphPositioning::Grid(cell_width),
+        Some(cell),
+        GColor::rgb(0, 0, 0),
+        char_starts,
+        |key| {
+            let image = swash.get_image_uncached(fonts, key)?;
+            let placement = image.placement;
+            if placement.width == 0 || placement.height == 0 {
+                return None;
+            }
+            plain &= image.content == glyphon::SwashContent::Mask;
+            masks.push((key, image.data));
+            Some(super::glyphpipe::GlyphSlot {
+                kind: 0,
+                atlas_x: 0.0,
+                atlas_y: 0.0,
+                w: placement.width as f32,
+                h: placement.height as f32,
+                left: placement.left,
+                top: placement.top,
+            })
+        },
+    );
+    if !plain || out.len() != masks.len() {
+        return Vec::new();
+    }
+    out.iter()
+        .zip(masks)
+        .map(|(glyph, (key, mask))| CellImage {
+            key,
+            rect: [
+                glyph.pos[0] as i32,
+                glyph.pos[1] as i32,
+                glyph.size[0] as i32,
+                glyph.size[1] as i32,
+            ],
+            mask,
+        })
+        .collect()
 }
 
 fn fit_emoji_glyphs(glyphs: &mut [GlyphInstance], cell: Rect4) {
