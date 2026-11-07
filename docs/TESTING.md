@@ -3027,6 +3027,22 @@ smaller bands, either explicit grid axis, and default monitor fitting at 1x and
 2x. A source guard requires both window constructors to correct once before
 renderer sizing and the first reveal. Run them offline with
 `cargo test -j 2 --locked --offline -p kettle-ui measured_startup_titlebar_`.
+The portable `queued_macos_startup_resizes_preserve_the_corrected_grid` and
+`macos_resize_filter_accepts_live_changes_and_precedes_layout` tests replay
+queued sizes after the native window has already changed. They cover the
+100x30 to 100x29 to 100x30 startup reflow at 1x, 1.5x and 2x, and require
+current native resize events to remain eligible for layout. On macOS, the
+default-window-size smoke must still report an initial and final 100x30 PTY,
+no corrective grid changes and zero child-observed SIGWINCH signals; the
+portable replay does not replace that native acceptance.
+`macos_native_tab_resize_matches_live_view_instead_of_window_rectangle` also
+covers automatic AppKit tabs, where the window-derived content rectangle is
+taller than the live NSView frame. It requires the final view-sized event to
+pass and stale view-sized events to fail at 1x, 1.25x, 1.5x and 2x, using winit's
+logical-to-physical rounding and the native window's backing scale. Source
+guards pin the live view query to the existing main-thread native borrow helper.
+This portable check does not replace live native-tab, grow/shrink, minimize,
+fullscreen or DPI acceptance.
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.
