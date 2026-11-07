@@ -481,6 +481,14 @@ pub struct Renderer {
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
     last_cursor_glyph_key: Option<u64>,
+    /// The surface rectangles of the cursor glyph's images when its cluster
+    /// has fallback-placed marks (`mark_fallback::cursor_images`) and they
+    /// are drawn as glyphon custom glyphs; empty when glyphon draws the
+    /// shaped buffer. Kept with the retained vertices for the cursor patch.
+    cursor_mark_images: Vec<[i32; 4]>,
+    /// Custom-glyph ids for those images, one per raster key and never
+    /// reused, since glyphon caches a custom glyph's raster by its id.
+    cursor_mark_ids: std::collections::HashMap<glyphon::cosmic_text::CacheKey, u16>,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -5251,7 +5259,7 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gcolor, gclip, gtext, gattrs, baseline)) = self
+        if let Some((gx, gy, gcolor, gclip, gtext, gattrs, baseline, gmarks)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| {
@@ -5263,6 +5271,7 @@ impl Renderer {
                     c.text.as_str(),
                     c.attrs.as_attrs(),
                     c.row_baseline,
+                    c.marks.as_slice(),
                 )
             })
             .filter(|_| need_cursor_prepare)
@@ -5295,6 +5304,54 @@ impl Renderer {
                     1.0,
                 )
             });
+            // The grid pane moved a mark in this cell, which glyphon cannot
+            // do: draw the pane's own images of the cell as custom glyphs, over
+            // the same shaped text left transparent.
+            self.cursor_mark_images.clear();
+            let mut masks = std::collections::HashMap::new();
+            let mut custom = Vec::new();
+            if !gmarks.is_empty()
+                && scale == 1.0
+                && let Some(ids) = gmarks
+                    .iter()
+                    .map(|image| {
+                        let next = self.cursor_mark_ids.len();
+                        match self.cursor_mark_ids.entry(image.key) {
+                            std::collections::hash_map::Entry::Occupied(id) => Some(*id.get()),
+                            std::collections::hash_map::Entry::Vacant(slot) => {
+                                u16::try_from(next).ok().map(|id| *slot.insert(id))
+                            }
+                        }
+                    })
+                    .collect::<Option<Vec<u16>>>()
+            {
+                self.cursor_glyph_buffer.set_text(
+                    gtext,
+                    &gattrs.color(GColor::rgba(gcolor.r, gcolor.g, gcolor.b, 0)),
+                    Shaping::Advanced,
+                    None,
+                );
+                for line in &mut self.cursor_glyph_buffer.lines {
+                    line.set_ltr_override(true);
+                }
+                self.cursor_glyph_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+                for (image, id) in gmarks.iter().zip(ids) {
+                    let [x, y, width, height] = image.rect;
+                    custom.push(glyphon::CustomGlyph {
+                        id,
+                        left: x as f32 - left,
+                        top: y as f32 - top,
+                        width: width as f32,
+                        height: height as f32,
+                        color: None,
+                        snap_to_physical_pixel: true,
+                        metadata: 0,
+                    });
+                    self.cursor_mark_images.push(image.rect);
+                    masks.insert(id, image.mask.as_slice());
+                }
+            }
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,
                 left,
@@ -5307,10 +5364,10 @@ impl Renderer {
                     bottom: (gclip.1 + gclip.3) as i32,
                 },
                 default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
-                custom_glyphs: &[],
+                custom_glyphs: &custom,
             };
             self.text_prepares += 1;
-            self.cursor_glyph_renderer.prepare(
+            self.cursor_glyph_renderer.prepare_with_custom(
                 &self.gpu.device,
                 &self.gpu.queue,
                 &mut self.font_system,
@@ -5318,6 +5375,15 @@ impl Renderer {
                 &self.viewport,
                 [area],
                 &mut self.swash,
+                |request| {
+                    let mask = masks.get(&request.id)?;
+                    (mask.len() == usize::from(request.width) * usize::from(request.height)).then(
+                        || glyphon::RasterizedCustomGlyph {
+                            data: mask.to_vec(),
+                            content_type: glyphon::ContentType::Mask,
+                        },
+                    )
+                },
             )?;
             // Commit the retained-vertex key only after prepare succeeds. A
             // transient atlas/device error must retry rather than treating

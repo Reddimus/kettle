@@ -14,7 +14,8 @@
 //! of 1/16 em, centred on (or aligned to) the base's ink. A mark the font
 //! attaches, or one the shaper already moved, keeps its position. The grid
 //! emit applies the cached shifts through [`MarkShift::moved`] and
-//! [`MarkShift::raise_px`].
+//! [`MarkShift::raise_px`], and the block cursor redraws a cell with a moved
+//! mark from that emit (`batching::moved_cell_images`).
 
 use glyphon::cosmic_text::{CacheKeyFlags, Command, FontSystem, LayoutGlyph, SwashCache};
 use read_fonts::TableProvider;

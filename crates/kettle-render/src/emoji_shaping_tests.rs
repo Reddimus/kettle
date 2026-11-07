@@ -156,6 +156,7 @@ fn assert_ligature_ink_is_preserved(text: &str) {
                 origin,
                 cell_width,
                 positioning,
+                None,
                 GColor::rgb(255, 255, 255),
                 &mut Vec::new(),
                 |key| {
@@ -292,6 +293,7 @@ fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
                 origin,
                 cell_width,
                 positioning,
+                None,
                 GColor::rgb(255, 255, 255),
                 &mut Vec::new(),
                 |key| {

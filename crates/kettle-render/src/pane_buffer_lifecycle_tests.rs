@@ -266,6 +266,7 @@ fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
         ),
         color: kettle_config::Rgb::new(1, 2, 3),
         clip: (0.0, 0.0, 100.0, 80.0),
+        marks: Vec::new(),
     };
     let initial = super::cursor_glyph_damage_key(
         Some(&cursor),
@@ -351,7 +352,7 @@ fn failed_text_prepare_keeps_the_retry_latch_armed() {
         .find("self.menu_text_renderer.prepare(")
         .expect("menu text prepare present");
     let cursor_prepare = body
-        .find("self.cursor_glyph_renderer.prepare(")
+        .find("self.cursor_glyph_renderer.prepare_with_custom(")
         .expect("cursor text prepare present");
     let clear = body
         .find("self.text_prepare_dirty = false;")
@@ -508,7 +509,7 @@ fn block_cursor_glyph_is_decoupled_from_the_pane_buffer() {
         "Renderer must own a dedicated cursor-glyph renderer + pending slot"
     );
     assert!(
-        src.contains("self.cursor_glyph_renderer.prepare(")
+        src.contains("self.cursor_glyph_renderer.prepare_with_custom(")
             && src.contains("self.cursor_glyph_renderer")
             && src
                 .matches(".render(&self.atlas, &self.viewport, &mut pass)")

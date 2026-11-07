@@ -234,7 +234,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   capital and neither mark hangs off its right edge. Such marks stack above
   or below the letter by combining class, as HarfBuzz places marks for fonts
   without anchors; a stack too tall for the line stops a quarter line past
-  its row. Marks the font places itself draw exactly as before.
+  its row, and a block cursor on the letter inverts the marks where they now
+  sit. Marks the font places itself draw exactly as before.
 
 - A config notice no longer takes Enter and Escape from the terminal under
   it: a command typed while the notice is up runs, and Escape reaches the

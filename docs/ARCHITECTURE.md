@@ -3398,7 +3398,15 @@ them. The grid emit applies them: the horizontal offset through the glyph's
 `x_offset` before cell locking, the vertical one to the rasterized image in
 whole pixels rounded away from the base, and never more than a quarter line
 past the row, so a long stack cannot cover the rows around it. Legacy panes
-keep the shaper's placement, since glyphon draws most of their text.
+keep the shaper's placement, since glyphon draws most of their text. The
+focused block cursor's inverted glyph is a glyphon pass, and glyphon places
+only a whole shaped buffer, so over a moved mark the pane's copy would show
+beside an inverted one left where the font drew it. When the cursor's cell
+holds a moved mark, `build_pane` runs the grid emit for that one cell
+(`batching::moved_cell_images`), and the cursor pass draws those images as
+glyphon custom glyphs in the cursor's text colour over the cell's shaped
+text, which it leaves transparent. The images join the cursor glyph's damage
+key, and the cursor patch takes its ink from them.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's

@@ -250,6 +250,10 @@ pub(crate) struct PendingCursorGlyph {
     pub(crate) color: Rgb,
     /// Pane rect `(x, y, w, h)`, narrowed to the cell for clustered text.
     pub(crate) clip: (f32, f32, f32, f32),
+    /// The grid pane's images of the cell when fallback mark placement moved
+    /// one of them (`batching::moved_cell_images`). The cursor pass then
+    /// draws these, in `color`, instead of the shaped `text`.
+    pub(crate) marks: Vec<super::batching::CellImage>,
 }
 
 pub(crate) fn invalidate_pane_titlebar_texts(texts: &mut [String]) {
@@ -284,6 +288,9 @@ pub(crate) fn cursor_glyph_damage_key(
     cursor.clip.1.to_bits().hash(&mut hash);
     cursor.clip.2.to_bits().hash(&mut hash);
     cursor.clip.3.to_bits().hash(&mut hash);
+    for image in &cursor.marks {
+        (image.key, image.rect).hash(&mut hash);
+    }
     metrics.font_size.to_bits().hash(&mut hash);
     metrics.line_height.to_bits().hash(&mut hash);
     family.hash(&mut hash);
@@ -1194,6 +1201,7 @@ impl Renderer {
                         } else {
                             pv.terminal
                         },
+                        marks: Vec::new(),
                     });
                 }
             }
@@ -1503,6 +1511,30 @@ impl Renderer {
             && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)
         {
             cursor.row_baseline = run.line_y - cvrow as f32 * ch;
+        }
+        // A mark the grid moved in the cursor's cell: the cursor pass draws
+        // the pane's own images of that cell, where the pane drew them.
+        if cfg.text_renderer == TextRendererMode::Grid
+            && draw_cursor
+            && cursor_focused
+            && matches!(shape, EShape::Block)
+            && let Some(cursor) = self.pending_cursor_glyph.as_mut()
+            && let Ok(row) = usize::try_from(cvrow)
+        {
+            let column = vis(
+                cvrow,
+                cursor_wide_quad.map_or(cp.column.0, |(column, _)| column),
+            );
+            cursor.marks = super::batching::moved_cell_images(
+                buf,
+                &self.pane_mark_shifts[idx],
+                (row, column),
+                (ox, oy),
+                cw,
+                &mut self.font_system,
+                &mut self.swash,
+                &mut self.glyph_char_starts,
+            );
         }
         // Return the scratch (with its grown String buffers) to the pool for the
         // next frame/pane.

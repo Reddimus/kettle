@@ -265,3 +265,100 @@ fn a_tall_unanchored_stack_stays_near_its_row() {
         );
     }
 }
+
+/// The focused block cursor's inverted glyph is drawn over the pane's. When
+/// the pane moved a mark, the inverted copy must move with it; otherwise the
+/// pane's mark shows in the text colour on the block, beside an inverted one
+/// left where the font drew it.
+#[test]
+fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    // The default theme's cursor is its foreground, which would hide the
+    // pane's copy on the block.
+    cfg.theme.cursor = Rgb::new(0xe0, 0x90, 0x30);
+    let distance = |pixel: &image::Rgba<u8>, rgb: Rgb| {
+        [rgb.r, rgb.g, rgb.b]
+            .iter()
+            .zip(pixel.0)
+            .map(|(&want, got)| u32::from(want.abs_diff(got)))
+            .sum::<u32>()
+    };
+    for text in ["#\u{301}", "Z\u{324}\u{308}"] {
+        let snap = snapshot_of(16, 3, format!("{text}\x1b[1;1H").as_bytes());
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(true));
+        let glyphs = text.chars().count();
+        if !shaped_to(&renderer, glyphs) || renderer.pane_mark_shifts[0][0].is_empty() {
+            eprintln!("no face here leaves {text:?} to the fallback; skipped");
+            continue;
+        }
+        let pane: Vec<[i32; 4]> = renderer
+            .glyph_instances
+            .iter()
+            .map(|glyph| {
+                [
+                    glyph.pos[0] as i32,
+                    glyph.pos[1] as i32,
+                    glyph.size[0] as i32,
+                    glyph.size[1] as i32,
+                ]
+            })
+            .collect();
+        assert_eq!(
+            renderer.cursor_mark_images, pane,
+            "{text:?}: the inverted images must be the pane's"
+        );
+
+        let block_colour = color::cursor_block_color(&cfg.theme, &snap.colors);
+        let inverted = color::cursor_glyph_color(&cfg.theme, &snap.colors, cfg.theme.background);
+        let ink = renderer.glyph_instances[glyphs - 1];
+        let text_colour = Rgb::new(
+            (ink.color[0] * 255.0).round() as u8,
+            (ink.color[1] * 255.0).round() as u8,
+            (ink.color[2] * 255.0).round() as u8,
+        );
+        let (x0, y0) = geometry::pane_grid_origin(
+            (0.0, 0.0, W as f32, H as f32),
+            (cfg.padding_x, cfg.padding_y),
+        );
+        let in_block = |x: u32, y: u32| {
+            (x0.ceil() as u32..(x0 + renderer.cell_w) as u32).contains(&x)
+                && (y0.ceil() as u32..(y0 + renderer.cell_h) as u32).contains(&y)
+        };
+        // Nothing on the block is nearer the text colour than the block and
+        // inverted colours: every pane pixel is drawn over.
+        let ghosts = frame
+            .enumerate_pixels()
+            .filter(|&(x, y, pixel)| {
+                let fg = distance(pixel, text_colour);
+                in_block(x, y)
+                    && fg < distance(pixel, block_colour)
+                    && fg < distance(pixel, inverted)
+            })
+            .count();
+        assert_eq!(ghosts, 0, "{text:?}: the pane's glyph shows on the block");
+        // Where the moved mark covers the block, it is inverted. (Ink past the
+        // block is drawn in the inverted colour too, as for any glyph.)
+        let mark = renderer
+            .pending_cursor_glyph
+            .as_ref()
+            .and_then(|cursor| cursor.marks.last())
+            .expect("the cursor carries the cell's images");
+        let [mx, my, mw, _] = mark.rect;
+        for (offset, &coverage) in mark.mask.iter().enumerate() {
+            let x = (mx + offset as i32 % mw) as u32;
+            let y = (my + offset as i32 / mw) as u32;
+            if coverage >= 160 && in_block(x, y) {
+                let pixel = frame.get_pixel(x, y);
+                assert!(
+                    distance(pixel, inverted) < distance(pixel, text_colour),
+                    "{text:?}: the moved mark must be inverted where the pane drew it, \
+                     at ({x}, {y}): {pixel:?}"
+                );
+            }
+        }
+    }
+}
