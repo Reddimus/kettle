@@ -579,8 +579,9 @@ column count of the pane it runs in:
   git repository (`session`, `uncommitted`, and `branch` bases are cycled from
   the panel).
 
-Kettle's default fresh window is sized for this (about 152 columns on a 1080p
-monitor at the default font; see `window-width` in [CONFIG.md](CONFIG.md)).
+Kettle's default fresh window is sized for this (about 164 columns on a 1080p
+monitor and 154 on a 1366 px wide laptop at the default font; see
+`window-width` in [CONFIG.md](CONFIG.md)).
 A split pane is narrower than the window, so zoom the pane running Claude
 (`Ctrl+Shift+X`) when the panel matters; `Alt+Arrow` still reaches the client
 while zoomed. `just default-window-size-smoke` proves the fresh-window width,

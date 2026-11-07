@@ -112,7 +112,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   are drawn larger, inside the same click targets.
 
 - The terminal is inset 12 px from the window edge by default (was 8).
-  `window-padding-x` and `window-padding-y` still set it.
+  `window-padding-x` and `window-padding-y` still set it. A fresh window
+  grows by the extra padding to keep its grid where the monitor has room:
+  about 164 columns on a 1080p monitor and 154 on a 1366 px wide laptop.
 
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
