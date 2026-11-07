@@ -482,6 +482,10 @@ app.rs and all production modules, or include the specific owning module.
 `kettle-ui::clipboard` selects its text backend from the window's raw display
 handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
 (`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
+The text worker reports whether its provider supports PRIMARY. The native
+Wayland provider does not, so PRIMARY bypasses that worker in both directions
+and uses arboard on XWayland. Missing arboard leaves PRIMARY unavailable;
+CLIPBOARD errors do not switch backends.
 A compositor reports the selection to one data device per client (Mutter sends
 it only to the first one created), and the bridge already owns that device for
 drag and drop, so the clipboard shares it instead of binding a second device
@@ -515,8 +519,9 @@ but not its optional Wayland data-control backend, so those formats require X11
 or XWayland on Linux. With only native Wayland text available, bitmap paste
 logs that it is unavailable and falls through to text without materializing a
 file. Preview image copies also retain their arboard worker. Native Wayland
-text requires focus and PRIMARY requires the compositor's primary-selection
-protocol; no data-control extension is required.
+text requires focus; PRIMARY currently requires X11 or XWayland. Kettle does
+not implement the compositor's primary-selection protocol, and no data-control
+extension is required.
 
 ### Private clipboard images and video receipts
 
