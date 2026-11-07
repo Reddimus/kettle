@@ -5801,9 +5801,11 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     }
 }
 
-/// Over a selection a link underline is drawn like an underline of the
-/// selected text: in its colour, at the resting 1 px weight, hovered or not.
-/// Link blue, the hover accent and the 1.5 px line competed with the fill.
+/// Over a highlight a link underline is drawn like an underline of the
+/// highlighted text: in its colour, at the resting 1 px weight, hovered or
+/// not. Link blue, the hover accent and the 1.5 px line competed with the
+/// fill. The same holds for a focused selection, an unfocused window's
+/// selection and a search match.
 #[test]
 fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     use alacritty_terminal::selection::SelectionRange;
@@ -5816,8 +5818,9 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     cfg.show_titlebar = false;
     cfg.background_opacity = 1.0;
     // A fill the theme already separates, so it is used as is, with white
-    // text on it. Link blue and the accent are readable on that fill too, so
-    // only the drawing rule decides which colour an underline over it takes.
+    // text on it. Link blue and the accent are readable on every fill below
+    // too, so only the drawing rule decides which colour an underline over
+    // it takes.
     cfg.theme.background = Rgb::new(0, 0, 0);
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.selection_background = Rgb::new(60, 90, 190);
@@ -5825,28 +5828,25 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     let accent = Rgb::new(0, 255, 170);
     renderer.set_accent_override(Some(accent));
     let mut cache = MinimumContrastCache::default();
-    let fill = super::theme::selection_fill(&cfg.theme, cfg.theme.background, true, &mut cache);
-    let (text, _) = super::theme::highlight_colors_cached(
-        CellHighlight::Selection,
-        &cfg,
-        &cfg.theme,
-        cfg.theme.foreground,
-        cfg.theme.background,
-        &mut cache,
+    assert_eq!(
+        super::theme::selection_fill(&cfg.theme, cfg.theme.background, true, &mut cache),
+        cfg.theme.selection_background
     );
-    assert_eq!(fill, cfg.theme.selection_background);
-    assert_eq!(text, cfg.theme.foreground);
-    for ink in [cfg.theme.palette[4], accent] {
-        assert!(color::contrast_ratio(ink, fill) >= 4.5);
-    }
 
     // Blank cells, so the lower half of each holds only fill and underline.
-    let mut snap = snapshot_of(20, 2, b"\x1b[?25l");
-    snap.selection = Some(SelectionRange::new(
+    let blank = snapshot_of(20, 2, b"\x1b[?25l");
+    let mut selected = snapshot_of(20, 2, b"\x1b[?25l");
+    selected.selection = Some(SelectionRange::new(
         Point::new(Line(0), Column(0)),
         Point::new(Line(0), Column(19)),
         false,
     ));
+    let match_row = HighlightRect {
+        col: 0,
+        row: 0,
+        width: 20,
+        active: false,
+    };
     let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
     let near = |c: Rgb, want: Rgb| {
         [(c.r, want.r), (c.g, want.g), (c.b, want.b)]
@@ -5870,49 +5870,78 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
             .filter(|inks| !inks.is_empty())
             .collect()
     };
-    // The selected row's bottom edge three quarters into a pixel, where a
+    // The highlighted row's bottom edge three quarters into a pixel, where a
     // 1 px line covers one pixel row and a 1.5 px line two.
     let shift = (0.75 - (cfg.padding_y + cell_h).fract()).rem_euclid(1.0);
-    for (label, hover, explicit) in [
-        ("detected", false, false),
-        ("OSC 8", false, true),
-        ("hovered", true, false),
+    for (highlight_label, highlight, window_focused) in [
+        ("focused selection", CellHighlight::Selection, true),
+        (
+            "unfocused selection",
+            CellHighlight::InactiveSelection,
+            false,
+        ),
+        ("search match", CellHighlight::Search(false), true),
     ] {
-        let link = |row| LinkRect {
-            col: 2,
-            row,
-            width: 8,
-            hover,
-            explicit,
-        };
-        let overlay = Overlay {
-            window_focused: true,
-            cursor_visible: false,
-            links: vec![link(0), link(1)],
-            ..Overlay::default()
-        };
-        let mut view = pane(&snap, 320, 120);
-        view.rect.1 += shift;
-        view.terminal.1 += shift;
-        let frame = capture(&mut renderer, &cfg, &[view], &overlay);
-        let top = cfg.padding_y + shift;
-
-        let rows = line_rows(&frame, top, fill);
-        assert!(!rows.is_empty(), "{label}: the underline stays drawn");
-        assert_eq!(rows.len(), 1, "{label}: a 1 px line covers one pixel row");
-        for ink in rows.iter().flatten() {
+        let search = matches!(highlight, CellHighlight::Search(_));
+        let snap = if search { &blank } else { &selected };
+        let (text, fill) = super::theme::highlight_colors_cached(
+            highlight,
+            &cfg,
+            &cfg.theme,
+            cfg.theme.foreground,
+            cfg.theme.background,
+            &mut cache,
+        );
+        assert_eq!(text, cfg.theme.foreground, "{highlight_label}");
+        for ink in [cfg.theme.palette[4], accent] {
             assert!(
-                near(*ink, text),
-                "{label}: underline {ink:?} over the selection, selected text is {text:?}"
+                color::contrast_ratio(ink, fill) >= 4.5,
+                "{highlight_label}: {ink:?} on {fill:?}"
             );
         }
-        // Off the selection the link keeps its own ink.
-        let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
-        assert!(!unselected.is_empty(), "{label}: unselected link drawn");
-        assert!(
-            unselected.iter().flatten().all(|&ink| !near(ink, text)),
-            "{label}: unselected link ink"
-        );
+        for (label, hover, explicit) in [
+            ("detected", false, false),
+            ("OSC 8", false, true),
+            ("hovered", true, false),
+        ] {
+            let label = format!("{highlight_label}, {label}");
+            let link = |row| LinkRect {
+                col: 2,
+                row,
+                width: 8,
+                hover,
+                explicit,
+            };
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                links: vec![link(0), link(1)],
+                highlights: if search { vec![match_row] } else { Vec::new() },
+                ..Overlay::default()
+            };
+            let mut view = pane(snap, 320, 120);
+            view.rect.1 += shift;
+            view.terminal.1 += shift;
+            let frame = capture(&mut renderer, &cfg, &[view], &overlay);
+            let top = cfg.padding_y + shift;
+
+            let rows = line_rows(&frame, top, fill);
+            assert!(!rows.is_empty(), "{label}: the underline stays drawn");
+            assert_eq!(rows.len(), 1, "{label}: a 1 px line covers one pixel row");
+            for ink in rows.iter().flatten() {
+                assert!(
+                    near(*ink, text),
+                    "{label}: underline {ink:?} over the highlight, its text is {text:?}"
+                );
+            }
+            // Off the highlight the link keeps its own ink.
+            let unselected = line_rows(&frame, top + cell_h, cfg.theme.background);
+            assert!(!unselected.is_empty(), "{label}: unselected link drawn");
+            assert!(
+                unselected.iter().flatten().all(|&ink| !near(ink, text)),
+                "{label}: unselected link ink"
+            );
+        }
     }
 }
 
