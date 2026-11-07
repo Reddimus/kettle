@@ -2,7 +2,8 @@
 # Derived from "TokyoNight Day" in the iTerm2-Color-Schemes Ghostty set
 # (https://github.com/mbadolato/iTerm2-Color-Schemes, MIT License; see LICENSE
 # in this directory). That palette comes from tokyonight.nvim
-# (https://github.com/folke/tokyonight.nvim, Apache License 2.0).
+# (https://github.com/folke/tokyonight.nvim, Apache License 2.0; full text in
+# docs/licenses/tokyonight.nvim/LICENSE).
 # Changed by Kettle: each text colour is darkened along its own hue (OKLCH
 # lightness) until the foreground, cursor and bright white reach 7:1 and ANSI
 # slots 1-7 and 9-15 reach 4.5:1 against the background. The background,
