@@ -1745,6 +1745,14 @@ impl App {
             let along_y = (press.1 - f64::from(y)).clamp(4.0, f64::from(height.max(8.0)) - 4.0);
             let size = window.inner_size();
             let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), height);
+            let destination_tab = tear_off_destination_tab(
+                &self.cfg,
+                destination_band,
+                (ws.linux_titlebar, ws.macos_titlebar_tabs),
+                window.scale_factor() as f32,
+                &self.linux_button_layout(ws),
+            );
+            let along_x = wayland_tab_anchor_x(self.cfg.tab_bar_pos, destination_tab, along_x);
             match self.cfg.tab_bar_pos {
                 TabBarPos::Top => (along_x, along_y),
                 TabBarPos::Bottom => (along_x, f64::from(destination_band.1) + along_y),
@@ -2248,6 +2256,14 @@ pub(super) fn accent_seed_from_cwd(cwd: Option<&std::path::Path>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     dir.hash(&mut h);
     h.finish()
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn wayland_tab_anchor_x(pos: TabBarPos, tab: Rect, offset: f64) -> f64 {
+    match pos {
+        TabBarPos::Top | TabBarPos::Bottom => f64::from(tab.0) + offset,
+        TabBarPos::Left | TabBarPos::Right => offset,
+    }
 }
 
 /// Translate a tab-local vertical grip into the destination client coordinates.
