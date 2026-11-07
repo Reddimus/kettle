@@ -17,6 +17,13 @@ palette's profile discovery without changing the real config directory.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
+Portable Wayland tear-off geometry coverage exercises the same horizontal
+strip layout used by painting, including centered single-tab custom headers,
+window-button reservations, narrow/wide surfaces, non-default padding and tab
+minimum widths, and fractional/double scales. Ordinary top/bottom/side grips
+retain their offsets. These tests do not exercise a compositor grab; native
+Wayland interaction remains a separate private-session check.
+
 ## Run it
 
 The shell path regression runs Fish integration from directories containing

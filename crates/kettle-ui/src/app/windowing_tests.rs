@@ -875,10 +875,19 @@ fn native_theme_hint_decision_table() {
     use kettle_config::ThemeMode;
     // Plain Auto: follow the OS regardless of the active palette.
     assert_eq!(native_theme_hint(ThemeMode::Auto, false, true, false), None);
-    assert_eq!(native_theme_hint(ThemeMode::Auto, false, false, false), None);
+    assert_eq!(
+        native_theme_hint(ThemeMode::Auto, false, false, false),
+        None
+    );
     // The macOS/Linux observers keep receiving OS changes even with forced window chrome.
-    assert_eq!(native_theme_hint(ThemeMode::Auto, false, false, true), Some(WindowTheme::Light));
-    assert_eq!(native_theme_hint(ThemeMode::Auto, false, true, true), Some(WindowTheme::Dark));
+    assert_eq!(
+        native_theme_hint(ThemeMode::Auto, false, false, true),
+        Some(WindowTheme::Light)
+    );
+    assert_eq!(
+        native_theme_hint(ThemeMode::Auto, false, true, true),
+        Some(WindowTheme::Dark)
+    );
     // Auto + schedule: the schedule drives the palette, so the titlebar
     // matches the palette, not the OS.
     assert_eq!(
@@ -1031,4 +1040,104 @@ fn review_vertical_tear_off_anchor_accounts_for_top_status() {
         4,
         "native and Wayland left/right paths must use the tested anchor"
     );
+}
+
+#[test]
+fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
+    use super::{tear_off_destination_tab, wayland_tab_anchor_x};
+    use kettle_config::{Config, TabBarPos};
+    let buttons = crate::window_buttons::ButtonLayout::default();
+    for scale in [1.0, 1.5, 2.0] {
+        for (width, minimum, expected_x) in [
+            (400.0, 80.0, 0.0),
+            (1000.0, 80.0, 168.14286),
+            (1000.0, 700.0, 81.0),
+        ] {
+            // Padding belongs to terminal content, never the titlebar grip.
+            let cfg = Config {
+                padding_x: 31.0,
+                padding_y: 19.0,
+                tab_min_width: minimum * scale,
+                ..Config::default()
+            };
+            let band = (0.0, 0.0, width * scale, 46.0 * scale);
+            let destination = tear_off_destination_tab(&cfg, band, (true, true), scale, &buttons);
+            assert!((destination.0 - expected_x * scale).abs() < 0.001);
+            let grip = wayland_tab_anchor_x(TabBarPos::Top, destination, f64::from(32.0 * scale));
+            assert!(
+                (grip - f64::from((expected_x + 32.0) * scale)).abs() < 0.001,
+                "the compositor grip must include the painted destination tab offset: {grip}"
+            );
+        }
+        // Window-button preferences can reserve space on either side.
+        let buttons =
+            crate::window_buttons::ButtonLayout::parse("close:minimize,maximize").unwrap();
+        let cfg = Config {
+            padding_x: 27.0,
+            padding_y: 7.0,
+            ..Config::default()
+        };
+        let destination = tear_off_destination_tab(
+            &cfg,
+            (0.0, 0.0, 1000.0 * scale, 46.0 * scale),
+            (true, true),
+            scale,
+            &buttons,
+        );
+        assert!((destination.0 - 191.14286 * scale).abs() < 0.001);
+        assert!(
+            (wayland_tab_anchor_x(TabBarPos::Top, destination, 21.0)
+                - f64::from(destination.0)
+                - 21.0)
+                .abs()
+                < 0.001
+        );
+    }
+}
+
+#[test]
+fn wayland_tearoff_ordinary_bar_grips_keep_their_offsets() {
+    use super::{
+        tab_band_rect, tear_off_destination_tab, tear_off_tab_anchor_y, wayland_tab_anchor_x,
+    };
+    use kettle_config::{Config, TabBarPos};
+    let buttons = crate::window_buttons::ButtonLayout::default();
+    for scale in [1.0, 1.5, 2.0] {
+        for width in [240, 1200] {
+            for pos in [
+                TabBarPos::Top,
+                TabBarPos::Bottom,
+                TabBarPos::Left,
+                TabBarPos::Right,
+            ] {
+                let cfg = Config {
+                    tab_bar_pos: pos,
+                    tab_bar_width: 173.0 * scale,
+                    padding_x: 37.0,
+                    padding_y: 23.0,
+                    tab_min_width: 113.0,
+                    ..Config::default()
+                };
+                let band = tab_band_rect(
+                    ((width as f32 * scale) as u32, (600.0 * scale) as u32),
+                    pos,
+                    28.0 * scale,
+                    cfg.tab_bar_width,
+                    0.0,
+                    24.0 * scale,
+                    22.0 * scale,
+                );
+                let destination =
+                    tear_off_destination_tab(&cfg, band, (false, false), scale, &buttons);
+                assert_eq!(destination, band);
+                assert_eq!(wayland_tab_anchor_x(pos, destination, 31.0), 31.0);
+                let expected_y = if pos == TabBarPos::Top {
+                    11.0
+                } else {
+                    f64::from(band.1) + 11.0
+                };
+                assert_eq!(tear_off_tab_anchor_y(pos, band, 11.0), expected_y);
+            }
+        }
+    }
 }
