@@ -18,6 +18,7 @@ mod geometry;
 mod gpu;
 mod labels;
 mod link_status;
+mod mark_fallback;
 pub use link_status::{PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout};
 mod overlays;
 mod screenshot;
@@ -208,6 +209,8 @@ mod color;
 mod confirm;
 
 pub use confirm::ConfirmDialogLayout;
+
+mod cursor_marks;
 
 mod cursor_patch;
 
@@ -434,6 +437,12 @@ pub struct Renderer {
     pane_style_keys: Vec<u64>,
     /// Each pane's row bidi layouts, grown and truncated with `pane_buffers`.
     pane_bidi: Vec<bidi_rows::PaneBidi>,
+    /// Each pane's per-row fallback mark placements
+    /// (`mark_fallback::line_shifts`), recomputed only when a row reshapes and
+    /// kept in step with `pane_line_keys`.
+    pane_mark_shifts: Vec<Vec<mark_fallback::LineShifts>>,
+    /// Glyph bounds and GPOS answers behind `pane_mark_shifts`.
+    mark_cache: mark_fallback::MarkCache,
     /// Each pane's cells that Kettle draws itself this frame (box drawing,
     /// blocks, Powerline, braille; see `builtin_glyphs`), and a hash of them
     /// so that a change to them alone re-emits the glyph instances. Grown and
@@ -490,6 +499,15 @@ pub struct Renderer {
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
     last_cursor_glyph_key: Option<u64>,
+    /// The surface rectangles of the cursor glyph's images when its cluster
+    /// has fallback-placed marks (`mark_fallback::cursor_images`) and they
+    /// are drawn as glyphon custom glyphs; empty when glyphon draws the
+    /// shaped buffer. Kept with the retained vertices for the cursor patch.
+    cursor_mark_images: Vec<[i32; 4]>,
+    /// The atlas and renderer that draw those images, made on first use.
+    cursor_marks: Option<cursor_marks::CursorMarks>,
+    /// glyphon's pipeline cache, for atlases made after startup.
+    glyphon_cache: Cache,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -961,6 +979,9 @@ impl Renderer {
         while self.pane_bidi.len() < panes.len() {
             self.pane_bidi.push(bidi_rows::PaneBidi::default());
         }
+        while self.pane_mark_shifts.len() < panes.len() {
+            self.pane_mark_shifts.push(Vec::new());
+        }
         while self.pane_builtins.len() < panes.len() {
             self.pane_builtins.push(Vec::new());
         }
@@ -991,6 +1012,7 @@ impl Renderer {
                 self.pane_line_keys.swap(i, j);
                 self.pane_style_keys.swap(i, j);
                 self.pane_bidi.swap(i, j);
+                self.pane_mark_shifts.swap(i, j);
                 self.pane_builtins.swap(i, j);
                 self.pane_builtin_keys.swap(i, j);
                 self.pane_titlebar_buffers.swap(i, j);
@@ -1000,6 +1022,7 @@ impl Renderer {
                 self.pane_line_keys[i].clear();
                 self.pane_style_keys[i] = 0;
                 self.pane_bidi[i].clear();
+                self.pane_mark_shifts[i].clear();
                 self.pane_builtins[i].clear();
                 self.pane_builtin_keys[i] = 0;
                 self.pane_titlebar_texts[i].clear();
@@ -1016,6 +1039,7 @@ impl Renderer {
         self.pane_line_keys.truncate(panes.len());
         self.pane_style_keys.truncate(panes.len());
         self.pane_bidi.truncate(panes.len());
+        self.pane_mark_shifts.truncate(panes.len());
         self.pane_builtins.truncate(panes.len());
         self.pane_builtin_keys.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
@@ -5159,6 +5183,10 @@ impl Renderer {
         // on a built-in glyph, so they must not be trusted afterwards.
         if cursor_glyph_key.is_none() || builtin_cursor.is_some() {
             self.last_cursor_glyph_key = None;
+            self.cursor_mark_images.clear();
+            if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
         }
         let preparing_text = need_prepare || need_cursor_prepare;
         if preparing_text {
@@ -5313,7 +5341,7 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gcolor, gclip, gtext, gattrs, baseline)) = self
+        if let Some((gx, gy, gcolor, gclip, gtext, gattrs, baseline, gmarks)) = self
             .pending_cursor_glyph
             .as_ref()
             .map(|c| {
@@ -5325,6 +5353,7 @@ impl Renderer {
                     c.text.as_str(),
                     c.attrs.as_attrs(),
                     c.row_baseline,
+                    c.marks.as_slice(),
                 )
             })
             .filter(|_| need_cursor_prepare)
@@ -5357,17 +5386,22 @@ impl Renderer {
                     1.0,
                 )
             });
+            let bounds = TextBounds {
+                left: gclip.0 as i32,
+                top: gclip.1 as i32,
+                right: (gclip.0 + gclip.2) as i32,
+                bottom: (gclip.1 + gclip.3) as i32,
+            };
+            // The grid pane moved a mark in this cell, which glyphon cannot
+            // do: the pane's own images of the cell are drawn instead, as
+            // custom glyphs in an atlas of their own (see `cursor_marks`).
+            let marked = !gmarks.is_empty() && scale == 1.0;
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,
                 left,
                 top,
                 scale,
-                bounds: TextBounds {
-                    left: gclip.0 as i32,
-                    top: gclip.1 as i32,
-                    right: (gclip.0 + gclip.2) as i32,
-                    bottom: (gclip.1 + gclip.3) as i32,
-                },
+                bounds,
                 default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
                 custom_glyphs: &[],
             };
@@ -5378,9 +5412,42 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [area],
+                (!marked).then_some(area),
                 &mut self.swash,
             )?;
+            self.cursor_mark_images.clear();
+            if marked {
+                if self
+                    .cursor_marks
+                    .as_ref()
+                    .is_none_or(|marks| !marks.has_room(gmarks))
+                {
+                    self.cursor_marks = Some(cursor_marks::CursorMarks::new(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &self.glyphon_cache,
+                        self.config.format,
+                        &mut self.font_system,
+                    ));
+                }
+                if let Some(marks) = self.cursor_marks.as_mut() {
+                    self.text_prepares += 1;
+                    marks.prepare(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &mut self.font_system,
+                        &mut self.swash,
+                        &self.viewport,
+                        gmarks,
+                        GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
+                        bounds,
+                    )?;
+                }
+                self.cursor_mark_images
+                    .extend(gmarks.iter().map(|image| image.rect));
+            } else if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
             // Commit the retained-vertex key only after prepare succeeds. A
             // transient atlas/device error must retry rather than treating
             // stale vertices as current on the next frame.
@@ -5939,6 +6006,9 @@ mod text_layout_damage_tests;
 
 #[cfg(test)]
 mod glyph_cell_lock_tests;
+
+#[cfg(test)]
+mod mark_fallback_tests;
 
 #[cfg(test)]
 mod paragraph_separator_shaping_tests;

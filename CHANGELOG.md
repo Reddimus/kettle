@@ -306,6 +306,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Combining marks that their font does not position sit on their letter. In
+  `Z̤̈`, which macOS draws in San Francisco because the bundled JetBrains Mono
+  lacks the diaeresis below, the upper diaeresis no longer overlaps the
+  capital and neither mark hangs off its right edge. Such marks stack above
+  or below the letter by combining class, as HarfBuzz places marks for fonts
+  without anchors; a stack too tall for the line stops a quarter line past
+  its row, and a block cursor on the letter inverts the marks where they now
+  sit. Marks the font places itself draw exactly as before.
+
 - Screen readers echo typed words in the terminal again. A typed space used to
   reach them only with the next character, so Orca read fragments such as
   " e" aloud instead of the word. The cursor's row now keeps the blanks
