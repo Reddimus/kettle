@@ -293,6 +293,9 @@ cp scripts/install.sh "${bundle}/install.sh"
 cp scripts/install-unix.py "${bundle}/install-unix.py"
 cp -R packaging/linux "${bundle}/packaging/linux"
 cp -R shell-integration "${bundle}/shell-integration"
+mkdir -p "${bundle}/docs/licenses/tokyonight.nvim"
+cp docs/licenses/tokyonight.nvim/LICENSE docs/licenses/tokyonight.nvim/README.md \
+  "${bundle}/docs/licenses/tokyonight.nvim/"
 
 # A release-tarball (`stable`) install must refuse --record-dir: the launcher
 # env wiring would be dropped on the next self-update, so users are steered to

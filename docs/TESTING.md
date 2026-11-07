@@ -1065,6 +1065,15 @@ A not-yet-published asset can skip that online part.
 Record that separately from the local install/uninstall result.
 
 `just package-templates` checks source rendering on a feature branch.
+Its hermetic tests compare installed TokyoNight license bytes for Homebrew,
+Arch, and the common Nix install hook. Nix's `tokyonight-license` flake check
+compares the final store files on both supported platforms. A Linux packaging
+fixture checks that NOTICE includes the complete license for existing updaters.
+Installer tests cover recorded license replacement and removal, and reject
+linked sources and destinations. The Linux updater transaction test compares
+installed license bytes with the verified archive and checks their provenance;
+a portable map test keeps the Linux document destinations and modes covered on
+other CI hosts.
 At an exact clean release tag, auto mode also checks published assets.
 The underlying script's `--require-release` makes that check mandatory:
 
@@ -1689,6 +1698,31 @@ test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
+
+`kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
+combining-class table, the placement maths (gaps, stacking, below marks that
+never rise, above marks that sink halfway, aligned and double classes), whole
+pixel rounding, the quarter-line overflow limit and the bounded cache. With
+the bundled JetBrains Mono alone, anchored marks (`Z\u{308}`, `q\u{323}` and
+mark-to-mark stacks) keep their place; unanchored ones (`#\u{301}`,
+`@\u{323}`), `.case` substitutes and a dot after a composed `Aacute` clear
+their base; and with `mkmk` turned off a stacked acute no longer follows the
+diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
+use an isolated database of bundled JetBrains Mono and Fira Sans and must be
+pixel-identical with fallback placement removed. Portable fixture checks verify
+the selected glyphs and faces, zero-offset anchors, and the shaped offsets
+controlled by `mark` and `mkmk`; Fira Sans anchors the grave below that
+JetBrains Mono lacks. A steady frame or zoom must reuse the cached placement,
+a row laid out late must still be placed, and a focused block cursor must
+cover a moved mark with its inverted
+copy. Switching between a moved-mark cell and a built-in shade also checks
+that only the current cell contributes cursor patch bounds, with queue and
+mapped uploads and pixel-identical crops in both blink phases. `cursor_marks`
+tests grow the cursor's own atlas past its first texture
+across several cells and check when it must be replaced. The bundled cases
+run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and a tall stack
+need a host fallback face and report `MARK_FONT_SKIP` without one. Without an
+adapter the tests report `MARK_GPU_SKIP`.
 
 Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
 DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and
