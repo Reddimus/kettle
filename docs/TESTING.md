@@ -894,6 +894,13 @@ the full matrix; files are named `state.language.theme.size.png` under
 percent (0.5) of its pixels differ or its size changed. A missing baseline is
 reported, never created. A change to a baseline belongs in the pull request
 that changes the UI, with the before and after images in its description.
+The committed Linux baselines in `tests/ui-states/linux` cover the full
+80-state matrix. Their source, rendering environment, and expected visible
+states are recorded in `tests/ui-states/README.md`. Linux CI compares fresh
+private-Wayland captures against them; macOS retains its separate 80-state
+geometry assertions without PNG comparison. A new baseline does not prove the
+comparison ran: retain the actual capture-and-compare CI result for that tree.
+
 The resolved `--out` and `--compare` directories must be disjoint. Equality,
 ancestor/descendant paths, and symlink aliases are rejected before deleting
 output or loading the live helper. Use a separate capture directory when
