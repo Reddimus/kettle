@@ -433,6 +433,120 @@ mod tests {
     }
 
     #[test]
+    fn native_tab_exit_completion_resumes_without_a_later_frame_notification() {
+        use crate::window_state::{DpiResizeAction, DpiResizeCoalescer, DpiResizeEvent};
+        use winit::dpi::{LogicalSize, PhysicalSize};
+
+        let wanted = frame(805.25, 544.25);
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let window_size =
+                LogicalSize::new(wanted.width, wanted.height).to_physical::<u32>(scale);
+            let view_size = LogicalSize::new(805.25, 516.25).to_physical::<u32>(scale);
+            assert_ne!(
+                window_size, view_size,
+                "the native tab band is outside the view"
+            );
+            for scale_changed in [false, true] {
+                // Replay both the old producer and the live-view producer,
+                // including the missing-view fallback accepted by the filter.
+                for (reported, current, resumes) in [
+                    (window_size, Some(view_size), false),
+                    (view_size, Some(view_size), true),
+                    (window_size, None, true),
+                ] {
+                    let mut geometry = Geometry::new(wanted, false);
+                    geometry.enter(None);
+                    geometry.will_exit();
+                    let mut surface_suspended = geometry.holds_resize(false);
+                    assert!(
+                        surface_suspended,
+                        "the final view notification is held during exit"
+                    );
+                    geometry.observe(wanted, false);
+                    let generation = geometry.exited();
+                    assert_eq!(
+                        geometry.finish(generation, false),
+                        Restore::Resume(Some(wanted))
+                    );
+                    // AppKit already restored this exact frame, so finish's
+                    // saved != frame(native) branch emits no new notification.
+                    assert_eq!(geometry.windowed, Some(wanted));
+                    assert!(!geometry.holds_resize(false));
+
+                    let mut dpi = DpiResizeCoalescer::default();
+                    if scale_changed {
+                        assert_eq!(
+                            dpi.on_event(DpiResizeEvent::ScaleFactorChanged),
+                            DpiResizeAction::Defer
+                        );
+                    }
+                    let mut layouts: Vec<PhysicalSize<u32>> = Vec::new();
+                    // The completion event is the only resize after finish.
+                    // Match the handler's nonzero, pending and current gates.
+                    if reported.width != 0
+                        && reported.height != 0
+                        && !geometry.holds_resize(false)
+                        && current.is_none_or(|current| reported == current)
+                    {
+                        surface_suspended = false;
+                        if dpi.on_event(DpiResizeEvent::Resized {
+                            width: reported.width,
+                            height: reported.height,
+                            renderer_ready: true,
+                        }) == DpiResizeAction::ApplyLayout
+                        {
+                            layouts.push(reported);
+                        }
+                    }
+                    // Without another frame notification, the old producer
+                    // cannot recover even via the bounded DPI fallback.
+                    for _ in 0..3 {
+                        assert_eq!(
+                            dpi.on_event(DpiResizeEvent::AboutToWait {
+                                width: window_size.width,
+                                height: window_size.height,
+                                renderer_ready: !surface_suspended,
+                            }),
+                            DpiResizeAction::Defer
+                        );
+                    }
+                    assert_eq!(surface_suspended, !resumes);
+                    assert_eq!(layouts, if resumes { vec![reported] } else { vec![] });
+                    assert_eq!(dpi.render_allowed(), resumes || !scale_changed);
+                }
+            }
+        }
+
+        // The portable replay cannot create an AppKit window. Pin the real
+        // completion producer to its live-view case and platform fallbacks.
+        let source = include_str!("app.rs");
+        let completion = source
+            .split_once("UserEvent::NativeFullscreenExited {\n                window_seq,")
+            .unwrap()
+            .1
+            .split_once("UserEvent::AccessibilityActivated")
+            .unwrap()
+            .0;
+        let finish = completion
+            .find("native.finish(generation, fullscreen)")
+            .unwrap();
+        let query = completion
+            .find("titlebar::macos_view_size(window)")
+            .expect("fullscreen completion must produce the live NSView size");
+        let dispatch = completion
+            .find("self.window_event_inner(&mut ws, el, WindowEvent::Resized(size))")
+            .unwrap();
+        assert!(finish < query && query < dispatch);
+        assert!(completion[..query].contains("#[cfg(target_os = \"macos\")]"));
+        assert!(completion[query..dispatch].contains(".unwrap_or_else(|| window.inner_size())"));
+        assert!(completion[query..dispatch].contains("#[cfg(not(target_os = \"macos\"))]"));
+        assert!(completion[query..dispatch].contains("let size = window.inner_size();"));
+        assert!(
+            completion[..query].contains("ws.dpi_resize_surface_suspended && !native.pending()")
+        );
+    }
+
+    #[test]
     fn a_nested_entry_cannot_relabel_the_previous_exit_or_save_its_stale_frame() {
         let wanted = frame(740.0, 480.0);
         let mut geometry = Geometry::new(wanted, false);
