@@ -14,6 +14,10 @@ profile lists including empty, native submenu dispatch order, and the shared
 Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
 saves and reloads a split layout, checks picker discovery and validates the
 palette's profile discovery without changing the real config directory.
+The portable profile inventory regression blocks an injected enumerator while
+menu dispatch uses the empty startup cache and then the last completed cache.
+It checks coalesced refreshes and eventual latest results without reading owner
+profiles. Existing menu-model tests pass an explicit empty profile list.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 

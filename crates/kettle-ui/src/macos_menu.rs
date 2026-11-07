@@ -107,13 +107,92 @@ fn command_shortcut(bindings: &Bindings, action: &Action) -> Option<(Trigger, St
 /// Pure, platform-independent menu construction. Native app commands retain
 /// their standard equivalents unless the live keymap owns that chord.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn menu_model(tr: &Translator, bindings: &Bindings, context: Context) -> Vec<Menu> {
-    menu_model_with_profiles(
-        tr,
-        bindings,
-        context,
-        &kettle_config::Config::list_profiles(),
-    )
+pub(crate) fn menu_model(
+    tr: &Translator,
+    bindings: &Bindings,
+    context: Context,
+    inventory: &ProfileInventory,
+) -> Vec<Menu> {
+    menu_model_with_profiles(tr, bindings, context, inventory.profiles())
+}
+
+/// One worker, one pending invalidation and one latest result. Enumeration
+/// never holds the result lock; dispatch only reads the event-loop-owned cache.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct ProfileInventory {
+    cached: Vec<String>,
+    requests: Option<std::sync::mpsc::SyncSender<()>>,
+    latest: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ProfileInventory {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn new(wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
+        Self::with_enumerator(kettle_config::Config::list_profiles, wake)
+    }
+
+    fn with_enumerator(
+        enumerate: impl Fn() -> Vec<String> + Send + 'static,
+        wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let (requests, rx) = std::sync::mpsc::sync_channel(1);
+        let latest = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = latest.clone();
+        let worker = std::thread::Builder::new()
+            .name("kettle-profiles".into())
+            .spawn(move || {
+                loop {
+                    let profiles = enumerate();
+                    let notify = result
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .replace(profiles)
+                        .is_none();
+                    if notify {
+                        wake();
+                    }
+                    // Poll on the worker as well: profile creation/removal need not
+                    // touch the active config file watched by live reload.
+                    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            })?;
+        Ok(Self {
+            cached: Vec::new(),
+            requests: Some(requests),
+            latest,
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn refresh(&self) {
+        if let Some(requests) = &self.requests {
+            let _ = requests.try_send(());
+        }
+    }
+
+    pub(crate) fn complete(&mut self) {
+        if let Some(profiles) = self.latest.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            self.cached = profiles;
+        }
+    }
+
+    fn profiles(&self) -> &[String] {
+        &self.cached
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for ProfileInventory {
+    fn drop(&mut self) {
+        self.requests.take();
+        // A stalled filesystem must not stall event-loop shutdown either.
+        self.worker.take();
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -272,9 +351,10 @@ pub(crate) fn sync(
     proxy: &winit::event_loop::EventLoopProxy<crate::app::UserEvent>,
     cfg: &kettle_config::Config,
     context: Context,
+    inventory: &ProfileInventory,
 ) {
     let tr = Translator::new(cfg.language.resolve(kettle_i18n::os_locale));
-    imp::sync(proxy, menu_model(&tr, &cfg.keybinds, context));
+    imp::sync(proxy, menu_model(&tr, &cfg.keybinds, context, inventory));
 }
 
 #[cfg(test)]

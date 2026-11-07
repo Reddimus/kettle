@@ -3767,6 +3767,14 @@ no context reads, clock queries, formatting or writes.
 
 ## Threading model
 
+The macOS profile menu reads an event-loop-owned inventory. One owned worker
+runs the bounded `Config::list_profiles` scan at startup, on config reload,
+and every five seconds to notice profile additions/removals that do not touch
+the active config. A one-slot request channel coalesces invalidations, and a
+single latest-result slot coalesces event-loop notifications. Redraw and pointer
+dispatch only construct a menu from the current cache. Shutdown disconnects the
+worker without waiting on a potentially stalled filesystem.
+
 The [2026-11-01 scaling diagnostics](SCALING-2026-11-01.md) retain the current
 per-pane readers, renderer-owned font systems and bounded search slices. The
 host did not qualify for calibrated standings. Thread and process-memory
