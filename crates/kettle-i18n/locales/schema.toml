@@ -2256,7 +2256,7 @@ context = "crates/kettle-ui/src/settings.rs: One-line factual Settings descripti
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
 
 [messages.settings_description_field_font_size]
-context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+context = "crates/kettle-ui/src/settings.rs: Font size uses logical pixels, not typographic points. English budget 70 characters. Ellipsized in narrow panels."
 
 [messages.settings_description_field_gpu_backend]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
