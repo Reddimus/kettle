@@ -163,6 +163,7 @@ def verify_fonts(listing, expected):
 
 
 def verify_gpu(text):
+    text = text.replace('\r\n', '\n')
     fields = dict(re.findall(r'^([^:\n]+):\s*([^\n]+)$', text, re.M))
     if (not re.match(r'^llvmpipe\b', fields.get('Adapter', ''), re.I)
             or fields.get('Adapter type') != 'Cpu' or fields.get('Backend') != 'Gl'
@@ -173,6 +174,7 @@ def verify_gpu(text):
 
 
 def verify_weston(text):
+    text = text.replace('\r\n', '\n')
     backend = re.findall(r'Loading module [^\n]*[/\\](headless-backend\.so)[\'\"]?', text)
     renderer = re.findall(r'GL renderer:\s*([^\n]+)', text)
     version = re.findall(r'GL version:\s*([^\n]+)', text)

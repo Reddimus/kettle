@@ -77,6 +77,28 @@ class EnvironmentTests(unittest.TestCase):
                 if os.name != 'nt':
                     self.assertEqual(Path(environment[key]).stat().st_mode & 0o777, 0o700)
 
+
+    def test_crlf_gpu_fields_match_lf_without_admitting_invalid_adapters(self):
+        try:
+            actual = runner.verify_gpu(GPU.replace('\n', '\r\n'))
+        except RuntimeError as error:
+            self.fail(f'valid CRLF GPU diagnostics were refused: {error}')
+        self.assertEqual(actual, runner.verify_gpu(GPU))
+        for old, new in (('Backend: Gl', 'Backend: Vulkan'),
+                         ('Adapter type: Cpu', 'Adapter type: DiscreteGpu'),
+                         ('Backend fallback: no', 'Backend fallback: yes'),
+                         ('Driver info: OpenGL ES 3.2 Mesa 24.0.9', 'Driver info: <unknown>')):
+            with self.subTest(invalid=new), self.assertRaises(RuntimeError):
+                runner.verify_gpu(GPU.replace(old, new).replace('\n', '\r\n'))
+
+    def test_crlf_weston_fields_match_lf_without_admitting_foreign_backends(self):
+        self.assertEqual(runner.verify_weston(WESTON.replace('\n', '\r\n')),
+                         runner.verify_weston(WESTON))
+        invalid = WESTON + "Loading module '/usr/lib/libweston-13/x11-backend.so'\n"
+        with self.assertRaises(RuntimeError):
+            runner.verify_weston(invalid.replace('\n', '\r\n'))
+
+
 ADAPTER = 'llvmpipe (LLVM 18.1.8, 256 bits)'
 GPU = f'''Backend policy: GL
 Backend: Gl
