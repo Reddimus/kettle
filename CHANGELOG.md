@@ -137,8 +137,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   cannot blur windows. With window blur on, Kettle used to raise the opacity to
   99% there, so the Settings slider seemed to do nothing; the window now keeps
   the configured opacity, as it does with blur off. The Linux default stays
-  99%. Settings says when blur is unavailable under the Window blur switch, in
-  English and Spanish.
+  99%. Wherever the session cannot blur (those Linux sessions, KDE Plasma on
+  X11 included, and Windows without its system backdrop, such as Windows 10),
+  Settings says "Not available in this session; opacity still applies." under
+  the Window blur switch, in English and Spanish.
 
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.

@@ -1507,7 +1507,7 @@ context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
 
 [messages.settings_note_blur_unavailable]
-context = "crates/kettle-ui/src/settings.rs row_description: shown in place of the Window blur row's description (under its label, not in the footer) while blur is on but the window system cannot blur (GNOME and X11 on Linux, Windows without its backdrop). Background opacity still works there. One line; English budget 70 characters. Ellipsized in narrow panels."
+context = "crates/kettle-ui/src/settings.rs row_description: shown in place of the Window blur row's description (under its label, not in the footer) while blur is on but this session cannot blur: GNOME and other Wayland compositors without KWin's blur protocol, X11 (KDE Plasma on X11 included, where KWin could blur but Kettle's X11 backend cannot ask), and Windows without its system backdrop, such as Windows 10. Say the session, not the desktop, lacks it. Background opacity still works there. One line; English budget 70 characters. Ellipsized in narrow panels."
 
 [messages.settings_note_claude_code_forbidden]
 context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when the organization's Claude Code policy (disableSideloadFlags) forbids plugins that the environment names, so new panes get none."

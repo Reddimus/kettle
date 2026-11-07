@@ -3039,9 +3039,11 @@ mod search_tests {
         }
     }
 
-    /// GNOME and X11 cannot blur a window. The Window blur row says so
-    /// beside its switch, and that opacity still works, while every other
-    /// row keeps its own description.
+    /// Some sessions cannot blur a window: GNOME, X11 (KDE Plasma's
+    /// included) and Windows without its backdrop. The Window blur row says
+    /// so beside its switch, naming the session rather than the desktop, and
+    /// that opacity still works, while every other row keeps its own
+    /// description.
     #[test]
     fn unavailable_blur_is_explained_beside_its_switch() {
         let cats = categories(&[]);
@@ -3050,10 +3052,15 @@ mod search_tests {
         assert_eq!(row_description(blur, false), description(blur));
         let note = row_description(blur, true);
         assert_ne!(note, description(blur));
-        assert!(EN.text(note).contains("opacity"), "{}", EN.text(note));
-        assert!(ES.text(note).contains("opacidad"), "{}", ES.text(note));
+        assert_eq!(
+            EN.text(note),
+            "Not available in this session; opacity still applies."
+        );
+        assert_eq!(
+            ES.text(note),
+            "No está disponible en esta sesión; la opacidad se sigue aplicando."
+        );
         assert!(EN.text(note).chars().count() <= 70);
-        assert_ne!(EN.text(note), ES.text(note));
         for field in fields.iter().filter(|f| f.key != "window-blur") {
             assert_eq!(
                 row_description(field, true),

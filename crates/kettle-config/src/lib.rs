@@ -1440,8 +1440,8 @@ pub struct Config {
     pub padding_y: f32,
     pub background_opacity: f32,
     /// Ask the window system to blur content behind Kettle. Where it cannot
-    /// (X11, Wayland without KWin's blur protocol), the window keeps the
-    /// configured opacity without blur. A window only receives an alpha-capable
+    /// (X11, Wayland without KWin's blur protocol, Windows without its system
+    /// backdrop), the window keeps the configured opacity without blur. A window only receives an alpha-capable
     /// surface when this or a sub-1.0 composed background alpha asks for one,
     /// so turning it on takes full effect in windows opened afterwards.
     pub window_blur: bool,
