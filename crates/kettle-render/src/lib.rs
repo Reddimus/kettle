@@ -434,7 +434,7 @@ pub struct Renderer {
     /// Each pane's per-row fallback mark placements
     /// (`mark_fallback::line_shifts`), recomputed only when a row reshapes and
     /// kept in step with `pane_line_keys`.
-    pane_mark_shifts: Vec<Vec<Box<[mark_fallback::MarkShift]>>>,
+    pane_mark_shifts: Vec<Vec<mark_fallback::LineShifts>>,
     /// Glyph bounds and GPOS answers behind `pane_mark_shifts`.
     mark_cache: mark_fallback::MarkCache,
     /// The row layouts the last frame drew, and those of the last frame
@@ -488,9 +488,8 @@ pub struct Renderer {
     /// are drawn as glyphon custom glyphs; empty when glyphon draws the
     /// shaped buffer. Kept with the retained vertices for the cursor patch.
     cursor_mark_images: Vec<[i32; 4]>,
-    /// Custom-glyph ids for those images, one per raster key and never
-    /// reused, since glyphon caches a custom glyph's raster by its id.
-    cursor_mark_ids: std::collections::HashMap<glyphon::cosmic_text::CacheKey, u16>,
+    /// Custom-glyph ids for those images.
+    cursor_mark_ids: batching::CustomGlyphIds,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -5316,15 +5315,7 @@ impl Renderer {
                 && scale == 1.0
                 && let Some(ids) = gmarks
                     .iter()
-                    .map(|image| {
-                        let next = self.cursor_mark_ids.len();
-                        match self.cursor_mark_ids.entry(image.key) {
-                            std::collections::hash_map::Entry::Occupied(id) => Some(*id.get()),
-                            std::collections::hash_map::Entry::Vacant(slot) => {
-                                u16::try_from(next).ok().map(|id| *slot.insert(id))
-                            }
-                        }
-                    })
+                    .map(|image| self.cursor_mark_ids.id(image))
                     .collect::<Option<Vec<u16>>>()
             {
                 self.cursor_glyph_buffer.set_text(
@@ -5351,7 +5342,8 @@ impl Renderer {
                         metadata: 0,
                     });
                     self.cursor_mark_images.push(image.rect);
-                    masks.insert(id, image.mask.as_slice());
+                    // An id names a raster only together with its size.
+                    masks.insert((id, width, height), image.mask.as_slice());
                 }
             }
             let area = TextArea {
@@ -5378,13 +5370,12 @@ impl Renderer {
                 [area],
                 &mut self.swash,
                 |request| {
-                    let mask = masks.get(&request.id)?;
-                    (mask.len() == usize::from(request.width) * usize::from(request.height)).then(
-                        || glyphon::RasterizedCustomGlyph {
-                            data: mask.to_vec(),
-                            content_type: glyphon::ContentType::Mask,
-                        },
-                    )
+                    let (width, height) = (i32::from(request.width), i32::from(request.height));
+                    let mask = masks.get(&(request.id, width, height))?;
+                    Some(glyphon::RasterizedCustomGlyph {
+                        data: mask.to_vec(),
+                        content_type: glyphon::ContentType::Mask,
+                    })
                 },
             )?;
             // Commit the retained-vertex key only after prepare succeeds. A

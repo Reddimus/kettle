@@ -1,4 +1,4 @@
-use super::mark_fallback::{MarkShift, shift_for};
+use super::mark_fallback::{LineShifts, MarkShift, shift_for, shifts_of};
 use super::theme::pane_inactive_amount;
 use super::{
     Config, ContextMenu, FontSystem, GColor, GlyphInstance, GlyphPipeline, OutlineInstance,
@@ -490,7 +490,7 @@ pub(crate) enum GlyphPositioning {
 pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
-    marks: &[Box<[MarkShift]>],
+    marks: &[LineShifts],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
@@ -529,7 +529,7 @@ pub(crate) fn emit_cell_locked_glyphs(
 pub(crate) fn emit_positioned_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
-    marks: &[Box<[MarkShift]>],
+    marks: &[LineShifts],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
@@ -543,7 +543,7 @@ pub(crate) fn emit_positioned_glyphs(
             continue;
         }
         let shifts: &[MarkShift] = match positioning {
-            GlyphPositioning::Grid(_) => marks.get(run.line_i).map_or(&[], |shifts| shifts),
+            GlyphPositioning::Grid(_) => shifts_of(marks, run.line_i),
             GlyphPositioning::Continuous | GlyphPositioning::GraphemeRows(_) => &[],
         };
         let mut next_shift = 0;
@@ -747,6 +747,30 @@ pub(crate) struct CellImage {
     pub(crate) mask: Vec<u8>,
 }
 
+/// glyphon custom-glyph ids for [`CellImage`]s. glyphon caches a custom
+/// glyph's raster by its id and size, so an id is never given to a second
+/// raster key of the same size: each image size has its own 65,536 ids, and
+/// only a 65,537th distinct raster of one exact size finds none.
+#[derive(Default)]
+pub(crate) struct CustomGlyphIds {
+    ids: std::collections::HashMap<glyphon::cosmic_text::CacheKey, u16>,
+    next: std::collections::HashMap<(i32, i32), u32>,
+}
+
+impl CustomGlyphIds {
+    /// The id for `image`'s raster, `None` once its size has none left.
+    pub(crate) fn id(&mut self, image: &CellImage) -> Option<u16> {
+        if let Some(&id) = self.ids.get(&image.key) {
+            return Some(id);
+        }
+        let next = self.next.entry((image.rect[2], image.rect[3])).or_default();
+        let id = u16::try_from(*next).ok()?;
+        *next += 1;
+        self.ids.insert(image.key, id);
+        Some(id)
+    }
+}
+
 /// The images the grid emit draws for `cell` (a buffer line and grid column)
 /// of `buf` when fallback placement in `marks` moved one of its glyphs;
 /// empty when it moved none, or when one is not a plain coverage mask.
@@ -757,7 +781,7 @@ pub(crate) struct CellImage {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn moved_cell_images(
     buf: &TextBuffer,
-    marks: &[Box<[MarkShift]>],
+    marks: &[LineShifts],
     cell: (usize, usize),
     origin: (f32, f32),
     cell_width: f32,
@@ -766,7 +790,8 @@ pub(crate) fn moved_cell_images(
     char_starts: &mut Vec<u32>,
 ) -> Vec<CellImage> {
     let (line, column) = cell;
-    let Some(shifts) = marks.get(line).filter(|shifts| !shifts.is_empty()) else {
+    let shifts = shifts_of(marks, line);
+    if shifts.is_empty() {
         return Vec::new();
     };
     let Some(run) = buf.layout_runs().find(|run| run.line_i == line) else {
@@ -934,4 +959,59 @@ pub(crate) fn text_layout_damage_key(
         pv.snap.display_offset.hash(&mut h);
     }
     h.finish()
+}
+
+#[cfg(test)]
+mod custom_glyph_id_tests {
+    use super::*;
+
+    fn image(glyph_id: u16, size: f32, width: i32) -> CellImage {
+        let (key, _, _) = glyphon::cosmic_text::CacheKey::new(
+            glyphon::fontdb::ID::dummy(),
+            glyph_id,
+            size,
+            (0.0, 0.0),
+            glyphon::fontdb::Weight::NORMAL,
+            glyphon::cosmic_text::CacheKeyFlags::empty(),
+        );
+        CellImage {
+            key,
+            rect: [0, 0, width, 3],
+            mask: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_id_names_one_raster_of_each_size() {
+        let mut ids = CustomGlyphIds::default();
+        let first = ids.id(&image(1, 13.0, 4)).unwrap();
+        assert_eq!(
+            ids.id(&image(1, 13.0, 4)),
+            Some(first),
+            "a raster keeps its id"
+        );
+        assert_ne!(
+            ids.id(&image(2, 13.0, 4)),
+            Some(first),
+            "another raster of its size does not share it"
+        );
+        assert_eq!(
+            ids.id(&image(3, 15.0, 5)),
+            Some(first),
+            "another size has its own ids"
+        );
+        for glyph_id in 3..=u16::MAX {
+            assert!(ids.id(&image(glyph_id, 13.0, 4)).is_some());
+        }
+        assert!(
+            ids.id(&image(1, 14.0, 4)).is_some(),
+            "a size has 65,536 ids"
+        );
+        assert_eq!(
+            ids.id(&image(2, 14.0, 4)),
+            None,
+            "a size's 65,537th raster finds no id rather than a used one"
+        );
+        assert!(ids.id(&image(2, 14.0, 6)).is_some());
+    }
 }

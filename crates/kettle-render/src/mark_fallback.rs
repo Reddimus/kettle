@@ -20,7 +20,8 @@
 use std::collections::HashMap;
 
 use glyphon::cosmic_text::{
-    CacheKey, CacheKeyFlags, Command, FontSystem, LayoutGlyph, SubpixelBin, SwashCache, fontdb,
+    CacheKey, CacheKeyFlags, Command, FontFeatures, FontSystem, LayoutGlyph, SubpixelBin,
+    SwashCache, fontdb,
 };
 use read_fonts::TableProvider;
 use read_fonts::tables::gpos::PositionSubtables;
@@ -109,26 +110,44 @@ pub(crate) fn shift_for<'a>(
         .filter(|shift| shift.index as usize == index && shift.glyph_id == glyph_id)
 }
 
-/// The fallback shifts of every line of `buffer`, by line.
+/// One laid-out line's fallback shifts, or `None` while the line has no
+/// layout to work them out from (it lies past the buffer's height).
+pub(crate) type LineShifts = Option<Box<[MarkShift]>>;
+
+/// The shifts `marks` holds for buffer line `line`, none if not worked out.
+pub(crate) fn shifts_of(marks: &[LineShifts], line: usize) -> &[MarkShift] {
+    marks
+        .get(line)
+        .and_then(Option::as_deref)
+        .unwrap_or_default()
+}
+
+/// The fallback shifts of every line of `buffer`, by line, for the default
+/// feature settings.
 pub(crate) fn buffer_shifts(
     buffer: &glyphon::Buffer,
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
-) -> Vec<Box<[MarkShift]>> {
+) -> Vec<LineShifts> {
     let mut cache = MarkCache::default();
     buffer
         .lines
         .iter()
-        .map(
-            |line| match line.layout_opt().and_then(|layout| layout.first()) {
-                Some(layout) => line_shifts(&layout.glyphs, line.text(), fonts, swash, &mut cache),
-                None => Box::default(),
-            },
-        )
+        .map(|line| {
+            let layout = line.layout_opt()?.first()?;
+            Some(line_shifts(
+                &layout.glyphs,
+                line.text(),
+                fonts,
+                swash,
+                &mut cache,
+            ))
+        })
         .collect()
 }
 
-/// The fallback shifts of one laid-out line of `text`.
+/// The fallback shifts of one laid-out line of `text`, shaped with the
+/// features last given to [`MarkCache::use_features`].
 pub(crate) fn line_shifts(
     glyphs: &[LayoutGlyph],
     text: &str,
@@ -169,6 +188,12 @@ pub(crate) fn line_shifts(
 /// Entries each map of a [`MarkCache`] holds before it starts over.
 const MARK_CACHE_LIMIT: usize = 4096;
 
+/// The GPOS features harfrust applies unless told otherwise, any of whose
+/// lookups may anchor a mark.
+const DEFAULT_POSITIONING: [&[u8; 4]; 7] = [
+    b"abvm", b"blwm", b"curs", b"dist", b"kern", b"mark", b"mkmk",
+];
+
 /// Outline bounds and GPOS answers by glyph. Rows of the same marks ask the
 /// same questions, and a screen of tall stacks would otherwise redo them for
 /// every reshaped row.
@@ -178,6 +203,9 @@ pub(crate) struct MarkCache {
     bounds: HashMap<CacheKey, Option<Ink>>,
     /// `None` when the font's GPOS could not be read.
     anchors: HashMap<Anchor, Option<bool>>,
+    /// The feature settings shaping used, in order, which decide the lookups
+    /// that count.
+    features: Vec<([u8; 4], u32)>,
 }
 
 /// Whether the font anchors `mark` to `to`, a base or an earlier mark.
@@ -193,6 +221,31 @@ impl MarkCache {
     pub(crate) fn clear(&mut self) {
         self.bounds.clear();
         self.anchors.clear();
+    }
+
+    /// Records the feature settings rows are shaped with, starting over when
+    /// they change: a feature turned off, such as `mkmk`, applies no anchor.
+    pub(crate) fn use_features(&mut self, features: &FontFeatures) {
+        let settings = features
+            .features
+            .iter()
+            .map(|feature| (*feature.tag.as_bytes(), feature.value));
+        if !self.features.iter().copied().eq(settings.clone()) {
+            self.clear();
+            self.features = settings.collect();
+        }
+    }
+
+    /// Whether shaping applies feature `tag`: on by default for the
+    /// [`DEFAULT_POSITIONING`] features, and as the last setting says.
+    fn applies(&self, tag: [u8; 4]) -> bool {
+        self.features
+            .iter()
+            .rev()
+            .find(|(setting, _)| *setting == tag)
+            .map_or(DEFAULT_POSITIONING.contains(&&tag), |&(_, value)| {
+                value != 0
+            })
     }
 
     /// The glyph's outline bounds in its line, or `None` for no outline.
@@ -223,10 +276,9 @@ impl MarkCache {
         })
     }
 
-    /// Whether any mark-to-base or mark-to-ligature lookup (`to_mark` false)
-    /// or mark-to-mark lookup (`to_mark` true) in the glyph's font anchors it
-    /// to glyph `to`, whatever feature enables the lookup. `None` when the
-    /// font's GPOS cannot be read.
+    /// Whether a mark-to-base or mark-to-ligature lookup (`to_mark` false)
+    /// or a mark-to-mark lookup (`to_mark` true) that shaping applies anchors
+    /// the glyph to glyph `to`. `None` when the font's GPOS cannot be read.
     fn anchored(
         &mut self,
         fonts: &mut FontSystem,
@@ -246,9 +298,68 @@ impl MarkCache {
         if self.anchors.len() >= MARK_CACHE_LIMIT {
             self.anchors.clear();
         }
-        let answer = ask_gpos(fonts, glyph, question);
+        let answer = self.ask_gpos(fonts, glyph, question);
         self.anchors.insert(question, answer);
         answer
+    }
+
+    /// Answers `question` from the GPOS of `glyph`'s font: `Some(false)` for
+    /// a font without GPOS, `None` for one that cannot be read.
+    fn ask_gpos(
+        &self,
+        fonts: &mut FontSystem,
+        glyph: &LayoutGlyph,
+        question: Anchor,
+    ) -> Option<bool> {
+        let index = fonts.db().face(glyph.font_id)?.index;
+        let font = fonts.get_font(glyph.font_id, glyph.font_weight)?;
+        let font = read_fonts::FontRef::from_index(font.data(), index).ok()?;
+        let gpos = match font.gpos() {
+            Ok(gpos) => gpos,
+            Err(read_fonts::ReadError::TableIsMissing(_)) => return Some(false),
+            Err(_) => return None,
+        };
+        let active = self.active_lookups(&gpos).ok()?;
+        let (to, mark) = (GlyphId16::new(question.to), GlyphId16::new(question.mark));
+        if question.to_mark {
+            anchored_to_mark(&gpos, active.as_deref(), to, mark).ok()
+        } else {
+            anchored_to_base(&gpos, active.as_deref(), to, mark).ok()
+        }
+    }
+
+    /// Which of the font's lookups shaping can apply: those of the features
+    /// it applies, in any script. `None` (all of them) when one of those is
+    /// contextual, since the lookups it calls are not followed here.
+    fn active_lookups(
+        &self,
+        gpos: &read_fonts::tables::gpos::Gpos<'_>,
+    ) -> Result<Option<Vec<bool>>, read_fonts::ReadError> {
+        let lookups = gpos.lookup_list()?;
+        let mut active = vec![false; usize::from(lookups.lookup_count())];
+        let features = gpos.feature_list()?;
+        for record in features.feature_records() {
+            if !self.applies(record.feature_tag().to_be_bytes()) {
+                continue;
+            }
+            let feature = record.feature(features.offset_data())?;
+            for index in feature.lookup_list_indices() {
+                if let Some(slot) = active.get_mut(usize::from(index.get())) {
+                    *slot = true;
+                }
+            }
+        }
+        for (index, lookup) in lookups.lookups().iter().enumerate() {
+            if active.get(index) == Some(&true)
+                && matches!(
+                    lookup?.subtables()?,
+                    PositionSubtables::Contextual(_) | PositionSubtables::ChainContextual(_)
+                )
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(active))
     }
 }
 
@@ -361,19 +472,9 @@ fn place_cluster(
     cache: &mut MarkCache,
     shifts: &mut Vec<MarkShift>,
 ) {
-    let ccc = icu_normalizer::properties::CanonicalCombiningClassMapBorrowed::new();
-    // The shaper decomposes a precomposed scalar the font lacks, so its marks
-    // are looked for in the canonical decomposition.
-    let mut marks: Vec<(char, u8, bool)> = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd()
-        .normalize_iter(text.chars())
-        .filter_map(|c| {
-            let class = ccc.get_u8(c);
-            (class != 0).then_some((c, class, false))
-        })
-        .collect();
-    if marks.is_empty() {
+    let Some(classes) = mark_classes(cluster, text, fonts) else {
         return;
-    }
+    };
     let mut base: Option<(usize, Ink, f32)> = None;
     let mut stack = Ink {
         left: 0.0,
@@ -401,20 +502,9 @@ fn place_cluster(
         let Some((base_index, base_ink, base_end)) = base else {
             continue;
         };
-        let Some(font) = fonts.get_font(glyph.font_id, glyph.font_weight) else {
+        let Some(class_id) = classes[i] else {
             continue;
         };
-        // The mark's scalar: the first unclaimed one the font maps to this
-        // glyph. A glyph the font substituted maps to none and stays.
-        let charmap = font.as_swash().charmap();
-        let Some(slot) = marks
-            .iter()
-            .position(|&(c, _, claimed)| !claimed && charmap.map(c) == glyph.glyph_id)
-        else {
-            continue;
-        };
-        marks[slot].2 = true;
-        let class_id = marks[slot].1;
         if last_class != Some(class_id) {
             stack = base_ink;
             last_class = Some(class_id);
@@ -466,6 +556,68 @@ fn place_cluster(
             above: class.above,
         });
     }
+}
+
+/// The canonical combining class of each mark glyph in `cluster`, shaped
+/// from `text`; `None` for bases and for glyphs whose scalar is unknown.
+/// `None` overall when the cluster has no mark.
+///
+/// The shaper decomposes a precomposed scalar the font lacks, so marks are
+/// looked for in the canonical decomposition. A glyph the font's cmap gives
+/// for a scalar takes it. GSUB can replace a mark one for one (JetBrains
+/// Mono's `.case` forms, for marks it stacks), which keeps the canonical
+/// order, so when exactly as many glyphs as scalars are left they pair up in
+/// order. Otherwise those glyphs are left as shaped.
+fn mark_classes(
+    cluster: &[LayoutGlyph],
+    text: &str,
+    fonts: &mut FontSystem,
+) -> Option<Vec<Option<u8>>> {
+    let ccc = icu_normalizer::properties::CanonicalCombiningClassMapBorrowed::new();
+    let mut scalars: Vec<(char, u8, bool)> =
+        icu_normalizer::DecomposingNormalizerBorrowed::new_nfd()
+            .normalize_iter(text.chars())
+            .filter_map(|c| {
+                let class = ccc.get_u8(c);
+                (class != 0).then_some((c, class, false))
+            })
+            .collect();
+    if scalars.is_empty() {
+        return None;
+    }
+    let mut classes = vec![None; cluster.len()];
+    let mut unmatched = Vec::new();
+    for (i, glyph) in cluster.iter().enumerate() {
+        if i == 0 || glyph.w != 0.0 {
+            continue;
+        }
+        let nominal = fonts
+            .get_font(glyph.font_id, glyph.font_weight)
+            .and_then(|font| {
+                let charmap = font.as_swash().charmap();
+                scalars
+                    .iter()
+                    .position(|&(c, _, claimed)| !claimed && charmap.map(c) == glyph.glyph_id)
+            });
+        match nominal {
+            Some(slot) => {
+                scalars[slot].2 = true;
+                classes[i] = Some(scalars[slot].1);
+            }
+            None => unmatched.push(i),
+        }
+    }
+    let left: Vec<u8> = scalars
+        .iter()
+        .filter(|&&(_, _, claimed)| !claimed)
+        .map(|&(_, class, _)| class)
+        .collect();
+    if left.len() == unmatched.len() {
+        for (i, class) in unmatched.into_iter().zip(left) {
+            classes[i] = Some(class);
+        }
+    }
+    Some(classes)
 }
 
 /// How the font anchors the mark at `index` in `cluster`, whose base is at
@@ -551,25 +703,6 @@ fn outline_bounds(key: CacheKey, fonts: &mut FontSystem, swash: &mut SwashCache)
     bounds.filter(|ink| ink.right > ink.left && ink.top > ink.bottom)
 }
 
-/// Answers `question` from the GPOS of `glyph`'s font: `Some(false)` for a
-/// font without GPOS, `None` for one that cannot be read.
-fn ask_gpos(fonts: &mut FontSystem, glyph: &LayoutGlyph, question: Anchor) -> Option<bool> {
-    let index = fonts.db().face(glyph.font_id)?.index;
-    let font = fonts.get_font(glyph.font_id, glyph.font_weight)?;
-    let font = read_fonts::FontRef::from_index(font.data(), index).ok()?;
-    let gpos = match font.gpos() {
-        Ok(gpos) => gpos,
-        Err(read_fonts::ReadError::TableIsMissing(_)) => return Some(false),
-        Err(_) => return None,
-    };
-    let (to, mark) = (GlyphId16::new(question.to), GlyphId16::new(question.mark));
-    if question.to_mark {
-        anchored_to_mark(&gpos, to, mark).ok()
-    } else {
-        anchored_to_base(&gpos, to, mark).ok()
-    }
-}
-
 type Anchors =
     [read_fonts::types::BigEndian<read_fonts::types::Nullable<read_fonts::types::Offset16>>];
 
@@ -580,14 +713,32 @@ fn has_anchor(anchors: &Anchors, class: u16) -> bool {
         .is_some_and(|anchor| !anchor.get().is_null())
 }
 
-/// Whether a mark-to-base or mark-to-ligature lookup anchors `mark` to
-/// `base`.
+/// The lookups of `gpos` that `active` (all when `None`) lets apply.
+fn applied_lookups<'a>(
+    gpos: &read_fonts::tables::gpos::Gpos<'a>,
+    active: Option<&[bool]>,
+) -> Result<
+    impl Iterator<Item = Result<read_fonts::tables::gpos::PositionLookup<'a>, read_fonts::ReadError>>,
+    read_fonts::ReadError,
+> {
+    Ok(gpos
+        .lookup_list()?
+        .lookups()
+        .iter()
+        .enumerate()
+        .filter(move |(index, _)| active.is_none_or(|active| active.get(*index) == Some(&true)))
+        .map(|(_, lookup)| lookup))
+}
+
+/// Whether an applied mark-to-base or mark-to-ligature lookup anchors `mark`
+/// to `base`.
 fn anchored_to_base(
     gpos: &read_fonts::tables::gpos::Gpos<'_>,
+    active: Option<&[bool]>,
     base: GlyphId16,
     mark: GlyphId16,
 ) -> Result<bool, read_fonts::ReadError> {
-    for lookup in gpos.lookup_list()?.lookups().iter() {
+    for lookup in applied_lookups(gpos, active)? {
         match lookup?.subtables()? {
             PositionSubtables::MarkToBase(subtables) => {
                 for subtable in subtables.iter() {
@@ -635,13 +786,15 @@ fn anchored_to_base(
     Ok(false)
 }
 
-/// Whether a mark-to-mark lookup anchors `mark` to the earlier `previous`.
+/// Whether an applied mark-to-mark lookup anchors `mark` to the earlier
+/// `previous`.
 fn anchored_to_mark(
     gpos: &read_fonts::tables::gpos::Gpos<'_>,
+    active: Option<&[bool]>,
     previous: GlyphId16,
     mark: GlyphId16,
 ) -> Result<bool, read_fonts::ReadError> {
-    for lookup in gpos.lookup_list()?.lookups().iter() {
+    for lookup in applied_lookups(gpos, active)? {
         let PositionSubtables::MarkToMark(subtables) = lookup?.subtables()? else {
             continue;
         };
@@ -889,6 +1042,10 @@ mod tests {
 
     /// Shapes `text` in the bundled JetBrains Mono alone, at 26 px.
     fn shape_bundled(text: &str) -> (FontSystem, Vec<LayoutGlyph>) {
+        shape_bundled_with(text, &FontFeatures::new())
+    }
+
+    fn shape_bundled_with(text: &str, features: &FontFeatures) -> (FontSystem, Vec<LayoutGlyph>) {
         use glyphon::cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Wrap};
         let mut fonts =
             FontSystem::new_with_locale_and_db("en-US".into(), glyphon::fontdb::Database::new());
@@ -897,7 +1054,9 @@ mod tests {
         buffer.set_wrap(Wrap::None);
         buffer.set_text(
             text,
-            &Attrs::new().family(Family::Name(kettle_config::font::FAMILY)),
+            &Attrs::new()
+                .family(Family::Name(kettle_config::font::FAMILY))
+                .font_features(features.clone()),
             Shaping::Advanced,
             None,
         );
@@ -986,5 +1145,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// JetBrains Mono swaps stacked marks for its `.case` forms, which no
+    /// cmap entry names. They keep their scalars' order, so they are placed.
+    #[test]
+    fn marks_the_font_substitutes_are_placed_by_their_scalars() {
+        let text = "@\u{323}\u{307}";
+        let (mut fonts, glyphs) = shape_bundled(text);
+        let (mut swash, mut cache) = (SwashCache::new(), MarkCache::default());
+        let shifts = line_shifts(&glyphs, text, &mut fonts, &mut swash, &mut cache);
+        let base = cache.ink(&glyphs[0], &mut fonts, &mut swash).unwrap();
+        let [below, above] = &shifts[..] else {
+            panic!("both marks are placed: {shifts:?}");
+        };
+        assert!(!below.above && below.top * 26.0 <= base.bottom);
+        assert!(above.above && above.bottom * 26.0 >= base.top);
+    }
+
+    /// With `mkmk` turned off the font's mark-to-mark anchors apply to
+    /// nothing: the acute stacks on the diaeresis instead of keeping the
+    /// diaeresis's place.
+    #[test]
+    fn a_feature_turned_off_anchors_nothing() {
+        use glyphon::cosmic_text::FeatureTag;
+        let mut features = FontFeatures::new();
+        features
+            .disable(FeatureTag::new(b"ccmp"))
+            .disable(FeatureTag::new(b"mkmk"));
+        let text = "#\u{308}\u{301}";
+        let (mut fonts, glyphs) = shape_bundled_with(text, &features);
+        assert!(
+            glyphs[1..]
+                .iter()
+                .all(|glyph| glyph.x_offset == 0.0 && glyph.y_offset == 0.0),
+            "the fixture needs marks the shaper left alone"
+        );
+        let (mut swash, mut cache) = (SwashCache::new(), MarkCache::default());
+        cache.use_features(&features);
+        let shifts = line_shifts(&glyphs, text, &mut fonts, &mut swash, &mut cache);
+        let [diaeresis, acute] = &shifts[..] else {
+            panic!("both marks are placed: {shifts:?}");
+        };
+        assert!(
+            acute.bottom >= diaeresis.top,
+            "the acute stacks above the diaeresis: {acute:?} over {diaeresis:?}"
+        );
     }
 }

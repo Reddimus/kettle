@@ -16,13 +16,26 @@ type Image = [f32; 4];
 /// The frame and glyph images of `text` alone in a pane, cursor hidden.
 fn frame_of(renderer: &mut Renderer, cfg: &Config, text: &str) -> (image::RgbaImage, Vec<Image>) {
     let snap = snapshot_of(16, 3, format!("{text}\x1b[?25l").as_bytes());
-    let frame = capture(renderer, cfg, &[pane(&snap, W, H)], &focused(false));
+    frame_of_snapshot(renderer, cfg, &snap)
+}
+
+fn frame_of_snapshot(
+    renderer: &mut Renderer,
+    cfg: &Config,
+    snap: &PaneSnapshot,
+) -> (image::RgbaImage, Vec<Image>) {
+    let frame = capture(renderer, cfg, &[pane(snap, W, H)], &focused(false));
     let images = renderer
         .glyph_instances
         .iter()
         .map(|glyph| [glyph.pos[0], glyph.pos[1], glyph.size[0], glyph.size[1]])
         .collect();
     (frame, images)
+}
+
+/// The fallback placement cached for the first pane's `row`.
+fn row_shifts(renderer: &Renderer, row: usize) -> &[mark_fallback::MarkShift] {
+    mark_fallback::shifts_of(&renderer.pane_mark_shifts[0], row)
 }
 
 /// Whether the first cell's cluster was shaped to `glyphs` real glyphs, none
@@ -64,12 +77,14 @@ fn ink_in(frame: &image::RgbaImage, rows: std::ops::Range<u32>, x0: u32, x1: u32
 fn stacked_marks_clear_a_capital_whose_font_does_not_anchor_them() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     let (frame, glyphs) = frame_of(&mut renderer, &cfg, "Z\u{324}\u{308}");
     if !shaped_to(&renderer, 3) {
-        eprintln!("no face here shapes Z\\u{{324}}\\u{{308}} to three glyphs; skipped");
+        eprintln!(
+            "MARK_FONT_SKIP: no face here shapes Z\\u{{324}}\\u{{308}} to three glyphs; skipped"
+        );
         return;
     }
     let [base, below, above] = [glyphs[0], glyphs[1], glyphs[2]];
@@ -104,14 +119,16 @@ fn stacked_marks_clear_a_capital_whose_font_does_not_anchor_them() {
 fn a_grave_stack_keeps_ink_above_and_below() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     let (_, plain) = frame_of(&mut renderer, &cfg, "a");
     let x_height = top(&plain[0]);
     let (frame, glyphs) = frame_of(&mut renderer, &cfg, "a\u{300}\u{316}");
     if !shaped_to(&renderer, 2) {
-        eprintln!("no face here shapes a\\u{{300}}\\u{{316}} to two glyphs; skipped");
+        eprintln!(
+            "MARK_FONT_SKIP: no face here shapes a\\u{{300}}\\u{{316}} to two glyphs; skipped"
+        );
         return;
     }
     let [base, below] = [glyphs[0], glyphs[1]];
@@ -134,7 +151,7 @@ fn a_grave_stack_keeps_ink_above_and_below() {
 fn marks_the_font_places_render_exactly_as_before() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     let (placed, _) = frame_of(
@@ -143,14 +160,12 @@ fn marks_the_font_places_render_exactly_as_before() {
         "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}",
     );
     assert!(
-        renderer.pane_mark_shifts[0]
-            .iter()
-            .all(|row| row.is_empty()),
+        (0..3).all(|row| row_shifts(&renderer, row).is_empty()),
         "no mark here is the fallback's to move: {:?}",
         renderer.pane_mark_shifts[0]
     );
     // The same rows emitted with no fallback placement at all.
-    renderer.pane_mark_shifts[0].clear();
+    renderer.pane_mark_shifts[0].fill(Some(Box::default()));
     renderer.grid_glyphs_dirty = true;
     let snap = snapshot_of(
         16,
@@ -168,7 +183,7 @@ fn marks_the_font_places_render_exactly_as_before() {
 fn an_unanchored_bundled_mark_clears_its_base() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     for (text, above) in [("#\u{301}", true), ("1\u{301}", true), ("@\u{323}", false)] {
@@ -199,27 +214,28 @@ fn an_unanchored_bundled_mark_clears_its_base() {
 fn mark_placement_is_cached_with_the_shaped_row() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     let snap = snapshot_of(16, 3, "#\u{301}\x1b[?25l".as_bytes());
     capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
-    let placed = renderer.pane_mark_shifts[0][0].clone();
+    let placed = row_shifts(&renderer, 0).to_vec();
     assert_eq!(placed.len(), 1, "the accent is placed once");
 
     // A marker the renderer would never compute survives frames that do not
     // reshape the row.
-    let marker: Box<[mark_fallback::MarkShift]> = Box::new([mark_fallback::MarkShift {
+    let marker = [mark_fallback::MarkShift {
         index: 9,
         ..placed[0]
-    }]);
-    renderer.pane_mark_shifts[0][0] = marker.clone();
+    }];
+    renderer.pane_mark_shifts[0][0] = Some(Box::new(marker));
     capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(true));
     cfg.font_size += 2.0;
     renderer.set_font_size(cfg.font_size);
     capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
     assert_eq!(
-        renderer.pane_mark_shifts[0][0], marker,
+        row_shifts(&renderer, 0),
+        marker,
         "a steady frame or a zoom must not redo the placement"
     );
 
@@ -230,10 +246,38 @@ fn mark_placement_is_cached_with_the_shaped_row() {
         &[pane(&changed, W, H)],
         &focused(false),
     );
-    assert_eq!(renderer.pane_mark_shifts[0][0].len(), 1);
-    assert_ne!(
-        renderer.pane_mark_shifts[0][0], marker,
-        "a new row is placed"
+    assert_eq!(row_shifts(&renderer, 0).len(), 1);
+    assert_ne!(row_shifts(&renderer, 0), marker, "a new row is placed");
+}
+
+/// A row past the buffer's height, as while a pane shrinks ahead of its
+/// terminal, is shaped but not laid out. It is placed once it is laid out,
+/// though its content, and so its row key, never changed.
+#[test]
+fn a_row_laid_out_late_is_placed_then() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
+        return;
+    };
+    let snap = snapshot_of(16, 3, "\r\n\r\n#\u{301}\x1b[?25l".as_bytes());
+    let short = (cfg.padding_y * 2.0 + renderer.cell_h * 1.5) as u32;
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, W, short)],
+        &focused(false),
+    );
+    assert!(
+        renderer.pane_buffers[0].lines[2].layout_opt().is_none(),
+        "the fixture needs the last row unlaid out"
+    );
+    let (_, images) = frame_of_snapshot(&mut renderer, &cfg, &snap);
+    assert_eq!(row_shifts(&renderer, 2).len(), 1, "the late row is placed");
+    let [base, mark] = [images[0], images[1]];
+    assert!(
+        bottom(&mark) <= top(&base),
+        "the accent must sit on the base: {mark:?} over {base:?}"
     );
 }
 
@@ -243,14 +287,14 @@ fn mark_placement_is_cached_with_the_shaped_row() {
 fn a_tall_unanchored_stack_stays_near_its_row() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     let marks = "\u{308}".repeat(12);
     let text = format!("Z\u{324}{marks}");
     let (_, glyphs) = frame_of(&mut renderer, &cfg, &text);
-    if !shaped_to(&renderer, 14) || renderer.pane_mark_shifts[0][0].is_empty() {
-        eprintln!("no face here leaves this stack to the fallback; skipped");
+    if !shaped_to(&renderer, 14) || row_shifts(&renderer, 0).is_empty() {
+        eprintln!("MARK_FONT_SKIP: no face here leaves this stack to the fallback; skipped");
         return;
     }
     let (_, row_top) = geometry::pane_grid_origin(
@@ -274,7 +318,7 @@ fn a_tall_unanchored_stack_stays_near_its_row() {
 fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(W, H) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        eprintln!("MARK_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     // The default theme's cursor is its foreground, which would hide the
@@ -291,8 +335,8 @@ fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
         let snap = snapshot_of(16, 3, format!("{text}\x1b[1;1H").as_bytes());
         let frame = capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(true));
         let glyphs = text.chars().count();
-        if !shaped_to(&renderer, glyphs) || renderer.pane_mark_shifts[0][0].is_empty() {
-            eprintln!("no face here leaves {text:?} to the fallback; skipped");
+        if !shaped_to(&renderer, glyphs) || row_shifts(&renderer, 0).is_empty() {
+            eprintln!("MARK_FONT_SKIP: no face here leaves {text:?} to the fallback; skipped");
             continue;
         }
         let pane: Vec<[i32; 4]> = renderer

@@ -1439,21 +1439,26 @@ impl Renderer {
         }
         // Fallback mark placement is a function of the shaped row alone, in
         // ems, so it is redone only for the rows shaped above. A relayout
-        // (zoom, resize) keeps it.
+        // (zoom, resize) keeps it. A row past the buffer's height has no
+        // layout yet; it is placed once a relayout gives it one.
         let shifts = &mut self.pane_mark_shifts[idx];
         shifts.resize_with(rows, Default::default);
         for &row in &reshaped_rows {
-            let line = &buf.lines[row];
-            shifts[row] = match line.layout_opt().and_then(|layout| layout.first()) {
-                Some(layout) => super::mark_fallback::line_shifts(
+            shifts[row] = None;
+        }
+        self.mark_cache.use_features(&ff);
+        for (line, shifts) in buf.lines.iter().zip(shifts.iter_mut()) {
+            if shifts.is_none()
+                && let Some(layout) = line.layout_opt().and_then(|layout| layout.first())
+            {
+                *shifts = Some(super::mark_fallback::line_shifts(
                     &layout.glyphs,
                     line.text(),
                     &mut self.font_system,
                     &mut self.swash,
                     &mut self.mark_cache,
-                ),
-                None => Box::default(),
-            };
+                ));
+            }
         }
         if cursor_focused
             && recolor_cursor_cell.is_some()
