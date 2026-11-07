@@ -3403,7 +3403,12 @@ the pane's text damage, since a change to them reshapes nothing. Under a focused
 block cursor the cell's glyph is drawn again in the cursor text colour from a
 one-instance cursor buffer in the glyph pipeline, at the place in the pass
 order where the glyphon cursor glyph would be, and only in the blink's on
-phase. glyphon 0.12's own custom glyphs are not used: a growing glyphon atlas
+phase. The cursor block quad is drawn again just before it, so the pane's
+copy in the cell's own colour cannot show through partly covered pixels (a
+shade, an arc's edge). The cursor instance only looks up the slot the pane
+resolved for the same cell and never allocates: it is resolved after the
+pane instances are uploaded, when an allocation could evict a slot they
+still draw from. glyphon 0.12's own custom glyphs are not used: a growing glyphon atlas
 re-rasterizes every cached custom glyph through whichever `prepare` grew it,
 and panics when that prepare has no rasterizer, and Kettle's chrome renderers
 share one atlas.

@@ -460,6 +460,77 @@ fn a_block_cursor_draws_the_glyph_in_the_cursor_text_colour() {
     }
 }
 
+/// A shade under a focused block cursor is the cursor's two colours mixed,
+/// whatever colour the cell's own text has: the pane's copy, drawn in the
+/// cell's colour first, must not show through the partly covered pixels.
+#[test]
+fn a_shade_under_the_cursor_shows_only_the_cursor_colours() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let mut cells = Vec::new();
+    let mut block = Rgb::new(0, 0, 0);
+    for fg in ["255;0;0", "0;255;0"] {
+        let snap = snapshot_of(
+            20,
+            4,
+            format!("\x1b[38;2;{fg};48;2;0;0;0m▒\x1b[D").as_bytes(),
+        );
+        block = crate::color::cursor_block_color(&cfg.theme, &snap.colors);
+        let image = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 320, 120)],
+            &focused(true),
+        );
+        let frame = Frame::of(image, &renderer, &cfg);
+        let [x0, y0, x1, y1] = frame.cell(0, 0);
+        let pixels: Vec<[u8; 3]> = (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .map(|(x, y)| frame.rgb(x, y))
+            .collect();
+        assert!(
+            pixels.iter().all(|p| *p == pixels[0]),
+            "the shade is one even tone under the cursor: {:?}",
+            pixels.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+        cells.push(pixels[0]);
+    }
+    assert_eq!(cells[0], cells[1], "the cell's own colour shows through");
+    assert_ne!(cells[0], [block.r, block.g, block.b], "the shade is drawn");
+}
+
+/// The cursor's built-in glyph reuses the slot the pane resolved for the
+/// same cell and never allocates one itself: it is resolved after the pane
+/// instances are uploaded, and an allocation then could evict a slot they
+/// still draw from. With no resident slot it draws nothing and writes
+/// nothing to the atlas.
+#[test]
+fn the_cursor_glyph_never_allocates_atlas_space() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, "\x1b[38;2;255;255;255;48;2;0;0;0m▒\x1b[D".as_bytes());
+    let panes = [pane(&snap, 320, 120)];
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert!(renderer.glyph_pipeline.cursor_clip.is_some());
+    // Lose every slot without asking for a pane upload, as eviction under
+    // atlas pressure can.
+    renderer.glyph_pipeline.clear();
+    let before = renderer.glyph_pipeline.upload_counts().texture_writes;
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert_eq!(
+        renderer.glyph_pipeline.upload_counts().texture_writes,
+        before,
+        "the cursor rasterized into the atlas"
+    );
+    assert!(renderer.glyph_pipeline.cursor_clip.is_none());
+}
+
 /// In a right-to-left row a built-in glyph moves with its cell to its
 /// visual column.
 #[test]

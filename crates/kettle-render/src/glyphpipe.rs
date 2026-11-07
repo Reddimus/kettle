@@ -875,7 +875,7 @@ pub struct GlyphPipeline {
     /// phase. Uploaded only when it changes.
     cursor: wgpu::Buffer,
     cursor_held: RetainedBytes,
-    cursor_clip: Option<[f32; 4]>,
+    pub(crate) cursor_clip: Option<[f32; 4]>,
     _cursor_gpu: GraphicsReservation,
 }
 
@@ -1170,6 +1170,13 @@ impl GlyphPipeline {
             outcome,
             &mut self.glyphs_complete,
         )
+    }
+
+    /// The slot `key` already holds, if any, without rasterizing, allocating
+    /// or evicting anything, so no instance already uploaded can lose its
+    /// atlas pixels to this lookup.
+    pub fn resident(&self, key: impl Into<SlotKey>) -> Option<GlyphSlot> {
+        self.slots.get(&key.into())?.slot
     }
 
     /// Evict the `n` coldest slots (smallest `last_used` epoch), returning

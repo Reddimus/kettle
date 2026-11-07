@@ -353,6 +353,13 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
         if cursor_on && builtin_cursor && !self.ime_prepared {
+            // The pane drew this cell's glyph in its own colour over the
+            // block. Put the block back first, so a glyph that only partly
+            // covers a pixel (a shade, an arc's edge) shows the cursor's two
+            // colours and nothing of the cell's.
+            if let Some(range) = self.cursor_quad_range.clone() {
+                self.quads.draw_range(&mut pass, range);
+            }
             let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
             let window = window.map_or(whole, |w| [w.x, w.y, w.width, w.height]);
             self.glyph_pipeline
@@ -555,8 +562,16 @@ pub(crate) fn builtin_glyph_instance(
             data: mask,
         })
     })?;
+    Some(builtin_glyph_at(cell, slot))
+}
+
+/// The instance drawing `cell` from the atlas `slot` holding its mask.
+pub(crate) fn builtin_glyph_at(
+    cell: &super::builtin_glyphs::BuiltinCell,
+    slot: super::glyphpipe::GlyphSlot,
+) -> GlyphInstance {
     let [r, g, b] = cell.color;
-    Some(GlyphInstance {
+    GlyphInstance {
         pos: [cell.rect[0] as f32, cell.rect[1] as f32],
         size: [slot.w, slot.h],
         uv: [slot.atlas_x, slot.atlas_y],
@@ -569,7 +584,7 @@ pub(crate) fn builtin_glyph_instance(
         ],
         kind: slot.kind,
         _pad: [0; 1],
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

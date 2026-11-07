@@ -44,10 +44,10 @@ use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
 use batching::cell_locked_glyph_offset;
 use batching::{
-    GlyphPositioning, SharedPipelines, apply_quad_alpha_floor, builtin_glyph_instance, clip_quads,
-    completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
-    pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads, rect,
-    text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
+    GlyphPositioning, SharedPipelines, apply_quad_alpha_floor, builtin_glyph_at,
+    builtin_glyph_instance, clip_quads, completion_text_damage_key, context_menu_text_damage_key,
+    emit_cell_locked_glyphs, pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads,
+    rect, text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
 };
 pub use capture::{
     DebugScene, capture_png, capture_png_with, capture_png_with_annotation, offscreen_selftest,
@@ -5269,19 +5269,19 @@ impl Renderer {
             self.glyph_instances = gi;
             self.glyph_clips = gc;
         }
-        // A built-in glyph under the block cursor, from the slot this frame's
-        // pane glyphs resolved (or rasterized now, after a clear).
+        // A built-in glyph under the block cursor. The pane emits the same
+        // cell with the same mask, so the cursor only looks up the slot the
+        // pane resolved and never allocates: an allocation here, after the
+        // upload, could evict a slot the uploaded pane instances still draw.
         let cursor_glyph = builtin_cursor.and_then(|cell| {
             let clip = self.pending_cursor_glyph.as_ref()?.clip;
-            builtin_glyph_instance(
-                &cell,
-                self.builtin_strokes,
-                &mut self.glyph_pipeline,
-                &self.gpu.device,
-                &self.gpu.queue,
-                &mut self.builtin_mask,
-            )
-            .map(|glyph| (glyph, [clip.0, clip.1, clip.2, clip.3]))
+            let slot = self
+                .glyph_pipeline
+                .resident(cell.key(self.builtin_strokes)?)?;
+            Some((
+                builtin_glyph_at(&cell, slot),
+                [clip.0, clip.1, clip.2, clip.3],
+            ))
         });
         self.glyph_pipeline
             .set_cursor(&self.gpu.device, &self.gpu.queue, cursor_glyph);
