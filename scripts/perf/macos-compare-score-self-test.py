@@ -213,6 +213,182 @@ class ApplePayloadTests(unittest.TestCase):
                     self.assertEqual(namespace["main"](), 7)
 
 
+class AppleWindowCleanupTests(unittest.TestCase):
+    def setUp(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+        marker = 'cat > "$apple_run" <<\'PY\'\n'
+        start = source.index(marker) + len(marker)
+        self.namespace = {"__name__": "apple_run_test"}
+        exec(compile(source[start:source.index("\nPY\n", start)], str(SCRIPT), "exec"), self.namespace)
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.marker = self.root / "result"
+        self.windows = self.root / "windows"
+        self.windows.write_text("")
+        self.app = "terminal"
+        self.launch_stdout = "tab 1 of window id 7331\n"
+        self.queries = [subprocess.CompletedProcess([], 0, "1001\n", ""),
+                        subprocess.CompletedProcess([], 0, "1001\n2002\n", "")]
+        self.query_count = 0
+        self.query_window_logs = []
+        self.launches = []
+        self.closes = []
+        self.close_result = subprocess.CompletedProcess([], 0, "", "")
+        self.register = mock.Mock()
+        self.namespace["append_pids"] = self.register
+        for target, name in ((subprocess, "Popen"), (os, "kill"), (os, "killpg"),
+                             (os, "system"), (os, "posix_spawn"), (os, "posix_spawnp")):
+            if hasattr(target, name):
+                self.enterContext(mock.patch.object(target, name, side_effect=AssertionError(
+                    f"unexpected native call: {name}")))
+        self.enterContext(mock.patch.object(subprocess, "run", side_effect=self.run_native_double))
+        self.enterContext(mock.patch.object(time, "sleep", side_effect=AssertionError("unexpected polling")))
+        self.enterContext(mock.patch.dict(os.environ, {"APPLE_WINDOW_LOG": str(self.windows)}))
+        self.enterContext(mock.patch.object(tempfile, "mkstemp", side_effect=lambda **kwargs: (
+            os.open(self.marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), str(self.marker))))
+
+    def run_native_double(self, argv, **kwargs):
+        app_name = "Terminal" if self.app == "terminal" else "iTerm2"
+        if argv == ["pgrep", "-x", app_name]:
+            self.assertEqual(kwargs["timeout"], 2)
+            self.assertFalse(kwargs["check"])
+            self.query_window_logs.append(self.windows.read_text() if self.windows.exists() else "")
+            result = self.queries[self.query_count]
+            self.query_count += 1
+        elif argv[0] == "osascript":
+            if not self.launches:
+                self.assertEqual(self.query_count, 1, "launch needs an initial ownership snapshot")
+                self.assertEqual(kwargs["timeout"], 1)
+                self.launches.append(argv)
+                self.marker.write_text("7\n")
+                result = subprocess.CompletedProcess(argv, 0, self.launch_stdout, "")
+            else:
+                self.assertEqual(kwargs["timeout"], 5)
+                self.closes.append(argv)
+                result = self.close_result
+        else:
+            raise AssertionError(f"unexpected native command: {argv}")
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def run_main(self):
+        argv = ["apple-run", "--app", self.app, "--timeout", "1", "--launch-timeout", "1",
+                "--pid-log", str(self.root / "pids"), "--marker-dir", str(self.root),
+                "--window-log", str(self.windows), "--", "/bin/true"]
+        with mock.patch.object(sys, "argv", argv):
+            return self.namespace["main"]()
+
+    def assert_window_closed(self):
+        if self.app == "terminal":
+            window_id = "7331"
+            command = 'tell application "Terminal" to close window id 7331 saving no'
+        else:
+            window_id = "fixture-window-7331"
+            command = 'tell application "iTerm2" to close (first window whose id is "fixture-window-7331")'
+        self.assertEqual(self.closes, [["osascript", "-e", command]],
+                         "the returned window must be closed even when the post-launch PID query fails")
+        self.assertEqual(self.windows.read_text(), f"{self.app}\t{window_id}\n")
+        self.assertEqual(self.query_window_logs[-1], f"{self.app}\t{window_id}\n",
+                         "record the returned window before the post-launch query")
+        self.assertFalse(self.marker.exists(), "cleanup must remove the completion marker")
+
+    def test_post_launch_pid_timeout_closes_recorded_window(self):
+        self.queries[1] = subprocess.TimeoutExpired("pgrep", 2)
+        with self.assertRaisesRegex(RuntimeError, "Terminal PID query timed out"):
+            self.run_main()
+        self.assert_window_closed()
+        self.register.assert_not_called()
+
+    def test_post_launch_pid_error_closes_recorded_window(self):
+        self.queries[1] = subprocess.CompletedProcess([], 2, "", "fixture error")
+        with self.assertRaisesRegex(RuntimeError, "Terminal PID query failed: 2"):
+            self.run_main()
+        self.assert_window_closed()
+        self.register.assert_not_called()
+
+    def test_post_launch_pid_oserror_closes_recorded_window(self):
+        self.queries[1] = OSError("fixture query error")
+        with self.assertRaisesRegex(OSError, "fixture query error"):
+            self.run_main()
+        self.assert_window_closed()
+
+    def test_failed_initial_query_never_launches(self):
+        for failure, error in ((subprocess.TimeoutExpired("pgrep", 2), RuntimeError),
+                               (subprocess.CompletedProcess([], 2, "", "fixture error"), RuntimeError),
+                               (OSError("fixture query error"), OSError)):
+            with self.subTest(failure=failure):
+                self.query_count = 0
+                self.queries[0] = failure
+                with self.assertRaises(error):
+                    self.run_main()
+                self.assertEqual(self.launches, [])
+                self.assertEqual(self.closes, [])
+                self.assertEqual(self.windows.read_text(), "")
+                self.assertFalse(self.marker.exists())
+                self.register.assert_not_called()
+
+    def test_success_closes_window_and_registers_only_new_pids(self):
+        self.assertEqual(self.run_main(), 7)
+        self.assert_window_closed()
+        self.register.assert_called_once_with(self.root / "pids", {2002})
+
+    def test_iterm_pid_error_closes_recorded_window(self):
+        self.app = "iterm2"
+        self.launch_stdout = "fixture-window-7331\n"
+        self.queries[1] = subprocess.CompletedProcess([], 2, "", "fixture error")
+        with self.assertRaisesRegex(RuntimeError, "iTerm2 PID query failed: 2"):
+            self.run_main()
+        self.assert_window_closed()
+
+    def test_no_initial_processes_still_launches_a_new_window(self):
+        self.queries[0] = subprocess.CompletedProcess([], 1, "", "")
+        self.assertEqual(self.run_main(), 7)
+        self.assert_window_closed()
+        self.register.assert_called_once_with(self.root / "pids", {1001, 2002})
+
+    def test_malformed_launch_output_does_not_close_an_owner_window(self):
+        for output in ("", "tab 1 of an unknown window\n"):
+            with self.subTest(output=output):
+                self.query_count = 0
+                self.launches.clear()
+                self.launch_stdout = output
+                self.assertEqual(self.run_main(), 7)
+                self.assertEqual(self.closes, [])
+                self.assertEqual(self.windows.read_text(), "")
+                self.assertFalse(self.marker.exists())
+
+    def test_cleanup_failure_retains_window_log_and_query_error(self):
+        for failure in (subprocess.TimeoutExpired("osascript", 5),
+                        subprocess.CompletedProcess([], 1, "", "fixture close failure")):
+            with self.subTest(failure=failure):
+                self.query_count = 0
+                self.launches.clear()
+                self.closes.clear()
+                self.windows.write_text("")
+                self.marker.unlink(missing_ok=True)
+                self.queries[1] = subprocess.TimeoutExpired("pgrep", 2)
+                self.close_result = failure
+                with self.assertRaisesRegex(RuntimeError, "Terminal PID query timed out"):
+                    self.run_main()
+                self.assert_window_closed()
+
+    def test_registration_error_still_closes_recorded_window(self):
+        self.register.side_effect = RuntimeError("fixture registration failure")
+        with self.assertRaisesRegex(RuntimeError, "fixture registration failure"):
+            self.run_main()
+        self.assert_window_closed()
+
+    def test_window_log_error_still_closes_returned_window(self):
+        self.windows = self.root / "missing" / "windows"
+        with self.assertRaises(FileNotFoundError):
+            self.run_main()
+        self.assertEqual(self.closes, [["osascript", "-e",
+                         'tell application "Terminal" to close window id 7331 saving no']])
+        self.assertFalse(self.marker.exists())
+
+
 class ProcessCleanupTests(unittest.TestCase):
     def embedded(self, variable, delimiter):
         source = SCRIPT.read_text()
