@@ -1825,10 +1825,25 @@ reorder/tear-off/re-dock gestures.
 Solid tab/status chrome derives from `theme.background` (24% darker for dark
 backgrounds, 6% for light ones); wallpaper modes still resolve through
 `chrome-background`. Horizontal inactive separators and rounded hover/pressed
-fills derive from strip and foreground with a 1.5:1 floor. Window focus from
-`Overlay::window_focused` dims tab text and controls with a 3:1 floor (4.5:1
-when focused), and replaces the active accent with a neutral line. The existing
-focus-event redraw and retained text-area damage keys repaint both transitions.
+fills derive from strip and foreground with a 1.5:1 floor. Chrome text has
+three roles in `chrome::Colors`: primary (`text`, at least 4.5:1), secondary
+(`secondary`) and muted (`muted`: the foreground mixed 55% toward the
+background, lifted back to 4.5:1). Secondary text moves the foreground toward
+the background only until it reaches 7:1 (WCAG AAA), never below 4.5:1 and
+never clearer than the foreground itself, so a theme whose own text is under
+7:1 shows it undimmed. Inactive top and bottom tab titles, the resting close
+glyph on those tabs and enabled menu shortcut, type and check hints are
+secondary; a disabled menu row's hint stays muted, and a hovered close glyph
+is primary on its chip. When `Overlay::window_focused` is false, tab text and
+controls, secondary text included, dim to a 3:1 floor and the active accent
+becomes a neutral line; a focused window keeps each role's own floor. The
+existing focus-event redraw and retained text-area damage keys repaint both
+transitions. The tab close glyph draws at 1.5 times the tab text
+(`TAB_CLOSE_GLYPH_SCALE`; `✕` in side bars, `×` elsewhere), and `+`, `▾` and
+GNOME's `≡` at 2 times (`TAB_CONTROL_GLYPH_SCALE`).
+`tab_strip::control_glyph_metrics` caps each em at 90% of its button's shorter
+side and its line at the button's height, so a glyph stays centred and
+unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
 square (growing with the band height), a 4 pt
 inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
@@ -4958,10 +4973,10 @@ to painting, pointer routing, AccessKit and
 and IME candidate positioning continue to use the shared content area. Startup
 size correction adds the header before renderer creation, preserving explicit
 grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
-28-point targets, rounded `chrome::tab_detail` hover/pressed fills and
-`Colors::tab_text` unfocused dimming, like the current New Tab controls. Glyphs
-retain 4.5:1 contrast when focused and 3:1 when dimmed. Outer corners remain
-square.
+28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
+hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
+New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
+dimmed. Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`

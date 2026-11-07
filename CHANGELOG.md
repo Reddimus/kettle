@@ -103,12 +103,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- Tab strips and menus are easier to read. Inactive tab titles, resting tab
-  close buttons and menu shortcut hints reach 7:1 contrast where the theme's
-  own text does (they stopped at 4.5:1), and stay at least 3:1 in an
-  unfocused window. A disabled menu row's hint stays dim. The tab close ×, the
-  new-tab +, the options ▾, GNOME's header ≡ and its window buttons are drawn
-  larger, inside the same click targets.
+- Tab strips and menus are easier to read. Inactive tab titles and resting
+  tab close buttons in a top or bottom tab bar, and menu shortcut hints, reach
+  7:1 contrast where the theme's own text does (they stopped at 4.5:1); tab
+  text still stays at least 3:1 in an unfocused window. A disabled menu row's
+  hint stays dim. The tab close × (✕ in a side tab bar, still inside its
+  chip), the new-tab +, the options ▾, GNOME's header ≡ and its window buttons
+  are drawn larger, inside the same click targets.
 
 - The terminal is inset 12 px from the window edge by default (was 8).
   `window-padding-x` and `window-padding-y` still set it.
