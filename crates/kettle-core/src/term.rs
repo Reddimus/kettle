@@ -8735,6 +8735,19 @@ impl Terminal {
         let t = self.term.lock().ok()?;
         Some(screen_text_of(&t, scrollback_lines))
     }
+
+    /// The viewport as screen readers read it; see
+    /// [`crate::grid_text::accessible_viewport_text`].
+    pub fn accessible_text(&self) -> Option<String> {
+        let t = self.term.lock().ok()?;
+        let cursor_visible = t
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
+        Some(crate::grid_text::accessible_viewport_text(
+            t.grid(),
+            cursor_visible,
+        ))
+    }
 }
 
 /// The selection could not be read within the limit asked for.
