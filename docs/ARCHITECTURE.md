@@ -3271,6 +3271,7 @@ moving existing items.
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
 | `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
 | `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
 | `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
@@ -3370,6 +3371,42 @@ only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
+
+**Built-in box drawing.** With `builtin-box-drawing` on (the default), Kettle
+draws box drawing (U+2500–U+257F), block elements (U+2580–U+259F), the
+Powerline separators U+E0B0–U+E0BF, the triangles U+25E2–U+25E5 and braille
+(U+2800–U+28FF) itself, as Ghostty, WezTerm, kitty and Alacritty do, instead of
+taking them from the font, whose outlines overlap their neighbours at joins,
+fall short of tall rows and dither shades. `build_pane` records each such cell
+(its glyph, its colour after bold, dim, selection, search, contrast and
+unfocused-cursor resolution, and its device-pixel rectangle) and gives the
+shaper a blank in its place, so the font's glyph is never drawn, never joins a
+ligature and never chooses a fallback face for the row. A cell with combining
+marks or two columns keeps the font. `crates/kettle-render/src/builtin_glyphs.rs`
+rasterizes a coverage mask exactly the size of the cell's pixel rectangle, whose
+edges are snapped the way the rasterizer fills the cell's background quad
+(`pixel_edge`), so neighbouring cells tile at any fractional cell size. Light
+strokes are the face's underline thickness rounded up to whole device pixels
+(at least one) and heavy strokes twice that; each is placed by one integer rule
+from the cell's width or height alone, so lines in a column or a row land on
+the same pixels in every cell and join without seams or doubled antialiasing.
+Double lines are two light strokes with a light gap. Arcs, diagonals and
+Powerline curves are antialiased, and arcs meet their straight arms on pixel
+centres where the curve has the line's full coverage. Shades are even
+25/50/75% coverage. The masks share the glyph pipeline's mask atlas and its LRU
+slot cache under a `SlotKey::Builtin` key (glyph, cell pixel size, stroke
+widths), so steady frames rasterize nothing and a font, size, scale or
+cell-size change clears them with every other slot. `emit_pane_glyphs` emits
+them in both text renderer modes; Legacy panes otherwise drawn by glyphon get a
+glyph range of their own for them. A per-pane hash of the recorded cells joins
+the pane's text damage, since a change to them reshapes nothing. Under a focused
+block cursor the cell's glyph is drawn again in the cursor text colour from a
+one-instance cursor buffer in the glyph pipeline, at the place in the pass
+order where the glyphon cursor glyph would be, and only in the blink's on
+phase. glyphon 0.12's own custom glyphs are not used: a growing glyphon atlas
+re-rasterizes every cached custom glyph through whichever `prepare` grew it,
+and panics when that prepare has no rasterizer, and Kettle's chrome renderers
+share one atlas.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's

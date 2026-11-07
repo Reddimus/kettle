@@ -340,9 +340,23 @@ impl Renderer {
         // quad and the normal glyph, but below every overlay and chrome layer:
         // an opaque menu or receipt must cover all of the terminal cursor. The
         // off phase shows the glyph beneath in its normal colour instead.
-        if cursor_on && self.pending_cursor_glyph.is_some() && !self.ime_prepared {
+        // A glyph Kettle draws itself (box drawing, blocks, Powerline,
+        // braille) has no glyphon vertices: the glyph pipeline draws it, in
+        // the same place in the order.
+        let builtin_cursor = self
+            .pending_cursor_glyph
+            .as_ref()
+            .is_some_and(|cursor| cursor.builtin.is_some());
+        if cursor_on && self.pending_cursor_glyph.is_some() && !self.ime_prepared && !builtin_cursor
+        {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+        }
+        if cursor_on && builtin_cursor && !self.ime_prepared {
+            let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
+            let window = window.map_or(whole, |w| [w.x, w.y, w.width, w.height]);
+            self.glyph_pipeline
+                .draw_cursor(&mut pass, target_size, window);
         }
         // Preview lanes sit above the terminal and below its dimming,
         // scrollbar and every overlay: menus and dialogs cover them whole.
@@ -513,6 +527,49 @@ pub(crate) fn emit_cell_locked_glyphs(
             })
         },
     );
+}
+
+/// The glyph instance for one cell Kettle draws itself, its mask rasterized
+/// into the mask atlas on a miss. Masks are cached like font glyphs, keyed by
+/// the glyph, the cell's pixel size and the stroke widths, so a steady frame
+/// rasterizes nothing; `mask` is the one buffer every miss reuses.
+pub(crate) fn builtin_glyph_instance(
+    cell: &super::builtin_glyphs::BuiltinCell,
+    strokes: super::builtin_glyphs::Strokes,
+    glyph_pipeline: &mut GlyphPipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mask: &mut Vec<u8>,
+) -> Option<GlyphInstance> {
+    let key = cell.key(strokes)?;
+    let slot = glyph_pipeline.ensure_glyph(device, queue, key, || {
+        if !super::builtin_glyphs::rasterize(key, mask) {
+            return None;
+        }
+        Some(RasterGlyph {
+            color: false,
+            width: u32::from(key.width),
+            height: u32::from(key.height),
+            left: 0,
+            top: 0,
+            data: mask,
+        })
+    })?;
+    let [r, g, b] = cell.color;
+    Some(GlyphInstance {
+        pos: [cell.rect[0] as f32, cell.rect[1] as f32],
+        size: [slot.w, slot.h],
+        uv: [slot.atlas_x, slot.atlas_y],
+        uv_size: [slot.w, slot.h],
+        color: [
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            1.0,
+        ],
+        kind: slot.kind,
+        _pad: [0; 1],
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

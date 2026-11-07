@@ -905,7 +905,7 @@ CONFIG_KEYS = frozenset("""accent-color add-kettle-to-path agent-badge agent-dis
 ask-before-closing audible-bell autoclean-groups background background-animation background-blur
 background-color background-darkness background-image background-image-align-horiz
 background-image-align-vert background-image-mode background-opacity background-type
-backspace-binding bell bell-flash-intensity bidi bold-is-bright borderless broadcast-default
+backspace-binding bell bell-flash-intensity bidi bold-is-bright borderless broadcast-default builtin-box-drawing
 case-sensitive cell-height cell-width check-for-updates chrome-background clear-select-on-copy
 clipboard clipboard-paste-protection close-button-on-tab colorterm command command-notify-threshold
 command-notify-threshold-ms completion-overlay copy-trim-whitespace copy-on-select copy-on-selection cursor-bg-color

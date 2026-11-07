@@ -266,6 +266,7 @@ fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
         ),
         color: kettle_config::Rgb::new(1, 2, 3),
         clip: (0.0, 0.0, 100.0, 80.0),
+        builtin: None,
     };
     let initial = super::cursor_glyph_damage_key(
         Some(&cursor),
