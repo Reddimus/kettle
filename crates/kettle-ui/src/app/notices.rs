@@ -310,8 +310,19 @@ impl App {
     }
 }
 
-pub(super) fn config_notice_key(visible: bool, key: &Key, mods: ModifiersState) -> Option<bool> {
-    visible.then(|| held_process_key(key, mods)).flatten()
+/// The config notice's answer to a key press: `Some(true)` opens the config,
+/// `Some(false)` dismisses it. Only while the notice has focus (a screen
+/// reader moved it there): the terminal is live under it, so a plain Enter
+/// or Escape otherwise belongs to the shell or the program running in it.
+pub(super) fn config_notice_key(
+    visible: bool,
+    focused: bool,
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<bool> {
+    (visible && focused)
+        .then(|| held_process_key(key, mods))
+        .flatten()
 }
 
 pub(super) fn held_pane_key(ws: &WindowState, key: &Key) -> Option<(u64, bool)> {
@@ -409,24 +420,22 @@ mod tests {
                 PersistentNoticeAction::Pane(7, primary)
             );
         }
+        let none = ModifiersState::empty();
+        let (enter, escape) = (Key::Named(NamedKey::Enter), Key::Named(NamedKey::Escape));
+        // Focused (a screen reader moved there): Enter opens, Escape dismisses.
+        assert_eq!(config_notice_key(true, true, &enter, none), Some(true));
+        assert_eq!(config_notice_key(true, true, &escape, none), Some(false));
+        // Merely visible over a live terminal: the shell gets both keys, so a
+        // command typed before the notice was noticed still runs.
+        assert_eq!(config_notice_key(true, false, &enter, none), None);
+        assert_eq!(config_notice_key(true, false, &escape, none), None);
+        assert_eq!(config_notice_key(false, true, &enter, none), None);
         assert_eq!(
-            config_notice_key(true, &Key::Named(NamedKey::Enter), ModifiersState::empty()),
-            Some(true)
-        );
-        assert_eq!(
-            config_notice_key(true, &Key::Named(NamedKey::Escape), ModifiersState::empty()),
-            Some(false)
-        );
-        assert_eq!(
-            config_notice_key(false, &Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            config_notice_key(true, true, &enter, ModifiersState::CONTROL),
             None
         );
         assert_eq!(
-            config_notice_key(true, &Key::Named(NamedKey::Enter), ModifiersState::CONTROL),
-            None
-        );
-        assert_eq!(
-            config_notice_key(true, &Key::Character("x".into()), ModifiersState::empty()),
+            config_notice_key(true, true, &Key::Character("x".into()), none),
             None
         );
     }
