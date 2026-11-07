@@ -37,7 +37,7 @@ roxmltree = "=0.21.2"
 xmlwriter = "=0.1.0"
 # Parse only the selected font face, without fontdb's all-face loader.
 skrifa = "=0.49.0"
-unicode-script = "=0.5.8"
+unicode-script = "=0.5.9"
 unicode-segmentation.workspace = true
 unicode-linebreak = "=0.1.5"
 # The pinned SVG engine's selector dialect, used only for generated diagrams.
