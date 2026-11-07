@@ -262,6 +262,10 @@ jobs:
           cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
           cp -R docs/changelog dist/kettle/docs/
           cp -R docs/licenses dist/kettle/docs/
+          # Existing Linux updaters install NOTICE but omit docs/licenses.
+          # Carry the exact license there for their first update as well.
+          printf '\nTokyoNight upstream license (full text):\n\n' >> dist/kettle/NOTICE
+          cat docs/licenses/tokyonight.nvim/LICENSE >> dist/kettle/NOTICE
           # Desktop integration assets — packaged at the SAME relative
           # paths the in-tree `scripts/install.sh` expects, so a user
           # who extracts the tarball can run `./kettle/install.sh` and

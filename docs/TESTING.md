@@ -1065,6 +1065,15 @@ A not-yet-published asset can skip that online part.
 Record that separately from the local install/uninstall result.
 
 `just package-templates` checks source rendering on a feature branch.
+Its hermetic tests compare installed TokyoNight license bytes for Homebrew,
+Arch, and the common Nix install hook. Nix's `tokyonight-license` flake check
+compares the final store files on both supported platforms. A Linux packaging
+fixture checks that NOTICE includes the complete license for existing updaters.
+Installer tests cover recorded license replacement and removal, and reject
+linked sources and destinations. The Linux updater transaction test compares
+installed license bytes with the verified archive and checks their provenance;
+a portable map test keeps the Linux document destinations and modes covered on
+other CI hosts.
 At an exact clean release tag, auto mode also checks published assets.
 The underlying script's `--require-release` makes that check mandatory:
 
