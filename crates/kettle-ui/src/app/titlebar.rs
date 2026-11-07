@@ -1,6 +1,19 @@
 //! Shared titlebar measurements and gestures. All layout values are physical pixels.
 use super::*;
 
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn macos_view_frame_size(
+    frame: winit::dpi::LogicalSize<f64>,
+    backing_scale: f64,
+) -> winit::dpi::PhysicalSize<u32> {
+    frame.to_physical(backing_scale)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn macos_view_size(window: &Window) -> Option<winit::dpi::PhysicalSize<u32>> {
+    native::view_size(window)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TitlebarBand {
     pub height: f32,
@@ -233,6 +246,16 @@ mod native {
         let view = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
         let native = view.window()?;
         Some(f(&native, view))
+    }
+
+    pub(super) fn view_size(window: &Window) -> Option<winit::dpi::PhysicalSize<u32>> {
+        with_window(window, |native, view| {
+            let frame = view.frame();
+            macos_view_frame_size(
+                winit::dpi::LogicalSize::new(frame.size.width, frame.size.height),
+                native.backingScaleFactor(),
+            )
+        })
     }
 
     pub(super) fn set_tabs(window: &Window, tabs: bool) {

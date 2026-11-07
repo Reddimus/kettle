@@ -1912,12 +1912,18 @@ Both window constructors measure the font before creating the window
 (`StartupFonts` in `kettle-render`) and size a fresh window through one rule
 (`startup_surface` in `app.rs`). An explicit `window-width`/`window-height`
 opens at exactly that grid. An unset axis keeps the 160×45 default grid's pixel
-size, converted with an 8×16 px baseline in **logical** pixels
-(`startup_inner_size`) so HiDPI gets the same grid; with neither set, the
-default grid is fitted to the
+size, converted with a baseline cell in **logical** pixels
+(`startup_inner_size`) so HiDPI gets the same grid. The cell is 8×16 px at
+macOS's 13 px default font and scales with the 14 px default elsewhere
+(`startup_geometry_cell`), so the larger font keeps the grid. With neither set,
+the default grid is fitted to the
 primary monitor, or the largest one on Wayland, at 90 % × 85 %
-(`default_startup_inner_size`), so a fresh window clears the ~144 columns agent
-TUIs want without becoming a screen-wide canvas on an ultrawide. The restore
+(`default_startup_inner_size`), so a fresh window on a 1080p monitor clears the
+~144 columns agent TUIs want without becoming a screen-wide canvas on an
+ultrawide. On a 1366 px wide laptop the fit leaves 154 columns at macOS's
+13 px font but 143 at the 14 px default elsewhere, which needs the window
+maximized (159 columns). At 1280 logical px, 14 px gives 134 columns fresh
+and 149 maximized. The restore
 planner's fallback surface for a saved window without geometry is the same rule
 in physical pixels. Restored geometry and explicit new-window geometry are
 applied after these attributes and still win.
@@ -3319,7 +3325,10 @@ warm-up frame.
 Each frame uses the same wgpu render-pass encoder. Quads cover earlier
 text; later text covers their pixels. Pane dimming covers cell backgrounds,
 inline images and complete cards before terminal glyphs and decorations,
-whose inactive colours already include the text contrast floor. Active-pane
+whose inactive colours already include the text contrast floor. The cached
+inactive ink resolver checks partial glyph coverage in the surface's blend
+mode, including output rounding, while retaining the original contrast cap
+for intentionally faint program text. Active-pane
 decorations stay in the cell pass below cursor quads. Color glyphs blend their
 bitmap RGB toward the pane dimming backdrop in their shader, preserving bitmap
 alpha. Preview lanes receive
