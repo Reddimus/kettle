@@ -24,8 +24,8 @@ pub(crate) fn text_backend(display: RawDisplayHandle) -> TextBackend {
     }
 }
 
-pub(crate) struct Clipboard {
-    arboard: Option<arboard::Clipboard>,
+pub(crate) struct Clipboard<F = arboard::Clipboard> {
+    arboard: Option<F>,
     #[cfg(any(target_os = "linux", test))]
     wayland: Option<worker::TextWorker>,
 }
@@ -63,35 +63,6 @@ impl Clipboard {
         }
     }
 
-    pub(crate) fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
-        self.set_selection(false, text)
-    }
-
-    pub(crate) fn set_selection(
-        &mut self,
-        primary: bool,
-        text: String,
-    ) -> Result<(), arboard::Error> {
-        #[cfg(any(target_os = "linux", test))]
-        if let Some(wayland) = &self.wayland {
-            return wayland.store(primary, text);
-        }
-        let clipboard = self
-            .arboard
-            .as_mut()
-            .ok_or(arboard::Error::ContentNotAvailable)?;
-        #[cfg(target_os = "linux")]
-        if primary {
-            use arboard::{LinuxClipboardKind, SetExtLinux};
-            return clipboard
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text);
-        }
-        let _ = primary;
-        clipboard.set_text(text)
-    }
-
     pub(crate) fn get_text(&mut self) -> Result<String, arboard::Error> {
         #[cfg(any(target_os = "linux", test))]
         if let Some(wayland) = &self.wayland {
@@ -105,32 +76,6 @@ impl Clipboard {
             .as_mut()
             .ok_or(arboard::Error::ContentNotAvailable)?
             .get_text()
-    }
-
-    pub(crate) fn get_selection_bounded(
-        &mut self,
-        primary: bool,
-        max: usize,
-        deadline: Instant,
-    ) -> Result<String, arboard::Error> {
-        #[cfg(any(target_os = "linux", test))]
-        if let Some(wayland) = &self.wayland {
-            return wayland.load(primary, max, deadline);
-        }
-        let clipboard = self
-            .arboard
-            .as_mut()
-            .ok_or(arboard::Error::ContentNotAvailable)?;
-        #[cfg(target_os = "linux")]
-        if primary {
-            use arboard::{GetExtLinux, LinuxClipboardKind};
-            return clipboard
-                .get()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text_bounded(max, deadline);
-        }
-        let _ = primary;
-        clipboard.get_text_bounded(max, deadline)
     }
 
     pub(crate) fn get_image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
@@ -149,6 +94,92 @@ impl Clipboard {
             .ok_or(arboard::Error::ContentNotAvailable)?
             .get()
             .file_list()
+    }
+}
+
+/// The platform selection boundary, injectable without opening an OS clipboard.
+pub(crate) trait SelectionFallback {
+    fn store(&mut self, primary: bool, text: String) -> Result<(), arboard::Error>;
+    fn load(
+        &mut self,
+        primary: bool,
+        max: usize,
+        deadline: Instant,
+    ) -> Result<String, arboard::Error>;
+}
+
+impl SelectionFallback for arboard::Clipboard {
+    fn store(&mut self, primary: bool, text: String) -> Result<(), arboard::Error> {
+        #[cfg(target_os = "linux")]
+        if primary {
+            use arboard::{LinuxClipboardKind, SetExtLinux};
+            return self.set().clipboard(LinuxClipboardKind::Primary).text(text);
+        }
+        let _ = primary;
+        self.set_text(text)
+    }
+
+    fn load(
+        &mut self,
+        primary: bool,
+        max: usize,
+        deadline: Instant,
+    ) -> Result<String, arboard::Error> {
+        #[cfg(target_os = "linux")]
+        if primary {
+            use arboard::{GetExtLinux, LinuxClipboardKind};
+            return self
+                .get()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text_bounded(max, deadline);
+        }
+        let _ = primary;
+        self.get_text_bounded(max, deadline)
+    }
+}
+
+// Native Wayland has no PRIMARY protocol; unsupported channels stay on
+// arboard (XWayland) without treating native CLIPBOARD errors as a fallback.
+impl<F: SelectionFallback> Clipboard<F> {
+    pub(crate) fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
+        self.set_selection(false, text)
+    }
+
+    pub(crate) fn set_selection(
+        &mut self,
+        primary: bool,
+        text: String,
+    ) -> Result<(), arboard::Error> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(wayland) = &self.wayland
+            && (!primary || wayland.supports_primary())
+        {
+            return wayland.store(primary, text);
+        }
+        let clipboard = self
+            .arboard
+            .as_mut()
+            .ok_or(arboard::Error::ContentNotAvailable)?;
+        clipboard.store(primary, text)
+    }
+
+    pub(crate) fn get_selection_bounded(
+        &mut self,
+        primary: bool,
+        max: usize,
+        deadline: Instant,
+    ) -> Result<String, arboard::Error> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(wayland) = &self.wayland
+            && (!primary || wayland.supports_primary())
+        {
+            return wayland.load(primary, max, deadline);
+        }
+        let clipboard = self
+            .arboard
+            .as_mut()
+            .ok_or(arboard::Error::ContentNotAvailable)?;
+        clipboard.load(primary, max, deadline)
     }
 }
 

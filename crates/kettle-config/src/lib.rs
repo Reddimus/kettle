@@ -1252,7 +1252,8 @@ pub enum ScrollbarMode {
 /// Policy for loading and saving the default last session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreSession {
-    /// Follow macOS window persistence; open fresh on other platforms.
+    /// Follow macOS window persistence, restore on Linux, and open fresh
+    /// on Windows.
     Auto,
     Always,
     Never,
@@ -1961,6 +1962,13 @@ pub struct Config {
     /// `text-renderer`: cell-locked grid rendering (default) vs the
     /// legacy continuous glyphon layout. See [`TextRenderer`].
     pub text_renderer: TextRenderer,
+    /// `builtin-box-drawing`: Kettle draws box drawing (U+2500-U+257F),
+    /// block elements (U+2580-U+259F), Powerline separators
+    /// (U+E0B0-U+E0BF), the triangles U+25E2-U+25E5 and braille
+    /// (U+2800-U+28FF) from each cell's pixel rectangle instead of the
+    /// font's glyphs, so lines join across cells without seams. `false`
+    /// keeps the font's glyphs. Reloads live.
+    pub builtin_box_drawing: bool,
     /// Terminator parity (terminatorlib/config.py:117
     /// `background_image`): path to background image.
     pub background_image: String,
@@ -2130,8 +2138,9 @@ pub struct Config {
     /// `update-policy = off` disables checking entirely regardless of this.
     pub update_check_interval_hours: u32,
     /// Restore the previous session's windows, tabs, splits and working dirs.
-    /// Auto follows macOS window persistence and is false elsewhere. The
-    /// resolved policy gates both loading and saving the default session.
+    /// Auto follows macOS window persistence, restores on Linux, and opens
+    /// fresh on Windows. The resolved policy gates both loading and saving
+    /// the default session.
     pub restore_session: RestoreSession,
     /// Recent primary-screen rows persisted per pane; zero disables content restore.
     pub restore_scrollback_lines: usize,
@@ -3417,6 +3426,7 @@ impl Default for Config {
             http_proxy: String::new(),
             background_type: BackgroundType::Solid,
             text_renderer: TextRenderer::default(),
+            builtin_box_drawing: true,
             background_animation: BackgroundAnimation::default(),
             chrome_background: ChromeBackground::default(),
             background_image: String::new(),
@@ -3967,6 +3977,8 @@ impl Config {
         "window_blur",
         "bold-is-bright",
         "bold_is_bright",
+        "builtin-box-drawing",
+        "builtin_box_drawing",
         "borderless",
         "check-for-updates",
         "clear-select-on-copy",
@@ -5259,6 +5271,11 @@ impl Config {
                 "bold-is-bright" | "bold_is_bright" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.bold_is_bright = b;
+                    }
+                }
+                "builtin-box-drawing" | "builtin_box_drawing" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.builtin_box_drawing = b;
                     }
                 }
                 "link-single-click" | "link_single_click" => {
@@ -8485,6 +8502,11 @@ cell-height = 1.2\n";
         // Bidi display is on unless turned off.
         assert!(d.bidi);
         assert!(!Config::parse_text("bidi = false").bidi);
+        // Kettle draws box drawing itself unless told to keep the font's.
+        assert!(d.builtin_box_drawing);
+        assert!(!Config::parse_text("builtin-box-drawing = false").builtin_box_drawing);
+        assert!(!Config::parse_text("builtin_box_drawing = off").builtin_box_drawing);
+        assert!(Config::parse_text("builtin-box-drawing = true").builtin_box_drawing);
         assert!(!Config::parse_text("allow_bold = false").allow_bold);
         assert!(Config::parse_text("bold-is-bright = true").bold_is_bright);
         assert!(Config::parse_text("bold_is_bright = true").bold_is_bright);
