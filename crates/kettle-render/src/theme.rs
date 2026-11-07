@@ -346,6 +346,7 @@ pub(crate) struct MinimumContrastCache {
     pub(crate) entries: std::collections::HashMap<(u32, u32, u64), Rgb>,
     pub(crate) misses: usize,
     highlight_ink: std::collections::HashMap<[u32; 6], Rgb>,
+    active_fills: std::collections::HashMap<(u32, u32), Rgb>,
     inactive_fills: std::collections::HashMap<(u32, u32), Rgb>,
 }
 
@@ -371,6 +372,7 @@ impl MinimumContrastCache {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.highlight_ink.clear();
+        self.active_fills.clear();
         self.inactive_fills.clear();
         self.misses = 0;
     }
@@ -402,18 +404,36 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
     )
 }
 
+/// The contrast a focused selection keeps against the cell background: WCAG's
+/// 3:1 for a state a reader must tell apart from its surroundings.
+pub(crate) const SELECTION_CONTRAST: f64 = 3.0;
+
 /// The contrast an unfocused window's selection keeps against the background:
 /// quieter than the focused fill's 3:1, yet still plainly a selection.
 pub(crate) const INACTIVE_SELECTION_CONTRAST: f64 = 2.0;
 
-/// Move the active fill toward the background while retaining visible separation.
+/// The theme's selection colour where it stands out from `background`;
+/// otherwise a stronger tint of the same hue that does. Blending toward white
+/// or black instead reached 3:1 by greying the tint, which left a muted fill.
+/// The unfocused fill then moves back toward the background, retaining visible
+/// separation.
 pub(crate) fn selection_fill(
     theme: &kettle_config::Theme,
     background: Rgb,
     focused: bool,
     cache: &mut MinimumContrastCache,
 ) -> Rgb {
-    let active = cache.resolve(theme.selection_background, background, 3.0);
+    let key = (
+        MinimumContrastCache::color_key(theme.selection_background),
+        MinimumContrastCache::color_key(background),
+    );
+    let active = *cache.active_fills.entry(key).or_insert_with(|| {
+        color::with_min_contrast_same_hue(
+            theme.selection_background,
+            background,
+            SELECTION_CONTRAST,
+        )
+    });
     if focused {
         return active;
     }

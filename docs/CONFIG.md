@@ -81,7 +81,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background; unfocused windows use a subdued fill at least 1.5:1 against it. Text and decorations meet 4.5:1 against the fill. A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
+| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the cell's background (the terminal background unless a program set one): a theme colour short of that becomes a stronger tint of the same hue. Unfocused windows use a subdued fill at least 2:1 against it. Text and decorations meet 4.5:1 against the fill. A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Search text follows the selection contrast rule: a readable explicit foreground has priority, then readable cell ink, then the strongest fallback. Quick-select labels default to the theme background |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
@@ -545,10 +545,14 @@ moves a key into the main table without changing its parser arm.
 
 ### Selection and history controls
 
-Active selection fills are strengthened to at least 3:1 against the terminal
-background. When the window loses focus the fill moves toward the background,
-retaining at least 1.5:1 separation. Focus changes repaint both selection and
-cursor without changing terminal state.
+The theme's selection colour is used as the active fill when it has at least
+3:1 contrast against the terminal background. Otherwise Kettle lightens or
+darkens it, keeping its hue and saturation, until it does. A selected cell
+that a program gave its own background gets a fill worked out the same way
+against that background, and an unfocused split's fills are worked out against
+its dimmed backgrounds. When the window loses focus the fill moves toward the
+background, retaining at least 2:1 separation. Focus changes repaint both selection and cursor without changing
+terminal state.
 
 Text, underlines, strikeouts and link decorations on a highlight meet 4.5:1
 against its effective fill, including dim, ANSI, indexed and truecolour text.

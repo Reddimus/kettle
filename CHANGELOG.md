@@ -122,6 +122,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
 
+- A theme selection colour too faint for 3:1 against the background is now
+  strengthened as a deeper or lighter tint of its own hue, not greyed toward
+  white or black: the default TokyoNight Night selection is a clear blue
+  (`#4d64a6`) instead of slate (`#5d6781`). A selected cell that a program gave
+  its own background gets a fill that stands out from that background, so the
+  selection no longer vanishes where the two match.
+
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel
   when the text holds controls, and shows a raw Paste in the warning colour.

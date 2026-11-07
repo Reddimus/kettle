@@ -458,9 +458,20 @@ impl Renderer {
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
         let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
+        // A dimmed split's cell backgrounds show through the pane dimmer, while
+        // its highlight fills are painted above it: highlights resolve against
+        // the background as shown.
+        let linear = self.config.format.is_srgb();
+        let shown = |bg: Rgb| {
+            if inactive > 0.0 {
+                color::over(bg, theme.background, f64::from(inactive), linear)
+            } else {
+                bg
+            }
+        };
         let selection_bg = super::theme::selection_fill(
             theme,
-            default_bg,
+            shown(default_bg),
             window_focused,
             &mut self.minimum_contrast_cache,
         );
@@ -610,6 +621,7 @@ impl Renderer {
         let mut fallback_run = None;
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
+        let mut selection_cell_fills = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -755,11 +767,7 @@ impl Renderer {
                             cfg,
                             theme,
                             fg,
-                            if selected && search.is_none() {
-                                default_bg
-                            } else {
-                                bg
-                            },
+                            bg,
                             &mut self.minimum_contrast_cache,
                         )
                         .1
@@ -778,13 +786,14 @@ impl Renderer {
                     );
                 }
             }
+            let highlight_bg = if matches!(highlight, CellHighlight::None) {
+                bg
+            } else {
+                shown(bg)
+            };
             fg = resolved_cell_foreground_cached(
                 fg,
-                if selected && search.is_none() {
-                    default_bg
-                } else {
-                    bg
-                },
+                highlight_bg,
                 highlight,
                 (flags.contains(Flags::DIM), bold),
                 cfg,
@@ -793,11 +802,20 @@ impl Renderer {
             );
             let cell_background = match highlight {
                 CellHighlight::Search(true) => cfg.search_background.unwrap_or(theme.palette[3]),
-                CellHighlight::Search(false) => {
-                    self.minimum_contrast_cache
-                        .resolve(theme.selection_background, bg, 3.0)
+                CellHighlight::Search(false) | CellHighlight::Selection => {
+                    super::theme::selection_fill(
+                        theme,
+                        highlight_bg,
+                        true,
+                        &mut self.minimum_contrast_cache,
+                    )
                 }
-                CellHighlight::Selection | CellHighlight::InactiveSelection => selection_bg,
+                CellHighlight::InactiveSelection => super::theme::selection_fill(
+                    theme,
+                    highlight_bg,
+                    false,
+                    &mut self.minimum_contrast_cache,
+                ),
                 CellHighlight::None => bg,
             };
             if inactive > 0.0 && matches!(highlight, CellHighlight::None) {
@@ -857,13 +875,30 @@ impl Renderer {
                     1.0,
                 ));
             }
+            // The row's selection fill is resolved against the default
+            // background. A selected cell with its own background gets the fill
+            // resolved against that one, which its text ink was resolved on.
+            if matches!(
+                highlight,
+                CellHighlight::Selection | CellHighlight::InactiveSelection
+            ) && cell_background != selection_bg
+            {
+                selection_cell_fills.push(rect(
+                    ox + vcol as f32 * cw,
+                    oy + vrow as f32 * ch,
+                    cw,
+                    ch,
+                    cell_background,
+                    1.0,
+                ));
+            }
             if let Some(active) = search {
                 let fill = super::theme::highlight_colors_cached(
                     CellHighlight::Search(active),
                     cfg,
                     theme,
                     fg,
-                    bg,
+                    highlight_bg,
                     &mut self.minimum_contrast_cache,
                 )
                 .1;
@@ -907,11 +942,7 @@ impl Renderer {
                     } else {
                         resolved_cell_foreground_cached(
                             line,
-                            if selected && search.is_none() {
-                                default_bg
-                            } else {
-                                bg
-                            },
+                            highlight_bg,
                             highlight,
                             (false, false),
                             cfg,
@@ -956,11 +987,7 @@ impl Renderer {
                 } else {
                     resolved_cell_foreground_cached(
                         ink,
-                        if selected && search.is_none() {
-                            default_bg
-                        } else {
-                            bg
-                        },
+                        highlight_bg,
                         highlight,
                         (false, false),
                         cfg,
@@ -1091,8 +1118,10 @@ impl Renderer {
         }
 
         if inactive > 0.0 {
+            decorations.extend(selection_cell_fills);
             decorations.extend(search_quads);
         } else {
+            quads.extend(selection_cell_fills);
             quads.extend(search_quads);
         }
         decorations.extend(highlight_decorations);

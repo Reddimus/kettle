@@ -5801,6 +5801,88 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     }
 }
 
+/// A selected cell keeps the selection visible against the background it
+/// shows when unselected, including a program-set background and a dimmed
+/// split. The row's fill was resolved against the undimmed default background
+/// only, so a cell whose SGR background happened to be that fill lost the
+/// selection (1:1).
+#[test]
+fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 120) else {
+        eprintln!("C09_GPU_SKIP: selection over cell backgrounds, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    cfg.unfocused_split_opacity = 0.1;
+    let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
+    // Cells 0..5 of both rows carry the default selection fill as their own
+    // background; only row 0 is selected, so row 1 shows what row 0 would.
+    let own = super::theme::selection_fill(
+        &cfg.theme,
+        cfg.theme.background,
+        true,
+        &mut MinimumContrastCache::default(),
+    );
+    let sgr = format!("\x1b[48;2;{};{};{}m", own.r, own.g, own.b);
+    let mut snap = snapshot_of(
+        20,
+        2,
+        format!("{sgr}  X  \x1b[0m\r\n{sgr}     \x1b[0m\x1b[?25l").as_bytes(),
+    );
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(0), Column(0)),
+        Point::new(Line(0), Column(19)),
+        false,
+    ));
+    let other = snapshot_of(20, 2, b"\x1b[?25l");
+    for window_focused in [true, false] {
+        for split_focused in [true, false] {
+            let mut view = pane(&snap, 320, 120);
+            view.focused = split_focused;
+            let mut sibling = pane(&other, 320, 120);
+            sibling.id = 2;
+            sibling.focused = !split_focused;
+            sibling.rect.0 = 320.0;
+            sibling.terminal.0 = 320.0;
+            let overlay = Overlay {
+                window_focused,
+                cursor_visible: false,
+                ..Overlay::default()
+            };
+            let frame = capture(&mut renderer, &cfg, &[view, sibling], &overlay);
+            let pixel = |col: f32, row: f32| {
+                let p = frame.get_pixel(
+                    (cfg.padding_x + (col + 0.5) * cell_w) as u32,
+                    (cfg.padding_y + (row + 0.5) * cell_h) as u32,
+                );
+                Rgb::new(p[0], p[1], p[2])
+            };
+            let case = format!("window {window_focused}, split {split_focused}");
+            // Rounding in the GPU's blend and the colour math.
+            let floor = (if window_focused { 3.0 } else { 2.0 }) - 0.1;
+            for (col, label) in [(0.0, "own background"), (10.0, "default background")] {
+                let (selected, shown) = (pixel(col, 0.0), pixel(col, 1.0));
+                assert!(
+                    color::contrast_ratio(selected, shown) >= floor,
+                    "{case}, {label}: fill {selected:?} beside {shown:?}"
+                );
+            }
+            let attrs = renderer.pane_buffers[0].lines[0].attrs_list().get_span(2);
+            let ink = attrs.color_opt.expect("selected text has a colour");
+            let ink = Rgb::new(ink.r(), ink.g(), ink.b());
+            assert!(
+                color::contrast_ratio(ink, pixel(0.0, 0.0)) >= 4.5 - 0.1,
+                "{case}: text {ink:?} on {:?}",
+                pixel(0.0, 0.0)
+            );
+        }
+    }
+}
+
 #[test]
 fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
     use alacritty_terminal::vte::ansi::CursorShape;
