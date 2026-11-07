@@ -110,6 +110,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   new-tab +, the options ▾, GNOME's header ≡ and its window buttons are drawn
   larger, inside the same click targets.
 
+- The terminal is inset 12 px from the window edge by default (was 8).
+  `window-padding-x` and `window-padding-y` still set it.
+
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.
 

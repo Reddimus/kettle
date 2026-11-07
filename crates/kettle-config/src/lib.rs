@@ -3240,8 +3240,8 @@ impl Default for Config {
             theme_overrides: ThemeOverrides::default(),
             scrollback: 10_000,
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
-            padding_x: 8.0,
-            padding_y: 8.0,
+            padding_x: 12.0,
+            padding_y: 12.0,
             // Native material is the product default. Linux stays at 99%
             // whether compositor blur is available or not; the live floor
             // still protects explicit lower values on unsupported sessions.
@@ -9555,8 +9555,8 @@ cell-height = 1.2\n";
     /// nothing.
     #[test]
     fn bare_padding_aliases_apply_and_are_known() {
-        let (cfg, unknown) = Config::parse_collect("padding-x = 12\npadding-y = 5\n");
-        assert_eq!(cfg.padding_x, 12.0);
+        let (cfg, unknown) = Config::parse_collect("padding-x = 14\npadding-y = 5\n");
+        assert_eq!(cfg.padding_x, 14.0);
         assert_eq!(cfg.padding_y, 5.0);
         assert!(
             unknown.is_empty(),
@@ -9579,6 +9579,33 @@ cell-height = 1.2\n";
             }
         }
         assert_eq!(Config::parse_text("padding-x = 0\n").padding_x, 0.0);
+    }
+
+    /// At 8 px the prompt sat close to the window edge. The default inset is
+    /// 12 px on both axes (the Settings control writes one value to both),
+    /// and the reference and example config say so.
+    #[test]
+    fn default_window_padding_is_a_generous_even_inset_and_documented() {
+        let cfg = Config::default();
+        assert_eq!((cfg.padding_x, cfg.padding_y), (12.0, 12.0));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let reference = std::fs::read_to_string(root.join("docs/CONFIG.md")).expect("CONFIG.md");
+        assert!(
+            reference.lines().any(|line| line
+                .starts_with("| `window-padding-x` / `window-padding-y` | float | `12` |")),
+            "docs/CONFIG.md must document the 12 px padding default"
+        );
+        let example = std::fs::read_to_string(root.join("docs/kettle.example.config"))
+            .expect("example config");
+        for key in ["window-padding-x", "window-padding-y"] {
+            assert!(
+                example
+                    .lines()
+                    .any(|line| line.starts_with(&format!("# {key}"))
+                        && line.trim_end().ends_with("= 12")),
+                "docs/kettle.example.config must show {key} = 12"
+            );
+        }
     }
 
     /// A NUL in a value would end the string a platform API reads: in a
