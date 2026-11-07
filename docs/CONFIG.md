@@ -1020,9 +1020,11 @@ Values are omitted, including environment values. Filenames and keys have
 control characters removed and are limited to 64 characters each.
 
 **Open Config** opens the file named by the notice with the operating system's
-default app, using the same mechanism as **Advanced…**. While the notice is
-visible, Enter opens the file and Escape dismisses it; both buttons are also
-available to screen readers. The terminal grid and IME cursor do not move.
+default app, using the same mechanism as **Advanced…**. If a screen reader
+moves focus to the notice, Enter opens the file and Escape dismisses it. While
+the terminal retains focus, those keys go to the running shell or program. Both
+buttons remain available to screen readers. The terminal grid and IME cursor
+do not move.
 Valid settings still apply. Dismissing a notice keeps it hidden until the
 diagnostics change. Use `kettle --check-config` for the complete diagnostics.
 
