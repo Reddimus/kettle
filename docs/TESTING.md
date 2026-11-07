@@ -17,6 +17,13 @@ palette's profile discovery without changing the real config directory.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
+The portable accessibility pane-lifetime regression uses window-less mux
+fixtures and the production lifecycle drain with the accessibility adapter absent.
+It closes split panes/tabs, reaps panes repeatedly, moves a tab between windows
+in both directions, and checks that retained announcement text, output cursor,
+serial, typing/input-row state and row IDs survive. Departed records are removed
+by live pane ID even when cache and pane counts happen to be equal.
+
 ## Run it
 
 The shell path regression runs Fish integration from directories containing
