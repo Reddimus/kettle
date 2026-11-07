@@ -3043,6 +3043,14 @@ logical-to-physical rounding and the native window's backing scale. Source
 guards pin the live view query to the existing main-thread native borrow helper.
 This portable check does not replace live native-tab, grow/shrink, minimize,
 fullscreen or DPI acceptance.
+`native_tab_exit_completion_resumes_without_a_later_frame_notification` replays
+a held final resize and fullscreen completion after AppKit already restored the
+saved frame, so no later frame notification is available. It covers differing
+window/view rectangles at four backing scales, pending DPI changes and a missing
+view. The old window-sized event leaves the surface suspended; the live-view
+completion commits one layout and releases suspension. A source guard connects
+the replay to the completion producer and its platform fallbacks. Native
+fullscreen exit without a later resize remains a required live acceptance check.
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.
