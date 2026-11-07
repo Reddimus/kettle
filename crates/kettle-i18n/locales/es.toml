@@ -802,7 +802,7 @@ settings_description_field_cursor_blink_timeout = "Detener el parpadeo tras segu
 settings_description_field_cursor_shape = "Elegir la forma del cursor de la terminal."
 settings_description_field_detachable_tabs = "Permitir arrastrar una pestaña a su propia ventana."
 settings_description_field_focus = "Elegir cómo recibe un panel el foco del teclado."
-settings_description_field_font_size = "Ajustar el tamaño de la fuente de la terminal en puntos."
+settings_description_field_font_size = "Ajustar el tamaño de la fuente de la terminal en píxeles lógicos."
 settings_description_field_gpu_backend = "Elegir la API gráfica que se usará al reiniciar."
 settings_description_field_gpu_device = "Fijar una GPU detectada para el próximo inicio."
 settings_description_field_gpu_force_software = "Usar renderizado por software al reiniciar."
@@ -891,6 +891,10 @@ settings_category_text_rendering = "Texto / Renderizado"
 settings_field_grapheme_clustering = "Agrupación de grafemas"
 
 settings_description_field_grapheme_clustering = "Unir emoji y grupos Unicode en las terminales nuevas."
+
+settings_field_builtin_box_drawing = "Dibujo de recuadros integrado"
+
+settings_description_field_builtin_box_drawing = "Ajustar líneas, bloques y separadores de Powerline a cada celda."
 
 
 tab_new_options = "Opciones de nueva pestaña"

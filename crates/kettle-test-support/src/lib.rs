@@ -980,6 +980,10 @@ mod sweep_tests {
             lock_path.exists(),
             "a live lock must survive before publication"
         );
+        // A concurrent spawn can retain the flock's open file description until
+        // exec, even after this handle closes. Explicitly abandon the fixture's
+        // lock so the next sweep does not depend on another child's scheduling.
+        lock.unlock().unwrap();
         drop(lock);
         super::sweep_stale_scratch_for_test(
             base.path(),

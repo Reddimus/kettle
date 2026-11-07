@@ -179,6 +179,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldDetachableTabs => Text::SettingsDescriptionFieldDetachableTabs,
         Text::SettingsFieldFocus => Text::SettingsDescriptionFieldFocus,
         Text::SettingsFieldGraphemeClustering => Text::SettingsDescriptionFieldGraphemeClustering,
+        Text::SettingsFieldBuiltinBoxDrawing => Text::SettingsDescriptionFieldBuiltinBoxDrawing,
         Text::SettingsFieldFontSize => Text::SettingsDescriptionFieldFontSize,
         Text::SettingsFieldGpuBackend => Text::SettingsDescriptionFieldGpuBackend,
         Text::SettingsFieldGpuDevice => Text::SettingsDescriptionFieldGpuDevice,
@@ -624,7 +625,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                         labels: None,
                     },
                 },
-                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt"),
+                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
                 number(
                     T::SettingsFieldBackgroundOpacity,
                     "background-opacity",
@@ -684,10 +685,10 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         },
         Category {
             name: T::SettingsCategoryTextRendering,
-            fields: vec![toggle(
-                T::SettingsFieldGraphemeClustering,
-                "grapheme-clustering",
-            )],
+            fields: vec![
+                toggle(T::SettingsFieldGraphemeClustering, "grapheme-clustering"),
+                toggle(T::SettingsFieldBuiltinBoxDrawing, "builtin-box-drawing"),
+            ],
         },
         // The Background page. `starfield` is a zero-config animated
         // background; `image` takes a file path (edited inline here).
@@ -1034,7 +1035,7 @@ fn owned_choice_index(cfg: &Config, key: &str, values: &[String]) -> Option<usiz
 }
 
 /// Read a field's current value from `cfg`, formatted for display next to its
-/// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
+/// label (e.g. `"14 px"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
 /// best-effort string; an unknown key (catalogue/Config drift) yields a
 /// fallback such as `"Off"`, `""`, or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
@@ -1373,6 +1374,7 @@ pub(crate) fn read_bool(cfg: &Config, key: &str) -> bool {
         "quick-terminal-animation" => cfg.quick_terminal_animation,
         "quick-terminal-autohide" => cfg.quick_terminal_autohide,
         "grapheme-clustering" => cfg.grapheme_clustering,
+        "builtin-box-drawing" => cfg.builtin_box_drawing,
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
         "window-blur" => cfg.window_blur,
@@ -1683,6 +1685,32 @@ mod tests {
         assert_eq!(next_value(&off, field, 1), "true");
     }
 
+    #[test]
+    fn builtin_box_drawing_setting_round_trips_in_both_languages() {
+        let cats = categories(&[]);
+        let cat = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryTextRendering)
+            .expect("Text / Rendering group");
+        let field = cat
+            .fields
+            .iter()
+            .find(|f| f.key == "builtin-box-drawing")
+            .expect("Text / Rendering exposes built-in box drawing");
+        assert!(matches!(field.kind, FieldKind::Toggle));
+        assert_eq!(EN.text(field.label), "Built-in box drawing");
+        assert_ne!(EN.text(field.label), ES.text(field.label));
+        assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        let cfg = Config::default();
+        assert!(read_bool(&cfg, field.key));
+        assert!(holds_default(&cfg, field));
+        assert_eq!(next_value(&cfg, field, 1), "false");
+        let off = Config::parse_text("builtin-box-drawing = false");
+        assert!(!read_bool(&off, field.key));
+        assert!(!holds_default(&off, field));
+        assert_eq!(next_value(&off, field, 1), "true");
+    }
+
     /// Every row a reset covers writes a token the config accepts, and that
     /// token reads back as the default: after an edit the row is no longer at
     /// its default, and writing the default value brings it back.
@@ -1897,7 +1925,6 @@ mod tests {
     #[test]
     fn display_units_have_spaces_and_keep_config_serialization() {
         for (suffix, expected) in [
-            ("pt", "13 pt"),
             ("px", "13 px"),
             ("MB", "13 MB"),
             ("h", "13 h"),
@@ -1954,7 +1981,17 @@ mod tests {
         cfg.scrollback_bytes = 120_000_000;
         cfg.cursor_blink_timeout = 10;
         cfg.update_check_interval_hours = 24;
-        assert_eq!(read(&cfg, field("font-size"), &EN), "13 pt");
+        for tr in [&EN, &ES] {
+            assert_eq!(read(&cfg, field("font-size"), tr), "13 px");
+        }
+        assert_eq!(
+            EN.text(description(field("font-size"))),
+            "Set the terminal font size in logical pixels."
+        );
+        assert_eq!(
+            ES.text(description(field("font-size"))),
+            "Ajustar el tamaño de la fuente de la terminal en píxeles lógicos."
+        );
         assert_eq!(read(&cfg, field("background-opacity"), &EN), "99%");
         assert_eq!(read(&cfg, field("scrollback-bytes"), &EN), "120 MB");
         assert_eq!(read(&cfg, field("cursor-blink-timeout"), &EN), "10 s");
@@ -2463,7 +2500,7 @@ mod tests {
                 6,
                 72,
                 1,
-                "pt"
+                "px"
             )),
             None
         );
@@ -2643,10 +2680,10 @@ mod tests {
     fn number_steps_and_clamps() {
         let mut cfg = Config::default();
         cfg.font_size = 14.0;
-        let f = number(Text::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt");
+        let f = number(Text::SettingsFieldFontSize, "font-size", 6, 72, 1, "px");
         assert_eq!(next_value(&cfg, &f, 1), "15");
         assert_eq!(next_value(&cfg, &f, -1), "13");
-        assert_eq!(read(&cfg, &f, &EN), "14 pt");
+        assert_eq!(read(&cfg, &f, &EN), "14 px");
         // clamp at ceiling
         cfg.font_size = 72.0;
         assert_eq!(next_value(&cfg, &f, 1), "72");

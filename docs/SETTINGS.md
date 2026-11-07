@@ -56,7 +56,8 @@ Changes are written to your config file, shown by `kettle --config-path`. Most
 apply immediately. A failed save reports that the setting was not applied; an inline
 text edit stays open so you can retry. GPU changes apply after restarting Kettle. Completion changes
 apply to new shells. Text / Rendering has a Grapheme clustering toggle (on by
-default); it applies only to new terminals. Opacity, background type, and blur may need a new window.
+default); it applies only to new terminals. Its Built-in box drawing toggle (on
+by default, `builtin-box-drawing`) applies at once. Opacity, background type, and blur may need a new window.
 The footer shows dependencies for the focused row and pending changes. Notes
 keep reserved space below scrolling fields when space permits. In short windows,
 the panel reduces spacing and hides the repeated category title to retain the
@@ -64,7 +65,7 @@ focused option. At the shortest supported heights, Search and categories share
 one header row, and result group headings give way to the editable option.
 
 Labels and display values use sentence case. Theme and GPU names retain their
-spelling. Quantities use a space before the unit, for example `13 pt`, `6 px`,
+spelling. Quantities use a space before the unit, for example `13 px`, `6 px`,
 `120 MB`, `24 h`, and `10 s`. Percentages use `99%`. Config tokens do not change.
 Labels and descriptions sit to the left of the value controls. The active
 category uses the same selection highlight as menus. Search, category controls,
@@ -80,7 +81,7 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 |---|---|---|
 | Appearance | `theme-mode` | Follow system (default), Light, Dark or Fixed theme. Fixed theme keeps the current palette; existing configs with `theme` alone remain fixed |
 | Theme | `theme`, `light-theme` or `dark-theme` | curated list: Kettle's default pair (TokyoNight Night, Kettle Day) and the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
-| Font size | `font-size` | 6–72 pt |
+| Font size | `font-size` | 6–72 px |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the row says "Not available in this session; opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works |
 | Window padding | `window-padding-x` | 0–40 px |

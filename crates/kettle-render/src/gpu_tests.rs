@@ -39,9 +39,16 @@ pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// and readback pixels successfully. Keep this scoped to these unit tests:
 /// the live renderer and the standalone smoke outside the affected Parallels
 /// guest retain hardware-first adapter selection.
+///
+/// The font stays at 13 px on every target: the frames these tests check
+/// were laid out at that size, and their pixel rings and ink floors assume
+/// its 7.8x16.25 px cell. The card outline, inactive text and tab-control
+/// regressions also run explicitly at the 14 px non-macOS default, including
+/// on macOS. A test about another size sets `font_size` itself.
 pub(crate) fn gpu_test_config() -> Config {
     Config {
         gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
+        font_size: 13.0,
         ..Config::default()
     }
 }
@@ -1288,6 +1295,7 @@ fn screenshot_grid_emits_cell_locked_glyphs() {
         emit_cell_locked_glyphs(
             &mut instances,
             &buf,
+            &[],
             (12.0, 12.0),
             cw,
             GlyphPositioning::Grid(cw),
@@ -1487,6 +1495,7 @@ fn grid_prompt_blink_frames_for(
         emit_cell_locked_glyphs(
             &mut instances,
             &buf,
+            &[],
             origin,
             cw,
             GlyphPositioning::Grid(cw),

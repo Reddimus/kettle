@@ -109,6 +109,7 @@ Bundled assets:
   whose palette comes from tokyonight.nvim (Apache-2.0,
   https://github.com/folke/tokyonight.nvim): darker text colours, the same
   background. Its header records the change.
+  The full TokyoNight upstream license is in docs/licenses/tokyonight.nvim/LICENSE.
 
 * Fira Sans 4.301 - SIL Open Font License 1.1
   Digitized data copyright 2012-2018, The Mozilla Foundation and Telefonica S.A.,

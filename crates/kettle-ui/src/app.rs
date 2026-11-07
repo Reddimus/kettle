@@ -896,6 +896,11 @@ impl ApplicationHandler<UserEvent> for App {
                         || (ws.dpi_resize_surface_suspended && !native.pending())
                 }) && let Some(window) = &ws.window
                 {
+                    // Match the live-view resize filter even in native tabs.
+                    #[cfg(target_os = "macos")]
+                    let size =
+                        titlebar::macos_view_size(window).unwrap_or_else(|| window.inner_size());
+                    #[cfg(not(target_os = "macos"))]
                     let size = window.inner_size();
                     self.window_event_inner(&mut ws, el, WindowEvent::Resized(size));
                 }

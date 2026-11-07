@@ -28,6 +28,8 @@ class MediaInstallTests(unittest.TestCase):
         shutil.copytree(
             ROOT / "packaging" / "linux", self.package / "packaging" / "linux"
         )
+        shutil.copytree(ROOT / "docs/licenses/tokyonight.nvim",
+                        self.package / "docs/licenses/tokyonight.nvim")
         self.gui = self.package / "kettle"
         self.gui.write_text("#!/bin/sh\nprintf 'kettle 5.0.0\\n'\n", encoding="ascii")
         self.gui.chmod(0o755)
@@ -89,6 +91,7 @@ class MediaInstallTests(unittest.TestCase):
         for name in ("install.sh", "install-unix.py"):
             shutil.copy2(self.package / name, scripts / name)
         shutil.copytree(self.package / "packaging", source / "packaging")
+        shutil.copytree(self.package / "docs", source / "docs")
         for profile, binary in (
             ("release", "kettle"),
             ("media-worker", "kettle-media-worker"),
@@ -191,6 +194,51 @@ class MediaInstallTests(unittest.TestCase):
         self.assertEqual(
             (release / "kettle-media-worker").read_bytes(), worker.read_bytes()
         )
+
+    def test_tokyonight_license_bytes_are_recorded_replaced_and_removed(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ("LICENSE", "README.md"):
+            source = self.package / "docs/licenses/tokyonight.nvim" / name
+            installed = self.prefix / "share/doc/kettle/docs/licenses/tokyonight.nvim" / name
+            self.assertEqual(installed.read_bytes(), source.read_bytes())
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o644)
+            source.write_bytes(source.read_bytes() + b"\nUpdated distribution fixture\n")
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads((self.prefix / "share/kettle/install-files.json").read_text())
+        for name in ("LICENSE", "README.md"):
+            relative = f"share/doc/kettle/docs/licenses/tokyonight.nvim/{name}"
+            expected = (self.package / "docs/licenses/tokyonight.nvim" / name).read_bytes()
+            self.assertEqual((self.prefix / relative).read_bytes(), expected)
+            record = next(record for record in manifest["files"] if record["path"] == relative)
+            self.assertEqual(record["sha256"], hashlib.sha256(expected).hexdigest())
+            self.assertEqual(record["size"], len(expected))
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.prefix / "share/doc/kettle/docs/licenses/tokyonight.nvim").exists())
+
+    def test_tokyonight_license_sources_and_destinations_refuse_symlinks(self):
+        source = self.package / "docs/licenses/tokyonight.nvim/LICENSE"
+        outside = self.root / "outside"
+        outside.mkdir()
+        target = outside / "LICENSE"
+        target.write_bytes(source.read_bytes())
+        source.unlink()
+        source.symlink_to(target)
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.prefix / "bin/kettle").exists())
+        source.unlink()
+        source.write_bytes(target.read_bytes())
+        parent = self.prefix / "share/doc/kettle/docs/licenses"
+        parent.mkdir(parents=True)
+        (parent / "tokyonight.nvim").symlink_to(outside, target_is_directory=True)
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        self.assertFalse((outside / "README.md").exists())
+        self.assertFalse((self.prefix / "bin/kettle").exists())
 
     def test_installs_and_removes_both_binaries(self):
         result = self.run_installer()
