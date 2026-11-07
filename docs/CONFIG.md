@@ -303,10 +303,11 @@ or unavailable detection selects the dark side. Kettle Day is a bundled theme
 derived from TokyoNight Day: it keeps that theme's background, selection
 background and background-tone slots (0 and 8) but darkens its text colours,
 selected text included, along their own hue, so body text reaches 7:1 and the
-ANSI colours prompts use reach 4.5:1 (WCAG AA). `TokyoNight Day` and every other bundled theme keep upstream's
-colours, and `palette = N=#hex` and `foreground` lines still override any of
-them. Existing configs that set `theme` without `theme-mode` keep their fixed
-theme, including named `palette` presets. An explicit mode always wins, regardless of line order.
+ANSI colours prompts use reach 4.5:1 (WCAG AA). `TokyoNight Day` and every
+other bundled theme keep upstream's colours, and `palette = N=#hex` and
+`foreground` lines still override any of them. Existing configs that set
+`theme` without `theme-mode` keep their fixed theme, including named `palette`
+presets. An explicit mode always wins, regardless of line order.
 
 Settings → Appearance → Appearance offers **Follow system**, **Light**, **Dark**
 and **Fixed theme**, mapped to `theme-mode = auto | light | dark | explicit`.

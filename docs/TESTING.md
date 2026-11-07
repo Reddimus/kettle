@@ -3102,8 +3102,9 @@ material tests. kettle-config also holds the default light theme's foreground
 to 7:1 and its ANSI text colours (slots 1–7 and 9–15) to 4.5:1 against its
 background, pins the bundled TokyoNight Day to upstream's colours, and checks
 that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
-without turning its hue, and credits its sources in its header. Portable tests cover portal value/filter policy and macOS
-appearance selection; Linux private-bus tests cover color-scheme snapshots,
+without turning its hue, and credits its sources in its header. Portable
+tests cover portal value/filter policy and macOS appearance selection; Linux
+private-bus tests cover color-scheme snapshots,
 SettingChanged and owner loss using the shared reduced-motion transport.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
@@ -3113,8 +3114,8 @@ kettle-render checks that a live frame shows the configured background alpha,
 as an offscreen capture of the same frame does, on PreMultiplied and
 PostMultiplied surfaces. kettle-ui's native material tests check that blur
 counts as unavailable only on a settled answer: not while a Wayland probe runs
-or waits to retry, and not once it has found blur. Settings tests pin the Window blur
-row's unavailable note in English and Spanish and check that the footer drops
+or waits to retry, and not once it has found blur. Settings tests pin the
+Window blur row's unavailable note in English and Spanish and check that the footer drops
 the blur hint on the Window blur and Background opacity rows while blur is
 unavailable; a source guard checks that the Settings projection passes the
 window's blur state to both. Live acceptance still needs GNOME Wayland and X11
