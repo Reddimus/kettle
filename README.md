@@ -314,8 +314,9 @@ They sit in blank cells before matches when possible. At column zero they use
 blank cells after the match when available; otherwise they overlay its start.
 Paths need path context: progress counters such as `158/158`, ratios such as
 `a/b` and slash-joined words such as `read/write` stay plain text; a relative
-path is underlined when its last part has an extension or it has three parts. Remote or unresolved paths are copied; see
-[configuration and hint actions](docs/CONFIG.md).
+path counts as a link (shown on hover and offered as a hint) when its last part
+has an extension or it has three parts. Remote or unresolved paths are copied;
+see [configuration and hint actions](docs/CONFIG.md).
 
 ## Themes
 
