@@ -372,8 +372,11 @@ fn startup_keeps_the_remote_spool_while_another_build_runs() {
     assert_eq!(std::fs::read(&path).unwrap(), b"");
 }
 
+/// Explicit grids at the 13 px font's 8x16 sizing cell.
 #[test]
 fn startup_geometry_cells_convert_to_inner_size() {
+    let baseline = super::startup_geometry_cell(13.0);
+    assert_eq!(baseline, (8.0, 16.0));
     let mut cfg = kettle_config::Config {
         macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         window_width: Some(120),
@@ -381,7 +384,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
         ..Default::default()
     };
     assert_eq!(
-        startup_inner_size_px(&cfg),
+        startup_inner_size_px(&cfg, baseline),
         Some((984, 664)),
         "120x40 cells + default padding; the auto tab bar is hidden"
     );
@@ -389,7 +392,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar = kettle_config::TabBarMode::Auto;
     cfg.status_bar = kettle_config::StatusBarMode::Bottom;
     assert_eq!(
-        startup_inner_size_px(&cfg),
+        startup_inner_size_px(&cfg, baseline),
         Some((984, 686)),
         "auto tab bar is hidden for a one-tab startup; status bar reserves its strip"
     );
@@ -398,7 +401,7 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.tab_bar = kettle_config::TabBarMode::Always;
     cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
     assert_eq!(
-        startup_inner_size_px(&cfg),
+        startup_inner_size_px(&cfg, baseline),
         Some((1164, 766)),
         "missing height comes from the 45-row default grid; vertical tabs reserve width"
     );
@@ -406,13 +409,13 @@ fn startup_geometry_cells_convert_to_inner_size() {
     cfg.window_height = Some(30);
     cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
     assert_eq!(
-        startup_inner_size_px(&cfg),
+        startup_inner_size_px(&cfg, baseline),
         Some((1304, 554)),
         "missing width comes from the 160-column default grid"
     );
     cfg.window_height = None;
     assert_eq!(
-        startup_inner_size_px(&cfg),
+        startup_inner_size_px(&cfg, baseline),
         None,
         "neither side set: the monitor-fitted default takes over"
     );
@@ -420,59 +423,63 @@ fn startup_geometry_cells_convert_to_inner_size() {
 
 #[test]
 fn startup_titlebar_tabs_reserve_the_single_tab_band() {
+    let baseline = super::startup_geometry_cell(13.0);
     let mut cfg = kettle_config::Config {
         window_width: Some(120), window_height: Some(40),
         tab_bar: kettle_config::TabBarMode::Auto,
         status_bar: kettle_config::StatusBarMode::Bottom,
         ..Default::default()
     };
-    assert_eq!(startup_inner_size_px(&cfg), Some((984,
+    assert_eq!(startup_inner_size_px(&cfg, baseline), Some((984,
         if cfg!(target_os = "macos") { 714 } else { 686 })));
     cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Native;
-    assert_eq!(startup_inner_size_px(&cfg), Some((984, 686)));
+    assert_eq!(startup_inner_size_px(&cfg, baseline), Some((984, 686)));
     cfg.borderless = true;
     cfg.macos_titlebar_style = kettle_config::MacosTitlebarStyle::Tabs;
-    assert_eq!(startup_inner_size_px(&cfg), Some((984, 686)));
+    assert_eq!(startup_inner_size_px(&cfg, baseline), Some((984, 686)));
 }
 
 /// A fresh window with no configured size opens at the 160x45 default
-/// grid (1304x744 logical px with a native titlebar and the single-tab strip
-/// hidden), fitted to 90 % x 85 % of the monitor. The numbers below are the
-/// ones the docs quote; the macOS titlebar-tabs band is covered by
+/// grid (1304x744 logical px at the 13 px font's sizing cell, with a native
+/// titlebar and the single-tab strip hidden), fitted to 90 % x 85 % of the
+/// monitor. The numbers below are the ones the docs quote; the macOS
+/// titlebar-tabs band is covered by
 /// `startup_titlebar_tabs_reserve_the_single_tab_band`.
 #[test]
 fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     use super::{
-        STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, StartupMonitor, default_startup_inner_size,
-        startup_inner_size,
+        STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, STARTUP_GEOMETRY_CELL, StartupMonitor,
+        default_startup_inner_size, startup_geometry_cell, startup_inner_size,
+        startup_inner_size_px,
     };
     let cfg = kettle_config::Config {
         macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         ..Default::default()
     };
+    let baseline = startup_geometry_cell(13.0);
     assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
     assert_eq!(
-        default_startup_inner_size(&cfg, None),
+        default_startup_inner_size(&cfg, None, baseline),
         (1304.0, 744.0),
         "160x45 cells + 12 px padding with the single-tab strip hidden, no monitor known"
     );
     assert_eq!(
-        default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
+        default_startup_inner_size(&cfg, Some((1920.0, 1080.0)), baseline),
         (1304.0, 744.0),
-        "a 1080p monitor fits the whole target (164x44 cells at the default font)"
+        "a 1080p monitor fits the whole target (164x44 cells at the 13 px font)"
     );
     assert_eq!(
-        default_startup_inner_size(&cfg, Some((1366.0, 768.0))),
+        default_startup_inner_size(&cfg, Some((1366.0, 768.0)), baseline),
         (1229.0, 652.0),
-        "a 1366x768 laptop clamps both axes: 154 columns at the default font"
+        "a 1366x768 laptop clamps both axes: 154 columns at the 13 px font"
     );
     assert_eq!(
-        default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
+        default_startup_inner_size(&cfg, Some((3440.0, 1440.0)), baseline),
         (1304.0, 744.0),
         "an ultrawide gets the same terminal-sized window, not a monitor fraction"
     );
     assert_eq!(
-        default_startup_inner_size(&cfg, Some((640.0, 480.0))),
+        default_startup_inner_size(&cfg, Some((640.0, 480.0)), baseline),
         (576.0, 408.0),
         "a monitor smaller than the target wins outright; there is no floor"
     );
@@ -485,7 +492,16 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
         ..Default::default()
     };
     let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
-    assert_eq!(startup_inner_size(&explicit, tiny), (3224.0, 3224.0));
+    assert_eq!(
+        startup_inner_size_px(&explicit, baseline),
+        Some((3224, 3224))
+    );
+    let (w, h) = startup_inner_size_px(&explicit, STARTUP_GEOMETRY_CELL).unwrap();
+    assert_eq!(
+        startup_inner_size(&explicit, tiny),
+        (f64::from(w), f64::from(h)),
+        "this target sizes from its own default font's cell"
+    );
     assert_eq!(
         startup_inner_size(&cfg, tiny),
         (576.0, 408.0),
@@ -516,39 +532,57 @@ fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
     );
 }
 
+/// The grid a fresh window with no configured size gets when the default
+/// font is `font_size` px and the window is sized from `baseline`: the
+/// bundled font's measured cell, laid out over the surface
+/// `startup_surface_for` gives the default path. Returns the surface too.
+fn fresh_window_grid(
+    font_size: f32,
+    baseline: (f64, f64),
+    monitor: (f64, f64),
+    scale: f64,
+) -> ((u32, u32), (usize, usize)) {
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, default_startup_inner_size,
+        grid_dims_px,
+    };
+    let cfg = kettle_config::Config {
+        font_size,
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
+    let cell = kettle_render::StartupFonts::load(&cfg, scale as f32).cell;
+    let monitor = StartupMonitor::from_physical(
+        (monitor.0 * scale) as u32,
+        (monitor.1 * scale) as u32,
+        scale,
+    );
+    let (w, h) = default_startup_inner_size(&cfg, Some(monitor.logical), baseline);
+    let physical = |logical: f64| (logical * monitor.scale).round().max(1.0) as u32;
+    let surface = (physical(w), physical(h));
+    let area = content_rect_for_with_strip(
+        surface,
+        ContentBands::default(),
+        cfg.tab_bar_pos,
+        cfg.status_bar,
+        cfg.tab_bar_width,
+    );
+    let grid = grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y));
+    (surface, grid)
+}
+
 /// The grids the docs quote for a fresh window, measured with the shipped
-/// font and padding rather than the 8x16 sizing baseline: 164x44 cells on a
+/// font and padding rather than the sizing baseline: 164x44 cells on a
 /// 1080p monitor and 154 columns on a 1366x768 laptop, past the 144 at which
 /// Claude Code's diff panel opens. A change to the default font or padding
 /// fails here, so the docs move with it; at 14 px with 12 px padding the
 /// laptop would get 143 columns and lose the panel.
 #[test]
 fn a_default_window_at_the_shipped_font_holds_the_documented_grid() {
-    use super::{
-        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px,
-        startup_surface_for,
-    };
-    let cfg = kettle_config::Config {
-        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
-        ..Default::default()
-    };
-    let grid = |monitor: (f64, f64), scale: f64| {
-        let cell = kettle_render::StartupFonts::load(&cfg, scale as f32).cell;
-        let monitor = StartupMonitor::from_physical(
-            (monitor.0 * scale) as u32,
-            (monitor.1 * scale) as u32,
-            scale,
-        );
-        let bands = ContentBands::default();
-        let surface = startup_surface_for(&cfg, cell, bands, Some(monitor));
-        let area = content_rect_for_with_strip(
-            surface,
-            bands,
-            cfg.tab_bar_pos,
-            cfg.status_bar,
-            cfg.tab_bar_width,
-        );
-        grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y))
+    use super::{ContentBands, STARTUP_GEOMETRY_CELL, StartupMonitor, startup_surface_for};
+    let size = kettle_config::DEFAULT_FONT_SIZE;
+    let grid = |monitor, scale| {
+        fresh_window_grid(size, STARTUP_GEOMETRY_CELL, monitor, scale).1
     };
     assert_eq!(grid((1920.0, 1080.0), 1.0), (164, 44));
     assert_eq!(grid((1366.0, 768.0), 1.0), (154, 38));
@@ -558,6 +592,49 @@ fn a_default_window_at_the_shipped_font_holds_the_documented_grid() {
             cols >= 144 && rows >= 33,
             "{cols}x{rows} on a 1366x768 laptop at {scale}x"
         );
+    }
+
+    // The helper lays out the surface the window constructors really use.
+    let cfg = kettle_config::Config {
+        macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
+        ..Default::default()
+    };
+    for monitor in [(1920.0, 1080.0), (1366.0, 768.0)] {
+        for scale in [1.0, 2.0] {
+            let cell = kettle_render::StartupFonts::load(&cfg, scale as f32).cell;
+            let display = StartupMonitor::from_physical(
+                (monitor.0 * scale) as u32,
+                (monitor.1 * scale) as u32,
+                scale,
+            );
+            assert_eq!(
+                startup_surface_for(&cfg, cell, ContentBands::default(), Some(display)),
+                fresh_window_grid(size, STARTUP_GEOMETRY_CELL, monitor, scale).0,
+                "{monitor:?} at {scale}x"
+            );
+        }
+    }
+}
+
+/// The sizing cell is 8x16 at the 13 px font and grows with a larger
+/// default font, so a fresh window keeps aiming at the 160x45 grid. With a
+/// fixed 8x16 cell a 15 px default would open a 1080p window at 1304x744 px,
+/// 142x38 cells, short of the 144 columns Claude Code's diff panel opens at.
+#[test]
+fn the_startup_sizing_cell_follows_the_default_font_size() {
+    use super::{STARTUP_GEOMETRY_CELL, startup_geometry_cell};
+    assert_eq!(startup_geometry_cell(13.0), (8.0, 16.0));
+    assert_eq!(
+        STARTUP_GEOMETRY_CELL,
+        startup_geometry_cell(kettle_config::DEFAULT_FONT_SIZE)
+    );
+    let fifteen = startup_geometry_cell(15.0);
+    let (surface, grid) = fresh_window_grid(15.0, fifteen, (1920.0, 1080.0), 1.0);
+    assert_eq!(surface, (1501, 855));
+    assert_eq!(grid, (164, 44), "15 px keeps the 13 px font's grid");
+    for scale in [1.25, 2.0] {
+        let (_, (cols, rows)) = fresh_window_grid(15.0, fifteen, (1920.0, 1080.0), scale);
+        assert!(cols >= grid.0 && rows >= grid.1, "{cols}x{rows} at {scale}x");
     }
 }
 

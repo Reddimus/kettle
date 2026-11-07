@@ -16013,7 +16013,7 @@ def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
     return float(geometry["surface"]["width"]) / scale, int(800.0 * scale / cell_w)
 
 
-# kettle-ui's STARTUP_DEFAULT_COLS and STARTUP_GEOMETRY_CELL_W: a fresh window
+# kettle-ui's STARTUP_DEFAULT_COLS and STARTUP_GEOMETRY_CELL: a fresh window
 # with no size set is 160 baseline cells of 8 logical px, plus its padding.
 STARTUP_DEFAULT_COLS = 160
 STARTUP_BASELINE_CELL_W = 8.0
