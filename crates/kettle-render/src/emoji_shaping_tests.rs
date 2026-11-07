@@ -152,6 +152,7 @@ fn assert_ligature_ink_is_preserved(text: &str) {
             emit_positioned_glyphs(
                 &mut instances,
                 &buf,
+                &[],
                 origin,
                 cell_width,
                 positioning,
@@ -287,6 +288,7 @@ fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
             emit_positioned_glyphs(
                 &mut instances,
                 &buf,
+                &[],
                 origin,
                 cell_width,
                 positioning,

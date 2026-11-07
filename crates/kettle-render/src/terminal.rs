@@ -1303,6 +1303,7 @@ impl Renderer {
         // crossed row, `rows - 1` total).
         let mut start = 0usize;
         let mut grapheme_rows_to_validate = Vec::new();
+        let mut reshaped_rows = Vec::new();
         for row in 0..rows {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
             let runs = &spans[start.min(end)..end];
@@ -1329,6 +1330,7 @@ impl Renderer {
             }
             // This row reshapes — the buffer's glyph vertices will differ.
             text_changed = true;
+            reshaped_rows.push(row);
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
             for (i, (text, fg, bold, italic)) in runs[..shaped.runs].iter().enumerate() {
@@ -1425,6 +1427,24 @@ impl Renderer {
         text_changed |= replaced;
         if replaced {
             buf.shape_until_scroll(&mut self.font_system, false);
+            reshaped_rows.extend_from_slice(&grapheme_rows_to_validate);
+        }
+        // Fallback mark placement is a function of the shaped row alone, in
+        // ems, so it is redone only for the rows shaped above. A relayout
+        // (zoom, resize) keeps it.
+        let shifts = &mut self.pane_mark_shifts[idx];
+        shifts.resize_with(rows, Default::default);
+        for &row in &reshaped_rows {
+            let line = &buf.lines[row];
+            shifts[row] = match line.layout_opt().and_then(|layout| layout.first()) {
+                Some(layout) => super::mark_fallback::line_shifts(
+                    &layout.glyphs,
+                    line.text(),
+                    &mut self.font_system,
+                    &mut self.swash,
+                ),
+                None => Box::default(),
+            };
         }
         if cursor_focused
             && recolor_cursor_cell.is_some()
@@ -1521,6 +1541,7 @@ impl Renderer {
             gpu,
             cell_w,
             pane_bidi,
+            pane_mark_shifts,
             ..
         } = self;
         let cw = *cell_w;
@@ -1564,6 +1585,7 @@ impl Renderer {
             emit_cell_locked_glyphs(
                 out,
                 buf,
+                pane_mark_shifts.get(i).map_or(&[], Vec::as_slice),
                 (ox, oy),
                 cw,
                 if cfg.text_renderer == TextRendererMode::Grid {

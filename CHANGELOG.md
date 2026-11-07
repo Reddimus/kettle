@@ -228,6 +228,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Combining marks that their font does not position sit on their letter. In
+  `Z̤̈`, which macOS draws in San Francisco because the bundled JetBrains Mono
+  lacks the diaeresis below, the upper diaeresis no longer overlaps the
+  capital and neither mark hangs off its right edge. Such marks stack above
+  or below the letter by combining class, as HarfBuzz places marks for fonts
+  without anchors; a stack too tall for the line stops a quarter line past
+  its row. Marks the font places itself draw exactly as before.
+
 - A config notice no longer takes Enter and Escape from the terminal under
   it: a command typed while the notice is up runs, and Escape reaches the
   program in the pane. The notice answers those keys once a screen reader has

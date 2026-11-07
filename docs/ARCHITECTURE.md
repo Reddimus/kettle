@@ -3371,6 +3371,35 @@ and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
 
+**Combining marks the font does not place.** harfrust positions a mark from
+the shaping font's GPOS anchors and, like HarfBuzz, places marks by combining
+class only for a font with no GPOS table at all. A font with GPOS but no
+anchor for a pair leaves the mark where its outline sits. On macOS the bundled
+JetBrains Mono lacks U+0324, so cosmic-text shapes `Z\u{324}\u{308}` in San
+Francisco, whose GPOS only kerns: its diaeresis stayed at lowercase height
+inside the capital. `mark_fallback` (`crates/kettle-render/src/mark_fallback.rs`)
+finds such marks when `build_pane` reshapes a row. A mark keeps its place when
+the shaper moved it (any offset) or when any mark-to-base, mark-to-ligature or
+mark-to-mark lookup in the font's GPOS anchors it, whatever feature enables
+the lookup; `read-fonts` reads the table. Each remaining mark glyph is matched
+through the font's cmap to a scalar of the cluster's canonical decomposition,
+and its canonical combining class (from `icu_normalizer`) decides its place,
+as in hb-ot-shape-fallback: above classes stack upward from the top of the
+base's ink, below classes downward from its bottom, 1/16 em apart except the
+attached classes, centred on the base's ink or aligned to its left or right
+edge, double marks centred on the end of its advance. A below mark never
+rises and an above mark drawn higher than needed sinks only halfway. Marks of
+other classes (overlays, nukta, virama, fixed-position classes), marks
+substituted by GSUB, emoji clusters and inkless bases such as a space are
+left alone, and a mark anchored to a mark that moved moves with it. The
+offsets are stored in ems per row in `pane_mark_shifts`, beside the row keys,
+so steady frames and zooms reuse them and only a reshaped row recomputes
+them. The grid emit applies them: the horizontal offset through the glyph's
+`x_offset` before cell locking, the vertical one to the rasterized image in
+whole pixels rounded away from the base, and never more than a quarter line
+past the row, so a long stack cannot cover the rows around it. Legacy panes
+keep the shaper's placement, since glyphon draws most of their text.
+
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's
 continuous positions instead of pinning to cells. Glyphon's color shader does

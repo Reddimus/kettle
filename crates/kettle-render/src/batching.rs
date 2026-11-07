@@ -1,3 +1,4 @@
+use super::mark_fallback::{MarkShift, shift_for};
 use super::theme::pane_inactive_amount;
 use super::{
     Config, ContextMenu, FontSystem, GColor, GlyphInstance, GlyphPipeline, OutlineInstance,
@@ -482,10 +483,14 @@ pub(crate) enum GlyphPositioning {
 /// `default_color`). `char_starts` is a scratch buffer reused across runs to
 /// avoid per-line allocation. Glyphs are appended in buffer order, so the
 /// caller can wrap the appended range in one `GlyphClip` for scissor clipping.
+/// `marks` holds each buffer line's fallback mark placements
+/// (`mark_fallback::line_shifts`); only `Grid` applies them, since Legacy
+/// text that glyphon draws cannot follow them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
+    marks: &[Box<[MarkShift]>],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
@@ -500,6 +505,7 @@ pub(crate) fn emit_cell_locked_glyphs(
     emit_positioned_glyphs(
         out,
         buf,
+        marks,
         origin,
         cell_width,
         positioning,
@@ -519,6 +525,7 @@ pub(crate) fn emit_cell_locked_glyphs(
 pub(crate) fn emit_positioned_glyphs(
     out: &mut Vec<GlyphInstance>,
     buf: &TextBuffer,
+    marks: &[Box<[MarkShift]>],
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
@@ -527,6 +534,12 @@ pub(crate) fn emit_positioned_glyphs(
     mut glyph_slot: impl FnMut(glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>,
 ) {
     for run in buf.layout_runs() {
+        let shifts: &[MarkShift] = match positioning {
+            GlyphPositioning::Grid(_) => marks.get(run.line_i).map_or(&[], |shifts| shifts),
+            GlyphPositioning::Continuous | GlyphPositioning::GraphemeRows(_) => &[],
+        };
+        let mut next_shift = 0;
+        let mut index = 0;
         let cell_w = match positioning {
             GlyphPositioning::Continuous => None,
             GlyphPositioning::Grid(width) => Some(width),
@@ -593,6 +606,24 @@ pub(crate) fn emit_positioned_glyphs(
             let cluster = emoji_cluster(first);
             let start = out.len();
             for glyph in glyphs {
+                let shift = shift_for(shifts, &mut next_shift, index, glyph.glyph_id);
+                index += 1;
+                let moved;
+                let (glyph, raise) = match shift {
+                    Some(shift) => {
+                        moved = shift.moved(glyph);
+                        (
+                            &moved,
+                            shift.raise_px(
+                                glyph.font_size,
+                                run.line_top,
+                                run.line_height,
+                                run.line_y,
+                            ),
+                        )
+                    }
+                    None => (glyph, 0),
+                };
                 let col = super::geometry::glyph_grid_col_with_metadata(
                     char_starts,
                     glyph.start,
@@ -619,7 +650,7 @@ pub(crate) fn emit_positioned_glyphs(
                 out.push(GlyphInstance {
                     pos: [
                         (phys.x + slot.left) as f32,
-                        (line_y.round() as i32 + phys.y - slot.top) as f32,
+                        (line_y.round() as i32 + phys.y - slot.top - raise) as f32,
                     ],
                     size: [slot.w, slot.h],
                     uv: [slot.atlas_x, slot.atlas_y],

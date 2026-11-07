@@ -1,0 +1,267 @@
+//! Headless frames of combining marks the shaping font does not place.
+//!
+//! The glyph instances are read in shaped order: a cluster's base, then its
+//! marks in canonical order.
+
+use crate::gpu_tests::gpu_test_guard;
+use crate::headless_tests::{capture, focused, pane, renderer, snapshot_of};
+use crate::*;
+
+const W: u32 = 320;
+const H: u32 = 96;
+
+/// A glyph instance's image rectangle: x, y, width, height.
+type Image = [f32; 4];
+
+/// The frame and glyph images of `text` alone in a pane, cursor hidden.
+fn frame_of(renderer: &mut Renderer, cfg: &Config, text: &str) -> (image::RgbaImage, Vec<Image>) {
+    let snap = snapshot_of(16, 3, format!("{text}\x1b[?25l").as_bytes());
+    let frame = capture(renderer, cfg, &[pane(&snap, W, H)], &focused(false));
+    let images = renderer
+        .glyph_instances
+        .iter()
+        .map(|glyph| [glyph.pos[0], glyph.pos[1], glyph.size[0], glyph.size[1]])
+        .collect();
+    (frame, images)
+}
+
+/// Whether the first cell's cluster was shaped to `glyphs` real glyphs, none
+/// missing. The row's pad blank follows them.
+fn shaped_to(renderer: &Renderer, glyphs: usize) -> bool {
+    renderer.pane_buffers[0]
+        .layout_runs()
+        .next()
+        .is_some_and(|run| {
+            let cluster: Vec<_> = run.glyphs.iter().filter(|glyph| glyph.start == 0).collect();
+            cluster.len() == glyphs && cluster.iter().all(|glyph| glyph.glyph_id != 0)
+        })
+}
+
+fn top(image: &Image) -> f32 {
+    image[1]
+}
+
+fn bottom(image: &Image) -> f32 {
+    image[1] + image[3]
+}
+
+fn centre(image: &Image) -> f32 {
+    image[0] + image[2] / 2.0
+}
+
+/// Whether the frame has ink in rows `rows`, between columns `x0..x1`.
+fn ink_in(frame: &image::RgbaImage, rows: std::ops::Range<u32>, x0: u32, x1: u32) -> bool {
+    let background = *frame.get_pixel(W - 1, H - 1);
+    rows.into_iter()
+        .any(|y| (x0..x1).any(|x| *frame.get_pixel(x, y) != background))
+}
+
+/// `Z\u{324}\u{308}` from the C08 fixture. JetBrains Mono lacks U+0324, so
+/// the cluster falls back to a face that has all three; San Francisco on
+/// macOS has GPOS but no mark anchors, and drew the diaeresis inside the
+/// capital with both marks off its right edge.
+#[test]
+fn stacked_marks_clear_a_capital_whose_font_does_not_anchor_them() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (frame, glyphs) = frame_of(&mut renderer, &cfg, "Z\u{324}\u{308}");
+    if !shaped_to(&renderer, 3) {
+        eprintln!("no face here shapes Z\\u{{324}}\\u{{308}} to three glyphs; skipped");
+        return;
+    }
+    let [base, below, above] = [glyphs[0], glyphs[1], glyphs[2]];
+    assert!(
+        bottom(&above) <= top(&base),
+        "the diaeresis must sit above the capital: {above:?} over {base:?}"
+    );
+    assert!(
+        top(&below) >= bottom(&base),
+        "the diaeresis below must hang under the baseline: {below:?} under {base:?}"
+    );
+    for mark in [above, below] {
+        assert!(
+            (centre(&mark) - centre(&base)).abs() <= 1.0,
+            "a mark must centre on the capital: {mark:?} on {base:?}"
+        );
+    }
+    let (x0, x1) = (base[0] as u32, (base[0] + base[2]) as u32);
+    assert!(
+        ink_in(&frame, 0..top(&base) as u32, x0, x1),
+        "the frame must have ink above the cap top"
+    );
+    assert!(
+        ink_in(&frame, bottom(&base) as u32..H, x0, x1),
+        "the frame must have ink below the baseline"
+    );
+}
+
+/// `a\u{300}\u{316}` from the same fixture: the shaper composes `à` and the
+/// grave below stays a mark.
+#[test]
+fn a_grave_stack_keeps_ink_above_and_below() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (_, plain) = frame_of(&mut renderer, &cfg, "a");
+    let x_height = top(&plain[0]);
+    let (frame, glyphs) = frame_of(&mut renderer, &cfg, "a\u{300}\u{316}");
+    if !shaped_to(&renderer, 2) {
+        eprintln!("no face here shapes a\\u{{300}}\\u{{316}} to two glyphs; skipped");
+        return;
+    }
+    let [base, below] = [glyphs[0], glyphs[1]];
+    let (x0, x1) = (base[0] as u32, (base[0] + base[2]) as u32);
+    assert!(
+        ink_in(&frame, 0..x_height as u32 - 1, x0, x1),
+        "the grave must rise above the x-height"
+    );
+    assert!(
+        top(&below) >= bottom(&base),
+        "the grave below must hang under the baseline: {below:?} under {base:?}"
+    );
+    assert!((centre(&below) - centre(&base)).abs() <= 1.5);
+}
+
+/// Marks the font anchors (mark-to-base with a zero offset, mark-to-base and
+/// mark-to-mark with offsets) or the shaper placed draw exactly as they did
+/// before fallback placement existed.
+#[test]
+fn marks_the_font_places_render_exactly_as_before() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let (placed, _) = frame_of(
+        &mut renderer,
+        &cfg,
+        "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}",
+    );
+    assert!(
+        renderer.pane_mark_shifts[0]
+            .iter()
+            .all(|row| row.is_empty()),
+        "no mark here is the fallback's to move: {:?}",
+        renderer.pane_mark_shifts[0]
+    );
+    // The same rows emitted with no fallback placement at all.
+    renderer.pane_mark_shifts[0].clear();
+    renderer.grid_glyphs_dirty = true;
+    let snap = snapshot_of(
+        16,
+        3,
+        "e\u{301} Z\u{308} x\u{308}\u{301} q\u{323} s\u{323}\u{307} a\u{300}\u{316}\x1b[?25l"
+            .as_bytes(),
+    );
+    let unplaced = capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
+    assert!(placed == unplaced, "font-placed marks must not move");
+}
+
+/// The bundled JetBrains Mono has no anchor on `#`, `1` or `@`, so this runs
+/// the same on every host.
+#[test]
+fn an_unanchored_bundled_mark_clears_its_base() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    for (text, above) in [("#\u{301}", true), ("1\u{301}", true), ("@\u{323}", false)] {
+        let (_, glyphs) = frame_of(&mut renderer, &cfg, text);
+        assert!(shaped_to(&renderer, 2), "{text:?}");
+        let [base, mark] = [glyphs[0], glyphs[1]];
+        if above {
+            assert!(
+                bottom(&mark) <= top(&base),
+                "{text:?}: the accent must sit on the base: {mark:?} over {base:?}"
+            );
+        } else {
+            assert!(
+                top(&mark) >= bottom(&base),
+                "{text:?}: the dot must hang under the base: {mark:?} under {base:?}"
+            );
+        }
+        assert!(
+            (centre(&mark) - centre(&base)).abs() <= 1.0,
+            "{text:?}: {mark:?} on {base:?}"
+        );
+    }
+}
+
+/// Placement is worked out when a row is shaped and kept with it: a steady
+/// frame or a zoom reuses it, and only a reshaped row recomputes it.
+#[test]
+fn mark_placement_is_cached_with_the_shaped_row() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(16, 3, "#\u{301}\x1b[?25l".as_bytes());
+    capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
+    let placed = renderer.pane_mark_shifts[0][0].clone();
+    assert_eq!(placed.len(), 1, "the accent is placed once");
+
+    // A marker the renderer would never compute survives frames that do not
+    // reshape the row.
+    let marker: Box<[mark_fallback::MarkShift]> = Box::new([mark_fallback::MarkShift {
+        index: 9,
+        ..placed[0]
+    }]);
+    renderer.pane_mark_shifts[0][0] = marker.clone();
+    capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(true));
+    cfg.font_size += 2.0;
+    renderer.set_font_size(cfg.font_size);
+    capture(&mut renderer, &cfg, &[pane(&snap, W, H)], &focused(false));
+    assert_eq!(
+        renderer.pane_mark_shifts[0][0], marker,
+        "a steady frame or a zoom must not redo the placement"
+    );
+
+    let changed = snapshot_of(16, 3, "1\u{301}\x1b[?25l".as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&changed, W, H)],
+        &focused(false),
+    );
+    assert_eq!(renderer.pane_mark_shifts[0][0].len(), 1);
+    assert_ne!(
+        renderer.pane_mark_shifts[0][0], marker,
+        "a new row is placed"
+    );
+}
+
+/// A stack of unanchored marks stops a quarter line past its row instead of
+/// covering the rows above.
+#[test]
+fn a_tall_unanchored_stack_stays_near_its_row() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(W, H) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let marks = "\u{308}".repeat(12);
+    let text = format!("Z\u{324}{marks}");
+    let (_, glyphs) = frame_of(&mut renderer, &cfg, &text);
+    if !shaped_to(&renderer, 14) || renderer.pane_mark_shifts[0][0].is_empty() {
+        eprintln!("no face here leaves this stack to the fallback; skipped");
+        return;
+    }
+    let (_, row_top) = geometry::pane_grid_origin(
+        (0.0, 0.0, W as f32, H as f32),
+        (cfg.padding_x, cfg.padding_y),
+    );
+    let ceiling = row_top - renderer.cell_h * 0.25 - 1.0;
+    for glyph in &glyphs {
+        assert!(
+            top(glyph) >= ceiling,
+            "{glyph:?} reaches above {ceiling} into the rows above"
+        );
+    }
+}

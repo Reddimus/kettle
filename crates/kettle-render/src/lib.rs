@@ -18,6 +18,7 @@ mod geometry;
 mod gpu;
 mod labels;
 mod link_status;
+mod mark_fallback;
 pub use link_status::{PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout};
 mod overlays;
 mod screenshot;
@@ -430,6 +431,10 @@ pub struct Renderer {
     pane_style_keys: Vec<u64>,
     /// Each pane's row bidi layouts, grown and truncated with `pane_buffers`.
     pane_bidi: Vec<bidi_rows::PaneBidi>,
+    /// Each pane's per-row fallback mark placements
+    /// (`mark_fallback::line_shifts`), recomputed only when a row reshapes and
+    /// kept in step with `pane_line_keys`.
+    pane_mark_shifts: Vec<Vec<Box<[mark_fallback::MarkShift]>>>,
     /// The row layouts the last frame drew, and those of the last frame
     /// presented, for pointer hit tests.
     drawn_bidi: Vec<PaintedBidi>,
@@ -954,6 +959,9 @@ impl Renderer {
         while self.pane_bidi.len() < panes.len() {
             self.pane_bidi.push(bidi_rows::PaneBidi::default());
         }
+        while self.pane_mark_shifts.len() < panes.len() {
+            self.pane_mark_shifts.push(Vec::new());
+        }
         // Parallel grow for per-pane titlebar buffers.
         while self.pane_titlebar_buffers.len() < panes.len() {
             let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -978,6 +986,7 @@ impl Renderer {
                 self.pane_line_keys.swap(i, j);
                 self.pane_style_keys.swap(i, j);
                 self.pane_bidi.swap(i, j);
+                self.pane_mark_shifts.swap(i, j);
                 self.pane_titlebar_buffers.swap(i, j);
                 self.pane_titlebar_texts.swap(i, j);
             } else {
@@ -985,6 +994,7 @@ impl Renderer {
                 self.pane_line_keys[i].clear();
                 self.pane_style_keys[i] = 0;
                 self.pane_bidi[i].clear();
+                self.pane_mark_shifts[i].clear();
                 self.pane_titlebar_texts[i].clear();
             }
         }
@@ -999,6 +1009,7 @@ impl Renderer {
         self.pane_line_keys.truncate(panes.len());
         self.pane_style_keys.truncate(panes.len());
         self.pane_bidi.truncate(panes.len());
+        self.pane_mark_shifts.truncate(panes.len());
         self.pane_titlebar_buffers.truncate(panes.len());
         self.pane_titlebar_texts.truncate(panes.len());
         // Write each pane's title into its titlebar
@@ -5880,6 +5891,9 @@ mod text_layout_damage_tests;
 
 #[cfg(test)]
 mod glyph_cell_lock_tests;
+
+#[cfg(test)]
+mod mark_fallback_tests;
 
 #[cfg(test)]
 mod paragraph_separator_shaping_tests;
