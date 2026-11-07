@@ -208,6 +208,8 @@ mod confirm;
 
 pub use confirm::ConfirmDialogLayout;
 
+mod cursor_marks;
+
 mod cursor_patch;
 
 mod cursor_policy;
@@ -488,8 +490,10 @@ pub struct Renderer {
     /// are drawn as glyphon custom glyphs; empty when glyphon draws the
     /// shaped buffer. Kept with the retained vertices for the cursor patch.
     cursor_mark_images: Vec<[i32; 4]>,
-    /// Custom-glyph ids for those images.
-    cursor_mark_ids: batching::CustomGlyphIds,
+    /// The atlas and renderer that draw those images, made on first use.
+    cursor_marks: Option<cursor_marks::CursorMarks>,
+    /// glyphon's pipeline cache, for atlases made after startup.
+    glyphon_cache: Cache,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -5305,79 +5309,68 @@ impl Renderer {
                     1.0,
                 )
             });
+            let bounds = TextBounds {
+                left: gclip.0 as i32,
+                top: gclip.1 as i32,
+                right: (gclip.0 + gclip.2) as i32,
+                bottom: (gclip.1 + gclip.3) as i32,
+            };
             // The grid pane moved a mark in this cell, which glyphon cannot
-            // do: draw the pane's own images of the cell as custom glyphs, over
-            // the same shaped text left transparent.
-            self.cursor_mark_images.clear();
-            let mut masks = std::collections::HashMap::new();
-            let mut custom = Vec::new();
-            if !gmarks.is_empty()
-                && scale == 1.0
-                && let Some(ids) = gmarks
-                    .iter()
-                    .map(|image| self.cursor_mark_ids.id(image))
-                    .collect::<Option<Vec<u16>>>()
-            {
-                self.cursor_glyph_buffer.set_text(
-                    gtext,
-                    &gattrs.color(GColor::rgba(gcolor.r, gcolor.g, gcolor.b, 0)),
-                    Shaping::Advanced,
-                    None,
-                );
-                for line in &mut self.cursor_glyph_buffer.lines {
-                    line.set_ltr_override(true);
-                }
-                self.cursor_glyph_buffer
-                    .shape_until_scroll(&mut self.font_system, false);
-                for (image, id) in gmarks.iter().zip(ids) {
-                    let [x, y, width, height] = image.rect;
-                    custom.push(glyphon::CustomGlyph {
-                        id,
-                        left: x as f32 - left,
-                        top: y as f32 - top,
-                        width: width as f32,
-                        height: height as f32,
-                        color: None,
-                        snap_to_physical_pixel: true,
-                        metadata: 0,
-                    });
-                    self.cursor_mark_images.push(image.rect);
-                    // An id names a raster only together with its size.
-                    masks.insert((id, width, height), image.mask.as_slice());
-                }
-            }
+            // do: the pane's own images of the cell are drawn instead, as
+            // custom glyphs in an atlas of their own (see `cursor_marks`).
+            let marked = !gmarks.is_empty() && scale == 1.0;
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,
                 left,
                 top,
                 scale,
-                bounds: TextBounds {
-                    left: gclip.0 as i32,
-                    top: gclip.1 as i32,
-                    right: (gclip.0 + gclip.2) as i32,
-                    bottom: (gclip.1 + gclip.3) as i32,
-                },
+                bounds,
                 default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
-                custom_glyphs: &custom,
+                custom_glyphs: &[],
             };
             self.text_prepares += 1;
-            self.cursor_glyph_renderer.prepare_with_custom(
+            self.cursor_glyph_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [area],
+                (!marked).then_some(area),
                 &mut self.swash,
-                |request| {
-                    let (width, height) = (i32::from(request.width), i32::from(request.height));
-                    let mask = masks.get(&(request.id, width, height))?;
-                    Some(glyphon::RasterizedCustomGlyph {
-                        data: mask.to_vec(),
-                        content_type: glyphon::ContentType::Mask,
-                    })
-                },
             )?;
+            self.cursor_mark_images.clear();
+            if marked {
+                if self
+                    .cursor_marks
+                    .as_ref()
+                    .is_none_or(|marks| !marks.has_room(gmarks))
+                {
+                    self.cursor_marks = Some(cursor_marks::CursorMarks::new(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &self.glyphon_cache,
+                        self.config.format,
+                        &mut self.font_system,
+                    ));
+                }
+                if let Some(marks) = self.cursor_marks.as_mut() {
+                    self.text_prepares += 1;
+                    marks.prepare(
+                        &self.gpu.device,
+                        &self.gpu.queue,
+                        &mut self.font_system,
+                        &mut self.swash,
+                        &self.viewport,
+                        gmarks,
+                        GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
+                        bounds,
+                    )?;
+                }
+                self.cursor_mark_images
+                    .extend(gmarks.iter().map(|image| image.rect));
+            } else if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
             // Commit the retained-vertex key only after prepare succeeds. A
             // transient atlas/device error must retry rather than treating
             // stale vertices as current on the next frame.

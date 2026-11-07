@@ -574,16 +574,21 @@ fn mark_classes(
     fonts: &mut FontSystem,
 ) -> Option<Vec<Option<u8>>> {
     let ccc = icu_normalizer::properties::CanonicalCombiningClassMapBorrowed::new();
-    let mut scalars: Vec<(char, u8, bool)> =
-        icu_normalizer::DecomposingNormalizerBorrowed::new_nfd()
-            .normalize_iter(text.chars())
-            .filter_map(|c| {
-                let class = ccc.get_u8(c);
-                (class != 0).then_some((c, class, false))
-            })
-            .collect();
+    let mut decomposed = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd()
+        .normalize_iter(text.chars())
+        .peekable();
+    let starter = decomposed.next_if(|&c| ccc.get_u8(c) == 0);
+    let mut scalars: Vec<(char, u8, bool)> = decomposed
+        .filter_map(|c| {
+            let class = ccc.get_u8(c);
+            (class != 0).then_some((c, class, false))
+        })
+        .collect();
     if scalars.is_empty() {
         return None;
+    }
+    if let Some(starter) = starter {
+        claim_composed(&cluster[0], starter, &mut scalars, fonts);
     }
     let mut classes = vec![None; cluster.len()];
     let mut unmatched = Vec::new();
@@ -618,6 +623,41 @@ fn mark_classes(
         }
     }
     Some(classes)
+}
+
+/// Claims the marks the shaper composed into `base`, the cluster's first
+/// glyph, so they are not paired with a substituted mark. harfrust composes
+/// a starter with each following mark, in canonical order and unless an
+/// earlier mark it kept blocks it, when the font has the composite:
+/// `A\u{301}\u{307}` is drawn as `Aacute` and a dot.
+fn claim_composed(
+    base: &LayoutGlyph,
+    starter: char,
+    scalars: &mut [(char, u8, bool)],
+    fonts: &mut FontSystem,
+) {
+    let Some(font) = fonts.get_font(base.font_id, base.font_weight) else {
+        return;
+    };
+    let charmap = font.as_swash().charmap();
+    let compose = icu_normalizer::properties::CanonicalCompositionBorrowed::new();
+    let mut composite = starter;
+    let mut kept = 0;
+    let mut absorbed = Vec::new();
+    for (slot, &(mark, class, _)) in scalars.iter().enumerate() {
+        match compose.compose(composite, mark) {
+            Some(next) if kept < class && charmap.map(next) != 0 => {
+                composite = next;
+                absorbed.push(slot);
+            }
+            _ => kept = class,
+        }
+    }
+    if !absorbed.is_empty() && charmap.map(composite) == base.glyph_id {
+        for slot in absorbed {
+            scalars[slot].2 = true;
+        }
+    }
 }
 
 /// How the font anchors the mark at `index` in `cluster`, whose base is at
@@ -1161,6 +1201,30 @@ mod tests {
         };
         assert!(!below.above && below.top * 26.0 <= base.bottom);
         assert!(above.above && above.bottom * 26.0 >= base.top);
+    }
+
+    /// `A\u{301}\u{307}` is drawn as `Aacute` and a substituted dot: the
+    /// acute composed into the base is not left over to block the pairing.
+    #[test]
+    fn a_substituted_mark_after_a_composed_base_is_placed() {
+        use glyphon::cosmic_text::FeatureTag;
+        let mut features = FontFeatures::new();
+        features.disable(FeatureTag::new(b"mark"));
+        let text = "A\u{301}\u{307}";
+        let (mut fonts, glyphs) = shape_bundled_with(text, &features);
+        assert_eq!(
+            glyphs.len(),
+            2,
+            "the fixture needs a composed base and a mark"
+        );
+        let (mut swash, mut cache) = (SwashCache::new(), MarkCache::default());
+        cache.use_features(&features);
+        let shifts = line_shifts(&glyphs, text, &mut fonts, &mut swash, &mut cache);
+        let base = cache.ink(&glyphs[0], &mut fonts, &mut swash).unwrap();
+        let [dot] = &shifts[..] else {
+            panic!("the dot is placed: {shifts:?}");
+        };
+        assert!(dot.above && dot.bottom * 26.0 >= base.top);
     }
 
     /// With `mkmk` turned off the font's mark-to-mark anchors apply to

@@ -344,6 +344,9 @@ impl Renderer {
         if cursor_on && self.pending_cursor_glyph.is_some() && !self.ime_prepared {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+            if let Some(marks) = &self.cursor_marks {
+                marks.render(&self.viewport, &mut pass)?;
+            }
         }
         // Preview lanes sit above the terminal and below its dimming,
         // scrollbar and every overlay: menus and dialogs cover them whole.
@@ -747,30 +750,6 @@ pub(crate) struct CellImage {
     pub(crate) mask: Vec<u8>,
 }
 
-/// glyphon custom-glyph ids for [`CellImage`]s. glyphon caches a custom
-/// glyph's raster by its id and size, so an id is never given to a second
-/// raster key of the same size: each image size has its own 65,536 ids, and
-/// only a 65,537th distinct raster of one exact size finds none.
-#[derive(Default)]
-pub(crate) struct CustomGlyphIds {
-    ids: std::collections::HashMap<glyphon::cosmic_text::CacheKey, u16>,
-    next: std::collections::HashMap<(i32, i32), u32>,
-}
-
-impl CustomGlyphIds {
-    /// The id for `image`'s raster, `None` once its size has none left.
-    pub(crate) fn id(&mut self, image: &CellImage) -> Option<u16> {
-        if let Some(&id) = self.ids.get(&image.key) {
-            return Some(id);
-        }
-        let next = self.next.entry((image.rect[2], image.rect[3])).or_default();
-        let id = u16::try_from(*next).ok()?;
-        *next += 1;
-        self.ids.insert(image.key, id);
-        Some(id)
-    }
-}
-
 /// The images the grid emit draws for `cell` (a buffer line and grid column)
 /// of `buf` when fallback placement in `marks` moved one of its glyphs;
 /// empty when it moved none, or when one is not a plain coverage mask.
@@ -959,59 +938,4 @@ pub(crate) fn text_layout_damage_key(
         pv.snap.display_offset.hash(&mut h);
     }
     h.finish()
-}
-
-#[cfg(test)]
-mod custom_glyph_id_tests {
-    use super::*;
-
-    fn image(glyph_id: u16, size: f32, width: i32) -> CellImage {
-        let (key, _, _) = glyphon::cosmic_text::CacheKey::new(
-            glyphon::fontdb::ID::dummy(),
-            glyph_id,
-            size,
-            (0.0, 0.0),
-            glyphon::fontdb::Weight::NORMAL,
-            glyphon::cosmic_text::CacheKeyFlags::empty(),
-        );
-        CellImage {
-            key,
-            rect: [0, 0, width, 3],
-            mask: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn an_id_names_one_raster_of_each_size() {
-        let mut ids = CustomGlyphIds::default();
-        let first = ids.id(&image(1, 13.0, 4)).unwrap();
-        assert_eq!(
-            ids.id(&image(1, 13.0, 4)),
-            Some(first),
-            "a raster keeps its id"
-        );
-        assert_ne!(
-            ids.id(&image(2, 13.0, 4)),
-            Some(first),
-            "another raster of its size does not share it"
-        );
-        assert_eq!(
-            ids.id(&image(3, 15.0, 5)),
-            Some(first),
-            "another size has its own ids"
-        );
-        for glyph_id in 3..=u16::MAX {
-            assert!(ids.id(&image(glyph_id, 13.0, 4)).is_some());
-        }
-        assert!(
-            ids.id(&image(1, 14.0, 4)).is_some(),
-            "a size has 65,536 ids"
-        );
-        assert_eq!(
-            ids.id(&image(2, 14.0, 4)),
-            None,
-            "a size's 65,537th raster finds no id rather than a used one"
-        );
-        assert!(ids.id(&image(2, 14.0, 6)).is_some());
-    }
 }

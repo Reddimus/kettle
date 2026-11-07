@@ -1680,18 +1680,20 @@ it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that
 never rise, above marks that sink halfway, aligned and double classes), whole
-pixel rounding, the quarter-line overflow limit, the bounded cache and the
-custom-glyph ids. With the bundled JetBrains Mono alone, anchored marks
-(`Z\u{308}`, `q\u{323}` and mark-to-mark stacks) keep their place, unanchored
-ones (`#\u{301}`, `@\u{323}`) and `.case` substitutes clear their base, and
-with `mkmk` turned off a stacked acute no longer follows the diaeresis.
-`mark_fallback_tests` render headless frames: font-placed marks must be
-pixel-identical with fallback placement removed, a steady frame or zoom must
-reuse the cached placement, a row laid out late must still be placed, and a
-focused block cursor must cover a moved mark with its inverted copy. The
-bundled cases run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and
-a tall stack need a host fallback face and report `MARK_FONT_SKIP` without
-one. Without an adapter the tests report `MARK_GPU_SKIP`.
+pixel rounding, the quarter-line overflow limit and the bounded cache. With
+the bundled JetBrains Mono alone, anchored marks (`Z\u{308}`, `q\u{323}` and
+mark-to-mark stacks) keep their place; unanchored ones (`#\u{301}`,
+`@\u{323}`), `.case` substitutes and a dot after a composed `Aacute` clear
+their base; and with `mkmk` turned off a stacked acute no longer follows the
+diaeresis. `mark_fallback_tests` render headless frames: font-placed marks
+must be pixel-identical with fallback placement removed, a steady frame or
+zoom must reuse the cached placement, a row laid out late must still be
+placed, and a focused block cursor must cover a moved mark with its inverted
+copy. `cursor_marks` tests grow the cursor's own atlas past its first texture
+across several cells and check when it must be replaced. The bundled cases
+run on every GPU host; `Z\u{324}\u{308}`, `a\u{300}\u{316}` and a tall stack
+need a host fallback face and report `MARK_FONT_SKIP` without one. Without an
+adapter the tests report `MARK_GPU_SKIP`.
 
 Core `overline_is_independent_and_reported_and_reset` covers SGR 53/55,
 DECRQSS, reset, saved cursor attributes and decorated blanks. Parser and

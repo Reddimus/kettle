@@ -3388,7 +3388,9 @@ every lookup counts, since the lookups it calls are not followed. `read-fonts`
 reads the table; a table that cannot be read leaves the marks alone. Each mark
 glyph is matched to a scalar of the cluster's canonical decomposition, through
 the font's cmap or, for marks GSUB replaced one for one (JetBrains Mono's
-`.case` forms), in canonical order when exactly as many remain. Its canonical
+`.case` forms), in canonical order when exactly as many remain; marks the
+shaper composed into the base (`A\u{301}` drawn as `Aacute`) are found by
+recomposing as harfrust does and are not counted. Its canonical
 combining class (from `icu_normalizer`) decides its place, as in
 hb-ot-shape-fallback: above classes stack upward from the top of the base's
 ink, below classes downward from its bottom, 1/16 em apart except the
@@ -3416,13 +3418,15 @@ The focused block cursor's inverted glyph is a glyphon pass, and glyphon
 places only a whole shaped buffer, so over a moved mark the pane's copy would
 show beside an inverted one left where the font drew it. When the cursor's
 cell holds a moved mark, `build_pane` runs the grid emit for that one cell
-(`batching::moved_cell_images`), and the cursor pass draws those images as
-glyphon custom glyphs in the cursor's text colour over the cell's shaped text,
-which it leaves transparent. glyphon caches a custom glyph's raster by id and
-size, so `CustomGlyphIds` never gives an id to a second raster of the same
-size; a size whose 65,536 ids are spent falls back to the shaped text. The
-images join the cursor glyph's damage key, and the cursor patch takes its ink
-from them.
+(`batching::moved_cell_images`), and the cursor pass draws those images, in
+the cursor's text colour, as glyphon custom glyphs instead of the shaped
+text. They have an atlas of their own (`cursor_marks`): glyphon asks again
+for every cached custom raster when an atlas grows and panics on `None`, and
+the shared atlas grows during prepares that cannot answer. The cursor's atlas
+grows only in its own prepare, which keeps every mask it handed out, and is
+replaced by a fresh one, ids and masks included, once it holds 4,096 rasters.
+The images join the cursor glyph's damage key, and the cursor patch takes its
+ink from them.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's
