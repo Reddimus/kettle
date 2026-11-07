@@ -873,6 +873,7 @@ impl App {
                     tr,
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
+                    blur_unavailable,
                     ws.settings_restart_pending,
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {

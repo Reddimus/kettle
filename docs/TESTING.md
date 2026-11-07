@@ -3111,12 +3111,16 @@ palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
 
 kettle-render checks that a live frame shows the configured background alpha,
 as an offscreen capture of the same frame does, on PreMultiplied and
-PostMultiplied surfaces. kettle-ui's native material tests report blur as
-unavailable only on a settled answer: not while a Wayland probe runs or waits
-to retry, and not once it has found blur. Settings tests cover the Window blur
-row's unavailable note in English and Spanish. Live acceptance still needs GNOME
-Wayland and X11 at 60% opacity with blur on, where the desktop shows through
-sharply and the note appears, and KDE/KWin, where blur works without the note.
+PostMultiplied surfaces. kettle-ui's native material tests check that blur
+counts as unavailable only on a settled answer: not while a Wayland probe runs
+or waits to retry, and not once it has found blur. Settings tests pin the Window blur
+row's unavailable note in English and Spanish and check that the footer drops
+the blur hint on the Window blur and Background opacity rows while blur is
+unavailable; a source guard checks that the Settings projection passes the
+window's blur state to both. Live acceptance still needs GNOME Wayland and X11
+at 60% opacity with blur on, where the desktop shows through sharply and the
+note appears, KDE Plasma on X11 and Windows 10, where the note appears, and
+KDE Plasma on Wayland, where blur works without the note.
 
 ### Linux header bar
 

@@ -1869,8 +1869,9 @@ as Windows does without its backdrop; Kettle's 99% Linux default keeps text
 readable until a user lowers it. The live window and an offscreen capture draw
 the same scene pass over a transparent clear, so no live-only layer changes
 the configured alpha. Settings replaces the Window blur description
-with an unavailable note once the probe has answered, in the projection that
-paint, hit tests and accessibility share.
+with an unavailable note once the probe has answered, and drops the footer's
+blur hint on the Window blur and Background opacity rows, in the projection
+that paint, hit tests and accessibility share.
 
 The shared tab band supplies painting, pointer hit tests, accessibility, ctl
 geometry, IME placement, docking and tear-off placement. Content and status

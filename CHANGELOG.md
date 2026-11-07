@@ -140,7 +140,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   99%. Wherever the session cannot blur (those Linux sessions, KDE Plasma on
   X11 included, and Windows without its system backdrop, such as Windows 10),
   Settings says "Not available in this session; opacity still applies." under
-  the Window blur switch, in English and Spanish.
+  the Window blur switch, in English and Spanish, and the footer of the
+  Window blur and Background opacity rows drops its hint about what blur
+  needs.
 
 - In Kettle's GNOME header bar the new-tab options button is drawn and named as
   the window's primary menu (≡, "Main menu"), as GNOME apps place it.

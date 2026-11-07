@@ -9,10 +9,14 @@ pub(super) fn language_change_pending(
     saved.resolve(os_locale) != running
 }
 
+/// `blur_unavailable` is the window's own answer
+/// (`NativeMaterial::blur_unavailable`), the one the Window blur row's
+/// description shows.
 pub(super) fn settings_footer_note(
     tr: &kettle_i18n::Translator,
     active_gpu: Option<&str>,
     focused_key: Option<&str>,
+    blur_unavailable: bool,
     restart_pending: bool,
     language_pending: bool,
     agent_previews: Option<kettle_i18n::Text>,
@@ -26,7 +30,9 @@ pub(super) fn settings_footer_note(
         Some("agent-display" | "agent-display-claude-code" | "agent-display-codex") => {
             notes.extend(agent_previews.map(|note| tr.text(note)));
         }
-        Some("window-blur" | "background-opacity") => {
+        // Where the session cannot blur, the Window blur row already says
+        // so; a hint about what blur needs would contradict it.
+        Some("window-blur" | "background-opacity") if !blur_unavailable => {
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
         Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
