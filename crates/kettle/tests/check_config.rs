@@ -168,3 +168,21 @@ fn inaccessible_default_config_is_an_error() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("i/o error:"));
 }
+
+#[test]
+fn check_config_labels_font_size_in_logical_pixels() {
+    use std::io::Write as _;
+    let root = kettle_test_support::private_tempdir("kettle-check-font-unit-");
+    let config_dir = root.path().join("kettle");
+    std::fs::create_dir(&config_dir).unwrap();
+    let mut file = create_config_file(&config_dir.join("config"));
+    file.write_all(b"font-size = 14\n").unwrap();
+    let output = check_config_command(root.path()).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let font = stdout
+        .lines()
+        .find(|line| line.starts_with("font:"))
+        .unwrap();
+    assert_eq!(font, "font:    JetBrainsMono Nerd Font 14px");
+}

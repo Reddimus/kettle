@@ -53,6 +53,55 @@ fn zoom_all_shares_the_font_size_arm() {
     );
 }
 
+/// Reset font size (Cmd/Ctrl+0) and zoom-normal-all return to the config's
+/// `font-size`, which is the platform default when the config sets none:
+/// 13 px on macOS and 14 px elsewhere, never a fixed 13. Both platforms'
+/// defaults are checked on every host.
+#[test]
+fn font_reset_returns_to_the_platform_default() {
+    use super::font_size_after;
+    use kettle_config::{Config, DEFAULT_FONT_SIZE, default_font_size};
+    for (macos, expected) in [(true, 13.0), (false, 14.0)] {
+        for reset in [Action::ResetFontSize, Action::ZoomNormalAll] {
+            assert_eq!(
+                font_size_after(&reset, 24.0, default_font_size(macos)),
+                expected,
+                "{reset:?} with macos={macos}"
+            );
+        }
+    }
+    let unset = Config::parse_text("");
+    assert_eq!(
+        font_size_after(&Action::ResetFontSize, 24.0, unset.font_size),
+        DEFAULT_FONT_SIZE
+    );
+    let set = Config::parse_text("font-size = 18\n");
+    assert_eq!(
+        font_size_after(&Action::ResetFontSize, 24.0, set.font_size),
+        18.0
+    );
+    for (step, expected) in [
+        (Action::IncreaseFontSize, 25.0),
+        (Action::ZoomInAll, 25.0),
+        (Action::DecreaseFontSize, 23.0),
+        (Action::ZoomOutAll, 23.0),
+        (Action::Copy, 24.0),
+    ] {
+        assert_eq!(font_size_after(&step, 24.0, 15.0), expected, "{step:?}");
+    }
+
+    // The window's font-size arm resets to the config, through this helper.
+    let src = production_source();
+    let arm = src
+        .split_once("| Action::ZoomNormalAll => {")
+        .expect("font-size arm")
+        .1
+        .split_once("Action::StartSearch =>")
+        .expect("end of the font-size arm")
+        .0;
+    assert!(arm.contains("font_size_after(&action, r.font_size(), self.cfg.font_size)"));
+}
+
 /// PTY rows, columns, and CSI 14 t pixels must be recomputed from the font
 /// metrics selected by the zoom transition, not the metrics that preceded
 /// it. A live renderer is too heavyweight for this unit suite, so pin the
@@ -146,6 +195,184 @@ fn resized_ignores_degenerate_size() {
         head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
         "the Resized handler must early-return on a 0-dimension size"
     );
+}
+
+#[test]
+fn queued_macos_startup_resizes_preserve_the_corrected_grid() {
+    use super::window_events::macos_resize_event_is_current;
+    use super::{
+        ContentBands, StartupMonitor, content_rect_for_with_strip, grid_dims_px, pty_pixel_size,
+        startup_surface_for, startup_surface_with_measured_titlebar,
+    };
+    use winit::dpi::PhysicalSize;
+
+    let cfg = kettle_config::Config {
+        window_width: Some(100),
+        window_height: Some(30),
+        ..Default::default()
+    };
+    for scale in [1.0, 1.5, 2.0] {
+        let cell = (7.8 * scale as f32, 16.25 * scale as f32);
+        let monitor = Some(StartupMonitor::from_display_points(1920, 1080, scale));
+        let estimated = 28.0 * scale as f32;
+        let measured = 32.0 * scale as f32;
+        let before = startup_surface_for(
+            &cfg,
+            cell,
+            ContentBands {
+                tab_bar_h: estimated,
+                ..Default::default()
+            },
+            monitor,
+        );
+        let after =
+            startup_surface_with_measured_titlebar(&cfg, before, estimated, measured, monitor);
+        let geometry = |size: (u32, u32)| {
+            let content = content_rect_for_with_strip(
+                size,
+                ContentBands {
+                    tab_bar_h: measured,
+                    ..Default::default()
+                },
+                cfg.tab_bar_pos,
+                cfg.status_bar,
+                cfg.tab_bar_width,
+            );
+            let grid = grid_dims_px((content.2, content.3), cell, (cfg.padding_x, cfg.padding_y));
+            (grid, pty_pixel_size(cell, grid))
+        };
+        let initial = geometry(after);
+        assert_eq!(initial.0, (100, 30));
+        assert_eq!(geometry(before).0, (100, 29));
+        if scale == 1.0 {
+            assert_eq!((before, after), ((805, 540), (805, 544)));
+            assert_eq!(initial.1, (780, 488));
+            assert_eq!(geometry(before).1, (780, 471));
+        }
+        // Renderer creation already read the corrected native size. AppKit's
+        // two queued frame notifications arrive afterwards, in their old order.
+        let current = PhysicalSize::new(after.0, after.1);
+        let mut changes = vec![initial];
+        for size in [before, after] {
+            if macos_resize_event_is_current(PhysicalSize::new(size.0, size.1), current) {
+                let next = geometry(size);
+                if changes.last() != Some(&next) {
+                    changes.push(next);
+                }
+            }
+        }
+        assert_eq!(
+            changes,
+            vec![initial],
+            "scale={scale}: no transient PTY reflow"
+        );
+    }
+}
+
+#[test]
+fn macos_resize_filter_accepts_live_changes_and_precedes_layout() {
+    use super::window_events::macos_resize_event_is_current;
+    use winit::dpi::PhysicalSize;
+
+    for (width, height) in [(805, 544), (900, 600), (640, 480), (1610, 1088)] {
+        let size = PhysicalSize::new(width, height);
+        assert!(macos_resize_event_is_current(size, size));
+        assert!(!macos_resize_event_is_current(
+            PhysicalSize::new(width, height - 4),
+            size,
+        ));
+        assert!(!macos_resize_event_is_current(
+            PhysicalSize::new(width + 4, height),
+            size,
+        ));
+    }
+    let source = production_source();
+    let resized = source
+        .split_once("WindowEvent::Resized(size) => {")
+        .unwrap()
+        .1
+        .split_once("WindowEvent::ScaleFactorChanged")
+        .unwrap()
+        .0;
+    let filter = resized
+        .find("!macos_resize_event_is_current(size, current)")
+        .unwrap();
+    assert!(resized[..filter].contains("#[cfg(target_os = \"macos\")]"));
+    assert!(resized[..filter].contains("size.width == 0 || size.height == 0"));
+    assert!(
+        resized[filter..]
+            .split_once("ws.dpi_resize_surface_suspended = false;")
+            .unwrap()
+            .0
+            .contains("return;")
+    );
+    assert!(filter < resized.find("ws.dpi_resize.on_event(").unwrap());
+    assert!(filter < resized.find("self.commit_window_resize(").unwrap());
+}
+
+#[test]
+fn macos_native_tab_resize_matches_live_view_instead_of_window_rectangle() {
+    use super::titlebar::macos_view_frame_size;
+    use super::window_events::macos_resize_event_is_current;
+    use winit::dpi::{LogicalSize, PhysicalSize};
+
+    // AppKit's window-derived content rectangle includes the native tab band;
+    // winit emits the smaller content view frame, including its pixel rounding.
+    let window_rectangle = LogicalSize::new(805.25, 544.25);
+    let live_view_frame = LogicalSize::new(805.25, 516.25);
+    let stale_view_frame = LogicalSize::new(805.25, 512.25);
+    for (scale, expected) in [
+        (1.0, (805, 516)),
+        (1.25, (1007, 645)),
+        (1.5, (1208, 774)),
+        (2.0, (1611, 1033)),
+    ] {
+        let final_event = PhysicalSize::new(expected.0, expected.1);
+        let window_size = window_rectangle.to_physical::<u32>(scale);
+        let current = macos_view_frame_size(live_view_frame, scale);
+        let stale_event = stale_view_frame.to_physical::<u32>(scale);
+        assert_eq!(current, final_event, "scale={scale}");
+        assert_ne!(current, window_size, "native tab height remains different");
+        assert!(!macos_resize_event_is_current(final_event, window_size));
+        assert!(macos_resize_event_is_current(final_event, current));
+        assert!(!macos_resize_event_is_current(stale_event, current));
+        assert!(!macos_resize_event_is_current(window_size, current));
+    }
+
+    // Keep the native query connected to the portable conversion above. Native
+    // windows cannot be created by this portable libtest regression.
+    let events = include_str!("window_events.rs");
+    let resized = events
+        .split_once("WindowEvent::Resized(size) => {")
+        .unwrap()
+        .1
+        .split_once("WindowEvent::ScaleFactorChanged")
+        .unwrap()
+        .0;
+    assert!(
+        resized.contains(".and_then(|window| titlebar::macos_view_size(window))"),
+        "resize acceptance must query the live view, not the window-derived rectangle"
+    );
+    assert!(!resized.contains("window.inner_size()"));
+    let titlebar = include_str!("titlebar.rs");
+    let query = titlebar
+        .split_once("pub(super) fn view_size(")
+        .unwrap()
+        .1
+        .split_once("pub(super) fn set_tabs(")
+        .unwrap()
+        .0;
+    for required in [
+        "with_window(window, |native, view|",
+        "view.frame()",
+        "macos_view_frame_size(",
+        "frame.size.width, frame.size.height",
+        "native.backingScaleFactor()",
+    ] {
+        assert!(query.contains(required), "native view query requires {required}");
+    }
+    assert!(!query.contains("unsafe"));
+    assert!(!query.contains("window_handle"));
 }
 
 /// Drift guard: pin the `should_zoom_font` policy. The

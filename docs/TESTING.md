@@ -1437,6 +1437,19 @@ skips separately from pixel acceptance. Picker interaction tests exercise
 all four modal projections without a native window.
 The emoji pixel cases also skip explicitly when no color emoji font is available.
 
+Font defaults are exercised for both platform choices on every host: 13 px
+on macOS and 14 px elsewhere. Startup tests load the bundled font to check
+fresh and maximized grids, including 1280-logical-pixel displays and the
+1440x900 non-macOS default-window smoke guard. The card-hover outline,
+inactive emoji/text and tab-control pixel tests run explicitly at both 13 px
+and 14 px even on macOS. `inactive_bundled_text_retains_contrast_after_raster_coverage`
+checks the real bundled mask at four subpixel phases without a GPU, on black
+and white backgrounds in both blend modes. The painted stems must retain
+4.5:1 contrast after coverage and output rounding. A separate headless test
+draws dark text after four spaces on white in Grid and Legacy at both sizes,
+including Legacy's half-pixel placement at 14 px. The portable check does not
+replace these readbacks.
+
 Portable renderer checks cover color-glyph dimming material, shader inputs and
 cache invalidation on focus or dimming changes. Animation stills tests use
 distinct APNG frame colors and fractional delays to verify that selection keeps
@@ -3016,6 +3029,30 @@ smaller bands, either explicit grid axis, and default monitor fitting at 1x and
 2x. A source guard requires both window constructors to correct once before
 renderer sizing and the first reveal. Run them offline with
 `cargo test -j 2 --locked --offline -p kettle-ui measured_startup_titlebar_`.
+The portable `queued_macos_startup_resizes_preserve_the_corrected_grid` and
+`macos_resize_filter_accepts_live_changes_and_precedes_layout` tests replay
+queued sizes after the native window has already changed. They cover the
+100x30 to 100x29 to 100x30 startup reflow at 1x, 1.5x and 2x, and require
+current native resize events to remain eligible for layout. On macOS, the
+default-window-size smoke must still report an initial and final 100x30 PTY,
+no corrective grid changes and zero child-observed SIGWINCH signals; the
+portable replay does not replace that native acceptance.
+`macos_native_tab_resize_matches_live_view_instead_of_window_rectangle` also
+covers automatic AppKit tabs, where the window-derived content rectangle is
+taller than the live NSView frame. It requires the final view-sized event to
+pass and stale view-sized events to fail at 1x, 1.25x, 1.5x and 2x, using winit's
+logical-to-physical rounding and the native window's backing scale. Source
+guards pin the live view query to the existing main-thread native borrow helper.
+This portable check does not replace live native-tab, grow/shrink, minimize,
+fullscreen or DPI acceptance.
+`native_tab_exit_completion_resumes_without_a_later_frame_notification` replays
+a held final resize and fullscreen completion after AppKit already restored the
+saved frame, so no later frame notification is available. It covers differing
+window/view rectangles at four backing scales, pending DPI changes and a missing
+view. The old window-sized event leaves the surface suspended; the live-view
+completion commits one layout and releases suspension. A source guard connects
+the replay to the completion producer and its platform fallbacks. Native
+fullscreen exit without a later resize remains a required live acceptance check.
 The live macOS check is
 `launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
 it requires an unlocked desktop and cannot run in the sandbox.
