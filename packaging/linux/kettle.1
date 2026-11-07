@@ -329,8 +329,9 @@ for in-window save/restore.
 .B \-\-restore
 Restore the previous session (windows, tabs, splits, working
 directories) for this launch \(em every saved window reopens at its
-(monitor-clamped) saved position. By default kettle opens a fresh window \(em a single
-pane in the default working directory, sized at about 164 columns (a 160x45
+(monitor-clamped) saved position. When restoration is disabled or no usable
+session is saved, kettle opens a fresh window \(em a single pane in the
+default working directory, sized at about 164 columns (a 160x45
 cell baseline fitted to the monitor) so agent TUIs such as Claude Code's diff
 panel work without configuration; see
 .B window-width
@@ -339,7 +340,8 @@ Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
 in the config. The default
 .B restore-session = auto
-follows the macOS keep-windows setting and opens fresh on other platforms.
+follows the macOS keep-windows setting, restores the previous session on Linux,
+and opens fresh on Windows.
 .TP
 .BI \-\-agent\-server \ MODE
 Enable kettle's agent control server for this launch, overriding the
@@ -398,14 +400,18 @@ and
 take precedence.
 .TP
 .B \-\-record\-raw\-input
-With
-.BR \-\-record ,
-capture RAW typed characters instead of redacted key tokens.
+While recording is enabled by CLI, environment or config, capture RAW
+printable key text instead of redacted tokens.
 .B WARNING:
 the trace can then contain typed passwords; leave it off unless you need
-byte-exact input. The window title shows
+literal key text. Named keys and modifier chords remain tokens. The window
+title shows
 .B [REC RAW]
-while active.
+while active. Also honored via
+.B KETTLE_RECORD_RAW_INPUT
+and the
+.B record\-raw\-input
+config key.
 .TP
 .BI \-\-accent \ COLOR
 Pin this window's chrome tint (peacock parity). Accepts hex forms
@@ -1105,15 +1111,15 @@ User config file (Linux). See CONFIGURATION above.
 .TP
 .I ~/.local/share/kettle/sessions/
 Session JSON (atomic write-then-rename) capturing every window:
-tabs, splits, working directories + window geometry. Always saved on exit
-in restore mode; replayed on the next launch only when restore is opted
-in via
-.B restore-session = true
-or the
-.B \-\-restore
-flag. The default
+tabs, splits, working directories + window geometry. Saved in restore mode
+and replayed on the next launch when restoration is enabled. The default
 .B restore-session = auto
-opens fresh on Linux and follows the keep-windows setting on macOS.
+restores on Linux, follows the keep-windows setting on macOS and opens fresh
+on Windows. Use
+.B restore-session = true
+to enable restoration explicitly, or
+.B \-\-restore
+for one launch.
 Failures are logged
 via
 .BR log::warn! .

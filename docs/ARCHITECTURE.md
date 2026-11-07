@@ -482,6 +482,10 @@ app.rs and all production modules, or include the specific owning module.
 `kettle-ui::clipboard` selects its text backend from the window's raw display
 handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
 (`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
+The text worker reports whether its provider supports PRIMARY. The native
+Wayland provider does not, so PRIMARY bypasses that worker in both directions
+and uses arboard on XWayland. Missing arboard leaves PRIMARY unavailable;
+CLIPBOARD errors do not switch backends.
 A compositor reports the selection to one data device per client (Mutter sends
 it only to the first one created), and the bridge already owns that device for
 drag and drop, so the clipboard shares it instead of binding a second device
@@ -515,8 +519,9 @@ but not its optional Wayland data-control backend, so those formats require X11
 or XWayland on Linux. With only native Wayland text available, bitmap paste
 logs that it is unavailable and falls through to text without materializing a
 file. Preview image copies also retain their arboard worker. Native Wayland
-text requires focus and PRIMARY requires the compositor's primary-selection
-protocol; no data-control extension is required.
+text requires focus; PRIMARY currently requires X11 or XWayland. Kettle does
+not implement the compositor's primary-selection protocol, and no data-control
+extension is required.
 
 ### Private clipboard images and video receipts
 
@@ -2473,7 +2478,7 @@ The blink attribute is retained by SGR, attribute operations, copies and
 reports; text continues to render steadily. Slow and fast blink share this
 protocol attribute. RIS and DECSTR reset the selected attribute extent.
 
-XTSAVE and XTRESTORE retain one value per implemented private mode. Unknown
+XTSAVE and XTRESTORE retain one snapshot per implemented private mode. Unknown
 modes, fixed modes, cursor-save actions and parser-owned synchronized updates
 are excluded. Repeated saves replace the prior value and resets clear the
 cache. Mode 41 explicitly negotiates the MoreFix tab rule: enabled wraps then
@@ -2484,7 +2489,11 @@ DECNKM (66) and DECKPAM/DECKPNM operate on the same keypad flag. DECBKM
 (67) selects BS or DEL for legacy Backarrow input, for both native keys and
 `send_keys`. Its explicit negotiation overrides the configured startup
 Backspace binding until RIS or DECSTR; Kitty and modifyOtherKeys sequences
-retain their protocol encodings. Mode save/restore uses the live state.
+retain their protocol encodings. Mode save/restore retains both the live
+Backarrow value and its negotiation flag. Saving and immediately restoring an
+unnegotiated terminal preserves the configured startup binding. The bounded
+mode cache stores Backarrow's two flags and MoreFix's optional negotiation
+state alongside ordinary boolean mode snapshots; RIS and DECSTR clear it.
 
 DECNCSM (95) is available at VT level 5. It suppresses the display-clear
 side effect of DECCOLM while retaining its cursor home and full-width/full-
@@ -2583,8 +2592,13 @@ General_Category=Mc mark after a measured base makes the cluster two cells;
 other positive-width scalars add their widths, capped at two, including Indic
 consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
 keep the first emoji's width, and regional-indicator pairs remain two cells.
-VS16 widens registered emoji sequences. An immediately following VS15 narrows
-a default emoji only if it has a registered text variation sequence.
+VS16 widens a registered variation base only when it immediately follows that
+base and the base contributes to the cluster width. An immediately following
+VS15 narrows a contributing two-cell registered variation base to one cell,
+including East Asian Wide bases. The accumulator retains the preceding width,
+also capped at two, so narrowing preserves other contributions such as Prepend
+number signs before applying the cluster's two-cell cap. Intervening scalars
+end selector eligibility even when they exceed the retained-text limit.
 
 An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
 the boundary context. Emoji modifier bases and Extended_Pictographic bases
@@ -2601,7 +2615,9 @@ text, without a synthetic selector or an orphan wide cell. Narrowing clears
 the spacer, backs up the cursor, cancels pending wrap and removes only the
 extra inserted cell in insertion mode. DECSLRM bounds all these operations.
 Cursor/grid edits and ignored Unicode controls end
-the append context; REP repeats
+the append context. The ASCII cluster shortcut commits its boundary and width
+state after writing the base, so insertion and bottom-margin scrolling cannot
+clear the newly opened cluster. REP repeats
 the complete retained cluster and leaves its final cell open to combining input.
 
 The `GRAPHEME` cell flag survives copying and reflow without enlarging the cell.
@@ -3254,8 +3270,8 @@ child. Executable and npm metadata checks inspect access ACLs through the
 open descriptor before accepting private-group write bits. Named users other
 than the owner or root, and named groups other than that private group, must
 have no effective write grant. The primary-group scan requires an exhaustive
-local passwd database: every `passwd:` NSS source must be `files`, `compat`,
-`systemd`, `altfiles`, or `extrausers`. Missing `nsswitch.conf` uses glibc's
+local passwd database: every `passwd:` NSS source must be `files`, `systemd`,
+`altfiles`, or `extrausers`; delegated `compat` enumeration is refused. Missing `nsswitch.conf` uses glibc's
 `files` default; unknown sources, duplicate passwd rules, malformed or
 unreadable configuration, and files over 64 KiB refuse the exception. A clean
 `getpwent` EOF alone cannot establish that NSS enumerated every account.
@@ -3825,6 +3841,14 @@ The wire is inert off macOS. Disabled hooks check a cached boolean and perform
 no context reads, clock queries, formatting or writes.
 
 ## Threading model
+
+The macOS profile menu reads an event-loop-owned inventory. One owned worker
+runs the bounded `Config::list_profiles` scan at startup, on config reload,
+and every five seconds to notice profile additions/removals that do not touch
+the active config. A one-slot request channel coalesces invalidations, and a
+single latest-result slot coalesces event-loop notifications. Redraw and pointer
+dispatch only construct a menu from the current cache. Shutdown disconnects the
+worker without waiting on a potentially stalled filesystem.
 
 The [2026-11-01 scaling diagnostics](SCALING-2026-11-01.md) retain the current
 per-pane readers, renderer-owned font systems and bounded search slices. The
@@ -5129,8 +5153,9 @@ text renderer or font dependency is added.
 Empty-space primary presses call `drag_window`; a second nearby press within
 400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
 presses are consumed. The 6 logical pixel inner resize band takes priority over
-header input and uses `drag_resize_window`, except when maximized, tiled,
-fullscreen or non-resizable. Native window controls activate on release over
+header input and uses `drag_resize_window`, except when maximized, fullscreen
+or non-resizable. Tiled windows retain the band because tiled state is not
+available. Native window controls activate on release over
 the originally pressed control. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.

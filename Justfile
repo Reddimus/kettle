@@ -456,7 +456,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: grapheme-tables-check bidi-tables-check conformance-adapter-self-test live-ui-helper-selftest native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: grapheme-tables-check bidi-tables-check conformance-adapter-self-test live-ui-helper-selftest ui-states-self-test native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -531,6 +531,11 @@ live-ui-helper-selftest:
 screenshot OUT=(TMPDIR / "kettle.png"):
     cargo run --release -p kettle -- --screenshot {{if os_family() == "windows" { "'" + replace(OUT, "'", "''") + "'" } else { quote(OUT) }}}
     @echo {{if os_family() == "windows" { "'wrote " + replace(OUT, "'", "''") + "'" } else { quote("wrote " + OUT) }}}
+
+# Headless output/baseline safety and injected UI geometry fixtures; no build or GUI.
+ui-states-self-test:
+    {{scope_python}} scripts/test-capture-ui-states.py
+    {{scope_python}} scripts/test-ui-wayland-environment.py
 
 # Capture Kettle's UI states (default, palette, settings, search, tabs, splits,
 # theme picker) as PNGs through `kettle ctl`, each from a fresh isolated Kettle

@@ -553,26 +553,27 @@ def main() -> int:
         )
         return 124
 
-    after_pids = process_ids(process_name)
-    append_pids(args.pid_log, after_pids - before_pids)
-    if args.idle_pid_file is not None and after_pids:
-        args.idle_pid_file.write_text(f"{min(after_pids)}\n", encoding="utf-8")
-    if launch.returncode != 0:
-        detail = launch.stderr.strip() or f"osascript exited {launch.returncode}"
-        print(f"{app_name} AppleScript launch failed: {detail}", file=sys.stderr)
-        return launch.returncode
-    launch_result = launch.stdout.strip().splitlines()[-1] if launch.stdout.strip() else ""
-    if args.app == "terminal":
-        match = re.search(r"window id (\d+)", launch_result)
-        window_id = match.group(1) if match else ""
-    else:
-        window_id = launch_result
-    if window_id:
-        with args.window_log.open("a", encoding="utf-8") as output:
-            output.write(f"{args.app}\t{window_id}\n")
+    if launch.returncode == 0:
+        launch_result = launch.stdout.strip().splitlines()[-1] if launch.stdout.strip() else ""
+        if args.app == "terminal":
+            match = re.search(r"window id (\d+)", launch_result)
+            window_id = match.group(1) if match else ""
+        else:
+            window_id = launch_result
 
-    deadline = time.monotonic() + args.timeout
     try:
+        if window_id:
+            with args.window_log.open("a", encoding="utf-8") as output:
+                output.write(f"{args.app}\t{window_id}\n")
+        after_pids = process_ids(process_name)
+        append_pids(args.pid_log, after_pids - before_pids)
+        if args.idle_pid_file is not None and after_pids:
+            args.idle_pid_file.write_text(f"{min(after_pids)}\n", encoding="utf-8")
+        if launch.returncode != 0:
+            detail = launch.stderr.strip() or f"osascript exited {launch.returncode}"
+            print(f"{app_name} AppleScript launch failed: {detail}", file=sys.stderr)
+            return launch.returncode
+        deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline:
             if marker.exists():
                 value = marker.read_text(encoding="utf-8", errors="replace").strip()
