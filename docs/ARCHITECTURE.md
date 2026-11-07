@@ -482,6 +482,10 @@ app.rs and all production modules, or include the specific owning module.
 `kettle-ui::clipboard` selects its text backend from the window's raw display
 handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
 (`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
+The text worker reports whether its provider supports PRIMARY. The native
+Wayland provider does not, so PRIMARY bypasses that worker in both directions
+and uses arboard on XWayland. Missing arboard leaves PRIMARY unavailable;
+CLIPBOARD errors do not switch backends.
 A compositor reports the selection to one data device per client (Mutter sends
 it only to the first one created), and the bridge already owns that device for
 drag and drop, so the clipboard shares it instead of binding a second device
@@ -515,8 +519,9 @@ but not its optional Wayland data-control backend, so those formats require X11
 or XWayland on Linux. With only native Wayland text available, bitmap paste
 logs that it is unavailable and falls through to text without materializing a
 file. Preview image copies also retain their arboard worker. Native Wayland
-text requires focus and PRIMARY requires the compositor's primary-selection
-protocol; no data-control extension is required.
+text requires focus; PRIMARY currently requires X11 or XWayland. Kettle does
+not implement the compositor's primary-selection protocol, and no data-control
+extension is required.
 
 ### Private clipboard images and video receipts
 
@@ -3254,8 +3259,8 @@ child. Executable and npm metadata checks inspect access ACLs through the
 open descriptor before accepting private-group write bits. Named users other
 than the owner or root, and named groups other than that private group, must
 have no effective write grant. The primary-group scan requires an exhaustive
-local passwd database: every `passwd:` NSS source must be `files`, `compat`,
-`systemd`, `altfiles`, or `extrausers`. Missing `nsswitch.conf` uses glibc's
+local passwd database: every `passwd:` NSS source must be `files`, `systemd`,
+`altfiles`, or `extrausers`; delegated `compat` enumeration is refused. Missing `nsswitch.conf` uses glibc's
 `files` default; unknown sources, duplicate passwd rules, malformed or
 unreadable configuration, and files over 64 KiB refuse the exception. A clean
 `getpwent` EOF alone cannot establish that NSS enumerated every account.
@@ -3400,6 +3405,63 @@ and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
 
+**Combining marks the font does not place.** harfrust positions a mark from
+the shaping font's GPOS anchors and, like HarfBuzz, places marks by combining
+class only for a font with no GPOS table at all. A font with GPOS but no
+anchor for a pair leaves the mark where its outline sits. On macOS the bundled
+JetBrains Mono lacks U+0324, so cosmic-text shapes `Z\u{324}\u{308}` in San
+Francisco, whose GPOS only kerns: its diaeresis stayed at lowercase height
+inside the capital. `mark_fallback` (`crates/kettle-render/src/mark_fallback.rs`)
+finds such marks once a row is shaped and laid out. A mark keeps its place
+when the shaper moved it (any offset), or when a mark-to-base,
+mark-to-ligature or mark-to-mark lookup that shaping applies anchors it: the
+lookups of the GPOS features harfrust applies by default (`abvm`, `blwm`,
+`curs`, `dist`, `kern`, `mark`, `mkmk`) and of any the user turns on, minus
+those turned off, in any script. When one of those lookups is contextual,
+every lookup counts, since the lookups it calls are not followed. `read-fonts`
+reads the table; a table that cannot be read leaves the marks alone. Each mark
+glyph is matched to a scalar of the cluster's canonical decomposition, through
+the font's cmap or, for marks GSUB replaced one for one (JetBrains Mono's
+`.case` forms), in canonical order when exactly as many remain; marks the
+shaper composed into the base (`A\u{301}` drawn as `Aacute`) are found by
+recomposing as harfrust does and are not counted. Its canonical
+combining class (from `icu_normalizer`) decides its place, as in
+HarfBuzz's fallback: above classes stack upward from the top of the base's
+ink, below classes downward from its bottom, 1/16 em apart except the
+attached classes, centred on the base's ink or aligned to its left or right
+edge, double marks centred on the end of its advance. A below mark never
+rises and an above mark drawn higher than needed sinks only halfway. Marks of
+other classes (overlays, nukta, virama, fixed-position classes), marks with
+no known scalar, emoji clusters and inkless bases such as a space are left
+alone, and a mark anchored to a mark that moved moves with it.
+
+The offsets are stored in ems per row in `pane_mark_shifts`, beside the row
+keys, so steady frames and zooms reuse them and only a reshaped row recomputes
+them. A row past the buffer's height, as while a pane shrinks ahead of its
+terminal, has no layout yet and is placed once a relayout gives it one.
+Outline bounds and GPOS answers are kept per glyph in a bounded `MarkCache`,
+so rows of the same marks ask each question once; it starts over when the
+feature settings change. The grid emit applies the offsets: the horizontal one
+through the glyph's `x_offset` before cell locking, the vertical one to the
+rasterized image in whole pixels rounded away from the base, and never more
+than a quarter line past the row, so a long stack cannot cover the rows around
+it. Legacy panes keep the shaper's placement, since glyphon draws most of
+their text.
+
+The focused block cursor's inverted glyph is a glyphon pass, and glyphon
+places only a whole shaped buffer, so over a moved mark the pane's copy would
+show beside an inverted one left where the font drew it. When the cursor's
+cell holds a moved mark, `build_pane` runs the grid emit for that one cell
+(`batching::moved_cell_images`), and the cursor pass draws those images, in
+the cursor's text colour, as glyphon custom glyphs instead of the shaped
+text. They have an atlas of their own (`cursor_marks`): glyphon asks again
+for every cached custom raster when an atlas grows and panics on `None`, and
+the shared atlas grows during prepares that cannot answer. The cursor's atlas
+grows only in its own prepare, which keeps every mask it handed out, and is
+replaced by a fresh one, ids and masks included, once it holds 4,096 rasters.
+The images join the cursor glyph's damage key, and the cursor patch takes its
+ink from them.
+
 **Built-in box drawing.** With `builtin-box-drawing` on (the default), Kettle
 draws box drawing (U+2500–U+257F), block elements (U+2580–U+259F), the
 Powerline separators U+E0B0–U+E0BF, the triangles U+25E2–U+25E5 and braille
@@ -3441,11 +3503,13 @@ Partly covered pixels (a shade, an arc's edge) therefore show only cursor
 colours, while decorations, images and pane outlines keep their original pass
 order. The off phase and IME restore normal pane ink. The cursor instance only
 looks up the slot the pane resolved for the same cell and never allocates: it
-is resolved after the pane instances are uploaded, when an allocation could evict a slot they
-still draw from. glyphon 0.12's own custom glyphs are not used: a growing glyphon atlas
-re-rasterizes every cached custom glyph through whichever `prepare` grew it,
+is resolved after the pane instances are uploaded, when an allocation could
+evict a slot they still draw from. Built-in masks do not use glyphon 0.12's
+custom glyphs: a growing glyphon atlas re-rasterizes every cached custom glyph
+through whichever `prepare` grew it,
 and panics when that prepare has no rasterizer, and Kettle's chrome renderers
-share one atlas.
+share one atlas. Moved-mark cursor images instead use the dedicated atlas
+described above.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's
@@ -5078,8 +5142,9 @@ text renderer or font dependency is added.
 Empty-space primary presses call `drag_window`; a second nearby press within
 400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
 presses are consumed. The 6 logical pixel inner resize band takes priority over
-header input and uses `drag_resize_window`, except when maximized, tiled,
-fullscreen or non-resizable. Native window controls activate on release over
+header input and uses `drag_resize_window`, except when maximized, fullscreen
+or non-resizable. Tiled windows retain the band because tiled state is not
+available. Native window controls activate on release over
 the originally pressed control. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.

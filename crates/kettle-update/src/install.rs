@@ -2984,7 +2984,7 @@ const LINUX_CHANGELOG_DIRECTORY: &str = "docs/changelog";
 #[cfg(target_os = "linux")]
 const LINUX_CHANGELOG_DESTINATION: &str = "share/doc/kettle/docs/changelog";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const LINUX_STATIC_INSTALL_MAP: &[(&str, &str, u32)] = &[
     ("install.sh", "share/kettle/install.sh", 0o755),
     ("install-unix.py", "share/kettle/install-unix.py", 0o755),
@@ -2992,6 +2992,16 @@ const LINUX_STATIC_INSTALL_MAP: &[(&str, &str, u32)] = &[
     ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
     ("README.md", "share/doc/kettle/README.md", 0o644),
     ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
+    (
+        "docs/licenses/tokyonight.nvim/LICENSE",
+        "share/doc/kettle/docs/licenses/tokyonight.nvim/LICENSE",
+        0o644,
+    ),
+    (
+        "docs/licenses/tokyonight.nvim/README.md",
+        "share/doc/kettle/docs/licenses/tokyonight.nvim/README.md",
+        0o644,
+    ),
     (
         "packaging/linux/kettle.desktop",
         "share/applications/kettle.desktop",
@@ -6658,6 +6668,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn linux_update_maps_tokyonight_notices_to_read_only_documents() {
+        for name in ["LICENSE", "README.md"] {
+            let source = format!("docs/licenses/tokyonight.nvim/{name}");
+            let destination = format!("share/doc/kettle/{source}");
+            assert!(
+                LINUX_STATIC_INSTALL_MAP.iter().any(|entry| {
+                    entry.0 == source && entry.1 == destination && entry.2 == 0o644
+                }),
+                "the Linux updater must publish {source} as {destination} with mode 0644"
+            );
+        }
+    }
+
+    #[test]
     fn archive_hardening_tests_have_no_test_only_extractor() {
         let source = include_str!("install.rs");
         for obsolete_helper in [
@@ -9003,6 +9027,16 @@ mod tests {
             ("NOTICE", b"notice".as_slice(), 0o644),
             ("README.md", b"readme".as_slice(), 0o644),
             ("CHANGELOG.md", b"changes".as_slice(), 0o644),
+            (
+                "docs/licenses/tokyonight.nvim/LICENSE",
+                include_bytes!("../../../docs/licenses/tokyonight.nvim/LICENSE").as_slice(),
+                0o755,
+            ),
+            (
+                "docs/licenses/tokyonight.nvim/README.md",
+                include_bytes!("../../../docs/licenses/tokyonight.nvim/README.md").as_slice(),
+                0o644,
+            ),
             ("docs/changelog/CHANGELOG-3.x.md", b"3.x".as_slice(), 0o644),
             ("docs/changelog/CHANGELOG-1.x.md", b"1.x".as_slice(), 0o644),
             ("docs/changelog/CHANGELOG-4.x.md", b"4.x".as_slice(), 0o755),
@@ -9353,7 +9387,21 @@ mod tests {
         // A real update always runs against an install that already verified,
         // because `install_update` first verifies provenance in
         // `prepare_update_transaction`.
-        seed_linux_install_provenance(&prefix);
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[
+                (
+                    "share/doc/kettle/docs/licenses/tokyonight.nvim/LICENSE",
+                    b"old-license",
+                    0o644,
+                ),
+                (
+                    "share/doc/kettle/docs/licenses/tokyonight.nvim/README.md",
+                    b"old-license-readme",
+                    0o644,
+                ),
+            ],
+        );
         let install = ManagedInstall {
             prefix: prefix.clone(),
             executable: prefix.join("bin/kettle"),
@@ -9463,6 +9511,14 @@ mod tests {
             ("README.md", "share/doc/kettle/README.md"),
             ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md"),
             (
+                "docs/licenses/tokyonight.nvim/LICENSE",
+                "share/doc/kettle/docs/licenses/tokyonight.nvim/LICENSE",
+            ),
+            (
+                "docs/licenses/tokyonight.nvim/README.md",
+                "share/doc/kettle/docs/licenses/tokyonight.nvim/README.md",
+            ),
+            (
                 "docs/changelog/CHANGELOG-0.x.md",
                 "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
             ),
@@ -9497,6 +9553,17 @@ mod tests {
                 .unwrap_or_else(|error| panic!("the fixture archive must ship {source}: {error}"));
             let got = fs::read(prefix.join(destination))
                 .unwrap_or_else(|error| panic!("{destination} was not installed: {error}"));
+            if source.starts_with("docs/licenses/tokyonight.nvim/") {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert_eq!(
+                    fs::metadata(prefix.join(destination))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o644
+                );
+            }
             assert_eq!(
                 got, want,
                 "{destination} does not hold the bytes the archive shipped for \
@@ -9771,6 +9838,14 @@ mod tests {
             ("NOTICE", "notice"),
             ("README.md", "readme"),
             ("CHANGELOG.md", "changes"),
+            (
+                "docs/licenses/tokyonight.nvim/LICENSE",
+                include_str!("../../../docs/licenses/tokyonight.nvim/LICENSE"),
+            ),
+            (
+                "docs/licenses/tokyonight.nvim/README.md",
+                include_str!("../../../docs/licenses/tokyonight.nvim/README.md"),
+            ),
             ("docs/changelog/CHANGELOG-0.x.md", "0.x"),
             ("docs/changelog/CHANGELOG-1.x.md", "1.x"),
             ("docs/changelog/CHANGELOG-2.x.md", "2.x"),

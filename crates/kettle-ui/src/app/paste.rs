@@ -2,26 +2,62 @@
 
 use super::*;
 
+/// Placement inputs shared by receipt activation and scrollback-pill precedence.
+pub(super) struct MediaPasteReceiptPlacement {
+    pub toast: Option<kettle_render::UpdateToastGeometry>,
+    pub notices: Vec<kettle_render::UpdateToastOverlay>,
+    pub receipt: kettle_render::MediaPasteReceiptOverlay,
+    pub completion: Option<kettle_render::CompletionOverlay>,
+    pub cell: (f32, f32),
+    pub text_cell: (f32, f32),
+}
+
+impl MediaPasteReceiptPlacement {
+    pub(super) fn geometry(&self) -> Option<kettle_render::MediaPasteReceiptGeometry> {
+        kettle_render::notification_geometry_with_notices(
+            self.toast,
+            &self.notices,
+            Some(&self.receipt),
+            self.completion.as_ref(),
+            self.cell,
+            self.text_cell.0,
+            self.text_cell.1,
+        )
+        .receipt
+    }
+}
+
 impl App {
     pub(super) fn media_paste_receipt_geometry(
         &self,
         ws: &WindowState,
     ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
         let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
-        kettle_render::notification_geometry_with_notices(
-            self.update_toast_projection(ws).map(|toast| toast.geometry),
-            &self
+        self.media_paste_receipt_placement(ws, receipt, completion)
+            .geometry()
+    }
+
+    pub(super) fn media_paste_receipt_placement(
+        &self,
+        ws: &WindowState,
+        receipt: kettle_render::MediaPasteReceiptOverlay,
+        completion: Option<kettle_render::CompletionOverlay>,
+    ) -> MediaPasteReceiptPlacement {
+        MediaPasteReceiptPlacement {
+            toast: self.update_toast_projection(ws).map(|toast| toast.geometry),
+            notices: self
                 .persistent_notices(ws)
                 .into_iter()
                 .map(|(_, notice)| notice)
-                .collect::<Vec<_>>(),
-            Some(&receipt),
-            completion.as_ref(),
-            self.menu_cell(ws),
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        )
-        .receipt
+                .collect(),
+            receipt,
+            completion,
+            cell: self.menu_cell(ws),
+            text_cell: (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+        }
     }
 
     pub(super) fn media_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
@@ -69,20 +105,9 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::notification_geometry_with_notices(
-            self.update_toast_projection(ws).map(|toast| toast.geometry),
-            &self
-                .persistent_notices(ws)
-                .into_iter()
-                .map(|(_, notice)| notice)
-                .collect::<Vec<_>>(),
-            Some(&receipt),
-            completion.as_ref(),
-            self.menu_cell(ws),
-            self.overlay_text_cell_width(ws),
-            self.overlay_text_line_height(ws),
-        )
-        .receipt
+        let Some(geometry) = self
+            .media_paste_receipt_placement(ws, receipt, completion)
+            .geometry()
         else {
             return false;
         };
@@ -462,6 +487,12 @@ impl App {
             })
             .collect();
         let paste = QueuedPaste {
+            accessibility_input: event
+                .filter(|_| prepare_input)
+                .map(|event| {
+                    AccessibilityInput::from_key(&event.logical_key, event.text.as_deref())
+                })
+                .unwrap_or_default(),
             key_presses: release_bytes
                 .iter()
                 .map(|((_, id), release)| (*id, release.clone()))
@@ -517,6 +548,7 @@ impl App {
         key_presses: &[(u64, TerminalKeyRelease)],
         prepare_input: bool,
         scroll_to_bottom: bool,
+        accessibility_input: AccessibilityInput,
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
         for (id, bytes) in targets {
@@ -527,6 +559,9 @@ impl App {
             if delivered.is_queued() && !bytes.is_empty() {
                 for (_, release) in key_presses.iter().filter(|(pane, _)| pane == id) {
                     release.mark_accepted();
+                }
+                if prepare_input {
+                    Self::apply_accessibility_input(ws, &[*id], accessibility_input);
                 }
             }
             if delivered.is_queued() && prepare_input {
@@ -565,6 +600,7 @@ impl App {
         }
         let recipients = self.broadcast_recipients(ws);
         self.queued_pastes.push_back(QueuedPaste {
+            accessibility_input: AccessibilityInput::default(),
             key_presses: Vec::new(),
             key_releases: Vec::new(),
             window: ws.seq,
@@ -624,6 +660,7 @@ impl App {
 
     pub(super) fn deliver_queued_paste(&mut self, el: &ActiveEventLoop, paste: QueuedPaste) {
         let QueuedPaste {
+            accessibility_input,
             window,
             target,
             receipt_pane,
@@ -689,6 +726,7 @@ impl App {
                     &key_presses,
                     prepare_input,
                     self.cfg.scroll_on_keystroke,
+                    accessibility_input,
                 );
                 for other in self.windows.values_mut() {
                     result = result.merge(Self::deliver_deferred_input(
@@ -697,6 +735,7 @@ impl App {
                         &key_presses,
                         prepare_input,
                         self.cfg.scroll_on_keystroke,
+                        accessibility_input,
                     ));
                 }
                 self.report_input_result(result);
@@ -1373,6 +1412,7 @@ pub(super) fn defer_authored_input(
                 },
             key_presses,
             key_releases,
+            accessibility_input,
             ..
         }),
         QueuedPasteContent::Input {
@@ -1396,6 +1436,7 @@ pub(super) fn defer_authored_input(
                 key_presses.push((*id, press.clone()));
             }
         }
+        accessibility_input.append(input.accessibility_input);
         for ((_, queued), (_, bytes)) in queued.iter_mut().zip(targets) {
             queued.extend_from_slice(bytes);
         }
@@ -1437,6 +1478,7 @@ pub(super) fn pop_ready_paste(
 /// A paste made while a clipboard image was still being encoded. It waits
 /// its turn so pastes land in the order they were made.
 pub(super) struct QueuedPaste {
+    pub(super) accessibility_input: AccessibilityInput,
     pub(super) window: u64,
     pub(super) target: Option<u64>,
     pub(super) receipt_pane: Option<u64>,

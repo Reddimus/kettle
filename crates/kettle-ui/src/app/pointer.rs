@@ -1935,12 +1935,17 @@ impl App {
     }
 
     fn scrollback_pill_at(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
-        self.pane_layout(ws, self.area(ws))
-            .into_iter()
-            .find_map(|(pane, partition)| {
-                let pill = self.scrollback_pill_for(ws, pane, partition.terminal)?;
-                rect_contains(pill.rect, px, py).then_some(pane)
-            })
+        scrollback_pill_hit(
+            self.pane_layout(ws, self.area(ws))
+                .into_iter()
+                .filter_map(|(pane, partition)| {
+                    Some((
+                        pane,
+                        self.scrollback_pill_for(ws, pane, partition.terminal)?,
+                    ))
+                }),
+            (px, py),
+        )
     }
 
     pub(super) fn press_scrollback_pill(
@@ -1956,25 +1961,53 @@ impl App {
             if completion_overlay_hit_test(completion.as_ref(), self.menu_cell(ws), (px, py)) {
                 return false;
             }
-            if let Some((receipt, completion)) = self.media_paste_receipt_projection(ws)
-                && kettle_render::notification_geometry(
-                    self.update_toast_projection(ws).map(|toast| toast.geometry),
-                    Some(&receipt),
-                    completion.as_ref(),
-                    self.menu_cell(ws),
-                    self.overlay_text_cell_width(ws),
-                    self.overlay_text_line_height(ws),
-                )
-                .receipt
-                .is_some_and(|geometry| geometry.hit_test(px, py).is_some())
-            {
-                return false;
-            }
-            if button == 0 {
-                Self::return_pane_to_live(ws, pane);
-            }
-            return true;
+            let receipt = self
+                .media_paste_receipt_projection(ws)
+                .map(|(receipt, completion)| {
+                    self.media_paste_receipt_placement(ws, receipt, completion)
+                });
+            return Self::press_scrollback_pill_with_receipt(
+                ws,
+                Some(pane),
+                receipt.as_ref(),
+                (px, py),
+                button,
+            );
         }
         false
+    }
+}
+
+pub(super) fn scrollback_pill_hit(
+    pills: impl IntoIterator<Item = (u64, kettle_render::ScrollbackPill)>,
+    point: (f32, f32),
+) -> Option<u64> {
+    pills
+        .into_iter()
+        .find_map(|(pane, pill)| rect_contains(pill.rect, point.0, point.1).then_some(pane))
+}
+
+impl App {
+    pub(super) fn press_scrollback_pill_with_receipt(
+        ws: &mut WindowState,
+        hit: Option<u64>,
+        receipt: Option<&MediaPasteReceiptPlacement>,
+        point: (f32, f32),
+        button: u8,
+    ) -> bool {
+        let Some(pane) = hit else {
+            return false;
+        };
+        if receipt.is_some_and(|placement| {
+            placement
+                .geometry()
+                .is_some_and(|geometry| geometry.hit_test(point.0, point.1).is_some())
+        }) {
+            return false;
+        }
+        if button == 0 {
+            Self::return_pane_to_live(ws, pane);
+        }
+        true
     }
 }
