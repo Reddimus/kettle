@@ -282,6 +282,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Screen readers echo typed words in the terminal again. A typed space used to
+  reach them only with the next character, so Orca read fragments such as
+  " e" aloud instead of the word. The cursor's row now keeps the blanks
+  before the cursor, so each typed character is its own text insertion.
+
 - A config notice no longer takes Enter and Escape from the terminal under
   it: a command typed while the notice is up runs, and Escape reaches the
   program in the pane. The notice answers those keys once a screen reader has
