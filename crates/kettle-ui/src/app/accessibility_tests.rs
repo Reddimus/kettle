@@ -1547,3 +1547,25 @@ fn config_notice_exposes_open_config_and_dismiss_with_the_shared_hit_rects() {
         }
     }
 }
+
+/// The terminal node reads the viewport through the screen-reader text, which
+/// keeps the blanks typed before the cursor, not the right-trimmed scrape
+/// that merged a typed space into the next character.
+#[test]
+fn terminal_node_text_keeps_the_blanks_typed_before_the_cursor() {
+    let src = production_source();
+    let tree = src
+        .split("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .nth(1)
+        .and_then(|rest| rest.split("fn accessibility_key").next())
+        .expect("accessibility_tree body");
+    let flat: String = tree.split_whitespace().collect();
+    assert!(
+        flat.contains("lettext=pane.term.accessible_text().unwrap_or_default();"),
+        "terminal text must come from Terminal::accessible_text"
+    );
+    assert!(
+        !tree.contains("screen_text("),
+        "the right-trimmed scrape drops a typed space until the next key"
+    );
+}
