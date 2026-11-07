@@ -8,6 +8,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Kettle draws box drawing, block elements, Powerline separators, the
+  triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
+  and kitty do. Lines are whole pixels sized from the font's underline, so
+  boxes, tables and tree views join across cells and rows without soft edges
+  or brighter dots at the joins, at any scale. Rounded corners, diagonals
+  and Powerline curves are smooth, shades are even tones instead of the
+  font's dither, and Powerline separators fill the row with no seam against
+  the next segment. `builtin-box-drawing = false`, or the new Text /
+  Rendering switch in Settings, keeps the font's glyphs.
+
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
   Konsole: brackets inside right-to-left text are mirrored and Arabic letters
@@ -295,6 +305,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- Combining marks that their font does not position sit on their letter. In
+  `Z̤̈`, which macOS draws in San Francisco because the bundled JetBrains Mono
+  lacks the diaeresis below, the upper diaeresis no longer overlaps the
+  capital and neither mark hangs off its right edge. Such marks stack above
+  or below the letter by combining class, as HarfBuzz places marks for fonts
+  without anchors; a stack too tall for the line stops a quarter line past
+  its row, and a block cursor on the letter inverts the marks where they now
+  sit. Marks the font places itself draw exactly as before.
 
 - Screen readers echo typed words in the terminal again. A typed space used to
   reach them only with the next character, so Orca read fragments such as

@@ -25,7 +25,11 @@ fn preview_lanes_draw_between_the_terminal_and_the_overlays() {
         .split_once("fn encode_scene_pass(")
         .expect("encode_scene_pass")
         .1;
-    let at = |needle: &str| pass.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    let pass: String = pass.split_whitespace().collect();
+    let at = |needle: &str| {
+        let normalized: String = needle.split_whitespace().collect();
+        pass.find(&normalized).unwrap_or_else(|| panic!("{needle}"))
+    };
     let terminal_text = at("self.text_renderer\n            .render(");
     let cursor = at("self.cursor_glyph_renderer\n                .render(");
     let lane_quads = at("self.lane_quads.draw(&mut pass);");

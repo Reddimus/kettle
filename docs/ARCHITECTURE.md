@@ -3296,6 +3296,7 @@ moving existing items.
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
 | `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
 | `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
 | `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
@@ -3398,6 +3399,112 @@ only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
 invalidate or stale-draw ordinary pane glyphs.
+
+**Combining marks the font does not place.** harfrust positions a mark from
+the shaping font's GPOS anchors and, like HarfBuzz, places marks by combining
+class only for a font with no GPOS table at all. A font with GPOS but no
+anchor for a pair leaves the mark where its outline sits. On macOS the bundled
+JetBrains Mono lacks U+0324, so cosmic-text shapes `Z\u{324}\u{308}` in San
+Francisco, whose GPOS only kerns: its diaeresis stayed at lowercase height
+inside the capital. `mark_fallback` (`crates/kettle-render/src/mark_fallback.rs`)
+finds such marks once a row is shaped and laid out. A mark keeps its place
+when the shaper moved it (any offset), or when a mark-to-base,
+mark-to-ligature or mark-to-mark lookup that shaping applies anchors it: the
+lookups of the GPOS features harfrust applies by default (`abvm`, `blwm`,
+`curs`, `dist`, `kern`, `mark`, `mkmk`) and of any the user turns on, minus
+those turned off, in any script. When one of those lookups is contextual,
+every lookup counts, since the lookups it calls are not followed. `read-fonts`
+reads the table; a table that cannot be read leaves the marks alone. Each mark
+glyph is matched to a scalar of the cluster's canonical decomposition, through
+the font's cmap or, for marks GSUB replaced one for one (JetBrains Mono's
+`.case` forms), in canonical order when exactly as many remain; marks the
+shaper composed into the base (`A\u{301}` drawn as `Aacute`) are found by
+recomposing as harfrust does and are not counted. Its canonical
+combining class (from `icu_normalizer`) decides its place, as in
+HarfBuzz's fallback: above classes stack upward from the top of the base's
+ink, below classes downward from its bottom, 1/16 em apart except the
+attached classes, centred on the base's ink or aligned to its left or right
+edge, double marks centred on the end of its advance. A below mark never
+rises and an above mark drawn higher than needed sinks only halfway. Marks of
+other classes (overlays, nukta, virama, fixed-position classes), marks with
+no known scalar, emoji clusters and inkless bases such as a space are left
+alone, and a mark anchored to a mark that moved moves with it.
+
+The offsets are stored in ems per row in `pane_mark_shifts`, beside the row
+keys, so steady frames and zooms reuse them and only a reshaped row recomputes
+them. A row past the buffer's height, as while a pane shrinks ahead of its
+terminal, has no layout yet and is placed once a relayout gives it one.
+Outline bounds and GPOS answers are kept per glyph in a bounded `MarkCache`,
+so rows of the same marks ask each question once; it starts over when the
+feature settings change. The grid emit applies the offsets: the horizontal one
+through the glyph's `x_offset` before cell locking, the vertical one to the
+rasterized image in whole pixels rounded away from the base, and never more
+than a quarter line past the row, so a long stack cannot cover the rows around
+it. Legacy panes keep the shaper's placement, since glyphon draws most of
+their text.
+
+The focused block cursor's inverted glyph is a glyphon pass, and glyphon
+places only a whole shaped buffer, so over a moved mark the pane's copy would
+show beside an inverted one left where the font drew it. When the cursor's
+cell holds a moved mark, `build_pane` runs the grid emit for that one cell
+(`batching::moved_cell_images`), and the cursor pass draws those images, in
+the cursor's text colour, as glyphon custom glyphs instead of the shaped
+text. They have an atlas of their own (`cursor_marks`): glyphon asks again
+for every cached custom raster when an atlas grows and panics on `None`, and
+the shared atlas grows during prepares that cannot answer. The cursor's atlas
+grows only in its own prepare, which keeps every mask it handed out, and is
+replaced by a fresh one, ids and masks included, once it holds 4,096 rasters.
+The images join the cursor glyph's damage key, and the cursor patch takes its
+ink from them.
+
+**Built-in box drawing.** With `builtin-box-drawing` on (the default), Kettle
+draws box drawing (U+2500–U+257F), block elements (U+2580–U+259F), the
+Powerline separators U+E0B0–U+E0BF, the triangles U+25E2–U+25E5 and braille
+(U+2800–U+28FF) itself, as Ghostty, WezTerm, kitty and Alacritty do, instead of
+taking them from the font, whose outlines overlap their neighbours at joins,
+fall short of tall rows and dither shades. `build_pane` records each such cell
+(its glyph, its colour after bold, dim, selection, search, contrast and
+unfocused-cursor resolution, and its device-pixel rectangle) and gives the
+shaper a blank in its place, so the font's glyph is never drawn, never joins a
+ligature and never chooses a fallback face for the row. A cell with combining
+marks or two columns keeps the font. `crates/kettle-render/src/builtin_glyphs.rs`
+rasterizes a coverage mask exactly the size of the cell's pixel rectangle, whose
+edges are snapped the way the rasterizer fills the cell's background quad
+(`pixel_edge`): first to the rasterizer's 1/256 px vertex grid, then to the
+pixels whose centres it covers. Neighbouring cells therefore tile at any
+fractional cell size, including edges just past a pixel centre. Light
+strokes are the face's underline thickness rounded up to whole device pixels
+(at least one) and heavy strokes twice that; each is placed by one integer rule
+from the cell's width or height alone, so lines in a column or a row land on
+the same pixels in every cell and join without seams or doubled antialiasing.
+Double lines are two light strokes with a light gap. Arcs, diagonals and
+Powerline curves are antialiased, and arcs meet their straight arms on pixel
+centres where the curve has the line's full coverage. Shades are even
+25/50/75% coverage. The masks share the glyph pipeline's mask atlas and its LRU
+slot cache under a `SlotKey::Builtin` key (glyph, cell pixel size, stroke
+widths), so steady frames rasterize nothing and a font, size, scale or
+cell-size change clears them with every other slot. `emit_pane_glyphs` emits
+them in both text renderer modes; Legacy panes otherwise drawn by glyphon get a
+glyph range of their own for them. A per-pane hash of the recorded cells joins
+the pane's text damage, since a change to them reshapes nothing. Under a focused
+block cursor the cell's glyph is drawn again in the cursor text colour from a
+one-instance cursor buffer in the glyph pipeline, at the place in the pass
+order where the glyphon cursor glyph would be, and only in the blink's on
+phase. During that phase, with no IME preedit, the normal pane instance for
+the cursor cell is omitted and disjoint scissors exclude its pixel rectangle
+from normal Grid and Legacy text, including neighbouring font overhang.
+The mask, cursor instance and exclusion share the same quantized cell bounds.
+Partly covered pixels (a shade, an arc's edge) therefore show only cursor
+colours, while decorations, images and pane outlines keep their original pass
+order. The off phase and IME restore normal pane ink. The cursor instance only
+looks up the slot the pane resolved for the same cell and never allocates: it
+is resolved after the pane instances are uploaded, when an allocation could
+evict a slot they still draw from. Built-in masks do not use glyphon 0.12's
+custom glyphs: a growing glyphon atlas re-rasterizes every cached custom glyph
+through whichever `prepare` grew it,
+and panics when that prepare has no rasterizer, and Kettle's chrome renderers
+share one atlas. Moved-mark cursor images instead use the dedicated atlas
+described above.
 
 Legacy panes containing emoji and inactive Legacy panes also use this glyph
 pipeline, retaining glyphon's
