@@ -75,6 +75,9 @@ const fn default_background_opacity(native_material_target: bool) -> f32 {
 pub const DEFAULT_BACKGROUND_OPACITY: f32 =
     default_background_opacity(cfg!(any(target_os = "macos", target_os = "windows")));
 
+/// Default `font-size`, in logical px.
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
 /// keep accidental huge/silly configs diagnostic instead of silently spawning
 /// an unusable window.
@@ -1430,6 +1433,7 @@ pub struct Config {
     pub font_family_bold: Option<String>,
     pub font_family_italic: Option<String>,
     pub font_family_bold_italic: Option<String>,
+    /// Logical px; [`DEFAULT_FONT_SIZE`] when the config sets none.
     pub font_size: f32,
     pub theme_name: String,
     pub theme: Theme,
@@ -3260,7 +3264,7 @@ impl Default for Config {
             font_family_bold: None,
             font_family_italic: None,
             font_family_bold_italic: None,
-            font_size: 13.0,
+            font_size: DEFAULT_FONT_SIZE,
             // TokyoNight Night is the shipped default theme. An unknown theme
             // name falls back to Catppuccin Mocha (`Theme::default`) instead.
             theme_name: "TokyoNight Night".to_string(),
