@@ -275,6 +275,10 @@ pub(crate) struct PendingCursorGlyph {
     pub(crate) color: Rgb,
     /// Pane rect `(x, y, w, h)`, narrowed to the cell for clustered text.
     pub(crate) clip: (f32, f32, f32, f32),
+    /// The grid pane's images of the cell when fallback mark placement moved
+    /// one of them (`batching::moved_cell_images`). The cursor pass then
+    /// draws these, in `color`, instead of the shaped `text`.
+    pub(crate) marks: Vec<super::batching::CellImage>,
     /// The cell's glyph when Kettle draws it itself (box drawing, blocks,
     /// Powerline, braille), in `color`. The glyph pipeline draws it from the
     /// same mask as the pane, so this pass prepares no glyphon text for it;
@@ -314,6 +318,9 @@ pub(crate) fn cursor_glyph_damage_key(
     cursor.clip.1.to_bits().hash(&mut hash);
     cursor.clip.2.to_bits().hash(&mut hash);
     cursor.clip.3.to_bits().hash(&mut hash);
+    for image in &cursor.marks {
+        (image.key, image.rect).hash(&mut hash);
+    }
     metrics.font_size.to_bits().hash(&mut hash);
     metrics.line_height.to_bits().hash(&mut hash);
     family.hash(&mut hash);
@@ -1266,6 +1273,7 @@ impl Renderer {
                         } else {
                             pv.terminal
                         },
+                        marks: Vec::new(),
                         builtin: cursor_builtin,
                     });
                 }
@@ -1377,6 +1385,7 @@ impl Renderer {
         // crossed row, `rows - 1` total).
         let mut start = 0usize;
         let mut grapheme_rows_to_validate = Vec::new();
+        let mut reshaped_rows = Vec::new();
         for row in 0..rows {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
             let runs = &spans[start.min(end)..end];
@@ -1403,6 +1412,7 @@ impl Renderer {
             }
             // This row reshapes — the buffer's glyph vertices will differ.
             text_changed = true;
+            reshaped_rows.push(row);
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
             for (i, (text, fg, bold, italic)) in runs[..shaped.runs].iter().enumerate() {
@@ -1499,6 +1509,30 @@ impl Renderer {
         text_changed |= replaced;
         if replaced {
             buf.shape_until_scroll(&mut self.font_system, false);
+            reshaped_rows.extend_from_slice(&grapheme_rows_to_validate);
+        }
+        // Fallback mark placement is a function of the shaped row alone, in
+        // ems, so it is redone only for the rows shaped above. A relayout
+        // (zoom, resize) keeps it. A row past the buffer's height has no
+        // layout yet; it is placed once a relayout gives it one.
+        let shifts = &mut self.pane_mark_shifts[idx];
+        shifts.resize_with(rows, Default::default);
+        for &row in &reshaped_rows {
+            shifts[row] = None;
+        }
+        self.mark_cache.use_features(&ff);
+        for (line, shifts) in buf.lines.iter().zip(shifts.iter_mut()) {
+            if shifts.is_none()
+                && let Some(layout) = line.layout_opt().and_then(|layout| layout.first())
+            {
+                *shifts = Some(super::mark_fallback::line_shifts(
+                    &layout.glyphs,
+                    line.text(),
+                    &mut self.font_system,
+                    &mut self.swash,
+                    &mut self.mark_cache,
+                ));
+            }
         }
         if cursor_focused
             && recolor_cursor_cell.is_some()
@@ -1559,6 +1593,30 @@ impl Renderer {
         {
             cursor.row_baseline = run.line_y - cvrow as f32 * ch;
         }
+        // A mark the grid moved in the cursor's cell: the cursor pass draws
+        // the pane's own images of that cell, where the pane drew them.
+        if cfg.text_renderer == TextRendererMode::Grid
+            && draw_cursor
+            && cursor_focused
+            && matches!(shape, EShape::Block)
+            && let Some(cursor) = self.pending_cursor_glyph.as_mut()
+            && let Ok(row) = usize::try_from(cvrow)
+        {
+            let column = vis(
+                cvrow,
+                cursor_wide_quad.map_or(cp.column.0, |(column, _)| column),
+            );
+            cursor.marks = super::batching::moved_cell_images(
+                buf,
+                &self.pane_mark_shifts[idx],
+                (row, column),
+                (ox, oy),
+                cw,
+                &mut self.font_system,
+                &mut self.swash,
+                &mut self.glyph_char_starts,
+            );
+        }
         // Return the scratch (with its grown String buffers) to the pool for the
         // next frame/pane.
         self.span_scratch = spans;
@@ -1596,6 +1654,7 @@ impl Renderer {
             gpu,
             cell_w,
             pane_bidi,
+            pane_mark_shifts,
             pane_builtins,
             builtin_strokes,
             builtin_mask,
@@ -1646,6 +1705,7 @@ impl Renderer {
                 emit_cell_locked_glyphs(
                     out,
                     buf,
+                    pane_mark_shifts.get(i).map_or(&[], Vec::as_slice),
                     (ox, oy),
                     cw,
                     if cfg.text_renderer == TextRendererMode::Grid {

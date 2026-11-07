@@ -754,6 +754,8 @@ impl App {
         ws.reuse_pane_snapshots_once = false;
         match ev {
             #[cfg(target_os = "macos")]
+            UserEvent::ProfilesReady => {}
+            #[cfg(target_os = "macos")]
             UserEvent::DockReopen
             | UserEvent::DockReopenReady(_)
             | UserEvent::DockReopenFinished(_) => {}

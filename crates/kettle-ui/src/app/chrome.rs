@@ -142,9 +142,8 @@ impl App {
         } else {
             (0.0, 0.0)
         };
-        let sw = (band.2 - left_controls - right_controls).max(0.0);
-        let x0 = band.0 + left_controls;
-        let tab_lane = (x0, band.1, sw, band.3);
+        let tab_lane = horizontal_tab_lane(band, (left_controls, right_controls));
+        let (x0, _, sw, _) = tab_lane;
         let y = band.1;
         let is_vertical = self.cfg.tab_bar_pos.is_vertical();
         // Left/Right strips route through a separate vertical-stacked path;
@@ -203,37 +202,19 @@ impl App {
             .window
             .as_ref()
             .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
-        let (arrow_rect, plus_rect, button_w) = if ws.linux_titlebar {
-            linux_header_tab_controls(tab_lane, scale, new_tab_dropdown_visible())
-        } else {
-            horizontal_new_tab_controls(tab_lane, scale, new_tab_dropdown_visible())
-        };
-        let strip = tab_segment_strip_width(sw, button_w, 0.0);
-        // Tabs divide the strip evenly and fill the bar; once they would
-        // shrink below `tab_min_width` the bar overflows and — when `scroll_tabbar`
-        // — scrolls with `‹ ›` arrows, showing only whole tabs (active kept in
-        // view). See `tab_strip_layout`. Scroll arrows are `height`-wide squares.
         let active = ws.mux.active;
-        let layout = if ws.macos_titlebar_tabs {
-            titlebar_tab_layout(
-                n,
-                active,
-                (strip, button_w, x0),
-                height,
-                self.cfg.tab_min_width,
-                self.cfg.scroll_tabbar,
-            )
-        } else {
-            tab_strip_layout(
-                n,
-                active,
-                strip,
-                button_w,
-                height,
-                self.cfg.tab_min_width,
-                self.cfg.scroll_tabbar,
-            )
-        };
+        let HorizontalTabGeometry {
+            arrow_rect,
+            plus_rect,
+            strip,
+            layout,
+        } = horizontal_tab_geometry(
+            tab_lane,
+            scale,
+            (ws.linux_titlebar, ws.macos_titlebar_tabs),
+            (n, active),
+            &self.cfg,
+        );
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -1243,4 +1224,90 @@ pub(super) fn tab_strip_visible(
             TabBarMode::Auto => tabs > 1 || dock,
             TabBarMode::Always => true,
         }
+}
+
+pub(super) fn horizontal_tab_lane(band: Rect, reservations: (f32, f32)) -> Rect {
+    (
+        band.0 + reservations.0,
+        band.1,
+        (band.2 - reservations.0 - reservations.1).max(0.0),
+        band.3,
+    )
+}
+
+pub(super) struct HorizontalTabGeometry {
+    pub arrow_rect: Rect,
+    pub plus_rect: Rect,
+    pub strip: f32,
+    pub layout: TabStripLayout,
+}
+
+/// The actual painted horizontal strip, also used to anchor a torn carrier.
+pub(super) fn horizontal_tab_geometry(
+    lane: Rect,
+    scale: f32,
+    header: (bool, bool),
+    tabs: (usize, usize),
+    cfg: &Config,
+) -> HorizontalTabGeometry {
+    let (linux, titlebar) = header;
+    let (n, active) = tabs;
+    let (arrow_rect, plus_rect, button_w) = if linux {
+        linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
+    } else {
+        horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
+    };
+    let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+    let layout = if titlebar {
+        titlebar_tab_layout(
+            n,
+            active,
+            (strip, button_w, lane.0),
+            lane.3,
+            cfg.tab_min_width,
+            cfg.scroll_tabbar,
+        )
+    } else {
+        tab_strip_layout(
+            n,
+            active,
+            strip,
+            button_w,
+            lane.3,
+            cfg.tab_min_width,
+            cfg.scroll_tabbar,
+        )
+    };
+    HorizontalTabGeometry {
+        arrow_rect,
+        plus_rect,
+        strip,
+        layout,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn tear_off_destination_tab(
+    cfg: &Config,
+    band: Rect,
+    header: (bool, bool),
+    scale: f32,
+    buttons: &crate::window_buttons::ButtonLayout,
+) -> Rect {
+    if cfg.tab_bar_pos.is_vertical() || !header.1 {
+        return band;
+    }
+    let reservations = if header.0 {
+        buttons.reservations(band.2, band.3)
+    } else {
+        (0.0, 0.0)
+    };
+    let lane = horizontal_tab_lane(band, reservations);
+    let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+    (
+        lane.0 + geometry.layout.xs[0].unwrap_or(0.0),
+        band.1,
+        geometry.layout.last_width,
+        band.3,
+    )
 }
