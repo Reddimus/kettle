@@ -571,34 +571,42 @@ fn fresh_window_grid(
     (surface, grid)
 }
 
-/// The grids the docs quote for a fresh window, measured with the shipped
-/// font and padding rather than the sizing baseline: 164x44 cells on a
-/// 1080p monitor and 154 columns on a 1366x768 laptop, past the 144 at which
-/// Claude Code's diff panel opens. A change to the default font or padding
-/// fails here, so the docs move with it; at 14 px with 12 px padding the
-/// laptop would get 143 columns and lose the panel.
+/// The grids the docs quote for a fresh window on each platform, measured
+/// with the shipped font and padding rather than the sizing baseline. Both
+/// get 164x44 cells on a 1080p monitor. On a 1366x768 laptop macOS's 13 px
+/// gets 154 columns, past the 144 at which Claude Code's diff panel opens;
+/// the 15 px default elsewhere gets 133 there, and needs the window maximized
+/// (`the_default_font_fits_144_columns_across_a_1366_px_screen`). A change to
+/// either default font or the padding fails here, so the docs move with it.
 #[test]
 fn a_default_window_at_the_shipped_font_holds_the_documented_grid() {
-    use super::{ContentBands, STARTUP_GEOMETRY_CELL, StartupMonitor, startup_surface_for};
-    let size = kettle_config::DEFAULT_FONT_SIZE;
-    let grid = |monitor, scale| {
-        fresh_window_grid(size, STARTUP_GEOMETRY_CELL, monitor, scale).1
+    use super::{
+        ContentBands, STARTUP_GEOMETRY_CELL, StartupMonitor, startup_geometry_cell,
+        startup_surface_for,
     };
-    assert_eq!(grid((1920.0, 1080.0), 1.0), (164, 44));
-    assert_eq!(grid((1366.0, 768.0), 1.0), (154, 38));
-    for scale in [1.25, 2.0] {
-        let (cols, rows) = grid((1366.0, 768.0), scale);
-        assert!(
-            cols >= 144 && rows >= 33,
-            "{cols}x{rows} on a 1366x768 laptop at {scale}x"
-        );
+    use kettle_config::default_font_size;
+    for (macos, laptop, hidpi_laptop) in [
+        (true, (154, 38), [(155, 38), (156, 39)]),
+        (false, (133, 33), [(134, 33), (135, 34)]),
+    ] {
+        let size = default_font_size(macos);
+        let grid = |monitor, scale| {
+            fresh_window_grid(size, startup_geometry_cell(size), monitor, scale).1
+        };
+        assert_eq!(grid((1920.0, 1080.0), 1.0), (164, 44), "{size} px");
+        assert_eq!(grid((1366.0, 768.0), 1.0), laptop, "{size} px");
+        for (scale, expected) in [1.25, 2.0].into_iter().zip(hidpi_laptop) {
+            assert_eq!(grid((1366.0, 768.0), scale), expected, "{size} px at {scale}x");
+        }
     }
 
-    // The helper lays out the surface the window constructors really use.
+    // The helper lays out the surface this target's window constructors use.
     let cfg = kettle_config::Config {
         macos_titlebar_style: kettle_config::MacosTitlebarStyle::Native,
         ..Default::default()
     };
+    let size = kettle_config::DEFAULT_FONT_SIZE;
+    assert_eq!(cfg.font_size, size);
     for monitor in [(1920.0, 1080.0), (1366.0, 768.0)] {
         for scale in [1.0, 2.0] {
             let cell = kettle_render::StartupFonts::load(&cfg, scale as f32).cell;
@@ -614,6 +622,60 @@ fn a_default_window_at_the_shipped_font_holds_the_documented_grid() {
             );
         }
     }
+}
+
+/// 15 px is the largest whole-pixel default whose bundled-font cell still
+/// fits the 144 columns Claude Code's diff panel opens at across a 1366 px
+/// wide screen (a maximized laptop window) with the default padding: its 9 px
+/// cell gives (1366 - 24) / 9 = 149 columns, where 16 px (9.6 px) would give
+/// 139. macOS's 13 px (7.8 px) gives 172.
+#[test]
+fn the_default_font_fits_144_columns_across_a_1366_px_screen() {
+    use super::{ContentBands, content_rect_for_with_strip, grid_dims_px};
+    use kettle_config::default_font_size;
+    let grid = |font_size: f32| {
+        let cfg = kettle_config::Config {
+            font_size,
+            ..Default::default()
+        };
+        let cell = kettle_render::StartupFonts::load(&cfg, 1.0).cell;
+        let area = content_rect_for_with_strip(
+            (1366, 768),
+            ContentBands::default(),
+            cfg.tab_bar_pos,
+            cfg.status_bar,
+            cfg.tab_bar_width,
+        );
+        let grid = grid_dims_px((area.2, area.3), cell, (cfg.padding_x, cfg.padding_y));
+        (cell, grid.0)
+    };
+    let (cell, cols) = grid(default_font_size(false));
+    assert!(
+        (cell.0 - 9.0).abs() < 1e-3 && (cell.1 - 18.75).abs() < 1e-3,
+        "the bundled font at 15 px: {cell:?}"
+    );
+    assert_eq!(cols, 149);
+    assert!(
+        grid(default_font_size(false) + 1.0).1 < 144,
+        "a larger default would lose the panel"
+    );
+    assert_eq!(grid(default_font_size(true)).1, 172);
+}
+
+/// The live default-window smoke mirrors the platform default font sizes to
+/// size its expectations; keep its copy in step.
+#[test]
+fn the_default_window_smoke_mirrors_the_default_font_sizes() {
+    use kettle_config::default_font_size;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/check-live-ui-smoke.py");
+    let script = std::fs::read_to_string(&path).expect("check-live-ui-smoke.py");
+    let mirror = format!(
+        "return {:?} if system == \"Darwin\" else {:?}",
+        default_font_size(true),
+        default_font_size(false)
+    );
+    assert!(script.contains(&mirror), "{} must say {mirror}", path.display());
 }
 
 /// The sizing cell is 8x16 at the 13 px font and grows with a larger

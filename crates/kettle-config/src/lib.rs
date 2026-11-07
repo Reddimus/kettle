@@ -75,8 +75,21 @@ const fn default_background_opacity(native_material_target: bool) -> f32 {
 pub const DEFAULT_BACKGROUND_OPACITY: f32 =
     default_background_opacity(cfg!(any(target_os = "macos", target_os = "windows")));
 
-/// Default `font-size`, in logical px.
-pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+/// Default `font-size`, in logical px, for macOS (`true`) or any other target.
+///
+/// macOS terminals size text in points that are already logical px, and 13 is
+/// the usual default there. GNOME Terminal and Windows Terminal size it in
+/// points at 96 DPI, so their 11 pt and 12 pt defaults are about 14.7 px and
+/// 16 px, and 13 px reads small beside them. 15 px is the largest whole-pixel
+/// size whose cell (9 px wide in the bundled font) still fits 144 columns, the
+/// width at which Claude Code's diff panel opens, across a 1366 px wide screen
+/// with the default padding.
+pub const fn default_font_size(macos: bool) -> f32 {
+    if macos { 13.0 } else { 15.0 }
+}
+
+/// Default `font-size` for the current target; see [`default_font_size`].
+pub const DEFAULT_FONT_SIZE: f32 = default_font_size(cfg!(target_os = "macos"));
 
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
 /// keep accidental huge/silly configs diagnostic instead of silently spawning
@@ -9685,6 +9698,55 @@ cell-height = 1.2\n";
                 "docs/kettle.example.config must show {key} = 12"
             );
         }
+    }
+
+    /// macOS keeps the 13 px its terminals use. Linux, the BSDs and Windows
+    /// size terminal text in points at 96 DPI (GNOME Terminal's 11 pt is about
+    /// 14.7 px, Windows Terminal's 12 pt is 16 px), where 13 px read small, so
+    /// they default to 15 px. Both values are checked on every host; the
+    /// running target's is the one a config without `font-size` gets.
+    #[test]
+    fn default_font_size_follows_the_platform() {
+        assert_eq!(default_font_size(true), 13.0);
+        assert_eq!(default_font_size(false), 15.0);
+        assert_eq!(
+            DEFAULT_FONT_SIZE,
+            default_font_size(cfg!(target_os = "macos"))
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(DEFAULT_FONT_SIZE, 13.0);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(DEFAULT_FONT_SIZE, 15.0);
+        assert_eq!(Config::default().font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(Config::parse_text("").font_size, DEFAULT_FONT_SIZE);
+        assert_eq!(
+            Config::parse_text("font-size = big\n").font_size,
+            DEFAULT_FONT_SIZE,
+            "a malformed size keeps the platform default"
+        );
+    }
+
+    /// The reference and the example config state both defaults, so a reader
+    /// on either platform finds the size they will get.
+    #[test]
+    fn default_font_size_is_documented_for_each_platform() {
+        let (macos, other) = (default_font_size(true), default_font_size(false));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let reference = std::fs::read_to_string(root.join("docs/CONFIG.md")).expect("CONFIG.md");
+        let row = format!("| `font-size` | float | `{macos}` macOS; `{other}` elsewhere |");
+        assert!(
+            reference.lines().any(|line| line.starts_with(&row)),
+            "docs/CONFIG.md must document both font-size defaults: {row}"
+        );
+        let example = std::fs::read_to_string(root.join("docs/kettle.example.config"))
+            .expect("example config");
+        let note = format!(
+            "# Logical px. Defaults: {macos} on macOS; {other} on Linux, the BSDs and Windows."
+        );
+        assert!(
+            example.lines().any(|line| line == note),
+            "docs/kettle.example.config must state both font-size defaults: {note}"
+        );
     }
 
     /// A NUL in a value would end the string a platform API reads: in a

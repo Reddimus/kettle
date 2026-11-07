@@ -8891,10 +8891,18 @@ def live_helper_selftest() -> None:
         }
         width, cols = startup_geometry_metrics(geometry)
         assert width == 1304.0 and cols == 102
-        assert default_startup_target_width(geometry) == 1304.0
+        assert default_startup_target_width(geometry, "Darwin") == 1304.0
         geometry["surface"]["width"] += 2.0 * scale
         assert startup_geometry_metrics(geometry)[0] > 1305.0
-    assert default_startup_target_width({"padding": {"x": 8}}) == 1296.0
+    assert default_startup_target_width({"padding": {"x": 8}}, "Darwin") == 1296.0
+    # The 15 px default elsewhere scales the 8 px cell; kettle-ui ceils the
+    # 1500.92 px target to a 1501 px window, inside the 1 px tolerance.
+    for system in ("Linux", "FreeBSD"):
+        target = default_startup_target_width({"padding": {"x": 12.0}}, system)
+        assert math.ceil(target) == 1501 and target + 1.0 > 1501, target
+    assert default_font_size("Darwin") == 13.0 and default_font_size("Linux") == 15.0
+    assert agent_grid_monitor("Darwin") == (1366, 768)
+    assert agent_grid_monitor("Linux") == (1600, 900)
     for padding in (-1.0, float("nan")):
         try:
             default_startup_target_width({"padding": {"x": padding}})
@@ -16014,17 +16022,39 @@ def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
 
 
 # kettle-ui's STARTUP_DEFAULT_COLS and STARTUP_GEOMETRY_CELL: a fresh window
-# with no size set is 160 baseline cells of 8 logical px, plus its padding.
+# with no size set is 160 baseline cells plus its padding. The cell is 8
+# logical px wide at macOS's 13 px default font and scales with the 15 px
+# default elsewhere (kettle_config::default_font_size).
 STARTUP_DEFAULT_COLS = 160
-STARTUP_BASELINE_CELL_W = 8.0
 
 
-def default_startup_target_width(geometry: Dict[str, object]) -> float:
+def default_font_size(system: str) -> float:
+    """kettle_config::default_font_size for a platform.system() name."""
+    return 13.0 if system == "Darwin" else 15.0
+
+
+def default_startup_target_width(
+    geometry: Dict[str, object], system: Optional[str] = None
+) -> float:
     """The logical width a fresh window aims for before the monitor fit."""
     padding = float(geometry["padding"]["x"])
     if not math.isfinite(padding) or padding < 0:
         raise ValueError("invalid window padding")
-    return STARTUP_DEFAULT_COLS * STARTUP_BASELINE_CELL_W + 2.0 * padding
+    system = platform.system() if system is None else system
+    cell_w = 8.0 * default_font_size(system) / 13.0
+    return STARTUP_DEFAULT_COLS * cell_w + 2.0 * padding
+
+
+def agent_grid_monitor(system: Optional[str] = None) -> Tuple[int, int]:
+    """The smallest monitor, in logical px, whose 90 % x 85 % fresh window
+    must hold the 144x33 cells agent TUIs want at the shipped font.
+
+    At macOS's 13 px a 1366x768 laptop gets 154x38. At the 15 px default
+    elsewhere its 1229 px leave 133 columns; 1600x900 gives 157x37, with
+    GNOME's header band.
+    """
+    system = platform.system() if system is None else system
+    return (1366, 768) if system == "Darwin" else (1600, 900)
 
 
 
@@ -16137,11 +16167,14 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
 
     default = launch("default", [])
     monitor = default["monitor"]
-    large_monitor = monitor and float(monitor["width"]) >= 1366 and float(monitor["height"]) >= 768
+    need_w, need_h = agent_grid_monitor()
+    large_monitor = (
+        monitor and float(monitor["width"]) >= need_w and float(monitor["height"]) >= need_h
+    )
     if large_monitor and (default["cols"] < 144 or default["rows"] < 33):
         raise SystemExit(
             "default-window-size smoke: a fresh window must open with at least 144x33 cells on a "
-            f"monitor >= 1366x768 logical px (got {default['cols']}x{default['rows']})"
+            f"monitor >= {need_w}x{need_h} logical px (got {default['cols']}x{default['rows']})"
         )
     surface_w, _ = startup_geometry_metrics(default)
     target_w = default_startup_target_width(default)

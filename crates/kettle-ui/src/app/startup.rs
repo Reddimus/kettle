@@ -79,18 +79,21 @@ const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
 /// value a half-specified `window-width`/`window-height` fills its other axis
 /// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
 /// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
-/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at the
-/// default font and padding) left every fresh window too narrow for the tools
-/// Kettle targets. 160x45 baseline cells and the default 12 px padding are 1304x744
-/// logical px, 1304x772 under macOS's titlebar tab band: about 164x44 real
-/// cells at the default 13 px font (7.8x16.25 px) on a 1080p monitor.
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 99 columns at
+/// macOS's default font and padding) left every fresh window too narrow for
+/// the tools Kettle targets. On macOS, 160x45 baseline cells and the default
+/// 12 px padding are 1304x744 logical px, 1304x772 under the titlebar tab
+/// band: about 164x44 real cells at the 13 px font (7.8x16.25 px) on a 1080p
+/// monitor. Elsewhere the 15 px default (9x18.75 px cells) scales the
+/// baseline to 1501x855 px, the same 164x44 cells.
 pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
 pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
 /// The default window never covers more of the monitor than this: a fixed
 /// target rather than a monitor fraction keeps a 3440-wide ultrawide from
 /// opening a 285-column canvas, and the fit keeps a 1366x768 laptop honest
-/// (its 90 % is 1229 px, 154 columns at the default font and padding). There
-/// is no floor on purpose: a monitor smaller than the target wins.
+/// (its 90 % is 1229 px: 154 columns at macOS's 13 px font and padding, 133
+/// at the 15 px default elsewhere, which needs a maximized window for 144).
+/// There is no floor on purpose: a monitor smaller than the target wins.
 pub(super) const STARTUP_MONITOR_WIDTH_FRACTION: f64 = 0.90;
 pub(super) const STARTUP_MONITOR_HEIGHT_FRACTION: f64 = 0.85;
 

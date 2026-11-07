@@ -121,10 +121,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   chip), the new-tab +, the options ▾, GNOME's header ≡ and its window buttons
   are drawn larger, inside the same click targets.
 
+- Text is larger by default on Linux, the BSDs and Windows: `font-size` is
+  15 px there (was 13), close to GNOME Terminal's 11 pt and Windows
+  Terminal's 12 pt. macOS keeps 13 px. A fresh window grows with the font to
+  keep about 164x44 cells on a 1080p monitor. A maximized window on a 1366 px
+  wide laptop fits 149 columns, past the 144 at which Claude Code's diff
+  panel opens; a fresh window there stays within 90 % of the screen and fits
+  133. Reset font size returns to the platform default, or to the configured
+  `font-size`.
+
 - The terminal is inset 12 px from the window edge by default (was 8).
   `window-padding-x` and `window-padding-y` still set it. A fresh window
   grows by the extra padding to keep its grid where the monitor has room:
-  about 164 columns on a 1080p monitor and 154 on a 1366 px wide laptop.
+  about 164 columns on a 1080p monitor and, at macOS's 13 px font, 154 on a
+  1366 px wide laptop.
 
 - Detected URLs and paths are underlined only while hovered, as in most
   terminals, so a screen of links no longer looks busy, competes with a

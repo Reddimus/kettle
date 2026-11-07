@@ -39,9 +39,15 @@ pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
 /// and readback pixels successfully. Keep this scoped to these unit tests:
 /// the live renderer and the standalone smoke outside the affected Parallels
 /// guest retain hardware-first adapter selection.
+///
+/// The font stays at 13 px on every target: the frames these tests check
+/// were laid out at that size, and their pixel rings and ink floors assume
+/// its 7.8x16.25 px cell. The 15 px default off macOS moves those edges by
+/// fractions of a pixel. A test about another size sets `font_size` itself.
 pub(crate) fn gpu_test_config() -> Config {
     Config {
         gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
+        font_size: 13.0,
         ..Config::default()
     }
 }
