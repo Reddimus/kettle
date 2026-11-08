@@ -39,7 +39,7 @@ jobs:
       - name: Run native shell integration fixtures
         run: |
           python3 scripts/check-shell-integration.py
-          python3 scripts/perf/macos-compare-score-self-test.py ApplePayloadTests
+          python3 scripts/perf/macos-compare-score-self-test.py ApplePayloadTests AppleWindowCleanupTests
       - name: Run Fish 4 compatibility fixtures
         run: |
           install_fish() {

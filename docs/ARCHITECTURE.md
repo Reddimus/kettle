@@ -2478,7 +2478,7 @@ The blink attribute is retained by SGR, attribute operations, copies and
 reports; text continues to render steadily. Slow and fast blink share this
 protocol attribute. RIS and DECSTR reset the selected attribute extent.
 
-XTSAVE and XTRESTORE retain one value per implemented private mode. Unknown
+XTSAVE and XTRESTORE retain one snapshot per implemented private mode. Unknown
 modes, fixed modes, cursor-save actions and parser-owned synchronized updates
 are excluded. Repeated saves replace the prior value and resets clear the
 cache. Mode 41 explicitly negotiates the MoreFix tab rule: enabled wraps then
@@ -2489,7 +2489,11 @@ DECNKM (66) and DECKPAM/DECKPNM operate on the same keypad flag. DECBKM
 (67) selects BS or DEL for legacy Backarrow input, for both native keys and
 `send_keys`. Its explicit negotiation overrides the configured startup
 Backspace binding until RIS or DECSTR; Kitty and modifyOtherKeys sequences
-retain their protocol encodings. Mode save/restore uses the live state.
+retain their protocol encodings. Mode save/restore retains both the live
+Backarrow value and its negotiation flag. Saving and immediately restoring an
+unnegotiated terminal preserves the configured startup binding. The bounded
+mode cache stores Backarrow's two flags and MoreFix's optional negotiation
+state alongside ordinary boolean mode snapshots; RIS and DECSTR clear it.
 
 DECNCSM (95) is available at VT level 5. It suppresses the display-clear
 side effect of DECCOLM while retaining its cursor home and full-width/full-
@@ -2588,8 +2592,13 @@ General_Category=Mc mark after a measured base makes the cluster two cells;
 other positive-width scalars add their widths, capped at two, including Indic
 consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
 keep the first emoji's width, and regional-indicator pairs remain two cells.
-VS16 widens registered emoji sequences. An immediately following VS15 narrows
-a default emoji only if it has a registered text variation sequence.
+VS16 widens a registered variation base only when it immediately follows that
+base and the base contributes to the cluster width. An immediately following
+VS15 narrows a contributing two-cell registered variation base to one cell,
+including East Asian Wide bases. The accumulator retains the preceding width,
+also capped at two, so narrowing preserves other contributions such as Prepend
+number signs before applying the cluster's two-cell cap. Intervening scalars
+end selector eligibility even when they exceed the retained-text limit.
 
 An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
 the boundary context. Emoji modifier bases and Extended_Pictographic bases
@@ -2606,7 +2615,9 @@ text, without a synthetic selector or an orphan wide cell. Narrowing clears
 the spacer, backs up the cursor, cancels pending wrap and removes only the
 extra inserted cell in insertion mode. DECSLRM bounds all these operations.
 Cursor/grid edits and ignored Unicode controls end
-the append context; REP repeats
+the append context. The ASCII cluster shortcut commits its boundary and width
+state after writing the base, so insertion and bottom-margin scrolling cannot
+clear the newly opened cluster. REP repeats
 the complete retained cluster and leaves its final cell open to combining input.
 
 The `GRAPHEME` cell flag survives copying and reflow without enlarging the cell.

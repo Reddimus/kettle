@@ -1569,3 +1569,152 @@ fn terminal_node_text_keeps_the_blanks_typed_before_the_cursor() {
         "the right-trimmed scrape drops a typed space until the next key"
     );
 }
+
+#[test]
+fn accessibility_pane_lifetime_prunes_churn_and_moves_without_an_adapter() {
+    use super::OutputAnnouncement;
+    use winit::keyboard::Key;
+
+    fn record(ws: &WindowState, pane: u64, text: &str) {
+        App::note_accessibility_input(ws, &[pane], &Key::Character("x".into()), Some("x"));
+        let mut output = ws.accessibility_output.borrow_mut();
+        let state = output.get_mut(&pane).unwrap();
+        state.seen = Some(kettle_core::grid_text::OutputCursor::default());
+        state.text = text.into();
+        state.serial = 7;
+        state.input_row = Some(23);
+        ws.accessibility_text_rows
+            .borrow_mut()
+            .insert(pane, vec![accesskit::NodeId(pane)]);
+    }
+    fn retained(ws: &WindowState, pane: u64, expected: &OutputAnnouncement) {
+        let output = ws.accessibility_output.borrow();
+        let state = &output[&pane];
+        assert_eq!(state.seen, expected.seen);
+        assert_eq!(state.text, expected.text);
+        assert_eq!(state.serial, expected.serial);
+        assert_eq!(state.input_row, expected.input_row);
+        assert_eq!(state.typing, expected.typing);
+        assert_eq!(
+            ws.accessibility_text_rows.borrow()[&pane],
+            [accesskit::NodeId(pane)]
+        );
+    }
+
+    let (mux, panes) = title_test_tab_mux(3);
+    let mut ws = WindowState::new(1, mux);
+    let keep = panes[0];
+    let gone = panes[1];
+    assert!(ws.window.is_none() && ws.accessibility.is_none());
+    record(&ws, keep, "retained announcement");
+    record(&ws, gone, "departed announcement");
+    let expected = ws.accessibility_output.borrow()[&keep].clone();
+    assert!(expected.typing);
+    assert!(!ws.mux.close_tab_at(1));
+    // Equal cardinalities do not imply that the cached ids are still live.
+    assert_eq!(ws.accessibility_output.borrow().len(), ws.mux.panes.len());
+    ws.take_closed_panes();
+    assert_eq!(
+        ws.accessibility_output.borrow().len(),
+        1,
+        "departed pane text must be released even without an adapter"
+    );
+    assert_eq!(ws.accessibility_text_rows.borrow().len(), 1);
+    retained(&ws, keep, &expected);
+
+    let cfg = title_test_config();
+    let argv = title_test_argv();
+    let waker: kettle_core::Waker = Arc::new(|| {});
+    for iteration in 0..18 {
+        if iteration % 3 == 0 {
+            assert!(ws.mux.focus_pane(keep));
+            ws.mux
+                .split_with(
+                    Dir::Horizontal,
+                    &cfg,
+                    80,
+                    24,
+                    8,
+                    16,
+                    waker.clone(),
+                    argv.clone(),
+                    None,
+                )
+                .unwrap();
+        } else {
+            ws.mux
+                .new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
+                .unwrap();
+        }
+        let pane = ws.mux.active_focus().unwrap();
+        record(&ws, pane, "temporary announcement");
+        match iteration % 3 {
+            0 => {
+                assert!(!ws.mux.close_focused());
+            }
+            1 => {
+                assert!(!ws.mux.close_tab());
+            }
+            _ => {
+                ws.mux.panes.get_mut(&pane).unwrap().closed = true;
+                assert!(!ws.mux.reap().mux_empty);
+            }
+        }
+        ws.take_closed_panes();
+        assert!(!ws.mux.panes.contains_key(&pane));
+        assert_eq!(ws.accessibility_output.borrow().len(), 1);
+        assert_eq!(ws.accessibility_text_rows.borrow().len(), 1);
+        retained(&ws, keep, &expected);
+    }
+
+    let (mux, target_panes) = title_test_tab_mux(1);
+    let mut target = WindowState::new(2, mux);
+    let target_keep = target_panes[0];
+    assert!(target.window.is_none() && target.accessibility.is_none());
+    record(&target, target_keep, "target announcement");
+    target
+        .accessibility_output
+        .borrow_mut()
+        .get_mut(&target_keep)
+        .unwrap()
+        .typing = false;
+    let target_expected = target.accessibility_output.borrow()[&target_keep].clone();
+    ws.mux
+        .new_tab_with(&cfg, 80, 24, 8, 16, waker, &argv, None)
+        .unwrap();
+    let moving = ws.mux.active_focus().unwrap();
+    record(&ws, moving, "moving announcement");
+    let detached = ws.mux.detach_tab(ws.mux.active).unwrap();
+    target.mux.attach_tab(detached, None);
+    assert!(
+        ws.take_closed_panes().is_empty(),
+        "moving is not a process close"
+    );
+    target.take_closed_panes();
+    assert_eq!(ws.accessibility_output.borrow().len(), 1);
+    retained(&ws, keep, &expected);
+    retained(&target, target_keep, &target_expected);
+    record(&target, moving, "moved announcement");
+    target.take_closed_panes();
+    assert_eq!(target.accessibility_output.borrow().len(), 2);
+    let detached = target.mux.detach_tab(target.mux.active).unwrap();
+    ws.mux.attach_tab(detached, None);
+    assert!(target.take_closed_panes().is_empty());
+    ws.take_closed_panes();
+    assert_eq!(target.accessibility_output.borrow().len(), 1);
+    assert_eq!(
+        ws.accessibility_output.borrow().len(),
+        1,
+        "a returning pane must not revive its old window-local record"
+    );
+    retained(&ws, keep, &expected);
+    retained(&target, target_keep, &target_expected);
+    assert!(target.mux.close_window());
+    target.take_closed_panes();
+    assert!(target.accessibility_output.borrow().is_empty());
+    assert!(target.accessibility_text_rows.borrow().is_empty());
+    assert!(ws.mux.close_window());
+    ws.take_closed_panes();
+    assert!(ws.accessibility_output.borrow().is_empty());
+    assert!(ws.accessibility_text_rows.borrow().is_empty());
+}

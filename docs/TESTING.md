@@ -21,6 +21,13 @@ profiles. Existing menu-model tests pass an explicit empty profile list.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
+The portable accessibility pane-lifetime regression uses window-less mux
+fixtures and the production lifecycle drain with the accessibility adapter absent.
+It closes split panes/tabs, reaps panes repeatedly, moves a tab between windows
+in both directions, and checks that retained announcement text, output cursor,
+serial, typing/input-row state and row IDs survive. Departed records are removed
+by live pane ID even when cache and pane counts happen to be equal.
+
 Portable Wayland tear-off geometry coverage exercises the same horizontal
 strip layout used by painting, including centered single-tab custom headers,
 window-button reservations, narrow/wide surfaces, non-default padding and tab
@@ -142,6 +149,13 @@ probes to time out during registration and after successful registration. It
 verifies that the benchmark wrapper reaps a child that ignores SIGTERM on
 timeout, payload completion, and a shutdown signal, preserving exit statuses
 and removing the registry entry and completion marker.
+Its `AppleWindowCleanupTests` executes the embedded AppleScript runner with all
+native calls mocked. It checks that a returned window ID is logged and closed
+when the post-launch PID query times out or fails, while a failed initial query
+prevents launch. It also covers successful completion, malformed launch output,
+and retained cleanup logs after a close failure. Run that class alone for a
+process-free check; the full suite includes real child-process fixtures. The
+Linux Fish CI job runs it alongside `ApplePayloadTests`.
 
 `cargo test -j 2 --locked --offline -p kettle-core
 search_tolerates_grid_commit_before_output_publication` uses the terminal's
@@ -892,6 +906,13 @@ the full matrix; files are named `state.language.theme.size.png` under
 percent (0.5) of its pixels differ or its size changed. A missing baseline is
 reported, never created. A change to a baseline belongs in the pull request
 that changes the UI, with the before and after images in its description.
+The committed Linux baselines in `tests/ui-states/linux` cover the full
+80-state matrix. Their source, rendering environment, and expected visible
+states are recorded in `tests/ui-states/README.md`. Linux CI compares fresh
+private-Wayland captures against them; macOS retains its separate 80-state
+geometry assertions without PNG comparison. A new baseline does not prove the
+comparison ran: retain the actual capture-and-compare CI result for that tree.
+
 The resolved `--out` and `--compare` directories must be disjoint. Equality,
 ancestor/descendant paths, and symlink aliases are rejected before deleting
 output or loading the live helper. Use a separate capture directory when
@@ -1726,7 +1747,11 @@ Portable cases cover every split of the no-clear sequence, VT4 versus VT5,
 mode save/restore, cursor homing in one-row panes, wide cells, selections,
 retained-graphics events, alternate screens, RIS and DECSTR. Backarrow tests
 exercise configured startup bindings, explicit BS/DEL negotiation, modifiers,
-Kitty precedence and reset. Removing the negotiated-key binding override
+Kitty precedence and reset. Save/restore regressions retain both Backarrow
+flags, cover every control-sequence split, replacement saves and reset-cleared
+snapshots, and assert actual key bytes from parsed Control-H and EscapeSequence
+settings. Immediate save/restore before negotiation preserves each startup
+binding; explicitly negotiated BS and DEL survive intervening changes. Removing the negotiated-key binding override
 makes the keyboard regression fail; removing the modes makes the core
 regressions fail.
 
@@ -1814,8 +1839,17 @@ check Mc marks (including GCB=Extend), Indic conjuncts, the Sinhala ZWJ
 tailoring, Thai/Lao spacing vowels, standalone modifiers, VS15 spacer cleanup,
 and scalar-mode preservation. Their edge, DECSLRM, autowrap and insertion
 matrices check cursor columns and cell flags; UTF-8 split and storage-cap
-cases check streaming state. Core regressions check resized cluster columns
-through copying, search and reflow. Renderer tests exercise shaping metadata and row
+cases check streaming state. ASCII accent regressions assert the actual cells,
+cursor, spacer flags and rows after insertion and bottom-margin autowrap;
+core cases also cover UTF-8 splits, margins, history and the scroll journal.
+They fail on the old production shortcut, independently of the ASCII run
+comparison. Core regressions check resized cluster columns
+through copying, search and reflow. Selector regressions check interrupted VS16
+after combining marks, ZWJ and VS15, and Prepend plus VS15 after width saturation.
+They exercise mode 2027, UTF-8 splits, cursor and spacer state, screen and DECSLRM
+edges, autowrap, insertion, ignored-control interruptions and discarded scalars.
+Core cases also check edge wrapping and selection, search and reflow columns.
+Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does

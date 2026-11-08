@@ -5923,11 +5923,11 @@ mod node_tests {
     #[cfg(unix)]
     #[test]
     fn ordinary_new_tab_routes_raw_wsl_cwd_through_launcher() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
         let launcher = root.path().join("wsl.exe");
-        std::fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let source = root.path().join("wsl-source.sh");
+        std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        kettle_test_support::copy_executable_fixture(&source, &launcher).unwrap();
         let launcher = launcher.to_string_lossy().into_owned();
         let cfg = Config {
             shell: Some(launcher.clone()),
@@ -5962,12 +5962,11 @@ mod node_tests {
     #[cfg(unix)]
     #[test]
     fn restore_leaf_routes_wsl_cwd_through_launcher() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().expect("temp dir");
         let launcher = root.path().join("wsl.exe");
-        std::fs::write(&launcher, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
-        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+        let source = root.path().join("wsl-source.sh");
+        std::fs::write(&source, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
+        kettle_test_support::copy_executable_fixture(&source, &launcher)
             .expect("executable fixture");
         let launcher = launcher.to_string_lossy().into_owned();
         let cfg = Config {
@@ -10790,6 +10789,17 @@ mod node_tests {
                 mux.panes[&mux.active_focus().unwrap()].argv[3],
                 expected.to_string()
             );
+            assert_eq!(
+                mux.panes.len(),
+                1,
+                "history fixture must not accumulate live PTY-owning panes"
+            );
+            assert_eq!(mux.tabs.len(), 1);
+            // Drop panes without adding the restored snapshot back to the ring.
+            assert!(mux.close_window());
+            assert!(mux.panes.is_empty());
+            assert!(mux.tabs.is_empty());
+            assert_eq!(mux.closed_tabs.len(), expected - 3);
         }
         assert!(
             !mux.undo_close_tab_geometry(&cfg, geometry, Arc::new(|| {}))
