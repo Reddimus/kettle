@@ -222,6 +222,8 @@ mod ctl_target_param_tests;
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
+    #[cfg(target_os = "macos")]
+    ProfilesReady,
     Wakeup,
     SystemSettingsChanged(Arc<std::sync::atomic::AtomicBool>),
     ShellsDetected,
@@ -431,6 +433,8 @@ pub struct App {
     system_motion: std::sync::OnceLock<crate::motion::SystemMotion>,
     #[cfg(target_os = "linux")]
     agent_launches: kettle_ctl::agent_launch::LaunchScopes,
+    #[cfg(target_os = "macos")]
+    profile_inventory: crate::macos_menu::ProfileInventory,
     proxy: EventLoopProxy<UserEvent>,
     pending_shell_action: PendingShellAction,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
@@ -719,6 +723,11 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
+            #[cfg(target_os = "macos")]
+            UserEvent::ProfilesReady => {
+                self.profile_inventory.complete();
+                self.sync_macos_menu(None);
+            }
             UserEvent::CardsTipClaimed(claimed) => self.cards_tip_claimed(claimed),
             UserEvent::GpusDetected(choices) => {
                 self.gpu_choices = choices;
