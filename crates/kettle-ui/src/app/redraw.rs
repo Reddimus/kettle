@@ -143,7 +143,7 @@ impl App {
                     &self.cfg.keybinds,
                     tr,
                     self.update_notice().as_ref(),
-                    &ws.palette_profiles,
+                    ws.palette_profiles.as_deref(),
                 )),
             ),
             None => (None, String::new(), None),
@@ -339,6 +339,10 @@ impl App {
                 [palette_picker, theme_picker, layout_picker, ssh_picker],
                 surface,
                 self.menu_cell(ws),
+                (
+                    self.overlay_text_cell_width(ws),
+                    self.overlay_text_line_height(ws),
+                ),
                 self.picker_top_chrome(ws),
             )
         });

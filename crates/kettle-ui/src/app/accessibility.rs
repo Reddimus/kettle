@@ -134,8 +134,9 @@ impl App {
                     window.scale_factor() as f32,
                 )
             });
-            let modal = modal_accessibility_projection(
+            let modal = modal_accessibility_projection_for_window(
                 overlay,
+                ws,
                 surface,
                 (
                     self.overlay_text_cell_width(ws),
@@ -754,8 +755,9 @@ impl App {
                 })
             })
             .unwrap_or((800.0, 600.0));
-        let mut modal = modal_accessibility_projection(
+        let mut modal = modal_accessibility_projection_for_window(
             overlay,
+            ws,
             surface,
             (
                 self.overlay_text_cell_width(ws),
@@ -958,6 +960,9 @@ impl App {
             }
         }
         overlay.palette_query.hash(&mut hasher);
+        if let Some(status) = palette_profile_accessibility_status(overlay, ws, &self.ui_text) {
+            status.hash(&mut hasher);
+        }
         overlay.layout_picker_query.hash(&mut hasher);
         overlay.theme_picker_query.hash(&mut hasher);
         overlay.ssh_query.hash(&mut hasher);
@@ -2042,6 +2047,7 @@ pub(super) const MODAL_KIND_THEMES: u64 = 10;
 pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
 const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
+const MODAL_KIND_PALETTE_STATUS: u64 = 14;
 /// Text runs take kinds of their own, above every modal kind, so no row index
 /// can reach them.
 const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
@@ -2221,6 +2227,48 @@ fn push_picker_accessibility(
     if projection.focus.is_none() {
         projection.focus = selected.or(Some(input_id));
     }
+}
+
+fn palette_profile_accessibility_status(
+    overlay: &Overlay,
+    ws: &WindowState,
+    tr: &kettle_i18n::Translator,
+) -> Option<&'static str> {
+    (overlay.palette_query.is_some() && ws.palette_profiles.is_none())
+        .then(|| tr.text(kettle_i18n::Text::MenuProfilesPending))
+}
+
+/// Keep semantic status independent of the header's fitted hint and prefix.
+pub(super) fn modal_accessibility_projection_for_window(
+    overlay: &Overlay,
+    ws: &WindowState,
+    surface: (f32, f32),
+    metrics: (f32, f32),
+    scale_factor: f32,
+    tr: &kettle_i18n::Translator,
+) -> ModalAccessibilityProjection {
+    let mut projection =
+        modal_accessibility_projection(overlay, surface, metrics, scale_factor, tr);
+    let Some(status) = palette_profile_accessibility_status(overlay, ws, tr) else {
+        return projection;
+    };
+    let dialog_id = accessibility_modal_id(MODAL_KIND_PALETTE, 0);
+    let status_id = accessibility_modal_id(MODAL_KIND_PALETTE_STATUS, 0);
+    let Some((_, dialog)) = projection.nodes.iter_mut().find(|(id, _)| *id == dialog_id) else {
+        return projection;
+    };
+    let mut children = dialog.children().to_vec();
+    children.push(status_id);
+    dialog.set_children(children);
+    let input_id = accessibility_modal_id(MODAL_KIND_PALETTE, 1);
+    if let Some((_, input)) = projection.nodes.iter_mut().find(|(id, _)| *id == input_id) {
+        input.set_description(status);
+    }
+    let mut node = Node::new(Role::Status);
+    node.set_label(status);
+    node.set_live(accesskit::Live::Polite);
+    projection.nodes.push((status_id, node));
+    projection
 }
 
 pub(super) fn modal_accessibility_projection(
@@ -3250,6 +3298,7 @@ mod context_menu_nesting_tests {
 
     fn panel(label: &str, anchor: (f32, f32)) -> ContextMenu {
         ContextMenu {
+            status: None,
             picker_header_height: 0.0,
             anchor,
             rows: vec![ContextMenuRow {

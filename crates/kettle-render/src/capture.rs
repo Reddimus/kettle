@@ -647,6 +647,7 @@ pub fn capture_png_with_annotation(
                 panel_w_clamped: 0.0,
                 panel_h_clamped: 0.0,
                 a11y_label: None,
+                status: None,
                 picker_header_height: 0.0,
             };
             menu_q.extend(menu_chrome_quads(

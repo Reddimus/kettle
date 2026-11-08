@@ -5680,6 +5680,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
     let overlay = Overlay {
         context_menu: Some(ContextMenu {
+            status: None,
             picker_header_height: 0.0,
             anchor: (ax, ay),
             rows: vec![

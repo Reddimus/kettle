@@ -82,6 +82,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/pointer.rs"),
         include_str!("app/preview.rs"),
         include_str!("app/preview_model.rs"),
+        include_str!("app/profiles.rs"),
         include_str!("app/quick_terminal.rs"),
         include_str!("app/recording.rs"),
         include_str!("app/redraw.rs"),
@@ -205,6 +206,7 @@ mod notices;
 mod paste;
 mod pointer;
 mod preview;
+mod profiles;
 mod quick_terminal;
 mod search;
 mod sessions;
@@ -212,6 +214,7 @@ mod system_opener;
 mod titlebar;
 mod update_toast;
 mod windowing;
+use profiles::{append_profile_choices, profile_launch_items};
 use titlebar::*;
 
 #[cfg(test)]
@@ -222,7 +225,6 @@ mod ctl_target_param_tests;
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
-    #[cfg(target_os = "macos")]
     ProfilesReady,
     Wakeup,
     SystemSettingsChanged(Arc<std::sync::atomic::AtomicBool>),
@@ -433,8 +435,8 @@ pub struct App {
     system_motion: std::sync::OnceLock<crate::motion::SystemMotion>,
     #[cfg(target_os = "linux")]
     agent_launches: kettle_ctl::agent_launch::LaunchScopes,
-    #[cfg(target_os = "macos")]
-    profile_inventory: crate::macos_menu::ProfileInventory,
+    profile_inventory: crate::profile_inventory::ProfileInventory,
+    profile_launch_gate: profiles::ProfileLaunchGate,
     proxy: EventLoopProxy<UserEvent>,
     pending_shell_action: PendingShellAction,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
@@ -566,6 +568,7 @@ pub struct App {
     system_appearance: std::sync::OnceLock<crate::appearance::SystemAppearance>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
+    prepared_profile_reload: Option<(std::path::PathBuf, kettle_config::LoadedConfig)>,
     /// Provenance paired with `config_path`; profile switching resets this to
     /// directory verification even when the process started with `--config`.
     config_trust: ConfigTrust,
@@ -723,11 +726,7 @@ impl ApplicationHandler<UserEvent> for App {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
         match ev {
-            #[cfg(target_os = "macos")]
-            UserEvent::ProfilesReady => {
-                self.profile_inventory.complete();
-                self.sync_macos_menu(None);
-            }
+            UserEvent::ProfilesReady => self.profiles_ready(),
             UserEvent::CardsTipClaimed(claimed) => self.cards_tip_claimed(claimed),
             UserEvent::GpusDetected(choices) => {
                 self.gpu_choices = choices;
@@ -756,7 +755,11 @@ impl ApplicationHandler<UserEvent> for App {
                         .filter(|menu| Self::shell_menu_is_loading(&menu.items, &self.ui_text))
                         .map(|menu| menu.anchor)
                     {
-                        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
+                        let items = Self::new_tab_menu_items(
+                            &shells,
+                            self.profile_inventory.snapshot(),
+                            &self.ui_text,
+                        );
                         self.show_context_menu(&mut ws, items, anchor.0, anchor.1);
                         if let Some(window) = &ws.window {
                             window.request_redraw();

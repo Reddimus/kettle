@@ -3706,36 +3706,56 @@ impl Config {
     ///   - the `profiles/` subdir doesn't exist
     ///   - the directory exists but has no `*.config` files
     ///
-    /// In all three cases, `Action::NextProfile` / `PrevProfile`
-    /// will no-op rather than panic.
+    /// Other scan failures also return an empty Vec for CLI compatibility.
+    /// Use [`Config::try_list_profiles`] when readiness or failure matters.
     ///
     /// Profiles always live at `<default config dir>/profiles/`, the same
     /// place [`Config::path_for_profile`] loads them from. `--config FILE`
     /// does not relocate them, so listing does not follow it either; that
     /// would put the listing out of step with the loader.
     pub fn list_profiles() -> Vec<String> {
-        let Some(default_p) = Self::default_path() else {
-            return Vec::new();
-        };
-        let Some(parent) = default_p.parent() else {
-            return Vec::new();
-        };
-        let profiles_dir = parent.join("profiles");
-        let Ok(rd) = std::fs::read_dir(&profiles_dir) else {
-            return Vec::new();
+        Self::try_list_profiles().unwrap_or_else(|error| {
+            log::warn!("profile listing unavailable: {error}");
+            Vec::new()
+        })
+    }
+
+    /// List profiles without conflating an unavailable scan with an empty directory.
+    /// Uses the same validation, bounds and ordering as [`Config::list_profiles`].
+    pub fn try_list_profiles() -> std::io::Result<Vec<String>> {
+        let default_p = Self::default_path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "config root unavailable")
+        })?;
+        let parent = default_p.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "config parent unavailable")
+        })?;
+        Self::try_list_profiles_in(&parent.join("profiles"))
+    }
+
+    fn try_list_profiles_in(profiles_dir: &std::path::Path) -> std::io::Result<Vec<String>> {
+        let rd = match std::fs::read_dir(profiles_dir) {
+            Ok(rd) => rd,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Only a genuinely absent directory establishes an empty result.
+                // A dangling directory symlink still represents an unavailable scan.
+                match std::fs::symlink_metadata(profiles_dir) {
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(Vec::new());
+                    }
+                    _ => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
         };
         let mut names = Vec::new();
         for (scanned, entry) in rd.enumerate() {
             if scanned == MAX_PROFILE_ENTRIES {
-                log::warn!(
+                return Err(std::io::Error::other(format!(
                     "profile listing refused: {} exceeds the {MAX_PROFILE_ENTRIES}-entry scan cap",
                     profiles_dir.display()
-                );
-                return Vec::new();
+                )));
             }
-            let Ok(entry) = entry else {
-                continue;
-            };
+            let entry = entry?;
             let file_name = entry.file_name();
             let Some(stem) = file_name
                 .to_str()
@@ -3749,20 +3769,20 @@ impl Config {
             else {
                 continue;
             };
-            if !entry.path().is_file() {
+            // Follow links as before; metadata failures must not confirm absence.
+            if !std::fs::metadata(entry.path())?.is_file() {
                 continue;
             }
             if names.len() == MAX_PROFILES {
-                log::warn!(
+                return Err(std::io::Error::other(format!(
                     "profile listing refused: {} exceeds the {MAX_PROFILES}-profile cap",
                     profiles_dir.display()
-                );
-                return Vec::new();
+                )));
             }
             names.push(stem.to_string());
         }
         sort_profile_names(&mut names);
-        names
+        Ok(names)
     }
 
     /// Companion to `path_for_profile`: extract the profile
@@ -12309,47 +12329,70 @@ split_horiz = <Control><Shift>j
 
     #[test]
     fn listed_profiles_rejects_oversized_directories() {
-        const CHILD: &str = "KETTLE_TEST_PROFILE_BOUNDS_CHILD";
-        if let Some(expected) = std::env::var_os(CHILD) {
-            let expected: usize = expected.to_str().unwrap().parse().unwrap();
-            assert_eq!(
-                Config::list_profiles().len(),
-                expected,
-                "profile listing must reject overflow instead of returning a partial list"
-            );
-            return;
-        }
         for (entries, profile_files, expected) in [(1024, true, 1024), (4096, false, 1)] {
             let dir = tempdir_for("profile-listing-bounds");
-            let profiles = dir.join("kettle").join("profiles");
-            std::fs::create_dir_all(&profiles).unwrap();
+            let profiles = dir.join("profiles");
+            std::fs::create_dir(&profiles).unwrap();
             std::fs::write(profiles.join("work.config"), "").unwrap();
             let extension = if profile_files { "config" } else { "txt" };
             for i in 1..entries {
                 std::fs::write(profiles.join(format!("p{i}.{extension}")), "").unwrap();
             }
-            for (overflow, expected) in [(false, expected), (true, 0)] {
-                if overflow {
-                    std::fs::write(profiles.join(format!("overflow.{extension}")), "").unwrap();
-                }
-                let output = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "config_tests::listed_profiles_rejects_oversized_directories",
-                        "--nocapture",
-                    ])
-                    .env(CHILD, expected.to_string())
-                    .env("XDG_CONFIG_HOME", dir.path())
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
+            assert_eq!(
+                Config::try_list_profiles_in(&profiles).unwrap().len(),
+                expected
+            );
+            std::fs::write(profiles.join(format!("overflow.{extension}")), "").unwrap();
+            assert!(
+                Config::try_list_profiles_in(&profiles).is_err(),
+                "overflow must refuse the whole scan"
+            );
         }
+    }
+
+    #[test]
+    fn fallible_profile_listing_distinguishes_missing_empty_and_unavailable() {
+        let dir = tempdir_for("fallible-profile-listing");
+        let profiles = dir.join("profiles");
+        assert!(Config::try_list_profiles_in(&profiles).unwrap().is_empty());
+        std::fs::create_dir(&profiles).unwrap();
+        assert!(Config::try_list_profiles_in(&profiles).unwrap().is_empty());
+        for name in [
+            "work.config",
+            "Home.config",
+            "alpha.config",
+            "bad name.config",
+            ".config",
+            "ignored.CONFIG",
+        ] {
+            std::fs::write(profiles.join(name), "").unwrap();
+        }
+        std::fs::create_dir(profiles.join("directory.config")).unwrap();
+        assert_eq!(
+            Config::try_list_profiles_in(&profiles).unwrap(),
+            ["alpha", "Home", "work"]
+        );
+        let file = dir.join("not-a-directory");
+        std::fs::write(&file, "").unwrap();
+        assert!(Config::try_list_profiles_in(&file).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallible_profile_listing_follows_links_and_reports_metadata_failure() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir_for("fallible-profile-links");
+        let profiles = dir.join("profiles");
+        std::fs::create_dir(&profiles).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, "").unwrap();
+        symlink(&target, profiles.join("work.config")).unwrap();
+        assert_eq!(Config::try_list_profiles_in(&profiles).unwrap(), ["work"]);
+        std::fs::remove_file(&target).unwrap();
+        assert!(Config::try_list_profiles_in(&profiles).is_err());
+        let missing_link = dir.join("missing-profiles");
+        symlink(dir.join("absent"), &missing_link).unwrap();
+        assert!(Config::try_list_profiles_in(&missing_link).is_err());
     }
 
     #[test]

@@ -1010,8 +1010,9 @@ pub(crate) struct WindowState {
     /// over the fuzzy-ranked configured-host list; a query with no match still
     /// connects to the typed target on Enter.
     pub(crate) ssh_input: Option<(crate::text_editor::TextEditor, usize)>,
-    /// Profile names captured when opening the palette; all projections use this list.
-    pub(crate) palette_profiles: Vec<String>,
+    /// Opening snapshot shared by every palette projection; None means discovery
+    /// had not completed when it opened. Completion never changes this snapshot.
+    pub(crate) palette_profiles: Option<Vec<String>>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
@@ -1589,7 +1590,7 @@ impl WindowState {
             links: Vec::new(),
             ssh_input: None,
             palette_input: None,
-            palette_profiles: Vec::new(),
+            palette_profiles: None,
             settings_nav: None,
             settings_text_edit: None,
             settings_restart_pending: false,

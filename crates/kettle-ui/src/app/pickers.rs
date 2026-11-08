@@ -57,8 +57,15 @@ pub(super) fn selected_ssh_target(
 }
 
 pub(super) struct PickerList {
+    pub(super) status: Option<PickerStatus>,
     pub(super) rows: Vec<ContextMenuRow>,
     pub(super) selected: usize,
+}
+
+pub(super) struct PickerStatus {
+    message: &'static str,
+    compact: &'static str,
+    guidance: String,
 }
 
 /// A picker's key hint: each key followed by what it does. The keys are the
@@ -78,10 +85,13 @@ const PICKER_MAX_VISIBLE_ROWS: usize = 8;
 
 /// Profile discovery is shared with `--list-profiles`; names remain config data.
 pub(crate) fn profile_launch_entries(
-    names: &[String],
+    names: Option<&[String]>,
     tr: &kettle_i18n::Translator,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
+    let Some(names) = names else {
+        return Vec::new();
+    };
     if names.is_empty() {
         return vec![(
             PaletteLabel::Text(kettle_i18n::Text::MenuNoProfiles),
@@ -103,12 +113,12 @@ pub(crate) fn profile_launch_entries(
         .collect()
 }
 
-/// Commands and the profiles captured when the palette opened, followed by
+/// Commands and the palette's opening profile snapshot, followed by
 /// release notes and Dismiss while an update notice is active.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
-    profiles: &[String],
+    profiles: Option<&[String]>,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
     let mut entries: Vec<_> = kettle_config::palette::commands()
@@ -133,13 +143,23 @@ pub(super) fn palette_entries(
     entries
 }
 
+pub(super) fn selected_palette_action(
+    query: &str,
+    selected: usize,
+    commands: &[(kettle_config::palette::PaletteLabel, Action)],
+    tr: &kettle_i18n::Translator,
+) -> Option<Action> {
+    let ranked = kettle_config::palette::rank_entries(query, commands, tr);
+    ranked.get(selected).map(|&index| commands[index].1.clone())
+}
+
 pub(super) fn command_picker_list(
     query: &str,
     selected: usize,
     bindings: &Bindings,
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
-    profiles: &[String],
+    profiles: Option<&[String]>,
 ) -> PickerList {
     let commands = palette_entries(notice, tr, profiles);
     let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
@@ -165,8 +185,21 @@ pub(super) fn command_picker_list(
             }
         })
         .collect::<Vec<_>>();
+    let status = profiles::palette_profile_status(profiles, tr).map(|message| PickerStatus {
+        message,
+        compact: tr.text(kettle_i18n::Text::PickerProfilesPending),
+        guidance: picker_hint(
+            tr,
+            &[
+                ("Enter", kettle_i18n::Text::PickerHintRun),
+                ("Tab/↑↓", kettle_i18n::Text::PickerHintSelect),
+                ("Esc", kettle_i18n::Text::PickerHintCancel),
+            ],
+        ),
+    });
     if rows.is_empty() {
         PickerList {
+            status,
             rows: vec![ContextMenuRow {
                 matched_chars: None,
                 label: tr
@@ -180,6 +213,7 @@ pub(super) fn command_picker_list(
         }
     } else {
         PickerList {
+            status,
             selected: selected.min(rows.len() - 1),
             rows,
         }
@@ -210,6 +244,7 @@ pub(super) fn layout_picker_list(
             kettle_i18n::Text::PickerNoMatchingLayout
         };
         PickerList {
+            status: None,
             rows: vec![ContextMenuRow {
                 matched_chars: None,
                 label: tr.text(label).to_string(),
@@ -226,6 +261,7 @@ pub(super) fn layout_picker_list(
         }
     } else {
         PickerList {
+            status: None,
             selected: selected.min(rows.len() - 1),
             rows,
         }
@@ -312,6 +348,7 @@ pub(super) fn theme_picker_list(
         .collect();
     if rows.is_empty() {
         return PickerList {
+            status: None,
             rows: vec![ContextMenuRow {
                 matched_chars: None,
                 label: tr.text(Text::PickerNoMatchingTheme).to_string(),
@@ -323,7 +360,11 @@ pub(super) fn theme_picker_list(
         };
     }
     let selected = selected.min(rows.len() - 1);
-    PickerList { rows, selected }
+    PickerList {
+        status: None,
+        rows,
+        selected,
+    }
 }
 
 /// The theme the picker's highlighted row names, if any row matches. Clamped
@@ -452,6 +493,7 @@ pub(super) fn ssh_picker_list(
         .collect::<Vec<_>>();
     if rows.is_empty() {
         PickerList {
+            status: None,
             rows: vec![ContextMenuRow {
                 matched_chars: None,
                 label: tr
@@ -469,6 +511,7 @@ pub(super) fn ssh_picker_list(
         }
     } else {
         PickerList {
+            status: None,
             selected: selected.min(rows.len() - 1),
             rows,
         }
@@ -516,6 +559,16 @@ pub(super) fn picker_card_geometry(
     top_chrome: f32,
     row_count: usize,
 ) -> Option<PickerGeometry> {
+    picker_card_geometry_with_status(surface, cell, top_chrome, row_count, 0.0)
+}
+
+fn picker_card_geometry_with_status(
+    surface: (f32, f32),
+    cell: (f32, f32),
+    top_chrome: f32,
+    row_count: usize,
+    status_height: f32,
+) -> Option<PickerGeometry> {
     let (sw, sh) = surface;
     let (_, ch) = cell;
     if ![sw, sh, cell.0, ch, top_chrome]
@@ -534,18 +587,18 @@ pub(super) fn picker_card_geometry(
     let remaining = (sh - top_chrome).max(0.0);
     let header_h = ch + kettle_render::menu::PICKER_HEADER_PAD;
     let row_h = ch + kettle_render::menu::ROW_PAD;
-    let spacing = remaining - header_h - row_h;
+    let spacing = remaining - header_h - status_height - row_h;
     if spacing < 0.0 {
         return None;
     }
     let bottom = 16.0_f32.min(spacing * 0.5);
     let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
     let y = top_chrome + top;
-    let available = sh - bottom - y - header_h;
+    let available = sh - bottom - y - header_h - status_height;
     let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
     Some(PickerGeometry {
         header: (x, y, width, header_h),
-        rows: (x, y + header_h, width, rows_h),
+        rows: (x, y + header_h + status_height, width, rows_h),
     })
 }
 
@@ -554,9 +607,41 @@ pub(super) fn picker_context_menu(
     mut list: PickerList,
     surface: (f32, f32),
     cell: (f32, f32),
+    text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    let geometry = picker_card_geometry(surface, cell, top_chrome, list.rows.len())?;
+    let base = picker_card_geometry(surface, cell, top_chrome, list.rows.len())?;
+    // Status is supplementary to the query and selected action. Try complete
+    // guidance, then the explanation, then a truthful compact message; never
+    // hide the whole picker just because a restored window cannot fit a band.
+    let status = list.status.as_ref().and_then(|status| {
+        [
+            format!("{}\n{}", status.message, status.guidance),
+            status.message.to_string(),
+            status.compact.to_string(),
+        ]
+        .into_iter()
+        .map(|text| kettle_render::MenuStatus::new(&text, base.header.2, text_cell))
+        .find(|status| {
+            picker_card_geometry_with_status(
+                surface,
+                cell,
+                top_chrome,
+                list.rows.len(),
+                status.height(),
+            )
+            .is_some()
+        })
+    });
+    let geometry = picker_card_geometry_with_status(
+        surface,
+        cell,
+        top_chrome,
+        list.rows.len(),
+        status
+            .as_ref()
+            .map_or(0.0, kettle_render::MenuStatus::height),
+    )?;
     let (x, y, width, height) = geometry.rows;
     let row_height = cell.1 + kettle_render::menu::ROW_PAD;
     let max_columns = kettle_render::menu::panel_columns(width, cell.0);
@@ -577,6 +662,7 @@ pub(super) fn picker_context_menu(
         panel_w_clamped: width,
         panel_h_clamped: height,
         a11y_label: None,
+        status,
         picker_header_height: geometry.header.3,
     })
 }
@@ -587,13 +673,14 @@ pub(super) fn picker_overlay_context_menu(
     pickers: [Option<PickerList>; 4],
     surface: (f32, f32),
     cell: (f32, f32),
+    text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
     pickers
         .into_iter()
         .flatten()
         .next()
-        .and_then(|list| picker_context_menu(list, surface, cell, top_chrome))
+        .and_then(|list| picker_context_menu(list, surface, cell, text_cell, top_chrome))
 }
 
 #[derive(Clone, Copy)]
@@ -616,7 +703,7 @@ pub(super) fn open_picker_list(
             &cfg.keybinds,
             tr,
             notice,
-            &ws.palette_profiles,
+            ws.palette_profiles.as_deref(),
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(
@@ -763,8 +850,16 @@ impl App {
             })
             .unwrap_or((800.0, 600.0));
         let cell = self.menu_cell(ws);
-        let Some(menu) = picker_context_menu(list, surface, cell, self.picker_top_chrome(ws))
-        else {
+        let Some(menu) = picker_context_menu(
+            list,
+            surface,
+            cell,
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            self.picker_top_chrome(ws),
+        ) else {
             return false;
         };
         let activate = matches!(event, PickerPointer::Press)

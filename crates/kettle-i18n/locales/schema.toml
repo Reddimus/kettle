@@ -2806,3 +2806,12 @@ plural = "count"
 
 [messages.a11y_main_menu]
 context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the ≡ button in Kettle's GNOME header bar, the window's primary menu (new tabs, profiles, layouts, Settings, About)."
+
+[messages.menu_profiles_pending]
+context = "crates/kettle-ui/src/app/profiles.rs and macos_menu.rs: Non-action profile status, also used in the pinned command-palette status band independently of the query. Discovery had not completed when this surface opened; it keeps that snapshot until reopened. Do not imply that the completed list is empty."
+
+[messages.picker_profiles_pending]
+context = "crates/kettle-ui/src/app/profiles.rs: Compact past-tense command-palette header status outside ranked actions, shown alongside keyboard guidance. Discovery had not completed when this palette opened. Keep it short; reopening takes the latest completed snapshot."
+
+[messages.notify_profile_launch_busy]
+context = "crates/kettle-ui/src/app/profiles.rs: Notification body when another launch validation already holds this App's admission permit. The user can retry once the scan/spawn completes; an already running child does not occupy admission."

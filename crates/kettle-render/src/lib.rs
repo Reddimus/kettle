@@ -113,8 +113,8 @@ use overlays::input_bar_colors;
 pub use overlays::{
     ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
-    TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
+    MediaPasteReceiptOverlay, MenuStatus, NotificationGeometry, Overlay, StatusBar, TabActivity,
+    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
     WindowControl, WindowControlButton, format_media_size, hint_label_rect,
     media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
     notification_geometry_with_notices, persistent_notice_geometry,
@@ -2838,7 +2838,7 @@ impl Renderer {
                 .context_menu_parents
                 .iter()
                 .chain(overlay.context_menu.iter())
-                .map(|menu| menu.rows.len())
+                .map(ContextMenu::text_buffer_count)
                 .sum();
             while self.context_menu_buffers.len() < row_count {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -2941,7 +2941,32 @@ impl Renderer {
                         hb.shape_until_scroll(&mut self.font_system, false);
                     }
                 }
-                row_base += menu.rows.len();
+                if let Some(status) = &menu.status {
+                    let band = menu.status_rect().expect("status band");
+                    for (index, line) in status.lines.iter().enumerate() {
+                        let i = row_base + menu.rows.len() + index;
+                        let slot = status.line_rect(band, index);
+                        let buffer = &mut self.context_menu_buffers[i];
+                        buffer.set_metrics(metrics);
+                        buffer.set_size(Some(slot.2), Some(slot.3));
+                        buffer.set_wrap(Wrap::None);
+                        if self.context_menu_texts[i] != *line
+                            || self.context_menu_match_keys[i] != 0
+                        {
+                            buffer.set_text(
+                                line,
+                                &Attrs::new().family(Family::Name(&family)),
+                                Shaping::Advanced,
+                                None,
+                            );
+                            self.context_menu_texts[i].clone_from(line);
+                        }
+                        // A slot can alternate between a matched row and status.
+                        self.context_menu_match_keys[i] = 0;
+                        buffer.shape_until_scroll(&mut self.font_system, false);
+                    }
+                }
+                row_base += menu.text_buffer_count();
             }
         }
 
@@ -4616,7 +4641,30 @@ impl Renderer {
                 }
                 row_y += row_h;
             }
-            menu_row_base += menu.rows.len();
+            if let Some(status) = &menu.status {
+                let band = menu.status_rect().expect("status band");
+                let fg = self
+                    .chrome_colors
+                    .secondary(theme.foreground, theme.background);
+                for index in 0..status.lines.len() {
+                    let (x, y, w, h) = status.line_rect(band, index);
+                    menu_areas.push(TextArea {
+                        buffer: &self.context_menu_buffers[menu_row_base + menu.rows.len() + index],
+                        left: x,
+                        top: y,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+            menu_row_base += menu.text_buffer_count();
         }
 
         // Settings surfaces use the menu layer, before all modal text.

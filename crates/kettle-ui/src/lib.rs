@@ -88,6 +88,7 @@ mod pane_partition;
 mod paste_image;
 #[cfg(target_os = "linux")]
 mod portal_settings;
+mod profile_inventory;
 mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;

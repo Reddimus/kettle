@@ -173,6 +173,15 @@ fn append_rows(
                 item.setSubmenu(Some(&child));
                 submenu.addItem(&item);
             }
+            Row::Info(title) => {
+                let item = NSMenuItem::new(mtm);
+                // SAFETY: a non-action status on a newly allocated main-thread item.
+                unsafe {
+                    item.setTitle(&NSString::from_str(title));
+                    item.setEnabled(false);
+                }
+                submenu.addItem(&item);
+            }
             Row::Separator => submenu.addItem(&NSMenuItem::separatorItem(mtm)),
             Row::Services(title) => {
                 let item = NSMenuItem::new(mtm);

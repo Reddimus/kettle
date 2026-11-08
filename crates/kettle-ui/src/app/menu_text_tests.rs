@@ -57,7 +57,7 @@ fn the_reconnect_row_names_every_session_shape() {
 fn the_new_tab_dropdown_follows_the_ui_language() {
     let shells = vec![("zsh".to_string(), vec!["zsh".to_string()])];
     let labels = |tr: &Translator| {
-        App::new_tab_menu_items(&shells, tr)
+        App::new_tab_menu_items(&shells, Some(&[]), tr)
             .into_iter()
             .filter_map(|item| match item {
                 ContextMenuItem::Item { label, .. } => Some(label.to_string()),
@@ -98,8 +98,8 @@ fn session_routes_follow_profiles_in_both_languages() {
     use super::{Action, profile_launch_entries};
     for tr in [EN, ES] {
         for names in [vec![], vec!["home".into(), "Work".into()]] {
-            let menu = App::new_tab_menu_with_profiles(&[], &names, &tr);
-            let commands = super::palette_entries(None, &tr, &names);
+            let menu = App::new_tab_menu_items(&[], Some(&names), &tr);
+            let commands = super::palette_entries(None, &tr, Some(&names));
             for action in [
                 Action::SaveLayout,
                 Action::OpenLayoutPicker,
@@ -115,7 +115,7 @@ fn session_routes_follow_profiles_in_both_languages() {
                     _ => None,
                 })
                 .unwrap();
-            let palette = profile_launch_entries(&names, &tr);
+            let palette = profile_launch_entries(Some(&names), &tr);
             for entry in &palette {
                 assert!(
                     commands
@@ -214,7 +214,7 @@ fn saved_layout_is_listed_by_picker_in_an_isolated_config_directory() {
         for name in ["Work", "home"] {
             std::fs::write(profiles.join(format!("{name}.config")), "").unwrap();
         }
-        let entries = palette_entries(None, &ES, &kettle_config::Config::list_profiles());
+        let entries = palette_entries(None, &ES, Some(&kettle_config::Config::list_profiles()));
         let launches: Vec<_> = entries
             .iter()
             .filter_map(|(_, action)| match action {

@@ -6,6 +6,8 @@
 //! mouse selections send actions through the event-loop proxy.
 
 #[cfg(any(target_os = "macos", test))]
+use crate::profile_inventory::ProfileInventory;
+#[cfg(any(target_os = "macos", test))]
 use kettle_config::keybinds::{Action, Bindings, Key, Mods, Trigger, hint_label};
 #[cfg(any(target_os = "macos", test))]
 use kettle_i18n::{Text as T, Translator};
@@ -41,6 +43,7 @@ pub(crate) enum Row {
         title: &'static str,
         rows: Vec<Row>,
     },
+    Info(&'static str),
     Services(&'static str),
     Separator,
 }
@@ -113,86 +116,7 @@ pub(crate) fn menu_model(
     context: Context,
     inventory: &ProfileInventory,
 ) -> Vec<Menu> {
-    menu_model_with_profiles(tr, bindings, context, inventory.profiles())
-}
-
-/// One worker, one pending invalidation and one latest result. Enumeration
-/// never holds the result lock; dispatch only reads the event-loop-owned cache.
-#[cfg(any(target_os = "macos", test))]
-pub(crate) struct ProfileInventory {
-    cached: Vec<String>,
-    requests: Option<std::sync::mpsc::SyncSender<()>>,
-    latest: std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl ProfileInventory {
-    #[cfg(target_os = "macos")]
-    pub(crate) fn new(wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
-        Self::with_enumerator(kettle_config::Config::list_profiles, wake)
-    }
-
-    fn with_enumerator(
-        enumerate: impl Fn() -> Vec<String> + Send + 'static,
-        wake: impl Fn() + Send + 'static,
-    ) -> std::io::Result<Self> {
-        let (requests, rx) = std::sync::mpsc::sync_channel(1);
-        let latest = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let result = latest.clone();
-        let worker = std::thread::Builder::new()
-            .name("kettle-profiles".into())
-            .spawn(move || {
-                loop {
-                    let profiles = enumerate();
-                    let notify = result
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .replace(profiles)
-                        .is_none();
-                    if notify {
-                        wake();
-                    }
-                    // Poll on the worker as well: profile creation/removal need not
-                    // touch the active config file watched by live reload.
-                    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                }
-            })?;
-        Ok(Self {
-            cached: Vec::new(),
-            requests: Some(requests),
-            latest,
-            worker: Some(worker),
-        })
-    }
-
-    pub(crate) fn refresh(&self) {
-        if let Some(requests) = &self.requests {
-            let _ = requests.try_send(());
-        }
-    }
-
-    pub(crate) fn complete(&mut self) {
-        if let Some(profiles) = self.latest.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            self.cached = profiles;
-        }
-    }
-
-    fn profiles(&self) -> &[String] {
-        &self.cached
-    }
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl Drop for ProfileInventory {
-    fn drop(&mut self) {
-        self.requests.take();
-        // A stalled filesystem must not stall event-loop shutdown either.
-        self.worker.take();
-    }
+    menu_model_with_profiles(tr, bindings, context, inventory.snapshot())
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -200,7 +124,7 @@ pub(crate) fn menu_model_with_profiles(
     tr: &Translator,
     bindings: &Bindings,
     context: Context,
-    profiles: &[String],
+    profiles: Option<&[String]>,
 ) -> Vec<Menu> {
     use Row::{Separator as Sep, Services};
     let command_bindings: Bindings = bindings
@@ -275,16 +199,20 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MenuNewTab, Action::NewTab),
                 Row::Submenu {
                     title: tr.text(T::MenuNewTabProfile),
-                    rows: crate::app::profile_launch_entries(profiles, tr)
-                        .into_iter()
-                        .map(|(label, action)| Row::Item {
-                            title: label.shown(tr).to_string(),
-                            enabled: context.enables(&action),
-                            command: Command::Kettle(action),
-                            shortcut: None,
-                            shortcut_label: None,
-                        })
-                        .collect(),
+                    rows: if profiles.is_none() {
+                        vec![Row::Info(tr.text(T::MenuProfilesPending))]
+                    } else {
+                        crate::app::profile_launch_entries(profiles, tr)
+                            .into_iter()
+                            .map(|(label, action)| Row::Item {
+                                title: label.shown(tr).to_string(),
+                                enabled: context.enables(&action),
+                                command: Command::Kettle(action),
+                                shortcut: None,
+                                shortcut_label: None,
+                            })
+                            .collect()
+                    },
                 },
                 item(T::MenuSaveLayout, Action::SaveLayout),
                 item(T::MenuOpenLayout, Action::OpenLayoutPicker),

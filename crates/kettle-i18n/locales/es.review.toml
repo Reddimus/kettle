@@ -22,6 +22,8 @@
 # panel and observed accessibility tree, including an independent second pass.
 
 [status]
+menu_profiles_pending = "draft"
+picker_profiles_pending = "draft"
 a11y_window_minimize = "draft"
 a11y_window_maximize = "draft"
 a11y_window_restore = "draft"
@@ -29,6 +31,7 @@ a11y_window_close = "draft"
 
 tab_new_options = "draft"
 
+notify_profile_launch_busy = "draft"
 notify_profile_launch_failed_body = "draft"
 notify_profile_launch_failed = "draft"
 notify_profiles_failed_body = "draft"

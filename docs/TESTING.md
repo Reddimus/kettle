@@ -9,15 +9,41 @@ runtime hosts. Windows CI retains compile and regression coverage, but does not
 produce a supported package. Record every skipped check and its reason.
 
 Profile/layout UI regression coverage lives in kettle-ui's `menu_text_tests`,
-`macos_menu::tests` and `picker_text_tests`: English/Spanish menu routes,
-profile lists including empty, native submenu dispatch order, and the shared
+`macos_menu::tests`, `app::profiles::tests` and `picker_text_tests`:
+English/Spanish menu routes, profile lists including empty, native submenu
+dispatch order, and the shared
 Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
 saves and reloads a split layout, checks picker discovery and validates the
 palette's profile discovery without changing the real config directory.
 The portable profile inventory regression blocks an injected enumerator while
 menu dispatch uses the empty startup cache and then the last completed cache.
 It checks coalesced refreshes and eventual latest results without reading owner
-profiles. Existing menu-model tests pass an explicit empty profile list.
+profiles. The shared blocked-enumerator fixture also exercises the production
+new-tab row snapshot and submenu activation, terminal profile rows and palette
+entries against the last completed cache. Refresh tests retain selected profile
+actions and parent navigation when profiles change. Launch-worker tests block
+validation before a stub process launcher, reject unlisted names, and check
+failure reporting without starting a profile process. Existing menu-model tests
+pass explicit profile slices, including empty lists. Run these portable cases
+with `cargo test -p kettle-ui app::profiles` and
+`cargo test -p kettle-ui profile_inventory_dispatch`.
+Profile-cache regressions cover one admitted launch
+validation under 64 repeated requests against a blocked injected enumerator,
+admission returning while the first injected child is still being reaped,
+exact-name/scan/spawn failures, first scan error versus successful empty,
+last-good cache retention (including unconsumed results), and pending/empty
+profile cycling. Palette tests use production list projection and geometry at
+328/358/720-pixel widths in EN/ES with long queries, pinned non-action status,
+Esc guidance, result scrolling, and ranked pointer/keyboard action identity.
+Renderer tests cover shared status/card surface bounds and text damage keys.
+Config tests use a private directory-path seam with real temporary directories
+for missing/empty/unavailable scans, validation/order, existing caps and Unix
+symlink/metadata failure behavior without changing process environment.
+
+Run the focused crate tests, Clippy and required repository gates on the changed
+source. Record physical regression controls and platform-specific results
+separately from portable tests. Catalogue parity, source checks and formatting
+do not establish compiled or live behavior.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
@@ -3394,3 +3420,35 @@ transitions, inactive colors, localized tooltips, AT-SPI button activation,
 IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless
 fallbacks. Portable checks do not establish compositor or rendering acceptance.
+
+Profile-cache regressions include a cached cycle target deleted before selection,
+a failed read that preserves the active path and trust, and deletion after a
+successful read while the exact prepared snapshot is consumed. Blocked-worker
+coverage distinguishes pending from the first ready-empty completion, requires
+that first completion to publish readiness, and retains the last completed cache
+during later scans. Actual worker completions exercise additions, removals and
+empty results while an open deep menu keeps its rows, actions, saved parent
+anchors/highlights/scroll offsets, offscreen highlight, manual viewport and
+typeahead. The palette keeps its opening profiles and exact query/caret/selection;
+reopening takes the completed inventory. English and Spanish pending status is
+non-action menu information or a persistent palette band outside ranked results.
+Status wrapping uses the renderer's measured overlay advance and line height,
+independent of terminal cell-width and cell-height scaling. Portable font-shaping
+checks require each status line to fit its natural-font bounds; picker projections
+also cover narrowed and shortened physical cells, narrow widths and long queries.
+At short restored heights, the palette first drops supplementary key guidance,
+then uses the compact pending translation if the full explanation cannot fit.
+If even that band cannot fit beside the physical input header and one result,
+it omits the visual band and replaces the decorative input prefix with Esc.
+The full reopening explanation remains an accessible input description and polite
+status. This constrained-height fallback preserves the query, caret, selection,
+composition and ranked action indices; it does not insert ranked status rows.
+Short-window cases include pending discovery at 360x120 with 0-, 24- and 46-pixel
+top chrome and separate natural/scaled cell metrics. Standard-height pending
+palettes retain the full status and Run/Select/Cancel guidance; ready-state
+geometry is unchanged.
+Portable checks cover native menu pending-to-empty modeling and captured-name
+actions, plus palette keyboard/pointer index agreement; they do not prove AppKit
+tracking or physical UI behavior. Ordinary resize/navigation coverage remains
+separate. Required compilation, tests, source controls and native acceptance must
+run on the changed source before it is accepted.

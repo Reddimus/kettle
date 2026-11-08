@@ -806,10 +806,10 @@ impl App {
             system_motion: std::sync::OnceLock::new(),
             #[cfg(target_os = "linux")]
             agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
-            #[cfg(target_os = "macos")]
+            profile_launch_gate: Default::default(),
             profile_inventory: {
                 let proxy = proxy.clone();
-                crate::macos_menu::ProfileInventory::new(move || {
+                crate::profile_inventory::ProfileInventory::new(move || {
                     let _ = proxy.send_event(UserEvent::ProfilesReady);
                 })?
             },
@@ -880,6 +880,7 @@ impl App {
             os_theme_dark: None,
             system_appearance: std::sync::OnceLock::new(),
             config_path: startup.config.clone(),
+            prepared_profile_reload: None,
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
             config_watcher_path: watcher

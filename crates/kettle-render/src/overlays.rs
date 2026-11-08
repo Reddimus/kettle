@@ -72,10 +72,43 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         }
 }
 
+/// Pinned explanatory text outside a menu's selectable/scrolling rows.
+pub struct MenuStatus {
+    pub lines: Vec<String>,
+    pub line_height: f32,
+}
+
+impl MenuStatus {
+    /// Use the renderer's natural overlay advance and line height, independent
+    /// of terminal cell scaling.
+    pub fn new(text: &str, width: f32, text_cell: (f32, f32)) -> Self {
+        let columns = menu::text_columns(width - 32.0, text_cell.0).max(1);
+        Self {
+            lines: crate::confirm::wrap(text, columns),
+            line_height: text_cell.1 + 4.0,
+        }
+    }
+
+    pub fn height(&self) -> f32 {
+        self.lines.len() as f32 * self.line_height + 12.0
+    }
+
+    pub fn line_rect(&self, band: Rect4, index: usize) -> Rect4 {
+        (
+            band.0 + 16.0,
+            band.1 + 6.0 + index as f32 * self.line_height,
+            (band.2 - 32.0).max(0.0),
+            self.line_height,
+        )
+    }
+}
+
 /// Vertical menu panel used by the right-click menu and the command, layout,
 /// and SSH pickers. The UI clamps the anchor and remains the source of truth
 /// for selection and dispatch; the renderer owns only shared list paint.
 pub struct ContextMenu {
+    /// Fixed explanatory band between a picker header and its result rows.
+    pub status: Option<MenuStatus>,
     /// Picker header above `anchor`; zero for ordinary context menus.
     pub picker_header_height: f32,
     /// Top-left of the panel in surface pixels (already clamped).
@@ -112,14 +145,36 @@ impl ContextMenu {
         )
     }
 
+    pub fn status_rect(&self) -> Option<Rect4> {
+        self.status.as_ref().map(|status| {
+            (
+                self.anchor.0,
+                self.anchor.1 - status.height(),
+                self.panel_w_clamped,
+                status.height(),
+            )
+        })
+    }
+
+    pub fn header_rect(&self) -> Rect4 {
+        let status_h = self.status.as_ref().map_or(0.0, MenuStatus::height);
+        (
+            self.anchor.0,
+            self.anchor.1 - status_h - self.picker_header_height,
+            self.panel_w_clamped,
+            self.picker_header_height,
+        )
+    }
+
     pub fn card_rect(&self) -> Rect4 {
         let (x, y, w, h) = self.rows_rect();
-        (
-            x,
-            y - self.picker_header_height,
-            w,
-            h + self.picker_header_height,
-        )
+        let above =
+            self.picker_header_height + self.status.as_ref().map_or(0.0, MenuStatus::height);
+        (x, y - above, w, h + above)
+    }
+
+    pub(crate) fn text_buffer_count(&self) -> usize {
+        self.rows.len() + self.status.as_ref().map_or(0, |status| status.lines.len())
     }
 
     /// Only fully painted picker rows have pointer/accessibility targets.
@@ -1537,10 +1592,15 @@ pub mod menu {
 
     /// Recover the number of text columns that fit inside a panel width.
     pub fn panel_columns(panel_width: f32, cell_width: f32) -> usize {
+        text_columns(panel_width - H_PAD, cell_width)
+    }
+
+    /// Text-column budget after the caller has removed its slot's padding.
+    pub fn text_columns(content_width: f32, cell_width: f32) -> usize {
         if cell_width <= 0.0 {
             return 0;
         }
-        ((panel_width - H_PAD).max(0.0) / cell_width).floor() as usize
+        (content_width.max(0.0) / cell_width).floor() as usize
     }
     /// Top + bottom breathing room reserved when clamping the panel
     /// height to the surface (for scrollable submenus). Keeps
@@ -1630,10 +1690,8 @@ pub(crate) fn picker_surfaces(
     if menu.picker_header_height <= 0.0 {
         return None;
     }
-    let (x, rows_y) = menu.anchor;
-    let y = rows_y - menu.picker_header_height;
+    let (x, y, _, h) = menu.card_rect();
     let w = context_menu_panel_width(menu, cw);
-    let h = menu.picker_header_height + menu.panel_h_clamped;
     let rgba = |c: Rgb, a| {
         [
             c.r as f32 / 255.0,

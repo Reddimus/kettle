@@ -32,6 +32,12 @@ pub(crate) fn context_menu_text_damage_key(
         menu.scroll_offset.hash(&mut hash);
         menu.panel_w_clamped.to_bits().hash(&mut hash);
         menu.panel_h_clamped.to_bits().hash(&mut hash);
+        menu.picker_header_height.to_bits().hash(&mut hash);
+        menu.status.is_some().hash(&mut hash);
+        if let Some(status) = &menu.status {
+            status.lines.hash(&mut hash);
+            status.line_height.to_bits().hash(&mut hash);
+        }
         menu.rows.len().hash(&mut hash);
         for row in &menu.rows {
             row.label.hash(&mut hash);

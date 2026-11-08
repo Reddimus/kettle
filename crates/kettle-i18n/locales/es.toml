@@ -901,6 +901,9 @@ tab_new_options = "Opciones de nueva pestaña"
 
 menu_new_tab_profile = "Nueva pestaña con perfil"
 
+menu_profiles_pending = "Los perfiles no estaban listos. Volver a abrir para actualizar."
+picker_profiles_pending = "Perfiles no estaban listos."
+
 menu_no_profiles = "Aún no hay perfiles — Crear perfil…"
 
 palette_launch_profile = "Nueva ventana con el perfil: {name}"
@@ -921,6 +924,7 @@ notify_profiles_failed_body = "Comprobar que el directorio de configuración est
 
 notify_profile_launch_failed = "No se abrió el perfil"
 
+notify_profile_launch_busy = "Se sigue comprobando otro inicio de perfil. Vuelve a intentarlo en breve."
 notify_profile_launch_failed_body = "Es posible que se haya eliminado el perfil o que Kettle no haya podido iniciar otro proceso."
 
 confirm_paste_without_controls = "Pegar sin caracteres de control"

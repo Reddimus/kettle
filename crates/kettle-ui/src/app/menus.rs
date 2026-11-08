@@ -639,25 +639,7 @@ impl App {
     }
 
     pub(super) fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
-        let profile_names = kettle_config::Config::list_profiles();
-        if profile_names.is_empty() {
-            return;
-        }
-        items.push(ContextMenuItem::Separator);
-        let inner: Vec<ContextMenuItem> = profile_names
-            .into_iter()
-            .map(|name| ContextMenuItem::ProfileChoice {
-                label: name.clone(),
-                profile: name,
-            })
-            .collect();
-        items.push(ContextMenuItem::Submenu {
-            label: self
-                .ui_text
-                .text(kettle_i18n::Text::MenuProfile)
-                .to_string(),
-            items: inner,
-        });
+        append_profile_choices(items, self.profile_inventory.snapshot(), &self.ui_text);
     }
 
     /// Append a "Theme…" entry that opens the searchable theme picker, which
@@ -1001,18 +983,11 @@ impl App {
 
     /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
-    /// palette / About) behind a separator. Pure over the shell list so the
-    /// menu shape is unit-testable.
+    /// palette / About) behind a separator. Pure over the cached shell and
+    /// profile lists so the menu shape is unit-testable.
     pub(super) fn new_tab_menu_items(
         shells: &[kettle_core::term::ShellChoice],
-        tr: &kettle_i18n::Translator,
-    ) -> Vec<ContextMenuItem> {
-        Self::new_tab_menu_with_profiles(shells, &kettle_config::Config::list_profiles(), tr)
-    }
-
-    pub(super) fn new_tab_menu_with_profiles(
-        shells: &[kettle_core::term::ShellChoice],
-        profiles: &[String],
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         use kettle_i18n::Text as T;
@@ -1024,14 +999,7 @@ impl App {
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Submenu {
             label: tr.text(T::MenuNewTabProfile).to_string(),
-            items: profile_launch_entries(profiles, tr)
-                .into_iter()
-                .map(|(label, action)| ContextMenuItem::DynamicItem {
-                    label: label.shown(tr).to_string(),
-                    action,
-                    enabled: true,
-                })
-                .collect(),
+            items: profile_launch_items(profiles, tr),
         });
         for (label, action) in [
             (T::MenuSaveLayout, Action::SaveLayout),
@@ -1128,10 +1096,11 @@ impl App {
 
     pub(super) fn shell_menu_items(
         shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         match shells {
-            Some(shells) => Self::new_tab_menu_items(shells, tr),
+            Some(shells) => Self::new_tab_menu_items(shells, profiles, tr),
             None => vec![ContextMenuItem::Info {
                 label: tr.text(kettle_i18n::Text::MenuDetectingShells).to_string(),
             }],
@@ -1152,7 +1121,11 @@ impl App {
     pub(super) fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
         let shells = kettle_core::term::cached_shells();
-        let items = Self::shell_menu_items(shells.as_deref(), &self.ui_text);
+        let items = Self::shell_menu_items(
+            shells.as_deref(),
+            self.profile_inventory.snapshot(),
+            &self.ui_text,
+        );
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -1735,6 +1708,7 @@ impl App {
             panel_w_clamped,
             panel_h_clamped,
             a11y_label: ws.context_menu_a11y_label.clone(),
+            status: None,
             picker_header_height: 0.0,
         })
     }

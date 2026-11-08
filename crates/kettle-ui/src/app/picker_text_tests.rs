@@ -109,6 +109,7 @@ fn modal_accessibility_names_follow_the_ui_language() {
             panel_w_clamped: 100.0,
             panel_h_clamped: 100.0,
             a11y_label: None,
+            status: None,
             picker_header_height: 0.0,
         }),
         ..kettle_render::Overlay::default()
@@ -214,14 +215,14 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
 fn picker_rows_and_empty_states_follow_the_ui_language() {
     let bindings = kettle_config::keybinds::defaults();
     assert_eq!(
-        command_picker_list("", 0, &bindings, &ES, None, &[],).rows[0].label,
+        command_picker_list("", 0, &bindings, &ES, None, Some(&[]),).rows[0].label,
         "Nueva pestaña"
     );
-    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, &[]);
+    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, Some(&[]));
     assert_eq!(none.rows[0].label, "Ningún comando coincide");
     assert!(!none.rows[0].enabled);
     assert_eq!(
-        command_picker_list("zzzqqq", 0, &bindings, &EN, None, &[],).rows[0].label,
+        command_picker_list("zzzqqq", 0, &bindings, &EN, None, Some(&[]),).rows[0].label,
         "No matching command"
     );
 

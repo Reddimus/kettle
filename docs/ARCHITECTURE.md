@@ -3842,13 +3842,50 @@ no context reads, clock queries, formatting or writes.
 
 ## Threading model
 
-The macOS profile menu reads an event-loop-owned inventory. One owned worker
-runs the bounded `Config::list_profiles` scan at startup, on config reload,
-and every five seconds to notice profile additions/removals that do not touch
-the active config. A one-slot request channel coalesces invalidations, and a
-single latest-result slot coalesces event-loop notifications. Redraw and pointer
-dispatch only construct a menu from the current cache. Shutdown disconnects the
-worker without waiting on a potentially stalled filesystem.
+Profile menus and actions on every platform read one event-loop-owned
+`profile_inventory` cache, including the new-tab dropdown, terminal Profile
+submenu, command palette, profile cycling and macOS menu bar. One owned worker
+runs the bounded `Config::try_list_profiles` scan at startup, on config reload,
+and after five-second idle polls to notice profile additions/removals that do
+not touch the active config; a stalled scan has no completion-time guarantee.
+A one-slot request channel coalesces invalidations, and a single latest-result
+slot coalesces event-loop notifications. Redraw and pointer
+dispatch only construct a menu from the latest completed cache. Completion updates
+the inventory and native macOS menu model only. Open in-app menus and palettes keep
+their opening snapshot, including rows, query, selection, typeahead and all saved
+parent viewports; reopening takes the latest completed cache. Before the first
+successful completion, non-action localized menu status and a pinned palette
+status band explain that no completed profile snapshot was available at opening.
+The band includes the full reopening explanation and Run/Select/Esc guidance;
+it wraps independently of the editor and stays outside ranked actions and result
+scrolling. The renderer's optional `ContextMenu::status` owns measured lines and
+shared band/header/card bounds for painting, pointer containment, accessibility
+dialog bounds and control diagnostics. At constrained heights the palette can
+drop supplementary guidance, use compact status, or replace the decorative
+input prefix with Esc when a status band cannot fit. The full accessible
+explanation remains available. Ready snapshots have no band and retain the
+existing picker layout. Accessibility also retains its independent full
+input description and polite Status node.
+The first successful completion publishes readiness even for an empty result.
+Failures are logged and retain the last successful cache, including an
+unconsumed successful worker result. Before any success, failures leave the
+snapshot unavailable; Next/Previous Profile does not claim that no profiles
+exist. The fallible config enumerator preserves the existing file/name
+validation, link following, sorting and scan/profile caps. A missing profiles
+directory is an empty scan; other root lookup, directory access, iteration,
+metadata and cap failures return errors. Successful scans may also be empty. The Vec-returning
+`Config::list_profiles` remains the compatibility wrapper for CLI callers and
+returns an empty list on error. No permission repair policy or cap is added.
+Shutdown disconnects the inventory worker without waiting on a potentially
+stalled filesystem. Separate-process profile launches acquire one nonblocking
+validation permit shared across all windows of an App; occupied admission
+reports a localized notification. The launch worker revalidates exact name
+membership with `Config::try_list_profiles` before spawning. RAII returns
+admission on validation/spawn/thread-start failure, and a successfully started
+child is retained before admission is released. The same already-started
+worker then waits for that child independently of the validation permit, so
+long-lived profile windows do not block later validations. There is no scan
+completion-time guarantee or new limit on profile files or live children.
 
 The [2026-11-01 scaling diagnostics](SCALING-2026-11-01.md) retain the current
 per-pane readers, renderer-owned font systems and bounded search slices. The
@@ -4712,8 +4749,9 @@ and uses the named-layout writer with strict filename validation and visible
 failure feedback. It does not change the current automatic save destination.
 Profile launches use separate processes because configuration is application-wide.
 The dropdown, native Shell submenu and palette share profile launch entries from
-`Config::list_profiles`; the palette captures names on open so row activation
-and geometry use the same list throughout that interaction.
+the shared profile inventory. The palette snapshots that cache and its readiness
+when it opens, so ranking, row activation and geometry use the same list until
+reopening. Inventory completion does not replace choices under the pointer.
 
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
@@ -5164,3 +5202,11 @@ reduced-motion and color-scheme, with bounded parsing and live updates.
 Left/right lanes, order and omissions
 share the control geometry. Missing or invalid settings use the default right
 minimize, maximize/restore, close order.
+
+Profile switching reads a bounded config snapshot before changing the active
+path or trust mode. A missing or refused cached target leaves the active profile
+in place. The reload consumes that same path-bound snapshot, so deletion after
+the read cannot replace it with defaults. This preserves the existing config
+reload work; profile directory enumeration runs on the inventory worker.
+Inventory refresh preserves a manually scrolled menu viewport, independently of
+its highlighted row. Resize and keyboard navigation still keep selection visible.

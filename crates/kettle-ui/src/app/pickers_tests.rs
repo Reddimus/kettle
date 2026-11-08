@@ -44,9 +44,9 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
-        &[],
+        Some(&[]),
     );
-    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
+    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), (8.0, 16.0), 0.0)
         .expect("a 320x160 surface fits a picker card");
 
     assert!(
@@ -159,6 +159,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
         layout_picker_list("", 0, &ws.layout_picker_entries, &EN_TEXT),
         (800.0, 600.0),
         (8.0, 16.0),
+        (8.0, 16.0),
         0.0,
     )
     .unwrap();
@@ -208,6 +209,7 @@ fn picker_card_geometry_is_centered_below_chrome() {
             layout_picker_list("", 0, &["one".into(), "two".into()], &EN_TEXT),
             surface,
             (8.0, 16.0),
+            (8.0, 16.0),
             0.0,
         )
         .unwrap();
@@ -251,6 +253,7 @@ fn picker_press_and_diagnostics_use_the_card_rows() {
     let menu = picker_context_menu(
         layout_picker_list("", 0, &["alpha".into(), "beta".into()], &EN_TEXT),
         (800.0, 600.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         46.0,
     )
@@ -301,7 +304,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        Some(&[]),
     );
     for row in &list.rows {
         assert_eq!(
@@ -330,7 +333,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        Some(&[]),
     );
     assert_eq!(empty.rows.len(), 1);
     assert!(!empty.rows[0].enabled);
@@ -347,9 +350,9 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 &kettle_config::keybinds::defaults(),
                 &EN_TEXT,
                 None,
-                &[],
+                Some(&[]),
             );
-            let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
+            let menu = picker_context_menu(list, surface, (8.0, 16.0), (8.0, 16.0), top)
                 .expect("a restored 120px window must retain its picker");
             let card = menu.card_rect();
             assert!(card.1 >= top);
@@ -371,6 +374,189 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 super::PickerPointer::Press
             ));
             assert_eq!(ws.palette_input.as_ref().unwrap().1, menu.highlight);
+        }
+    }
+}
+
+#[test]
+fn short_pending_palette_preserves_input_action_and_accessibility_with_scaled_cells() {
+    use kettle_i18n::{Language, Text, Translator};
+    use unicode_width::UnicodeWidthStr as _;
+
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let cfg = kettle_config::Config::default();
+        for (cell, text_cell) in [
+            ((8.0, 16.0), (8.0, 16.0)),
+            ((4.0, 16.0), (8.0, 16.0)),
+            ((8.0, 8.0), (8.0, 16.0)),
+            ((4.5, 9.0), (9.0, 18.0)),
+            ((8.0, 16.0), (16.0, 32.0)),
+        ] {
+            for top in [0.0, 24.0, 46.0] {
+                for surface in [(360.0, 120.0), (800.0, 120.0), (800.0, 200.0)] {
+                    for query in [String::new(), "split".into(), "query".repeat(40)] {
+                        let commands = super::palette_entries(None, &tr, None);
+                        let ranked = kettle_config::palette::rank_entries(&query, &commands, &tr);
+                        let selected = 20.min(ranked.len().saturating_sub(1));
+                        let mut ws = WindowState::new(1, Mux::new());
+                        super::profiles::open_profile_palette(&mut ws, None);
+                        let mut editor = crate::text_editor::TextEditor::from(query.as_str());
+                        editor.move_left(true, false);
+                        ws.palette_input = Some((editor, selected));
+                        ws.ime_preedit = Some(("composing".into(), Some((2, 5))));
+                        let before = ws.palette_input.clone();
+                        let preedit = ws.ime_preedit.clone();
+                        let (text, cursor_byte, selection) = super::project_modal_editor(
+                            &ws.palette_input.as_ref().unwrap().0,
+                            ws.ime_preedit.as_ref(),
+                        );
+                        let menu = picker_context_menu(
+                            super::open_picker_list(&ws, &cfg, &tr, None).unwrap(),
+                            surface,
+                            cell,
+                            text_cell,
+                            top,
+                        )
+                        .expect("pending status cannot hide the input and selected action");
+                        let card = menu.card_rect();
+                        assert!(card.1 >= top && card.1 + card.3 <= surface.1 + 0.01);
+                        assert_eq!(menu.picker_header_height, cell.1 + 14.0);
+                        assert_eq!(menu.rows.len(), ranked.len().max(1));
+                        assert_eq!(menu.highlight, selected);
+                        let row = menu
+                            .visible_row_rect(selected)
+                            .expect("selected row is visible");
+                        assert!(row.1 + row.3 <= surface.1 + 0.01);
+                        if let Some(status) = &menu.status {
+                            let band = menu.status_rect().unwrap();
+                            for (index, line) in status.lines.iter().enumerate() {
+                                let slot = status.line_rect(band, index);
+                                assert!(line.width() as f32 * text_cell.0 <= slot.2);
+                                assert!(slot.3 >= text_cell.1);
+                                assert!(slot.1 + slot.3 <= band.1 + band.3 + 0.01);
+                            }
+                            ws.cursor.x = (band.0 + 1.0) as f64;
+                            ws.cursor.y = (band.1 + 1.0) as f64;
+                            assert!(!super::apply_picker_pointer(
+                                &mut ws,
+                                &menu,
+                                cell.1,
+                                super::PickerPointer::Press,
+                            ));
+                        }
+                        let mut field = kettle_render::TextFieldOverlay {
+                            picker_header: true,
+                            text,
+                            cursor_byte,
+                            selection,
+                            horizontal_scroll: 3,
+                            rect: (0.0, 0.0, 0.0, 0.0),
+                            prefix: "  \u{2318} ".into(),
+                            hint: super::picker_hint(&tr, &[("Esc", Text::PickerHintCancel)]),
+                            accent_palette: 5,
+                        };
+                        let original = field.clone();
+                        super::place_picker_header(&mut field, &menu, true);
+                        assert_eq!(field.rect, menu.header_rect());
+                        assert_eq!(field.text, original.text);
+                        assert_eq!(field.cursor_byte, original.cursor_byte);
+                        assert_eq!(field.selection, original.selection);
+                        assert_eq!(field.horizontal_scroll, original.horizontal_scroll);
+                        let cw = kettle_render::text_field_cell_width(
+                            &field, text_cell.0, text_cell.1,
+                        );
+                        let slots = kettle_render::text_field_rects(&field, cw);
+                        assert!(
+                            slots[1].2 > cw,
+                            "query and caret retain a visible input slot"
+                        );
+                        if menu.status.is_none() {
+                            assert!(
+                                kettle_render::text_field_labels(&field, cw)
+                                    .0
+                                    .contains("Esc")
+                            );
+                        }
+                        assert_eq!(ws.palette_input, before);
+                        assert_eq!(ws.ime_preedit, preedit);
+                        if let Some(&entry) = ranked.get(selected) {
+                            ws.cursor.x = (row.0 + 1.0) as f64;
+                            ws.cursor.y = (row.1 + 1.0) as f64;
+                            assert!(super::apply_picker_pointer(
+                                &mut ws,
+                                &menu,
+                                cell.1,
+                                super::PickerPointer::Press,
+                            ));
+                            assert_eq!(ws.palette_input, before);
+                            assert_eq!(
+                                super::selected_palette_action(&query, selected, &commands, &tr),
+                                Some(commands[entry].1.clone())
+                            );
+                        } else {
+                            assert!(!menu.rows[0].enabled);
+                        }
+                        let overlay = kettle_render::Overlay {
+                            tr,
+                            palette_query: Some(query.clone()),
+                            context_menu: Some(menu),
+                            text_field: Some(field),
+                            ..Default::default()
+                        };
+                        let a11y = super::modal_accessibility_projection_for_window(
+                            &overlay, &ws, surface, text_cell, 1.0, &tr,
+                        );
+                        let input = a11y
+                            .nodes
+                            .iter()
+                            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+                            .unwrap();
+                        assert_eq!(
+                            input.1.description(),
+                            Some(tr.text(Text::MenuProfilesPending))
+                        );
+                        let status = a11y
+                            .nodes
+                            .iter()
+                            .find(|(_, node)| node.role() == accesskit::Role::Status)
+                            .unwrap();
+                        assert_eq!(
+                            status.1.label(),
+                            Some(tr.text(Text::MenuProfilesPending))
+                        );
+                        assert_eq!(status.1.live(), Some(accesskit::Live::Polite));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn short_pending_palette_degrades_guidance_then_explanation_before_omitting_the_band() {
+    use kettle_i18n::{Language, Text, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for top in [0.0, 24.0, 46.0] {
+            let menu = picker_context_menu(
+                command_picker_list(
+                    "", 20, &kettle_config::keybinds::defaults(), &tr, None, None,
+                ),
+                (360.0, 120.0),
+                (8.0, 16.0),
+                (8.0, 16.0),
+                top,
+            )
+            .unwrap();
+            let shown = menu.status.as_ref().map(|status| status.lines.join(" "));
+            let expected = match top {
+                0.0 => Some(tr.text(Text::MenuProfilesPending)),
+                24.0 => Some(tr.text(Text::PickerProfilesPending)),
+                _ => None,
+            };
+            assert_eq!(shown.as_deref(), expected);
+            assert!(menu.visible_row_rect(20).is_some());
         }
     }
 }

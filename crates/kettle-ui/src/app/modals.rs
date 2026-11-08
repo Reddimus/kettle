@@ -93,6 +93,20 @@ pub(super) fn edit_modal_text(
     crate::modal_input::edit_key(editor, key, mods, read, write)
 }
 
+pub(super) fn place_picker_header(
+    field: &mut kettle_render::TextFieldOverlay,
+    menu: &ContextMenu,
+    pending_palette: bool,
+) {
+    field.rect = menu.header_rect();
+    if pending_palette && menu.status.is_none() {
+        // The smallest restored windows have room for input and one action
+        // only. Keep Escape visible beside long queries; accessibility still
+        // exposes the complete pending explanation.
+        field.prefix = " Esc ".to_string();
+    }
+}
+
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
@@ -180,20 +194,18 @@ impl App {
             field_hit
                 || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
                     .and_then(|list| {
-                        picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
-                    })
-                    .is_some_and(|menu| {
-                        rect_contains(
+                        picker_context_menu(
+                            list,
+                            surface,
+                            (cw, ch),
                             (
-                                menu.anchor.0,
-                                menu.anchor.1,
-                                menu.panel_w_clamped,
-                                menu.panel_h_clamped,
+                                self.overlay_text_cell_width(ws),
+                                self.overlay_text_line_height(ws),
                             ),
-                            x,
-                            y,
+                            self.picker_top_chrome(ws),
                         )
                     })
+                    .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
     }
@@ -265,9 +277,20 @@ impl App {
             || ws.theme_picker_input.is_some()
             || ws.layout_picker_input.is_some()
             || ws.ssh_input.is_some();
-        if picker {
-            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1)?.header;
-        }
+        let picker_menu = if picker {
+            Some(picker_context_menu(
+                open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())?,
+                (sw, sh),
+                (cw, ch),
+                (
+                    self.overlay_text_cell_width(ws),
+                    self.overlay_text_line_height(ws),
+                ),
+                self.picker_top_chrome(ws),
+            )?)
+        } else {
+            None
+        };
         if ws.settings_text_edit.is_none()
             && !ws
                 .settings_nav
@@ -325,6 +348,13 @@ impl App {
                 5
             },
         };
+        if let Some(menu) = &picker_menu {
+            place_picker_header(
+                &mut field,
+                menu,
+                ws.palette_input.is_some() && ws.palette_profiles.is_none(),
+            );
+        }
         let cw = self.modal_field_cell_width(ws, &field);
         let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
@@ -1671,7 +1701,7 @@ impl App {
         let cmds = palette_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
-            &ws.palette_profiles,
+            ws.palette_profiles.as_deref(),
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -1698,8 +1728,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text);
-                let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
+                let action = selected_palette_action(q, *sel, &cmds, &self.ui_text);
                 ws.palette_input = None;
                 if let Some(a) = action {
                     self.handle_action(ws, a, event_loop);
