@@ -927,6 +927,7 @@ impl Renderer {
                 self.card_label_texts.clear();
                 invalidate_pane_titlebar_texts(&mut self.pane_titlebar_texts);
                 self.tab_texts.clear();
+                self.tab_tooltip_text.clear();
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
