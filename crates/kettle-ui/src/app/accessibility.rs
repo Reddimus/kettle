@@ -281,19 +281,7 @@ impl App {
                         state.seen,
                         state.input_row,
                     );
-                    state.seen = Some(now);
-                    if state.input_row.is_some_and(|row| row < now.row()) {
-                        state.input_row = None;
-                    }
-                    let spoken = if state.typing {
-                        String::new()
-                    } else {
-                        output_announcement(&output, &self.ui_text)
-                    };
-                    if !spoken.is_empty() && Some(pane_id) == focused {
-                        state.text = spoken;
-                        state.serial = state.serial.wrapping_add(1);
-                    }
+                    state.update(now, &output, Some(pane_id) == focused, &self.ui_text);
                 }
                 if Some(pane_id) == focused && !alt && !state.text.is_empty() {
                     let id = accessibility_output_id(pane_id, state.serial);
@@ -2915,9 +2903,61 @@ pub(crate) struct OutputAnnouncement {
     pub(crate) typing: bool,
 }
 
+impl OutputAnnouncement {
+    pub(super) fn update(
+        &mut self,
+        now: kettle_core::grid_text::OutputCursor,
+        output: &kettle_core::grid_text::NewOutput,
+        focused: bool,
+        tr: &kettle_i18n::Translator,
+    ) {
+        self.seen = Some(now);
+        if self.input_row.is_some_and(|row| row < now.row()) {
+            self.input_row = None;
+        }
+        let spoken = if self.typing {
+            String::new()
+        } else {
+            output_announcement(output, tr)
+        };
+        if !spoken.is_empty() && focused {
+            self.text = spoken;
+            self.serial = self.serial.wrapping_add(1);
+        }
+    }
+}
+
 /// The most of a batch read out: its last lines.
 const OUTPUT_SPOKEN_LINES: usize = 8;
 const OUTPUT_SPOKEN_BYTES: usize = 600;
+
+/// Fixed-size meaning of one key or a coalesced batch, without retaining text.
+#[derive(Clone, Copy, Default)]
+pub(super) struct AccessibilityInput {
+    submitted: bool,
+    typing: Option<bool>,
+}
+
+impl AccessibilityInput {
+    pub(super) fn from_key(key: &winit::keyboard::Key, text: Option<&str>) -> Self {
+        use winit::keyboard::{Key, NamedKey};
+        let submitted = matches!(key, Key::Named(NamedKey::Enter));
+        let edits = matches!(
+            key,
+            Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Space)
+        ) || text.is_some_and(|text| text.chars().any(|c| !c.is_control()));
+        Self {
+            submitted,
+            typing: (submitted || edits).then_some(!submitted),
+        }
+    }
+
+    pub(super) fn append(&mut self, next: Self) {
+        // Coalescing preserves any submitted row and the last meaningful key.
+        self.submitted |= next.submitted;
+        self.typing = next.typing.or(self.typing);
+    }
+}
 
 impl App {
     /// Keyboard input reached `recipients`: Enter marks the row the command
@@ -2929,19 +2969,21 @@ impl App {
         key: &winit::keyboard::Key,
         text: Option<&str>,
     ) {
-        use winit::keyboard::{Key, NamedKey};
-        let enter = matches!(key, Key::Named(NamedKey::Enter));
-        let edits = matches!(
-            key,
-            Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Space)
-        ) || text.is_some_and(|text| text.chars().any(|c| !c.is_control()));
-        if !enter && !edits {
+        Self::apply_accessibility_input(ws, recipients, AccessibilityInput::from_key(key, text));
+    }
+
+    pub(super) fn apply_accessibility_input(
+        ws: &WindowState,
+        recipients: &[u64],
+        input: AccessibilityInput,
+    ) {
+        let Some(typing) = input.typing else {
             return;
-        }
+        };
         let mut outputs = ws.accessibility_output.borrow_mut();
         for id in recipients {
             let state = outputs.entry(*id).or_default();
-            if enter {
+            if input.submitted {
                 state.input_row = ws.mux.panes.get(id).and_then(|pane| {
                     pane.term
                         .term
@@ -2949,10 +2991,8 @@ impl App {
                         .ok()
                         .map(|term| kettle_core::grid_text::cursor_row(term.grid()))
                 });
-                state.typing = false;
-            } else {
-                state.typing = true;
             }
+            state.typing = typing;
         }
     }
 }
