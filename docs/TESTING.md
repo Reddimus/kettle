@@ -646,7 +646,10 @@ PTY probe checks the captured environment and original invocation in both a
 split and an empty mux, without a window or GPU.
 `remote_reconnect_replays_preserve_environment_and_invocation` repeats the
 probe after duplicate pane/tab, split, undo-close, and a live tab move, then
-checks another replay from each result. Session round-trip tests
+checks another replay from each result. The probe starts its success marker on a
+new PTY line so serial test-runner progress labels cannot split it across rows.
+Failure diagnostics retain at most 4096 viewport characters, PTY read progress,
+and the unreaped owned-child exit status before teardown. Session round-trip tests
 `remote_reconnect_session_restore_falls_back_to_configured_shell` and
 `remote_reconnect_environment_session_restore_omits_private_values` verify
 shell fallback for invocation-only and environment-only settings and ensure
