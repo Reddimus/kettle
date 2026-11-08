@@ -260,7 +260,11 @@ mod linux {
     fn mcp_supervisor_runs_after_server_executable_is_replaced() {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("kettle");
-        std::fs::copy(env!("CARGO_BIN_EXE_kettle"), &executable).unwrap();
+        kettle_test_support::copy_executable_fixture(
+            Path::new(env!("CARGO_BIN_EXE_kettle")),
+            &executable,
+        )
+        .unwrap();
         let mut peer = Peer::with_executable(&executable);
         let replacement = directory.path().join("replacement");
         std::fs::copy("/bin/false", &replacement).unwrap();

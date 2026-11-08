@@ -5923,11 +5923,11 @@ mod node_tests {
     #[cfg(unix)]
     #[test]
     fn ordinary_new_tab_routes_raw_wsl_cwd_through_launcher() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
         let launcher = root.path().join("wsl.exe");
-        std::fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let source = root.path().join("wsl-source.sh");
+        std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        kettle_test_support::copy_executable_fixture(&source, &launcher).unwrap();
         let launcher = launcher.to_string_lossy().into_owned();
         let cfg = Config {
             shell: Some(launcher.clone()),
@@ -5962,12 +5962,11 @@ mod node_tests {
     #[cfg(unix)]
     #[test]
     fn restore_leaf_routes_wsl_cwd_through_launcher() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let root = tempfile::tempdir().expect("temp dir");
         let launcher = root.path().join("wsl.exe");
-        std::fs::write(&launcher, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
-        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+        let source = root.path().join("wsl-source.sh");
+        std::fs::write(&source, b"#!/bin/sh\nexit 0\n").expect("launcher fixture");
+        kettle_test_support::copy_executable_fixture(&source, &launcher)
             .expect("executable fixture");
         let launcher = launcher.to_string_lossy().into_owned();
         let cfg = Config {
