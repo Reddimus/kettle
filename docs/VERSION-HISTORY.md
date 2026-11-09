@@ -13,7 +13,8 @@ changelog before `tag-release.sh` creates the matching tag. Git tags and GitHub
 releases remain authoritative for what has actually shipped.
 
 - Latest version in this tree: `v6.0.0`, with matching source version,
-  changelog heading, and Git tag.
+  changelog heading and workspace dependency versions. These source records
+  describe the prepared version; Git tags and releases establish what shipped.
 - Current workspace version: `6.0.0`
 - Release headings inspected: 198 across the root `CHANGELOG.md` and
   `docs/changelog/` archives. That count comprises `[Unreleased]` and 197 dated

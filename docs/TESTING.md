@@ -1052,16 +1052,17 @@ be disjoint. When `tests/ui-states/linux` exists, CI compares against it;
 otherwise it explicitly reports capture-only operation. Do not mix baselines
 from different compositors/font environments.
 
-The initial Linux pixel gate remains pending until the final merged build,
-after the font and C08 changes land. Capture its full matrix in the final CI
-environment, retain the build/commit and font/environment identity, and review
-all 80 PNGs before adding them under `tests/ui-states/linux` in an explained PR
-with before/after artifacts. Re-run CI with those baselines to establish the
-pixel gate. This environment preparation has not run Weston or captured pixels
-on native Linux; the first hosted Linux execution, artifact inspection and
-baseline promotion remain pending. No baseline is generated or accepted by
-headless fixture tests; capture-only CI does not prove pixel equality. Native
-geometry evidence must also identify the exact capture script/build used.
+The initial 80 Linux baselines are checked in under `tests/ui-states/linux`.
+[Their provenance](../tests/ui-states/README.md) records hosted CI run
+42383598778, its exact source and binary, bundled fonts, headless Weston GL and
+llvmpipe environment, and completed owned-process cleanup. That run's Linux
+capture passed; its unrelated Windows failures remain documented. CI now
+compares captures with these baselines. Review any baseline update in an
+explained PR with before/after artifacts, and re-run the comparison gate.
+Portable fixture tests do not establish pixel equality. This headless Linux
+gate also does not establish native GNOME/KDE behavior, macOS pixel parity,
+IME or accessibility acceptance. Native geometry and pixel evidence must
+identify the exact capture script, build and environment used.
 
 ## Diagram gate
 
