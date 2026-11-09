@@ -285,6 +285,16 @@ one-pixel focus outline while retaining interior underline and leak detection.
 The Git streaming helper checks that both output pipes close after success and
 consumer failure.
 
+`video_preview::tests::a_parent_timeout_does_not_wait_for_inherited_pipes`
+exercises physical timeout pipe cleanup after a retained direct child is stopped
+and reaped. Two sibling fixture children inherit one anonymous stdout pipe;
+the controlled holder acknowledges successful stdout writes before collection
+and after collection returns or its three-second observation window expires.
+Parent control EOF then releases the holder for stdout EOF and reader closure.
+This covers post-reap descriptor lifetime, not shell ancestry or total launch
+time. The existing stalled-helper, absolute-cutoff and retry tests retain
+real-launch and request-deadline coverage.
+
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
 one artifact per hook, deduplication after primary display, stable replacement
 keys and shutdown cleanup through the real server process and a fixture control

@@ -722,6 +722,21 @@ fn stop_and_reap_child(mut child: impl PreviewChildCleanup) -> bool {
     }
 }
 
+fn cleanup_timed_out_preview(
+    writer: std::thread::JoinHandle<std::io::Result<()>>,
+    reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> PreviewChildAttempt<Checked> {
+    let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
+    if join_preview_thread(writer, cleanup).is_none() {
+        return PreviewChildAttempt::WorkerLost;
+    }
+    match join_preview_thread(reader, cleanup) {
+        Some(Ok(Ok(_))) => PreviewChildAttempt::TimedOut,
+        Some(Ok(Err(_)) | Err(_)) => PreviewChildAttempt::Failed,
+        None => PreviewChildAttempt::WorkerLost,
+    }
+}
+
 /// Check `path`, by `deadline`.
 fn run_preview_child(path: &Path, deadline: std::time::Instant) -> PreviewChildOutcome<Checked> {
     retry_preview_timeout(deadline, |until| run_preview_child_once(path, until))
@@ -809,15 +824,7 @@ fn run_preview_child_once(path: &Path, until: std::time::Instant) -> PreviewChil
                 if !stop_and_reap_child(child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
-                let cleanup = std::time::Instant::now() + WORKER_CLEANUP;
-                if join_preview_thread(writer, cleanup).is_none() {
-                    return PreviewChildAttempt::WorkerLost;
-                }
-                return match join_preview_thread(reader, cleanup) {
-                    Some(Ok(Ok(_))) => PreviewChildAttempt::TimedOut,
-                    Some(Ok(Err(_)) | Err(_)) => PreviewChildAttempt::Failed,
-                    None => PreviewChildAttempt::WorkerLost,
-                };
+                return cleanup_timed_out_preview(writer, reader);
             }
             Err(_) => {
                 if !stop_and_reap_child(child) {
@@ -2135,25 +2142,296 @@ mod tests {
     }
 
     #[cfg(unix)]
+    const PIPE_FIXTURE_ROLE: &str = "KETTLE_VIDEO_TIMEOUT_PIPE_ROLE";
+    #[cfg(unix)]
+    const PIPE_BEFORE: &[u8] = b"pipe-before\n";
+    #[cfg(unix)]
+    const PIPE_AFTER: &[u8] = b"pipe-after\n";
+    #[cfg(unix)]
+    const PIPE_OBSERVATION: Duration = Duration::from_secs(3);
+
+    #[cfg(unix)]
+    fn timeout_pipe_helper(role: &std::ffi::OsStr) -> std::io::Result<()> {
+        let holder = role == "holder";
+        if !holder && role != "direct" {
+            return Err(std::io::Error::other("unknown pipe fixture role"));
+        }
+        let mut stdout = std::io::stdout().lock();
+        let mut ack = std::io::stderr().lock();
+        let mut control = std::io::stdin().lock();
+        if holder {
+            stdout.write_all(PIPE_BEFORE)?;
+            stdout.flush()?;
+        }
+        ack.write_all(b"r")?;
+        ack.flush()?;
+        let mut command = [0];
+        while control.read(&mut command)? != 0 {
+            match command[0] {
+                b'n' => {}
+                b'w' if holder => {
+                    stdout.write_all(PIPE_AFTER)?;
+                    stdout.flush()?;
+                    ack.write_all(b"w")?;
+                    ack.flush()?;
+                }
+                _ => return Err(std::io::Error::other("unknown pipe fixture command")),
+            }
+        }
+        // EOF releases either helper if its parent disappears; neither forks.
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    struct TimeoutPipeChild {
+        child: Option<std::process::Child>,
+        control: Option<std::os::unix::net::UnixStream>,
+    }
+
+    #[cfg(unix)]
+    impl TimeoutPipeChild {
+        fn spawn(role: &str, stdout: std::io::PipeWriter) -> std::io::Result<Self> {
+            use std::os::fd::OwnedFd;
+            let (control, peer) = std::os::unix::net::UnixStream::pair()?;
+            control.set_read_timeout(Some(PIPE_OBSERVATION))?;
+            control.set_write_timeout(Some(PIPE_OBSERVATION))?;
+            let ack = OwnedFd::from(peer.try_clone()?);
+            let mut command = Command::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "video_preview::tests::a_parent_timeout_does_not_wait_for_inherited_pipes",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(PIPE_FIXTURE_ROLE, role)
+                .stdin(Stdio::from(OwnedFd::from(peer)))
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(ack));
+            // Install custody immediately; dropping Command closes its stdio copies.
+            Ok(Self {
+                child: Some(command.spawn()?),
+                control: Some(control),
+            })
+        }
+
+        fn acknowledge(&mut self, expected: u8) -> std::io::Result<()> {
+            let mut ack = [0];
+            self.control.as_mut().unwrap().read_exact(&mut ack)?;
+            if ack[0] != expected {
+                return Err(std::io::Error::other(
+                    "unexpected pipe fixture acknowledgement",
+                ));
+            }
+            Ok(())
+        }
+
+        fn require_running(&mut self) -> std::io::Result<()> {
+            if self.child.as_mut().unwrap().try_wait()?.is_some() {
+                return Err(std::io::Error::other(
+                    "pipe fixture child exited before stop",
+                ));
+            }
+            Ok(())
+        }
+
+        fn stop(&mut self) -> bool {
+            let reaped = self.child.take().is_none_or(stop_and_reap_child);
+            drop(self.control.take());
+            reaped
+        }
+
+        fn release(&mut self) -> bool {
+            drop(self.control.take());
+            let Some(mut child) = self.child.take() else {
+                return true;
+            };
+            let mut success = false;
+            if preview_cleanup_until(std::time::Instant::now() + PIPE_OBSERVATION, || match child
+                .try_wait()
+            {
+                Ok(Some(status)) => {
+                    success = status.success();
+                    true
+                }
+                _ => false,
+            }) {
+                return success;
+            }
+            if !stop_and_reap_child(child) {
+                eprintln!("pipe fixture cleanup incomplete: child custody retained");
+            }
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TimeoutPipeChild {
+        fn drop(&mut self) {
+            if !self.release() {
+                eprintln!("pipe fixture did not exit cleanly on control EOF");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    type TimeoutPipeCollection = (PreviewChildAttempt<Checked>, Duration);
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct TimeoutPipeFixture {
+        direct: Option<TimeoutPipeChild>,
+        holder: Option<TimeoutPipeChild>,
+        writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+        reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+        collector: Option<std::thread::JoinHandle<TimeoutPipeCollection>>,
+        reader_closed: Option<std::sync::mpsc::Receiver<bool>>,
+    }
+
+    #[cfg(unix)]
+    impl TimeoutPipeFixture {
+        fn finish(&mut self) -> (bool, Option<TimeoutPipeCollection>) {
+            // Release all writers before waiting for EOF, including on unwind.
+            let mut complete = self.direct.take().is_none_or(|mut child| child.release());
+            complete &= self.holder.take().is_none_or(|mut child| child.release());
+            let until = std::time::Instant::now() + PIPE_OBSERVATION;
+            if let Some(writer) = self.writer.take() {
+                complete &= matches!(join_preview_thread(writer, until), Some(Ok(_)));
+            }
+            if let Some(reader) = self.reader.take() {
+                complete &= matches!(join_preview_thread(reader, until), Some(Ok(_)));
+            }
+            let collected = self
+                .collector
+                .take()
+                .map(|collector| join_preview_thread(collector, until).and_then(Result::ok));
+            complete &= collected.as_ref().is_none_or(Option::is_some);
+            if let Some(closed) = self.reader_closed.take() {
+                complete &= closed
+                    .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                    .is_ok_and(|valid| valid);
+            }
+            if !complete {
+                eprintln!("pipe fixture cleanup incomplete or stdout witnesses invalid");
+            }
+            (complete, collected.flatten())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TimeoutPipeFixture {
+        fn drop(&mut self) {
+            let _ = self.finish();
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_parent_timeout_does_not_wait_for_inherited_pipes() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = crate::test_tempdir();
-        let helper = dir.path().join("holds-pipe");
-        std::fs::write(&helper, "#!/bin/sh\nsleep 5 &\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (attempt, elapsed) = std::thread::spawn(move || {
-            assert!(block_sigpipe_on_current_thread());
-            STAND_IN.with(|stand_in| *stand_in.borrow_mut() = Some(helper));
+        if let Some(role) = std::env::var_os(PIPE_FIXTURE_ROLE) {
+            std::process::exit(if timeout_pipe_helper(&role).is_ok() {
+                0
+            } else {
+                2
+            });
+        }
+        kettle_test_support::run_alone_in_child(
+            "video_preview::tests::a_parent_timeout_does_not_wait_for_inherited_pipes",
+            inherited_pipe_timeout_alone,
+        );
+    }
+
+    #[cfg(unix)]
+    fn inherited_pipe_timeout_alone() {
+        let mut fixture = TimeoutPipeFixture::default();
+        let observed = (|| -> std::io::Result<bool> {
+            let (mut stdout, write_end) = std::io::pipe()?;
+            fixture.direct = Some(TimeoutPipeChild::spawn("direct", write_end.try_clone()?)?);
+            fixture.holder = Some(TimeoutPipeChild::spawn("holder", write_end)?);
+            // Both Command objects and every parent stdout writer are now gone.
+            let (closed, reader_closed) = std::sync::mpsc::sync_channel(1);
+            fixture.reader_closed = Some(reader_closed);
+            fixture.reader = Some(std::thread::Builder::new().spawn(move || {
+                let output = read_bounded_preview(&mut stdout);
+                let valid = output.as_ref().is_ok_and(|bytes| {
+                    bytes.len() < MAX_OUTPUT_BYTES
+                        && bytes
+                            .windows(PIPE_BEFORE.len())
+                            .any(|part| part == PIPE_BEFORE)
+                        && bytes
+                            .windows(PIPE_AFTER.len())
+                            .any(|part| part == PIPE_AFTER)
+                });
+                drop(stdout);
+                // Production may detach this reader; retain proof of read completion/FD close.
+                let _ = closed.send(valid);
+                output
+            })?);
+            fixture.direct.as_mut().unwrap().acknowledge(b'r')?;
+            fixture.holder.as_mut().unwrap().acknowledge(b'r')?;
+            let mut input = fixture
+                .direct
+                .as_ref()
+                .unwrap()
+                .control
+                .as_ref()
+                .unwrap()
+                .try_clone()?;
+            let (wrote, writer_done) = std::sync::mpsc::sync_channel(1);
+            fixture.writer = Some(std::thread::Builder::new().spawn(move || {
+                let result = input.write_all(b"n");
+                drop(input);
+                let _ = wrote.send(result.is_ok());
+                result
+            })?);
+            if writer_done.recv_timeout(PIPE_OBSERVATION) != Ok(true)
+                || !preview_cleanup_until(std::time::Instant::now() + PIPE_OBSERVATION, || {
+                    fixture.writer.as_ref().unwrap().is_finished()
+                })
+            {
+                return Err(std::io::Error::other("pipe fixture writer did not finish"));
+            }
+            fixture.direct.as_mut().unwrap().require_running()?;
+            fixture.holder.as_mut().unwrap().require_running()?;
             let started = std::time::Instant::now();
-            let attempt = run_preview_child_once(
-                Path::new("/clip.mp4"),
-                started + Duration::from_millis(300),
-            );
-            (attempt, started.elapsed())
-        })
-        .join()
-        .unwrap();
+            preview_cleanup_until(started + Duration::from_millis(300), || false);
+            fixture.direct.as_mut().unwrap().require_running()?;
+            if !fixture.direct.as_mut().unwrap().stop() {
+                return Err(std::io::Error::other("direct fixture child was not reaped"));
+            }
+            // The retained holder is now the sole stdout writer, waiting on control.
+            let writer = fixture.writer.take().unwrap();
+            let reader = fixture.reader.take().unwrap();
+            let (finished, completion) = std::sync::mpsc::sync_channel(1);
+            fixture.collector = Some(std::thread::Builder::new().spawn(move || {
+                let attempt = cleanup_timed_out_preview(writer, reader);
+                let elapsed = started.elapsed();
+                let _ = finished.send(());
+                (attempt, elapsed)
+            })?);
+            let returned_while_held = completion
+                .recv_timeout(
+                    (started + PIPE_OBSERVATION)
+                        .saturating_duration_since(std::time::Instant::now()),
+                )
+                .is_ok();
+            // Also run this witness when collection blocks: release only after its ack.
+            let holder = fixture.holder.as_mut().unwrap();
+            holder.control.as_mut().unwrap().write_all(b"w")?;
+            holder.acknowledge(b'w')?;
+            Ok(returned_while_held)
+        })();
+        let (complete, collected) = fixture.finish();
+        assert!(
+            complete,
+            "pipe fixture cleanup incomplete or stdout witnesses invalid"
+        );
+        let returned_while_held = observed.expect("controlled inherited-pipe scenario");
+        let (attempt, elapsed) = collected.expect("collector completed after holder release");
+        assert!(
+            returned_while_held,
+            "collection did not finish while stdout was held"
+        );
         assert_eq!(attempt, PreviewChildAttempt::WorkerLost);
         assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
     }
