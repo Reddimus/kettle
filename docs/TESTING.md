@@ -2700,7 +2700,12 @@ compare caret and selection placement with the shaped pointer stops, including
 long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
 all shaped clusters visible and retain its full selection width at every caret
 boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
-tests cover English and Spanish at narrow widths. Settings value-slot tests compare
+tests cover English and Spanish at narrow widths. Picker-header tests check the
+full, shortened and Esc-only hint at exact and fractional width boundaries,
+using the complete projected query even when it is scrolled. No picker fallback
+ellipsizes the final action. UI tests pass the actual localized palette, theme,
+layout and SSH hint strings through the renderer, preserving theme's Esc restore
+action. Unsupported hint shapes retain whole-or-drop behavior. Settings value-slot tests compare
 the editor's start with the fitted label and gap at terminal cell-width scales
 0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks

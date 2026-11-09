@@ -8,6 +8,62 @@ const EN: Translator = Translator::new(Language::En);
 const ES: Translator = Translator::new(Language::Es);
 
 #[test]
+fn narrow_picker_hints_keep_each_callers_translated_escape_action() {
+    for tr in [&EN, &ES] {
+        for keys in [
+            vec![
+                ("Enter", Text::PickerHintRun),
+                ("Tab/↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+            vec![
+                ("Enter", Text::PickerHintKeep),
+                ("↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintRestore),
+            ],
+            vec![
+                ("Enter", Text::PickerHintSpawn),
+                ("Tab/↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+            vec![
+                ("Enter", Text::PickerHintConnect),
+                ("Tab", Text::PickerHintComplete),
+                ("↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+        ] {
+            let full = picker_hint(tr, &keys);
+            let mut field = kettle_render::TextFieldOverlay {
+                picker_header: true,
+                text: "año".into(),
+                cursor_byte: 4,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, 224.0, 30.0),
+                prefix: "  ⌘ ".into(),
+                hint: full.clone(),
+                accent_palette: 5,
+            };
+            let action = keys.last().unwrap().1;
+            assert_eq!(
+                kettle_render::text_field_labels(&field, 8.0).1,
+                format!("(Esc {})  ", tr.text(action))
+            );
+            field.rect.2 = 1000.0;
+            assert_eq!(
+                kettle_render::text_field_labels(&field, 8.0).1,
+                format!("{full}  ")
+            );
+            field.rect.2 = 224.0;
+            field.text = "full projected query ".repeat(8);
+            field.horizontal_scroll = 120;
+            assert!(kettle_render::text_field_labels(&field, 8.0).1.is_empty());
+        }
+    }
+}
+
+#[test]
 fn picker_hints_keep_their_keys_and_translate_their_actions() {
     let palette = [
         ("Enter", Text::PickerHintRun),

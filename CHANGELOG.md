@@ -278,6 +278,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The command palette and the theme, layout and SSH pickers open as one
   centred card near the top of the window, with the query field above its
   results, and command labels highlight the characters that match the query.
+  Narrow headers keep complete key-hint segments ending with Esc when they
+  fit beside the full query; hints disappear when the query needs the space.
 - On macOS, `Cmd+D` splits beside and `Shift+Cmd+D` splits below, as in
   iTerm2, Ghostty and Warp. `Shift+Cmd+D` no longer closes a pane; panes
   close with `Ctrl+Shift+W`, and `keybind = cmd+shift+d=close_pane` restores
