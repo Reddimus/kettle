@@ -367,6 +367,8 @@ class StableProcessHandle:
                 signal.pidfd_send_signal(self.pidfd, signal_number)
                 return True
             if self.audit_token is not None:
+                if signal_number == 0:
+                    return self.matches_current()
                 import ctypes
 
                 library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
