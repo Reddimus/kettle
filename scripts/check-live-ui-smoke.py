@@ -19589,7 +19589,7 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
-                "tab-bar = never",
+                "tab-bar = off",
                 "status-bar = off",
                 "scrollbar = never",
                 "restore-session = false",
