@@ -17,15 +17,16 @@ env:
 
 jobs:
   artifact:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: 35048f0d7cd776dcb6dfdad1b280d41a3c57bd06
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: stable
+          toolchain: 1.99.1
       - name: Linux build dependencies
         run: |
           scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
@@ -33,14 +34,54 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Qualification supervisor fixtures
         run: python3 scripts/test-qualify-live-ui.py
-      - name: Build one fixed release artifact
-        run: nice -n 10 cargo build --locked --release -p kettle --bin kettle
+      - name: Build one fixed optimized pair
+        run: |
+          set -euo pipefail
+          mkdir -p target/qualification
+          nice -n 10 cargo build --locked --release -p kettle --bin kettle --message-format=json \
+            | tee target/qualification/kettle-build.jsonl
+          nice -n 10 cargo build --locked --profile media-worker -p kettle-media-worker --message-format=json \
+            | tee target/qualification/worker-build.jsonl
+          cargo metadata --offline --locked --no-deps --format-version 1 > target/qualification/cargo-metadata.json
       - name: Bind and pack the candidate
         run: |
           mkdir -p target/qualification
           python3 scripts/qualify-live-ui.py manifest --kettle target/release/kettle \
             --out target/qualification/identity.json
-          tar -C target/release -cf target/qualification/binary.tar kettle
+          python3 - <<'PYPAIR'
+          import hashlib, json, os, platform, subprocess
+          from pathlib import Path
+          out = Path("target/qualification")
+          identity = json.loads((out / "identity.json").read_text())
+          assert identity["source"] == "35048f0d7cd776dcb6dfdad1b280d41a3c57bd06"
+          assert identity["tree"] == "f53e1feaf9a3ad9cc6b17e8e4b61c36cafea8f87"
+          packages = {p["name"]: p for p in json.loads((out / "cargo-metadata.json").read_text())["packages"]}
+          records = []
+          for name, log, binary in (("kettle", "kettle-build.jsonl", "target/release/kettle"),
+                                    ("kettle-media-worker", "worker-build.jsonl", "target/media-worker/kettle-media-worker")):
+              messages = [json.loads(line) for line in (out / log).read_text().splitlines() if line.startswith("{")]
+              package = packages[name]
+              scripts = [dict(m["env"]) for m in messages if m.get("reason") == "build-script-executed" and m["package_id"] == package["id"]]
+              hashes = {e["KETTLE_SOURCE_HASH"] for e in scripts if "KETTLE_SOURCE_HASH" in e}
+              assert len(hashes) == 1
+              source_hash = hashes.pop()
+              assert len(source_hash) == 16 and all(c in "0123456789abcdef" for c in source_hash)
+              artifacts = [m for m in messages if m.get("reason") == "compiler-artifact" and m["package_id"] == package["id"] and m["target"]["name"] == name and m.get("executable") == str(Path(binary).resolve())]
+              assert artifacts and all(m["profile"]["opt_level"] == "3" and not m["profile"]["test"] and not m["profile"]["debug_assertions"] for m in artifacts)
+              with Path(binary).open("rb") as handle:
+                  digest = hashlib.file_digest(handle, "sha256").hexdigest()
+              records.append({"name": name, "sha256": digest, "source_hash": source_hash, "version": package["version"], "profile": "release" if name == "kettle" else "media-worker"})
+          assert records[0]["source_hash"] == records[1]["source_hash"]
+          assert records[0]["version"] == records[1]["version"] == "6.0.0"
+          assert records[0]["sha256"] == identity["binary_sha256"]
+          pair = dict(identity, binaries=records, rustc=subprocess.check_output(["rustc", "-Vv"], text=True), machine=platform.machine(), libc=os.confstr("CS_GNU_LIBC_VERSION"), workflow_commit=os.environ["GITHUB_WORKFLOW_SHA"], run_id=os.environ["GITHUB_RUN_ID"], run_attempt=os.environ["GITHUB_RUN_ATTEMPT"])
+          (out / "pair-identity.json").write_text(json.dumps(pair, indent=2) + "\n")
+          (out / "pair.sha256").write_text("".join(r["sha256"] + "  " + r["name"] + "\n" for r in records))
+          PYPAIR
+          tar -cf target/qualification/binary.tar \
+            -C "$GITHUB_WORKSPACE/target/release" kettle \
+            -C "$GITHUB_WORKSPACE/target/media-worker" kettle-media-worker
+          (cd target/qualification && sha256sum binary.tar > binary.tar.sha256)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-qualification-binary
@@ -50,7 +91,7 @@ jobs:
 
   repetitions:
     needs: artifact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -63,6 +104,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: 35048f0d7cd776dcb6dfdad1b280d41a3c57bd06
       - name: Linux runtime dependencies
         run: |
           scripts/install-ci-linux-deps.sh libfontconfig1 libfreetype6 libx11-6 \
@@ -72,14 +114,22 @@ jobs:
         with:
           name: ui-qualification-binary
           path: target/qualification
-      - name: Unpack the fixed artifact
-        run: tar -C target/qualification -xf target/qualification/binary.tar
+      - name: Verify and unpack the fixed pair
+        run: |
+          set -euo pipefail
+          cd target/qualification
+          sha256sum -c binary.tar.sha256
+          tar -xf binary.tar
+          sha256sum -c pair.sha256
       - name: Run 100 repetitions of each scenario
         run: |
           allocation="$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:$GITHUB_JOB:$QUALIFICATION_ALLOCATION:$RUNNER_NAME:$(cat /proc/sys/kernel/random/boot_id)"
           xvfb-run -a python3 scripts/qualify-live-ui.py run \
             --kettle target/qualification/kettle --identity target/qualification/identity.json \
             --out target/qualification-results --allocation "$allocation"
+      - name: Require the same pair after repetitions
+        if: always()
+        run: cd target/qualification && sha256sum -c pair.sha256
       - name: Preserve every case and failure
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -92,12 +142,13 @@ jobs:
   qualification:
     needs: repetitions
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: 35048f0d7cd776dcb6dfdad1b280d41a3c57bd06
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
