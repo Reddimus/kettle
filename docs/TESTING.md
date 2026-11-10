@@ -3304,9 +3304,12 @@ view. The old window-sized event leaves the surface suspended; the live-view
 completion commits one layout and releases suspension. A source guard connects
 the replay to the completion producer and its platform fallbacks. Native
 fullscreen exit without a later resize remains a required live acceptance check.
-The live macOS check is
-`launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
-it requires an unlocked desktop and cannot run in the sandbox.
+For live caption and fullscreen coverage, run `just native-titlebar-smoke`
+from an unlocked macOS desktop session with the smoke's required permissions.
+Automatic AppKit-tab and DPI transitions, and fullscreen exit without a later
+resize event, still require separate live checks. `just conformance-esctest`
+checks terminal escape sequences; it does not verify native fullscreen
+restoration.
 
 ## Cursor and selection regression checks
 
