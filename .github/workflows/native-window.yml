@@ -1,58 +1,423 @@
-name: Native window regression
+name: Exact0b213932 ARM64 Mac private test pair
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "crates/kettle-ui/**"
-      - "scripts/check-native-titlebar.py"
-      - "scripts/test-native-titlebar.py"
-      - "scripts/native-window-info.swift"
-      - "scripts/check-modal-shortcuts.py"
-      - "scripts/check-live-ui-smoke.py"
-      - ".github/workflows/native-window.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-window-${{ github.ref }}
-  cancel-in-progress: true
+  group: macos-private-pair-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '1'
+  RUST_TEST_THREADS: '1'
+  CARGO_NET_OFFLINE: 'true'
+  RUSTUP_TOOLCHAIN: '1.97.1'
+  RUSTFLAGS: ''
+  CARGO_ENCODED_RUSTFLAGS: ''
+  RUSTC_WRAPPER: ''
+  RUSTC_WORKSPACE_WRAPPER: ''
 
 jobs:
-  titlebar:
-    name: macOS native fullscreen and caption
+  native_unit:
     runs-on: macos-26
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: "8"
-      CARGO_INCREMENTAL: "0"
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
+          path: carrier
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+          ref: 0b2139325bd27a18eb25e34e20cf64056e6ee8a9
+          path: product
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          shared-key: native-window
-      - name: Checker unit tests
-        run: python3 scripts/test-native-titlebar.py
-      - name: Build the native fixture
-        run: nice -n 10 cargo build --locked -p kettle
-      - name: Native caption and fullscreen
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin
+          components: clippy, rustfmt
+      - name: Record initial tool routes and select the admitted direct toolchain
+        working-directory: product
         run: |
-          launchctl asuser "$(id -u)" python3 scripts/check-native-titlebar.py \
-            --kettle ./target/debug/kettle --out-dir "$RUNNER_TEMP/native-window"
-      - name: Preserve native evidence
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          python3 -I -B - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          product = workspace / "product"
+          helper = workspace / "carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py"
+          spec = importlib.util.spec_from_file_location("fixed_manifest", helper)
+          fixed = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(fixed)
+          search = os.pathsep.join(
+              str(product / item) if not Path(item).is_absolute() else item
+              for item in os.get_exec_path()
+          )
+          initial = {}
+          for name in ("rustup", "rustc", "cargo", "rustdoc"):
+              path = shutil.which(name, path=search)
+              row = {"resolved_by_PATH": path}
+              if path is not None:
+                  try:
+                      resolved = Path(path).resolve(strict=True)
+                      row.update(resolved=str(resolved), binary=fixed.fact(resolved))
+                  except (OSError, ValueError) as error:
+                      row["observation_error"] = str(error)
+              initial[name] = row
+          selected = {}
+          for name in ("rustc", "cargo", "rustdoc"):
+              text = subprocess.check_output(
+                  ["rustup", "which", "--toolchain", "1.97.1", name],
+                  cwd=product, text=True, timeout=15,
+              ).strip()
+              fixed.need(len(text.encode()) <= 4096, "bounded selected tool path")
+              path = Path(text)
+              fixed.need(path.is_absolute(), "absolute selected tool path")
+              selected[name] = {"path": str(path), "binary": fixed.fact(path)}
+          record = {
+              "scope": "INITIAL_TOOL_ROUTE_OBSERVATIONS_NOT_ADMISSION_OR_COMPILER_PROOF",
+              "initial_PATH_tools": initial,
+              "rustup_selected_1_97_1": selected,
+              "selected_bin_for_next_steps": str(Path(selected["rustc"]["path"]).parent),
+          }
+          payload = json.dumps(record, indent=2) + "\n"
+          fixed.need(len(payload.encode()) <= 32768, "bounded route diagnostic")
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "macos-private-pair"
+          evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+          with (evidence / "initial-tool-route-before-selection.json").open("x") as output:
+              output.write(payload)
+          print(payload, end="", flush=True)
+          selected_bin = record["selected_bin_for_next_steps"]
+          fixed.need("\n" not in selected_bin and "\r" not in selected_bin, "one selected bin path")
+          with Path(os.environ["GITHUB_PATH"]).open("a") as output:
+              output.write(selected_bin + "\n")
+          PY
+      - name: Exact clean source and native architecture admission
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase entry
+      - name: Record actual OS, compiler and SDK
+        working-directory: product
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/macos-private-pair"
+          {
+            sw_vers
+            uname -a
+            printf 'RUNNER_ARCH=%s\nImageOS=%s\nImageVersion=%s\n' "$RUNNER_ARCH" "${ImageOS:-}" "${ImageVersion:-}"
+            rustc -Vv
+            cargo -Vv
+            rustup show active-toolchain
+            rustup which --toolchain 1.97.1 rustc
+            rustup which --toolchain 1.97.1 cargo
+            cargo clippy -V
+            cargo fmt --version
+            python3 --version
+            xcode-select -p
+            xcodebuild -version
+            xcrun --find clang
+            xcrun clang --version
+            xcrun --find swiftc
+            xcrun swiftc --version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --show-sdk-version
+            shasum -a 256 "$(rustc --print sysroot)/bin/rustc" "$(xcrun --find clang)" "$(xcrun --find swiftc)"
+          } > "$evidence/os-tools-sdk.txt" 2>&1
+          python3 -I -B -c 'import json,os,sys; from pathlib import Path; names=("GITHUB_REPOSITORY","GITHUB_SHA","GITHUB_REF","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_WORKFLOW","RUNNER_OS","RUNNER_ARCH","ImageOS","ImageVersion","CARGO_INCREMENTAL","CARGO_BUILD_JOBS","CARGO_NET_OFFLINE","RUSTUP_TOOLCHAIN","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS","SDKROOT","MACOSX_DEPLOYMENT_TARGET","DEVELOPER_DIR"); Path(sys.argv[1]).write_text(json.dumps({key:os.environ.get(key) for key in names},indent=2)+"\n")' "$evidence/run-metadata.json"
+      - name: Locked online prefetch
+        run: |
+          set -euo pipefail
+          cd product
+          CARGO_NET_OFFLINE=false nice -n 10 cargo fetch --locked
+          CARGO_NET_OFFLINE=false nice -n 10 cargo fetch --locked --manifest-path vendor/Cargo.toml
+      - name: Focused native source validation with retained bounded output
+        run: |
+          set -euo pipefail
+          export CAPTURE_ROOT="$RUNNER_TEMP/macos-private-pair/native-unit"
+          mkdir -m 700 "$CAPTURE_ROOT"
+          started="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          set +e
+          (
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE/product"
+            # Keep the verified absolute rustdoc override in this native-test subshell.
+            RUSTDOC="$(rustup which --toolchain 1.97.1 rustdoc)" || exit $?
+            export RUSTDOC
+            nice -n 10 cargo fmt --all --check || exit $?
+            nice -n 10 python3 -X warn_default_encoding -W error::EncodingWarning scripts/test-grapheme-tables.py || exit $?
+            python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-core || exit $?
+            nice -n 10 cargo test --locked --target aarch64-apple-darwin -p kettle-core || exit $?
+            python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-vendor || exit $?
+            nice -n 10 cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal || exit $?
+            python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-vendor-clippy || exit $?
+            nice -n 10 cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings || exit $?
+            python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-render || exit $?
+            nice -n 10 cargo test --locked --target aarch64-apple-darwin -p kettle-render || exit $?
+          ) 2>&1 | python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/bounded-drain.py"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          python3 -I -B -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"command_exit":int(sys.argv[2]),"log_drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":json.loads(sys.argv[6])},indent=2)+"\n")' "$CAPTURE_ROOT/exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished" '["fixed-native-unit-sequence"]'
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+      - name: Exact source bookend after attempted validation
+        if: ${{ always() }}
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase after
+      - name: Validate complete successful native source evidence
+        id: native_validation
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase native-unit
+      - name: Prepare bounded diagnostic prefixes
+        id: prepare_diagnostics
+        if: ${{ always() }}
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/prepare-upload.py" --evidence "$RUNNER_TEMP/macos-private-pair" --output "$RUNNER_TEMP/macos-private-diagnostics-native-unit"
+      - name: Retain bounded diagnostic prefixes
+        if: ${{ always() && steps.prepare_diagnostics.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: native-window-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/native-window/**/*.json
-            ${{ runner.temp }}/native-window/**/*.log
-            ${{ runner.temp }}/native-window/**/*.png
+          name: macos-arm64-diagnostics-native-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-private-diagnostics-native-unit
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain complete validated native source evidence
+        if: ${{ success() && steps.native_validation.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-arm64-native-unit-full-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-private-pair
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+  private_pair:
+    needs: native_unit
+    runs-on: macos-26
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      VALIDATION_JOB_RESULT: ${{ needs.native_unit.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: carrier
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 0b2139325bd27a18eb25e34e20cf64056e6ee8a9
+          path: product
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin
+          components: clippy, rustfmt
+      - name: Record initial tool routes and select the admitted direct toolchain
+        working-directory: product
+        run: |
+          python3 -I -B - <<'PY'
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          product = workspace / "product"
+          helper = workspace / "carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py"
+          spec = importlib.util.spec_from_file_location("fixed_manifest", helper)
+          fixed = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(fixed)
+          search = os.pathsep.join(
+              str(product / item) if not Path(item).is_absolute() else item
+              for item in os.get_exec_path()
+          )
+          initial = {}
+          for name in ("rustup", "rustc", "cargo", "rustdoc"):
+              path = shutil.which(name, path=search)
+              row = {"resolved_by_PATH": path}
+              if path is not None:
+                  try:
+                      resolved = Path(path).resolve(strict=True)
+                      row.update(resolved=str(resolved), binary=fixed.fact(resolved))
+                  except (OSError, ValueError) as error:
+                      row["observation_error"] = str(error)
+              initial[name] = row
+          selected = {}
+          for name in ("rustc", "cargo", "rustdoc"):
+              text = subprocess.check_output(
+                  ["rustup", "which", "--toolchain", "1.97.1", name],
+                  cwd=product, text=True, timeout=15,
+              ).strip()
+              fixed.need(len(text.encode()) <= 4096, "bounded selected tool path")
+              path = Path(text)
+              fixed.need(path.is_absolute(), "absolute selected tool path")
+              selected[name] = {"path": str(path), "binary": fixed.fact(path)}
+          record = {
+              "scope": "INITIAL_TOOL_ROUTE_OBSERVATIONS_NOT_ADMISSION_OR_COMPILER_PROOF",
+              "initial_PATH_tools": initial,
+              "rustup_selected_1_97_1": selected,
+              "selected_bin_for_next_steps": str(Path(selected["rustc"]["path"]).parent),
+          }
+          payload = json.dumps(record, indent=2) + "\n"
+          fixed.need(len(payload.encode()) <= 32768, "bounded route diagnostic")
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "macos-private-pair"
+          evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
+          with (evidence / "initial-tool-route-before-selection.json").open("x") as output:
+              output.write(payload)
+          print(payload, end="", flush=True)
+          selected_bin = record["selected_bin_for_next_steps"]
+          fixed.need("\n" not in selected_bin and "\r" not in selected_bin, "one selected bin path")
+          with Path(os.environ["GITHUB_PATH"]).open("a") as output:
+              output.write(selected_bin + "\n")
+          PY
+      - name: Exact clean source and native architecture admission
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase entry
+      - name: Record actual OS, compiler and SDK
+        working-directory: product
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/macos-private-pair"
+          {
+            sw_vers
+            uname -a
+            printf 'RUNNER_ARCH=%s\nImageOS=%s\nImageVersion=%s\n' "$RUNNER_ARCH" "${ImageOS:-}" "${ImageVersion:-}"
+            rustc -Vv
+            cargo -Vv
+            rustup show active-toolchain
+            rustup which --toolchain 1.97.1 rustc
+            rustup which --toolchain 1.97.1 cargo
+            cargo clippy -V
+            cargo fmt --version
+            python3 --version
+            xcode-select -p
+            xcodebuild -version
+            xcrun --find clang
+            xcrun clang --version
+            xcrun --find swiftc
+            xcrun swiftc --version
+            xcrun --sdk macosx --show-sdk-path
+            xcrun --sdk macosx --show-sdk-version
+            shasum -a 256 "$(rustc --print sysroot)/bin/rustc" "$(xcrun --find clang)" "$(xcrun --find swiftc)"
+          } > "$evidence/os-tools-sdk.txt" 2>&1
+          python3 -I -B -c 'import json,os,sys; from pathlib import Path; names=("GITHUB_REPOSITORY","GITHUB_SHA","GITHUB_REF","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_WORKFLOW","RUNNER_OS","RUNNER_ARCH","ImageOS","ImageVersion","CARGO_INCREMENTAL","CARGO_BUILD_JOBS","CARGO_NET_OFFLINE","RUSTUP_TOOLCHAIN","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS","SDKROOT","MACOSX_DEPLOYMENT_TARGET","DEVELOPER_DIR"); Path(sys.argv[1]).write_text(json.dumps({key:os.environ.get(key) for key in names},indent=2)+"\n")' "$evidence/run-metadata.json"
+      - name: Locked online product prefetch
+        run: |
+          set -euo pipefail
+          cd product
+          CARGO_NET_OFFLINE=false nice -n 10 cargo fetch --locked
+      - name: Retain actual package identities
+        run: |
+          set -euo pipefail
+          cd product
+          cargo metadata --locked --offline --no-deps --format-version 1 > "$RUNNER_TEMP/macos-private-pair/cargo-metadata.json"
+      - name: 8 GiB and exact source before main
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-main
+      - name: Build main with retained actual origin
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          export CAPTURE_ROOT="$RUNNER_TEMP/macos-private-pair/main"
+          mkdir -m 700 "$CAPTURE_ROOT"
+          started="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          set +e
+          (
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE/product"
+            nice -n 10 cargo build --locked --release --target aarch64-apple-darwin -p kettle --message-format=json-render-diagnostics || exit $?
+          ) 2>&1 | python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/bounded-drain.py"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          python3 -I -B -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"command_exit":int(sys.argv[2]),"log_drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":json.loads(sys.argv[6])},indent=2)+"\n")' "$CAPTURE_ROOT/exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished" '["nice","-n","10","cargo","build","--locked","--release","--target","aarch64-apple-darwin","-p","kettle","--message-format=json-render-diagnostics"]'
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+      - name: 8 GiB and exact source before worker
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase before-worker
+      - name: Build worker with retained actual origin
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          export CAPTURE_ROOT="$RUNNER_TEMP/macos-private-pair/worker"
+          mkdir -m 700 "$CAPTURE_ROOT"
+          started="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          set +e
+          (
+            set -euo pipefail
+            cd "$GITHUB_WORKSPACE/product"
+            nice -n 10 cargo build --locked --profile media-worker --target aarch64-apple-darwin -p kettle-media-worker --message-format=json-render-diagnostics || exit $?
+          ) 2>&1 | python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/bounded-drain.py"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(python3 -I -B -c 'import time; print(time.time_ns())')"
+          python3 -I -B -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"command_exit":int(sys.argv[2]),"log_drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":json.loads(sys.argv[6])},indent=2)+"\n")' "$CAPTURE_ROOT/exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished" '["nice","-n","10","cargo","build","--locked","--profile","media-worker","--target","aarch64-apple-darwin","-p","kettle-media-worker","--message-format=json-render-diagnostics"]'
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+      - name: Retain raw pair, main version and actual Mach-O ABI
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          cd product
+          evidence="$RUNNER_TEMP/macos-private-pair"
+          mkdir -m 700 "$evidence/raw"
+          cp target/aarch64-apple-darwin/release/kettle "$evidence/raw/kettle"
+          cp target/aarch64-apple-darwin/media-worker/kettle-media-worker "$evidence/raw/kettle-media-worker"
+          mkdir -m 700 "$evidence/version-home" "$evidence/version-home/config" "$evidence/version-home/data" "$evidence/version-home/state" "$evidence/version-home/cache" "$evidence/version-home/runtime"
+          env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$evidence/version-home" XDG_CONFIG_HOME="$evidence/version-home/config" XDG_DATA_HOME="$evidence/version-home/data" XDG_STATE_HOME="$evidence/version-home/state" XDG_CACHE_HOME="$evidence/version-home/cache" XDG_RUNTIME_DIR="$evidence/version-home/runtime" "$evidence/raw/kettle" --version > "$evidence/version.txt"
+          file "$evidence/raw/kettle" "$evidence/raw/kettle-media-worker" > "$evidence/file.txt"
+          lipo -archs "$evidence/raw/kettle" > "$evidence/main.archs.txt"
+          lipo -archs "$evidence/raw/kettle-media-worker" > "$evidence/worker.archs.txt"
+          otool -L "$evidence/raw/kettle" > "$evidence/main.otool-libraries.txt"
+          otool -l "$evidence/raw/kettle" > "$evidence/main.otool-load-commands.txt"
+          otool -L "$evidence/raw/kettle-media-worker" > "$evidence/worker.otool-libraries.txt"
+          otool -l "$evidence/raw/kettle-media-worker" > "$evidence/worker.otool-load-commands.txt"
+      - name: Exact source bookend after attempted pair build
+        if: ${{ always() }}
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase after
+      - name: Validate raw artifact manifest from actual product metadata
+        id: pair_validation
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/manifest-checker.py" --product "$GITHUB_WORKSPACE/product" --evidence "$RUNNER_TEMP/macos-private-pair" --phase pair
+      - name: Prepare bounded diagnostic prefixes
+        id: prepare_diagnostics
+        if: ${{ always() }}
+        run: |
+          python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-macos-arm64-private-pair/prepare-upload.py" --evidence "$RUNNER_TEMP/macos-private-pair" --output "$RUNNER_TEMP/macos-private-diagnostics-private-pair"
+      - name: Retain bounded diagnostic prefixes
+        if: ${{ always() && steps.prepare_diagnostics.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-arm64-diagnostics-private-pair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-private-diagnostics-private-pair
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain positively validated raw private-test pair
+        if: ${{ success() && steps.pair_validation.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-arm64-private-pair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-private-pair
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
