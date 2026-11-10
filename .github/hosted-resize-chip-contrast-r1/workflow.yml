@@ -1,0 +1,362 @@
+name: One-off resize chip regressions and hosted Linux strict gate
+permissions:
+  contents: read
+concurrency:
+  group: hosted-resize-chip-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_INCREMENTAL: '0'
+  RUST_TEST_THREADS: '1'
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  KETTLE_MERMAID_REQUIRED: '1'
+  CARGO_TARGET_DIR: ${{ github.workspace }}/product/target
+  CARGO_TERM_COLOR: never
+jobs:
+  strict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Checkout isolated carrier only
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ github.sha }}
+        path: carrier
+        persist-credentials: false
+    - name: Checkout exact product baseline separately
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 614b6cfbd40161821dbfd4077462897c9248ab07
+        path: product
+        persist-credentials: false
+    - name: Checkout exact614b baseline for old helper-body controls
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 614b6cfbd40161821dbfd4077462897c9248ab07
+        path: old-control
+        persist-credentials: false
+    - name: Apply exact dirty4 candidate and old helper-body control; verify both1981file trees
+      id: apply
+      run: |
+        set -euo pipefail
+        packet="$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1"
+        evidence="$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        mkdir -m 700 "$evidence"
+        printf '%s\n' "3bd3692e56855b6882174255c39a8b2197602df157dbd23aef07df836c220bfd  $packet/source.patch.gz" | sha256sum --check
+        printf '%s\n' "f12f9975c300b3d41786778b767f841cc42bbf034f35f5bbafa32f47078cf590  $packet/old-control.patch.gz" | sha256sum --check
+        printf '%s\n' "6c0e5ffc0b75a57a6bce2f046a8d2d6188db7c378cf300c496671ed6b8d8c414  $packet/expected-new-files.json" | sha256sum --check
+        printf '%s\n' "a52a117e180fe5f78f2d553b7e4907f6287ce4b3b27068dd568855f5d4235d5a  $packet/expected-old-files.json" | sha256sum --check
+        printf '%s\n' "11fe646819df021541d2fa50d4bc786d09798b9f1bebd9dcfc62610b6d4d7f69  $packet/bindingchecker.py" | sha256sum --check
+        printf '%s\n' "0e1bf33243048bf6ea2af4ce3c4e2fbc446ef85d7c998ebb0fdb7641519d63b7  $packet/regressioncheck.py" | sha256sum --check
+        gzip -cd "$packet/source.patch.gz" > "$evidence/source.patch"
+        gzip -cd "$packet/old-control.patch.gz" > "$evidence/old-control.patch"
+        printf '%s\n' "fda4c2ed8568d25b83cbcdd6148295953f971e042abe72868c489c6f24cf03a1  $evidence/source.patch" "59fb1b7590c9e453386b8d754b20872172eac03f1cab9fd8fad348dc80fe55fc  $evidence/old-control.patch" | sha256sum --check
+        git -C product apply --check --index "$evidence/source.patch"
+        git -C product apply --index "$evidence/source.patch"
+        git -C old-control apply --check --index "$evidence/old-control.patch"
+        git -C old-control apply --index "$evidence/old-control.patch"
+        python3 -I -B "$packet/bindingchecker.py" --product product --variant new --row entry --phase entry --evidence "$evidence"
+        python3 -I -B "$packet/bindingchecker.py" --product old-control --variant old --row entry --phase entry --evidence "$evidence"
+    - name: Stable Rust with required components
+      uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+    - name: Existing CI Linux dependencies
+      timeout-minutes: 5
+      working-directory: product
+      run: |
+        scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
+          libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+          libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core fish \
+          xclip x11-utils xdotool libxtst6 dbus-daemon ffmpeg weston fontconfig \
+          libgl1-mesa-dri libegl-mesa0
+    - name: Existing product Rust cache
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      with:
+        workspaces: product -> target
+        save-if: false
+    - name: Install exact strict-gate tools
+      uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68
+      with:
+        tool: just@1.58.0,cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-shear@1.14.0,zizmor@1.31.1,typos@1.51.1,shellcheck@0.11.0,lychee@0.24.2
+    - name: Existing Ruff action and exact CLI
+      uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89
+      with:
+        version: 0.16.10
+        args: check
+        src: product/scripts
+    - name: Record OS and tools; require actual Node, npx and Chrome
+      run: |
+        set -euo pipefail
+        evidence="$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        {
+          uname -a
+          cat /etc/os-release
+          printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
+          git --version
+          python3 --version
+          rustc --version --verbose
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+          just --version
+          cargo deny --version
+          cargo audit --version
+          cargo shear --version
+          zizmor --version
+          typos --version
+          shellcheck --version
+          lychee --version
+          ruff --version
+          node --version
+          npm --version
+          npx --version
+          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$chrome"
+          printf 'Chrome executable: %s\n' "$chrome"
+          "$chrome" --version
+          printf 'PUPPETEER_EXECUTABLE_PATH=%s\n' "$chrome" >> "$GITHUB_ENV"
+        } > "$evidence/os-tools.txt" 2>&1
+        cat "$evidence/os-tools.txt"
+        python3 -I -B -c 'import json,os,sys; from pathlib import Path; names=("GITHUB_REPOSITORY","GITHUB_SHA","GITHUB_REF","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_WORKFLOW","RUNNER_OS","RUNNER_ARCH","ImageOS","ImageVersion"); Path(sys.argv[1]).write_text(json.dumps({key:os.environ.get(key) for key in names},indent=2)+"\n")' "$evidence/run-metadata.json"
+    - name: Prefetch locked workspace, vendor and fuzz dependencies online
+      timeout-minutes: 15
+      working-directory: product
+      env:
+        CARGO_NET_OFFLINE: 'false'
+      run: |
+        set -euo pipefail
+        nice -n 10 cargo fetch --locked
+        nice -n 10 cargo fetch --locked --manifest-path vendor/Cargo.toml
+        nice -n 10 cargo fetch --locked --manifest-path fuzz/Cargo.toml
+    - name: Two exact old resize helper assertion controls; reject setup and zero-test failures
+      id: old_controls
+      timeout-minutes: 45
+      env:
+        CARGO_NET_OFFLINE: 'true'
+        CARGO_TARGET_DIR: ${{ github.workspace }}/old-control/target
+      run: |
+        set -euo pipefail
+        packet="$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1"
+        evidence="$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        check_both() {
+          python3 -I -B "$packet/bindingchecker.py" --product "$GITHUB_WORKSPACE/product" --variant new --row "$1" --phase "$2" --evidence "$evidence"
+          python3 -I -B "$packet/bindingchecker.py" --product "$GITHUB_WORKSPACE/old-control" --variant old --row "$1" --phase "$2" --evidence "$evidence"
+        }
+        run_and_drain() {
+          label="$1"
+          shift
+          export CAPTURE_ROOT="$evidence/$label"
+          mkdir -m 700 "$CAPTURE_ROOT"
+          started="$(date +%s%N)"
+          set +e
+          nice -n 10 "$@" 2>&1 | python3 -I -B -c '
+        import hashlib
+        import json
+        import os
+        import sys
+        import time
+        from pathlib import Path
+        root=Path(os.environ["CAPTURE_ROOT"])
+        limit=16*1024*1024
+        total=kept=echoed=0
+        live_limit=64*1024
+        digest=hashlib.sha256()
+        with (root/"strict.log").open("xb") as output:
+            while True:
+                data=os.read(sys.stdin.fileno(),65536)
+                if not data:
+                    break
+                total+=len(data)
+                digest.update(data)
+                retained=data[:max(0,limit-kept)]
+                output.write(retained)
+                output.flush()
+                kept+=len(retained)
+                progress=json.dumps({"strict_log_bytes":total,"last_chunk_bytes":len(data),"wall_ns":time.time_ns()},sort_keys=True)+"\n"
+                progress_bytes=len(progress.encode("ascii"))
+                if echoed+progress_bytes<=live_limit:
+                    sys.stdout.write(progress)
+                    sys.stdout.flush()
+                    echoed+=progress_bytes
+        record={"bytes":total,"retained_bytes":kept,"sha256_all_drained_bytes":digest.hexdigest(),"limit":limit,"over_limit":total>limit,"pipe_eof":True,"drained_wall_ns":time.time_ns(),"live_echo_bytes":echoed,"live_echo_limit":live_limit}
+        (root/"strict-log.json").write_text(json.dumps(record,indent=2)+"\n")
+        print(json.dumps(record,sort_keys=True))
+        raise SystemExit(2 if total>limit else 0)
+        '
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(date +%s%N)"
+          python3 -I -B -c 'import json,os,sys;from pathlib import Path;Path(sys.argv[1]).write_text(json.dumps({"scope":"HOSTED_RUST_TEST_ONLY_NOT_NATIVE_RELEASE","command_exit":int(sys.argv[2]),"drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":["nice","-n","10",*sys.argv[6:]],"cargo_target_dir":os.environ["CARGO_TARGET_DIR"],"cargo_incremental":os.environ["CARGO_INCREMENTAL"],"jobs":os.environ["CARGO_BUILD_JOBS"],"cargo_net_offline":os.environ["CARGO_NET_OFFLINE"]},indent=2)+"\n")' "$CAPTURE_ROOT/command-exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished" "$@"
+        }
+        for case in light themes; do
+          case "$case" in
+            light) filter=chrome::tests::resize_chip_light_theme_text_and_outline_are_readable ;;
+            themes) filter=chrome::tests::resize_chip_is_readable_across_themes_and_color_overrides ;;
+          esac
+          label="old-$case"
+          check_both "$label" before
+          run_and_drain "$label" cargo test --locked --offline --manifest-path "$GITHUB_WORKSPACE/old-control/Cargo.toml" -p kettle-render --lib "$filter" -- --exact
+          check_both "$label" after
+          python3 -I -B "$packet/regressioncheck.py" --root "$CAPTURE_ROOT" --exit "${statuses[0]}" --drain-exit "${statuses[1]}" --expect red --name "$filter"
+        done
+    - name: Restored full renderer GREEN with both resize regression markers
+      id: new_focused
+      timeout-minutes: 45
+      working-directory: product
+      env:
+        CARGO_NET_OFFLINE: 'true'
+      run: |
+        set -euo pipefail
+        packet="$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1"
+        evidence="$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        check_both() {
+          python3 -I -B "$packet/bindingchecker.py" --product "$GITHUB_WORKSPACE/product" --variant new --row "$1" --phase "$2" --evidence "$evidence"
+          python3 -I -B "$packet/bindingchecker.py" --product "$GITHUB_WORKSPACE/old-control" --variant old --row "$1" --phase "$2" --evidence "$evidence"
+        }
+        run_and_drain() {
+          label="$1"
+          shift
+          export CAPTURE_ROOT="$evidence/$label"
+          mkdir -m 700 "$CAPTURE_ROOT"
+          started="$(date +%s%N)"
+          set +e
+          nice -n 10 "$@" 2>&1 | python3 -I -B -c '
+        import hashlib
+        import json
+        import os
+        import sys
+        import time
+        from pathlib import Path
+        root=Path(os.environ["CAPTURE_ROOT"])
+        limit=16*1024*1024
+        total=kept=echoed=0
+        live_limit=64*1024
+        digest=hashlib.sha256()
+        with (root/"strict.log").open("xb") as output:
+            while True:
+                data=os.read(sys.stdin.fileno(),65536)
+                if not data:
+                    break
+                total+=len(data)
+                digest.update(data)
+                retained=data[:max(0,limit-kept)]
+                output.write(retained)
+                output.flush()
+                kept+=len(retained)
+                progress=json.dumps({"strict_log_bytes":total,"last_chunk_bytes":len(data),"wall_ns":time.time_ns()},sort_keys=True)+"\n"
+                progress_bytes=len(progress.encode("ascii"))
+                if echoed+progress_bytes<=live_limit:
+                    sys.stdout.write(progress)
+                    sys.stdout.flush()
+                    echoed+=progress_bytes
+        record={"bytes":total,"retained_bytes":kept,"sha256_all_drained_bytes":digest.hexdigest(),"limit":limit,"over_limit":total>limit,"pipe_eof":True,"drained_wall_ns":time.time_ns(),"live_echo_bytes":echoed,"live_echo_limit":live_limit}
+        (root/"strict-log.json").write_text(json.dumps(record,indent=2)+"\n")
+        print(json.dumps(record,sort_keys=True))
+        raise SystemExit(2 if total>limit else 0)
+        '
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(date +%s%N)"
+          python3 -I -B -c 'import json,os,sys;from pathlib import Path;Path(sys.argv[1]).write_text(json.dumps({"scope":"HOSTED_RUST_TEST_ONLY_NOT_NATIVE_RELEASE","command_exit":int(sys.argv[2]),"drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":["nice","-n","10",*sys.argv[6:]],"cargo_target_dir":os.environ["CARGO_TARGET_DIR"],"cargo_incremental":os.environ["CARGO_INCREMENTAL"],"jobs":os.environ["CARGO_BUILD_JOBS"],"cargo_net_offline":os.environ["CARGO_NET_OFFLINE"]},indent=2)+"\n")' "$CAPTURE_ROOT/command-exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished" "$@"
+        }
+        for case in renderer; do
+          label="new-$case"
+          check_both "$label" before
+          case "$case" in
+            renderer)
+              run_and_drain "$label" cargo test --locked --offline -p kettle-render --lib
+              names=(--name chrome::tests::resize_chip_light_theme_text_and_outline_are_readable --name chrome::tests::resize_chip_is_readable_across_themes_and_color_overrides)
+              ;;
+          esac
+          check_both "$label" after
+          python3 -I -B "$packet/regressioncheck.py" --root "$CAPTURE_ROOT" --exit "${statuses[0]}" --drain-exit "${statuses[1]}" --expect green "${names[@]}"
+        done
+    - name: Fresh exact-source and 8 GiB check immediately before product gate
+      run: |
+        set -euo pipefail
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product product --variant new --row strict --phase before --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product old-control --variant old --row strict --phase before --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+    - name: Actual hosted Linux strict gate with bounded evidence log
+      id: strict
+      timeout-minutes: 90
+      working-directory: product
+      env:
+        CARGO_NET_OFFLINE: 'true'
+      run: |
+        set -euo pipefail
+        export CAPTURE_ROOT="$RUNNER_TEMP/hosted-resize-chip-contrast-r1/strict"
+        mkdir -m 700 "$CAPTURE_ROOT"
+        started="$(date +%s%N)"
+        set +e
+        nice -n 10 just gauntlet-strict 2>&1 | python3 -I -B -c '
+        import hashlib
+        import json
+        import os
+        import sys
+        import time
+        from pathlib import Path
+        root=Path(os.environ["CAPTURE_ROOT"])
+        limit=16*1024*1024
+        total=kept=echoed=0
+        live_limit=64*1024
+        digest=hashlib.sha256()
+        with (root/"strict.log").open("xb") as output:
+            while True:
+                data=os.read(sys.stdin.fileno(),65536)
+                if not data:
+                    break
+                total+=len(data)
+                digest.update(data)
+                retained=data[:max(0,limit-kept)]
+                output.write(retained)
+                output.flush()
+                kept+=len(retained)
+                progress=json.dumps({"strict_log_bytes":total,"last_chunk_bytes":len(data),"wall_ns":time.time_ns()},sort_keys=True)+"\n"
+                progress_bytes=len(progress.encode("ascii"))
+                if echoed+progress_bytes<=live_limit:
+                    sys.stdout.write(progress)
+                    sys.stdout.flush()
+                    echoed+=progress_bytes
+        record={"bytes":total,"retained_bytes":kept,"sha256_all_drained_bytes":digest.hexdigest(),"limit":limit,"over_limit":total>limit,"pipe_eof":True,"drained_wall_ns":time.time_ns(),"live_echo_bytes":echoed,"live_echo_limit":live_limit}
+        (root/"strict-log.json").write_text(json.dumps(record,indent=2)+"\n")
+        print(json.dumps(record,sort_keys=True))
+        raise SystemExit(2 if total>limit else 0)
+        '
+        statuses=("${PIPESTATUS[@]}")
+        set -e
+        finished="$(date +%s%N)"
+        python3 -I -B -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"scope":"HOSTED_LINUX_SOURCE_ONLY_NOT_MAC_DELL_OR_RELEASE","strict_exit":int(sys.argv[2]),"log_drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":["nice","-n","10","just","gauntlet-strict"],"cargo_net_offline":True,"cargo_incremental":"0","jobs":1},indent=2)+"\n")' \
+          "$CAPTURE_ROOT/strict-exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished"
+        if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+        if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+        grep -Fx "test term::grapheme::tests::scalar_classification_and_owned_shaping_keep_separate_bases ... ok" "$CAPTURE_ROOT/strict.log"
+    - name: Strict row source post-bookends
+      if: ${{ always() && steps.strict.outcome != 'skipped' && steps.apply.outcome == 'success' }}
+      run: |
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product product --variant new --row strict --phase after --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product old-control --variant old --row strict --phase after --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+    - name: Verify all exact source bytes and modes after the attempted gate
+      if: ${{ always() && steps.apply.outcome == 'success' }}
+      run: |
+        set -euo pipefail
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product product --variant new --row final --phase after --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+        python3 -I -B "$GITHUB_WORKSPACE/carrier/.github/hosted-resize-chip-contrast-r1/bindingchecker.py" --product old-control --variant old --row final --phase after --evidence "$RUNNER_TEMP/hosted-resize-chip-contrast-r1"
+    - name: Retain bounded gate evidence and exact carrier inputs
+      if: ${{ always() }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: hosted-resize-chip-contrast-r1-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ runner.temp }}/hosted-resize-chip-contrast-r1
+          carrier/.github/hosted-resize-chip-contrast-r1
+          carrier/.github/workflows/native-window.yml
+        if-no-files-found: error
+        retention-days: 7
+'on':
+  workflow_dispatch: null
