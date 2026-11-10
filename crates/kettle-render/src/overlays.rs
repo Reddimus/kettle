@@ -1554,6 +1554,24 @@ pub(crate) fn push_input_bar(
     quads.push(rect(x, y, 4.0, h, edge, 1.0));
 }
 
+pub(crate) fn push_resize_overlay_chrome(
+    quads: &mut Vec<QuadInstance>,
+    (x, y, w, h): Rect4,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    let palette = colors.completion(theme, accent);
+    let edge = colors.icon(accent, palette.panel_bg);
+    // Opaque chrome keeps contrast independent of terminal pixels below it.
+    quads.push(rect(x, y, w, h, palette.panel_bg, 1.0));
+    quads.push(rect(x, y, w, 1.0, edge, 1.0));
+    quads.push(rect(x, y + h - 1.0, w, 1.0, edge, 1.0));
+    quads.push(rect(x, y, 1.0, h, edge, 1.0));
+    quads.push(rect(x + w - 1.0, y, 1.0, h, edge, 1.0));
+    palette.label
+}
+
 // Named constants for the right-click context-menu chrome. Public so
 // `kettle-ui` reads the same values through `kettle_render::menu` instead
 // of redeclaring them.

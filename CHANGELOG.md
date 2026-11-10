@@ -310,6 +310,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The transient terminal-size chip uses an opaque chrome surface with readable
+  text and outline in light, dark and custom themes, including translucent
+  windows. Its accent follows the window's resolved accent.
+
 - Broadcast keystrokes update each recipient pane's accessibility state only
   after that pane accepts the input, including keys delayed behind a media paste.
 - Command-status marks follow scrollback and scroll-region changes instead of

@@ -124,7 +124,7 @@ pub use overlays::{
 use overlays::{
     MAIN_MENU_GLYPH, MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH,
     context_menu_panel_width, media_paste_receipt_text, menu_chrome_quads, push_input_bar,
-    scroll_arrow_glyphs, toast_buffer_text,
+    push_resize_overlay_chrome, scroll_arrow_glyphs, toast_buffer_text,
 };
 #[cfg(test)]
 use overlays::{
@@ -3515,13 +3515,14 @@ impl Renderer {
             let chip_h = ch + pad;
             let cx = (sw - chip_w) / 2.0;
             let cy = (sh - chip_h) / 2.0;
-            menu_q.push(rect(cx, cy, chip_w, chip_h, theme.palette[0], 0.92));
-            // 1px accent outline so the chip reads on same-color content.
-            let acc = cfg.accent_color.unwrap_or(theme.palette[4]);
-            menu_q.push(rect(cx, cy, chip_w, 1.0, acc, 1.0));
-            menu_q.push(rect(cx, cy + chip_h - 1.0, chip_w, 1.0, acc, 1.0));
-            menu_q.push(rect(cx, cy, 1.0, chip_h, acc, 1.0));
-            menu_q.push(rect(cx + chip_w - 1.0, cy, 1.0, chip_h, acc, 1.0));
+            let acc = self.ui_accent(cfg, theme);
+            let ink = push_resize_overlay_chrome(
+                &mut menu_q,
+                (cx, cy, chip_w, chip_h),
+                theme,
+                acc,
+                &mut self.chrome_colors,
+            );
             menu_areas.push(TextArea {
                 buffer: &self.resize_overlay_buffer,
                 left: cx + pad,
@@ -3533,11 +3534,7 @@ impl Renderer {
                     right: (cx + chip_w) as i32,
                     bottom: (cy + chip_h) as i32,
                 },
-                default_color: GColor::rgb(
-                    theme.foreground.r,
-                    theme.foreground.g,
-                    theme.foreground.b,
-                ),
+                default_color: gc(ink),
                 custom_glyphs: &[],
             });
         }

@@ -218,6 +218,67 @@ mod tests {
     use super::*;
     use kettle_config::Theme;
 
+    fn resize_chip_colors(theme: &Theme, accent: Rgb) -> (Rgb, Rgb, Rgb, f32) {
+        let mut quads = Vec::new();
+        let ink = crate::overlays::push_resize_overlay_chrome(
+            &mut quads,
+            (10.0, 20.0, 80.0, 30.0),
+            theme,
+            accent,
+            &mut Colors::default(),
+        );
+        assert_eq!(quads.len(), 5);
+        assert_eq!(quads[0].pos, [10.0, 20.0]);
+        assert_eq!(quads[0].size, [80.0, 30.0]);
+        let rgb = |rgba: [f32; 4]| {
+            Rgb::new(
+                (rgba[0] * 255.0).round() as u8,
+                (rgba[1] * 255.0).round() as u8,
+                (rgba[2] * 255.0).round() as u8,
+            )
+        };
+        let edge = rgb(quads[1].color);
+        assert!(quads[1..].iter().all(|quad| rgb(quad.color) == edge));
+        assert!(quads[1..].iter().all(|quad| quad.color[3] == 1.0));
+        (ink, rgb(quads[0].color), edge, quads[0].color[3])
+    }
+
+    #[test]
+    fn resize_chip_light_theme_text_and_outline_are_readable() {
+        let theme = Theme::by_name("Catppuccin Latte");
+        let (ink, fill, edge, alpha) = resize_chip_colors(&theme, theme.palette[4]);
+        assert!(color::contrast_ratio(ink, fill) >= TEXT_CONTRAST);
+        assert!(color::contrast_ratio(edge, fill) >= ICON_CONTRAST);
+        assert_eq!(alpha, 1.0, "terminal content must not change chip contrast");
+    }
+
+    #[test]
+    fn resize_chip_is_readable_across_themes_and_color_overrides() {
+        for name in Theme::list() {
+            let original = Theme::by_name(name);
+            for override_color in [None, Some(Rgb::new(128, 128, 128))] {
+                let mut theme = original.clone();
+                if let Some(color) = override_color {
+                    theme.background = color;
+                    theme.foreground = color;
+                    theme.palette[0] = color;
+                }
+                for accent in [theme.palette[4], theme.background, theme.foreground] {
+                    let (ink, fill, edge, alpha) = resize_chip_colors(&theme, accent);
+                    assert!(
+                        color::contrast_ratio(ink, fill) >= TEXT_CONTRAST,
+                        "{name}: resize text with override {override_color:?}"
+                    );
+                    assert!(
+                        color::contrast_ratio(edge, fill) >= ICON_CONTRAST,
+                        "{name}: resize outline with override {override_color:?}"
+                    );
+                    assert_eq!(alpha, 1.0, "{name}: opaque resize fill");
+                }
+            }
+        }
+    }
+
     #[test]
     fn bundled_chrome_roles_meet_contrast_floors() {
         assert_eq!(TEXT_CONTRAST, 4.5);
