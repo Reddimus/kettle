@@ -244,19 +244,31 @@ date. Recheck that before upgrading a crate or dropping a patch.
   `unicode-width = "=0.2.3"` constraint aligns product, vendor-validation
   and fuzz width data at Unicode 18. These are local additions to the pinned package.
   - Cluster widths share a pure calculator and bounded streaming accumulator:
-    Mc spacing marks, Indic conjuncts and positive-width joined scalars reserve
-    up to two cells; adjacent VS16 widens a contributing registered variation
-    base, while adjacent VS15 narrows a contributing two-cell variation base.
+    Mc spacing marks except the generated Virama/Invisible_Stacker intersection,
+    Indic conjuncts and positive-width joined scalars reserve up to two cells.
+    Final viramas add no column, without changing InCb segmentation. Adjacent
+    VS16 widens a contributing registered variation base, while adjacent VS15 narrows a contributing two-cell variation base.
     A second capped total preserves preceding contributions (including Prepend
     number signs) when VS15 narrows a base after width saturation. Intervening
     scalars clear selector eligibility even beyond the retained-text cap, and
     unattached skin-tone modifiers start their own two-cell clusters. Emoji
-    ZWJ sequences, regional pairs and scalar mode retain their width rules.
+    ZWJ sequences and regional pairs retain their width rules. In mode 2027,
+    GCB=Prepend, A8FA and the Khmer 17A4/17D8 singletons contribute one cell;
+    the cluster cap stays two and scalar mode is unchanged. Width contribution
+    is separate from shaping-base eligibility. `grapheme_shaping_base_offset`
+    admits A8FA for stored GRAPHEME cells' prefix/cursor anchors, while the
+    existing `grapheme_base_offset` keeps scalar-width selection for raw text
+    and emoji classification. This follows stored metadata, not the current
+    mode bit. Before the first shaping base,
+    bounded retention reserves three slots for that base and two later
+    presentation scalars, keeping the first base out of tail replacement.
     Late widening/shrinking reuses cell flags and spacers, respects autowrap,
     insertion and DECSLRM, and never fabricates VS16 for script text.
   - `scripts/generate-grapheme-tables.py` additionally generates joining Mc
     ranges from General_Category in the pinned GraphemeBreakProperty comments,
-    Emoji_Modifier_Base from `emoji-data.txt`, and variation bases from
+    their Virama/Invisible_Stacker intersection from the licensed, pinned
+    Unicode 18 `IndicSyllabicCategory.txt`, Emoji_Modifier_Base from
+    `emoji-data.txt`, and variation bases from
     `tests/unicode18/emoji-variation-bases.txt`. The latter is a compact offline
     extraction of all 371 bases of Unicode 18 `emoji-variation-sequences.txt`,
     using the locally cached `unicode-width` 0.2.3 generated

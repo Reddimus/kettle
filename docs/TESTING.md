@@ -1889,6 +1889,25 @@ after combining marks, ZWJ and VS15, and Prepend plus VS15 after width saturatio
 They exercise mode 2027, UTF-8 splits, cursor and spacer state, screen and DECSLRM
 edges, autowrap, insertion, ignored-control interruptions and discarded scalars.
 Core cases also check edge wrapping and selection, search and reflow columns.
+The final-width regressions retain all 32 Javanese/Grantha trailing-virama
+sequences and 17 singleton mismatches from the full mode-on measurement of
+candidate `35048`. They check the generated six-scalar Mc/virama exception,
+the non-excluded U+1B43 neighbor, Grantha's unchanged cluster boundaries, every
+UTF-8 split, mode-off compatibility, edge/margin/insert behavior, and A8FA's
+shaping-base eligibility. Saturated positive and zero-width prefixes must
+retain the first spacing base through later selectors and ZWJ tails, including
+attributes, hyperlinks, semantic navigation, search, selection and reflow.
+The `35048` measurements precede these fixes; source regressions do not replace
+a fresh full on/off native measurement of the rebuilt candidate. Unsupported
+tofu capability does not establish font coverage, and matching the reference
+on these cases does not establish universal Unicode column conformance.
+Portable renderer regressions derive scalar-mode snapshots and same-style row
+groups for A8FA before a selector plus Thai SARA AM, and before an unattached
+modifier. They check the original emoji classification, cover fresh-cursor
+overwrite, and keep A8FA as the shaping anchor of a stored cluster after mode
+2027 is disabled. These classification checks do not establish column or
+host-font raster coverage; the vendor and core width controls above check
+columns separately.
 Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot

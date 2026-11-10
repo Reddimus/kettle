@@ -646,7 +646,7 @@ pub(crate) fn emit_positioned_glyphs(
             let Some(text) = run.text.get(range.clone()) else {
                 continue;
             };
-            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            let offset = alacritty_terminal::term::grapheme_shaping_base_offset(text);
             if offset == 0 {
                 continue;
             }

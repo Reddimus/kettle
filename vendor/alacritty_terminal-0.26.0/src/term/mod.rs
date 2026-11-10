@@ -34,9 +34,9 @@ mod rectangles;
 pub mod search;
 
 #[cfg(test)]
-mod column_tests;
-#[cfg(test)]
 mod ascii_run_tests;
+#[cfg(test)]
+mod column_tests;
 #[cfg(test)]
 mod grapheme_width_tests;
 #[cfg(test)]
@@ -58,9 +58,14 @@ pub const MIN_COLUMNS: usize = 2;
 /// Minimum number of visible lines.
 pub const MIN_SCREEN_LINES: usize = 1;
 
-/// UTF-8 offset of a stored cluster's spacing base, retaining prefix order.
+/// UTF-8 offset of a scalar-width base for raw text classification.
 pub fn grapheme_base_offset(text: &str) -> usize {
     grapheme::base_offset(text)
+}
+
+/// UTF-8 offset of a stored GRAPHEME cell's shaping base, retaining prefix order.
+pub fn grapheme_shaping_base_offset(text: &str) -> usize {
+    grapheme::shaping_base_offset(text)
 }
 
 /// Unicode Emoji_Presentation property from the engine's pinned tables.
@@ -418,6 +423,7 @@ pub struct Term<T> {
     grapheme_clustering: bool,
     grapheme_state: grapheme::GraphemeState,
     grapheme_width: grapheme::GraphemeWidth,
+    grapheme_base_seen: bool,
     grapheme_anchor: Option<GraphemeAnchor>,
     grapheme_template: Cell,
     last_grapheme: Vec<char>,
@@ -726,6 +732,7 @@ impl<T> Term<T> {
     fn stop_grapheme(&mut self) {
         self.grapheme_state = Default::default();
         self.grapheme_width = Default::default();
+        self.grapheme_base_seen = false;
         self.grapheme_anchor = None;
     }
 
@@ -785,6 +792,7 @@ impl<T> Term<T> {
             grapheme_clustering: config.grapheme_clustering,
             grapheme_state: Default::default(),
             grapheme_width: Default::default(),
+            grapheme_base_seen: false,
             grapheme_anchor: None,
             grapheme_template: Cell::default(),
             last_grapheme: Vec::new(),
@@ -2345,6 +2353,7 @@ impl<T: EventListener> Term<T> {
         // Insertion and bottom-margin wrapping can clear the previous cluster.
         self.grapheme_state = grapheme::GraphemeState::after_ascii();
         self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+        self.grapheme_base_seen = true;
         self.grapheme_anchor = point.map(|point| {
             self.grid[point].flags.insert(Flags::GRAPHEME);
             GraphemeAnchor {
@@ -2389,10 +2398,10 @@ impl<T: EventListener> Term<T> {
         }
         let row = &mut self.grid[start.line];
         let cells = &mut row[start.column..start.column + taken];
-        if cells
-            .iter()
-            .any(|cell| cell.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER))
-        {
+        if cells.iter().any(|cell| {
+            cell.flags
+                .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+        }) {
             return 0;
         }
         for (cell, &byte) in cells.iter_mut().zip(run) {
@@ -2413,6 +2422,7 @@ impl<T: EventListener> Term<T> {
             let c = run[taken - 1] as char;
             self.grapheme_state = grapheme::GraphemeState::after_ascii();
             self.grapheme_width = grapheme::GraphemeWidth::after_ascii(c);
+            self.grapheme_base_seen = true;
             self.last_grapheme.clear();
             self.last_grapheme.push(c);
             self.grapheme_template = self.grid.cursor.template.clone();
@@ -2445,7 +2455,9 @@ impl<T: EventListener> Term<T> {
         }
         let boundary = state.advance(c) && !self.grapheme_width.joins_sinhala(c);
         let mut width_state = self.grapheme_width;
-        if boundary || self.grapheme_anchor.is_none() {
+        let starts_cluster = boundary || self.grapheme_anchor.is_none();
+        let base_seen = (!starts_cluster && self.grapheme_base_seen) || grapheme::is_base(c);
+        if starts_cluster {
             width_state = Default::default();
             let cluster_width = width_state.advance(c);
             self.last_grapheme.clear();
@@ -2465,7 +2477,14 @@ impl<T: EventListener> Term<T> {
         } else {
             let anchor = self.grapheme_anchor.unwrap();
             let cluster_width = width_state.advance(c);
-            let full = self.last_grapheme.len() > cell::MAX_ZEROWIDTH_PER_CELL;
+            // Before the first shaping base, reserve its slot plus two tail
+            // slots. The base then stays before every later tail replacement.
+            let capacity = if base_seen {
+                cell::MAX_ZEROWIDTH_PER_CELL + 1
+            } else {
+                cell::MAX_ZEROWIDTH_PER_CELL - 2
+            };
+            let full = self.last_grapheme.len() >= capacity;
             let retained_tail = if !full {
                 self.last_grapheme.push(c);
                 1
@@ -2510,6 +2529,7 @@ impl<T: EventListener> Term<T> {
         }
         self.grapheme_state = state;
         self.grapheme_width = width_state;
+        self.grapheme_base_seen = base_seen;
     }
 
     fn widen_grapheme(&mut self, anchor: GraphemeAnchor) {
@@ -2591,18 +2611,13 @@ impl<T: EventListener> Handler for Term<T> {
             self.input_grapheme(c, 1);
             return;
         }
-        let Some(mut width) = c.width() else {
-            if self.grapheme_clustering {
+        if self.grapheme_clustering {
+            if let Some(width) = grapheme::scalar_width(c) {
+                self.input_grapheme(c, width);
+            } else {
                 self.stop_grapheme();
             }
-            return;
-        };
-        if self.grapheme_clustering {
-            if grapheme::emoji_presentation(c) {
-                width = 2;
-            }
-            self.input_grapheme(c, width);
-        } else {
+        } else if let Some(width) = c.width() {
             self.input_char(c, width);
         }
     }

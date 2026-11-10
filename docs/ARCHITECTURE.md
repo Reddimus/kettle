@@ -2576,6 +2576,7 @@ disabled, output keeps its per-codepoint layout.
 
 The engine uses generated Unicode 18 GCB, InCB, Extended_Pictographic,
 Emoji_Modifier_Base, emoji-variation base and joining General_Category=Mc tables,
+plus the Mc intersection with Indic_Syllabic_Category=Virama or Invisible_Stacker,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
 state survives PTY splits independently of retained text. The product, vendor
 validation and fuzz graphs all pin Unicode 18 width tables in `unicode-width` 0.2.3;
@@ -2583,14 +2584,20 @@ the Unicode 17 segmentation dependency used by other interfaces does not decide
 terminal cluster boundaries.
 
 A cluster occupies its leading cell and its recorded wide spacer, with at most
-30 trailing scalars in the existing cell extra storage. Beyond that cap, the
-latest variation selector, ZWJ and its following spacing scalar, or first
-spacing scalar replace the final retained slots; other excess scalars are
-dropped while boundary and width state still advance. The pure cluster-width
+30 trailing scalars in the existing cell extra storage. Until the first shaping
+base arrives, retention reserves three slots for that base and two presentation
+tails. Excess prefix scalars are dropped, preserving the retained text order.
+The first base then stays before the final two slots, so later variation
+selectors and ZWJ/spacing tails cannot evict it. Base-led clusters retain the
+full existing capacity. Beyond the cap, the latest variation selector or ZWJ
+and its following spacing scalar replace the final slots; other excess scalars
+are dropped while boundary and width state still advance. The pure cluster-width
 calculator and streaming input share the same finite width accumulator. A
-General_Category=Mc mark after a measured base makes the cluster two cells;
-other positive-width scalars add their widths, capped at two, including Indic
-consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
+General_Category=Mc mark after a measured base makes the cluster two cells,
+except for the generated Virama/Invisible_Stacker intersection: a final virama
+adds no column. InCb is unchanged; Grantha's InCb=Extend virama does not become
+a conjunct linker. Other positive-width scalars add their widths, capped at two,
+including Indic consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
 keep the first emoji's width, and regional-indicator pairs remain two cells.
 VS16 widens a registered variation base only when it immediately follows that
 base and the base contributes to the cluster width. An immediately following
@@ -2599,6 +2606,20 @@ including East Asian Wide bases. The accumulator retains the preceding width,
 also capped at two, so narrowing preserves other contributions such as Prepend
 number signs before applying the cluster's two-cell cap. Intervening scalars
 end selector eligibility even when they exceed the retained-text limit.
+
+Mode 2027 gives each GCB=Prepend scalar, U+A8FA DEVANAGARI CARET, U+17A4 KHMER
+INDEPENDENT VOWEL QAA and U+17D8 KHMER SIGN BEYYAL a one-cell contribution,
+matching the selected application-side width reference for these singletons.
+This is terminal policy, not a Unicode column-count requirement or a promise of
+arbitrary `wcswidth` string equality: the cluster cap remains two cells. The
+legacy mode-off path keeps `unicode-width` scalar contributions. Shaping-base
+selection remains separate: Prepend anchors to its following base, A8FA is a
+spacing base for stored `GRAPHEME` cells, and soft hyphen keeps its previous
+formatting-base behavior. The renderer uses `grapheme_shaping_base_offset` only
+for those cells' prefix and cursor anchors. Raw row graphemes and emoji
+classification keep `grapheme_base_offset`'s scalar-width base selection, so a
+zero-width A8FA attached in scalar mode cannot change emoji font selection or
+ink fitting. Stored cell metadata selects this distinction after mode changes.
 
 An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
 the boundary context. Emoji modifier bases and Extended_Pictographic bases
