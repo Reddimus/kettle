@@ -1,57 +1,189 @@
-name: Native window regression
+name: One-off 827 two-doc hosted Linux strict gate
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "crates/kettle-ui/**"
-      - "scripts/check-native-titlebar.py"
-      - "scripts/test-native-titlebar.py"
-      - "scripts/native-window-info.swift"
-      - "scripts/check-modal-shortcuts.py"
-      - "scripts/check-live-ui-smoke.py"
-      - ".github/workflows/native-window.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: native-window-${{ github.ref }}
-  cancel-in-progress: true
+  group: hosted-docs-strict-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_INCREMENTAL: '0'
+  RUST_TEST_THREADS: '1'
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  KETTLE_MERMAID_REQUIRED: '1'
 
 jobs:
-  titlebar:
-    name: macOS native fullscreen and caption
-    runs-on: macos-26
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: "8"
-      CARGO_INCREMENTAL: "0"
+  strict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout isolated carrier only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          path: carrier
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Checkout exact product baseline separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 82772df1dcba0b1fc11657e106897f8f4b797489
+          path: product
+          persist-credentials: false
+      - name: Apply exact two-doc patch and verify all source before setup
+        id: apply
+        run: |
+          set -euo pipefail
+          packet="$GITHUB_WORKSPACE/carrier/.github/hosted-docs-strict-827-a3c62bd8"
+          evidence="$RUNNER_TEMP/hosted-docs-strict"
+          mkdir -m 700 "$evidence"
+          printf '%s\n' \
+            "0985439e2e0ba3888c0a75ecea49d7e9899335dbfaa44ed4957a960cf94fb02d  $packet/docs.patch.gz" \
+            "5478f7e0a2aca37736869592aef4bad8055517d7fcae5dfe993cb13a241297f6  $packet/expected-files.json" \
+            "2a7d53ce02d4ab7b0964885e5d0bf215a1ec9ed37a43f266d308778b2fb08b8d  $packet/bindingchecker.py" | sha256sum --check
+          gzip -cd "$packet/docs.patch.gz" > "$evidence/docs.patch"
+          printf '%s\n' "a3c62bd8359ce0365028a4b6c272080330e99c9996dd0233521c13d78c112749  $evidence/docs.patch" | sha256sum --check
+          git -C product apply --check "$evidence/docs.patch"
+          git -C product apply "$evidence/docs.patch"
+          python3 -I -B "$packet/bindingchecker.py" --product product --evidence "$evidence" --phase entry
+      - name: Stable Rust with required components
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          shared-key: native-window
-      - name: Checker unit tests
-        run: python3 scripts/test-native-titlebar.py
-      - name: Build the native fixture
-        run: nice -n 10 cargo build --locked -p kettle
-      - name: Native caption and fullscreen
+          components: clippy, rustfmt
+      - name: Existing CI Linux dependencies
+        timeout-minutes: 5
+        working-directory: product
         run: |
-          launchctl asuser "$(id -u)" python3 scripts/check-native-titlebar.py \
-            --kettle ./target/debug/kettle --out-dir "$RUNNER_TEMP/native-window"
-      - name: Preserve native evidence
-        if: always()
+          scripts/install-ci-linux-deps.sh pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb xauth fonts-dejavu-core fish \
+            xclip x11-utils xdotool libxtst6 dbus-daemon ffmpeg weston fontconfig \
+            libgl1-mesa-dri libegl-mesa0
+      - name: Existing product Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: product -> target
+          save-if: false
+      - name: Install exact strict-gate tools
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: just@1.58.0,cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-shear@1.14.0,zizmor@1.31.1,typos@1.51.1,shellcheck@0.11.0,lychee@0.24.2
+      - name: Existing Ruff action and exact CLI
+        uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
+        with:
+          version: 0.16.10
+          args: check
+          src: product/scripts
+      - name: Record OS and tools; require actual Node, npx and Chrome
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/hosted-docs-strict"
+          {
+            uname -a
+            cat /etc/os-release
+            printf 'ImageOS=%s\nImageVersion=%s\nRUNNER_OS=%s\nRUNNER_ARCH=%s\n' "${ImageOS:-}" "${ImageVersion:-}" "$RUNNER_OS" "$RUNNER_ARCH"
+            git --version
+            python3 --version
+            rustc --version --verbose
+            cargo --version
+            cargo clippy --version
+            cargo fmt --version
+            just --version
+            cargo deny --version
+            cargo audit --version
+            cargo shear --version
+            zizmor --version
+            typos --version
+            shellcheck --version
+            lychee --version
+            ruff --version
+            node --version
+            npm --version
+            npx --version
+            chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+            test -n "$chrome"
+            printf 'Chrome executable: %s\n' "$chrome"
+            "$chrome" --version
+            printf 'PUPPETEER_EXECUTABLE_PATH=%s\n' "$chrome" >> "$GITHUB_ENV"
+          } > "$evidence/os-tools.txt" 2>&1
+          cat "$evidence/os-tools.txt"
+          python3 -I -B -c 'import json,os,sys; from pathlib import Path; names=("GITHUB_REPOSITORY","GITHUB_SHA","GITHUB_REF","GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT","GITHUB_WORKFLOW","RUNNER_OS","RUNNER_ARCH","ImageOS","ImageVersion"); Path(sys.argv[1]).write_text(json.dumps({key:os.environ.get(key) for key in names},indent=2)+"\n")' "$evidence/run-metadata.json"
+      - name: Prefetch locked workspace, vendor and fuzz dependencies online
+        timeout-minutes: 15
+        working-directory: product
+        env:
+          CARGO_NET_OFFLINE: 'false'
+        run: |
+          set -euo pipefail
+          nice -n 10 cargo fetch --locked
+          nice -n 10 cargo fetch --locked --manifest-path vendor/Cargo.toml
+          nice -n 10 cargo fetch --locked --manifest-path fuzz/Cargo.toml
+      - name: Fresh exact-source and 8 GiB check immediately before product gate
+        run: |
+          python3 -I -B carrier/.github/hosted-docs-strict-827-a3c62bd8/bindingchecker.py \
+            --product product --evidence "$RUNNER_TEMP/hosted-docs-strict" --phase before
+      - name: Actual hosted Linux strict gate with bounded evidence log
+        id: strict
+        timeout-minutes: 60
+        working-directory: product
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          set -euo pipefail
+          export CAPTURE_ROOT="$RUNNER_TEMP/hosted-docs-strict"
+          started="$(date +%s%N)"
+          set +e
+          nice -n 10 just gauntlet-strict 2>&1 | python3 -I -B -c '
+          import hashlib,json,os,sys,time
+          from pathlib import Path
+          root=Path(os.environ["CAPTURE_ROOT"])
+          limit=16*1024*1024
+          total=kept=0
+          digest=hashlib.sha256()
+          with (root/"strict.log").open("xb") as output:
+              while True:
+                  data=sys.stdin.buffer.read(65536)
+                  if not data:
+                      break
+                  total+=len(data)
+                  digest.update(data)
+                  retained=data[:max(0,limit-kept)]
+                  output.write(retained)
+                  kept+=len(retained)
+          record={"bytes":total,"retained_bytes":kept,"sha256_all_drained_bytes":digest.hexdigest(),"limit":limit,"over_limit":total>limit,"pipe_eof":True,"drained_wall_ns":time.time_ns()}
+          (root/"strict-log.json").write_text(json.dumps(record,indent=2)+"\n")
+          print(json.dumps(record,sort_keys=True))
+          raise SystemExit(2 if total>limit else 0)
+          '
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          finished="$(date +%s%N)"
+          python3 -I -B -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps({"scope":"HOSTED_LINUX_SOURCE_ONLY_NOT_MAC_DELL_OR_RELEASE","strict_exit":int(sys.argv[2]),"log_drain_exit":int(sys.argv[3]),"started_wall_ns":int(sys.argv[4]),"finished_wall_ns":int(sys.argv[5]),"argv":["nice","-n","10","just","gauntlet-strict"],"cargo_net_offline":True,"cargo_incremental":"0","jobs":1},indent=2)+"\n")' \
+            "$CAPTURE_ROOT/strict-exit.json" "${statuses[0]}" "${statuses[1]}" "$started" "$finished"
+          if (( statuses[0] != 0 )); then exit "${statuses[0]}"; fi
+          if (( statuses[1] != 0 )); then exit "${statuses[1]}"; fi
+      - name: Verify all exact source bytes and modes after the attempted gate
+        if: ${{ always() && steps.apply.outcome == 'success' }}
+        run: |
+          python3 -I -B carrier/.github/hosted-docs-strict-827-a3c62bd8/bindingchecker.py \
+            --product product --evidence "$RUNNER_TEMP/hosted-docs-strict" --phase after
+      - name: Retain bounded gate evidence and exact carrier inputs
+        if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: native-window-${{ github.run_id }}-${{ github.run_attempt }}
+          name: hosted-docs-strict-827-a3c62bd8-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/native-window/*.json
-            ${{ runner.temp }}/native-window/*.log
-            ${{ runner.temp }}/native-window/*.png
+            ${{ runner.temp }}/hosted-docs-strict
+            carrier/.github/hosted-docs-strict-827-a3c62bd8
+            carrier/.github/workflows/native-window.yml
+          if-no-files-found: error
           retention-days: 7
