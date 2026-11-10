@@ -465,9 +465,9 @@ jobs:
             ${{ runner.temp }}/modal-shortcuts/*.json
             ${{ runner.temp }}/modal-shortcuts/*.log
             ${{ runner.temp }}/modal-shortcuts/*.png
-            ${{ runner.temp }}/native-titlebar/*.json
-            ${{ runner.temp }}/native-titlebar/*.log
-            ${{ runner.temp }}/native-titlebar/*.png
+            ${{ runner.temp }}/native-titlebar/**/*.json
+            ${{ runner.temp }}/native-titlebar/**/*.log
+            ${{ runner.temp }}/native-titlebar/**/*.png
           if-no-files-found: ignore
           retention-days: 7
       - name: Agent CLI non-interactive smoke (macOS)
