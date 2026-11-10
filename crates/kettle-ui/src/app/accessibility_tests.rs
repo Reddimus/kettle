@@ -1071,6 +1071,31 @@ fn terminal_accessibility_keeps_each_row_on_its_own_line() {
 }
 
 #[test]
+fn terminal_accessibility_runs_mark_each_word_start() {
+    // Orca's word echo reads the word before the caret; without word starts
+    // it repeated the whole line, prompt included, after every typed word.
+    let ids = [accesskit::NodeId(1), accesskit::NodeId(2)];
+    let runs = super::terminal_accessibility_runs(
+        "fixture:~/project$ echo  orca-check\n  indented",
+        (0.0, 0.0, 80.0, 40.0),
+        20.0,
+        &ids,
+    );
+    assert_eq!(runs[0].1.word_starts(), &[0, 19, 25]);
+    // A row's leading spaces are a word of their own.
+    assert_eq!(runs[1].1.word_starts(), &[0, 2]);
+}
+
+#[test]
+fn accessibility_word_starts_stop_where_accesskit_indices_end() {
+    let spaces = (0..300).map(|index| index % 2 == 1);
+    let starts = super::accessibility_word_starts(spaces);
+    assert_eq!(starts.first(), Some(&0));
+    assert_eq!(starts.last(), Some(&254));
+    assert_eq!(starts.len(), 128);
+}
+
+#[test]
 fn completion_accessibility_positions_are_zero_based() {
     for position in 0..2 {
         let candidate = kettle_render::CompletionOverlayRow {
@@ -1177,6 +1202,10 @@ fn accessibility_editor_runs_keep_oversized_graphemes_atomic() {
     let run = super::accessibility::editor_accessibility_run(&characters);
     assert_eq!(run.value(), Some("\u{fffd}b"));
     assert_eq!(run.character_lengths(), &[3, 1]);
+    assert_eq!(run.word_starts(), &[0]);
+    let characters = crate::text_editor::EditorCharacters::new("open  file.png");
+    let run = super::accessibility::editor_accessibility_run(&characters);
+    assert_eq!(run.word_starts(), &[0, 6]);
     let mut editor = crate::search_input::SearchEditor::from_text(text, 1024);
     editor.set_character_selection(0, 1);
     assert_eq!(editor.selection(), Some(0..401));
