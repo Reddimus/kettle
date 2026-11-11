@@ -10,6 +10,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Each row of the theme picker shows a small strip of that theme's colours:
+  its background, its text colour and six accent colours. In a narrow window
+  the strip is dropped before a theme's name is shortened.
+
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
   and kitty do. Lines are whole pixels sized from the font's underline, so
@@ -125,6 +129,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Tabs show their go-to-tab shortcut on every platform, taken from the key
+  bindings: Alt+1 to Alt+9 on Linux and Windows, ⌘1 to ⌘9 on macOS, or whatever
+  key you bound instead. Linux tabs showed none before, and macOS showed a fixed
+  Cmd+N.
+- The terminal's right-click menu offers Find… and Clear Scrollback, next to
+  Copy, Paste and Select All. Before, they were only in the palette and the key
+  bindings.
 - Tab strips and menus are easier to read. Inactive tab titles and resting
   tab close buttons in a top or bottom tab bar, and menu shortcut hints, reach
   7:1 contrast where the theme's own text does (they stopped at 4.5:1); tab
@@ -334,6 +345,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - macOS comparison checks clean up their owned windows after setup failures,
   and Linux UI checks compare captures with reviewed reference images.
 
+- Screen readers read terminal text word by word. Orca's word echo repeated
+  the whole row, prompt included, after every typed word, because Kettle's
+  accessible text marked no word boundaries; terminal rows and text fields now
+  do.
 - Combining marks that their font does not position sit on their letter. In
   `Z̤̈`, which macOS draws in San Francisco because the bundled JetBrains Mono
   lacks the diaeresis below, the upper diaeresis no longer overlaps the

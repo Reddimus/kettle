@@ -340,6 +340,18 @@ impl App {
                 action: Action::SelectAll,
                 enabled: true,
             },
+            // iTerm2, Terminal.app and Konsole keep find and clear one
+            // right-click away, not behind a submenu.
+            ContextMenuItem::Item {
+                label: tr.text(T::MenuFind),
+                action: Action::StartSearch,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: tr.text(T::MenuClearScrollback),
+                action: Action::ClearHistory,
+                enabled: true,
+            },
             ContextMenuItem::Separator,
             // `Split Auto` splits along the pane's longer axis — Terminator
             // offers it first because it is the one that needs no decision.
@@ -1598,6 +1610,7 @@ impl App {
                 .zip(hints)
                 .map(|(it, hint)| match it {
                     ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
@@ -1605,6 +1618,7 @@ impl App {
                         hint,
                     },
                     ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -1612,6 +1626,7 @@ impl App {
                         hint,
                     },
                     ContextMenuItem::Separator => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: String::new(),
                         separator: true,
@@ -1619,6 +1634,7 @@ impl App {
                         hint: String::new(),
                     },
                     ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -1627,6 +1643,7 @@ impl App {
                     },
                     ContextMenuItem::ConfigItem { label, .. }
                     | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -1634,6 +1651,7 @@ impl App {
                         hint: String::new(),
                     },
                     ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         // `hint` is "▸": this row opens a submenu.
                         label: label.clone(),
@@ -1646,6 +1664,7 @@ impl App {
                     // submenu's items in.
                     ContextMenuItem::ProfileChoice { label, .. }
                     | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -1654,6 +1673,7 @@ impl App {
                     },
                     // New-tab ▾ shell choice — a normal clickable row.
                     ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -1663,6 +1683,7 @@ impl App {
                     // URL-aware leading rows ("Open Link" /
                     // "Copy Link Address") — normal clickable rows.
                     ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
@@ -1672,6 +1693,7 @@ impl App {
                     // A card's media rows — normal clickable rows.
                     ContextMenuItem::Media { label, .. }
                     | ContextMenuItem::Preview { label, .. } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: (*label).to_string(),
                         separator: false,
@@ -1681,6 +1703,7 @@ impl App {
                     // Dropdown parity: Info renders as a dimmed
                     // (disabled-style) static line.
                     ContextMenuItem::Info { label } => ContextMenuRow {
+                        swatches: None,
                         matched_chars: None,
                         label: label.clone(),
                         separator: false,
@@ -2996,6 +3019,11 @@ pub(super) fn fit_context_menu_row(row: &mut ContextMenuRow, max_columns: usize)
     if row.separator {
         return;
     }
+    // Decorative swatches give way first, so a narrow panel shows the same
+    // label and hint as a row without them.
+    if row.swatches.is_some() && kettle_render::menu_row_chars(row) > max_columns {
+        row.swatches = None;
+    }
     let hint_columns = if row.hint.is_empty() {
         0
     } else {
@@ -3083,7 +3111,12 @@ pub(super) fn grouped_terminal_menu(
             | ContextMenuItem::Preview { .. } => None,
             ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
                 match action {
-                    Action::Copy | Action::Paste | Action::SelectAll | Action::HintMode => None,
+                    Action::Copy
+                    | Action::Paste
+                    | Action::SelectAll
+                    | Action::HintMode
+                    | Action::StartSearch
+                    | Action::ClearHistory => None,
                     Action::SplitAuto
                     | Action::SplitRight
                     | Action::SplitLeft
@@ -3127,6 +3160,16 @@ pub(super) fn grouped_terminal_menu(
             action: Action::SelectAll,
             ..
         } => 3,
+        // Find and Clear Scrollback close the block, after the hints and
+        // any media or preview rows, which keep their old order.
+        ContextMenuItem::Item {
+            action: Action::StartSearch,
+            ..
+        } => 5,
+        ContextMenuItem::Item {
+            action: Action::ClearHistory,
+            ..
+        } => 6,
         _ => 4,
     });
     // A divider between the rows about the link under the pointer and the

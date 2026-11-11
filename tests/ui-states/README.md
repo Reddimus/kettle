@@ -32,7 +32,7 @@ The states pin these visible arrangements:
 | `search-nomatch` | Search query and no-match state |
 | `tabs` | Three tabs with one active tab |
 | `splits` | Three nonoverlapping panes and active-pane border |
-| `theme-picker` | Theme rows, light/dark labels, and active selection |
+| `theme-picker` | Theme rows with their colour swatches, light/dark labels, and active selection (the narrow window drops the swatches) |
 
 CI regenerates these files through the private Wayland runner and compares
 each name against this directory. The existing thresholds remain 24 per

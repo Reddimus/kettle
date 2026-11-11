@@ -1183,6 +1183,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
     use unicode_width::UnicodeWidthStr as _;
 
     let mut row = ContextMenuRow {
+        swatches: None,
         matched_chars: None,
         label: "Visible label".to_string(),
         separator: false,
@@ -1554,4 +1555,56 @@ fn a_disabled_copy_stays_greyed_while_other_disabled_rows_go() {
     ));
     assert!(!super::item_is_dispatchable(&kept[0]));
     assert_eq!(super::next_context_menu_highlight(&kept, 1, 1), 1);
+}
+
+#[test]
+fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
+    // The blind panel's context-menu round found find and clear only behind
+    // submenus or the palette; iTerm2, Terminal.app and Konsole show them
+    // directly.
+    use kettle_i18n::{Language, Translator};
+    let tr = Translator::new(Language::En);
+    let items: Vec<_> = [
+        Action::ClearHistory,
+        Action::SplitAuto,
+        Action::Reset,
+        Action::StartSearch,
+        Action::HintMode,
+        Action::SelectAll,
+        Action::Paste,
+        Action::Copy,
+    ]
+    .into_iter()
+    .map(|action| ContextMenuItem::Item {
+        label: tr.text(kettle_i18n::Text::MenuPaste),
+        action,
+        enabled: true,
+    })
+    .collect();
+    let grouped = super::grouped_terminal_menu(items, tr);
+    let primary: Vec<_> = grouped
+        .iter()
+        .take_while(|item| !matches!(item, ContextMenuItem::Separator))
+        .map(|item| match item {
+            ContextMenuItem::Item { action, .. } => action.clone(),
+            _ => panic!("unexpected primary row"),
+        })
+        .collect();
+    assert_eq!(
+        primary,
+        [
+            Action::Copy,
+            Action::Paste,
+            Action::SelectAll,
+            Action::HintMode,
+            Action::StartSearch,
+            Action::ClearHistory,
+        ]
+    );
+    // Reset stays in the Pane submenu.
+    assert!(grouped.iter().any(|item| matches!(
+        item,
+        ContextMenuItem::Submenu { items, .. }
+            if items.iter().any(|row| matches!(row, ContextMenuItem::Item { action: Action::Reset, .. }))
+    )));
 }

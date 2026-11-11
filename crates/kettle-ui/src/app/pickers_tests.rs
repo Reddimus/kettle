@@ -318,6 +318,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         );
     }
     let mut row = ContextMenuRow {
+        swatches: None,
         label: "año abcdefghijklmnop".into(),
         matched_chars: Some(vec![0..3, 6..19]),
         hint: String::new(),

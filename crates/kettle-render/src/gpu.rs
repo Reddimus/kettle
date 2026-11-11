@@ -762,6 +762,11 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let picker_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let menu_swatch_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
+            &device,
+            format,
+            crate::overlays::MENU_SWATCH_SURFACES,
+        );
         let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
         let confirmation_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
@@ -940,6 +945,7 @@ impl Renderer {
             rounded_surfaces,
             toast_surfaces,
             picker_surfaces,
+            menu_swatch_surfaces,
             transport_surface_count: 0,
             settings_surface_count: 0,
             confirmation_text_renderer,

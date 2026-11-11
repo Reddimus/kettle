@@ -959,13 +959,16 @@ impl Renderer {
         )
     }
 
-    /// Whether an image, outline or rounded toast can paint inside `near`. Their
-    /// shading is interpolated, so it does not crop exactly.
+    /// Whether an image, outline, rounded toast or menu swatch can paint inside
+    /// `near`. Their shading is interpolated, so it does not crop exactly.
     fn inexact_draws_touch(&self, near: PixelBox) -> bool {
-        if self.toast_surfaces.uploaded().is_none_or(|mut surfaces| {
-            surfaces.any(|surface| PixelBox::bounding(surface.pos, surface.size).intersects(near))
-        }) {
-            return true;
+        for pipeline in [&self.toast_surfaces, &self.menu_swatch_surfaces] {
+            if pipeline.uploaded().is_none_or(|mut surfaces| {
+                surfaces
+                    .any(|surface| PixelBox::bounding(surface.pos, surface.size).intersects(near))
+            }) {
+                return true;
+            }
         }
         if self.ime_prepared
             && self.ime_quads.uploaded().is_none_or(|mut quads| {

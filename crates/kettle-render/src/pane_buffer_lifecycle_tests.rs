@@ -182,6 +182,7 @@ fn context_menu_hover_preserves_text_damage_key() {
         anchor: (20.0, 30.0),
         rows: vec![
             super::ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: "Copy".to_string(),
                 separator: false,
@@ -189,6 +190,7 @@ fn context_menu_hover_preserves_text_damage_key() {
                 hint: "Ctrl+Shift+C".to_string(),
             },
             super::ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: "Paste".to_string(),
                 separator: false,

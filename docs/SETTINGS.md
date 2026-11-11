@@ -218,20 +218,22 @@ these config-only options; edits still reload immediately for every open pane.
 
 ### Theme picker
 
-The theme picker lists every bundled theme. Type part of a name to filter
-them, or move with ↑/↓ (and Tab); the window wears the selected theme while
-you browse. Enter keeps it and writes it to your config file, and Esc puts
-back the theme you started with. The prompt names the active appearance:
-**light theme:** or **dark theme:**. Following the
-system saves a pick to that side and keeps following. Forced Light/Dark modes
-also update their own side; Fixed theme writes `theme`. With nothing typed, the themes of your
-current theme's appearance come first, each followed by the most similar one,
-so the arrows never jump between a dark and a light palette until the end of
-the list; each row says whether its theme is dark or light, and your current
-theme is ticked. Open it from the Settings **Theme** row (Enter or a click),
-**right-click → Theme…**, the command palette's **Choose theme…**, or the
-bindable `open_theme_picker` action. Opened from Settings, it covers the panel
-and returns to it when it closes.
+The theme picker lists every bundled theme. Type part of a name to filter them,
+or move with ↑/↓ (and Tab); the window wears the selected theme while you
+browse. Enter keeps it and writes it to your config file, and Esc puts back the
+theme you started with. The prompt names the active appearance: **light theme:**
+or **dark theme:**. Following the system saves a pick to that side and keeps
+following. Forced Light/Dark modes also update their own side; Fixed theme
+writes `theme`. With nothing typed, the themes of your current theme's
+appearance come first, each followed by the most similar one, so the arrows
+never jump between a dark and a light palette until the end of the list; each
+row says whether its theme is dark or light and shows a strip of its colours
+(background, text and six accent colours), and your current theme is ticked.
+When the window is too narrow for every row's strip, no row shows one, so names
+are never shortened for it. Open it from the Settings **Theme** row (Enter or a
+click), **right-click → Theme…**, the command palette's **Choose theme…**, or
+the bindable `open_theme_picker` action. Opened from Settings, it covers the
+panel and returns to it when it closes.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,

@@ -13,6 +13,7 @@ fn menu_width_and_inverse_share_one_formula() {
 #[test]
 fn row_budget_uses_display_columns() {
     let row = ContextMenuRow {
+        swatches: None,
         matched_chars: None,
         label: "主题 👩‍💻".to_string(),
         separator: false,
@@ -30,6 +31,7 @@ fn row_budget_uses_display_columns() {
 #[test]
 fn app_clamped_width_is_authoritative_for_every_render_pass() {
     let row = ContextMenuRow {
+        swatches: None,
         matched_chars: None,
         label: "short".to_string(),
         separator: false,
@@ -56,6 +58,7 @@ fn scroll_indicators_follow_the_remaining_suffix() {
         .into_iter()
         .enumerate()
         .map(|(index, separator)| ContextMenuRow {
+            swatches: None,
             matched_chars: None,
             label: format!("row {index}"),
             separator,
@@ -94,6 +97,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
     let menu = ContextMenu {
         anchor: (0.0, 0.0),
         rows: vec![ContextMenuRow {
+            swatches: None,
             matched_chars: None,
             label: String::new(),
             separator: true,
@@ -163,6 +167,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         anchor: (10.0, 10.0),
         rows: (0..20)
             .map(|_| ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: "Command".into(),
                 hint: String::new(),
@@ -211,6 +216,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             anchor: (10.0, 10.0),
             rows: (0..10)
                 .map(|_| ContextMenuRow {
+                    swatches: None,
                     matched_chars: None,
                     label: "row".into(),
                     separator: false,
@@ -258,6 +264,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
 #[test]
 fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
     let mut row = ContextMenuRow {
+        swatches: None,
         label: "Cerrar pestaña".into(),
         hint: String::new(),
         separator: false,
@@ -293,6 +300,7 @@ fn picker_surface_encloses_header_and_selection_stays_inside_rounded_corners() {
     let menu = ContextMenu {
         anchor: (140.0, 100.0),
         rows: vec![ContextMenuRow {
+            swatches: None,
             label: "one".into(),
             separator: false,
             enabled: true,
@@ -365,6 +373,7 @@ fn pinned_status_shares_card_surface_bounds_but_has_no_action_index() {
         anchor: (16.0, 180.0),
         rows: (0..10)
             .map(|index| ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: format!("action {index}"),
                 enabled: true,
@@ -468,5 +477,152 @@ fn pinned_status_lines_fit_natural_overlay_font_bounds() {
                 }
             }
         }
+    }
+}
+fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
+    ContextMenuRow {
+        swatches: Some(std::array::from_fn(|index| {
+            kettle_config::Rgb::new(index as u8 * 30, 200 - index as u8 * 20, 7)
+        })),
+        matched_chars: None,
+        label: label.into(),
+        separator: false,
+        enabled: true,
+        hint: hint.into(),
+    }
+}
+
+fn natural_menu(rows: Vec<ContextMenuRow>) -> ContextMenu {
+    ContextMenu {
+        status: None,
+        anchor: (50.0, 40.0),
+        rows,
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 0.0,
+        panel_h_clamped: 0.0,
+        a11y_label: None,
+        picker_header_height: 0.0,
+    }
+}
+
+/// The row measure reserves the strip's columns, and the painter puts the
+/// strip inside them: right of the label and its gap, left of the hint and
+/// its gap, in a panel exactly as wide as the measure asks.
+#[test]
+fn swatches_paint_inside_the_columns_their_row_reserves() {
+    let ch = 16.0;
+    let label = "A Rather Long Theme Name";
+    for cw in [8.0_f32, 7.3, 9.6] {
+        for hint in ["✓ dark", ""] {
+            let row = swatch_row(label, hint);
+            let mut bare = swatch_row(label, hint);
+            bare.swatches = None;
+            assert_eq!(
+                menu_row_chars(&row),
+                menu_row_chars(&bare) + menu::swatch_columns()
+            );
+            let colors = row.swatches.unwrap();
+            let menu = natural_menu(vec![row]);
+            let panel_w = context_menu_panel_width(&menu, cw);
+            assert_eq!(
+                panel_w,
+                menu_row_chars(&menu.rows[0]) as f32 * cw + menu::H_PAD
+            );
+            let painted = super::overlays::menu_swatch_rects(&menu, cw, ch);
+            assert_eq!(painted.len(), menu::SWATCH_COUNT, "cw {cw} hint {hint:?}");
+            let (ax, ay) = menu.anchor;
+            let label_end = ax + 16.0 + label.len() as f32 * cw;
+            let hint_w = unicode_width::UnicodeWidthStr::width(hint) as f32 * cw;
+            let strip_left = painted[0].0.0;
+            let strip_right = painted.last().map(|((x, _, w, _), _)| x + w).unwrap();
+            let reserved = (menu::swatch_columns() - menu::SWATCH_GAP_COLUMNS) as f32 * cw;
+            assert!(strip_right - strip_left <= reserved, "cw {cw}");
+            // The label's gap is the hint's spacer, or the strip's own gap.
+            let left_gap = if hint.is_empty() {
+                menu::SWATCH_GAP_COLUMNS
+            } else {
+                2
+            };
+            assert!(
+                strip_left >= label_end + left_gap as f32 * cw - 0.5,
+                "cw {cw} hint {hint:?}: strip {strip_left} overlaps the label"
+            );
+            let limit = if hint.is_empty() {
+                ax + panel_w - 16.0
+            } else {
+                ax + panel_w - 16.0 - hint_w - menu::SWATCH_GAP_COLUMNS as f32 * cw
+            };
+            assert!(
+                strip_right <= limit + 0.5,
+                "cw {cw} hint {hint:?}: strip {strip_right} reaches the hint"
+            );
+            let row_mid = ay + (ch + menu::ROW_PAD) * 0.5;
+            for (((x, y, w, h), color), expected) in painted.iter().zip(colors) {
+                assert_eq!(*color, expected);
+                assert_eq!((*w, *h), (cw, cw));
+                assert!((y + h * 0.5 - row_mid).abs() <= 0.5, "vertically centred");
+                assert!(*x >= strip_left && x + w <= strip_right);
+            }
+        }
+    }
+}
+
+/// Ordinary menu rows paint no swatches, and a picker paints them only for
+/// rows in its scrolled view, outlined in the menu's border colour.
+#[test]
+fn only_visible_rows_with_swatches_paint_them() {
+    let theme = kettle_config::Theme::default();
+    let plain = ["Copy", "Paste", "", "New Tab"]
+        .into_iter()
+        .map(|label| ContextMenuRow {
+            swatches: None,
+            matched_chars: None,
+            label: label.into(),
+            separator: label.is_empty(),
+            enabled: true,
+            hint: "Ctrl+C".into(),
+        })
+        .collect();
+    let menu = natural_menu(plain);
+    assert!(super::overlays::menu_swatch_rects(&menu, 8.0, 16.0).is_empty());
+    assert!(super::overlays::menu_swatch_surfaces([&menu], &theme, 8.0, 16.0).is_empty());
+
+    let row_h = 16.0 + menu::ROW_PAD;
+    let mut menu = natural_menu(
+        (0..10)
+            .map(|i| swatch_row(&format!("t{i}"), "dark"))
+            .collect(),
+    );
+    menu.panel_w_clamped = 360.0;
+    menu.panel_h_clamped = 4.0 * row_h;
+    menu.scroll_offset = 4;
+    let painted = super::overlays::menu_swatch_rects(&menu, 8.0, 16.0);
+    let (inset, content_h) = menu::scroll_content(10.0 * row_h, 4.0 * row_h, row_h);
+    let rows = (content_h / row_h).floor() as usize;
+    assert!(rows > 0 && rows < 10);
+    assert_eq!(painted.len(), rows * menu::SWATCH_COUNT);
+    let top = menu.anchor.1 + inset;
+    assert!(
+        painted
+            .iter()
+            .all(|((_, y, _, h), _)| *y >= top && y + h <= top + content_h)
+    );
+
+    let surfaces = super::overlays::menu_swatch_surfaces([&menu], &theme, 8.0, 16.0);
+    assert_eq!(surfaces.len(), painted.len());
+    let unit = |c: kettle_config::Rgb, a| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            a,
+        ]
+    };
+    for (surface, ((x, y, w, h), color)) in surfaces.iter().zip(&painted) {
+        assert_eq!((surface.pos, surface.size), ([*x, *y], [*w, *h]));
+        assert_eq!(surface.fill, unit(*color, 1.0));
+        assert_eq!(surface.stroke, unit(theme.foreground, 0.45));
+        assert_eq!(surface.params[1], 1.0, "a 1 px outline");
     }
 }
