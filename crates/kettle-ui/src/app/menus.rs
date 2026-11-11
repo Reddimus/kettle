@@ -3179,129 +3179,96 @@ pub(super) fn preferences_submenu(
     cfg: &kettle_config::Config,
     tr: kettle_i18n::Translator,
 ) -> ContextMenuItem {
+    use kettle_config::{AskBeforeClosing, BellMode, ScrollbarMode};
     use kettle_i18n::Text as T;
-    let tr = &tr;
+    use kettle_render::MenuToggle::{Check, Radio};
+    let row = |toggle, text, action| toggle_menu_item(toggle, tr.text(text), action);
     let mut inner: Vec<ContextMenuItem> = Vec::new();
-    let r = |sel: bool| if sel { "● " } else { "○ " };
-    let c = |sel: bool| if sel { "✓ " } else { "  " };
-    let dyn_item = |label: String, action: Action| ContextMenuItem::DynamicItem {
-        label,
-        action,
-        enabled: true,
-        toggle: None,
-    };
     // Scrollbar radio.
     let sb = cfg.scrollbar;
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(sb == kettle_config::ScrollbarMode::Always),
-            tr.text(T::MenuPrefScrollbarAlways)
+    for (mode, text, action) in [
+        (
+            ScrollbarMode::Always,
+            T::MenuPrefScrollbarAlways,
+            Action::SetScrollbarAlways,
         ),
-        Action::SetScrollbarAlways,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(sb == kettle_config::ScrollbarMode::Auto),
-            tr.text(T::MenuPrefScrollbarAuto)
+        (
+            ScrollbarMode::Auto,
+            T::MenuPrefScrollbarAuto,
+            Action::SetScrollbarAuto,
         ),
-        Action::SetScrollbarAuto,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(sb == kettle_config::ScrollbarMode::Never),
-            tr.text(T::MenuPrefScrollbarHidden)
+        (
+            ScrollbarMode::Never,
+            T::MenuPrefScrollbarHidden,
+            Action::SetScrollbarNever,
         ),
-        Action::SetScrollbarNever,
-    ));
+    ] {
+        inner.push(row(Radio(sb == mode), text, action));
+    }
     inner.push(ContextMenuItem::Separator);
     // Boolean toggles.
-    inner.push(dyn_item(
-        format!("{}{}", c(cfg.cursor_blink), tr.text(T::MenuPrefCursorBlink)),
-        Action::ToggleCursorBlink,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            c(cfg.copy_on_select),
-            tr.text(T::MenuPrefCopyOnSelect)
+    for (on, text, action) in [
+        (
+            cfg.cursor_blink,
+            T::MenuPrefCursorBlink,
+            Action::ToggleCursorBlink,
         ),
-        Action::ToggleCopyOnSelect,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            c(cfg.mouse_hide_while_typing),
-            tr.text(T::MenuPrefMouseHide)
+        (
+            cfg.copy_on_select,
+            T::MenuPrefCopyOnSelect,
+            Action::ToggleCopyOnSelect,
         ),
-        Action::ToggleMouseHide,
-    ));
+        (
+            cfg.mouse_hide_while_typing,
+            T::MenuPrefMouseHide,
+            Action::ToggleMouseHide,
+        ),
+    ] {
+        inner.push(row(Check(on), text, action));
+    }
     inner.push(ContextMenuItem::Separator);
     // Close-confirmation radio. `always` is worded to say that it also
     // covers the titlebar close, because that gesture ignores the other
     // two policies by design.
     let ask_before_closing = cfg.ask_before_closing;
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(ask_before_closing == kettle_config::AskBeforeClosing::Always),
-            tr.text(T::MenuPrefConfirmAlways)
+    for (policy, text, action) in [
+        (
+            AskBeforeClosing::Always,
+            T::MenuPrefConfirmAlways,
+            Action::SetAskBeforeClosingAlways,
         ),
-        Action::SetAskBeforeClosingAlways,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals),
-            tr.text(T::MenuPrefConfirmMultiple)
+        (
+            AskBeforeClosing::MultipleTerminals,
+            T::MenuPrefConfirmMultiple,
+            Action::SetAskBeforeClosingMultiple,
         ),
-        Action::SetAskBeforeClosingMultiple,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(ask_before_closing == kettle_config::AskBeforeClosing::Never),
-            tr.text(T::MenuPrefConfirmNever)
+        (
+            AskBeforeClosing::Never,
+            T::MenuPrefConfirmNever,
+            Action::SetAskBeforeClosingNever,
         ),
-        Action::SetAskBeforeClosingNever,
-    ));
+    ] {
+        inner.push(row(Radio(ask_before_closing == policy), text, action));
+    }
     inner.push(ContextMenuItem::Separator);
     // Bell radio.
     let bell = cfg.bell;
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(bell == kettle_config::BellMode::Off),
-            tr.text(T::MenuPrefBellOff)
+    for (mode, text, action) in [
+        (BellMode::Off, T::MenuPrefBellOff, Action::SetBellOff),
+        (
+            BellMode::Visual,
+            T::MenuPrefBellVisual,
+            Action::SetBellVisual,
         ),
-        Action::SetBellOff,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(bell == kettle_config::BellMode::Visual),
-            tr.text(T::MenuPrefBellVisual)
+        (
+            BellMode::Attention,
+            T::MenuPrefBellAttention,
+            Action::SetBellAttention,
         ),
-        Action::SetBellVisual,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(bell == kettle_config::BellMode::Attention),
-            tr.text(T::MenuPrefBellAttention)
-        ),
-        Action::SetBellAttention,
-    ));
-    inner.push(dyn_item(
-        format!(
-            "{}{}",
-            r(bell == kettle_config::BellMode::Both),
-            tr.text(T::MenuPrefBellBoth)
-        ),
-        Action::SetBellBoth,
-    ));
+        (BellMode::Both, T::MenuPrefBellBoth, Action::SetBellBoth),
+    ] {
+        inner.push(row(Radio(bell == mode), text, action));
+    }
     inner.push(ContextMenuItem::Separator);
     // Font size +/- (reuse existing actions).
     inner.push(ContextMenuItem::Item {
@@ -3323,26 +3290,37 @@ pub(super) fn preferences_submenu(
     });
     ContextMenuItem::Submenu {
         label: tr.text(T::MenuPreferences).to_string(),
-        items: compact_preferences(inner, *tr),
+        items: compact_preferences(inner, tr),
     }
 }
 
-/// Terminator parity: the per-pane read-only toggle. Its check marker mirrors
-/// the Preferences submenu's; dispatch goes through the same
+/// Terminator parity: the per-pane read-only toggle, a check box like the
+/// Preferences submenu's. Dispatch goes through the same
 /// `Action::TogglePaneReadOnly` the keybind uses.
 pub(super) fn read_only_menu_item(
     read_only: bool,
     tr: &kettle_i18n::Translator,
 ) -> ContextMenuItem {
+    toggle_menu_item(
+        kettle_render::MenuToggle::Check(read_only),
+        tr.text(kettle_i18n::Text::MenuReadOnly),
+        Action::TogglePaneReadOnly,
+    )
+}
+
+/// A check box or radio row. The state travels as data for screen readers,
+/// and the painted label starts with the state's marker, so the two cannot
+/// disagree.
+fn toggle_menu_item(
+    toggle: kettle_render::MenuToggle,
+    text: &str,
+    action: Action,
+) -> ContextMenuItem {
     ContextMenuItem::DynamicItem {
-        label: format!(
-            "{}{}",
-            if read_only { "✓ " } else { "  " },
-            tr.text(kettle_i18n::Text::MenuReadOnly)
-        ),
-        action: Action::TogglePaneReadOnly,
+        label: format!("{}{text}", toggle.marker()),
+        action,
         enabled: true,
-        toggle: None,
+        toggle: Some(toggle),
     }
 }
 

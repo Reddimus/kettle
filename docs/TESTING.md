@@ -3144,6 +3144,10 @@ three config policies; `cargo test -p kettle-ui paste` checks paste preview,
 flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
+`cargo test -p kettle-ui menu_text_tests` builds the real Read only row and
+Preferences submenu, projects them, and checks that check boxes and radios
+reach AccessKit with their state and an unmarked name while the painted
+labels keep their marks, in the open panel and in a parent panel.
 Native acceptance still needs clipboard, PRIMARY and PuTTY-style text paste,
 mixed bracketed/raw broadcast recipients, each of the three dialog buttons,
 and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.

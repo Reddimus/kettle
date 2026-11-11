@@ -936,6 +936,7 @@ impl App {
                 row.label.hash(&mut hasher);
                 row.hint.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
+                row.toggle.hash(&mut hasher);
             }
         }
         overlay.context_menu.is_some().hash(&mut hasher);
@@ -955,6 +956,7 @@ impl App {
                 row.hint.hash(&mut hasher);
                 row.separator.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
+                row.toggle.hash(&mut hasher);
             }
         }
         overlay.palette_query.hash(&mut hasher);
@@ -2321,19 +2323,7 @@ pub(super) fn modal_accessibility_projection(
                 continue;
             }
             let id = accessibility_modal_id(2, index + 1);
-            let mut node = Node::new(Role::MenuItem);
-            node.set_label(row.label.clone());
-            if row.hint == SUBMENU_SIGN {
-                node.set_has_popup(accesskit::HasPopup::Menu);
-            } else if !row.hint.is_empty() {
-                node.set_description(row.hint.trim().to_string());
-            }
-            if !row.enabled {
-                node.set_disabled();
-            } else {
-                node.add_action(AccessibilityAction::Focus);
-                node.add_action(AccessibilityAction::Click);
-            }
+            let node = context_menu_item_node(row);
             if index == menu.highlight {
                 highlighted = Some(id);
             }
@@ -2740,6 +2730,46 @@ pub(super) fn media_receipt_accessibility_label(
     label
 }
 
+/// One context-menu row as a menu item. A row that toggles a setting is a
+/// check box or radio item with its state, named without the marker the
+/// label is painted with. A shortcut is set as the keyboard shortcut and kept
+/// as the description: the locked AccessKit adapters for macOS, AT-SPI and
+/// Windows do not pass the shortcut property on, so the description is what
+/// VoiceOver, Orca and Narrator read.
+fn context_menu_item_node(row: &ContextMenuRow) -> Node {
+    let (role, label) = match row.toggle {
+        Some(toggle) => (
+            match toggle {
+                kettle_render::MenuToggle::Check(_) => Role::MenuItemCheckBox,
+                kettle_render::MenuToggle::Radio(_) => Role::MenuItemRadio,
+            },
+            row.label
+                .strip_prefix(toggle.marker())
+                .unwrap_or(&row.label),
+        ),
+        None => (Role::MenuItem, row.label.as_str()),
+    };
+    let mut node = Node::new(role);
+    node.set_label(label);
+    if let Some(toggle) = row.toggle {
+        node.set_toggled(accesskit::Toggled::from(toggle.is_on()));
+    }
+    if row.hint == SUBMENU_SIGN {
+        node.set_has_popup(accesskit::HasPopup::Menu);
+    } else if !row.hint.is_empty() {
+        let shortcut = row.hint.trim();
+        node.set_keyboard_shortcut(shortcut);
+        node.set_description(shortcut);
+    }
+    if row.enabled {
+        node.add_action(AccessibilityAction::Focus);
+        node.add_action(AccessibilityAction::Click);
+    } else {
+        node.set_disabled();
+    }
+    node
+}
+
 /// Preserve the drill-in path as actual menu/menu-item ancestry for assistive technology.
 pub(super) fn nest_context_menu_accessibility(
     projection: &mut ModalAccessibilityProjection,
@@ -2780,17 +2810,7 @@ pub(super) fn nest_context_menu_accessibility(
                 continue;
             }
             let id = accessibility_modal_id(kind, index + 1);
-            let mut item = Node::new(Role::MenuItem);
-            item.set_label(row.label.clone());
-            if !row.hint.is_empty() && row.hint != SUBMENU_SIGN {
-                item.set_description(row.hint.trim().to_string());
-            }
-            if row.enabled {
-                item.add_action(AccessibilityAction::Focus);
-                item.add_action(AccessibilityAction::Click);
-            } else {
-                item.set_disabled();
-            }
+            let mut item = context_menu_item_node(row);
             if matches!(
                 parent.items.get(index),
                 Some(ContextMenuItem::Submenu { .. })

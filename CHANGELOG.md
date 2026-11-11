@@ -37,6 +37,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers find each pane's place in its scrollback as a vertical scroll
   bar, and can move it a line at a time or straight to a line.
 
+- The context menu's Read only row and the Preferences check boxes and
+  choices reach screen readers as check box and radio menu items that carry
+  whether they are on, and their names no longer start with the check mark or
+  dot drawn before them. The menu looks the same, and a row's shortcut is
+  still given as its description.
+
 - A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
   the key that restores them, in English and Spanish.
 
