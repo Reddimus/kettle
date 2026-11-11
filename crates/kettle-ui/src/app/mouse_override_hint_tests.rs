@@ -1,6 +1,7 @@
 //! The hint that Shift keeps a click Kettle's while a program uses the mouse.
 use super::accessibility::{
-    accessibility_modal_id, modal_accessibility_projection, nest_context_menu_accessibility,
+    ACCESSIBILITY_ROOT_ID, accessibility_modal_id, modal_accessibility_projection,
+    modal_focus_in_tree, nest_context_menu_accessibility,
 };
 #[cfg(unix)]
 use super::{
@@ -533,6 +534,114 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
         nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
         check(&projection, 40, (40.0, 60.0));
     }
+}
+
+/// The tree `accessibility_tree` hands the platform for `projection` alone:
+/// a window holding the modal's roots, focused where the modal's focus can
+/// be named, with the tree info the first update carries.
+fn finished_tree(
+    projection: super::accessibility::ModalAccessibilityProjection,
+) -> accesskit::TreeUpdate {
+    let mut root = accesskit::Node::new(accesskit::Role::Window);
+    root.set_children(projection.roots);
+    let mut nodes = projection.nodes;
+    nodes.push((ACCESSIBILITY_ROOT_ID, root));
+    let focus = modal_focus_in_tree(projection.focus, &nodes).unwrap_or(ACCESSIBILITY_ROOT_ID);
+    accesskit::TreeUpdate {
+        nodes,
+        tree: Some(accesskit::TreeInfo::new(ACCESSIBILITY_ROOT_ID)),
+        tree_id: accesskit::TreeId::ROOT,
+        focus,
+    }
+}
+
+/// Hovering a line of the wrapped Shift hint other than its first
+/// highlights that line's row, whose node the join took out of the tree. The
+/// tree a screen reader is handed must still name a focus it holds: AccessKit
+/// panics on one it does not, with assistive technology running. This holds
+/// for the open menu and once the menu is a parent panel and the hover
+/// leaves the submenu for it.
+#[test]
+fn hovering_a_continued_line_of_the_hint_keeps_the_tree_valid() {
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let leaf = ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::MenuSplitRight),
+            action: Action::SplitRight,
+            enabled: true,
+        };
+        let mut menu = vec![
+            ContextMenuItem::Item {
+                label: tr.text(kettle_i18n::Text::MenuCopy),
+                action: Action::Copy,
+                enabled: true,
+            },
+            ContextMenuItem::Submenu {
+                label: "Split".into(),
+                items: vec![leaf.clone()],
+            },
+        ];
+        prepend_mouse_override_row(&mut menu, true, 16, tr);
+        let menu = filter_disabled(menu);
+        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), 16);
+        assert!(lines.len() > 2, "{language:?}: {lines:?}");
+        let split = lines.len() + 2;
+        for hovered in [1, lines.len() - 1] {
+            for from_parent in [false, true] {
+                let mut state = ContextMenuState {
+                    anchor: (40.0, 60.0),
+                    anchor_scale: 1.0,
+                    items: menu.clone(),
+                    highlight: split,
+                    drill_stack: Vec::new(),
+                    scroll_offset: 0,
+                    typeahead_buf: String::new(),
+                    typeahead_until: None,
+                };
+                if from_parent {
+                    // Split is open, and the hover lands on the parent panel:
+                    // `update_menu_highlight_from_cursor` leaves the submenu.
+                    assert!(state.enter_submenu(split));
+                    assert_eq!(state.drill_stack.len(), 1);
+                    assert!(state.leave_submenu());
+                }
+                state.highlight = hovered;
+                let mut panel = painted_panel(&menu, (40.0, 60.0));
+                panel.highlight = hovered;
+                let mut ws = WindowState::new(1, Mux::new());
+                ws.context_menu = Some(state);
+                let overlay = Overlay {
+                    context_menu: Some(panel),
+                    ..Overlay::default()
+                };
+                let mut projection =
+                    modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+                nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+                let update = finished_tree(projection);
+                assert!(
+                    update.nodes.iter().any(|(id, _)| *id == update.focus),
+                    "{language:?} line {hovered} from_parent {from_parent}: focus {:?} is not in the tree",
+                    update.focus
+                );
+                let _ = accesskit_consumer::Tree::new(update, true);
+            }
+        }
+    }
+}
+
+/// The modal's focus reaches the tree only while its node is there; else
+/// the open menu takes it, and with no menu the caller's default applies.
+#[test]
+fn a_modal_focus_outside_the_tree_falls_back_to_the_menu() {
+    let menu = accessibility_modal_id(2, 0);
+    let row = accessibility_modal_id(2, 3);
+    let gone = accessibility_modal_id(2, 2);
+    let node = || accesskit::Node::new(accesskit::Role::MenuItem);
+    let both = [(menu, node()), (row, node())];
+    assert_eq!(modal_focus_in_tree(Some(row), &both), Some(row));
+    assert_eq!(modal_focus_in_tree(Some(gone), &both), Some(menu));
+    assert_eq!(modal_focus_in_tree(None, &both), None);
+    assert_eq!(modal_focus_in_tree(Some(gone), &both[1..]), None);
 }
 
 /// An Info line of its own reading `text`: the hint's single line on a menu

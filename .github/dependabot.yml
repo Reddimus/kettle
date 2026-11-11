@@ -28,6 +28,7 @@ updates:
       accessibility:
         patterns:
           - "accesskit"
+          - "accesskit_consumer"
           - "accesskit_winit"
       # These exact pins form one audited parser/layout/paint contract.
       # Review upgrades together; passing resolution alone is insufficient.

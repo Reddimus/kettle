@@ -155,11 +155,12 @@ impl App {
             ));
             let mut nodes = modal.nodes;
             nodes.push((ACCESSIBILITY_ROOT_ID, root));
+            let focus = modal_focus_in_tree(modal.focus, &nodes).unwrap_or(ACCESSIBILITY_ROOT_ID);
             return TreeUpdate {
                 nodes,
                 tree: None,
                 tree_id: TreeId::ROOT,
-                focus: modal.focus.unwrap_or(ACCESSIBILITY_ROOT_ID),
+                focus,
             };
         }
         let area = self.area(ws);
@@ -770,6 +771,7 @@ impl App {
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
+        let modal_focus = modal_focus_in_tree(modal_focus, &nodes);
         let mut root = Node::new(Role::Window);
         root.set_label(self.ui_text.text(kettle_i18n::Text::A11yWindow));
         root.set_children(children);
@@ -2048,6 +2050,23 @@ pub(super) fn modal_accessibility_diagnostic_label<'a>(
         }
     }
     node.label()
+}
+
+/// The modal focus a finished tree of `nodes` can name: the node the modal
+/// projection chose while it is still in `nodes`, else the open context
+/// menu while that is, else none, so the caller's own default applies.
+/// AccessKit rejects a tree whose focus is not one of its nodes, and a pass
+/// after the projection can take the chosen node out, as joining a wrapped
+/// sentence does with the lines that continue it.
+pub(super) fn modal_focus_in_tree(
+    focus: Option<NodeId>,
+    nodes: &[(NodeId, Node)],
+) -> Option<NodeId> {
+    let held = |target: &NodeId| nodes.iter().any(|(id, _)| id == target);
+    let focus = focus?;
+    Some(focus)
+        .filter(held)
+        .or(Some(accessibility_modal_id(2, 0)).filter(held))
 }
 
 pub(super) struct ModalAccessibilityProjection {
