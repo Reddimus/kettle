@@ -1088,13 +1088,15 @@ fn terminal_accessibility_runs_mark_each_word_start() {
 
 #[test]
 fn accessibility_word_starts_leave_rows_past_accesskit_indices_whole() {
-    // AccessKit looks a caret up as a u8 index: past 256 characters it would
-    // wrap onto the wrong word, so such a row stays one word.
-    let fits = super::accessibility_word_starts((0..256).map(|index| index % 2 == 1));
+    // AccessKit looks a caret up as a u8 index, and a caret can sit at the
+    // run's length: from 256 characters it would wrap onto the wrong word, so
+    // such a row stays one word.
+    let fits = super::accessibility_word_starts((0..255).map(|index| index % 2 == 1));
     assert_eq!(fits.len(), 128);
     assert_eq!(fits.last(), Some(&254));
-    let long = super::accessibility_word_starts((0..257).map(|index| index % 2 == 1));
+    let long = super::accessibility_word_starts((0..256).map(|index| index % 2 == 1));
     assert!(long.is_empty());
+    assert_eq!(super::accessibility_word_starts(std::iter::empty()), &[] as &[u8]);
 }
 
 #[test]
