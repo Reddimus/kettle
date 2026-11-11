@@ -339,6 +339,42 @@ upstream release that contains all of these fixes.
   forward or replaced by an upstream equivalent, and
   `kettle-render`'s `pane_rows_shape_left_to_right_without_mirroring` test
   fails without it.
+- Local change, Kettle's own (not an upstream backport): font fallback no
+  longer shapes a run with faces whose character maps prove they cannot fill
+  a cluster it is missing. Upstream's last fallback stage shapes the run once
+  with every face in the database, building a shape plan for each, and
+  nothing remembers the result, so a screen of characters no installed face
+  covers held the event loop for seconds and did so again for every row
+  shaped later. `FontFallbackIter` now reads each face's character map,
+  without loading the face, from the subtable harfrust 0.5 shapes with (its
+  `find_best_cmap_subtable`, including the symbol remapping), and passes over
+  a face that maps none of the missing clusters' characters, their canonical
+  decompositions or their compositions. Whenever that cannot be shown, the
+  face is tried as upstream tries it: a face whose map does not parse, has no
+  subtable harfrust would use or uses Mac Roman; a right-to-left run, whose
+  characters harfrust may draw mirrored; and a cluster holding a character
+  harfrust can draw without mapping it (default-ignorables, its fallback
+  spaces, U+2011, tabs, and the Hebrew, Thai and Lao blocks, Lao because the
+  Thai shaper splits its SARA AM). `FontSystem` remembers a cluster only when
+  every face's map was read and none maps a character it needs, then skips
+  the walk for a run whose missing clusters are all remembered. It holds up to
+  4096 clusters of at most 64 bytes and is cleared when full, so a screen with
+  more distinct such clusters reads the maps again, and in `db_mut`.
+  Verified: shaping matched the unpatched crate, face and glyph, for every
+  scalar from U+0080 to U+2FFFF and U+E0000 to U+E01EF in five contexts and
+  for a list of multi-character clusters (Latin with marks, Arabic, Lao,
+  Thai, Devanagari, emoji sequences, right-to-left lines with brackets), on
+  the bundled faces and on a macOS system font database. That is evidence,
+  not a proof, for other databases. The crate gains a dependency on
+  `icu_normalizer` 2.4, already in the graph through `kettle-render`, three
+  `#[doc(hidden)]` counters on `FontSystem` (`fallback_shape_count`,
+  `loaded_font_count`, `coverage_check_count`) and a `#[doc(hidden)]`
+  `fallback_coverage` module for tests. `src/font/coverage.rs` is new;
+  `src/font/fallback/mod.rs`, `src/font/system.rs`, `src/font/mod.rs`,
+  `src/shape.rs`, `src/lib.rs` and `Cargo.toml` change. Re-check on any
+  upgrade of cosmic-text or harfrust: the exemptions and the subtable order
+  copy harfrust 0.5, and `kettle-render`'s `fallback_walk_tests` fail without
+  the change.
 - Upstream status, checked 2026-10-16: both commits are on
   pop-os/cosmic-text's `main`, and crates.io's newest `cosmic-text` is still
   0.19.0, published 2026-04-22, before either.

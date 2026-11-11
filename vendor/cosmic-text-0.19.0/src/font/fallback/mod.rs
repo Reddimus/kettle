@@ -194,6 +194,34 @@ pub struct FontFallbackIter<'a> {
     other_i: usize,
     end: bool,
     ideal_weight: fontdb::Weight,
+    /// What the last stage may skip by, set by `set_missing`.
+    missing: MissingClusters,
+}
+
+/// What `FontFallbackIter`'s last stage, the walk of every face, knows about
+/// the clusters still missing. Kettle-owned; see `font/coverage.rs`.
+#[derive(Debug, Default)]
+enum MissingClusters {
+    /// Nothing: every face is tried, as upstream does.
+    #[default]
+    Unknown,
+    /// A face is tried only if it maps a character one of these needs.
+    Need {
+        clusters: Vec<NeededCluster>,
+        /// Whether the walk began after `set_missing`, so that every face's
+        /// character map is read in it.
+        whole_walk: bool,
+    },
+    /// No face maps any character these need, so the walk is skipped.
+    Uncoverable,
+}
+
+#[derive(Debug)]
+struct NeededCluster {
+    text: String,
+    chars: Vec<char>,
+    /// Whether some face read in the walk maps one of `chars`.
+    mapped: bool,
 }
 
 impl<'a> FontFallbackIter<'a> {
@@ -221,7 +249,66 @@ impl<'a> FontFallbackIter<'a> {
             other_i: 0,
             end: false,
             ideal_weight,
+            missing: MissingClusters::Unknown,
         }
+    }
+
+    /// Tell the iterator which clusters its first face left missing, so the
+    /// walk of every face can pass over faces whose character maps prove
+    /// they cannot fill any of them. `rtl` is the run's direction.
+    pub(crate) fn set_missing<'c>(
+        &mut self,
+        clusters: impl Iterator<Item = &'c str> + Clone,
+        rtl: bool,
+    ) {
+        self.missing = MissingClusters::Unknown;
+        if rtl {
+            return;
+        }
+        if self.font_system.all_clusters_missing(clusters.clone()) {
+            self.missing = MissingClusters::Uncoverable;
+            return;
+        }
+        let mut needed = Vec::new();
+        for text in clusters {
+            let Some(chars) = super::coverage::required_chars(text, false) else {
+                return;
+            };
+            needed.push(NeededCluster {
+                text: text.into(),
+                chars,
+                mapped: false,
+            });
+        }
+        self.missing = MissingClusters::Need {
+            clusters: needed,
+            whole_walk: self.other_i == 0,
+        };
+    }
+
+    /// The missing clusters whose characters no face maps, once a walk has
+    /// read every face's character map.
+    pub(crate) fn unmapped_clusters(&self) -> impl Iterator<Item = &str> {
+        let clusters = match &self.missing {
+            MissingClusters::Need {
+                clusters,
+                whole_walk: true,
+            } if self.end => clusters.as_slice(),
+            _ => &[],
+        };
+        clusters
+            .iter()
+            .filter(|cluster| !cluster.mapped)
+            .map(|cluster| cluster.text.as_str())
+    }
+
+    /// Whether every face has been tried.
+    pub(crate) const fn is_exhausted(&self) -> bool {
+        self.end
+    }
+
+    pub(crate) fn font_system_mut(&mut self) -> &mut FontSystem {
+        self.font_system
     }
 
     pub fn check_missing(&self, word: &str) {
@@ -284,6 +371,24 @@ impl<'a> FontFallbackIter<'a> {
             .iter()
             .filter(|m_key| m_key.font_weight_diff == 0 || m_key.variable_weight_match)
             .find(|m_key| self.face_contains_family(m_key.id, default_family_name))
+    }
+
+    /// Whether shaping with face `id` could fill a missing cluster. `false`
+    /// only when its character map maps no character any of them needs.
+    fn face_may_fill(&mut self, id: fontdb::ID) -> bool {
+        let MissingClusters::Need { clusters, .. } = &mut self.missing else {
+            return true;
+        };
+        self.font_system.with_face_cmap(id, |maps| {
+            let mut any = false;
+            for cluster in clusters.iter_mut() {
+                if maps.is_none_or(|maps| cluster.chars.iter().any(|&c| maps(c))) {
+                    cluster.mapped = true;
+                    any = true;
+                }
+            }
+            any
+        })
     }
 
     fn next_item(&mut self, fallbacks: &Fallbacks) -> Option<<Self as Iterator>::Item> {
@@ -467,12 +572,16 @@ impl<'a> FontFallbackIter<'a> {
         //TODO: do we need to do this?
         //TODO: do not evaluate fonts more than once!
         let forbidden_families = fallbacks.forbidden_fallback();
+        if matches!(self.missing, MissingClusters::Uncoverable) {
+            self.other_i = self.font_match_keys.len();
+        }
         while self.other_i < self.font_match_keys.len() {
             let id = self.font_match_keys[self.other_i].id;
             self.other_i += 1;
             if forbidden_families
                 .iter()
                 .all(|family_name| !self.face_contains_family(id, family_name))
+                && self.face_may_fill(id)
             {
                 if let Some(font) = self.font_system.get_font(id, self.ideal_weight) {
                     return Some(font);
