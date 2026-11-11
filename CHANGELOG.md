@@ -123,6 +123,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Tabs show their go-to-tab shortcut on every platform, taken from the key
+  bindings: Alt+1 to Alt+9 on Linux and Windows, ⌘1 to ⌘9 on macOS, or whatever
+  key you bound instead. Linux tabs showed none before, and macOS showed a fixed
+  Cmd+N.
 - The terminal's right-click menu offers Find… and Clear Scrollback, next to
   Copy, Paste and Select All. Before, they were only in the palette and the key
   bindings.
