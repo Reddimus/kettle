@@ -2172,6 +2172,27 @@ pub(super) fn disable_app_state_restoration() {
     unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
 }
 
+/// Opt every Kettle window out of AppKit's automatic window tabbing before
+/// the application launches. Kettle's tabs are its own, drawn in one
+/// NSWindow by the mux; no code calls AppKit's native-tab API. Neither does
+/// winit unless it is handed a tabbing identifier, so AppKit's defaults
+/// applied: tabbing allowed, `tabbingMode` automatic, and one generated
+/// identifier for windows of the same class. Under the "Prefer tabs" system
+/// setting, a new Kettle window, a detached tab among them, could then open
+/// as a native tab of another, and AppKit can add its own tab items (Move Tab
+/// to New Window among them) to the Windows menu beside Kettle's.
+#[cfg(target_os = "macos")]
+pub(super) fn disable_automatic_window_tabbing() {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::warn!("window tabbing: opt-out called off the main thread");
+        return;
+    };
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
+}
+
 pub(super) fn rounded_window_corner_policy(
     is_macos: bool,
     live_decorated: bool,

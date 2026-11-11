@@ -24,6 +24,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PalettePrevTab, PrevTab),
         (T::PaletteMoveTabLeft, MoveTabLeft),
         (T::PaletteMoveTabRight, MoveTabRight),
+        (T::PaletteRenameTab, EditTabTitle),
         (T::PaletteSplitRight, SplitRight),
         (T::PaletteSplitDown, SplitDown),
         (T::PaletteSplitAuto, SplitAuto),
@@ -293,13 +294,13 @@ mod tests {
             OpenContextMenu,
             // Terminator-parity actions excluded from the palette
             // because they're either parametric (no enumeration target),
-            // tied to inline overlays (the title-edit ones open their own
-            // input prompts), or send raw text to the focused PTY (insert-
-            // number) which doesn't fit the palette's "do a thing" model.
-            // The palette doesn't need a row for each; they remain
-            // reachable via keybinds.
+            // tied to inline overlays (the window and pane title editors
+            // open their own input prompts; the tab one is listed anyway,
+            // as "Rename tab…", so a rename needs no right-click), or send raw
+            // text to the focused PTY (insert-number) which doesn't fit the
+            // palette's "do a thing" model. They remain reachable via
+            // keybinds.
             EditWindowTitle,
-            EditTabTitle,
             EditPaneTitle,
             InsertPaneNumber,
             InsertPanePadded,

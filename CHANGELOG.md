@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Renaming a tab and moving it to a new window no longer need the right-click
+  menu or a tab drag. The command palette lists "Rename tab…" beside its
+  existing "Move tab to new window", and on macOS the menu bar's Window menu
+  has Rename Tab…, Move Tab Left, Move Tab Right and Move Tab to New Window.
+  The move rows are unavailable while the window has one tab, and Move Tab to
+  New Window also while `detachable-tabs = false`. No new default shortcuts.
+
 - Each row of the theme picker shows a small strip of that theme's colours:
   its background, its text colour and six accent colours. In a narrow window
   the strip is dropped before a theme's name is shortened.
@@ -331,6 +338,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
+  Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing
+  was left on, so under the "Prefer tabs when opening documents" system
+  setting (by default, while in full screen) a new Kettle window, such as a
+  tab moved to a new window, could open as an AppKit tab of another Kettle
+  window, and AppKit could add its own tab items, a second Move Tab to New
+  Window among them, to the Window menu.
 
 - A screen of characters that no installed font covers no longer freezes the
   window for seconds, and terminal queries such as cursor-position reports

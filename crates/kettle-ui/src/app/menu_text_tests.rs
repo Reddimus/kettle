@@ -582,3 +582,28 @@ fn a_parent_panel_keeps_its_check_box_states() {
         assert_eq!(node.label(), Some(toggle_name(painted_label, name)));
     }
 }
+
+/// The palette offers renaming the tab and moving it to a new window, so
+/// neither needs a keybind or the right-click menu. Typing the label, in
+/// either language, finds the action first.
+#[test]
+fn palette_offers_renaming_and_moving_the_tab() {
+    use super::Action;
+    use kettle_i18n::Text;
+    for tr in [EN, ES] {
+        let entries = super::palette_entries(None, &tr, &[]);
+        for (text, action) in [
+            (Text::PaletteRenameTab, Action::EditTabTitle),
+            (Text::PaletteMoveTabToNewWindow, Action::MoveTabToNewWindow),
+        ] {
+            let label = tr.text(text);
+            let row = entries
+                .iter()
+                .position(|(_, a)| *a == action)
+                .unwrap_or_else(|| panic!("{action:?} is not in the palette"));
+            assert_eq!(entries[row].0.shown(&tr), label);
+            let ranked = kettle_config::palette::rank_entries(label, &entries, &tr);
+            assert_eq!(ranked.first(), Some(&row), "{label}");
+        }
+    }
+}

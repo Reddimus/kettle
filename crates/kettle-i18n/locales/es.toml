@@ -451,6 +451,7 @@ palette_move_pane_right = "Mover el panel a la derecha"
 palette_move_pane_up = "Mover el panel hacia arriba"
 palette_move_tab_left = "Mover la pestaña a la izquierda"
 palette_move_tab_right = "Mover la pestaña a la derecha"
+palette_rename_tab = "Cambiar el nombre de la pestaña…"
 palette_move_tab_to_window = "Mover pestaña a otra ventana"
 window_transfer_no_targets = "No hay otras ventanas"
 palette_move_tab_to_new_window = "Mover la pestaña a una ventana nueva"
@@ -878,6 +879,14 @@ macos_menu_fullscreen = "Entrar en pantalla completa"
 macos_menu_next_tab = "Pestaña siguiente"
 
 macos_menu_previous_tab = "Pestaña anterior"
+
+macos_menu_rename_tab = "Cambiar el nombre de la pestaña…"
+
+macos_menu_move_tab_left = "Mover la pestaña a la izquierda"
+
+macos_menu_move_tab_right = "Mover la pestaña a la derecha"
+
+macos_menu_move_tab_to_new_window = "Mover la pestaña a una ventana nueva"
 
 
 search_a11y_regex = "Usar expresiones regulares"
