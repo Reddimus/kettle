@@ -688,7 +688,7 @@ mod tests {
         for cell_scale in [0.5, 1.0, 2.0] {
             let terminal_cell_width = natural_advance * cell_scale;
             let text_advance = terminal_cell_width / cell_scale;
-            let hint = "⌘1".to_string();
+            let hint = "Alt+1".to_string();
             let content = horizontal_tab_content_layout(
                 (0.0, 0.0, 320.0, 32.0),
                 true,
@@ -698,7 +698,7 @@ mod tests {
                 Some(&hint),
                 text_advance,
             );
-            let lane = content.hint.expect("a wide tab has room for Cmd+1");
+            let lane = content.hint.expect("a wide tab has room for Alt+1");
             assert!((lane.2 - 5.0 * natural_advance).abs() < 0.001);
             buffer.set_size(Some(lane.2), Some(lane.3));
             buffer.set_text(&hint, &attrs, Shaping::Advanced, None);
@@ -707,7 +707,7 @@ mod tests {
             assert_eq!(
                 runs.len(),
                 1,
-                "Cmd+1 must not wrap at cell-width={cell_scale}"
+                "Alt+1 must not wrap at cell-width={cell_scale}"
             );
             assert_eq!(
                 runs[0].glyphs.len(),
