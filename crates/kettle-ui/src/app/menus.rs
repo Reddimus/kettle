@@ -340,6 +340,18 @@ impl App {
                 action: Action::SelectAll,
                 enabled: true,
             },
+            // iTerm2, Terminal.app and Konsole keep find and clear one
+            // right-click away, not behind a submenu.
+            ContextMenuItem::Item {
+                label: tr.text(T::MenuFind),
+                action: Action::StartSearch,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: tr.text(T::MenuClearScrollback),
+                action: Action::ClearHistory,
+                enabled: true,
+            },
             ContextMenuItem::Separator,
             // `Split Auto` splits along the pane's longer axis — Terminator
             // offers it first because it is the one that needs no decision.
@@ -3109,7 +3121,12 @@ pub(super) fn grouped_terminal_menu(
             | ContextMenuItem::Preview { .. } => None,
             ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
                 match action {
-                    Action::Copy | Action::Paste | Action::SelectAll | Action::HintMode => None,
+                    Action::Copy
+                    | Action::Paste
+                    | Action::SelectAll
+                    | Action::HintMode
+                    | Action::StartSearch
+                    | Action::ClearHistory => None,
                     Action::SplitAuto
                     | Action::SplitRight
                     | Action::SplitLeft
@@ -3153,7 +3170,19 @@ pub(super) fn grouped_terminal_menu(
             action: Action::SelectAll,
             ..
         } => 3,
-        _ => 4,
+        ContextMenuItem::Item {
+            action: Action::HintMode,
+            ..
+        } => 4,
+        ContextMenuItem::Item {
+            action: Action::StartSearch,
+            ..
+        } => 5,
+        ContextMenuItem::Item {
+            action: Action::ClearHistory,
+            ..
+        } => 6,
+        _ => 7,
     });
     // A divider between the rows about the link under the pointer and the
     // terminal's own clipboard rows.
