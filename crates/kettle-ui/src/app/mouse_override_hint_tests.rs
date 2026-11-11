@@ -1,8 +1,9 @@
 //! The hint that Shift keeps a click Kettle's while a program uses the mouse.
 use super::{
-    ContextMenuItem, MouseReport, context_menu_item_columns, filter_disabled,
+    ContextMenuItem, ContextMenuRow, MouseReport, clamp_context_menu_panel,
+    context_menu_info_columns, context_menu_item_columns, filter_disabled, fit_context_menu_row,
     grouped_terminal_menu, item_is_dispatchable, pane_tracks_mouse, prepend_mouse_override_row,
-    production_source, right_click_hint_due,
+    production_source, right_click_hint_due, wrap_menu_info,
 };
 use crate::window_state::MouseOverrideHint;
 use kettle_config::Action;
@@ -147,6 +148,7 @@ fn the_shift_menu_over_a_tracking_pane_leads_with_the_hint() {
         prepend_mouse_override_row(
             &mut menu,
             pane_tracks_mouse(TermMode::MOUSE_REPORT_CLICK, false),
+            200,
             tr,
         );
         let menu = filter_disabled(menu);
@@ -167,7 +169,12 @@ fn the_shift_menu_over_a_tracking_pane_leads_with_the_hint() {
 
         let plain = rows();
         let mut menu = rows();
-        prepend_mouse_override_row(&mut menu, pane_tracks_mouse(TermMode::empty(), false), tr);
+        prepend_mouse_override_row(
+            &mut menu,
+            pane_tracks_mouse(TermMode::empty(), false),
+            200,
+            tr,
+        );
         assert_eq!(menu.len(), plain.len());
         assert!(matches!(
             menu[0],
@@ -182,6 +189,112 @@ fn the_shift_menu_over_a_tracking_pane_leads_with_the_hint() {
                 .any(|item| matches!(item, ContextMenuItem::Info { .. }))
         );
     }
+}
+
+/// What the menu paints for `menu` on a surface `surface_w` pixels wide:
+/// each row's label after the panel is measured, clamped to the surface and
+/// each row fitted to it, as `show_context_menu` and the row projection do.
+/// Also the panel's natural width, before the clamp.
+fn painted_labels(menu: &[ContextMenuItem], surface_w: f32, cell_w: f32) -> (Vec<String>, f32) {
+    let widest = menu
+        .iter()
+        .map(|item| context_menu_item_columns(item, ""))
+        .max()
+        .unwrap_or(0);
+    let panel_w = kettle_render::menu::panel_width(widest as f32, cell_w);
+    let (clamped_w, _) = clamp_context_menu_panel((panel_w, 1.0), (surface_w, 600.0));
+    let columns = kettle_render::menu::panel_columns(clamped_w, cell_w);
+    let labels = menu
+        .iter()
+        .filter_map(|item| match item {
+            ContextMenuItem::Info { label } => {
+                let mut row = ContextMenuRow {
+                    swatches: None,
+                    matched_chars: None,
+                    label: label.clone(),
+                    separator: false,
+                    enabled: false,
+                    hint: String::new(),
+                };
+                fit_context_menu_row(&mut row, columns);
+                Some(row.label)
+            }
+            _ => None,
+        })
+        .collect();
+    (labels, panel_w)
+}
+
+/// On an 80-column window the hint is painted whole, in English and in
+/// Spanish: it wraps to the menu's own width rather than running past the
+/// panel and losing its end to an ellipsis, and it leaves the menu as wide
+/// as it was. A window too narrow for the other rows wraps it to the window.
+#[test]
+fn the_shift_menu_hint_wraps_to_fit_instead_of_being_cut_off() {
+    const WIDE: &str = "A menu row sixty columns wide, wider than a forty-column view";
+    let cell_w = 8.0;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let text = tr.text(kettle_i18n::Text::MouseOverrideHint);
+        for (window_columns, labels) in [
+            (
+                80.0,
+                vec![
+                    tr.text(kettle_i18n::Text::MenuCopy),
+                    tr.text(kettle_i18n::Text::MenuPaste),
+                    tr.text(kettle_i18n::Text::MenuSplitRight),
+                ],
+            ),
+            (40.0, vec![tr.text(kettle_i18n::Text::MenuCopy), WIDE]),
+        ] {
+            let surface_w = window_columns * cell_w;
+            let rows: Vec<ContextMenuItem> = labels
+                .into_iter()
+                .map(|label| ContextMenuItem::Item {
+                    label,
+                    action: Action::Copy,
+                    enabled: true,
+                })
+                .collect();
+            let widest = rows
+                .iter()
+                .map(|item| context_menu_item_columns(item, ""))
+                .max()
+                .unwrap_or(0);
+            let (_, plain_w) = painted_labels(&rows, surface_w, cell_w);
+            let mut menu = rows;
+            prepend_mouse_override_row(
+                &mut menu,
+                true,
+                context_menu_info_columns(widest, surface_w, cell_w),
+                tr,
+            );
+            let menu = filter_disabled(menu);
+            let lines: Vec<&str> = menu
+                .iter()
+                .filter_map(|item| match item {
+                    ContextMenuItem::Info { label } => Some(label.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(lines.len() > 1, "{language:?} {window_columns}: {lines:?}");
+            let (painted, hinted_w) = painted_labels(&menu, surface_w, cell_w);
+            assert_eq!(
+                painted, lines,
+                "{language:?} {window_columns}: nothing is cut"
+            );
+            assert_eq!(painted.join(" "), text, "{language:?} {window_columns}");
+            assert!(!painted.iter().any(|line| line.contains('\u{2026}')));
+            assert!(
+                hinted_w <= plain_w,
+                "{language:?} {window_columns}: the hint widened the menu"
+            );
+        }
+    }
+    assert_eq!(wrap_menu_info("one two three", 7), ["one two", "three"]);
+    assert_eq!(wrap_menu_info("a longword b", 3), ["a", "longword", "b"]);
+    assert_eq!(wrap_menu_info("a b", 0), ["a", "b"]);
+    assert!(wrap_menu_info("", 10).is_empty());
 }
 
 /// The pieces above are where the pointer, the menu, the notice and the
@@ -211,9 +324,10 @@ fn the_hint_is_wired_into_reports_menus_notices_and_expiry() {
         .find("let mut items = grouped_terminal_menu(items, tr);")
         .expect("grouping");
     let row = menu
-        .find("prepend_mouse_override_row(&mut items, shift_over_tracking, tr);")
+        .find("prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);")
         .expect("the hint row");
     assert!(grouped < row, "the row leads the grouped menu");
+    assert!(menu.contains("let info_columns = self.context_menu_info_columns(ws, &items);"));
     assert!(menu.contains(
         "let shift_over_tracking = offer_copied\n            && in_focused_pane\n            && ws\n                .mux\n                .active_focus()\n                .is_some_and(|pane| self.pane_program_tracks_mouse(ws, pane));"
     ));

@@ -848,7 +848,8 @@ impl App {
                 .mux
                 .active_focus()
                 .is_some_and(|pane| self.pane_program_tracks_mouse(ws, pane));
-        prepend_mouse_override_row(&mut items, shift_over_tracking, tr);
+        let info_columns = self.context_menu_info_columns(ws, &items);
+        prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -935,14 +936,7 @@ impl App {
             .max()
             .unwrap_or(0) as f32;
         let panel_w = kettle_render::menu::panel_width(max_columns, cw);
-        let (sw, sh) = ws
-            .renderer
-            .as_ref()
-            .map(|r| {
-                let (w, h) = r.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
+        let (sw, sh) = self.context_menu_surface(ws);
         if !context_menu_surface_can_fit_row((sw, sh), (cw, ch)) {
             ws.context_menu = None;
             if let Some(window) = &ws.window {
@@ -970,6 +964,33 @@ impl App {
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
+    }
+
+    /// The surface a menu opens on, in physical pixels.
+    fn context_menu_surface(&self, ws: &WindowState) -> (f32, f32) {
+        ws.renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0))
+    }
+
+    /// How many columns an Info line may take in a menu of `items`, measured
+    /// as `show_context_menu` measures the panel.
+    fn context_menu_info_columns(&self, ws: &WindowState, items: &[ContextMenuItem]) -> usize {
+        let items = filter_disabled(items.to_vec());
+        let hints = self.menu_item_hints(&items);
+        let widest = items
+            .iter()
+            .zip(hints.iter())
+            .map(|(item, hint)| context_menu_item_columns(item, hint))
+            .max()
+            .unwrap_or(0);
+        let (cw, _) = self.menu_cell(ws);
+        let (sw, _) = self.context_menu_surface(ws);
+        context_menu_info_columns(widest, sw, cw)
     }
 
     /// The renderer's FRACTIONAL cell metrics, for menu geometry. `cell_px`
@@ -3130,24 +3151,54 @@ impl PendingShellAction {
     }
 }
 
-/// Lead a grouped terminal menu with the Shift hint, as a row that does
-/// nothing, when Shift opened it over a program that has the mouse.
+/// Lead a grouped terminal menu with the Shift hint, as rows that do
+/// nothing, when Shift opened it over a program that has the mouse. The
+/// sentence is wrapped to `columns` (see `context_menu_info_columns`), one
+/// Info row per line, so it neither widens the menu nor loses its end to the
+/// ellipsis a row wider than the panel gets.
 pub(super) fn prepend_mouse_override_row(
     items: &mut Vec<ContextMenuItem>,
     shift_over_tracking: bool,
+    columns: usize,
     tr: kettle_i18n::Translator,
 ) {
     if shift_over_tracking {
-        items.splice(
-            0..0,
-            [
-                ContextMenuItem::Info {
-                    label: tr.text(kettle_i18n::Text::MouseOverrideHint).into(),
-                },
-                ContextMenuItem::Separator,
-            ],
-        );
+        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), columns);
+        let rows = lines
+            .into_iter()
+            .map(|label| ContextMenuItem::Info { label })
+            .chain(std::iter::once(ContextMenuItem::Separator));
+        items.splice(0..0, rows);
     }
+}
+
+/// The columns an Info line may take in a menu whose widest other row takes
+/// `widest_row`: that row's width, or the panel's minimum width if wider, but
+/// never more than a panel on a `surface_w`-pixel surface can show.
+pub(super) fn context_menu_info_columns(widest_row: usize, surface_w: f32, cell_w: f32) -> usize {
+    let natural = kettle_render::menu::panel_width(widest_row as f32, cell_w);
+    let (room, _) = clamp_context_menu_panel((f32::INFINITY, 0.0), (surface_w, 0.0));
+    kettle_render::menu::panel_columns(natural.min(room), cell_w).max(1)
+}
+
+/// Break `text` at spaces into lines at most `columns` wide. A word wider
+/// than that keeps a line of its own.
+pub(super) fn wrap_menu_info(text: &str, columns: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() > columns {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Bound the terminal menu by categories, independently of optional commands.

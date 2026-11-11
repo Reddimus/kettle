@@ -571,7 +571,7 @@ once every 30 seconds in a window. A right-click Kettle keeps from the
 program, such as one on the search bar, brings up no notice. With
 `putty-paste-style` on there is no notice either, since Shift+right-click
 pastes there. The menu that Shift+right-click opens over such a program starts
-with the same line.
+with the same sentence, broken over as many lines as the menu's width needs.
 
 ## Claude Code diff panel
 
