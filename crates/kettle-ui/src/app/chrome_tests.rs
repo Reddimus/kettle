@@ -1016,4 +1016,7 @@ fn tab_hints_follow_the_go_to_tab_bindings_on_every_platform() {
     custom.insert(*trigger, action.clone());
     let hint = super::chrome::tab_goto_hint(&custom, 1).unwrap();
     assert!(hint.contains("F2"), "{hint}");
+    // Unbound: no hint.
+    custom.retain(|_, bound| *bound != Action::GotoTab(2));
+    assert!(super::chrome::tab_goto_hint(&custom, 2).is_none());
 }
