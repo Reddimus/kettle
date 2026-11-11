@@ -2275,19 +2275,18 @@ impl App {
         {
             ws.settings_restart_pending = true;
         }
-        if saved
-            && matches!(
-                key_str,
-                "background-opacity" | "background-type" | "window-blur"
-            )
-        {
-            // Winit's alpha-capable window attribute is fixed at creation.
-            // Renderer colors reload immediately, but crossing the opaque /
-            // translucent boundary or enabling native material needs a fresh
-            // window before the OS compositor can show the result.
+        let surface_setting = matches!(
+            key_str,
+            "background-opacity" | "background-type" | "window-blur"
+        );
+        self.reload_config(ws);
+        // Winit's alpha-capable window attribute is fixed at creation.
+        // Renderer colors and the surface's alpha mode reload immediately, so
+        // only a change this window was not created able to show (an opaque
+        // window turning translucent, or blur turned on) needs a new window.
+        if saved && surface_setting && ws.surface_caps.lacks_for(&self.cfg) {
             ws.settings_restart_pending = true;
         }
-        self.reload_config(ws);
         // A theme pick needs no `save_session()`. `persist_pref` above durably
         // writes the config `theme =` line, the single source of truth on restart.
     }

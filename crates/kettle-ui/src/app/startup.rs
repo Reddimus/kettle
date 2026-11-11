@@ -1368,6 +1368,7 @@ impl App {
         ws.startup_surface = None;
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        ws.surface_caps = crate::window_state::SurfaceCaps::for_config(&self.cfg);
         self.sync_macos_titlebar(ws);
         self.sync_output_frame_budget(ws, true);
         self.poll_system_appearance(ws);

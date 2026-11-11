@@ -321,6 +321,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A screen of characters that no installed font covers no longer freezes the
+  window for seconds, and terminal queries such as cursor-position reports
+  are answered promptly while it draws. Finding no font for such a character
+  used to shape it with every installed font, and again each time a row
+  holding it was redrawn. Kettle now skips fonts whose character map shows
+  they cannot supply it, and remembers the clusters (a character with any
+  marks on it) that no font's map holds. The fonts chosen matched the
+  previous behaviour for every character tested, alone and in a range of
+  combining, emoji and right-to-left sequences.
+- Settings no longer asks you to restart Kettle or open a new window after
+  you change the background opacity of a window that already shows it, such
+  as the 99% default on Linux. The note now appears only when the window was
+  opened opaque and is turning translucent, or when blur is turned on in a
+  window opened without it.
 - The transient terminal-size chip uses an opaque chrome surface with readable
   text and outline in light, dark and custom themes, including translucent
   windows. Its accent follows the window's resolved accent.
