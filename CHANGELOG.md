@@ -317,6 +317,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Settings no longer asks you to restart Kettle or open a new window after
+  you change the background opacity of a window that already shows it, such
+  as the 99% default on Linux. The note now appears only when the window was
+  opened opaque and is turning translucent, or when blur is turned on in a
+  window opened without it.
 - Screen readers read terminal text word by word. Orca's word echo repeated
   the whole row, prompt included, after every typed word, because Kettle's
   accessible text marked no word boundaries; terminal rows and text fields now

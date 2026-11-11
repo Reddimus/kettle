@@ -267,18 +267,36 @@ fn window_padding_setting_writes_both_axes() {
 }
 
 #[test]
-fn surface_restart_hint_requires_a_successful_config_write() {
+fn surface_restart_hint_requires_a_successful_write_and_a_missing_capability() {
     let src = production_source();
-    let arm = src
+    let normalized = src
         .split("let saved = self.persist_pref(key_str, &new_val);")
         .nth(1)
-        .and_then(|rest| rest.split("self.reload_config(ws);").next())
-        .expect("settings persistence arm");
+        .expect("settings persistence arm")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Up to the end of `settings_store`: the next item starts with `fn`.
+    let arm = normalized
+        .split(" fn ")
+        .next()
+        .expect("settings_store body");
     assert!(
-        arm.contains("if saved")
-            && arm.contains("\"background-opacity\" | \"background-type\" | \"window-blur\"",)
-            && arm.contains("ws.settings_restart_pending = true;"),
-        "a failed surface-setting write must not promise that a new window will apply it"
+        arm.contains("\"background-opacity\" | \"background-type\" | \"window-blur\""),
+        "the surface settings are background opacity, type and blur"
+    );
+    // The hint is decided against the reloaded config, after the reload, and
+    // only when the window was created without what that config needs.
+    let (_, after_reload) = arm
+        .split_once("self.reload_config(ws);")
+        .expect("reload in the persistence arm");
+    assert!(
+        after_reload.contains(
+            "if saved && surface_setting && ws.surface_caps.lacks_for(&self.cfg) { \
+             ws.settings_restart_pending = true; }"
+        ),
+        "a surface change the window can already show must not ask for a new window, \
+         and a failed write must not promise one"
     );
 }
 
