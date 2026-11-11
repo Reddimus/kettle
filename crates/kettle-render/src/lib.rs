@@ -34,9 +34,7 @@ pub use text_field::{
 mod settings;
 mod tab_strip;
 mod terminal;
-pub use tab_strip::{
-    HorizontalTabContent, horizontal_tab_content_layout, tab_shortcut_hint, tab_text_scale,
-};
+pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_text_scale};
 mod theme;
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};

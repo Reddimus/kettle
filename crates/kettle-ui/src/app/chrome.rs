@@ -275,7 +275,7 @@ impl App {
                 if i == active && !recording_notice.is_empty() {
                     full_label = format!("{recording_notice} {full_label}");
                 }
-                let hint = kettle_render::tab_shortcut_hint(i, cfg!(target_os = "macos"));
+                let hint = tab_goto_hint(&self.cfg.keybinds, i);
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
@@ -1310,4 +1310,16 @@ pub(super) fn tear_off_destination_tab(
         geometry.layout.last_width,
         band.3,
     )
+}
+
+/// The shortcut shown on tab `index`: whatever key the bindings give "go to
+/// tab N" (Cmd+N on macOS and Alt+N elsewhere by default, or the user's own),
+/// so the tab bar teaches the shortcut on every platform. Only the first nine
+/// tabs have one.
+pub(super) fn tab_goto_hint(
+    bindings: &kettle_config::keybinds::Bindings,
+    index: usize,
+) -> Option<String> {
+    let index = u8::try_from(index).ok().filter(|index| *index < 9)?;
+    kettle_config::keybinds::ui_hint_label(bindings, &Action::GotoTab(index))
 }

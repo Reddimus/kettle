@@ -30,7 +30,7 @@ fn horizontal_single_tab_controls_match_hit_tests_and_accesskit() {
                                 320.0,
                                 28.0,
                             );
-                            let hint = kettle_render::tab_shortcut_hint(idx, true).unwrap();
+                            let hint = format!("⌘{}", idx + 1);
                             let content = kettle_render::horizontal_tab_content_layout(
                                 rect,
                                 count > 1 || hovered,
@@ -991,4 +991,32 @@ fn new_tab_control_targets_grow_with_zoomed_chrome() {
             }
         }
     }
+}
+
+#[test]
+fn tab_hints_follow_the_go_to_tab_bindings_on_every_platform() {
+    // The hints used to exist only on macOS; Linux tabs showed none although
+    // Alt+1..9 switch to them.
+    let defaults = kettle_config::keybinds::defaults();
+    let expected = if cfg!(target_os = "macos") { "⌘1" } else { "Alt+1" };
+    assert_eq!(super::chrome::tab_goto_hint(&defaults, 0).as_deref(), Some(expected));
+    assert!(super::chrome::tab_goto_hint(&defaults, 8).is_some());
+    assert!(super::chrome::tab_goto_hint(&defaults, 9).is_none());
+    // A rebound shortcut is the one shown.
+    let parsed =
+        kettle_config::Config::parse_text("keybind = ctrl+shift+f2=goto_tab:2\n").keybinds;
+    let (trigger, action) = parsed
+        .iter()
+        .find(|(trigger, action)| {
+            **action == Action::GotoTab(1) && trigger.label().contains("F2")
+        })
+        .unwrap();
+    let mut custom = defaults.clone();
+    custom.retain(|_, bound| *bound != Action::GotoTab(1));
+    custom.insert(*trigger, action.clone());
+    let hint = super::chrome::tab_goto_hint(&custom, 1).unwrap();
+    assert!(hint.contains("F2"), "{hint}");
+    // Unbound: no hint.
+    custom.retain(|_, bound| *bound != Action::GotoTab(2));
+    assert!(super::chrome::tab_goto_hint(&custom, 2).is_none());
 }

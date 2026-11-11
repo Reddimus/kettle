@@ -436,6 +436,12 @@ args = [{ name = "host", type = "str" }]
 context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row that reopens a detected remote session in a new pane. user and host are verbatim."
 args = [{ name = "user", type = "str" }, { name = "host", type = "str" }]
 
+[messages.menu_clear_scrollback]
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row that clears the pane's scrollback."
+
+[messages.menu_find]
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row that opens search in the pane's history."
+
 [messages.menu_reset_terminal]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
