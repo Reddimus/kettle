@@ -163,8 +163,8 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
 /// The most swatch squares one frame paints; whole rows past it are skipped.
 pub(crate) const MENU_SWATCH_SURFACES: usize = 32 * menu::SWATCH_COUNT;
 
-/// Rounded swatch squares for every open menu level, outlined in the menu's
-/// border colour so a swatch matching the panel background stays visible.
+/// Rounded swatch squares for every open menu level, outlined in the theme's
+/// foreground so a swatch matching the panel background stays visible.
 pub(crate) fn menu_swatch_surfaces<'a>(
     menus: impl IntoIterator<Item = &'a ContextMenu>,
     theme: &kettle_config::Theme,

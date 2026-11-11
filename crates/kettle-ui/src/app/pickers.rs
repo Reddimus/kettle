@@ -624,6 +624,10 @@ pub(super) fn picker_context_menu(
     {
         for row in &mut list.rows {
             row.swatches = None;
+            // The padding only lined the strips up; without them it would
+            // cost the name columns.
+            let hint = row.hint.trim_start().to_string();
+            row.hint = hint;
         }
     }
     for row in &mut list.rows {

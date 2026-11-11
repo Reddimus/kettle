@@ -898,6 +898,11 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
             .all(|row| kettle_render::menu_row_chars(row) <= columns);
         for (row, original) in menu.rows.iter().zip(&originals.rows) {
             assert_eq!(row.swatches.is_some(), all_fit, "{}", original.label);
+            if !all_fit {
+                // Without strips the alignment padding goes too, so it never
+                // costs a name its columns.
+                assert!(!row.hint.starts_with(' '), "{:?}", row.hint);
+            }
             if original.label.width() + original.hint.width() + 2 <= columns {
                 assert_eq!(row.label, original.label);
             }
