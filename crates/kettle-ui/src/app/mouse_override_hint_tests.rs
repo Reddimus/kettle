@@ -656,6 +656,21 @@ fn a_modal_focus_outside_the_tree_falls_back_to_the_menu() {
     assert_eq!(modal_focus_in_tree(Some(gone), &both[1..]), None);
 }
 
+/// Both trees `accessibility_tree` builds, the confirm dialog's and the
+/// window's, hand the modal's focus through `modal_focus_in_tree`, so
+/// neither names a node the tree does not hold.
+#[test]
+fn the_window_tree_hands_over_only_a_held_modal_focus() {
+    let src = production_source();
+    let tree = src
+        .split("fn accessibility_tree(")
+        .nth(1)
+        .and_then(|body| body.split("fn accessibility_key(").next())
+        .expect("accessibility_tree");
+    assert_eq!(tree.matches("modal_focus_in_tree(").count(), 2);
+    assert!(!tree.contains("modal.focus.unwrap_or("));
+}
+
 /// An Info line of its own reading `text`: the hint's single line on a menu
 /// wide enough for it, relabelled.
 fn info_line(text: &str) -> ContextMenuItem {
