@@ -229,7 +229,7 @@ pub(super) fn output_generation_advanced(previous: Option<u64>, current: u64) ->
     previous.is_some_and(|previous| previous != current)
 }
 
-struct PaneEventBatch {
+pub(super) struct PaneEventBatch {
     bell: bool,
     bell_panes: Vec<u64>,
     output_chunks: Vec<(u64, Vec<u8>)>,
@@ -239,7 +239,7 @@ struct PaneEventBatch {
     pending_restarts_local: Vec<u64>,
 }
 
-fn drain_pane_events(
+pub(super) fn drain_pane_events(
     ws: &mut WindowState,
     exit_action: kettle_config::ExitAction,
     force_no_bell: bool,

@@ -636,37 +636,17 @@ impl App {
             if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) {
                 self.release_held(ws, stale);
             }
-            if !self.ctl_driving
-                && right_click_hint_due(
-                    btn,
-                    report,
-                    ws.mods.shift_key(),
-                    self.cfg.putty_paste_style,
-                )
-            {
-                self.raise_mouse_override_hint(ws, pane_id);
+            if !self.ctl_driving {
+                raise_mouse_override_hint(
+                    ws,
+                    pane_id,
+                    (btn, report),
+                    &self.cfg,
+                    std::time::Instant::now(),
+                );
             }
         }
         report
-    }
-
-    /// Tell the user, now and then, that Shift keeps a click Kettle's: their
-    /// right-click just went to the program in `pane_id` instead of opening
-    /// the menu.
-    fn raise_mouse_override_hint(&mut self, ws: &mut WindowState, pane_id: u64) {
-        let Some(pane) = ws.mux.panes.get_mut(&pane_id) else {
-            return;
-        };
-        if ws.mouse_override_hint.right_click_reported(
-            pane_id,
-            &mut pane.mouse_override_hinted,
-            std::time::Instant::now(),
-        ) {
-            ws.accessibility_pending = true;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-        }
     }
 
     /// Send each held button `which` names its release now, in the pane its
@@ -1190,6 +1170,45 @@ pub(super) fn right_click_hint_due(
 /// and the pane takes input.
 pub(super) fn pane_tracks_mouse(mode: kettle_core::TermMode, read_only: bool) -> bool {
     !read_only && input::mouse_tracking(mode).0 != input::MouseTracking::Off
+}
+
+/// Whether a plain click in this pane would go to its program.
+pub(super) fn program_tracks_mouse(ws: &WindowState, pane_id: u64) -> bool {
+    ws.mux.panes.get(&pane_id).is_some_and(|pane| {
+        pane.term
+            .term
+            .lock()
+            .is_ok_and(|term| pane_tracks_mouse(*term.mode(), pane.read_only))
+    })
+}
+
+/// After a press `report_mouse` sent the focused pane `pane_id` (`press`:
+/// its button and what became of it), tell the user, now and then, that
+/// Shift keeps a click Kettle's: a plain right-click just went to the
+/// program instead of opening the menu. Says whether the hint came up.
+pub(super) fn raise_mouse_override_hint(
+    ws: &mut WindowState,
+    pane_id: u64,
+    (btn, report): (u8, MouseReport),
+    cfg: &Config,
+    now: std::time::Instant,
+) -> bool {
+    if !right_click_hint_due(btn, report, ws.mods.shift_key(), cfg.putty_paste_style) {
+        return false;
+    }
+    let Some(pane) = ws.mux.panes.get_mut(&pane_id) else {
+        return false;
+    };
+    let raised =
+        ws.mouse_override_hint
+            .right_click_reported(pane_id, &mut pane.mouse_override_hinted, now);
+    if raised {
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+    raised
 }
 
 /// Where a mouse report lands in its pane.
@@ -1945,13 +1964,6 @@ impl App {
             .panes
             .get(&pane_id)
             .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
-    }
-
-    /// Whether a plain click in this pane would go to its program.
-    pub(super) fn pane_program_tracks_mouse(&self, ws: &WindowState, pane_id: u64) -> bool {
-        let read_only = ws.mux.panes.get(&pane_id).is_some_and(|p| p.read_only);
-        self.pane_mode(ws, pane_id)
-            .is_some_and(|mode| pane_tracks_mouse(mode, read_only))
     }
 }
 

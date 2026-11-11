@@ -2,6 +2,11 @@
 use super::accessibility::{
     accessibility_modal_id, modal_accessibility_projection, nest_context_menu_accessibility,
 };
+#[cfg(unix)]
+use super::{
+    Config, PtyGeometry, drain_pane_events, program_tracks_mouse, raise_mouse_override_hint,
+    shift_menu_hint_due,
+};
 use super::{
     ContextMenu, ContextMenuItem, ContextMenuLevel, ContextMenuRow, ContextMenuState, MouseReport,
     Mux, Overlay, SUBMENU_SIGN, clamp_context_menu_panel, context_menu_info_columns,
@@ -315,7 +320,7 @@ fn the_hint_is_wired_into_reports_menus_notices_and_expiry() {
         .find("let report = self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion);")
         .expect("the press is sent first");
     let raised = report
-        .find("if !self.ctl_driving\n                && right_click_hint_due(\n                    btn,\n                    report,\n                    ws.mods.shift_key(),\n                    self.cfg.putty_paste_style,\n                )\n            {\n                self.raise_mouse_override_hint(ws, pane_id);")
+        .find("if !self.ctl_driving {\n                raise_mouse_override_hint(\n                    ws,\n                    pane_id,\n                    (btn, report),\n                    &self.cfg,\n                    std::time::Instant::now(),\n                );")
         .expect("a reported press raises the hint");
     assert!(sent < raised);
 
@@ -333,7 +338,7 @@ fn the_hint_is_wired_into_reports_menus_notices_and_expiry() {
     assert!(grouped < row, "the row leads the grouped menu");
     assert!(menu.contains("let info_columns = self.context_menu_info_columns(ws, &items);"));
     assert!(menu.contains(
-        "let shift_over_tracking = offer_copied\n            && in_focused_pane\n            && ws\n                .mux\n                .active_focus()\n                .is_some_and(|pane| self.pane_program_tracks_mouse(ws, pane));"
+        "let shift_over_tracking = shift_menu_hint_due(ws, offer_copied, in_focused_pane, &self.cfg);"
     ));
 
     assert!(src.contains("let mouse_hint = ws.mouse_override_hint.pane() == Some(id);"));
@@ -588,4 +593,153 @@ fn separate_info_lines_are_read_one_by_one() {
             Some("Copy version")
         ]
     );
+}
+
+/// A window holding one real pane, a PTY running `cat`, whose program has
+/// turned mouse reporting on (DECSET 1000) as Vim or htop does.
+#[cfg(unix)]
+fn tracking_window() -> (WindowState, u64) {
+    let cfg = Config {
+        shell_integration: false,
+        login_shell: false,
+        ..Config::default()
+    };
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(
+        &cfg,
+        PtyGeometry::from_cell_size(80, 24, 8, 16),
+        std::sync::Arc::new(|| {}),
+        &["/bin/cat".into()],
+        None,
+    )
+    .expect("PTY fixture");
+    let pane = mux.active_focus().unwrap();
+    let ws = WindowState::new(1, mux);
+    set_mouse_reporting(&ws, pane, true);
+    (ws, pane)
+}
+
+/// The pane's program turns mouse reporting on or off.
+#[cfg(unix)]
+fn set_mouse_reporting(ws: &WindowState, pane: u64, on: bool) {
+    let mut parser: alacritty_terminal::vte::ansi::Processor =
+        alacritty_terminal::vte::ansi::Processor::new();
+    let seq: &[u8] = if on { b"\x1b[?1000h" } else { b"\x1b[?1000l" };
+    parser.advance(&mut *ws.mux.panes[&pane].term.term.lock().unwrap(), seq);
+}
+
+#[cfg(unix)]
+fn wait_until(mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PTY fixture timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// What `report_mouse` does after a press it sent a pane whose terminal
+/// has mouse reporting on: a plain right-click the program got raises the
+/// hint on that pane, marks it and asks for a new accessibility tree; Shift,
+/// another button or `putty-paste-style` raise nothing. Once the program
+/// turns reporting off, the event drain ends the pane's session, so it
+/// raises the hint again when the program turns reporting back on.
+#[cfg(unix)]
+#[test]
+fn a_right_click_a_tracking_pane_got_raises_the_hint_until_its_program_lets_go() {
+    let (mut ws, pane) = tracking_window();
+    let cfg = Config::default();
+    let putty = Config {
+        putty_paste_style: true,
+        ..Config::default()
+    };
+    let now = std::time::Instant::now();
+    assert!(program_tracks_mouse(&ws, pane));
+    ws.accessibility_pending = false;
+
+    ws.mods = winit::keyboard::ModifiersState::SHIFT;
+    assert!(!raise_mouse_override_hint(
+        &mut ws,
+        pane,
+        (2, MouseReport::Written),
+        &cfg,
+        now
+    ));
+    ws.mods = winit::keyboard::ModifiersState::empty();
+    for (press, cfg) in [
+        ((0, MouseReport::Written), &cfg),
+        ((2, MouseReport::Declined), &cfg),
+        ((2, MouseReport::Swallowed), &cfg),
+        ((2, MouseReport::Written), &putty),
+    ] {
+        assert!(!raise_mouse_override_hint(&mut ws, pane, press, cfg, now));
+    }
+    assert_eq!(ws.mouse_override_hint.pane(), None);
+    assert!(!ws.mux.panes[&pane].mouse_override_hinted);
+    assert!(!ws.accessibility_pending);
+
+    assert!(raise_mouse_override_hint(
+        &mut ws,
+        pane,
+        (2, MouseReport::Written),
+        &cfg,
+        now
+    ));
+    assert_eq!(ws.mouse_override_hint.pane(), Some(pane));
+    assert!(ws.mux.panes[&pane].mouse_override_hinted);
+    assert!(ws.accessibility_pending);
+
+    // Past the window's gap, the same session still has had its hint.
+    let later = now + crate::window_state::MOUSE_OVERRIDE_HINT_GAP;
+    assert!(ws.mouse_override_hint.expire(later));
+    drain_pane_events(&mut ws, cfg.exit_action, false, |_, _| None);
+    assert!(ws.mux.panes[&pane].mouse_override_hinted);
+    assert!(!raise_mouse_override_hint(
+        &mut ws,
+        pane,
+        (2, MouseReport::Written),
+        &cfg,
+        later
+    ));
+
+    set_mouse_reporting(&ws, pane, false);
+    assert!(!program_tracks_mouse(&ws, pane));
+    wait_until(|| {
+        drain_pane_events(&mut ws, cfg.exit_action, false, |_, _| None);
+        !ws.mux.panes[&pane].mouse_override_hinted
+    });
+    set_mouse_reporting(&ws, pane, true);
+    assert!(raise_mouse_override_hint(
+        &mut ws,
+        pane,
+        (2, MouseReport::Written),
+        &cfg,
+        later
+    ));
+    assert_eq!(ws.mouse_override_hint.pane(), Some(pane));
+}
+
+/// What `open_context_menu` asks before it leads the menu with the hint, of
+/// a window whose focused pane is real: Shift opened the menu inside that
+/// pane, and its program has mouse reporting on. A menu opened from the
+/// keyboard, a click outside the pane, a read-only pane and a program that
+/// turned reporting off all go without it.
+#[cfg(unix)]
+#[test]
+fn the_shift_menu_over_a_tracking_pane_takes_the_hint() {
+    let (mut ws, pane) = tracking_window();
+    let cfg = Config::default();
+    assert!(shift_menu_hint_due(&ws, true, true, &cfg));
+    assert!(
+        !shift_menu_hint_due(&ws, false, true, &cfg),
+        "a menu opened from the keyboard"
+    );
+    assert!(!shift_menu_hint_due(&ws, true, false, &cfg));
+    ws.mux.panes.get_mut(&pane).unwrap().read_only = true;
+    assert!(!shift_menu_hint_due(&ws, true, true, &cfg));
+    ws.mux.panes.get_mut(&pane).unwrap().read_only = false;
+    set_mouse_reporting(&ws, pane, false);
+    assert!(!shift_menu_hint_due(&ws, true, true, &cfg));
 }

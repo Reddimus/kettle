@@ -840,14 +840,7 @@ impl App {
         // escape hatch.
         self.append_preferences_submenu_items(&mut items);
         let mut items = grouped_terminal_menu(items, tr);
-        // Shift opened this menu over a program that has the mouse: say so,
-        // since a plain right-click would have gone to the program.
-        let shift_over_tracking = offer_copied
-            && in_focused_pane
-            && ws
-                .mux
-                .active_focus()
-                .is_some_and(|pane| self.pane_program_tracks_mouse(ws, pane));
+        let shift_over_tracking = shift_menu_hint_due(ws, offer_copied, in_focused_pane, &self.cfg);
         let info_columns = self.context_menu_info_columns(ws, &items);
         prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
@@ -3155,6 +3148,24 @@ impl PendingShellAction {
         let (window, index) = self.0.take()?;
         shells.get(index).map(|(_, argv)| (window, argv.clone()))
     }
+}
+
+/// Whether the terminal menu opening now leads with the Shift hint: Shift
+/// opened it (`offer_copied`; a menu opened from the keyboard never has it)
+/// inside the focused pane, whose program has the mouse, so a plain
+/// right-click would have gone to the program.
+pub(super) fn shift_menu_hint_due(
+    ws: &WindowState,
+    offer_copied: bool,
+    in_focused_pane: bool,
+    _cfg: &Config,
+) -> bool {
+    offer_copied
+        && in_focused_pane
+        && ws
+            .mux
+            .active_focus()
+            .is_some_and(|pane| super::pointer::program_tracks_mouse(ws, pane))
 }
 
 /// Lead a grouped terminal menu with the Shift hint, as rows that do
