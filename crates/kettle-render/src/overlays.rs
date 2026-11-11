@@ -1673,11 +1673,16 @@ pub(crate) fn menu_level_surfaces(
             params: [radius + spread, 0.0, 0.0, 0.0],
         });
     }
+    // The border is blended over the panel colour here and drawn opaque: the
+    // shader leaves the panel's fill out of its border band, so a
+    // translucent stroke would let the parent level, the terminal and this
+    // level's own shadow show through the edge.
+    let border = colors.surface(theme.background, theme.palette[8], 0.65, linear);
     out.push(RoundedSurface {
         pos: [x, y],
         size: [w, h],
         fill: rgba(theme.background, 1.0),
-        stroke: rgba(theme.palette[8], 0.65),
+        stroke: rgba(border, 1.0),
         params: [radius, 1.0, 0.0, 0.0],
     });
     let selected = context_menu_row_rects(menu, (cw, ch))

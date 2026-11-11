@@ -6144,6 +6144,87 @@ fn submenu_covers_its_parents_selection_labels_and_shadowed_edge() {
     );
 }
 
+/// A submenu's bordered edge is opaque: where its top edge crosses the
+/// parent's selection and its bottom edge the next row's label, the edge
+/// rows paint exactly as they do with no parent beneath.
+#[test]
+fn submenu_edge_hides_its_parents_selection_and_labels() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 220) else {
+        eprintln!("submenu edge check skipped: no GPU adapter");
+        return;
+    };
+    let bg = cfg.theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let long = "MMMMMMMMMMMMMMMMMMMMMMMM";
+    let parent = || menu_level((40.0, 20.0), &[long, long, long, long], 1, (320.0, row_h));
+    // Clamped against the parent: the top edge crosses the selected row and
+    // the bottom edge the next row's label ink.
+    let child_top = 20.0 + row_h + 12.0;
+    let child = || menu_level((120.0, child_top), &["A"], usize::MAX, (200.0, row_h));
+    let snap = snapshot_of(20, 4, b"");
+    let frame = |renderer: &mut Renderer, overlay: &Overlay| {
+        capture(renderer, &cfg, &[pane(&snap, 480, 220)], overlay)
+    };
+    let under = frame(
+        &mut renderer,
+        &Overlay {
+            context_menu: Some(parent()),
+            ..focused(false)
+        },
+    );
+    let alone = frame(
+        &mut renderer,
+        &Overlay {
+            context_menu: Some(child()),
+            ..focused(false)
+        },
+    );
+    let nested = frame(
+        &mut renderer,
+        &Overlay {
+            context_menu: Some(child()),
+            context_menu_parents: vec![parent()],
+            ..focused(false)
+        },
+    );
+    // Rows whose pixel centres lie wholly inside the child's top and bottom
+    // edges: the border band and the panel just inside it. The columns keep
+    // clear of the rounded corners.
+    let top = child_top.ceil() as u32;
+    let bottom = (child_top + row_h).floor() as u32;
+    let rows = [top, top + 1, bottom - 2, bottom - 1];
+    let columns = 140..300;
+    let differs = |a: &image::Rgba<u8>, b: &image::Rgba<u8>| {
+        a.0.iter().zip(b.0).take(3).any(|(x, y)| x.abs_diff(y) > 2)
+    };
+    // The parent paints something other than the terminal under both edges.
+    for (edge, ys) in [("top", &rows[..2]), ("bottom", &rows[2..])] {
+        let covered = ys
+            .iter()
+            .flat_map(|&y| columns.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| differs(under.get_pixel(x, y), &image::Rgba([bg.r, bg.g, bg.b, 255])))
+            .count();
+        assert!(
+            covered > 20,
+            "the parent paints nothing under the child's {edge} edge"
+        );
+    }
+    let shows: Vec<_> = rows
+        .iter()
+        .flat_map(|&y| columns.clone().map(move |x| (x, y)))
+        .filter(|&(x, y)| differs(nested.get_pixel(x, y), alone.get_pixel(x, y)))
+        .collect();
+    assert!(
+        shows.is_empty(),
+        "{} parent pixels show through the submenu's edge, first at {:?}: {:?} vs {:?} alone",
+        shows.len(),
+        shows.first(),
+        shows.first().map(|&(x, y)| nested.get_pixel(x, y)),
+        shows.first().map(|&(x, y)| alone.get_pixel(x, y)),
+    );
+}
+
 #[test]
 fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     use alacritty_terminal::selection::SelectionRange;
