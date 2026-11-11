@@ -3366,14 +3366,17 @@ flowchart LR
     text --> cursor["Fallback cursors and focused cursor glyph"]
     cursor --> lanes["Preview lane surfaces, images and text"]
     lanes --> overlay["Lane dimming and scrollbar"]
-    overlay --> menu["Menu chrome and receipt image"]
-    menu --> toast["Rounded update-toast surfaces"]
-    toast --> labels["Menu and settings text"]
+    overlay --> chrome["Settings surfaces, pre-menu chrome quads, receipt image and toast surfaces"]
+    chrome --> levels["Each menu level in turn: surfaces, quads, swatches, labels"]
+    levels --> post["Post-level quads: picker caret and selection"]
+    post --> labels["Chrome and settings text"]
 ```
 
 Update toasts use a separate instance of the existing rounded-surface pipeline
 for their body and two controls. Its bounded batch cannot consume media-control
-capacity, and it draws below the shared chrome text. Surface uploads are
+capacity. It draws after the receipt image and before every open menu level, so
+an open menu covers a toast; the toast's text is in the shared chrome-text pass
+after the levels, cut out of each menu panel. Surface uploads are
 retained and counted with the other pipelines. Shared toast geometry supplies
 the rounded contour for pointer ownership and hover pauses, while accessibility
 keeps rectangular control bounds.
@@ -3631,13 +3634,16 @@ adjust). The Background settings page edits the image path through an inline tex
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
 The menu chrome and menu text passes own the right-click context menu so its
-labels land **on top of** the panel background. If the menu's opaque panel
-quad drew in the dimming pass (`overlay_quads`) after its labels were
-rendered, it would paint over them and leave the menu blank.
+labels land **on top of** the panel background. If a level's opaque rounded
+panel surface drew after its labels, in the dimming pass (`overlay_quads`) or
+a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. These are
+with the highlighted row drawn as an inset rounded selection. The panel's
+border is blended over the panel colour and drawn opaque, because the shader
+leaves the fill out of the border band; a translucent border would let the
+level beneath show through the edge. These are
 `RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
 the picker's header divider and the scroll arrows stay flat quads. The scene
 pass draws the levels root first, one layer each: the level's surfaces, its
