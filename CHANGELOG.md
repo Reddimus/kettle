@@ -322,7 +322,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   are answered promptly while it draws. Finding no font for such a character
   used to shape it with every installed font, and again each time a row
   holding it was redrawn. Kettle now skips fonts whose character map shows
-  they cannot supply it, and remembers characters no font's map holds. The
+  they cannot supply it, and remembers the clusters (a character with any
+  marks on it) that no font's map holds. The
   fonts chosen matched the previous behaviour for every character tested,
   alone and in a range of combining, emoji and right-to-left sequences.
 
