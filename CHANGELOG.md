@@ -18,7 +18,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   at most once every 30 seconds in a window, and not at all with
   `putty-paste-style` on, where Shift+right-click pastes. The menu that
   Shift+right-click opens over such a program starts with the same sentence,
-  wrapped to the menu's width.
+  wrapped to the menu's width, and a screen reader reads it as one item.
 
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm

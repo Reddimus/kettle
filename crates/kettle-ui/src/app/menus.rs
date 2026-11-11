@@ -1113,20 +1113,12 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
         let v = &self.version_line;
-        let mut items = vec![ContextMenuItem::Info {
-            label: format!("kettle {v}"),
-        }];
+        let mut items = vec![ContextMenuItem::info(format!("kettle {v}"))];
         let facts = crate::update_notice::fact_rows(&self.update_facts, &tr);
         if facts.is_empty() {
-            items.push(ContextMenuItem::Info {
-                label: tr.text(T::AboutUpdateUnknown).to_string(),
-            });
+            items.push(ContextMenuItem::info(tr.text(T::AboutUpdateUnknown)));
         }
-        items.extend(
-            facts
-                .into_iter()
-                .map(|label| ContextMenuItem::Info { label }),
-        );
+        items.extend(facts.into_iter().map(ContextMenuItem::info));
         items.extend([
             ContextMenuItem::Separator,
             ContextMenuItem::UrlItem {
@@ -1174,9 +1166,9 @@ impl App {
     ) -> Vec<ContextMenuItem> {
         match shells {
             Some(shells) => Self::new_tab_menu_items(shells, tr),
-            None => vec![ContextMenuItem::Info {
-                label: tr.text(kettle_i18n::Text::MenuDetectingShells).to_string(),
-            }],
+            None => vec![ContextMenuItem::info(
+                tr.text(kettle_i18n::Text::MenuDetectingShells),
+            )],
         }
     }
 
@@ -1184,7 +1176,7 @@ impl App {
         items: &[ContextMenuItem],
         tr: &kettle_i18n::Translator,
     ) -> bool {
-        matches!(items, [ContextMenuItem::Info { label }]
+        matches!(items, [ContextMenuItem::Info { label, .. }]
             if label == tr.text(kettle_i18n::Text::MenuDetectingShells))
     }
 
@@ -1759,7 +1751,7 @@ impl App {
                     },
                     // Dropdown parity: Info renders as a dimmed
                     // (disabled-style) static line.
-                    ContextMenuItem::Info { label } => ContextMenuRow {
+                    ContextMenuItem::Info { label, .. } => ContextMenuRow {
                         swatches: None,
                         matched_chars: None,
                         label: label.clone(),
@@ -2430,7 +2422,21 @@ pub(super) enum ContextMenuItem {
     /// mnemonic, and maps to no click.
     Info {
         label: String,
+        /// This line goes on with the sentence of the Info line above it,
+        /// one the menu wrapped to its width. Assistive technology reads the
+        /// whole sentence as that first line, and skips this one.
+        continued: bool,
     },
+}
+
+impl ContextMenuItem {
+    /// A static information line of its own.
+    pub(super) fn info(label: impl Into<String>) -> Self {
+        Self::Info {
+            label: label.into(),
+            continued: false,
+        }
+    }
 }
 
 /// The card a media menu row acts on, and the shelf item it showed when the
@@ -2542,7 +2548,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
         ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
             (label, "", false)
         }
-        ContextMenuItem::Info { label } => (label, "", false),
+        ContextMenuItem::Info { label, .. } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
     label.width()
@@ -3155,7 +3161,8 @@ impl PendingShellAction {
 /// nothing, when Shift opened it over a program that has the mouse. The
 /// sentence is wrapped to `columns` (see `context_menu_info_columns`), one
 /// Info row per line, so it neither widens the menu nor loses its end to the
-/// ellipsis a row wider than the panel gets.
+/// ellipsis a row wider than the panel gets. Every line after the first is
+/// marked `continued`, so assistive technology reads the sentence once, whole.
 pub(super) fn prepend_mouse_override_row(
     items: &mut Vec<ContextMenuItem>,
     shift_over_tracking: bool,
@@ -3166,7 +3173,11 @@ pub(super) fn prepend_mouse_override_row(
         let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), columns);
         let rows = lines
             .into_iter()
-            .map(|label| ContextMenuItem::Info { label })
+            .enumerate()
+            .map(|(line, label)| ContextMenuItem::Info {
+                label,
+                continued: line > 0,
+            })
             .chain(std::iter::once(ContextMenuItem::Separator));
         items.splice(0..0, rows);
     }

@@ -1496,12 +1496,9 @@ impl App {
             .map(|(seq, window)| (*seq, window.last_title.clone()))
             .collect();
         destinations.sort_unstable_by_key(|(seq, _)| *seq);
-        let mut items = vec![ContextMenuItem::Info {
-            label: self
-                .ui_text
-                .text(kettle_i18n::Text::PaletteMoveTabToWindow)
-                .to_owned(),
-        }];
+        let mut items = vec![ContextMenuItem::info(
+            self.ui_text.text(kettle_i18n::Text::PaletteMoveTabToWindow),
+        )];
         for (window, title) in destinations {
             let title: String = sanitize_title(&title).chars().take(200).collect();
             items.push(ContextMenuItem::WindowChoice {
@@ -1511,12 +1508,10 @@ impl App {
             });
         }
         if items.len() == 1 {
-            items.push(ContextMenuItem::Info {
-                label: self
-                    .ui_text
-                    .text(kettle_i18n::Text::WindowTransferNoTargets)
-                    .to_owned(),
-            });
+            items.push(ContextMenuItem::info(
+                self.ui_text
+                    .text(kettle_i18n::Text::WindowTransferNoTargets),
+            ));
         }
         self.close_all_modals(ws);
         self.show_context_menu(ws, items, 0.0, 0.0);

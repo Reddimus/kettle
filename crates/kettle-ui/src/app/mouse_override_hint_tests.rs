@@ -1,11 +1,15 @@
 //! The hint that Shift keeps a click Kettle's while a program uses the mouse.
-use super::{
-    ContextMenuItem, ContextMenuRow, MouseReport, clamp_context_menu_panel,
-    context_menu_info_columns, context_menu_item_columns, filter_disabled, fit_context_menu_row,
-    grouped_terminal_menu, item_is_dispatchable, pane_tracks_mouse, prepend_mouse_override_row,
-    production_source, right_click_hint_due, wrap_menu_info,
+use super::accessibility::{
+    accessibility_modal_id, modal_accessibility_projection, nest_context_menu_accessibility,
 };
-use crate::window_state::MouseOverrideHint;
+use super::{
+    ContextMenu, ContextMenuItem, ContextMenuLevel, ContextMenuRow, ContextMenuState, MouseReport,
+    Mux, Overlay, SUBMENU_SIGN, clamp_context_menu_panel, context_menu_info_columns,
+    context_menu_item_columns, filter_disabled, fit_context_menu_row, grouped_terminal_menu,
+    item_is_dispatchable, pane_tracks_mouse, prepend_mouse_override_row, production_source,
+    right_click_hint_due, wrap_menu_info,
+};
+use crate::window_state::{MouseOverrideHint, WindowState};
 use kettle_config::Action;
 use kettle_core::TermMode;
 use unicode_width::UnicodeWidthStr as _;
@@ -153,7 +157,7 @@ fn the_shift_menu_over_a_tracking_pane_leads_with_the_hint() {
         );
         let menu = filter_disabled(menu);
         assert!(
-            matches!(&menu[0], ContextMenuItem::Info { label } if label == text),
+            matches!(&menu[0], ContextMenuItem::Info { label, .. } if label == text),
             "{:?}",
             menu.first().map(std::mem::discriminant)
         );
@@ -207,7 +211,7 @@ fn painted_labels(menu: &[ContextMenuItem], surface_w: f32, cell_w: f32) -> (Vec
     let labels = menu
         .iter()
         .filter_map(|item| match item {
-            ContextMenuItem::Info { label } => {
+            ContextMenuItem::Info { label, .. } => {
                 let mut row = ContextMenuRow {
                     swatches: None,
                     matched_chars: None,
@@ -273,7 +277,7 @@ fn the_shift_menu_hint_wraps_to_fit_instead_of_being_cut_off() {
             let lines: Vec<&str> = menu
                 .iter()
                 .filter_map(|item| match item {
-                    ContextMenuItem::Info { label } => Some(label.as_str()),
+                    ContextMenuItem::Info { label, .. } => Some(label.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -342,4 +346,246 @@ fn the_hint_is_wired_into_reports_menus_notices_and_expiry() {
     assert!(src.contains(
         "if pane.mouse_override_hinted\n            && let Ok(term) = pane.term.term.try_lock()\n            && !super::pointer::pane_tracks_mouse(*term.mode(), false)\n        {\n            pane.mouse_override_hinted = false;"
     ));
+}
+
+/// The panel the menu paints for `items` at `anchor`, as
+/// `context_menu_overlay` builds it, tall enough to show every row.
+fn painted_panel(items: &[ContextMenuItem], anchor: (f32, f32)) -> ContextMenu {
+    let rows = items
+        .iter()
+        .map(|item| {
+            let (label, enabled, hint) = match item {
+                ContextMenuItem::Item { label, enabled, .. } => (label.to_string(), *enabled, ""),
+                ContextMenuItem::Submenu { label, .. } => (label.clone(), true, SUBMENU_SIGN),
+                ContextMenuItem::Info { label, .. } => (label.clone(), false, ""),
+                _ => (String::new(), false, ""),
+            };
+            ContextMenuRow {
+                swatches: None,
+                matched_chars: None,
+                label,
+                separator: matches!(item, ContextMenuItem::Separator),
+                enabled,
+                hint: hint.to_string(),
+            }
+        })
+        .collect();
+    ContextMenu {
+        picker_header_height: 0.0,
+        anchor,
+        rows,
+        highlight: items.iter().position(item_is_dispatchable).unwrap_or(0),
+        scroll_offset: 0,
+        panel_w_clamped: 200.0,
+        panel_h_clamped: 2000.0,
+        a11y_label: None,
+    }
+}
+
+/// What assistive technology gets for the menu of `kind` in `projection`:
+/// the item nodes its Menu node holds, in order.
+fn projected_items(
+    projection: &super::accessibility::ModalAccessibilityProjection,
+    kind: u64,
+) -> Vec<(accesskit::NodeId, &accesskit::Node)> {
+    let node = |id| {
+        projection
+            .nodes
+            .iter()
+            .find(|(node_id, _)| *node_id == id)
+            .map(|(_, node)| node)
+    };
+    let menu = node(accessibility_modal_id(kind, 0)).expect("menu node");
+    menu.children()
+        .iter()
+        .map(|id| (*id, node(*id).expect("every child is projected")))
+        .collect()
+}
+
+/// A screen reader gets the Shift hint the menu wraps over several lines as
+/// one item named with the whole sentence, not as a run of fragments, both
+/// in the menu Shift+right-click opens and once a submenu of it is open and
+/// it is the parent panel. That item covers every painted line and does
+/// nothing; the rows after it keep their ids, so a click on one still finds
+/// its row.
+#[test]
+fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
+    let row_h = 16.0 + kettle_render::menu::ROW_PAD;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let text = tr.text(kettle_i18n::Text::MouseOverrideHint);
+        let leaf = ContextMenuItem::Item {
+            label: tr.text(kettle_i18n::Text::MenuSplitRight),
+            action: Action::SplitRight,
+            enabled: true,
+        };
+        let mut menu = vec![
+            ContextMenuItem::Item {
+                label: tr.text(kettle_i18n::Text::MenuCopy),
+                action: Action::Copy,
+                enabled: true,
+            },
+            ContextMenuItem::Submenu {
+                label: "Split".into(),
+                items: vec![leaf.clone()],
+            },
+        ];
+        prepend_mouse_override_row(&mut menu, true, 16, tr);
+        let menu = filter_disabled(menu);
+        let lines = wrap_menu_info(text, 16);
+        assert!(lines.len() > 2, "{language:?}: {lines:?}");
+        let copy = lines.len() + 1;
+        let split = copy + 1;
+
+        let check = |projection: &super::accessibility::ModalAccessibilityProjection,
+                     kind: u64,
+                     anchor: (f32, f32)| {
+            let items = projected_items(projection, kind);
+            let labels: Vec<Option<&str>> = items.iter().map(|(_, node)| node.label()).collect();
+            assert_eq!(
+                labels,
+                [
+                    Some(text),
+                    Some(tr.text(kettle_i18n::Text::MenuCopy)),
+                    Some("Split")
+                ],
+                "{language:?} kind {kind}: one node for the sentence"
+            );
+            for line in &lines {
+                assert!(
+                    !projection
+                        .nodes
+                        .iter()
+                        .any(|(_, node)| node.label() == Some(line.as_str())),
+                    "{language:?} kind {kind}: the fragment {line:?} is read on its own"
+                );
+            }
+            let (id, hint) = items[0];
+            assert_eq!(id, accessibility_modal_id(kind, 1));
+            assert_eq!(hint.role(), accesskit::Role::MenuItem);
+            assert!(hint.is_disabled());
+            assert!(!hint.is_hidden());
+            assert_eq!(
+                hint.bounds(),
+                Some(accesskit::Rect::new(
+                    f64::from(anchor.0),
+                    f64::from(anchor.1),
+                    f64::from(anchor.0 + 200.0),
+                    f64::from(anchor.1 + row_h * lines.len() as f32),
+                )),
+                "{language:?} kind {kind}: the item covers every line"
+            );
+            assert_eq!(items[1].0, accessibility_modal_id(kind, copy + 1));
+            assert_eq!(items[2].0, accessibility_modal_id(kind, split + 1));
+        };
+
+        // Open on its own.
+        let mut ws = WindowState::new(1, Mux::new());
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (40.0, 60.0),
+            anchor_scale: 1.0,
+            items: menu.clone(),
+            highlight: copy,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        let overlay = Overlay {
+            context_menu: Some(painted_panel(&menu, (40.0, 60.0))),
+            ..Overlay::default()
+        };
+        let mut projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        check(&projection, 2, (40.0, 60.0));
+        assert_eq!(projection.focus, Some(accessibility_modal_id(2, copy + 1)));
+
+        // Split is open, and the terminal menu is its parent panel.
+        ws.context_menu = Some(ContextMenuState {
+            anchor: (240.0, 60.0),
+            anchor_scale: 1.0,
+            items: vec![leaf.clone()],
+            highlight: 0,
+            drill_stack: vec![ContextMenuLevel {
+                anchor: (40.0, 60.0),
+                anchor_scale: 1.0,
+                items: menu.clone(),
+                highlight: split,
+                scroll_offset: 0,
+            }],
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        let overlay = Overlay {
+            context_menu: Some(painted_panel(std::slice::from_ref(&leaf), (240.0, 60.0))),
+            context_menu_parents: vec![painted_panel(&menu, (40.0, 60.0))],
+            ..Overlay::default()
+        };
+        let mut projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        check(&projection, 40, (40.0, 60.0));
+    }
+}
+
+/// An Info line of its own reading `text`: the hint's single line on a menu
+/// wide enough for it, relabelled.
+fn info_line(text: &str) -> ContextMenuItem {
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let mut items = Vec::new();
+    prepend_mouse_override_row(&mut items, true, usize::MAX, tr);
+    let mut line = items.remove(0);
+    if let ContextMenuItem::Info { label, .. } = &mut line {
+        *label = text.into();
+    }
+    line
+}
+
+/// Info lines of their own, such as the About panel's, are each read as
+/// they are painted: only lines the menu wrapped from one sentence join.
+#[test]
+fn separate_info_lines_are_read_one_by_one() {
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let menu = vec![
+        info_line("kettle 9.9.9"),
+        info_line("Up to date"),
+        ContextMenuItem::Separator,
+        ContextMenuItem::Item {
+            label: "Copy version",
+            action: Action::Copy,
+            enabled: true,
+        },
+    ];
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.context_menu = Some(ContextMenuState {
+        anchor: (40.0, 60.0),
+        anchor_scale: 1.0,
+        items: menu.clone(),
+        highlight: 3,
+        drill_stack: Vec::new(),
+        scroll_offset: 0,
+        typeahead_buf: String::new(),
+        typeahead_until: None,
+    });
+    let overlay = Overlay {
+        context_menu: Some(painted_panel(&menu, (40.0, 60.0))),
+        ..Overlay::default()
+    };
+    let mut projection =
+        modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+    nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+    let labels: Vec<Option<&str>> = projected_items(&projection, 2)
+        .iter()
+        .map(|(_, node)| node.label())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            Some("kettle 9.9.9"),
+            Some("Up to date"),
+            Some("Copy version")
+        ]
+    );
 }
