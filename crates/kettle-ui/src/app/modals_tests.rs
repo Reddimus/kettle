@@ -791,6 +791,38 @@ fn the_titlebar_close_asks_for_a_lone_busy_pane_under_the_default() {
     }
 }
 
+/// The titlebar close of a real one-pane window reaches the PTY question for
+/// that pane, and a second tab takes it out of reach again. `confirm_close`
+/// samples the pane `lone_pane_in_scope` names, so a `None` here would turn
+/// every titlebar close into an unread pane that never asks.
+#[cfg(unix)]
+#[test]
+fn a_one_pane_windows_titlebar_close_samples_its_pane() {
+    let cfg = kettle_config::Config::default();
+    let argv = ["/bin/sh".to_string(), "-c".to_string(), "exec cat".to_string()];
+    let waker: kettle_core::Waker = std::sync::Arc::new(|| {});
+    let mut mux = Mux::new();
+    mux.new_tab_with(&cfg, 80, 24, 8, 16, waker.clone(), &argv, None)
+        .expect("spawn the pane");
+    let only = mux.active_focus().expect("the pane");
+    let close = super::ConfirmAction::CloseWindow {
+        drop_panes: super::DropPanes::No,
+    };
+    let mut ws = WindowState::new(1, mux);
+    let (scope, _) = super::window_close_scope(&ws);
+    assert_eq!(scope, 1);
+    assert!(super::titlebar_close_consults_policy(cfg.ask_before_closing, scope));
+    assert_eq!(super::lone_pane_in_scope(&ws, scope, &close), Some(only));
+
+    ws.mux
+        .new_tab_with(&cfg, 80, 24, 8, 16, waker, &argv, None)
+        .expect("spawn a second pane");
+    let (scope, _) = super::window_close_scope(&ws);
+    assert_eq!(scope, 2);
+    assert!(!super::titlebar_close_consults_policy(cfg.ask_before_closing, scope));
+    assert_eq!(super::lone_pane_in_scope(&ws, scope, &close), None);
+}
+
 #[test]
 fn confirm_close_decides_through_the_shared_policy() {
     let src = include_str!("modals.rs");
