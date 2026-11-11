@@ -18,7 +18,7 @@ fn right_click(
     report: MouseReport,
     now: std::time::Instant,
 ) -> bool {
-    right_click_hint_due(2, report, false) && hint.right_click_reported(pane, hinted, now)
+    right_click_hint_due(2, report, false, false) && hint.right_click_reported(pane, hinted, now)
 }
 
 /// A plain right-click the program was sent raises the hint. One on a pane
@@ -57,8 +57,8 @@ fn a_reported_plain_right_click_raises_the_hint_and_no_other_does() {
         MouseReport::Swallowed,
         now
     ));
-    assert!(!right_click_hint_due(2, MouseReport::Written, true));
-    assert!(!right_click_hint_due(0, MouseReport::Written, false));
+    assert!(!right_click_hint_due(2, MouseReport::Written, true, false));
+    assert!(!right_click_hint_due(0, MouseReport::Written, false, false));
     assert!(!hinted);
     assert_eq!(hint.pane(), None);
 
@@ -71,6 +71,15 @@ fn a_reported_plain_right_click_raises_the_hint_and_no_other_does() {
     ));
     assert_eq!(hint.pane(), Some(1));
     assert!(hinted);
+}
+
+/// With `putty-paste-style` on, Shift+right-click pastes into the program
+/// rather than opening the menu, so a reported right-click raises no hint
+/// that would tell the user to hold Shift.
+#[test]
+fn putty_paste_style_raises_no_hint() {
+    assert!(right_click_hint_due(2, MouseReport::Written, false, false));
+    assert!(!right_click_hint_due(2, MouseReport::Written, false, true));
 }
 
 /// The second reported right-click, in the same pane or in another pane of
@@ -189,7 +198,7 @@ fn the_hint_is_wired_into_reports_menus_notices_and_expiry() {
         .find("let report = self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion);")
         .expect("the press is sent first");
     let raised = report
-        .find("if !self.ctl_driving && right_click_hint_due(btn, report, ws.mods.shift_key()) {\n                self.raise_mouse_override_hint(ws, pane_id);")
+        .find("if !self.ctl_driving\n                && right_click_hint_due(\n                    btn,\n                    report,\n                    ws.mods.shift_key(),\n                    self.cfg.putty_paste_style,\n                )\n            {\n                self.raise_mouse_override_hint(ws, pane_id);")
         .expect("a reported press raises the hint");
     assert!(sent < raised);
 

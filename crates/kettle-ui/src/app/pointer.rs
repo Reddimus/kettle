@@ -636,7 +636,14 @@ impl App {
             if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) {
                 self.release_held(ws, stale);
             }
-            if !self.ctl_driving && right_click_hint_due(btn, report, ws.mods.shift_key()) {
+            if !self.ctl_driving
+                && right_click_hint_due(
+                    btn,
+                    report,
+                    ws.mods.shift_key(),
+                    self.cfg.putty_paste_style,
+                )
+            {
                 self.raise_mouse_override_hint(ws, pane_id);
             }
         }
@@ -1167,9 +1174,16 @@ impl MouseReport {
 /// Whether a press calls for the Shift hint: a plain right-click the program
 /// was actually sent. One Kettle kept from it (a search bar, a full input
 /// queue) or handled itself (no mouse reporting, Shift held) did not reach
-/// the program, so there is nothing to explain.
-pub(super) fn right_click_hint_due(btn: u8, report: MouseReport, shift: bool) -> bool {
-    btn == 2 && report == MouseReport::Written && !shift
+/// the program, so there is nothing to explain. With `putty-paste-style` on,
+/// Shift+right-click pastes into the program instead of opening the menu, so
+/// the hint's advice would be wrong and it stays down.
+pub(super) fn right_click_hint_due(
+    btn: u8,
+    report: MouseReport,
+    shift: bool,
+    putty_paste_style: bool,
+) -> bool {
+    btn == 2 && report == MouseReport::Written && !shift && !putty_paste_style
 }
 
 /// Whether the program in a pane gets plain clicks: mouse reporting is on

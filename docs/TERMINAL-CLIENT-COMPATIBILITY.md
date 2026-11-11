@@ -568,8 +568,10 @@ brings up a short notice on its pane, "Hold Shift to select text or open the
 menu while a program uses the mouse", for a few seconds. It comes back only
 after the program turns mouse reporting off and on again, and never more than
 once every 30 seconds in a window. A right-click Kettle keeps from the
-program, such as one on the search bar, brings up no notice. The menu that
-Shift+right-click opens over such a program starts with the same line.
+program, such as one on the search bar, brings up no notice. With
+`putty-paste-style` on there is no notice either, since Shift+right-click
+pastes there. The menu that Shift+right-click opens over such a program starts
+with the same line.
 
 ## Claude Code diff panel
 
