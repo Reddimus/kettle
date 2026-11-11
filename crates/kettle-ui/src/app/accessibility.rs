@@ -1771,6 +1771,32 @@ pub(super) fn accessibility_text_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
 }
 
+/// Word starts for a text run, in characters, from whether each character
+/// is whitespace. AccessKit does not find word boundaries itself, and without
+/// them a screen reader treats the whole run as one word: Orca's word echo
+/// then repeats the line from the prompt to the caret after every word. A word
+/// starts at a non-space character that follows a space; trailing spaces stay
+/// with the word before them, and a run's first character always starts one.
+/// AccessKit indexes words with `u8` and casts a caret's index to `u8` when it
+/// looks one up. A caret can sit after a run's last character, at the run's
+/// length, so in a run longer than 255 characters it would wrap onto a word
+/// near the start. Such a run gets no word starts and stays one word, as before.
+pub(super) fn accessibility_word_starts(spaces: impl Iterator<Item = bool>) -> Vec<u8> {
+    let spaces: Vec<bool> = spaces.take(usize::from(u8::MAX) + 1).collect();
+    if spaces.len() > usize::from(u8::MAX) {
+        return Vec::new();
+    }
+    let mut starts = Vec::new();
+    let mut after_space = false;
+    for (index, &space) in spaces.iter().enumerate() {
+        if index == 0 || (after_space && !space) {
+            starts.push(index as u8);
+        }
+        after_space = space;
+    }
+    starts
+}
+
 pub(super) fn terminal_accessibility_runs(
     text: &str,
     rect: Rect,
@@ -1794,6 +1820,9 @@ pub(super) fn terminal_accessibility_runs(
                     .map(|character| character.len_utf8() as u8)
                     .collect::<Vec<_>>(),
             );
+            node.set_word_starts(accessibility_word_starts(
+                line.chars().map(char::is_whitespace),
+            ));
             let top = (y + row as f32 * cell_height).min(y + height);
             let bottom = (top + cell_height).min(y + height);
             node.set_bounds(accesskit::Rect::new(
@@ -2082,6 +2111,7 @@ pub(super) fn editor_accessibility_run(
     let mut run = Node::new(Role::TextRun);
     let mut value = String::new();
     let mut lengths = Vec::new();
+    let mut spaces = Vec::new();
     for grapheme in characters.graphemes() {
         // AccessKit's byte lengths are u8. An oversized cluster stays one
         // selectable unit, represented by a replacement character in AT text.
@@ -2092,9 +2122,11 @@ pub(super) fn editor_accessibility_run(
         };
         value.push_str(grapheme);
         lengths.push(grapheme.len() as u8);
+        spaces.push(grapheme.chars().all(char::is_whitespace));
     }
     run.set_value(value);
     run.set_character_lengths(lengths);
+    run.set_word_starts(accessibility_word_starts(spaces.into_iter()));
     run
 }
 
