@@ -3752,9 +3752,12 @@ pub struct Terminal {
 
 /// Who owns a pane's terminal at one instant, from the PTY itself.
 ///
-/// "The child" is whatever process the pane spawned: the shell, or a wrapper
+/// "The child" is whatever process the pane spawned: the shell, the program
+/// itself (a `-e` or profile command such as `vim` or `ssh`), or a wrapper
 /// such as `login -pfl`, `/usr/bin/env` or a user script. The spawn makes it a
 /// session leader, so its process group is its own pid for its whole life.
+/// `Child` therefore says only that the child's group owns the terminal, not
+/// that a shell sits at its prompt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForegroundJob {
     /// The child's own process group is in the foreground.
