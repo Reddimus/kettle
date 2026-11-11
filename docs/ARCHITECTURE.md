@@ -4429,10 +4429,16 @@ is appropriate. Keep passive notifications separate from confirmations. The
 existing `ask-before-closing` policy and integrated-shell idle detection decide
 when a question appears. Under the default `busy-or-multiple`, a close of exactly
 one pane also asks the PTY at that moment: `Terminal::foreground_job` compares
-`tcgetpgrp` on the master with the spawned child's process group, and the pane is
-busy when they differ (`close_needs_prompt` and `lone_pane_job` in
-`kettle-ui/src/app/modals.rs`). The background process snapshot is not used for
-this, because it can be older than a job started a moment ago. The titlebar
+`tcgetpgrp` on the master with the spawned child's process group. The pane is
+idle only while an interactive shell owns the terminal at its prompt: the child
+itself, judged by its current argv, or for a wrapper that does not `exec`, the
+shell leading the foreground group. A child that is not an interactive shell
+(`vim`, `ssh` or a script started as the pane's command, or a non-interactive
+wrapper running commands in its own group) is busy while it owns the terminal,
+and so is any other group under a shell child (`close_needs_prompt`,
+`lone_pane_job` and `classify_lone_pane_job` in `kettle-ui/src/app/modals.rs`).
+The background process snapshot is not used for this, because it can be older
+than a job started a moment ago. The titlebar
 close and Alt+F4 (`WindowEvent::CloseRequested`) reach that question only when
 `titlebar_close_consults_policy` allows it: under `always`, or for a one-pane
 window under `busy-or-multiple`.

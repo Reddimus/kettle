@@ -128,11 +128,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Changed
 
 - Closing a single pane, or a tab or window holding only one, asks first when a
-  program is running in it, such as `sleep 600` or an editor started from the
-  shell, as Terminal.app and iTerm2 do. That includes the titlebar close button
-  and Alt+F4 on a one-pane window; a window holding several panes still closes
-  from the titlebar at once unless the setting is `always`. An idle shell still
-  closes at once.
+  program is running in it, as Terminal.app and iTerm2 do: a job such as
+  `sleep 600` or an editor started from the shell, or the pane's own program
+  when it was started as something other than a shell (`vim`, `ssh` or a script
+  as its command). That includes the titlebar close button and Alt+F4 on a
+  one-pane window; a window holding several panes still closes from the
+  titlebar at once unless the setting is `always`. An idle shell still closes
+  at once.
   This is the new default, `ask-before-closing = busy-or-multiple`, which also
   appears in the Preferences menu and the command palette. A config that sets
   `multiple-terminals` keeps asking only when more than one pane would close.

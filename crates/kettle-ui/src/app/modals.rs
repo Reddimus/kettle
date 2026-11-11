@@ -2799,9 +2799,12 @@ pub(super) fn titlebar_close_consults_policy(
 /// What the PTY says about the one pane a close would take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LonePaneJob {
-    /// A program other than the pane's shell owns the terminal.
+    /// A program other than an idle interactive shell owns the terminal: a
+    /// job the shell started, or the pane's own program when that is not an
+    /// interactive shell (`vim`, `ssh`, a script).
     Busy,
-    /// The shell owns it, or the pane's program has already exited.
+    /// An interactive shell owns it at its prompt, or the pane's program has
+    /// already exited.
     Idle,
     /// The PTY could not say (or this is Windows). Treated as idle, which is
     /// what every single-pane close did before `busy-or-multiple`, so a pane
@@ -2833,24 +2836,34 @@ pub(super) fn lone_pane_in_scope(
     }
 }
 
-/// Sample, at close time, whether a program other than the pane's shell owns
-/// its terminal.
+/// Sample, at close time, whether a program other than an idle interactive
+/// shell owns the pane's terminal.
 ///
-/// "The shell" is the pane's spawned child: whatever was launched for it,
-/// including a wrapper such as `login -pfl`, `/usr/bin/env` or a custom
-/// script. The pane is busy when the PTY's foreground process group is not
-/// that child's group. Both are read now, from the PTY and the kernel; the
-/// background process snapshot is not used, because it can predate a job
-/// started a second ago.
+/// "The child" is the pane's spawned process: a shell, a program started
+/// with `-e` or a profile command (`vim`, `ssh`, a script), or a wrapper such
+/// as `login -pfl`, `/usr/bin/env` or a custom script. Both the PTY's
+/// foreground process group and the child's group are read now, from the PTY
+/// and the kernel; the background process snapshot is not used, because it
+/// can predate a job started a second ago.
 ///
-/// A wrapper that does not `exec` leaves the real shell as its child, and an
-/// interactive shell puts itself in a process group of its own, so the groups
-/// differ while the shell sits at its prompt. Only when the launch was not
-/// itself an interactive shell, the pane is still idle when the foreground
-/// group's leader is a login shell (`argv[0]` starting with `-`) or an
-/// interactive shell, by basename in `/etc/shells` or the configured `shell`,
-/// and, when OSC 133 integration has marked a prompt in this pane, the shell
-/// is at its prompt. A shell running a script or a `-c` command is a job.
+/// When the child's group owns the terminal, the pane is idle only when the
+/// child is an interactive shell and, if OSC 133 integration has marked a
+/// prompt in this pane, the shell is at its prompt. Otherwise the child is
+/// the program itself, or a non-interactive wrapper running commands in its
+/// own group, and closing the pane ends it. The child's current argv is read
+/// for this, so an `env zsh` launch that became `zsh` is a shell and a shell
+/// that ran `exec vim` is not; the launch argv stands in when it cannot be
+/// read.
+///
+/// When another group owns the terminal and the child is an interactive
+/// shell, that group is a job. A wrapper that does not `exec` leaves the real
+/// shell as its child, and an interactive shell puts itself in a process
+/// group of its own, so the groups differ while the shell sits at its prompt.
+/// For such a child, the pane is still idle when the foreground group's
+/// leader is a login shell (`argv[0]` starting with `-`) or an interactive
+/// shell, by basename in `/etc/shells` or the configured `shell`, and, when
+/// OSC 133 integration has marked a prompt in this pane, the shell is at its
+/// prompt. A shell running a script or a `-c` command is a job.
 ///
 /// Windows keeps the old behaviour: ConPTY has no foreground process group.
 pub(super) fn lone_pane_job(
@@ -2866,7 +2879,11 @@ pub(super) fn lone_pane_job(
         classify_lone_pane_job(
             term.foreground_job(),
             integration_running,
-            || argv_is_interactive_shell(launch_argv, etc_shells(), configured_shell),
+            || {
+                let live = term.child_pid().and_then(kettle_remote::process_argv);
+                let argv = live.as_deref().unwrap_or(launch_argv);
+                argv_is_interactive_shell(argv, etc_shells(), configured_shell)
+            },
             |leader| {
                 kettle_remote::process_argv(leader).is_some_and(|argv| {
                     argv_is_interactive_shell(&argv, etc_shells(), configured_shell)
@@ -2881,21 +2898,33 @@ pub(super) fn lone_pane_job(
     }
 }
 
-/// The pure decision behind [`lone_pane_job`]; the closures run only for a
-/// foreground group that is not the child's.
+/// The pure decision behind [`lone_pane_job`]. `child_is_shell` says whether
+/// the pane's spawned child is an interactive shell; `leader_is_shell` runs
+/// only for a foreground group that is not the child's, under a child that
+/// is not a shell.
 #[cfg(any(unix, test))]
 pub(super) fn classify_lone_pane_job(
     job: kettle_core::ForegroundJob,
     integration_running: bool,
-    launch_is_shell: impl FnOnce() -> bool,
+    child_is_shell: impl FnOnce() -> bool,
     leader_is_shell: impl FnOnce(u32) -> bool,
 ) -> LonePaneJob {
     use kettle_core::ForegroundJob;
     match job {
-        ForegroundJob::Child => LonePaneJob::Idle,
         ForegroundJob::Unknown => LonePaneJob::Unknown,
+        // The child owns the terminal. It is the prompt only when it is an
+        // interactive shell that integration, if any, shows at its prompt;
+        // otherwise it is the program (`vim`, `ssh`, a script) or a
+        // non-interactive wrapper running its commands in its own group.
+        ForegroundJob::Child => {
+            if !integration_running && child_is_shell() {
+                LonePaneJob::Idle
+            } else {
+                LonePaneJob::Busy
+            }
+        }
         // The spawned child is the shell, so any other group is a job.
-        ForegroundJob::Other(_) if launch_is_shell() => LonePaneJob::Busy,
+        ForegroundJob::Other(_) if child_is_shell() => LonePaneJob::Busy,
         ForegroundJob::Other(_) if integration_running => LonePaneJob::Busy,
         ForegroundJob::Other(leader) if leader_is_shell(leader) => LonePaneJob::Idle,
         ForegroundJob::Other(_) => LonePaneJob::Busy,
