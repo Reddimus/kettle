@@ -39,9 +39,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - The context menu's Read only row and the Preferences check boxes and
   choices reach screen readers as check box and radio menu items that carry
-  whether they are on, and their names no longer start with the check mark or
-  dot drawn before them. The menu looks the same, and a row's shortcut is
-  still given as its description.
+  whether they are on. On Linux and Windows their names no longer start with
+  the check mark or dot drawn before them; on macOS the names keep the mark,
+  because it is still how VoiceOver hears the state. The menu looks the same,
+  and a row's shortcut is still given as its description.
 
 - A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
   the key that restores them, in English and Spanish.

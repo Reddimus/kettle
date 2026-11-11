@@ -294,13 +294,24 @@ fn menu_item_nodes(
         .collect()
 }
 
+/// A toggle row's accessible name on the host running the test: on macOS
+/// it keeps the painted marker, since VoiceOver gets no other state for a
+/// menu item there; elsewhere it is the plain name.
+fn toggle_name<'a>(painted: &'a str, plain: &'a str) -> &'a str {
+    if cfg!(target_os = "macos") {
+        painted
+    } else {
+        plain
+    }
+}
+
 /// A row as a screen reader gets it next to how it is painted.
 type SpokenRow = (String, Option<String>, Option<accesskit::Toggled>);
 
 fn spoken(painted: &str, name: &str, on: bool) -> SpokenRow {
     (
         painted.to_string(),
-        Some(name.to_string()),
+        Some(toggle_name(painted, name).to_string()),
         Some(accesskit::Toggled::from(on)),
     )
 }
@@ -313,10 +324,11 @@ fn spoken_rows(nodes: Vec<(String, accesskit::Node)>, role: accesskit::Role) -> 
         .collect()
 }
 
-/// Read only is a check box to a screen reader: its state is a property and
-/// its name has no check mark, while the painted row keeps the mark.
+/// Read only is a check box to a screen reader: its state is a property, and
+/// its name has no check mark except on macOS, while the painted row keeps
+/// the mark.
 #[test]
-fn the_read_only_row_is_a_check_box_named_without_its_mark() {
+fn the_read_only_row_is_a_check_box_with_its_state() {
     use accesskit::{Role, Toggled};
     for (tr, name) in [(EN, "Read only"), (ES, "Solo lectura")] {
         for (on, mark, toggled) in [(true, "✓ ", Toggled::True), (false, "  ", Toggled::False)] {
@@ -330,12 +342,13 @@ fn the_read_only_row_is_a_check_box_named_without_its_mark() {
                 }
             ));
             let menu = menu_panel(std::slice::from_ref(&item), "Ctrl+Shift+R");
-            assert_eq!(menu.rows[0].label, format!("{mark}{name}"));
+            let painted = format!("{mark}{name}");
+            assert_eq!(menu.rows[0].label, painted);
             let nodes = menu_item_nodes(menu, &tr);
             let (_, node) = &nodes[0];
             assert_eq!(node.role(), Role::MenuItemCheckBox, "read only = {on}");
             assert_eq!(node.toggled(), Some(toggled), "read only = {on}");
-            assert_eq!(node.label(), Some(name));
+            assert_eq!(node.label(), Some(toggle_name(&painted, name)));
             // The shortcut is both the property and the spoken description.
             assert_eq!(node.keyboard_shortcut(), Some("Ctrl+Shift+R"));
             assert_eq!(node.description(), Some("Ctrl+Shift+R"));
@@ -502,7 +515,8 @@ fn a_menu_shortcut_is_both_the_shortcut_and_the_description() {
 }
 
 /// Drilled into a radio group, the Preferences panel behind it is still in
-/// the tree, and its check boxes there keep their state and plain names.
+/// the tree, and its check boxes there keep their state and the same names
+/// as in an open panel.
 #[test]
 fn a_parent_panel_keeps_its_check_box_states() {
     use accesskit::{Role, Toggled};
@@ -565,6 +579,6 @@ fn a_parent_panel_keeps_its_check_box_states() {
             .unwrap_or_else(|| panic!("no parent-panel node for {name:?}"));
         assert_eq!(node.role(), Role::MenuItemCheckBox, "{name}");
         assert_eq!(node.toggled(), Some(toggled), "{name}");
-        assert_eq!(node.label(), Some(name));
+        assert_eq!(node.label(), Some(toggle_name(painted_label, name)));
     }
 }

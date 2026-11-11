@@ -5001,16 +5001,19 @@ A row that toggles a setting, such as Read only or a Preferences choice,
 carries a `MenuToggle` (check box or radio, on or off) beside its label. The
 painted label still starts with the state's marker (`✓ `, two spaces, `● ` or
 `○ `), built from that state, so the two cannot drift. AccessKit gets a
-MenuItemCheckBox or MenuItemRadio with the toggled state, named without the
-marker. A row's shortcut is set as AccessKit's keyboard shortcut and kept as
-its description: the locked adapters (`accesskit_macos` 0.27, `accesskit_unix`
-0.24 through `accesskit_atspi_common` 0.21, `accesskit_windows` 0.35) do not
-pass the shortcut property to the platform, so the description is what screen
-readers announce. On macOS both toggle roles are AXMenuItem and the state is
-only the item's boolean AXValue, which VoiceOver has not been checked to
-speak; AT-SPI has CheckMenuItem and RadioMenuItem with the checked state, and
-UIA has check box and radio button controls. Separators stay out of the tree, because
-AccessKit's only separator role, Splitter, is an AXSplitter on macOS.
+MenuItemCheckBox or MenuItemRadio with the toggled state. A row's shortcut is
+set as AccessKit's keyboard shortcut and kept as its description: the locked
+adapters (`accesskit_macos` 0.27, `accesskit_unix` 0.24 through
+`accesskit_atspi_common` 0.21, `accesskit_windows` 0.35) do not pass the
+shortcut property to the platform, so the description is what screen readers
+announce. AT-SPI has CheckMenuItem and RadioMenuItem with the checked state,
+and UIA has check box and radio button controls, so on Linux and Windows the
+name drops the marker. On macOS both toggle roles are AXMenuItem, the adapter
+sets no AXMenuItemMarkChar, and the state is only the item's boolean AXValue,
+which VoiceOver is not known to speak for a menu item; there the name keeps
+the painted marker (`MENU_TOGGLE_MARK_IN_NAME`), as it always has, so the
+state is still read. Separators stay out of the tree, because AccessKit's
+only separator role, Splitter, is an AXSplitter on macOS.
 
 ### Automatic shell startup and command outcomes
 

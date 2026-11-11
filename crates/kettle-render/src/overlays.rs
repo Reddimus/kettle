@@ -60,7 +60,8 @@ pub struct ContextMenuRow {
     pub swatches: Option<[Rgb; menu::SWATCH_COUNT]>,
     /// A check box or radio row's state. The painted label still starts with
     /// the state's [`MenuToggle::marker`], so the menu looks as it always
-    /// has; screen readers take the state from here and the name without it.
+    /// has; screen readers take the state from here, and outside macOS the
+    /// name without it.
     /// `None` on every row that is not a toggle.
     pub toggle: Option<MenuToggle>,
 }

@@ -3146,8 +3146,12 @@ flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
 shared geometry, panel flipping and clipping ancestor text under submenus.
 `cargo test -p kettle-ui menu_text_tests` builds the real Read only row and
 Preferences submenu, projects them, and checks that check boxes and radios
-reach AccessKit with their state and an unmarked name while the painted
-labels keep their marks, in the open panel and in a parent panel.
+reach AccessKit with their state while the painted labels keep their marks,
+in the open panel and in a parent panel; the name is unmarked except on
+macOS, where it keeps the mark. `cargo test -p kettle-ui
+a_toggle_row_keeps_its_marker` checks both namings on any host.
+Whether VoiceOver speaks a toggled menu item's state without the mark is
+still a live check on macOS.
 Native acceptance still needs clipboard, PRIMARY and PuTTY-style text paste,
 mixed bracketed/raw broadcast recipients, each of the three dialog buttons,
 and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.

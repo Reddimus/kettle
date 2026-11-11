@@ -2323,7 +2323,7 @@ pub(super) fn modal_accessibility_projection(
                 continue;
             }
             let id = accessibility_modal_id(2, index + 1);
-            let node = context_menu_item_node(row);
+            let node = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
             if index == menu.highlight {
                 highlighted = Some(id);
             }
@@ -2730,22 +2730,35 @@ pub(super) fn media_receipt_accessibility_label(
     label
 }
 
+/// Whether a toggle row's accessible name keeps the marker it is painted
+/// with. On macOS the locked `accesskit_macos` makes check box and radio menu
+/// items plain AXMenuItems, sets no AXMenuItemMarkChar, and gives the state
+/// only as a boolean AXValue, which VoiceOver is not known to read for a menu
+/// item; the marker in the name is what it has always spoken there. AT-SPI
+/// and UIA have real checked states, so elsewhere the name drops the marker.
+const MENU_TOGGLE_MARK_IN_NAME: bool = cfg!(target_os = "macos");
+
 /// One context-menu row as a menu item. A row that toggles a setting is a
-/// check box or radio item with its state, named without the marker the
-/// label is painted with. A shortcut is set as the keyboard shortcut and kept
-/// as the description: the locked AccessKit adapters for macOS, AT-SPI and
-/// Windows do not pass the shortcut property on, so the description is what
-/// VoiceOver, Orca and Narrator read.
-fn context_menu_item_node(row: &ContextMenuRow) -> Node {
+/// check box or radio item with its state, and is named without the marker
+/// the label is painted with unless `mark_in_name` keeps it (see
+/// [`MENU_TOGGLE_MARK_IN_NAME`]). A shortcut is set as the keyboard shortcut
+/// and kept as the description: the locked AccessKit adapters for macOS,
+/// AT-SPI and Windows do not pass the shortcut property on, so the
+/// description is what VoiceOver, Orca and Narrator read.
+fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
     let (role, label) = match row.toggle {
         Some(toggle) => (
             match toggle {
                 kettle_render::MenuToggle::Check(_) => Role::MenuItemCheckBox,
                 kettle_render::MenuToggle::Radio(_) => Role::MenuItemRadio,
             },
-            row.label
-                .strip_prefix(toggle.marker())
-                .unwrap_or(&row.label),
+            if mark_in_name {
+                row.label.as_str()
+            } else {
+                row.label
+                    .strip_prefix(toggle.marker())
+                    .unwrap_or(&row.label)
+            },
         ),
         None => (Role::MenuItem, row.label.as_str()),
     };
@@ -2810,7 +2823,7 @@ pub(super) fn nest_context_menu_accessibility(
                 continue;
             }
             let id = accessibility_modal_id(kind, index + 1);
-            let mut item = context_menu_item_node(row);
+            let mut item = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
             if matches!(
                 parent.items.get(index),
                 Some(ContextMenuItem::Submenu { .. })
@@ -3447,6 +3460,56 @@ mod context_menu_nesting_tests {
         assert_eq!(node(1).description(), None);
         assert_eq!(node(2).has_popup(), None);
         assert_eq!(node(2).description(), Some("⌘V"));
+    }
+
+    /// Both namings of a toggle row, whatever host runs the test: with the
+    /// marker kept (macOS, where it is the only spoken state) and without it.
+    /// The role and toggled state are the same either way, and a plain row's
+    /// name never changes.
+    #[test]
+    fn a_toggle_row_keeps_its_marker_in_the_name_only_when_asked() {
+        use kettle_render::MenuToggle;
+        assert_eq!(MENU_TOGGLE_MARK_IN_NAME, cfg!(target_os = "macos"));
+        for (toggle, role, painted, plain) in [
+            (
+                Some(MenuToggle::Check(true)),
+                Role::MenuItemCheckBox,
+                "✓ Read only",
+                "Read only",
+            ),
+            (
+                Some(MenuToggle::Check(false)),
+                Role::MenuItemCheckBox,
+                "  Read only",
+                "Read only",
+            ),
+            (
+                Some(MenuToggle::Radio(true)),
+                Role::MenuItemRadio,
+                "● Bell visual flash",
+                "Bell visual flash",
+            ),
+            (
+                Some(MenuToggle::Radio(false)),
+                Role::MenuItemRadio,
+                "○ Bell off",
+                "Bell off",
+            ),
+            (None, Role::MenuItem, "Copy", "Copy"),
+        ] {
+            let mut row = panel(painted, (40.0, 60.0)).rows.remove(0);
+            row.toggle = toggle;
+            for (mark_in_name, name) in [(true, painted), (false, plain)] {
+                let node = context_menu_item_node(&row, mark_in_name);
+                assert_eq!(node.role(), role, "{painted:?}");
+                assert_eq!(node.label(), Some(name), "{painted:?}, {mark_in_name}");
+                assert_eq!(
+                    node.toggled(),
+                    toggle.map(|toggle| accesskit::Toggled::from(toggle.is_on())),
+                    "{painted:?}"
+                );
+            }
+        }
     }
 
     #[test]
