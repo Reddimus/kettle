@@ -2883,7 +2883,7 @@ impl Renderer {
                 self.context_menu_match_keys.resize(row_count, 0);
                 // Row height matches a comfortable click target (~28-32 px
                 // on default cell metrics).
-                let row_h = ch + 12.0;
+                let row_h = menu::row_height(ch);
                 for (index, row) in menu.rows.iter().enumerate() {
                     let i = row_base + index;
                     if row.separator {
@@ -4535,7 +4535,7 @@ impl Renderer {
             // Row labels — collected into `menu_areas` so the second
             // TextRenderer can prepare them as their own batch.
             let panel_w = context_menu_panel_width(menu, cw);
-            let row_h = ch + 12.0;
+            let row_h = menu::row_height(ch);
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
             // Skip scrolled-off rows + stop drawing when

@@ -894,7 +894,7 @@ impl App {
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
         let panel_h: f32 = items
             .iter()
@@ -1192,7 +1192,7 @@ impl App {
             return;
         };
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -1221,7 +1221,7 @@ impl App {
             return;
         };
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -1257,7 +1257,7 @@ impl App {
             menu.scroll_offset,
             geometry,
             (ws.cursor.x as f32, ws.cursor.y as f32),
-            ch + kettle_render::menu::ROW_PAD,
+            kettle_render::menu::row_height(ch),
         )
     }
 
@@ -1449,7 +1449,7 @@ impl App {
             return None;
         }
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let (inset, content_h) =
             context_menu_content_geometry(&menu.items, h, row_h, kettle_render::menu::SEP_H);
         if inset <= 0.0 {
@@ -1484,7 +1484,7 @@ impl App {
             &active,
             &parents,
             (ws.cursor.x as f32, ws.cursor.y as f32),
-            ch + kettle_render::menu::ROW_PAD,
+            kettle_render::menu::row_height(ch),
             bcode,
         )
     }
@@ -1505,7 +1505,7 @@ impl App {
         menu: &ContextMenuState,
     ) -> Option<((f32, f32), (f32, f32))> {
         let (cw, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
         // Natural height: sum every row + separator.
         let natural_h: f32 = menu
@@ -1599,7 +1599,7 @@ impl App {
         let anchor = scale_context_menu_anchor(anchor, previous_scale, current_scale);
         let anchor = clamp_context_menu_anchor(anchor, panel, surface);
         let (_, cell_h) = self.menu_cell(ws);
-        let row_h = cell_h + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(cell_h);
         let sep_h = kettle_render::menu::SEP_H;
         if let Some(menu) = ws.context_menu.as_mut() {
             let (_, content_h) = context_menu_content_geometry(&menu.items, panel.1, row_h, sep_h);
@@ -1779,7 +1779,7 @@ impl App {
             return;
         };
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
@@ -1821,7 +1821,7 @@ impl App {
             return None;
         }
         let (_, ch) = self.menu_cell(ws);
-        let row_h = ch + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(ch);
         for (depth, parent) in menu.drill_stack.iter().enumerate().rev() {
             let ((x, y), (w, h)) = self.context_menu_level_geometry(ws, &parent.as_state())?;
             if px < x || px >= x + w || py < y || py >= y + h {
@@ -1951,7 +1951,7 @@ impl App {
                     return true;
                 };
                 let (_, ch) = self.menu_cell(ws);
-                let row_h = ch + kettle_render::menu::ROW_PAD;
+                let row_h = kettle_render::menu::row_height(ch);
                 let sep_h = kettle_render::menu::SEP_H;
                 let next = ws.context_menu.as_ref().map(|m| {
                     let (_, panel_h) =

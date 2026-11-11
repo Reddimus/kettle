@@ -438,7 +438,7 @@ fn swatches_paint_inside_the_columns_their_row_reserves() {
                 strip_right <= limit + 0.5,
                 "cw {cw} hint {hint:?}: strip {strip_right} reaches the hint"
             );
-            let row_mid = ay + (ch + menu::ROW_PAD) * 0.5;
+            let row_mid = ay + menu::row_height(ch) * 0.5;
             for (((x, y, w, h), color), expected) in painted.iter().zip(colors) {
                 assert_eq!(*color, expected);
                 assert_eq!((*w, *h), (cw, cw));
@@ -469,7 +469,7 @@ fn only_visible_rows_with_swatches_paint_them() {
     assert!(super::overlays::menu_swatch_rects(&menu, 8.0, 16.0).is_empty());
     assert!(super::overlays::menu_swatch_surfaces([&menu], &theme, 8.0, 16.0).is_empty());
 
-    let row_h = 16.0 + menu::ROW_PAD;
+    let row_h = menu::row_height(16.0);
     let mut menu = natural_menu(
         (0..10)
             .map(|i| swatch_row(&format!("t{i}"), "dark"))

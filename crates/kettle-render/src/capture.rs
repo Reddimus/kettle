@@ -670,7 +670,7 @@ pub fn capture_png_with_annotation(
             // Text areas — one TextBuffer per non-separator row.
             // Positioning mirrors the live renderer's menu block.
             let panel_w = context_menu_panel_width(&menu, cw);
-            let row_h = ch + 12.0;
+            let row_h = crate::overlays::menu::row_height(ch);
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
             // Allocate buffers first (one per row, separators get an

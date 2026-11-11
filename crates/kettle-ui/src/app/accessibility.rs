@@ -2826,7 +2826,7 @@ fn bound_context_menu_accessibility(
     cell_h: f32,
     kind: u64,
 ) {
-    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let row_h = kettle_render::menu::row_height(cell_h);
     let natural_h: f32 = menu
         .rows
         .iter()

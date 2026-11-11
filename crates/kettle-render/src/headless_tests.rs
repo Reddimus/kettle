@@ -5699,7 +5699,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     };
     let snap = snapshot_of(20, 4, b"");
     let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 200)], &overlay);
-    let row_h = renderer.cell_h + 12.0;
+    let row_h = menu::row_height(renderer.cell_h);
     let theme = &cfg.theme;
     let fg = theme.foreground;
     let mut colors = chrome::Colors::default();

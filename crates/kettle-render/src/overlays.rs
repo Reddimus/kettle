@@ -125,7 +125,7 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
         return out;
     }
     let panel_w = context_menu_panel_width(menu, cw);
-    let row_h = ch + menu::ROW_PAD;
+    let row_h = menu::row_height(ch);
     let sep_h = menu::SEP_H;
     let natural_h: f32 = menu
         .rows
@@ -1455,7 +1455,7 @@ pub(crate) fn menu_chrome_quads(
 ) -> Vec<QuadInstance> {
     let mut out: Vec<QuadInstance> = Vec::new();
     let panel_w = context_menu_panel_width(menu, cw);
-    let row_h = ch + 12.0;
+    let row_h = menu::row_height(ch);
     let sep_h = 8.0_f32;
     // Terminator menu UX: natural panel height (sum of every row) may exceed
     // the surface. App-side `context_menu_geometry` already computed the
@@ -1634,6 +1634,11 @@ pub mod menu {
     /// `ROW_PAD` = total row height (~28-32 px on default cell
     /// metrics, a comfortable click target).
     pub const ROW_PAD: f32 = 12.0;
+    /// Height of one selectable menu row for a text cell height. Paint, hit
+    /// testing and accessibility bounds all take their row height from here.
+    pub fn row_height(cell_h: f32) -> f32 {
+        cell_h + ROW_PAD
+    }
     /// Separator row height. Smaller than a regular row so the menu
     /// reads as grouped without wasting vertical space.
     pub const SEP_H: f32 = 8.0;
