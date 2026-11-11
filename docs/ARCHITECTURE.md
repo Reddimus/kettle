@@ -298,10 +298,15 @@ title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
-Edit, View and Window menus, actions, separators, enabled state and live Cmd
-shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+Edit, View and Window menus (the Window menu carries the tab commands: next,
+previous, rename, move left, right and to a new window), actions, separators,
+enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
-Services and the Windows menu each time. Menu text follows the configured
+Services and the Windows menu each time. AppKit's automatic window tabbing is
+turned off before the event loop launches AppKit
+(`disable_automatic_window_tabbing`), since Kettle's tabs live inside one
+NSWindow and AppKit could otherwise merge Kettle windows into native tabs
+and add its own tab items to that Windows menu. Menu text follows the configured
 language on reload; other UI surfaces still require a restart. The root NSMenu
 only performs native application equivalents (unless the keymap owns them).
 Kettle equivalents are declined so the original event reaches winit's modal
@@ -4451,7 +4456,21 @@ The presentation follows the
 closing a running terminal process has no reliable undo, so an explicit question
 is appropriate. Keep passive notifications separate from confirmations. The
 existing `ask-before-closing` policy and integrated-shell idle detection decide
-when a question appears.
+when a question appears. Under the default `busy-or-multiple`, a close of exactly
+one pane also asks the PTY at that moment: `Terminal::foreground_job` compares
+`tcgetpgrp` on the master with the spawned child's process group. The pane is
+idle only while an interactive shell owns the terminal at its prompt: the child
+itself, judged by its current argv, or for a wrapper that does not `exec`, the
+shell leading the foreground group. A child that is not an interactive shell
+(`vim`, `ssh` or a script started as the pane's command, or a non-interactive
+wrapper running commands in its own group) is busy while it owns the terminal,
+and so is any other group under a shell child (`close_needs_prompt`,
+`lone_pane_job` and `classify_lone_pane_job` in `kettle-ui/src/app/modals.rs`).
+The background process snapshot is not used for this, because it can be older
+than a job started a moment ago. The titlebar
+close and Alt+F4 (`WindowEvent::CloseRequested`) reach that question only when
+`titlebar_close_consults_policy` allows it: under `always`, or for a one-pane
+window under `busy-or-multiple`.
 
 Use the tab rectangles produced by `App::tab_bar` for painting, hit-testing and
 reorder targets. Do not reconstruct tab indices from an independently calculated
@@ -5020,6 +5039,24 @@ Ancestor text is clipped under child panels. AccessKit nests the child Menu
 under the expanded parent MenuItem, with actions on visible ancestor rows.
 Menus have no editable text or IME caret; paste consent reuses the existing
 confirmation layout and IME ownership rules.
+
+A row that toggles a setting, such as Read only or a Preferences choice,
+carries a `MenuToggle` (check box or radio, on or off) beside its label. The
+painted label still starts with the state's marker (`✓ `, two spaces, `● ` or
+`○ `), built from that state, so the two cannot drift. AccessKit gets a
+MenuItemCheckBox or MenuItemRadio with the toggled state. A row's shortcut is
+set as AccessKit's keyboard shortcut and kept as its description: the locked
+adapters (`accesskit_macos` 0.27, `accesskit_unix` 0.24 through
+`accesskit_atspi_common` 0.21, `accesskit_windows` 0.35) do not pass the
+shortcut property to the platform, so the description is what screen readers
+announce. AT-SPI has CheckMenuItem and RadioMenuItem with the checked state,
+and UIA has check box and radio button controls, so on Linux and Windows the
+name drops the marker. On macOS both toggle roles are AXMenuItem, the adapter
+sets no AXMenuItemMarkChar, and the state is only the item's boolean AXValue,
+which VoiceOver is not known to speak for a menu item; there the name keeps
+the painted marker (`MENU_TOGGLE_MARK_IN_NAME`), as it always has, so the
+state is still read. Separators stay out of the tree, because AccessKit's
+only separator role, Splitter, is an AXSplitter on macOS.
 
 ### Automatic shell startup and command outcomes
 

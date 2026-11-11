@@ -580,6 +580,7 @@ pub fn capture_png_with_annotation(
             let tr = Translator::default();
             let rows = vec![
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuCopy).into(),
@@ -588,6 +589,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuPaste).into(),
@@ -596,6 +598,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: String::new(),
@@ -604,6 +607,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuSplitRight).into(),
@@ -612,6 +616,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuSplitDown).into(),
@@ -620,6 +625,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuClosePane).into(),
@@ -628,6 +634,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: String::new(),
@@ -636,6 +643,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuNewTab).into(),

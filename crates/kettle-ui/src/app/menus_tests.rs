@@ -157,15 +157,11 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
 /// dispatchable, no click mapping, survives filter_disabled.
 #[test]
 fn info_rows_are_inert_but_visible() {
-    let info = ContextMenuItem::Info {
-        label: "kettle 9.9.9".to_string(),
-    };
+    let info = ContextMenuItem::info("kettle 9.9.9");
     assert!(!super::item_is_dispatchable(&info));
     assert!(super::item_to_click(&info, 0).is_none());
     let kept = filter_disabled(vec![
-        ContextMenuItem::Info {
-            label: "x".to_string(),
-        },
+        ContextMenuItem::info("x"),
         ContextMenuItem::Separator,
         item("Copy version info", true),
     ]);
@@ -270,6 +266,7 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
         Action::ToggleCopyOnSelect,
         Action::ToggleMouseHide,
         Action::SetAskBeforeClosingAlways,
+        Action::SetAskBeforeClosingBusyOrMultiple,
         Action::SetAskBeforeClosingMultiple,
         Action::SetAskBeforeClosingNever,
         Action::SetBellOff,
@@ -295,6 +292,9 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
             Action::ToggleCopyOnSelect => "toggle_copy_on_select",
             Action::ToggleMouseHide => "toggle_mouse_hide",
             Action::SetAskBeforeClosingAlways => "set_ask_before_closing_always",
+            Action::SetAskBeforeClosingBusyOrMultiple => {
+                "set_ask_before_closing_busy_or_multiple"
+            }
             Action::SetAskBeforeClosingMultiple => "set_ask_before_closing_multiple",
             Action::SetAskBeforeClosingNever => "set_ask_before_closing_never",
             Action::SetBellOff => "set_bell_off",
@@ -709,7 +709,6 @@ fn the_context_menu_carries_every_terminator_row() {
         (T::MenuSplitDown, "Split Down", "Action::SplitDown"),
         (T::MenuClosePane, "Close Pane", "Action::ClosePane"),
         (T::MenuNewTab, "New Tab", "Action::NewTab"),
-        (T::MenuReadOnly, "Read only", "Action::TogglePaneReadOnly"),
         (T::MenuSetGroup, "Set Group…", "Action::CreateGroup"),
         // Rows Ghostty adds to Terminator's set.
         (T::MenuSplitLeft, "Split Left", "Action::SplitLeft"),
@@ -749,6 +748,13 @@ fn the_context_menu_carries_every_terminator_row() {
                  stay together, found entry: {entry:?}"
         );
     }
+    // Read only is a check box row with its own builder, which
+    // `menu_text_tests` drives directly; here it must stay in the menu.
+    assert_eq!(en.text(T::MenuReadOnly), "Read only");
+    assert!(
+        body.contains("read_only_menu_item(read_only, &tr)"),
+        "the context menu is missing Terminator's \"Read only\" row"
+    );
     // Zoom swaps label with the state rather than sitting on one word,
     // matching Terminator's Zoom/Restore pair.
     assert_eq!(en.text(T::MenuZoom), "Zoom");
@@ -924,7 +930,8 @@ fn item_to_click_maps_every_dispatchable_row_type() {
             &ContextMenuItem::DynamicItem {
                 label: "Bold".into(),
                 action: Action::Copy,
-                enabled: true
+                enabled: true,
+                toggle: None
             },
             0
         ),
@@ -1180,6 +1187,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
     use unicode_width::UnicodeWidthStr as _;
 
     let mut row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         matched_chars: None,
         label: "Visible label".to_string(),
@@ -1285,7 +1293,7 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
     ] {
         let tr = kettle_i18n::Translator::new(language);
         let items = App::shell_menu_items(None, &tr);
-        assert!(matches!(items.as_slice(), [ContextMenuItem::Info {label}] if label == text));
+        assert!(matches!(items.as_slice(), [ContextMenuItem::Info { label, .. }] if label == text));
     }
     assert_eq!(
         pending.request(1, 1, Some(&shells)),
@@ -1318,9 +1326,7 @@ fn loading_shell_menu_survives_construction_and_can_refresh() {
             ContextMenuItem::NewTabShell { argv, .. } if argv == &["test-shell"])));
         assert!(!App::shell_menu_is_loading(&[], &tr));
         assert!(!App::shell_menu_is_loading(
-            &[ContextMenuItem::Info {
-                label: "About".into(),
-            }],
+            &[ContextMenuItem::info("About")],
             &tr
         ));
     }
@@ -1608,12 +1614,14 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
 /// Paint, pointer hit testing and screen-reader bounds agree on every row of
 /// every open level, in a scrolled, cut panel as well: the rect the renderer
 /// lays a row out in is the rect a click picks that row from and the rect a
-/// screen reader is given. The rounded chrome changes none of them.
+/// screen reader is given. The rounded chrome changes none of them. A hint
+/// sentence the menu wrapped over several Info lines paints as stacked lines
+/// inside the panel, each picked by a click on its own rect, and reads as one
+/// item whose bounds cover every line.
 #[test]
 fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
     use super::accessibility::{
-        accessibility_modal_id, bound_context_menu_accessibility, modal_accessibility_projection,
-        nest_context_menu_accessibility,
+        accessibility_modal_id, modal_accessibility_projection, nest_context_menu_accessibility,
     };
     use super::menus::context_menu_click_at;
     use super::{ContextMenu, ContextMenuClick, ContextMenuLevel, ContextMenuState};
@@ -1640,7 +1648,17 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         .collect();
     items.insert(3, ContextMenuItem::Separator);
     items.insert(7, ContextMenuItem::Separator);
-    let parent_items = vec![
+    let hint_lines = ["Hold Shift to", "select text while", "a program has the mouse"];
+    let mut parent_items: Vec<ContextMenuItem> = hint_lines
+        .iter()
+        .enumerate()
+        .map(|(line, label)| ContextMenuItem::Info {
+            label: (*label).into(),
+            continued: line > 0,
+        })
+        .collect();
+    parent_items.extend([
+        ContextMenuItem::Separator,
         ContextMenuItem::Submenu {
             label: "Split".into(),
             items: items.clone(),
@@ -1650,17 +1668,22 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
             label: "More".into(),
             items: items.clone(),
         },
-    ];
+    ]);
+    let parent_h = 5.0 * row_h + 2.0 * kettle_render::menu::SEP_H;
     let panel = |items: &[ContextMenuItem], anchor, scroll_offset, height| ContextMenu {
         anchor,
         rows: items
             .iter()
             .map(|item| kettle_render::ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
-                label: "Leaf".into(),
+                label: match item {
+                    ContextMenuItem::Info { label, .. } => label.clone(),
+                    _ => "Leaf".into(),
+                },
                 separator: matches!(item, ContextMenuItem::Separator),
-                enabled: true,
+                enabled: !matches!(item, ContextMenuItem::Info { .. }),
                 hint: String::new(),
             })
             .collect(),
@@ -1671,7 +1694,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         a11y_label: None,
         picker_header_height: 0.0,
     };
-    let parent = panel(&parent_items, (40.0, 30.0), 0, 2.0 * row_h + 8.0);
+    let parent = panel(&parent_items, (40.0, 30.0), 0, parent_h);
     let active = panel(&items, (300.0, 30.0), 2, 5.0 * row_h);
     let mut ws = WindowState::new(1, Mux::new());
     ws.context_menu = Some(ContextMenuState {
@@ -1683,7 +1706,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
             anchor: parent.anchor,
             anchor_scale: 1.0,
             items: parent_items,
-            highlight: 0,
+            highlight: 4,
             scroll_offset: 0,
         }],
         scroll_offset: active.scroll_offset,
@@ -1696,7 +1719,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
             &ws.context_menu.as_ref().unwrap().drill_stack[0].items,
             parent.anchor,
             0,
-            2.0 * row_h + 8.0,
+            parent_h,
         )],
         ..kettle_render::Overlay::default()
     };
@@ -1704,37 +1727,87 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         modal_accessibility_projection(&overlay, (800.0, 600.0), cell, 1.0, &EN_TEXT);
     // As the window's accessibility tree builds it.
     nest_context_menu_accessibility(&mut projection, &ws, &overlay, cell.1);
-    bound_context_menu_accessibility(
-        &mut projection,
-        overlay.context_menu.as_ref().unwrap(),
-        cell.1,
-        2,
-    );
-    let bounds = |kind: u64, index: usize| {
+    let node = |kind: u64, index: usize| {
         projection
             .nodes
             .iter()
             .find(|(id, _)| *id == accessibility_modal_id(kind, index + 1))
-            .and_then(|(_, node)| node.bounds())
+            .map(|(_, node)| node)
+    };
+    let bounds = |kind: u64, index: usize| node(kind, index).and_then(|node| node.bounds());
+    let ax_rect = |(x, y, w, h): (f32, f32, f32, f32)| {
+        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
     };
     let menu = ws.context_menu.as_ref().unwrap();
-    for (kind, level, depth) in [(2, &active, None), (40, &parent, Some(0))] {
+    let mut wrapped_checked = false;
+    for (kind, level, level_items, depth) in [
+        (2, &active, &items[..], None),
+        (40, &parent, &menu.drill_stack[0].items[..], Some(0)),
+    ] {
         let painted = kettle_render::context_menu_row_rects(level, cell);
         assert!(!painted.is_empty());
+        let painted_at = |row: usize| {
+            painted
+                .iter()
+                .find(|(index, _)| *index == row)
+                .map(|(_, rect)| *rect)
+        };
         let mut items_hit = 0;
-        for (index, (x, y, w, h)) in painted {
+        for &(index, (x, y, w, h)) in &painted {
             let separator = level.rows[index].separator;
-            if !separator {
-                assert_eq!(
+            match &level_items[index] {
+                ContextMenuItem::Separator => {}
+                ContextMenuItem::Info { continued, .. } => {
+                    // Each wrapped line paints in its own row, inside the
+                    // rounded panel and below the line before it.
+                    let (px, py) = level.anchor;
+                    let (pw, ph) = (level.panel_w_clamped, level.panel_h_clamped);
+                    assert!(
+                        x >= px && y >= py && x + w <= px + pw && y + h <= py + ph,
+                        "hint line {index} at depth {depth:?} leaves its panel"
+                    );
+                    if *continued {
+                        let (_, above_y, _, above_h) = painted_at(index - 1).unwrap();
+                        assert_eq!(y, above_y + above_h, "hint line {index} stacks");
+                        assert!(
+                            node(kind, index).is_none(),
+                            "a continued hint line leaves the tree"
+                        );
+                    } else {
+                        let end = index
+                            + 1
+                            + level_items[index + 1..]
+                                .iter()
+                                .take_while(|item| {
+                                    matches!(item, ContextMenuItem::Info { continued: true, .. })
+                                })
+                                .count();
+                        assert!(end - index > 1, "the hint is wrapped");
+                        let (x0, y0, x1, y1) = (index..end)
+                            .map(|line| painted_at(line).unwrap())
+                            .fold(
+                                (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+                                |(x0, y0, x1, y1), (x, y, w, h)| {
+                                    (x0.min(x), y0.min(y), x1.max(x + w), y1.max(y + h))
+                                },
+                            );
+                        assert_eq!(
+                            bounds(kind, index),
+                            Some(ax_rect((x0, y0, x1 - x0, y1 - y0))),
+                            "the hint's bounds cover every line at depth {depth:?}"
+                        );
+                        assert_eq!(
+                            node(kind, index).and_then(|node| node.label()),
+                            Some(hint_lines.join(" ").as_str())
+                        );
+                        wrapped_checked = true;
+                    }
+                }
+                _ => assert_eq!(
                     bounds(kind, index),
-                    Some(accesskit::Rect::new(
-                        x as f64,
-                        y as f64,
-                        (x + w) as f64,
-                        (y + h) as f64
-                    )),
+                    Some(ax_rect((x, y, w, h))),
                     "screen-reader bounds of row {index} at depth {depth:?}"
-                );
+                ),
             }
             for cursor in [
                 (x, y),
@@ -1761,5 +1834,30 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
             }
         }
         assert!(items_hit > 0);
+    }
+    assert!(wrapped_checked, "the parent level holds a wrapped hint");
+}
+
+/// The confirm-close radio labels name what each mode asks about, never one
+/// gesture: since `busy-or-multiple` became the default, the titlebar close of
+/// a one-pane window that runs a program asks under it too, so a label that
+/// claimed the titlebar for `always` alone would mislead.
+#[test]
+fn confirm_close_radio_labels_do_not_single_out_the_titlebar() {
+    use kettle_i18n::Text;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        for text in [
+            Text::MenuPrefConfirmAlways,
+            Text::MenuPrefConfirmBusyOrMultiple,
+            Text::MenuPrefConfirmMultiple,
+            Text::MenuPrefConfirmNever,
+        ] {
+            let label = tr.text(text).to_lowercase();
+            assert!(
+                !label.contains("titlebar") && !label.contains("barra de título"),
+                "{language:?}: {label:?}"
+            );
+        }
     }
 }

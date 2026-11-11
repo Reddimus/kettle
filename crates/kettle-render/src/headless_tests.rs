@@ -5671,6 +5671,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         return;
     };
     let row = |label: &str, hint: &str, enabled| ContextMenuRow {
+        toggle: None,
         swatches: None,
         matched_chars: None,
         label: label.into(),
@@ -5795,6 +5796,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
         rows: ["Dracula", "Nord"]
             .into_iter()
             .map(|label| ContextMenuRow {
+                toggle: None,
                 swatches,
                 matched_chars: None,
                 label: label.into(),
@@ -5847,6 +5849,7 @@ fn menu_level(
         rows: labels
             .iter()
             .map(|label| ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: (*label).into(),

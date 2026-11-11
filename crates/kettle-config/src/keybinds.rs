@@ -470,6 +470,7 @@ pub enum Action {
     /// it was set, which is Preferences — not a third button on a destructive
     /// one-line prompt.
     SetAskBeforeClosingAlways,
+    SetAskBeforeClosingBusyOrMultiple,
     SetAskBeforeClosingMultiple,
     SetAskBeforeClosingNever,
     ToggleCursorBlink,
@@ -858,6 +859,7 @@ pub fn action_names() -> Vec<&'static str> {
         "set_scrollbar_auto",
         "set_scrollbar_never",
         "set_ask_before_closing_always",
+        "set_ask_before_closing_busy_or_multiple",
         "set_ask_before_closing_multiple",
         "set_ask_before_closing_never",
         "toggle_cursor_blink",
@@ -1194,6 +1196,8 @@ impl Action {
             "set_ask_before_closing_always" | "set-ask-before-closing-always" => {
                 SetAskBeforeClosingAlways
             }
+            "set_ask_before_closing_busy_or_multiple"
+            | "set-ask-before-closing-busy-or-multiple" => SetAskBeforeClosingBusyOrMultiple,
             "set_ask_before_closing_multiple" | "set-ask-before-closing-multiple" => {
                 SetAskBeforeClosingMultiple
             }

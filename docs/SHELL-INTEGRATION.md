@@ -283,8 +283,13 @@ busy and its close behaviour is unchanged.
 
 The OSC 133 marks also make close-confirmation prompt-aware. A pane idle at an
 integrated-shell prompt (marks seen, no command running) skips the
-`ask-before-closing` dialog. A shell without integration always counts as busy,
-so its behavior is unchanged.
+`ask-before-closing` dialog. A shell without integration always counts as busy
+when several panes would close. A single pane is judged by its terminal instead:
+under the default `busy-or-multiple` it asks only while a program other than an
+idle interactive shell owns the terminal. A pane started as another program,
+such as `vim` or `ssh`, asks while that program runs. The pane's shell, or the
+shell a wrapper that does not `exec` leaves in charge, counts as idle only while
+the marks, if this pane has sent any, show it at its prompt.
 
 ### Command correlation
 

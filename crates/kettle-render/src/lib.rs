@@ -111,8 +111,8 @@ use overlays::input_bar_colors;
 pub use overlays::{
     ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar,
-    TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
+    MediaPasteReceiptOverlay, MenuToggle, NotificationGeometry, Overlay, StatusBar, TabActivity,
+    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
     WindowControl, WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
     media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
     notification_geometry_with_notices, persistent_notice_geometry,

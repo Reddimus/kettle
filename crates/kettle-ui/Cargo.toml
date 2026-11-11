@@ -172,6 +172,10 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# The tree consumer the platform adapters run, so tests can hand it a finished
+# accessibility tree and see it accepted. accesskit_winit already pulls this
+# version in, so it adds no crate to the graph.
+accesskit_consumer = "0.39.2"
 alacritty_terminal = "0.26.0"
 kettle-test-support.workspace = true
 url = "2.5"

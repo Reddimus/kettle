@@ -867,9 +867,17 @@ pub enum AskBeforeClosing {
     /// Always show the dialog, even with one pane (Terminator's
     /// most-cautious mode).
     Always,
-    /// Show the dialog only when ≥2 panes/tabs would be killed.
-    /// Terminator's default.
+    /// `busy-or-multiple`, the default: everything `MultipleTerminals` asks,
+    /// and also a close of a single pane while a program is running in it:
+    /// a job its shell started, such as `sleep` or an editor (Terminal.app
+    /// and iTerm2 ask there too), or the pane's own program when that is not
+    /// an idle interactive shell, such as a pane started as `vim` or `ssh`.
+    /// It is a mode of its own so that an explicit `multiple-terminals` keeps
+    /// meaning exactly what it did.
     #[default]
+    BusyOrMultiple,
+    /// Show the dialog only when ≥2 panes/tabs would be killed.
+    /// Terminator's default, and Kettle's before `BusyOrMultiple`.
     MultipleTerminals,
     /// Never show the dialog. Close immediately.
     Never,
@@ -1152,6 +1160,8 @@ impl AskBeforeClosing {
     ///   - `Never`              → never prompt
     ///   - `Always`             → always prompt
     ///   - `MultipleTerminals`  → prompt iff scope_count > 1
+    ///   - `BusyOrMultiple`     → prompt iff scope_count > 1; a single pane
+    ///     is decided by [`asks_for_busy_single_pane`](Self::asks_for_busy_single_pane)
     ///
     /// kettle-ui's `confirm_close` uses this to decide whether a close
     /// action prompts.
@@ -1159,8 +1169,18 @@ impl AskBeforeClosing {
         match self {
             AskBeforeClosing::Never => false,
             AskBeforeClosing::Always => true,
-            AskBeforeClosing::MultipleTerminals => scope_count > 1,
+            AskBeforeClosing::MultipleTerminals | AskBeforeClosing::BusyOrMultiple => {
+                scope_count > 1
+            }
         }
+    }
+
+    /// Whether closing exactly one pane asks while a program is running in
+    /// it: a job its shell started, or the pane's own program when that is
+    /// not an idle interactive shell. kettle-ui decides that from the PTY at
+    /// close time; only `BusyOrMultiple` asks it.
+    pub fn asks_for_busy_single_pane(self) -> bool {
+        self == AskBeforeClosing::BusyOrMultiple
     }
 }
 
@@ -3358,7 +3378,7 @@ impl Default for Config {
             add_kettle_to_path: AddKettleToPath::Auto,
             preview_lane_side: PreviewLaneSide::Bottom,
             media_open_mode: MediaOpenMode::Overlay,
-            ask_before_closing: AskBeforeClosing::MultipleTerminals,
+            ask_before_closing: AskBeforeClosing::BusyOrMultiple,
             close_button_on_tab: true,
             new_tab_after_current_tab: false,
             title_at_bottom: false,
@@ -4343,7 +4363,13 @@ impl Config {
                 // to the default with no warning.
                 "ask-before-closing" | "ask_before_closing" => matches!(
                     v.to_ascii_lowercase().as_str(),
-                    "always" | "never" | "multiple" | "multiple-terminals" | "multiple_terminals"
+                    "always"
+                        | "never"
+                        | "multiple"
+                        | "multiple-terminals"
+                        | "multiple_terminals"
+                        | "busy-or-multiple"
+                        | "busy_or_multiple"
                 ),
                 // Light/dark-theme must name a real bundled
                 // theme (used by auto-theme); a typo silently kept the prior.
@@ -5416,7 +5442,10 @@ impl Config {
                         "multiple" | "multiple-terminals" | "multiple_terminals" => {
                             AskBeforeClosing::MultipleTerminals
                         }
-                        _ => AskBeforeClosing::MultipleTerminals,
+                        "busy-or-multiple" | "busy_or_multiple" => AskBeforeClosing::BusyOrMultiple,
+                        // A typo gets the default, as an absent key does;
+                        // `--check-config` reports it.
+                        _ => AskBeforeClosing::BusyOrMultiple,
                     };
                 }
                 "close-button-on-tab" | "close_button_on_tab" => {
@@ -9022,7 +9051,7 @@ cell-height = 1.2\n";
         let d = Config::default();
         assert!(!d.login_shell);
         assert_eq!(d.exit_action, ExitAction::CloseOnSuccess);
-        assert_eq!(d.ask_before_closing, AskBeforeClosing::MultipleTerminals);
+        assert_eq!(d.ask_before_closing, AskBeforeClosing::BusyOrMultiple);
         assert!(Config::parse_text("login-shell = true").login_shell);
         assert!(Config::parse_text("login_shell = true").login_shell);
         // The boolean field retains legacy spellings and adds auto.
@@ -12074,6 +12103,13 @@ split_horiz = <Control><Shift>j
         assert!(!MultipleTerminals.should_prompt(1));
         assert!(MultipleTerminals.should_prompt(2));
         assert!(MultipleTerminals.should_prompt(100));
+        assert!(!MultipleTerminals.asks_for_busy_single_pane());
+        assert!(!Always.asks_for_busy_single_pane());
+        assert!(!Never.asks_for_busy_single_pane());
+        // BusyOrMultiple: the same count rule, plus the busy single pane.
+        assert!(!BusyOrMultiple.should_prompt(1));
+        assert!(BusyOrMultiple.should_prompt(2));
+        assert!(BusyOrMultiple.asks_for_busy_single_pane());
     }
 
     /// Drift guard. Terminator's `tab_position` is kettle's

@@ -3125,8 +3125,9 @@ cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
 ### macOS menu bar regression coverage
 
 `cargo test -p kettle-ui macos_menu` runs the pure menu model on every platform:
-English and Spanish structure, translated titles and separators, action mapping,
-Cmd-only hints following remaps and unbinds, and focused-window availability.
+English and Spanish structure, translated titles and separators, action mapping
+(the Window menu's Rename Tab… and Move Tab to New Window among it, the move
+rows off for a lone tab or `detachable-tabs = false`), Cmd-only hints following remaps and unbinds, and focused-window availability.
 `cargo test -p kettle-ui menu_paste_availability` exercises writable local and
 cross-window broadcast recipients, read-only focus, and group exclusions using
 the same recipient selection as paste delivery.
@@ -3134,6 +3135,11 @@ Source guards check that AppKit only performs native application and Services eq
 leaving Kettle shortcuts on the original keyboard dispatch and terminal-writer
 path, and that resume, focus/selection dispatch and config reload reconcile the
 menu while retaining Services and Windows registration.
+`automatic_window_tabbing_is_off_before_the_event_loop_exists` checks that
+`run_with` turns AppKit's automatic window tabbing off once, before the event
+loop is built, and `move_tab_rows_agree_with_the_wrapping_mux_at_every_position`
+pins Move Tab Left / Right as enabled wherever `Mux::nudge_active_tab` moves the
+tab, the first and last tab included, since the move wraps.
 `cargo test -p kettle-ui --test macos_menu_native` runs the production menu subclass
 on the process main thread on macOS. It dispatches synthetic AppKit key events
 to native commands and a nested, registered Services menu, checks disabled
@@ -3159,6 +3165,14 @@ three config policies; `cargo test -p kettle-ui paste` checks paste preview,
 flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
+`cargo test -p kettle-ui menu_text_tests` builds the real Read only row and
+Preferences submenu, projects them, and checks that check boxes and radios
+reach AccessKit with their state while the painted labels keep their marks,
+in the open panel and in a parent panel; the name is unmarked except on
+macOS, where it keeps the mark. `cargo test -p kettle-ui
+a_toggle_row_keeps_its_marker` checks both namings on any host.
+Whether VoiceOver speaks a toggled menu item's state without the mark is
+still a live check on macOS.
 Native acceptance still needs clipboard, PRIMARY and PuTTY-style text paste,
 mixed bracketed/raw broadcast recipients, each of the three dialog buttons,
 and hover/click/arrow-key menu navigation at 800x600 in English and Spanish.

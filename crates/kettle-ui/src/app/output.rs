@@ -229,7 +229,7 @@ pub(super) fn output_generation_advanced(previous: Option<u64>, current: u64) ->
     previous.is_some_and(|previous| previous != current)
 }
 
-struct PaneEventBatch {
+pub(super) struct PaneEventBatch {
     bell: bool,
     bell_panes: Vec<u64>,
     output_chunks: Vec<(u64, Vec<u8>)>,
@@ -239,7 +239,7 @@ struct PaneEventBatch {
     pending_restarts_local: Vec<u64>,
 }
 
-fn drain_pane_events(
+pub(super) fn drain_pane_events(
     ws: &mut WindowState,
     exit_action: kettle_config::ExitAction,
     force_no_bell: bool,
@@ -346,6 +346,16 @@ fn drain_pane_events(
             // timeout; only typing, focus, and settings do.
             ws.blink_on = true;
             ws.last_blink = std::time::Instant::now();
+        }
+        // A program that turned mouse reporting off ended the session the
+        // Shift hint was shown for; the next one may show it again. Only a
+        // pane that had the hint reads its mode here, and never waits for
+        // it: the reader holding the lock wakes another drain when it is done.
+        if pane.mouse_override_hinted
+            && let Ok(term) = pane.term.term.try_lock()
+            && !super::pointer::pane_tracks_mouse(*term.mode(), false)
+        {
+            pane.mouse_override_hinted = false;
         }
         let notice_revision = pane.osc52_notice.revision;
         let event_rx = pane.rx.clone();

@@ -58,6 +58,40 @@ pub struct ContextMenuRow {
     /// picker's background, foreground and ANSI red through cyan. `None` on
     /// every other row. Screen readers keep reading only the label and hint.
     pub swatches: Option<[Rgb; menu::SWATCH_COUNT]>,
+    /// A check box or radio row's state. The painted label still starts with
+    /// the state's [`MenuToggle::marker`], so the menu looks as it always
+    /// has; screen readers take the state from here, and outside macOS the
+    /// name without it.
+    /// `None` on every row that is not a toggle.
+    pub toggle: Option<MenuToggle>,
+}
+
+/// The state of a menu row that toggles a setting: a check box (on or off)
+/// or one choice of a radio group (selected or not).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MenuToggle {
+    Check(bool),
+    Radio(bool),
+}
+
+impl MenuToggle {
+    /// Whether the box is checked or the choice is selected.
+    pub fn is_on(self) -> bool {
+        match self {
+            Self::Check(on) | Self::Radio(on) => on,
+        }
+    }
+
+    /// The two-column marker painted before the row's label: `✓ ` or two
+    /// spaces for a check box, `● ` or `○ ` for a radio choice.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Check(true) => "✓ ",
+            Self::Check(false) => "  ",
+            Self::Radio(true) => "● ",
+            Self::Radio(false) => "○ ",
+        }
+    }
 }
 
 /// Dropdown-parity: a menu row's display-column budget — the label plus

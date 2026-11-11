@@ -850,6 +850,7 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
     let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
     for template in &list.rows {
         let row = || kettle_render::ContextMenuRow {
+            toggle: None,
             swatches: template.swatches,
             matched_chars: None,
             label: template.label.clone(),

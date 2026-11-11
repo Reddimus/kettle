@@ -995,6 +995,9 @@ pub(crate) struct Osc52NoticeState {
 
 pub struct Pane {
     pub(crate) osc52_notice: Osc52NoticeState,
+    /// The Shift hint was shown for this pane since its program turned mouse
+    /// reporting on. Cleared when the program turns it off.
+    pub(crate) mouse_override_hinted: bool,
     pub inline_cards: kettle_render::InlineCards,
     pub term: Terminal,
     /// The pane's own child process, read right after spawning it. Only this
@@ -2593,6 +2596,7 @@ impl Mux {
                 closed: false,
                 held: false,
                 osc52_notice: Osc52NoticeState::default(),
+                mouse_override_hinted: false,
                 exit_code: None,
                 close_on_success: false,
                 held_child_reaped: false,

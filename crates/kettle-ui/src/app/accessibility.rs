@@ -155,11 +155,12 @@ impl App {
             ));
             let mut nodes = modal.nodes;
             nodes.push((ACCESSIBILITY_ROOT_ID, root));
+            let focus = modal_focus_in_tree(modal.focus, &nodes).unwrap_or(ACCESSIBILITY_ROOT_ID);
             return TreeUpdate {
                 nodes,
                 tree: None,
                 tree_id: TreeId::ROOT,
-                focus: modal.focus.unwrap_or(ACCESSIBILITY_ROOT_ID),
+                focus,
             };
         }
         let area = self.area(ws);
@@ -767,15 +768,10 @@ impl App {
             &self.ui_text,
         );
         nest_context_menu_accessibility(&mut modal, ws, overlay, self.menu_cell(ws).1);
-        if ws.context_menu.is_some()
-            && let Some(menu) = overlay.context_menu.as_ref()
-        {
-            let (_, ch) = self.menu_cell(ws);
-            bound_context_menu_accessibility(&mut modal, menu, ch, 2);
-        }
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
+        let modal_focus = modal_focus_in_tree(modal_focus, &nodes);
         let mut root = Node::new(Role::Window);
         root.set_label(self.ui_text.text(kettle_i18n::Text::A11yWindow));
         root.set_children(children);
@@ -936,6 +932,7 @@ impl App {
                 row.label.hash(&mut hasher);
                 row.hint.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
+                row.toggle.hash(&mut hasher);
             }
         }
         overlay.context_menu.is_some().hash(&mut hasher);
@@ -955,6 +952,7 @@ impl App {
                 row.hint.hash(&mut hasher);
                 row.separator.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
+                row.toggle.hash(&mut hasher);
             }
         }
         overlay.palette_query.hash(&mut hasher);
@@ -2056,6 +2054,23 @@ pub(super) fn modal_accessibility_diagnostic_label<'a>(
     node.label()
 }
 
+/// The modal focus a finished tree of `nodes` can name: the node the modal
+/// projection chose while it is still in `nodes`, else the open context
+/// menu while that is, else none, so the caller's own default applies.
+/// AccessKit rejects a tree whose focus is not one of its nodes, and a pass
+/// after the projection can take the chosen node out, as joining a wrapped
+/// sentence does with the lines that continue it.
+pub(super) fn modal_focus_in_tree(
+    focus: Option<NodeId>,
+    nodes: &[(NodeId, Node)],
+) -> Option<NodeId> {
+    let held = |target: &NodeId| nodes.iter().any(|(id, _)| id == target);
+    let focus = focus?;
+    Some(focus)
+        .filter(held)
+        .or(Some(accessibility_modal_id(2, 0)).filter(held))
+}
+
 pub(super) struct ModalAccessibilityProjection {
     pub(super) roots: Vec<NodeId>,
     pub(super) nodes: Vec<(NodeId, Node)>,
@@ -2321,19 +2336,7 @@ pub(super) fn modal_accessibility_projection(
                 continue;
             }
             let id = accessibility_modal_id(2, index + 1);
-            let mut node = Node::new(Role::MenuItem);
-            node.set_label(row.label.clone());
-            if row.hint == SUBMENU_SIGN {
-                node.set_has_popup(accesskit::HasPopup::Menu);
-            } else if !row.hint.is_empty() {
-                node.set_description(row.hint.trim().to_string());
-            }
-            if !row.enabled {
-                node.set_disabled();
-            } else {
-                node.add_action(AccessibilityAction::Focus);
-                node.add_action(AccessibilityAction::Click);
-            }
+            let node = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
             if index == menu.highlight {
                 highlighted = Some(id);
             }
@@ -2740,7 +2743,62 @@ pub(super) fn media_receipt_accessibility_label(
     label
 }
 
-/// Preserve the drill-in path as actual menu/menu-item ancestry for assistive technology.
+/// Whether a toggle row's accessible name keeps the marker it is painted
+/// with. On macOS the locked `accesskit_macos` makes check box and radio menu
+/// items plain AXMenuItems, sets no AXMenuItemMarkChar, and gives the state
+/// only as a boolean AXValue, which VoiceOver is not known to read for a menu
+/// item; the marker in the name is what it has always spoken there. AT-SPI
+/// and UIA have real checked states, so elsewhere the name drops the marker.
+const MENU_TOGGLE_MARK_IN_NAME: bool = cfg!(target_os = "macos");
+
+/// One context-menu row as a menu item. A row that toggles a setting is a
+/// check box or radio item with its state, and is named without the marker
+/// the label is painted with unless `mark_in_name` keeps it (see
+/// [`MENU_TOGGLE_MARK_IN_NAME`]). A shortcut is set as the keyboard shortcut
+/// and kept as the description: the locked AccessKit adapters for macOS,
+/// AT-SPI and Windows do not pass the shortcut property on, so the
+/// description is what VoiceOver, Orca and Narrator read.
+fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
+    let (role, label) = match row.toggle {
+        Some(toggle) => (
+            match toggle {
+                kettle_render::MenuToggle::Check(_) => Role::MenuItemCheckBox,
+                kettle_render::MenuToggle::Radio(_) => Role::MenuItemRadio,
+            },
+            if mark_in_name {
+                row.label.as_str()
+            } else {
+                row.label
+                    .strip_prefix(toggle.marker())
+                    .unwrap_or(&row.label)
+            },
+        ),
+        None => (Role::MenuItem, row.label.as_str()),
+    };
+    let mut node = Node::new(role);
+    node.set_label(label);
+    if let Some(toggle) = row.toggle {
+        node.set_toggled(accesskit::Toggled::from(toggle.is_on()));
+    }
+    if row.hint == SUBMENU_SIGN {
+        node.set_has_popup(accesskit::HasPopup::Menu);
+    } else if !row.hint.is_empty() {
+        let shortcut = row.hint.trim();
+        node.set_keyboard_shortcut(shortcut);
+        node.set_description(shortcut);
+    }
+    if row.enabled {
+        node.add_action(AccessibilityAction::Focus);
+        node.add_action(AccessibilityAction::Click);
+    } else {
+        node.set_disabled();
+    }
+    node
+}
+
+/// Finish the open menu for assistive technology: bound its rows where they
+/// are painted, read a wrapped sentence as one item, and preserve the
+/// drill-in path as actual menu/menu-item ancestry.
 pub(super) fn nest_context_menu_accessibility(
     projection: &mut ModalAccessibilityProjection,
     ws: &WindowState,
@@ -2754,6 +2812,10 @@ pub(super) fn nest_context_menu_accessibility(
     if !projection.nodes.iter().any(|(id, _)| *id == current_id) {
         return;
     }
+    if let Some(panel) = overlay.context_menu.as_ref() {
+        bound_context_menu_accessibility(projection, panel, cell_h, 2);
+    }
+    join_wrapped_info_accessibility(projection, &menu.items, 2);
     for (index, item) in menu.items.iter().enumerate() {
         if matches!(item, ContextMenuItem::Submenu { .. })
             && let Some((_, node)) = projection
@@ -2780,17 +2842,7 @@ pub(super) fn nest_context_menu_accessibility(
                 continue;
             }
             let id = accessibility_modal_id(kind, index + 1);
-            let mut item = Node::new(Role::MenuItem);
-            item.set_label(row.label.clone());
-            if !row.hint.is_empty() && row.hint != SUBMENU_SIGN {
-                item.set_description(row.hint.trim().to_string());
-            }
-            if row.enabled {
-                item.add_action(AccessibilityAction::Focus);
-                item.add_action(AccessibilityAction::Click);
-            } else {
-                item.set_disabled();
-            }
+            let mut item = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
             if matches!(
                 parent.items.get(index),
                 Some(ContextMenuItem::Submenu { .. })
@@ -2809,6 +2861,7 @@ pub(super) fn nest_context_menu_accessibility(
         parent_menu.set_children(children);
         projection.nodes.push((menu_id, parent_menu));
         bound_context_menu_accessibility(projection, panel, cell_h, kind);
+        join_wrapped_info_accessibility(projection, &parent.items, kind);
         child = menu_id;
     }
     if child != current_id {
@@ -2820,7 +2873,82 @@ pub(super) fn nest_context_menu_accessibility(
     }
 }
 
-pub(super) fn bound_context_menu_accessibility(
+/// Give assistive technology a sentence the menu wrapped over several Info
+/// rows as one item: the first line's node is named with the whole sentence
+/// and covers every line, and the nodes of the lines that continue it leave
+/// the tree. A focus on one of those lines, where hovering it puts the
+/// highlight, moves to the first. Node ids stay the row index plus one, so
+/// the rows after the sentence keep theirs. Run it after the menu of `kind`
+/// is bounded.
+fn join_wrapped_info_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    items: &[ContextMenuItem],
+    kind: u64,
+) {
+    let mut first = 0;
+    while first < items.len() {
+        let ContextMenuItem::Info {
+            label,
+            continued: false,
+        } = &items[first]
+        else {
+            first += 1;
+            continue;
+        };
+        let mut sentence = label.clone();
+        let mut end = first + 1;
+        while let Some(ContextMenuItem::Info {
+            label,
+            continued: true,
+        }) = items.get(end)
+        {
+            sentence.push(' ');
+            sentence.push_str(label);
+            end += 1;
+        }
+        if end > first + 1 {
+            let lines: Vec<NodeId> = (first..end)
+                .map(|index| accessibility_modal_id(kind, index + 1))
+                .collect();
+            let shown = projection
+                .nodes
+                .iter()
+                .filter(|(id, node)| lines.contains(id) && !node.is_hidden())
+                .filter_map(|(_, node)| node.bounds())
+                .reduce(|all, line| all.union(line));
+            let continuations = &lines[1..];
+            projection
+                .nodes
+                .retain(|(id, _)| !continuations.contains(id));
+            if projection
+                .focus
+                .is_some_and(|focus| continuations.contains(&focus))
+            {
+                projection.focus = Some(lines[0]);
+            }
+            for (id, node) in &mut projection.nodes {
+                if *id == lines[0] {
+                    node.set_label(sentence.clone());
+                    if let Some(bounds) = shown {
+                        node.set_bounds(bounds);
+                        node.clear_hidden();
+                    }
+                } else if *id == accessibility_modal_id(kind, 0) {
+                    let children: Vec<NodeId> = node
+                        .children()
+                        .iter()
+                        .copied()
+                        .filter(|child| !continuations.contains(child))
+                        .collect();
+                    node.set_children(children);
+                }
+            }
+        }
+        first = end;
+    }
+}
+
+fn bound_context_menu_accessibility(
     projection: &mut ModalAccessibilityProjection,
     menu: &ContextMenu,
     cell_h: f32,
@@ -3285,6 +3413,7 @@ mod context_menu_nesting_tests {
             picker_header_height: 0.0,
             anchor,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: label.into(),
@@ -3398,6 +3527,7 @@ mod context_menu_nesting_tests {
         let mut menu = panel("Split", (40.0, 60.0));
         menu.rows[0].hint = SUBMENU_SIGN.to_string();
         menu.rows.push(ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: "Paste".into(),
@@ -3425,6 +3555,56 @@ mod context_menu_nesting_tests {
         assert_eq!(node(1).description(), None);
         assert_eq!(node(2).has_popup(), None);
         assert_eq!(node(2).description(), Some("⌘V"));
+    }
+
+    /// Both namings of a toggle row, whatever host runs the test: with the
+    /// marker kept (macOS, where it is the only spoken state) and without it.
+    /// The role and toggled state are the same either way, and a plain row's
+    /// name never changes.
+    #[test]
+    fn a_toggle_row_keeps_its_marker_in_the_name_only_when_asked() {
+        use kettle_render::MenuToggle;
+        assert_eq!(MENU_TOGGLE_MARK_IN_NAME, cfg!(target_os = "macos"));
+        for (toggle, role, painted, plain) in [
+            (
+                Some(MenuToggle::Check(true)),
+                Role::MenuItemCheckBox,
+                "✓ Read only",
+                "Read only",
+            ),
+            (
+                Some(MenuToggle::Check(false)),
+                Role::MenuItemCheckBox,
+                "  Read only",
+                "Read only",
+            ),
+            (
+                Some(MenuToggle::Radio(true)),
+                Role::MenuItemRadio,
+                "● Bell visual flash",
+                "Bell visual flash",
+            ),
+            (
+                Some(MenuToggle::Radio(false)),
+                Role::MenuItemRadio,
+                "○ Bell off",
+                "Bell off",
+            ),
+            (None, Role::MenuItem, "Copy", "Copy"),
+        ] {
+            let mut row = panel(painted, (40.0, 60.0)).rows.remove(0);
+            row.toggle = toggle;
+            for (mark_in_name, name) in [(true, painted), (false, plain)] {
+                let node = context_menu_item_node(&row, mark_in_name);
+                assert_eq!(node.role(), role, "{painted:?}");
+                assert_eq!(node.label(), Some(name), "{painted:?}, {mark_in_name}");
+                assert_eq!(
+                    node.toggled(),
+                    toggle.map(|toggle| accesskit::Toggled::from(toggle.is_on())),
+                    "{painted:?}"
+                );
+            }
+        }
     }
 
     #[test]
