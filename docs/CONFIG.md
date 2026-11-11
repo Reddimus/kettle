@@ -766,9 +766,10 @@ filter every bundled theme by name, or move through them with the arrows, and
 the window previews the selected theme. Enter keeps it and writes it to the
 config file; Esc restores the theme you started with. With nothing typed it
 lists the current theme's appearance first, in the same look order, and the
-other appearance after it, and each row says whether its theme is dark or
-light and shows a strip of its colours. The command palette lists it as "Choose theme…" and the right-click
-menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
+other appearance after it, and each row says whether its theme is dark or light
+and shows a strip of its colours. The command palette lists it as "Choose
+theme…" and the right-click menu as "Theme…", and Enter or a click on the
+Settings Theme row opens it.
 
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).

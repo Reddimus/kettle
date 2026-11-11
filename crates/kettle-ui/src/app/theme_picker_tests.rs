@@ -81,8 +81,10 @@ fn rows_tick_the_opening_theme_and_name_their_appearance() {
     let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
     assert!(list.rows.len() > 1);
     for row in &list.rows {
-        let appearance = row.hint.strip_prefix("✓ ").unwrap_or(&row.hint);
-        assert_eq!(row.hint.starts_with("✓ "), row.label == "TokyoNight Night");
+        // Hints are padded on the left to one width (the swatch column).
+        let hint = row.hint.trim_start();
+        let appearance = hint.strip_prefix("✓ ").unwrap_or(hint);
+        assert_eq!(hint.starts_with("✓ "), row.label == "TokyoNight Night");
         let expected = if Theme::by_name(&row.label).is_dark() {
             "dark"
         } else {
@@ -95,7 +97,7 @@ fn rows_tick_the_opening_theme_and_name_their_appearance() {
         es.rows
             .iter()
             .find(|row| row.label == name)
-            .map(|row| row.hint.as_str())
+            .map(|row| row.hint.trim_start())
     };
     assert_eq!(hint("TokyoNight Night"), Some("✓ oscuro"));
     assert_eq!(hint("TokyoNight Day"), Some("claro"));
@@ -877,30 +879,51 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
         }
     }
 
-    // The real narrow window: a row keeps its swatches exactly when its full
-    // measure fits the panel, and names that fit without them stay whole.
+    // The real windows: the strip is one column, so either every row keeps it
+    // (all fit) or none does; names that fit without it stay whole.
     let originals = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
     let (mut kept, mut dropped) = (0, 0);
-    for cell in [(8.0, 16.0), (10.0, 20.0)] {
+    for (surface, cell) in [
+        ((1280.0, 820.0), (8.0, 16.0)),
+        ((640.0, 820.0), (8.0, 16.0)),
+        ((640.0, 820.0), (10.0, 20.0)),
+    ] {
         let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
-        let menu =
-            picker_overlay_context_menu([None, Some(list), None, None], (640.0, 820.0), cell, 0.0)
-                .expect("a narrow window fits the picker");
+        let menu = picker_overlay_context_menu([None, Some(list), None, None], surface, cell, 0.0)
+            .expect("the window fits the picker");
         let columns = kettle_render::menu::panel_columns(menu.panel_w_clamped, cell.0);
+        let all_fit = originals
+            .rows
+            .iter()
+            .all(|row| kettle_render::menu_row_chars(row) <= columns);
         for (row, original) in menu.rows.iter().zip(&originals.rows) {
-            let fits = kettle_render::menu_row_chars(original) <= columns;
-            assert_eq!(row.swatches.is_some(), fits, "{}", original.label);
-            if fits {
-                kept += 1
-            } else {
-                dropped += 1
-            }
+            assert_eq!(row.swatches.is_some(), all_fit, "{}", original.label);
             if original.label.width() + original.hint.width() + 2 <= columns {
                 assert_eq!(row.label, original.label);
             }
         }
+        if all_fit { kept += 1 } else { dropped += 1 }
     }
     assert!(kept > 0 && dropped > 0, "{kept} kept, {dropped} dropped");
+}
+
+/// The hints of theme rows share one width, so every row's strip starts in the
+/// same column whatever its tick mark or appearance word.
+#[test]
+fn theme_row_strips_form_one_column() {
+    use unicode_width::UnicodeWidthStr as _;
+
+    for tr in [&EN, &ES] {
+        let list = theme_picker_list("", 0, "TokyoNight Night", tr);
+        let widths: std::collections::BTreeSet<_> =
+            list.rows.iter().map(|row| row.hint.width()).collect();
+        assert_eq!(widths.len(), 1, "{widths:?}");
+        assert!(
+            list.rows
+                .iter()
+                .any(|row| row.hint.trim_start().starts_with('✓'))
+        );
+    }
 }
 
 /// Swatches are decorative: the picker's options read the same names and

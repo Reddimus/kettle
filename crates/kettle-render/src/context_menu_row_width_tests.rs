@@ -503,7 +503,7 @@ fn only_visible_rows_with_swatches_paint_them() {
     for (surface, ((x, y, w, h), color)) in surfaces.iter().zip(&painted) {
         assert_eq!((surface.pos, surface.size), ([*x, *y], [*w, *h]));
         assert_eq!(surface.fill, unit(*color, 1.0));
-        assert_eq!(surface.stroke, unit(theme.palette[8], 0.65));
+        assert_eq!(surface.stroke, unit(theme.foreground, 0.45));
         assert_eq!(surface.params[1], 1.0, "a 1 px outline");
     }
 }

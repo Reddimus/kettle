@@ -187,7 +187,9 @@ pub(crate) fn menu_swatch_surfaces<'a>(
                 pos: [x, y],
                 size: [w, h],
                 fill: rgba(color, 1.0),
-                stroke: rgba(theme.palette[8], 0.65),
+                // The foreground always contrasts with the menu surface; palette 8
+                // equals the background in some themes (Solarized Dark).
+                stroke: rgba(theme.foreground, 0.45),
                 params: [(w * 0.25).min(3.0), 1.0, 0.0, 0.0],
             },
         )

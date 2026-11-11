@@ -326,7 +326,7 @@ pub(super) fn theme_picker_list(
 ) -> PickerList {
     use kettle_i18n::Text;
     let mut swatches = theme_swatch_cache();
-    let rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on, tr)
+    let mut rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on, tr)
         .into_iter()
         .map(|(name, dark)| {
             let appearance = tr.text(if dark {
@@ -353,6 +353,16 @@ pub(super) fn theme_picker_list(
             }
         })
         .collect();
+    // Each strip sits just left of its row's hint, and the hints differ in
+    // width ("dark", "✓ light", Spanish "oscuro"): pad them to one width so
+    // the strips form a single column. Measuring and painting both read the
+    // padded hint, so they stay in step.
+    use unicode_width::UnicodeWidthStr as _;
+    let hint_width = rows.iter().map(|row| row.hint.width()).max().unwrap_or(0);
+    for row in &mut rows {
+        let pad = hint_width - row.hint.width();
+        row.hint.insert_str(0, &" ".repeat(pad));
+    }
     if rows.is_empty() {
         return PickerList {
             rows: vec![ContextMenuRow {
@@ -606,6 +616,16 @@ pub(super) fn picker_context_menu(
     let (x, y, width, height) = geometry.rows;
     let row_height = cell.1 + kettle_render::menu::ROW_PAD;
     let max_columns = kettle_render::menu::panel_columns(width, cell.0);
+    // The strip is one column: when any row is too narrow for it, no row keeps it.
+    if list
+        .rows
+        .iter()
+        .any(|row| row.swatches.is_some() && kettle_render::menu_row_chars(row) > max_columns)
+    {
+        for row in &mut list.rows {
+            row.swatches = None;
+        }
+    }
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
