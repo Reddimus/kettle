@@ -324,6 +324,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
+  Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing
+  was left on, so under the "Prefer tabs when opening documents" system
+  setting (by default, while in full screen) a new Kettle window, such as a
+  tab moved to a new window, could open as an AppKit tab of another Kettle
+  window, and AppKit could add its own tab items, a second Move Tab to New
+  Window among them, to the Window menu.
+
 - A screen of characters that no installed font covers no longer freezes the
   window for seconds, and terminal queries such as cursor-position reports
   are answered promptly while it draws. Finding no font for such a character
