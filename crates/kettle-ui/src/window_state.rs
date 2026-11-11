@@ -2637,11 +2637,12 @@ mod surface_caps_tests {
     use kettle_config::{BackgroundType, Config};
 
     fn config(opacity: f32, blur: bool) -> Config {
-        let mut cfg = Config::default();
-        cfg.background_type = BackgroundType::Solid;
-        cfg.background_opacity = opacity;
-        cfg.window_blur = blur;
-        cfg
+        Config {
+            background_type: BackgroundType::Solid,
+            background_opacity: opacity,
+            window_blur: blur,
+            ..Config::default()
+        }
     }
 
     #[test]
