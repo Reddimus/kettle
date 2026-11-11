@@ -557,10 +557,11 @@ fn finished_tree(
 
 /// Hovering a line of the wrapped Shift hint other than its first
 /// highlights that line's row, whose node the join took out of the tree. The
-/// tree a screen reader is handed must still name a focus it holds: AccessKit
-/// panics on one it does not, with assistive technology running. This holds
-/// for the open menu and once the menu is a parent panel and the hover
-/// leaves the submenu for it.
+/// focus moves to the sentence, the item that holds that line, and the tree a
+/// screen reader is handed names a focus it holds: AccessKit panics on one it
+/// does not, with assistive technology running. This holds for the open menu
+/// and once the menu is a parent panel and the hover leaves the submenu for
+/// it.
 #[test]
 fn hovering_a_continued_line_of_the_hint_keeps_the_tree_valid() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
@@ -617,7 +618,18 @@ fn hovering_a_continued_line_of_the_hint_keeps_the_tree_valid() {
                 let mut projection =
                     modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
                 nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+                let first = accessibility_modal_id(2, 1);
+                assert_eq!(
+                    projection.focus,
+                    Some(first),
+                    "{language:?} line {hovered} from_parent {from_parent}: the sentence takes the focus"
+                );
+                assert!(
+                    projection.nodes.iter().any(|(id, _)| *id == first),
+                    "{language:?}: the sentence is projected"
+                );
                 let update = finished_tree(projection);
+                assert_eq!(update.focus, first);
                 assert!(
                     update.nodes.iter().any(|(id, _)| *id == update.focus),
                     "{language:?} line {hovered} from_parent {from_parent}: focus {:?} is not in the tree",

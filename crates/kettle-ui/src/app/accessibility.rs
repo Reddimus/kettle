@@ -2843,8 +2843,10 @@ pub(super) fn nest_context_menu_accessibility(
 /// Give assistive technology a sentence the menu wrapped over several Info
 /// rows as one item: the first line's node is named with the whole sentence
 /// and covers every line, and the nodes of the lines that continue it leave
-/// the tree. Node ids stay the row index plus one, so the rows after the
-/// sentence keep theirs. Run it after the menu of `kind` is bounded.
+/// the tree. A focus on one of those lines, where hovering it puts the
+/// highlight, moves to the first. Node ids stay the row index plus one, so
+/// the rows after the sentence keep theirs. Run it after the menu of `kind`
+/// is bounded.
 fn join_wrapped_info_accessibility(
     projection: &mut ModalAccessibilityProjection,
     items: &[ContextMenuItem],
@@ -2885,6 +2887,12 @@ fn join_wrapped_info_accessibility(
             projection
                 .nodes
                 .retain(|(id, _)| !continuations.contains(id));
+            if projection
+                .focus
+                .is_some_and(|focus| continuations.contains(&focus))
+            {
+                projection.focus = Some(lines[0]);
+            }
             for (id, node) in &mut projection.nodes {
                 if *id == lines[0] {
                     node.set_label(sentence.clone());
