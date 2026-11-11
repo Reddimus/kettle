@@ -25,7 +25,7 @@ The states pin these visible arrangements:
 | --- | --- |
 | `default` | Fixture text, prompt, and normal window |
 | `palette-empty` | Initial command rows and shortcut hints |
-| `palette-query` | Filtered split commands |
+| `palette-query` | Commands matching `split`, including fuzzy matches such as the English close-confirmation preference |
 | `palette-nomatch` | Empty-result message with the query retained |
 | `settings` | Appearance controls and responsive navigation |
 | `search-matches` | Match highlight, count and search controls |

@@ -394,10 +394,11 @@ fn preferences_radios_and_check_boxes_carry_their_state() {
     assert_eq!(
         radios(1),
         [
+            spoken("● Confirm close: always", "Confirm close: always", true),
             spoken(
-                "● Confirm close: always, including titlebar",
-                "Confirm close: always, including titlebar",
-                true
+                "○ Confirm close: running programs or multiple terminals",
+                "Confirm close: running programs or multiple terminals",
+                false
             ),
             spoken(
                 "○ Confirm close: multiple terminals",
@@ -450,9 +451,10 @@ fn preferences_radios_and_check_boxes_carry_their_state() {
         ("○ Scrollbar always", A::SetScrollbarAlways),
         ("○ Scrollbar auto", A::SetScrollbarAuto),
         ("● Scrollbar hidden", A::SetScrollbarNever),
+        ("● Confirm close: always", A::SetAskBeforeClosingAlways),
         (
-            "● Confirm close: always, including titlebar",
-            A::SetAskBeforeClosingAlways,
+            "○ Confirm close: running programs or multiple terminals",
+            A::SetAskBeforeClosingBusyOrMultiple,
         ),
         (
             "○ Confirm close: multiple terminals",
@@ -485,6 +487,55 @@ fn preferences_radios_and_check_boxes_carry_their_state() {
         .collect();
     assert_eq!(menu_items.len(), plain);
     assert!(menu_items.iter().all(|(_, node)| node.toggled().is_none()));
+}
+
+/// The close-confirmation group offers all four modes as radio items, from
+/// the most cautious to none, and whichever mode is configured, that one
+/// radio alone is on.
+#[test]
+fn every_close_confirmation_mode_is_a_radio_that_is_on_when_configured() {
+    use accesskit::Role;
+    use kettle_config::AskBeforeClosing;
+    let modes = [
+        AskBeforeClosing::Always,
+        AskBeforeClosing::BusyOrMultiple,
+        AskBeforeClosing::MultipleTerminals,
+        AskBeforeClosing::Never,
+    ];
+    let names = [
+        "Confirm close: always",
+        "Confirm close: running programs or multiple terminals",
+        "Confirm close: multiple terminals",
+        "Confirm close: never",
+    ];
+    for (selected, mode) in modes.into_iter().enumerate() {
+        let cfg = kettle_config::Config {
+            ask_before_closing: mode,
+            ..kettle_config::Config::default()
+        };
+        let ContextMenuItem::Submenu { items, .. } = super::preferences_submenu(&cfg, EN) else {
+            panic!("Preferences is a submenu");
+        };
+        let ContextMenuItem::Submenu { items: group, .. } = &items[1] else {
+            panic!("Preferences row 1 is not the close-confirmation group");
+        };
+        let nodes = menu_item_nodes(menu_panel(group, ""), &EN);
+        assert_eq!(nodes.len(), names.len(), "{mode:?}");
+        let expected: Vec<SpokenRow> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let on = index == selected;
+                let painted = format!("{}{name}", if on { "● " } else { "○ " });
+                spoken(&painted, name, on)
+            })
+            .collect();
+        assert_eq!(
+            spoken_rows(nodes, Role::MenuItemRadio),
+            expected,
+            "{mode:?}"
+        );
+    }
 }
 
 /// A row's shortcut is AccessKit's keyboard shortcut and stays its spoken
