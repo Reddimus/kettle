@@ -3170,10 +3170,8 @@ pub(super) fn grouped_terminal_menu(
             action: Action::SelectAll,
             ..
         } => 3,
-        ContextMenuItem::Item {
-            action: Action::HintMode,
-            ..
-        } => 4,
+        // Find and Clear Scrollback close the block, after the hints and
+        // any media or preview rows, which keep their old order.
         ContextMenuItem::Item {
             action: Action::StartSearch,
             ..
@@ -3182,7 +3180,7 @@ pub(super) fn grouped_terminal_menu(
             action: Action::ClearHistory,
             ..
         } => 6,
-        _ => 7,
+        _ => 4,
     });
     // A divider between the rows about the link under the pointer and the
     // terminal's own clipboard rows.

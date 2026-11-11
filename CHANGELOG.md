@@ -123,9 +123,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- The terminal's right-click menu offers Find… and Clear Scrollback directly,
-  next to Copy, Paste and Select All, instead of only in the palette and the
-  Pane submenu.
+- The terminal's right-click menu offers Find… and Clear Scrollback, next to
+  Copy, Paste and Select All. Before, they were only in the palette and the key
+  bindings.
 - Tab strips and menus are easier to read. Inactive tab titles and resting
   tab close buttons in a top or bottom tab bar, and menu shortcut hints, reach
   7:1 contrast where the theme's own text does (they stopped at 4.5:1); tab
