@@ -3110,8 +3110,9 @@ cargo test -j 2 --locked --offline -p kettle-ui -p kettle-render --no-fail-fast
 ### macOS menu bar regression coverage
 
 `cargo test -p kettle-ui macos_menu` runs the pure menu model on every platform:
-English and Spanish structure, translated titles and separators, action mapping,
-Cmd-only hints following remaps and unbinds, and focused-window availability.
+English and Spanish structure, translated titles and separators, action mapping
+(the Window menu's Rename Tab… and Move Tab to New Window among it, the move
+rows off for a lone tab or `detachable-tabs = false`), Cmd-only hints following remaps and unbinds, and focused-window availability.
 `cargo test -p kettle-ui menu_paste_availability` exercises writable local and
 cross-window broadcast recipients, read-only focus, and group exclusions using
 the same recipient selection as paste delivery.

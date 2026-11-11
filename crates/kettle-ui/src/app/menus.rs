@@ -421,7 +421,8 @@ impl App {
                 action: Action::EditWindowTitle,
                 enabled: true,
             },
-            // The same editors as a double-click on a tab or a pane titlebar.
+            // The same inline editors the edit_*_title actions open; no
+            // double-click opens them.
             ContextMenuItem::Item {
                 label: tr.text(T::MenuSetTabTitle),
                 action: Action::EditTabTitle,

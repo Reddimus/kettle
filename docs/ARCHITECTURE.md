@@ -298,8 +298,9 @@ title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
-Edit, View and Window menus, actions, separators, enabled state and live Cmd
-shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+Edit, View and Window menus (the Window menu carries the tab commands: next,
+previous, rename, move left, right and to a new window), actions, separators,
+enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. Menu text follows the configured
 language on reload; other UI surfaces still require a restart. The root NSMenu

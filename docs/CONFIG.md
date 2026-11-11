@@ -712,7 +712,8 @@ tabs can move live between windows), `close_window`,
 into its own window LIVE — running programs keep running; dragging a tab
 past the tab bar does the same with the mouse, Chromium-style: the live
 window rides the pointer, and dropping it on another
-kettle window's tab bar merges it there), `move_tab_to_window` (choose another
+kettle window's tab bar merges it there; also in the command palette and,
+with Move Tab Left / Right, in the macOS Window menu), `move_tab_to_window` (choose another
 window in this process without restarting the tab; also available in the
 command palette, including on Wayland), `open_settings`
 (`settings` — the Ctrl+, overlay), `layout_picker`, `about` (also
@@ -772,7 +773,10 @@ theme…" and the right-click menu as "Theme…", and Enter or a click on the
 Settings Theme row opens it.
 
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
-inline rename overlay for the OS window / active tab / focused pane).
+inline rename overlay for the OS window / active tab / focused pane). None has
+a default key. `edit_tab_title` is also "Rename tab…" in the command palette
+and Rename Tab… in the macOS Window menu; all three are in the right-click
+menu as Set Window / Tab / Pane Title….
 
 **Media**: `open_media_shelf` opens the focused pane's newest shelf item,
 or closes its open preview. Clicking an inline card opens that item. By
