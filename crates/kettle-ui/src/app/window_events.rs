@@ -36,9 +36,12 @@ impl App {
                 //
                 // A one-pane window has no such false positive under
                 // `busy-or-multiple`: `confirm_close` asks the PTY whether a
-                // program other than the pane's shell owns the terminal, so the
-                // gesture asks exactly when a job would die, as Terminal.app
-                // and iTerm2 do on their close button.
+                // program other than an idle interactive shell owns the
+                // terminal, either a job the shell started or the pane's own
+                // program when that is not an interactive shell (a pane
+                // started as `vim` or `ssh`), so the gesture asks exactly when
+                // a program would die, as Terminal.app and iTerm2 do on their
+                // close button.
                 // `titlebar_close_consults_policy` holds that rule. The keybind
                 // close actions (`ClosePane`, `CloseTab`, `CloseWindow`) are
                 // Kettle commands and keep the full policy. Ask BEFORE any of

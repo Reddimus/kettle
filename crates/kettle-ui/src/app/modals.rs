@@ -2787,7 +2787,9 @@ pub(super) fn close_needs_prompt(
 /// integration busy and would put a question on nearly every such window.
 /// A one-pane window under `busy-or-multiple` is decided by the PTY in
 /// [`close_needs_prompt`], which has no such false positive, so the gesture
-/// asks exactly when a program other than the pane's shell would die.
+/// asks exactly when a program would die: a job the pane's shell started, or
+/// the pane's own program when that is not an interactive shell (a pane
+/// started as `vim` or `ssh`).
 pub(super) fn titlebar_close_consults_policy(
     policy: kettle_config::AskBeforeClosing,
     scope: usize,

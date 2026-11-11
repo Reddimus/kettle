@@ -386,7 +386,7 @@ context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: P
 context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker. Ask before every close that would end a running program, from any gesture, including the window's titlebar close button."
 
 [messages.menu_pref_confirm_busy_or_multiple]
-context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker. The default: ask before closing when a program other than the shell is running in a single pane, or when several panes would close."
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker. The default: ask before closing a single pane when a program is running in it, either one the shell started or the pane's own program when that is not an interactive shell (a pane started as vim or ssh), or when several panes would close."
 
 [messages.menu_pref_confirm_multiple]
 context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker. Ask only when several panes would close."
