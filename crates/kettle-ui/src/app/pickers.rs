@@ -148,6 +148,7 @@ pub(super) fn command_picker_list(
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
+                swatches: None,
                 matched_chars: kettle_config::palette::matched_char_positions(
                     query,
                     label.shown(tr),
@@ -168,6 +169,7 @@ pub(super) fn command_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: tr
                     .text(kettle_i18n::Text::PickerNoMatchingCommand)
@@ -196,6 +198,7 @@ pub(super) fn layout_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            swatches: None,
             matched_chars: None,
             label: layouts[index].clone(),
             separator: false,
@@ -211,6 +214,7 @@ pub(super) fn layout_picker_list(
         };
         PickerList {
             rows: vec![ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: tr.text(label).to_string(),
                 separator: false,
@@ -279,8 +283,41 @@ pub(super) fn theme_picker_appearance_prefix(key: &str, tr: &kettle_i18n::Transl
     format!("  ◐ {} ", tr.text(label))
 }
 
-/// The theme picker's rows. The theme it opened on is ticked, and each row
-/// says whether it is dark or light.
+type ThemeSwatches = [kettle_config::Rgb; kettle_render::menu::SWATCH_COUNT];
+
+/// Picker swatches of every bundled theme the picker has listed, by name.
+/// Each theme is parsed once per process: the picker rebuilds all of its rows
+/// on every frame, and the list holds hundreds of themes.
+fn theme_swatch_cache()
+-> std::sync::MutexGuard<'static, std::collections::HashMap<&'static str, ThemeSwatches>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, ThemeSwatches>>,
+    > = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A bundled theme's picker swatches: its background and foreground, then
+/// ANSI red, green, yellow, blue, magenta and cyan (palette 1 to 6). These are
+/// the theme's own colours, before any colour overrides in the user's config.
+pub(super) fn theme_swatches(theme: &kettle_config::Theme) -> ThemeSwatches {
+    let p = theme.palette;
+    [
+        theme.background,
+        theme.foreground,
+        p[1],
+        p[2],
+        p[3],
+        p[4],
+        p[5],
+        p[6],
+    ]
+}
+
+/// The theme picker's rows. The theme it opened on is ticked, each row
+/// says whether it is dark or light, and each shows the theme's colours.
 pub(super) fn theme_picker_list(
     query: &str,
     selected: usize,
@@ -288,6 +325,7 @@ pub(super) fn theme_picker_list(
     tr: &kettle_i18n::Translator,
 ) -> PickerList {
     use kettle_i18n::Text;
+    let mut swatches = theme_swatch_cache();
     let rows: Vec<ContextMenuRow> = theme_picker_matches(query, opened_on, tr)
         .into_iter()
         .map(|(name, dark)| {
@@ -302,6 +340,11 @@ pub(super) fn theme_picker_list(
                 ""
             };
             ContextMenuRow {
+                swatches: Some(
+                    *swatches
+                        .entry(name)
+                        .or_insert_with(|| theme_swatches(&kettle_config::Theme::by_name(name))),
+                ),
                 matched_chars: None,
                 label: tr.theme_name(name).to_string(),
                 separator: false,
@@ -313,6 +356,7 @@ pub(super) fn theme_picker_list(
     if rows.is_empty() {
         return PickerList {
             rows: vec![ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: tr.text(Text::PickerNoMatchingTheme).to_string(),
                 separator: false,
@@ -443,6 +487,7 @@ pub(super) fn ssh_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            swatches: None,
             matched_chars: None,
             label: hosts[index].0.clone(),
             separator: false,
@@ -453,6 +498,7 @@ pub(super) fn ssh_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: tr
                     .text(if hosts.is_empty() {

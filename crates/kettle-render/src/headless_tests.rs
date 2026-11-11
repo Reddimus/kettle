@@ -5671,6 +5671,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         return;
     };
     let row = |label: &str, hint: &str, enabled| ContextMenuRow {
+        swatches: None,
         matched_chars: None,
         label: label.into(),
         separator: false,
@@ -5767,6 +5768,70 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         disabled + 1.0 < enabled,
         "disabled hint {disabled:.2}:1 vs enabled {enabled:.2}:1"
     );
+}
+
+/// A row's swatches reach the frame in their own colours, above the selected
+/// row's tint, and a row without them paints none.
+#[test]
+fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 200) else {
+        eprintln!("menu swatch paint check skipped: no GPU adapter");
+        return;
+    };
+    let colors: [Rgb; menu::SWATCH_COUNT] = [
+        Rgb::new(255, 0, 255),
+        Rgb::new(0, 255, 0),
+        Rgb::new(255, 128, 0),
+        Rgb::new(0, 128, 255),
+        Rgb::new(255, 255, 0),
+        Rgb::new(0, 255, 255),
+        Rgb::new(255, 0, 0),
+        Rgb::new(128, 0, 255),
+    ];
+    let menu = |swatches| ContextMenu {
+        picker_header_height: 0.0,
+        anchor: (40.0, 20.0),
+        rows: ["Dracula", "Nord"]
+            .into_iter()
+            .map(|label| ContextMenuRow {
+                swatches,
+                matched_chars: None,
+                label: label.into(),
+                separator: false,
+                enabled: true,
+                hint: "dark".into(),
+            })
+            .collect(),
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 360.0,
+        panel_h_clamped: 0.0,
+        a11y_label: None,
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let painted =
+        overlays::menu_swatch_rects(&menu(Some(colors)), renderer.cell_w, renderer.cell_h);
+    assert_eq!(painted.len(), 2 * menu::SWATCH_COUNT);
+    for swatches in [Some(colors), None] {
+        let overlay = Overlay {
+            context_menu: Some(menu(swatches)),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 200)], &overlay);
+        for ((x, y, w, h), color) in &painted {
+            let p = frame.get_pixel((x + w * 0.5) as u32, (y + h * 0.5) as u32);
+            let close = [color.r, color.g, color.b]
+                .into_iter()
+                .zip(p.0)
+                .all(|(want, got)| want.abs_diff(got) <= 3);
+            assert_eq!(
+                close,
+                swatches.is_some(),
+                "swatch {color:?} at ({x}, {y}) painted {p:?}"
+            );
+        }
+    }
 }
 
 #[test]

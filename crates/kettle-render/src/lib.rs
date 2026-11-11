@@ -686,6 +686,8 @@ pub struct Renderer {
     rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
     toast_surfaces: rounded_surface::RoundedSurfacePipeline,
     picker_surfaces: rounded_surface::RoundedSurfacePipeline,
+    /// Menu row swatches, drawn above the row highlight and below row text.
+    menu_swatch_surfaces: rounded_surface::RoundedSurfacePipeline,
     transport_surface_count: u32,
     settings_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
@@ -4606,7 +4608,7 @@ impl Renderer {
                         unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
                     menu_areas.push(TextArea {
                         buffer: &self.context_menu_hint_buffers[menu_row_base + i],
-                        left: (ax + panel_w - 16.0 - hint_w).max(ax + 16.0),
+                        left: overlays::menu_hint_left(ax, panel_w, hint_w),
                         top: row_y + 6.0,
                         scale: 1.0,
                         bounds,
@@ -5571,6 +5573,21 @@ impl Renderer {
             picker_surfaces
                 .as_ref()
                 .map_or(&[][..], |surfaces| &surfaces[..]),
+        );
+        let menu_swatches = overlays::menu_swatch_surfaces(
+            overlay
+                .context_menu_parents
+                .iter()
+                .chain(overlay.context_menu.iter()),
+            theme,
+            cw,
+            ch,
+        );
+        self.menu_swatch_surfaces.upload(
+            &self.gpu.device,
+            &self.gpu.queue,
+            [sw, sh],
+            &menu_swatches,
         );
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);

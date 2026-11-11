@@ -757,3 +757,190 @@ fn system_switch_rebases_picker_escape_without_changing_query() {
     assert_eq!(restore.0, baseline.0);
     assert_eq!(restore.1.background, baseline.1.background);
 }
+
+/// Each theme row's swatches are that theme's background, foreground and
+/// ANSI red through cyan, in that order; later builds reuse the same colours.
+#[test]
+fn theme_rows_show_the_themes_own_colours() {
+    let hex =
+        |value: u32| kettle_config::Rgb::new((value >> 16) as u8, (value >> 8) as u8, value as u8);
+    let dracula = [
+        0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xbd93f9, 0xff79c6, 0x8be9fd,
+    ]
+    .map(hex);
+    for _ in 0..2 {
+        let list = theme_picker_list("dracula", 0, "TokyoNight Night", &EN);
+        assert_eq!(list.rows[0].label, "Dracula");
+        assert_eq!(list.rows[0].swatches, Some(dracula));
+        for row in &list.rows {
+            let theme = Theme::by_name(&row.label);
+            let p = theme.palette;
+            assert_eq!(
+                row.swatches,
+                Some([
+                    theme.background,
+                    theme.foreground,
+                    p[1],
+                    p[2],
+                    p[3],
+                    p[4],
+                    p[5],
+                    p[6]
+                ]),
+                "{}",
+                row.label
+            );
+        }
+    }
+    let every = theme_picker_list("", 0, "TokyoNight Night", &EN);
+    assert_eq!(every.rows.len(), Theme::list().len());
+    assert!(every.rows.iter().all(|row| row.swatches.is_some()));
+}
+
+/// Only theme rows carry swatches: the other pickers, the theme picker's
+/// no-match row and every other row the app builds have none.
+#[test]
+fn rows_other_than_themes_carry_no_swatches() {
+    let layouts = ["dev".to_string()];
+    let hosts = [("gpu".to_string(), "dev@gpu".to_string())];
+    let lists = [
+        super::command_picker_list("", 0, &kettle_config::keybinds::defaults(), &EN, None, &[]),
+        super::command_picker_list(
+            "zzqqxxjj",
+            0,
+            &kettle_config::keybinds::defaults(),
+            &EN,
+            None,
+            &[],
+        ),
+        super::layout_picker_list("", 0, &layouts, &EN),
+        super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),
+        super::ssh_picker_list("", 0, &hosts, &EN),
+        super::ssh_picker_list("", 0, &[], &EN),
+        theme_picker_list("zzqqxxjj", 0, "TokyoNight Night", &EN),
+    ];
+    for list in lists {
+        assert!(!list.rows.is_empty());
+        for row in &list.rows {
+            assert_eq!(row.swatches, None, "{}", row.label);
+        }
+    }
+    // Context menus, submenus and accessibility rows are built in place; the
+    // theme picker's list is the one place that fills the field.
+    let src = production_source();
+    assert_eq!(src.matches("swatches: Some(").count(), 1);
+    let picker = src
+        .split("fn theme_picker_list(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("theme_picker_list's body");
+    assert!(picker.contains("swatches: Some("));
+}
+
+/// A narrow picker drops a row's swatches before it shortens the theme name
+/// or its hint, so the row then shows (and a screen reader reads) exactly
+/// what it would without swatches. The fit keeps them only while the whole
+/// row, swatches included, fits the width the renderer measures.
+#[test]
+fn a_narrow_picker_drops_swatches_before_the_name() {
+    use unicode_width::UnicodeWidthStr as _;
+
+    let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
+    for template in &list.rows {
+        let row = || kettle_render::ContextMenuRow {
+            swatches: template.swatches,
+            matched_chars: None,
+            label: template.label.clone(),
+            separator: false,
+            enabled: true,
+            hint: template.hint.clone(),
+        };
+        let full = kettle_render::menu_row_chars(&row());
+        let bare = full - kettle_render::menu::swatch_columns();
+        assert_eq!(bare, template.label.width() + template.hint.width() + 2);
+        for columns in 0..=full + 2 {
+            let mut fitted = row();
+            super::fit_context_menu_row(&mut fitted, columns);
+            let mut plain = row();
+            plain.swatches = None;
+            super::fit_context_menu_row(&mut plain, columns);
+            assert_eq!(fitted.swatches.is_some(), columns >= full, "{columns}");
+            assert_eq!(
+                (&fitted.label, &fitted.hint),
+                (&plain.label, &plain.hint),
+                "{columns}"
+            );
+            if columns >= bare {
+                assert_eq!(fitted.label, template.label, "{columns}: name kept whole");
+                assert_eq!(fitted.hint, template.hint, "{columns}");
+            }
+        }
+    }
+
+    // The real narrow window: a row keeps its swatches exactly when its full
+    // measure fits the panel, and names that fit without them stay whole.
+    let originals = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
+    let (mut kept, mut dropped) = (0, 0);
+    for cell in [(8.0, 16.0), (10.0, 20.0)] {
+        let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
+        let menu =
+            picker_overlay_context_menu([None, Some(list), None, None], (640.0, 820.0), cell, 0.0)
+                .expect("a narrow window fits the picker");
+        let columns = kettle_render::menu::panel_columns(menu.panel_w_clamped, cell.0);
+        for (row, original) in menu.rows.iter().zip(&originals.rows) {
+            let fits = kettle_render::menu_row_chars(original) <= columns;
+            assert_eq!(row.swatches.is_some(), fits, "{}", original.label);
+            if fits {
+                kept += 1
+            } else {
+                dropped += 1
+            }
+            if original.label.width() + original.hint.width() + 2 <= columns {
+                assert_eq!(row.label, original.label);
+            }
+        }
+    }
+    assert!(kept > 0 && dropped > 0, "{kept} kept, {dropped} dropped");
+}
+
+/// Swatches are decorative: the picker's options read the same names and
+/// descriptions with or without them, at any window width.
+#[test]
+fn swatches_leave_the_accessible_rows_unchanged() {
+    for surface in [(1280.0, 820.0), (640.0, 820.0), (360.0, 400.0)] {
+        let read = |strip: bool| {
+            let mut list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
+            if strip {
+                for row in &mut list.rows {
+                    row.swatches = None;
+                }
+            }
+            let overlay = kettle_render::Overlay {
+                theme_picker_query: Some("tokyonight".into()),
+                context_menu: picker_overlay_context_menu(
+                    [None, Some(list), None, None],
+                    surface,
+                    (8.0, 16.0),
+                    0.0,
+                ),
+                ..kettle_render::Overlay::default()
+            };
+            modal_accessibility_projection(&overlay, surface, (8.0, 16.0), 1.0, &EN)
+                .nodes
+                .iter()
+                .map(|(_, node)| {
+                    (
+                        node.label().map(str::to_string),
+                        node.description().map(str::to_string),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let with = read(false);
+        assert!(
+            with.iter()
+                .any(|(label, _)| label.as_deref() == Some("TokyoNight Night"))
+        );
+        assert_eq!(with, read(true), "{surface:?}");
+    }
+}

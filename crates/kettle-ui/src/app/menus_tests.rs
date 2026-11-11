@@ -1180,6 +1180,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
     use unicode_width::UnicodeWidthStr as _;
 
     let mut row = ContextMenuRow {
+        swatches: None,
         matched_chars: None,
         label: "Visible label".to_string(),
         separator: false,

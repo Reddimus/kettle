@@ -4105,7 +4105,10 @@ non-regression claim.
   shared ownership because mlua's `IntoLuaMulti` consumes the
   argument); `ContextMenuRow.label` clones the visible row text
   each frame the menu is open (~533 clones/frame in the worst
-  case — the theme picker with nothing typed). The menu allocation is bounded
+  case — the theme picker with nothing typed). Theme rows also carry a
+  fixed-size swatch array, parsed once per bundled theme into a
+  process-wide cache and copied per frame, so the picker never re-parses
+  themes while it is open. The menu allocation is bounded
   by user interaction (only allocates while a menu or picker is OPEN) so
   the steady-state allocator pressure is zero. A `Cow<'static, str>`
   refactor of `ContextMenuRow.label` is the natural next step if

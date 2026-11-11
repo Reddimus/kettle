@@ -194,6 +194,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
             .into_iter()
             .map(
                 |(label, separator, enabled)| kettle_render::ContextMenuRow {
+                    swatches: None,
                     matched_chars: None,
                     label: label.into(),
                     separator,
