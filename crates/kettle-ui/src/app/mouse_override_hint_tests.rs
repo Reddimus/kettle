@@ -743,3 +743,20 @@ fn the_shift_menu_over_a_tracking_pane_takes_the_hint() {
     set_mouse_reporting(&ws, pane, false);
     assert!(!shift_menu_hint_due(&ws, true, true, &cfg));
 }
+
+/// With `putty-paste-style` on, Shift+right-click pastes, so no terminal
+/// menu leads with the hint over a tracking pane: not one a control client
+/// opens with Shift held, whose press is not turned into a paste, and not
+/// one opened from the keyboard.
+#[cfg(unix)]
+#[test]
+fn putty_paste_style_leaves_the_hint_out_of_the_menu() {
+    let (ws, _) = tracking_window();
+    let putty = Config {
+        putty_paste_style: true,
+        ..Config::default()
+    };
+    assert!(shift_menu_hint_due(&ws, true, true, &Config::default()));
+    assert!(!shift_menu_hint_due(&ws, true, true, &putty));
+    assert!(!shift_menu_hint_due(&ws, false, true, &putty));
+}

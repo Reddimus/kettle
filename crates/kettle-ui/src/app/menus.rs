@@ -3153,15 +3153,18 @@ impl PendingShellAction {
 /// Whether the terminal menu opening now leads with the Shift hint: Shift
 /// opened it (`offer_copied`; a menu opened from the keyboard never has it)
 /// inside the focused pane, whose program has the mouse, so a plain
-/// right-click would have gone to the program.
+/// right-click would have gone to the program. With `putty-paste-style` on,
+/// Shift+right-click pastes rather than opening the menu, so the hint's
+/// advice would be wrong and no menu leads with it, however it was opened.
 pub(super) fn shift_menu_hint_due(
     ws: &WindowState,
     offer_copied: bool,
     in_focused_pane: bool,
-    _cfg: &Config,
+    cfg: &Config,
 ) -> bool {
     offer_copied
         && in_focused_pane
+        && !cfg.putty_paste_style
         && ws
             .mux
             .active_focus()
