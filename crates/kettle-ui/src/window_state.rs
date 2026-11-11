@@ -821,6 +821,39 @@ pub(crate) struct LaneHover {
     pub(crate) used: bool,
 }
 
+/// The surface capabilities a window gets at creation. Winit fixes the
+/// window's transparency and blur request then, and macOS keeps its native
+/// material on the same alpha decision, so a later reload cannot add either.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SurfaceCaps {
+    /// The configured background needed an alpha surface.
+    pub(crate) alpha: bool,
+    /// The window asked the window system for blur.
+    pub(crate) blur: bool,
+}
+
+impl SurfaceCaps {
+    pub(crate) fn for_config(cfg: &kettle_config::Config) -> Self {
+        Self {
+            alpha: kettle_render::window_requires_alpha_surface(cfg),
+            blur: cfg.window_blur,
+        }
+    }
+
+    /// Whether the window must be created with these capabilities.
+    pub(crate) fn transparent_window(self) -> bool {
+        self.alpha || self.blur
+    }
+
+    /// Whether `cfg` needs a capability this window was created without, so
+    /// only a new window can show it. Lowering the opacity of a window that is
+    /// already translucent, or turning blur off, applies at once.
+    pub(crate) fn lacks_for(self, cfg: &kettle_config::Config) -> bool {
+        let wanted = Self::for_config(cfg);
+        (wanted.alpha && !self.alpha) || (wanted.blur && !self.blur)
+    }
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API and used as the map key. Never
@@ -1024,9 +1057,13 @@ pub(crate) struct WindowState {
     /// Set when a persisted Settings change needs a restart or a new window to
     /// take effect. GPU pin, power preference, backend, and force-software
     /// changes need the next launch; background opacity, background type, and
-    /// window blur need a new window. The settings overlay shows a restart
+    /// window blur need a new window only when `surface_caps` lacks what the
+    /// new config asks for. The settings overlay shows a restart
     /// footer while this is true; opening the overlay clears it.
     pub(crate) settings_restart_pending: bool,
+    /// What this window's OS surface was created able to show. A Settings
+    /// change asks for a new window only when it needs more than this.
+    pub(crate) surface_caps: SurfaceCaps,
     /// The animated-background frame index last requested for paint.
     /// The event loop requests a bg redraw only when the live frame index
     /// differs from this (an edge-trigger), so an animated wallpaper repaints at
@@ -1593,6 +1630,7 @@ impl WindowState {
             settings_nav: None,
             settings_text_edit: None,
             settings_restart_pending: false,
+            surface_caps: SurfaceCaps::default(),
             last_bg_frame: None,
             layout_picker_input: None,
             layout_picker_entries: Vec::new(),
@@ -2590,5 +2628,60 @@ mod tests {
             false,
         ));
         assert!(!terminal_owned.contains(&key));
+    }
+}
+
+#[cfg(test)]
+mod surface_caps_tests {
+    use super::SurfaceCaps;
+    use kettle_config::{BackgroundType, Config};
+
+    fn config(opacity: f32, blur: bool) -> Config {
+        Config {
+            background_type: BackgroundType::Solid,
+            background_opacity: opacity,
+            window_blur: blur,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn lowering_opacity_of_a_translucent_window_applies_without_a_new_window() {
+        // The Linux default: 99% with blur requested (unavailable on GNOME).
+        let created = SurfaceCaps::for_config(&config(0.99, true));
+        assert!(created.transparent_window());
+        assert!(!created.lacks_for(&config(0.59, true)));
+        assert!(!created.lacks_for(&config(0.2, false)));
+        assert!(!created.lacks_for(&config(1.0, true)));
+    }
+
+    #[test]
+    fn an_opaque_window_needs_a_new_window_to_turn_translucent() {
+        let created = SurfaceCaps::for_config(&config(1.0, false));
+        assert!(!created.transparent_window());
+        assert!(created.lacks_for(&config(0.8, false)));
+        assert!(!created.lacks_for(&config(1.0, false)));
+    }
+
+    #[test]
+    fn turning_blur_on_needs_a_new_window_and_turning_it_off_does_not() {
+        let without_blur = SurfaceCaps::for_config(&config(0.86, false));
+        assert!(without_blur.lacks_for(&config(0.86, true)));
+        let with_blur = SurfaceCaps::for_config(&config(0.86, true));
+        assert!(!with_blur.lacks_for(&config(0.86, false)));
+    }
+
+    #[test]
+    fn blur_alone_keeps_an_opaque_background_window_short_of_alpha() {
+        // macOS keeps its native material on the creation-time alpha decision,
+        // which blur does not change, so a 100% window still needs a new one.
+        let created = SurfaceCaps::for_config(&config(1.0, true));
+        assert!(created.transparent_window());
+        assert!(created.lacks_for(&config(0.7, true)));
+    }
+
+    #[test]
+    fn a_window_state_without_a_window_assumes_no_capabilities() {
+        assert!(SurfaceCaps::default().lacks_for(&config(0.5, false)));
     }
 }
