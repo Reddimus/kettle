@@ -136,7 +136,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   titlebar at once unless the setting is `always`. An idle shell still closes
   at once.
   This is the new default, `ask-before-closing = busy-or-multiple`, which also
-  appears in the Preferences menu and the command palette. A config that sets
+  appears in the Preferences menu and the command palette. The menu's `always`
+  row now reads "Confirm close: always", since the titlebar is no longer
+  special to it alone. A config that sets
   `multiple-terminals` keeps asking only when more than one pane would close.
   Windows keeps the old behaviour for a single pane.
 - Tabs show their go-to-tab shortcut on every platform, taken from the key
