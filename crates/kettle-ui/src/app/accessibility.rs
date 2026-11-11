@@ -1777,17 +1777,20 @@ pub(super) fn accessibility_text_id(pane_id: u64) -> NodeId {
 /// then repeats the line from the prompt to the caret after every word. A word
 /// starts at a non-space character that follows a space; trailing spaces stay
 /// with the word before them, and a run's first character always starts one.
-/// AccessKit indexes words with `u8`, so starts past 255 characters are left
-/// out rather than wrapped.
+/// AccessKit indexes words with `u8` and casts a caret's index to `u8` when it
+/// looks one up, so in a run longer than 256 characters a caret past the end
+/// would wrap onto a word near the start. Such a run gets no word starts and
+/// stays one word, as before.
 pub(super) fn accessibility_word_starts(spaces: impl Iterator<Item = bool>) -> Vec<u8> {
+    let spaces: Vec<bool> = spaces.take(usize::from(u8::MAX) + 2).collect();
+    if spaces.len() > usize::from(u8::MAX) + 1 {
+        return Vec::new();
+    }
     let mut starts = Vec::new();
     let mut after_space = false;
-    for (index, space) in spaces.enumerate() {
+    for (index, &space) in spaces.iter().enumerate() {
         if index == 0 || (after_space && !space) {
-            match u8::try_from(index) {
-                Ok(index) => starts.push(index),
-                Err(_) => break,
-            }
+            starts.push(index as u8);
         }
         after_space = space;
     }
