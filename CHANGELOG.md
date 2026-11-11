@@ -321,9 +321,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   window for seconds, and terminal queries such as cursor-position reports
   are answered promptly while it draws. Finding no font for such a character
   used to shape it with every installed font, and again each time a row
-  holding it was redrawn. Kettle now skips fonts whose character map cannot
-  supply it and remembers characters no font has; the font chosen for every
-  other character is unchanged.
+  holding it was redrawn. Kettle now skips fonts whose character map shows
+  they cannot supply it, and remembers characters no font's map holds. The
+  fonts chosen matched the previous behaviour for every character tested,
+  alone and in a range of combining, emoji and right-to-left sequences.
 
 - Screen readers read terminal text word by word. Orca's word echo repeated
   the whole row, prompt included, after every typed word, because Kettle's

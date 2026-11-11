@@ -325,7 +325,7 @@ fn shape_run(
 
     if !missing.is_empty() {
         let clusters = missing_clusters(&glyphs[glyph_start..]);
-        font_iter.set_missing(clusters.iter().map(|range| &line[range.clone()]));
+        font_iter.set_missing(clusters.iter().map(|range| &line[range.clone()]), span_rtl);
     }
 
     //TODO: improve performance!
@@ -406,12 +406,14 @@ fn shape_run(
         }
     }
 
-    // Every face was tried, so what is still missing has no glyph anywhere.
+    // Remember only what every face's character map proved: a cluster that
+    // some face maps can still be left missing here, for example when that
+    // face's ligature joins it to a neighbour another face already drew.
     if !missing.is_empty() && font_iter.is_exhausted() {
-        let clusters = missing_clusters(&glyphs[glyph_start..]);
+        let unmapped: Vec<String> = font_iter.unmapped_clusters().map(Into::into).collect();
         let font_system = font_iter.font_system_mut();
-        for range in clusters {
-            font_system.remember_missing_cluster(&line[range]);
+        for cluster in unmapped {
+            font_system.remember_missing_cluster(&cluster);
         }
     }
 

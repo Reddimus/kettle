@@ -4,16 +4,19 @@
 //!
 //! Kettle-owned. A run whose cluster no face covers used to be shaped with
 //! every face in the database, building a shape plan for each one, every time
-//! the run was shaped. `FontFallbackIter` now asks these questions first, so
-//! the faces it skips are exactly those whose shaping could not have filled a
-//! missing cluster.
+//! the run was shaped. `FontFallbackIter` now asks these questions first and
+//! skips a face only when its character map proves that shaping with it could
+//! not fill any missing cluster. Whenever that cannot be shown, the face is
+//! tried as upstream tries it.
 
 use alloc::vec::Vec;
 use skrifa::raw::tables::cmap::{Cmap, CmapSubtable, PlatformId};
 use skrifa::raw::TableProvider as _;
 
-/// Clusters no face covers, remembered at most this many at once. The set is
-/// cleared when it is full.
+/// Clusters no face maps, remembered at most this many at once. The set is
+/// cleared when it is full: a screen with more distinct such clusters than
+/// this walks the faces' character maps again for each one, at the cost of a
+/// character-map read per face rather than a shaping per face.
 pub(crate) const MISSING_CLUSTERS_LIMIT: usize = 4096;
 
 /// Longer clusters are never remembered: a terminal cell can carry a long run
@@ -32,6 +35,11 @@ pub(crate) const MISSING_CLUSTER_MAX_BYTES: usize = 64;
 ///   (`decompose_current_character`).
 /// - The Hebrew shaper composes to presentation forms, and the Thai shaper
 ///   maps marks to private-use glyphs, by the face's own character map.
+/// - harfrust 0.5 sends Lao through the Thai shaper (`ot_shaper.rs` 156-157),
+///   whose `preprocess_text` splits SARA AM, U+0E33 and U+0EB3 alike
+///   (`is_sara_am` masks with `!0x0080`, `ot_shaper_thai.rs` 358-368), into
+///   NIKHAHIT and SARA AA. Lao's SARA AM decomposes only by compatibility, so
+///   neither normalization below finds those parts.
 pub(crate) fn shaper_substitutes(c: char) -> bool {
     matches!(
         u32::from(c),
@@ -63,72 +71,90 @@ pub(crate) fn shaper_substitutes(c: char) -> bool {
             | 0x202F
             | 0x205F
             | 0x3000
-            // Hebrew and Thai blocks
+            // Hebrew, Thai and Lao blocks
             | 0x0590..=0x05FF
             | 0x0E00..=0x0E7F
+            | 0x0E80..=0x0EFF
     )
 }
 
-/// The characters a face must map at least one of to give a glyph to one of
-/// `clusters`: each cluster's own characters and those of its canonical
-/// decomposition and composition, which HarfBuzz uses when the face lacks the
-/// character as written. `None` when a cluster holds a character the shaper
-/// can draw some other way, and no face may be skipped.
-pub(crate) fn required_chars<'a>(clusters: impl Iterator<Item = &'a str>) -> Option<Vec<char>> {
+/// The characters a face must map at least one of to give `cluster` a glyph:
+/// its own characters and those of its canonical decomposition and
+/// composition, which HarfBuzz uses when the face lacks the character as
+/// written. `None` when the cluster holds a character the shaper can draw some
+/// other way, and no face may be skipped for it.
+///
+/// A right-to-left run is never given a set: harfrust draws a mirrored
+/// character with its Bidi_Mirroring_Glyph when the face has that
+/// (`rotate_chars`, `ot_shape.rs` 777-791), and that is not looked up here.
+pub fn required_chars(cluster: &str, rtl: bool) -> Option<Vec<char>> {
+    if rtl || cluster.chars().any(shaper_substitutes) {
+        return None;
+    }
     let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
     let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
     let mut chars = Vec::new();
-    for cluster in clusters {
-        if cluster.chars().any(shaper_substitutes) {
+    let forms = cluster
+        .chars()
+        .chain(nfd.normalize_iter(cluster.chars()))
+        .chain(nfc.normalize_iter(cluster.chars()));
+    for c in forms {
+        if shaper_substitutes(c) {
             return None;
         }
-        let forms = cluster
-            .chars()
-            .chain(nfd.normalize_iter(cluster.chars()))
-            .chain(nfc.normalize_iter(cluster.chars()));
-        for c in forms {
-            if shaper_substitutes(c) {
-                return None;
-            }
-            if !chars.contains(&c) {
-                chars.push(c);
-            }
+        if !chars.contains(&c) {
+            chars.push(c);
         }
     }
     Some(chars)
 }
 
 /// Whether the face in `data` maps any of `chars` to a glyph other than
-/// `.notdef`. The subtable is the one harfrust shapes with
-/// (`find_best_cmap_subtable`), including its symbol-font remapping, so a
-/// `false` here means harfrust would find no nominal glyph for any of them.
-/// A face that cannot be read answers `true`: loading it decides, as before.
-pub(crate) fn face_maps_any(data: &[u8], index: u32, chars: &[char]) -> bool {
+/// `.notdef`, in the subtable harfrust shapes with (`find_best_cmap_subtable`
+/// in its `tables.rs`), including its symbol-font remapping. Only `false` lets
+/// a face be skipped, so every case this cannot settle answers `true`: a face
+/// that does not parse, has no readable character map or no subtable harfrust
+/// would use, or uses a Mac Roman subtable, which harfrust remaps.
+pub fn face_maps_any(data: &[u8], index: u32, chars: &[char]) -> bool {
+    with_cmap(data, index, |maps| {
+        maps.is_none_or(|maps| chars.iter().any(|&c| maps(c)))
+    })
+}
+
+/// Calls `f` with a lookup of the face's nominal glyphs, or with `None` when
+/// the face's character map cannot be read the way harfrust reads it.
+pub(crate) fn with_cmap<T>(
+    data: &[u8],
+    index: u32,
+    f: impl FnOnce(Option<&dyn Fn(char) -> bool>) -> T,
+) -> T {
     let Ok(font) = skrifa::FontRef::from_index(data, index) else {
-        return true;
+        return f(None);
     };
     let Ok(cmap) = font.cmap() else {
-        // harfrust shapes a face without a character map to `.notdef` only.
-        return false;
+        return f(None);
     };
     let Some((subtable, platform, encoding)) = best_subtable(&cmap) else {
-        return false;
+        return f(None);
     };
     if platform == PlatformId::Macintosh {
-        // harfrust remaps through Mac Roman here; do not second-guess it.
-        return true;
+        return f(None);
     }
     let is_symbol = platform == PlatformId::Windows && encoding == WINDOWS_SYMBOL;
-    let maps = |c: u32| subtable.map_codepoint(c).is_some_and(|g| g.to_u32() != 0);
-    chars.iter().any(|&c| {
+    let maps = |c: char| {
+        let nominal = |c: u32| subtable.map_codepoint(c).is_some_and(|g| g.to_u32() != 0);
         let c = u32::from(c);
-        maps(c) || (is_symbol && c <= 0x00FF && maps(0xF000 + c))
-    })
+        nominal(c) || (is_symbol && c <= 0x00FF && nominal(0xF000 + c))
+    };
+    f(Some(&maps))
 }
 
 const WINDOWS_SYMBOL: u16 = 0;
 
-/// harfrust 0.5's `find_best_cmap_subtable`, in its order.
+/// harfrust 0.5's `find_best_cmap_subtable` (`tables.rs` 209-255): the
+/// platform and encoding pairs in its order, and within a pair the first
+/// record whose subtable parses as a format it maps with, passing over records
+/// that do not, as its `find_cmap_subtable` does.
 fn best_subtable<'a>(cmap: &Cmap<'a>) -> Option<(CmapSubtable<'a>, PlatformId, u16)> {
     const ORDER: [(PlatformId, u16); 10] = [
         (PlatformId::Windows, WINDOWS_SYMBOL),

@@ -21,7 +21,7 @@ use self_cell::self_cell;
 pub mod fallback;
 pub use fallback::{Fallback, PlatformFallback};
 
-mod coverage;
+pub(crate) mod coverage;
 
 pub use self::system::*;
 mod system;

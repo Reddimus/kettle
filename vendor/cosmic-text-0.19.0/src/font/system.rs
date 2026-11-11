@@ -169,12 +169,16 @@ pub struct FontSystem {
     /// List of fallbacks
     pub(crate) fallbacks: Fallbacks,
 
-    /// Clusters that no face in the database gave a glyph, each proven by a
-    /// walk of every face. Kettle-owned; see `font/coverage.rs`.
+    /// Clusters whose characters no face in the database maps, each proven
+    /// by reading every face's character map. Kettle-owned; see
+    /// `font/coverage.rs`.
     missing_clusters: BTreeSet<Box<str>>,
 
     /// Fallback faces shaped after a run's first face, for tests.
     fallback_shapes: u64,
+
+    /// Character maps read to decide whether a face may be skipped, for tests.
+    coverage_checks: u64,
 }
 
 impl fmt::Debug for FontSystem {
@@ -278,6 +282,7 @@ impl FontSystem {
             fallbacks,
             missing_clusters: BTreeSet::new(),
             fallback_shapes: 0,
+            coverage_checks: 0,
         }
     }
 
@@ -349,7 +354,14 @@ impl FontSystem {
         self.fallback_shapes = self.fallback_shapes.wrapping_add(1);
     }
 
-    /// Whether every one of `clusters` is known to have no glyph in any face.
+    /// How many faces' character maps font fallback has read to decide
+    /// whether to skip them, since this system was created. For tests.
+    #[doc(hidden)]
+    pub fn coverage_check_count(&self) -> u64 {
+        self.coverage_checks
+    }
+
+    /// Whether every one of `clusters` is known to be mapped by no face.
     pub(crate) fn all_clusters_missing<'c>(
         &self,
         mut clusters: impl Iterator<Item = &'c str>,
@@ -357,35 +369,46 @@ impl FontSystem {
         clusters.all(|cluster| self.missing_clusters.contains(cluster))
     }
 
-    /// Remember `cluster` as having no glyph in any face, after a fallback
-    /// walk of every face left it missing.
+    /// Remember `cluster` as mapped by no face, after every face's character
+    /// map was read and none mapped any character it needs.
     pub(crate) fn remember_missing_cluster(&mut self, cluster: &str) {
         if cluster.len() > super::coverage::MISSING_CLUSTER_MAX_BYTES
-            || cluster.chars().any(super::coverage::shaper_substitutes)
             || self.missing_clusters.contains(cluster)
         {
             return;
         }
+        // Cleared rather than evicted in part: see `MISSING_CLUSTERS_LIMIT`.
         if self.missing_clusters.len() >= super::coverage::MISSING_CLUSTERS_LIMIT {
             self.missing_clusters.clear();
         }
         self.missing_clusters.insert(cluster.into());
     }
 
-    /// Whether face `id` maps any of `chars`, read from its character map
-    /// without loading the face for shaping.
-    pub(crate) fn face_maps_any(&mut self, id: fontdb::ID, chars: &[char]) -> bool {
+    /// Calls `f` with a lookup of face `id`'s nominal glyphs, read from its
+    /// character map without loading the face for shaping, or with `None`
+    /// when that cannot be read the way harfrust reads it.
+    pub(crate) fn with_face_cmap<T>(
+        &mut self,
+        id: fontdb::ID,
+        f: impl FnOnce(Option<&dyn Fn(char) -> bool>) -> T,
+    ) -> T {
+        self.coverage_checks = self.coverage_checks.wrapping_add(1);
         // SAFETY: as in `get_font`, which maps the same file the same way: the
         // mapping is shared with every face of that file and is only read.
         #[cfg(feature = "std")]
         unsafe {
             self.db.make_shared_face_data(id);
         }
-        self.db
-            .with_face_data(id, |data, index| {
-                super::coverage::face_maps_any(data, index, chars)
-            })
-            .unwrap_or(true)
+        let mut f = Some(f);
+        let read = self.db.with_face_data(id, |data, index| {
+            let f = f.take().expect("called once");
+            super::coverage::with_cmap(data, index, f)
+        });
+        match (read, f) {
+            (Some(read), _) => read,
+            (None, Some(f)) => f(None),
+            (None, None) => unreachable!("the face data was read"),
+        }
     }
 
     pub fn is_monospace(&self, id: fontdb::ID) -> bool {

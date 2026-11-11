@@ -116,6 +116,11 @@ pub use self::edit::*;
 mod edit;
 
 pub use self::font::*;
+/// Kettle-owned font-fallback coverage checks, exposed for its tests.
+#[doc(hidden)]
+pub mod fallback_coverage {
+    pub use crate::font::coverage::{face_maps_any, required_chars};
+}
 mod font;
 
 pub use self::layout::*;
