@@ -709,7 +709,6 @@ fn the_context_menu_carries_every_terminator_row() {
         (T::MenuSplitDown, "Split Down", "Action::SplitDown"),
         (T::MenuClosePane, "Close Pane", "Action::ClosePane"),
         (T::MenuNewTab, "New Tab", "Action::NewTab"),
-        (T::MenuReadOnly, "Read only", "Action::TogglePaneReadOnly"),
         (T::MenuSetGroup, "Set Group…", "Action::CreateGroup"),
         // Rows Ghostty adds to Terminator's set.
         (T::MenuSplitLeft, "Split Left", "Action::SplitLeft"),
@@ -749,6 +748,13 @@ fn the_context_menu_carries_every_terminator_row() {
                  stay together, found entry: {entry:?}"
         );
     }
+    // Read only is a check box row with its own builder, which
+    // `menu_text_tests` drives directly; here it must stay in the menu.
+    assert_eq!(en.text(T::MenuReadOnly), "Read only");
+    assert!(
+        body.contains("read_only_menu_item(read_only, &tr)"),
+        "the context menu is missing Terminator's \"Read only\" row"
+    );
     // Zoom swaps label with the state rather than sitting on one word,
     // matching Terminator's Zoom/Restore pair.
     assert_eq!(en.text(T::MenuZoom), "Zoom");
@@ -924,7 +930,8 @@ fn item_to_click_maps_every_dispatchable_row_type() {
             &ContextMenuItem::DynamicItem {
                 label: "Bold".into(),
                 action: Action::Copy,
-                enabled: true
+                enabled: true,
+                toggle: None
             },
             0
         ),
@@ -1180,6 +1187,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
     use unicode_width::UnicodeWidthStr as _;
 
     let mut row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         matched_chars: None,
         label: "Visible label".to_string(),

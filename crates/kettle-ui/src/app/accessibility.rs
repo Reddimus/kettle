@@ -3285,6 +3285,7 @@ mod context_menu_nesting_tests {
             picker_header_height: 0.0,
             anchor,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: label.into(),
@@ -3398,6 +3399,7 @@ mod context_menu_nesting_tests {
         let mut menu = panel("Split", (40.0, 60.0));
         menu.rows[0].hint = SUBMENU_SIGN.to_string();
         menu.rows.push(ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: "Paste".into(),

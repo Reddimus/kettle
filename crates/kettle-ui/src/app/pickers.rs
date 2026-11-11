@@ -148,6 +148,7 @@ pub(super) fn command_picker_list(
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: kettle_config::palette::matched_char_positions(
                     query,
@@ -169,6 +170,7 @@ pub(super) fn command_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr
@@ -198,6 +200,7 @@ pub(super) fn layout_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: layouts[index].clone(),
@@ -214,6 +217,7 @@ pub(super) fn layout_picker_list(
         };
         PickerList {
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr.text(label).to_string(),
@@ -340,6 +344,7 @@ pub(super) fn theme_picker_list(
                 ""
             };
             ContextMenuRow {
+                toggle: None,
                 swatches: Some(
                     *swatches
                         .entry(name)
@@ -366,6 +371,7 @@ pub(super) fn theme_picker_list(
     if rows.is_empty() {
         return PickerList {
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr.text(Text::PickerNoMatchingTheme).to_string(),
@@ -497,6 +503,7 @@ pub(super) fn ssh_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: hosts[index].0.clone(),
@@ -508,6 +515,7 @@ pub(super) fn ssh_picker_list(
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr

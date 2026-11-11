@@ -387,6 +387,7 @@ impl App {
                     .to_string(),
                 action: Action::ToggleZoom,
                 enabled: true,
+                toggle: None,
             },
             ContextMenuItem::Item {
                 label: tr.text(T::MenuClosePane),
@@ -439,19 +440,7 @@ impl App {
                 action: Action::Reset,
                 enabled: true,
             },
-            // Terminator parity: per-pane read-only toggle. The
-            // check marker mirrors the Preferences-submenu convention
-            // ("✓ on / off"); dispatch goes through the same
-            // `Action::TogglePaneReadOnly` the keybind uses.
-            ContextMenuItem::DynamicItem {
-                label: format!(
-                    "{}{}",
-                    if read_only { "✓ " } else { "  " },
-                    tr.text(T::MenuReadOnly)
-                ),
-                action: Action::TogglePaneReadOnly,
-                enabled: true,
-            },
+            read_only_menu_item(read_only, &tr),
             // Right-click entries for the broadcast-group surface. Layered
             // below the close-family + new-tab so they don't
             // hijack muscle memory; users who never use groups
@@ -495,159 +484,10 @@ impl App {
     }
 
     /// Append runtime settings to the Preferences submenu. Each action updates
-    /// the live config and persists through `persist_config_toggle`; radio and
-    /// check marks are labels rather than separate state.
+    /// the live config and persists through `persist_config_toggle`.
     pub(super) fn append_preferences_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
-        use kettle_i18n::Text as T;
-        let tr = &self.ui_text;
         items.push(ContextMenuItem::Separator);
-        let mut inner: Vec<ContextMenuItem> = Vec::new();
-        let r = |sel: bool| if sel { "● " } else { "○ " };
-        let c = |sel: bool| if sel { "✓ " } else { "  " };
-        let dyn_item = |label: String, action: Action| ContextMenuItem::DynamicItem {
-            label,
-            action,
-            enabled: true,
-        };
-        // Scrollbar radio.
-        let sb = self.cfg.scrollbar;
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(sb == kettle_config::ScrollbarMode::Always),
-                tr.text(T::MenuPrefScrollbarAlways)
-            ),
-            Action::SetScrollbarAlways,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(sb == kettle_config::ScrollbarMode::Auto),
-                tr.text(T::MenuPrefScrollbarAuto)
-            ),
-            Action::SetScrollbarAuto,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(sb == kettle_config::ScrollbarMode::Never),
-                tr.text(T::MenuPrefScrollbarHidden)
-            ),
-            Action::SetScrollbarNever,
-        ));
-        inner.push(ContextMenuItem::Separator);
-        // Boolean toggles.
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                c(self.cfg.cursor_blink),
-                tr.text(T::MenuPrefCursorBlink)
-            ),
-            Action::ToggleCursorBlink,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                c(self.cfg.copy_on_select),
-                tr.text(T::MenuPrefCopyOnSelect)
-            ),
-            Action::ToggleCopyOnSelect,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                c(self.cfg.mouse_hide_while_typing),
-                tr.text(T::MenuPrefMouseHide)
-            ),
-            Action::ToggleMouseHide,
-        ));
-        inner.push(ContextMenuItem::Separator);
-        // Close-confirmation radio. `always` is worded to say that it also
-        // covers the titlebar close, because that gesture ignores the other
-        // two policies by design.
-        let ask_before_closing = self.cfg.ask_before_closing;
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::Always),
-                tr.text(T::MenuPrefConfirmAlways)
-            ),
-            Action::SetAskBeforeClosingAlways,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals),
-                tr.text(T::MenuPrefConfirmMultiple)
-            ),
-            Action::SetAskBeforeClosingMultiple,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::Never),
-                tr.text(T::MenuPrefConfirmNever)
-            ),
-            Action::SetAskBeforeClosingNever,
-        ));
-        inner.push(ContextMenuItem::Separator);
-        // Bell radio.
-        let bell = self.cfg.bell;
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(bell == kettle_config::BellMode::Off),
-                tr.text(T::MenuPrefBellOff)
-            ),
-            Action::SetBellOff,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(bell == kettle_config::BellMode::Visual),
-                tr.text(T::MenuPrefBellVisual)
-            ),
-            Action::SetBellVisual,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(bell == kettle_config::BellMode::Attention),
-                tr.text(T::MenuPrefBellAttention)
-            ),
-            Action::SetBellAttention,
-        ));
-        inner.push(dyn_item(
-            format!(
-                "{}{}",
-                r(bell == kettle_config::BellMode::Both),
-                tr.text(T::MenuPrefBellBoth)
-            ),
-            Action::SetBellBoth,
-        ));
-        inner.push(ContextMenuItem::Separator);
-        // Font size +/- (reuse existing actions).
-        inner.push(ContextMenuItem::Item {
-            label: tr.text(T::MenuPrefFontBigger),
-            action: kettle_config::Action::IncreaseFontSize,
-            enabled: true,
-        });
-        inner.push(ContextMenuItem::Item {
-            label: tr.text(T::MenuPrefFontSmaller),
-            action: kettle_config::Action::DecreaseFontSize,
-            enabled: true,
-        });
-        inner.push(ContextMenuItem::Separator);
-        // The Advanced… escape hatch for everything not exposed as a toggle.
-        inner.push(ContextMenuItem::Item {
-            label: tr.text(T::MenuPrefAdvanced),
-            action: kettle_config::Action::EditConfig,
-            enabled: true,
-        });
-        items.push(ContextMenuItem::Submenu {
-            label: tr.text(T::MenuPreferences).to_string(),
-            items: compact_preferences(inner, *tr),
-        });
+        items.push(preferences_submenu(&self.cfg, self.ui_text));
     }
 
     pub(super) fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
@@ -1042,6 +882,7 @@ impl App {
                     label: label.shown(tr).to_string(),
                     action,
                     enabled: true,
+                    toggle: None,
                 })
                 .collect(),
         });
@@ -1631,114 +1472,12 @@ impl App {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
         let hints = self.menu_item_hints(&menu.items);
-        let mut rows: Vec<ContextMenuRow> =
-            menu.items
-                .iter()
-                .zip(hints)
-                .map(|(it, hint)| match it {
-                    ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: (*label).to_string(),
-                        separator: false,
-                        enabled: *enabled,
-                        hint,
-                    },
-                    ContextMenuItem::DynamicItem { label, enabled, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: *enabled,
-                        hint,
-                    },
-                    ContextMenuItem::Separator => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: String::new(),
-                        separator: true,
-                        enabled: false,
-                        hint: String::new(),
-                    },
-                    ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: true,
-                        hint: String::new(),
-                    },
-                    ContextMenuItem::ConfigItem { label, .. }
-                    | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: true,
-                        hint: String::new(),
-                    },
-                    ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        // `hint` is "▸": this row opens a submenu.
-                        label: label.clone(),
-                        separator: false,
-                        enabled: true,
-                        hint,
-                    },
-                    // ProfileChoice rows only live inside a Submenu, so they
-                    // reach menu.items (and this arm) after a drill-in swaps the
-                    // submenu's items in.
-                    ContextMenuItem::ProfileChoice { label, .. }
-                    | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: true,
-                        hint: String::new(),
-                    },
-                    // New-tab ▾ shell choice — a normal clickable row.
-                    ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: true,
-                        hint,
-                    },
-                    // URL-aware leading rows ("Open Link" /
-                    // "Copy Link Address") — normal clickable rows.
-                    ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: (*label).to_string(),
-                        separator: false,
-                        enabled: true,
-                        hint: String::new(),
-                    },
-                    // A card's media rows — normal clickable rows.
-                    ContextMenuItem::Media { label, .. }
-                    | ContextMenuItem::Preview { label, .. } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: (*label).to_string(),
-                        separator: false,
-                        enabled: true,
-                        hint: String::new(),
-                    },
-                    // Dropdown parity: Info renders as a dimmed
-                    // (disabled-style) static line.
-                    ContextMenuItem::Info { label } => ContextMenuRow {
-                        swatches: None,
-                        matched_chars: None,
-                        label: label.clone(),
-                        separator: false,
-                        enabled: false,
-                        hint: String::new(),
-                    },
-                })
-                .collect();
+        let mut rows: Vec<ContextMenuRow> = menu
+            .items
+            .iter()
+            .zip(hints)
+            .map(|(it, hint)| context_menu_row(it, hint))
+            .collect();
         // Terminator menu UX: pass through the scroll state + clamped panel
         // geometry the renderer needs to draw only the visible slice.
         let (panel_w_clamped, panel_h_clamped) = self
@@ -2097,6 +1836,7 @@ mod tests {
                 label: format!("Row {i}"),
                 action: Action::Paste,
                 enabled: true,
+                toggle: None,
             })
             .collect()
     }
@@ -2311,6 +2051,9 @@ pub(super) enum ContextMenuItem {
         label: String,
         action: Action,
         enabled: bool,
+        /// A check box or radio row's state, which the label's leading
+        /// marker paints. `None` for a row that toggles nothing.
+        toggle: Option<kettle_render::MenuToggle>,
     },
     Separator,
     /// Terminator plugin parity:
@@ -3302,6 +3045,304 @@ mod cascading_tests {
         assert_eq!(submenu_anchor_x(40.0, 200.0, 250.0, 800.0), 240.0);
         assert_eq!(submenu_anchor_x(550.0, 200.0, 250.0, 800.0), 300.0);
         assert_eq!(submenu_anchor_x(4.0, 400.0, 500.0, 800.0), 4.0);
+    }
+}
+
+/// The renderer's row for one menu item, with `hint` as its shortcut column.
+/// The label is the painted text; the renderer stays Action-agnostic.
+pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextMenuRow {
+    match item {
+        ContextMenuItem::Item { label, enabled, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: (*label).to_string(),
+            separator: false,
+            enabled: *enabled,
+            hint,
+        },
+        ContextMenuItem::DynamicItem {
+            label,
+            enabled,
+            toggle,
+            ..
+        } => ContextMenuRow {
+            toggle: *toggle,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: *enabled,
+            hint,
+        },
+        ContextMenuItem::Separator => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: String::new(),
+            separator: true,
+            enabled: false,
+            hint: String::new(),
+        },
+        ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        },
+        ContextMenuItem::ConfigItem { label, .. }
+        | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        },
+        ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            // `hint` is "▸": this row opens a submenu.
+            label: label.clone(),
+            separator: false,
+            enabled: true,
+            hint,
+        },
+        // ProfileChoice rows only live inside a Submenu, so they
+        // reach menu.items (and this arm) after a drill-in swaps the
+        // submenu's items in.
+        ContextMenuItem::ProfileChoice { label, .. }
+        | ContextMenuItem::WindowChoice { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        },
+        // New-tab ▾ shell choice — a normal clickable row.
+        ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: true,
+            hint,
+        },
+        // URL-aware leading rows ("Open Link" /
+        // "Copy Link Address") — normal clickable rows.
+        ContextMenuItem::UrlItem { label, .. } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: (*label).to_string(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        },
+        // A card's media rows — normal clickable rows.
+        ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
+            ContextMenuRow {
+                toggle: None,
+                swatches: None,
+                matched_chars: None,
+                label: (*label).to_string(),
+                separator: false,
+                enabled: true,
+                hint: String::new(),
+            }
+        }
+        // Dropdown parity: Info renders as a dimmed
+        // (disabled-style) static line.
+        ContextMenuItem::Info { label } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: label.clone(),
+            separator: false,
+            enabled: false,
+            hint: String::new(),
+        },
+    }
+}
+
+/// The Preferences submenu: runtime settings as radio groups and check boxes,
+/// read from `cfg`, then font size and the Advanced… escape hatch.
+pub(super) fn preferences_submenu(
+    cfg: &kettle_config::Config,
+    tr: kettle_i18n::Translator,
+) -> ContextMenuItem {
+    use kettle_i18n::Text as T;
+    let tr = &tr;
+    let mut inner: Vec<ContextMenuItem> = Vec::new();
+    let r = |sel: bool| if sel { "● " } else { "○ " };
+    let c = |sel: bool| if sel { "✓ " } else { "  " };
+    let dyn_item = |label: String, action: Action| ContextMenuItem::DynamicItem {
+        label,
+        action,
+        enabled: true,
+        toggle: None,
+    };
+    // Scrollbar radio.
+    let sb = cfg.scrollbar;
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(sb == kettle_config::ScrollbarMode::Always),
+            tr.text(T::MenuPrefScrollbarAlways)
+        ),
+        Action::SetScrollbarAlways,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(sb == kettle_config::ScrollbarMode::Auto),
+            tr.text(T::MenuPrefScrollbarAuto)
+        ),
+        Action::SetScrollbarAuto,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(sb == kettle_config::ScrollbarMode::Never),
+            tr.text(T::MenuPrefScrollbarHidden)
+        ),
+        Action::SetScrollbarNever,
+    ));
+    inner.push(ContextMenuItem::Separator);
+    // Boolean toggles.
+    inner.push(dyn_item(
+        format!("{}{}", c(cfg.cursor_blink), tr.text(T::MenuPrefCursorBlink)),
+        Action::ToggleCursorBlink,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            c(cfg.copy_on_select),
+            tr.text(T::MenuPrefCopyOnSelect)
+        ),
+        Action::ToggleCopyOnSelect,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            c(cfg.mouse_hide_while_typing),
+            tr.text(T::MenuPrefMouseHide)
+        ),
+        Action::ToggleMouseHide,
+    ));
+    inner.push(ContextMenuItem::Separator);
+    // Close-confirmation radio. `always` is worded to say that it also
+    // covers the titlebar close, because that gesture ignores the other
+    // two policies by design.
+    let ask_before_closing = cfg.ask_before_closing;
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(ask_before_closing == kettle_config::AskBeforeClosing::Always),
+            tr.text(T::MenuPrefConfirmAlways)
+        ),
+        Action::SetAskBeforeClosingAlways,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals),
+            tr.text(T::MenuPrefConfirmMultiple)
+        ),
+        Action::SetAskBeforeClosingMultiple,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(ask_before_closing == kettle_config::AskBeforeClosing::Never),
+            tr.text(T::MenuPrefConfirmNever)
+        ),
+        Action::SetAskBeforeClosingNever,
+    ));
+    inner.push(ContextMenuItem::Separator);
+    // Bell radio.
+    let bell = cfg.bell;
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(bell == kettle_config::BellMode::Off),
+            tr.text(T::MenuPrefBellOff)
+        ),
+        Action::SetBellOff,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(bell == kettle_config::BellMode::Visual),
+            tr.text(T::MenuPrefBellVisual)
+        ),
+        Action::SetBellVisual,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(bell == kettle_config::BellMode::Attention),
+            tr.text(T::MenuPrefBellAttention)
+        ),
+        Action::SetBellAttention,
+    ));
+    inner.push(dyn_item(
+        format!(
+            "{}{}",
+            r(bell == kettle_config::BellMode::Both),
+            tr.text(T::MenuPrefBellBoth)
+        ),
+        Action::SetBellBoth,
+    ));
+    inner.push(ContextMenuItem::Separator);
+    // Font size +/- (reuse existing actions).
+    inner.push(ContextMenuItem::Item {
+        label: tr.text(T::MenuPrefFontBigger),
+        action: kettle_config::Action::IncreaseFontSize,
+        enabled: true,
+    });
+    inner.push(ContextMenuItem::Item {
+        label: tr.text(T::MenuPrefFontSmaller),
+        action: kettle_config::Action::DecreaseFontSize,
+        enabled: true,
+    });
+    inner.push(ContextMenuItem::Separator);
+    // The Advanced… escape hatch for everything not exposed as a toggle.
+    inner.push(ContextMenuItem::Item {
+        label: tr.text(T::MenuPrefAdvanced),
+        action: kettle_config::Action::EditConfig,
+        enabled: true,
+    });
+    ContextMenuItem::Submenu {
+        label: tr.text(T::MenuPreferences).to_string(),
+        items: compact_preferences(inner, *tr),
+    }
+}
+
+/// Terminator parity: the per-pane read-only toggle. Its check marker mirrors
+/// the Preferences submenu's; dispatch goes through the same
+/// `Action::TogglePaneReadOnly` the keybind uses.
+pub(super) fn read_only_menu_item(
+    read_only: bool,
+    tr: &kettle_i18n::Translator,
+) -> ContextMenuItem {
+    ContextMenuItem::DynamicItem {
+        label: format!(
+            "{}{}",
+            if read_only { "✓ " } else { "  " },
+            tr.text(kettle_i18n::Text::MenuReadOnly)
+        ),
+        action: Action::TogglePaneReadOnly,
+        enabled: true,
+        toggle: None,
     }
 }
 

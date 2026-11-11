@@ -126,7 +126,7 @@ fn session_routes_follow_profiles_in_both_languages() {
             assert_eq!(submenu.len(), names.len().max(1));
             for (row, (label, action)) in submenu.iter().zip(&palette) {
                 assert!(
-                    matches!(row, ContextMenuItem::DynamicItem { label: shown, action: a, enabled: true } if shown == label.shown(&tr) && a == action)
+                    matches!(row, ContextMenuItem::DynamicItem { label: shown, action: a, enabled: true, toggle: None } if shown == label.shown(&tr) && a == action)
                 );
             }
             if names.is_empty() {

@@ -13,6 +13,7 @@ fn menu_width_and_inverse_share_one_formula() {
 #[test]
 fn row_budget_uses_display_columns() {
     let row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         matched_chars: None,
         label: "主题 👩‍💻".to_string(),
@@ -31,6 +32,7 @@ fn row_budget_uses_display_columns() {
 #[test]
 fn app_clamped_width_is_authoritative_for_every_render_pass() {
     let row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         matched_chars: None,
         label: "short".to_string(),
@@ -57,6 +59,7 @@ fn scroll_indicators_follow_the_remaining_suffix() {
         .into_iter()
         .enumerate()
         .map(|(index, separator)| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: format!("row {index}"),
@@ -96,6 +99,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
     let menu = ContextMenu {
         anchor: (0.0, 0.0),
         rows: vec![ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: String::new(),
@@ -165,6 +169,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         anchor: (10.0, 10.0),
         rows: (0..20)
             .map(|_| ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: "Command".into(),
@@ -213,6 +218,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             anchor: (10.0, 10.0),
             rows: (0..10)
                 .map(|_| ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: "row".into(),
@@ -260,6 +266,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
 #[test]
 fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
     let mut row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         label: "Cerrar pestaña".into(),
         hint: String::new(),
@@ -296,6 +303,7 @@ fn picker_surface_encloses_header_and_selection_stays_inside_rounded_corners() {
     let menu = ContextMenu {
         anchor: (140.0, 100.0),
         rows: vec![ContextMenuRow {
+            toggle: None,
             swatches: None,
             label: "one".into(),
             separator: false,
@@ -363,6 +371,7 @@ fn submenu_surfaces_clip_ancestor_labels_into_disjoint_rectangles() {
 
 fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
     ContextMenuRow {
+        toggle: None,
         swatches: Some(std::array::from_fn(|index| {
             kettle_config::Rgb::new(index as u8 * 30, 200 - index as u8 * 20, 7)
         })),
@@ -457,6 +466,7 @@ fn only_visible_rows_with_swatches_paint_them() {
     let plain = ["Copy", "Paste", "", "New Tab"]
         .into_iter()
         .map(|label| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: label.into(),
