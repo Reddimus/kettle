@@ -412,21 +412,6 @@ impl ProcessTree for sysinfo::System {
     }
 }
 
-/// Detect the remote-session context for the pane rooted at `child_pid`.
-///
-/// Walks the process tree breadth-first from `child_pid` (the process
-/// kettle spawned, itself included) and returns the first
-/// `detect_ssh` / `detect_container` match, so the closest process wins.
-///
-/// Returns `None` when:
-///   - no process in the tree matches a known remote-client argv
-///   - `child_pid` itself is gone (process exited)
-///   - sysinfo can't enumerate processes (rare; permission denied
-///     on hardened systems)
-///
-/// Allocates a fresh `sysinfo::System` per call. For repeated polling,
-/// prefer [`detect_remote_with`] or [`RemoteScanner`], which reuse their
-/// process snapshot across calls.
 /// One process's argv, read on the calling thread.
 ///
 /// For a single question asked at a single moment, such as whether the
@@ -463,6 +448,21 @@ pub fn process_argv(pid: u32) -> Option<Vec<String>> {
     }
 }
 
+/// Detect the remote-session context for the pane rooted at `child_pid`.
+///
+/// Walks the process tree breadth-first from `child_pid` (the process
+/// kettle spawned, itself included) and returns the first
+/// `detect_ssh` / `detect_container` match, so the closest process wins.
+///
+/// Returns `None` when:
+///   - no process in the tree matches a known remote-client argv
+///   - `child_pid` itself is gone (process exited)
+///   - sysinfo can't enumerate processes (rare; permission denied
+///     on hardened systems)
+///
+/// Allocates a fresh `sysinfo::System` per call. For repeated polling,
+/// prefer [`detect_remote_with`] or [`RemoteScanner`], which reuse their
+/// process snapshot across calls.
 pub fn detect_remote(child_pid: u32) -> Option<RemoteContext> {
     let mut sys = sysinfo::System::new();
     detect_remote_with(child_pid, &mut sys)
