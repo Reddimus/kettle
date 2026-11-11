@@ -839,7 +839,16 @@ impl App {
         // Preferences submenu: runtime-mutable settings + the Advanced…
         // escape hatch.
         self.append_preferences_submenu_items(&mut items);
-        let items = grouped_terminal_menu(items, tr);
+        let mut items = grouped_terminal_menu(items, tr);
+        // Shift opened this menu over a program that has the mouse: say so,
+        // since a plain right-click would have gone to the program.
+        let shift_over_tracking = offer_copied
+            && in_focused_pane
+            && ws
+                .mux
+                .active_focus()
+                .is_some_and(|pane| self.pane_program_tracks_mouse(ws, pane));
+        prepend_mouse_override_row(&mut items, shift_over_tracking, tr);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -3118,6 +3127,26 @@ impl PendingShellAction {
     ) -> Option<(u64, Vec<String>)> {
         let (window, index) = self.0.take()?;
         shells.get(index).map(|(_, argv)| (window, argv.clone()))
+    }
+}
+
+/// Lead a grouped terminal menu with the Shift hint, as a row that does
+/// nothing, when Shift opened it over a program that has the mouse.
+pub(super) fn prepend_mouse_override_row(
+    items: &mut Vec<ContextMenuItem>,
+    shift_over_tracking: bool,
+    tr: kettle_i18n::Translator,
+) {
+    if shift_over_tracking {
+        items.splice(
+            0..0,
+            [
+                ContextMenuItem::Info {
+                    label: tr.text(kettle_i18n::Text::MouseOverrideHint).into(),
+                },
+                ContextMenuItem::Separator,
+            ],
+        );
     }
 }
 

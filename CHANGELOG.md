@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   its background, its text colour and six accent colours. In a narrow window
   the strip is dropped before a theme's name is shortened.
 
+- When a program that uses the mouse, such as Vim, htop or tmux, takes a
+  right-click, a short notice on its pane says to hold Shift to select text
+  or open the menu. It shows once each time a program turns the mouse on, and
+  at most once every 30 seconds in a window. The menu that Shift+right-click
+  opens over such a program starts with the same line.
+
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
   and kitty do. Lines are whole pixels sized from the font's underline, so

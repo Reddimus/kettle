@@ -636,8 +636,30 @@ impl App {
             if let Some(stale) = ws.held_buttons.pressed(btn, pane, cell) {
                 self.release_held(ws, stale);
             }
+            if !self.ctl_driving && right_click_hint_due(btn, report, ws.mods.shift_key()) {
+                self.raise_mouse_override_hint(ws, pane_id);
+            }
         }
         report
+    }
+
+    /// Tell the user, now and then, that Shift keeps a click Kettle's: their
+    /// right-click just went to the program in `pane_id` instead of opening
+    /// the menu.
+    fn raise_mouse_override_hint(&mut self, ws: &mut WindowState, pane_id: u64) {
+        let Some(pane) = ws.mux.panes.get_mut(&pane_id) else {
+            return;
+        };
+        if ws.mouse_override_hint.right_click_reported(
+            pane_id,
+            &mut pane.mouse_override_hinted,
+            std::time::Instant::now(),
+        ) {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
     }
 
     /// Send each held button `which` names its release now, in the pane its
@@ -1140,6 +1162,20 @@ impl MouseReport {
     pub(super) fn consumed(self) -> bool {
         self != Self::Declined
     }
+}
+
+/// Whether a press calls for the Shift hint: a plain right-click the program
+/// was actually sent. One Kettle kept from it (a search bar, a full input
+/// queue) or handled itself (no mouse reporting, Shift held) did not reach
+/// the program, so there is nothing to explain.
+pub(super) fn right_click_hint_due(btn: u8, report: MouseReport, shift: bool) -> bool {
+    btn == 2 && report == MouseReport::Written && !shift
+}
+
+/// Whether the program in a pane gets plain clicks: mouse reporting is on
+/// and the pane takes input.
+pub(super) fn pane_tracks_mouse(mode: kettle_core::TermMode, read_only: bool) -> bool {
+    !read_only && input::mouse_tracking(mode).0 != input::MouseTracking::Off
 }
 
 /// Where a mouse report lands in its pane.
@@ -1895,6 +1931,13 @@ impl App {
             .panes
             .get(&pane_id)
             .and_then(|p| p.term.term.lock().ok().map(|t| *t.mode()))
+    }
+
+    /// Whether a plain click in this pane would go to its program.
+    pub(super) fn pane_program_tracks_mouse(&self, ws: &WindowState, pane_id: u64) -> bool {
+        let read_only = ws.mux.panes.get(&pane_id).is_some_and(|p| p.read_only);
+        self.pane_mode(ws, pane_id)
+            .is_some_and(|mode| pane_tracks_mouse(mode, read_only))
     }
 }
 

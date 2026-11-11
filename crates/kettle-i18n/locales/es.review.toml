@@ -939,6 +939,7 @@ scrollback_a11y_position = "draft"
 settings_hint_reset = "draft"
 a11y_output_lines = "draft"
 a11y_main_menu = "draft"
+mouse_override_hint = "draft"
 
 [second-pass]
 keys = [
@@ -1078,4 +1079,5 @@ keys = [
     "menu_a11y_update",
     "update_a11y_failed",
     "update_a11y_restart",
+    "mouse_override_hint",
 ]

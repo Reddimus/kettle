@@ -563,6 +563,14 @@ selected, Shift+right-click off the selection extends it, as in xterm, and on
 the selection opens the menu. With `putty-paste-style` on, a right-click
 pastes instead, Shift or not.
 
+Kettle says so where you need it. The first right-click such a program gets
+brings up a short notice on its pane, "Hold Shift to select text or open the
+menu while a program uses the mouse", for a few seconds. It comes back only
+after the program turns mouse reporting off and on again, and never more than
+once every 30 seconds in a window. A right-click Kettle keeps from the
+program, such as one on the search bar, brings up no notice. The menu that
+Shift+right-click opens over such a program starts with the same line.
+
 ## Claude Code diff panel
 
 Claude Code 2.1.260 and newer draws a diff panel beside the conversation

@@ -595,6 +595,18 @@ impl App {
                 w.request_redraw();
             }
         }
+        // The Shift hint leaves its pane when its time is up.
+        if ws.mouse_override_hint.expire(now) {
+            ws.accessibility_pending = true;
+            if !render_hidden && let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+        let mouse_hint_wait = ws.mouse_override_hint.deadline().map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let receipt_enabled = ws
             .media_paste_receipt
             .as_ref()
@@ -932,6 +944,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = media_receipt_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = mouse_hint_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = card_settle_wait {
