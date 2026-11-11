@@ -270,6 +270,7 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
         Action::ToggleCopyOnSelect,
         Action::ToggleMouseHide,
         Action::SetAskBeforeClosingAlways,
+        Action::SetAskBeforeClosingBusyOrMultiple,
         Action::SetAskBeforeClosingMultiple,
         Action::SetAskBeforeClosingNever,
         Action::SetBellOff,
@@ -295,6 +296,9 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
             Action::ToggleCopyOnSelect => "toggle_copy_on_select",
             Action::ToggleMouseHide => "toggle_mouse_hide",
             Action::SetAskBeforeClosingAlways => "set_ask_before_closing_always",
+            Action::SetAskBeforeClosingBusyOrMultiple => {
+                "set_ask_before_closing_busy_or_multiple"
+            }
             Action::SetAskBeforeClosingMultiple => "set_ask_before_closing_multiple",
             Action::SetAskBeforeClosingNever => "set_ask_before_closing_never",
             Action::SetBellOff => "set_bell_off",

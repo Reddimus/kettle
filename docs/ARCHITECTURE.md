@@ -4427,7 +4427,12 @@ The presentation follows the
 closing a running terminal process has no reliable undo, so an explicit question
 is appropriate. Keep passive notifications separate from confirmations. The
 existing `ask-before-closing` policy and integrated-shell idle detection decide
-when a question appears.
+when a question appears. Under the default `busy-or-multiple`, a close of exactly
+one pane also asks the PTY at that moment: `Terminal::foreground_job` compares
+`tcgetpgrp` on the master with the spawned child's process group, and the pane is
+busy when they differ (`close_needs_prompt` and `lone_pane_job` in
+`kettle-ui/src/app/modals.rs`). The background process snapshot is not used for
+this, because it can be older than a job started a moment ago.
 
 Use the tab rectangles produced by `App::tab_bar` for painting, hit-testing and
 reorder targets. Do not reconstruct tab indices from an independently calculated

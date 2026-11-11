@@ -385,6 +385,9 @@ context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: P
 [messages.menu_pref_confirm_always]
 context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
+[messages.menu_pref_confirm_busy_or_multiple]
+context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker. The default: ask before closing when a program other than the shell is running in a single pane, or when several panes would close."
+
 [messages.menu_pref_confirm_multiple]
 context = "crates/kettle-ui/src/app/menus.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
 
@@ -913,6 +916,9 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 
 [messages.palette_set_ask_before_closing_always]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingAlways action."
+
+[messages.palette_set_ask_before_closing_busy_or_multiple]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingBusyOrMultiple action."
 
 [messages.palette_set_ask_before_closing_multiple]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingMultiple action."

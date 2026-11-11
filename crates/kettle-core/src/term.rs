@@ -3750,6 +3750,21 @@ pub struct Terminal {
     out_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// Who owns a pane's terminal at one instant, from the PTY itself.
+///
+/// "The child" is whatever process the pane spawned: the shell, or a wrapper
+/// such as `login -pfl`, `/usr/bin/env` or a user script. The spawn makes it a
+/// session leader, so its process group is its own pid for its whole life.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForegroundJob {
+    /// The child's own process group is in the foreground.
+    Child,
+    /// Another process group is, named by its id (its leader's pid).
+    Other(u32),
+    /// The PTY or the child could not be queried, or the platform cannot say.
+    Unknown,
+}
+
 /// Command state reported by OSC 133 shell integration.
 ///
 /// `Unknown` is deliberately distinct from `Running`: without a complete
@@ -7417,6 +7432,41 @@ impl Terminal {
                 .context("cannot read the PTY foreground process group");
         }
         u32::try_from(foreground).context("PTY foreground process group is out of range")
+    }
+
+    /// Whether the pane's spawned child or some other process group owns the
+    /// terminal right now.
+    ///
+    /// A fresh `tcgetpgrp` on the master compared with `getpgid` of the
+    /// spawned child, both read at the call, so a job started a moment ago
+    /// already counts. Nothing here waits on the child reaper or a background
+    /// scan. A child that has exited, or a master that is gone, is `Unknown`.
+    #[cfg(unix)]
+    pub fn foreground_job(&self) -> ForegroundJob {
+        let Ok(foreground) = self.foreground_process_group() else {
+            return ForegroundJob::Unknown;
+        };
+        let Some(child) = self
+            .child_pid
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        else {
+            return ForegroundJob::Unknown;
+        };
+        // SAFETY: getpgid only queries the integer pid; a child that has
+        // exited makes it fail, which is reported as Unknown.
+        let child_group = unsafe { libc::getpgid(child) };
+        match u32::try_from(child_group) {
+            Ok(group) if group == foreground => ForegroundJob::Child,
+            Ok(_) => ForegroundJob::Other(foreground),
+            Err(_) => ForegroundJob::Unknown,
+        }
+    }
+
+    /// Whether OSC 133 shell integration has ever marked a prompt in this
+    /// pane. While false, [`shell_at_prompt`](Self::shell_at_prompt) says
+    /// nothing either way.
+    pub fn shell_integration_seen(&self) -> bool {
+        self.prompt_seen.load(Ordering::Acquire)
     }
 
     /// The last command generation, only when no OSC 133 command is running.

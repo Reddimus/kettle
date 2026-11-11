@@ -303,6 +303,19 @@ fn same_user(pid: libc::c_int) -> bool {
     unsafe { info.assume_init().pbi_uid == libc::geteuid() }
 }
 
+/// One same-user process's complete argv, for [`super::process_argv`].
+pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    if !same_user(pid) {
+        return None;
+    }
+    let mut args = Vec::new();
+    let size = read_procargs2(pid, &mut args, &mut 0).ok()?;
+    let parsed = parse_proc_argv(kern_procargs2_argv(&args[..size])?);
+    // A pid recycled to another user between the two checks is not ours.
+    (parsed.complete && same_user(pid)).then_some(parsed.argv)
+}
+
 pub(crate) fn read_connection_environment(
     pid: u32,
     names: &[&str],

@@ -728,3 +728,294 @@ fn paste_confirmation_enter_activates_each_of_three_buttons() {
         super::ConfirmKeyResult::Move(2)
     );
 }
+
+/// The default policy asks before closing a lone pane that a job owns, and
+/// only then: an idle prompt, a pane the PTY cannot read, and every explicit
+/// mode keep their old answers. `busy` is 1 throughout, as for a shell with no
+/// OSC 133 integration, which is why it cannot decide this by itself.
+#[test]
+fn a_lone_busy_pane_prompts_only_under_the_default_policy() {
+    use kettle_config::AskBeforeClosing;
+    let default = kettle_config::Config::default().ask_before_closing;
+    assert!(super::close_needs_prompt(default, 1, 1, || super::LonePaneJob::Busy));
+    assert!(!super::close_needs_prompt(default, 1, 1, || super::LonePaneJob::Idle));
+    assert!(!super::close_needs_prompt(default, 1, 1, || super::LonePaneJob::Unknown));
+    // OSC 133 calling the pane idle does not hide a job the PTY can see.
+    assert!(super::close_needs_prompt(default, 1, 0, || super::LonePaneJob::Busy));
+    // Several panes keep the count rule and never ask the PTY.
+    assert!(super::close_needs_prompt(default, 2, 1, || unreachable!()));
+    assert!(!super::close_needs_prompt(default, 3, 0, || super::LonePaneJob::Idle));
+
+    for (policy, single_busy) in [
+        (AskBeforeClosing::Never, false),
+        (AskBeforeClosing::MultipleTerminals, false),
+        (AskBeforeClosing::Always, true),
+    ] {
+        let asked = std::cell::Cell::new(false);
+        let job = || {
+            asked.set(true);
+            super::LonePaneJob::Busy
+        };
+        assert_eq!(super::close_needs_prompt(policy, 1, 1, job), single_busy, "{policy:?}");
+        assert!(!asked.get(), "{policy:?} must not sample the PTY");
+    }
+    assert!(!super::close_needs_prompt(AskBeforeClosing::Never, 1, 0, || super::LonePaneJob::Busy));
+    assert!(!super::close_needs_prompt(AskBeforeClosing::Never, 5, 5, || super::LonePaneJob::Busy));
+}
+
+#[test]
+fn confirm_close_decides_through_the_shared_policy() {
+    let src = include_str!("modals.rs");
+    let body = src
+        .split("pub(super) fn confirm_close(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(body.contains("close_needs_prompt(self.cfg.ask_before_closing, scope, busy"));
+    assert!(body.contains("lone_pane_job(&pane.term, pane.path_argv(), configured_shell)"));
+    assert!(!body.contains("should_prompt("), "the decision lives in close_needs_prompt");
+}
+
+#[test]
+fn the_lone_pane_is_the_one_the_gesture_named() {
+    let ws = WindowState::new(1, Mux::new());
+    assert_eq!(super::lone_pane_in_scope(&ws, 1, &super::ConfirmAction::ClosePane(7)), Some(7));
+    assert_eq!(super::lone_pane_in_scope(&ws, 2, &super::ConfirmAction::ClosePane(7)), None);
+    assert_eq!(
+        super::lone_pane_in_scope(&ws, 1, &super::ConfirmAction::CloseTabHolding(vec![3])),
+        Some(3)
+    );
+    assert_eq!(
+        super::lone_pane_in_scope(&ws, 1, &super::ConfirmAction::CloseTabHolding(vec![3, 4])),
+        None
+    );
+    assert_eq!(
+        super::lone_pane_in_scope(
+            &ws,
+            1,
+            &super::ConfirmAction::CloseWindow {
+                drop_panes: super::DropPanes::Yes
+            }
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_foreground_group_other_than_the_spawned_one_is_a_job() {
+    use kettle_core::ForegroundJob;
+    let never = |_: u32| -> bool { unreachable!("the leader is read only for a wrapper") };
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Child, false, || unreachable!(), never),
+        super::LonePaneJob::Idle
+    );
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Unknown, false, || unreachable!(), never),
+        super::LonePaneJob::Unknown
+    );
+    // The launch is the shell itself: any other group is a job, even one
+    // that is a shell (a nested `bash` the user started).
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Other(42), false, || true, never),
+        super::LonePaneJob::Busy
+    );
+    // A wrapper that did not exec: its shell in its own group is idle...
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Other(42), false, || false, |pid| pid == 42),
+        super::LonePaneJob::Idle
+    );
+    // ...unless OSC 133 says that shell is running a command,
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Other(42), true, || false, never),
+        super::LonePaneJob::Busy
+    );
+    // and a non-shell leader is a job.
+    assert_eq!(
+        super::classify_lone_pane_job(ForegroundJob::Other(42), false, || false, |_| false),
+        super::LonePaneJob::Busy
+    );
+}
+
+#[test]
+fn only_an_interactive_shell_leader_counts_as_the_prompt() {
+    let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let shells = "# /etc/shells\n/bin/bash\n/bin/zsh\n/bin/sh\n/opt/local/bin/oil\n";
+    for idle in [
+        &["-zsh"][..],
+        &["/bin/zsh"],
+        &["zsh", "-l"],
+        &["-bash"],
+        &["/opt/local/bin/oil"],
+        &["fish"],
+    ] {
+        assert!(super::argv_is_interactive_shell(&argv(idle), shells, None), "{idle:?}");
+    }
+    for busy in [
+        &["vim", "notes.txt"][..],
+        &["sleep", "600"],
+        &["/bin/bash", "build.sh"],
+        &["sh", "-c", "make"],
+        &["-zsh", "-c", "make"],
+        &["/opt/local/bin/oil", "script.oil"],
+        &["login", "-pfl", "me", "/bin/zsh"],
+        &[],
+        &["-"],
+    ] {
+        assert!(!super::argv_is_interactive_shell(&argv(busy), shells, None), "{busy:?}");
+    }
+    // The configured shell counts even when /etc/shells does not list it.
+    assert!(!super::argv_is_interactive_shell(&argv(&["myshell"]), "", None));
+    assert!(super::argv_is_interactive_shell(
+        &argv(&["myshell"]),
+        "",
+        Some("/home/me/bin/myshell")
+    ));
+}
+
+/// The close question is read by people who do not know which terminal they
+/// are using, so neither locale may name the product in it, including the
+/// one-pane wording a lone busy pane now shows.
+#[test]
+fn close_dialog_text_never_names_the_product() {
+    use kettle_i18n::Text;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let mut lines: Vec<String> = [
+            Text::ConfirmTitleCloseWindow,
+            Text::ConfirmTitleCloseTab,
+            Text::ConfirmTitleClosePane,
+            Text::ConfirmButtonCloseWindow,
+            Text::ConfirmButtonCloseTab,
+            Text::ConfirmButtonClosePane,
+            Text::ConfirmButtonCancel,
+            Text::ConfirmCloseConsequences,
+            Text::ConfirmCloseBothPanes,
+        ]
+        .into_iter()
+        .map(|text| tr.text(text).to_string())
+        .collect();
+        for count in [1, 2, 3] {
+            lines.push(tr.confirm_close_scope(count));
+            lines.push(tr.confirm_close_tab(count));
+            lines.push(tr.confirm_close_window(count));
+        }
+        for line in lines {
+            assert!(!line.is_empty());
+            assert!(
+                !line.to_lowercase().contains("kettle"),
+                "{language:?}: {line:?}"
+            );
+        }
+    }
+}
+
+/// Real PTYs: an idle shell is idle, `sleep` started a moment ago is busy,
+/// and a wrapper that does not `exec` leaves its interactive shell idle.
+#[cfg(unix)]
+#[test]
+fn a_lone_pane_is_busy_exactly_while_a_job_owns_its_terminal() {
+    type Spawned = (
+        kettle_core::Terminal,
+        crossbeam_channel::Receiver<kettle_core::TermEvent>,
+    );
+    fn spawn(argv: &[String]) -> Option<Spawned> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        match kettle_core::Terminal::new(
+            argv,
+            None,
+            0,
+            80,
+            24,
+            8,
+            16,
+            false,
+            Default::default(),
+            None,
+            tx,
+            std::sync::Arc::new(|| {}),
+        ) {
+            Ok(terminal) => Some((terminal, rx)),
+            Err(error) => {
+                eprintln!("skipping lone-pane job test: no PTY ({error})");
+                None
+            }
+        }
+    }
+    fn wait_until(
+        terminal: &kettle_core::Terminal,
+        events: &crossbeam_channel::Receiver<kettle_core::TermEvent>,
+        mut done: impl FnMut(&kettle_core::Terminal) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                if let kettle_core::TermEvent::PtyWrite(reply) = event {
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if done(terminal) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+    fn on_screen(terminal: &kettle_core::Terminal, needle: &str) -> bool {
+        terminal
+            .screen_text(0)
+            .is_some_and(|screen| screen.text.contains(needle))
+    }
+
+    #[cfg(target_os = "macos")]
+    let shell = vec!["/bin/zsh".to_string(), "-f".to_string()];
+    #[cfg(not(target_os = "macos"))]
+    let shell = vec![
+        "/bin/bash".to_string(),
+        "--noprofile".to_string(),
+        "--norc".to_string(),
+    ];
+    // `; :` keeps sh from exec-ing the shell, so sh stays the pane's child
+    // and the interactive shell runs in a process group of its own.
+    let wrapper = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        format!("{}; :", shell.join(" ")),
+    ];
+    for (launch, wrapped) in [(shell, false), (wrapper, true)] {
+        let Some((terminal, rx)) = spawn(&launch) else {
+            return;
+        };
+        let job = |terminal: &kettle_core::Terminal| super::lone_pane_job(terminal, &launch, None);
+        // Split the marker so the echo of the typed line cannot match it.
+        terminal.write(b"printf 'LONE_PANE''_READY\\n'\r");
+        assert!(
+            wait_until(&terminal, &rx, |t| on_screen(t, "LONE_PANE_READY")),
+            "{launch:?}"
+        );
+        assert!(
+            wait_until(&terminal, &rx, |t| job(t) == super::LonePaneJob::Idle),
+            "{launch:?}: an idle shell must not count as busy"
+        );
+        // The wrapped shell is idle through the fallback, not because it is
+        // the child: its group really is a different one.
+        assert_eq!(
+            matches!(terminal.foreground_job(), kettle_core::ForegroundJob::Other(_)),
+            wrapped,
+            "{launch:?}"
+        );
+        terminal.write(b"sleep 30\r");
+        assert!(
+            wait_until(&terminal, &rx, |t| job(t) == super::LonePaneJob::Busy),
+            "{launch:?}: a running sleep must count as busy"
+        );
+        // Interrupt the job and leave the shell, so nothing outlives the test.
+        terminal.write(b"\x03");
+        assert!(
+            wait_until(&terminal, &rx, |t| job(t) == super::LonePaneJob::Idle),
+            "{launch:?}: the shell is idle again once the job ends"
+        );
+        terminal.write(b"exit\r");
+    }
+}
