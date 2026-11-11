@@ -317,6 +317,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A screen of characters that no installed font covers no longer freezes the
+  window for seconds, and terminal queries such as cursor-position reports
+  are answered promptly while it draws. Finding no font for such a character
+  used to shape it with every installed font, and again each time a row
+  holding it was redrawn. Kettle now skips fonts whose character map cannot
+  supply it and remembers characters no font has; the font chosen for every
+  other character is unchanged.
+
 - Screen readers read terminal text word by word. Orca's word echo repeated
   the whole row, prompt included, after every typed word, because Kettle's
   accessible text marked no word boundaries; terminal rows and text fields now

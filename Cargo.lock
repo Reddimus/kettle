@@ -976,6 +976,7 @@ dependencies = [
  "bitflags 2.13.2",
  "fontdb",
  "harfrust 0.5.2",
+ "icu_normalizer",
  "linebender_resource_handle",
  "log",
  "rangemap",

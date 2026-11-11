@@ -6030,6 +6030,9 @@ mod mark_fallback_tests;
 mod paragraph_separator_shaping_tests;
 
 #[cfg(test)]
+mod fallback_walk_tests;
+
+#[cfg(test)]
 mod emoji_shaping_tests;
 
 #[cfg(test)]

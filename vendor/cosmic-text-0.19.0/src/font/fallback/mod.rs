@@ -194,6 +194,21 @@ pub struct FontFallbackIter<'a> {
     other_i: usize,
     end: bool,
     ideal_weight: fontdb::Weight,
+    /// What the last stage may skip by, set by `set_missing`.
+    missing: MissingClusters,
+}
+
+/// What `FontFallbackIter`'s last stage, the walk of every face, knows about
+/// the clusters still missing. Kettle-owned; see `font/coverage.rs`.
+#[derive(Debug, Default)]
+enum MissingClusters {
+    /// Nothing: every face is tried, as upstream does.
+    #[default]
+    Unknown,
+    /// A face is tried only if it maps one of these.
+    Need(Vec<char>),
+    /// No face covers any of them, so the walk is skipped.
+    Uncoverable,
 }
 
 impl<'a> FontFallbackIter<'a> {
@@ -221,7 +236,30 @@ impl<'a> FontFallbackIter<'a> {
             other_i: 0,
             end: false,
             ideal_weight,
+            missing: MissingClusters::Unknown,
         }
+    }
+
+    /// Tell the iterator which clusters its first face left missing, so the
+    /// walk of every face can pass over faces that cannot fill any of them.
+    pub(crate) fn set_missing<'c>(&mut self, clusters: impl Iterator<Item = &'c str> + Clone) {
+        self.missing = if self.font_system.all_clusters_missing(clusters.clone()) {
+            MissingClusters::Uncoverable
+        } else {
+            match super::coverage::required_chars(clusters) {
+                Some(chars) => MissingClusters::Need(chars),
+                None => MissingClusters::Unknown,
+            }
+        };
+    }
+
+    /// Whether every face has been tried.
+    pub(crate) const fn is_exhausted(&self) -> bool {
+        self.end
+    }
+
+    pub(crate) fn font_system_mut(&mut self) -> &mut FontSystem {
+        self.font_system
     }
 
     pub fn check_missing(&self, word: &str) {
@@ -467,9 +505,17 @@ impl<'a> FontFallbackIter<'a> {
         //TODO: do we need to do this?
         //TODO: do not evaluate fonts more than once!
         let forbidden_families = fallbacks.forbidden_fallback();
+        if matches!(self.missing, MissingClusters::Uncoverable) {
+            self.other_i = self.font_match_keys.len();
+        }
         while self.other_i < self.font_match_keys.len() {
             let id = self.font_match_keys[self.other_i].id;
             self.other_i += 1;
+            if let MissingClusters::Need(chars) = &self.missing {
+                if !self.font_system.face_maps_any(id, chars) {
+                    continue;
+                }
+            }
             if forbidden_families
                 .iter()
                 .all(|family_name| !self.face_contains_family(id, family_name))

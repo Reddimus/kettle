@@ -91,6 +91,11 @@ default-features = false
 version = "0.5.0"
 default-features = false
 
+[dependencies.icu_normalizer]
+version = "2.4.0"
+features = ["compiled_data"]
+default-features = false
+
 [dependencies.hashbrown]
 version = "0.17"
 optional = true

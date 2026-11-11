@@ -323,11 +323,17 @@ fn shape_run(
         )
     };
 
+    if !missing.is_empty() {
+        let clusters = missing_clusters(&glyphs[glyph_start..]);
+        font_iter.set_missing(clusters.iter().map(|range| &line[range.clone()]));
+    }
+
     //TODO: improve performance!
     while !missing.is_empty() {
         let Some(font) = font_iter.next() else {
             break;
         };
+        font_iter.font_system_mut().count_fallback_shape();
 
         log::trace!(
             "Evaluating fallback with font '{}'",
@@ -400,6 +406,15 @@ fn shape_run(
         }
     }
 
+    // Every face was tried, so what is still missing has no glyph anywhere.
+    if !missing.is_empty() && font_iter.is_exhausted() {
+        let clusters = missing_clusters(&glyphs[glyph_start..]);
+        let font_system = font_iter.font_system_mut();
+        for range in clusters {
+            font_system.remember_missing_cluster(&line[range]);
+        }
+    }
+
     // Debug missing font fallbacks
     font_iter.check_missing(&line[start_run..end_run]);
 
@@ -411,6 +426,18 @@ fn shape_run(
 
     // Restore the scripts buffer.
     font_system.shape_buffer.scripts = scripts;
+}
+
+/// The byte ranges of the clusters in `glyphs` that have no glyph, each once.
+fn missing_clusters(glyphs: &[ShapeGlyph]) -> Vec<Range<usize>> {
+    let mut clusters: Vec<Range<usize>> = Vec::new();
+    for glyph in glyphs.iter().filter(|glyph| glyph.glyph_id == 0) {
+        let range = glyph.start..glyph.end;
+        if !clusters.contains(&range) {
+            clusters.push(range);
+        }
+    }
+    clusters
 }
 
 #[cfg(feature = "shape-run-cache")]

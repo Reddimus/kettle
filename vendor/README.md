@@ -339,6 +339,30 @@ upstream release that contains all of these fixes.
   forward or replaced by an upstream equivalent, and
   `kettle-render`'s `pane_rows_shape_left_to_right_without_mirroring` test
   fails without it.
+- Local change, Kettle's own (not an upstream backport): font fallback no
+  longer shapes a run with faces that cannot fill a cluster it is missing.
+  Upstream's last fallback stage shapes the run once with every face in the
+  database, building a shape plan for each, and nothing remembers the result,
+  so a screen of characters no installed face covers held the event loop for
+  seconds and did so again for every row shaped later. `FontFallbackIter` now
+  passes over a face whose character map holds none of the missing clusters'
+  characters, their canonical decompositions or their compositions, read from
+  the subtable harfrust shapes with and without loading the face. Clusters
+  holding a character harfrust can draw without its own mapping
+  (default-ignorables, the spaces of its space fallback, U+2011, tabs, and the
+  Hebrew and Thai blocks) keep the full walk. `FontSystem` remembers up to
+  4096 clusters of at most 64 bytes that a full walk left missing, clears them
+  when full and in `db_mut`, and skips the walk for a run whose missing
+  clusters are all remembered. The chosen face and glyph are unchanged:
+  base and patched shaping matched for every scalar from U+0080 to U+2FFFF
+  and U+E0000 to U+E01EF in five contexts, on the bundled faces and on a
+  macOS system font database. The crate gains a dependency on
+  `icu_normalizer` 2.4, already in the graph through `kettle-render`, and two
+  `#[doc(hidden)]` counters, `FontSystem::fallback_shape_count` and
+  `FontSystem::loaded_font_count`. `src/font/coverage.rs` is new;
+  `src/font/fallback/mod.rs`, `src/font/system.rs`, `src/font/mod.rs`,
+  `src/shape.rs` and `Cargo.toml` change. Re-check on any upgrade:
+  `kettle-render`'s `fallback_walk_tests` fail without it.
 - Upstream status, checked 2026-10-16: both commits are on
   pop-os/cosmic-text's `main`, and crates.io's newest `cosmic-text` is still
   0.19.0, published 2026-04-22, before either.

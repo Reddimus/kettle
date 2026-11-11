@@ -168,6 +168,13 @@ pub struct FontSystem {
 
     /// List of fallbacks
     pub(crate) fallbacks: Fallbacks,
+
+    /// Clusters that no face in the database gave a glyph, each proven by a
+    /// walk of every face. Kettle-owned; see `font/coverage.rs`.
+    missing_clusters: BTreeSet<Box<str>>,
+
+    /// Fallback faces shaped after a run's first face, for tests.
+    fallback_shapes: u64,
 }
 
 impl fmt::Debug for FontSystem {
@@ -269,6 +276,8 @@ impl FontSystem {
             shape_buffer: ShapeBuffer::default(),
             dyn_fallback: Box::new(impl_fallback),
             fallbacks,
+            missing_clusters: BTreeSet::new(),
+            fallback_shapes: 0,
         }
     }
 
@@ -290,6 +299,8 @@ impl FontSystem {
     /// Get a mutable reference to the database.
     pub fn db_mut(&mut self) -> &mut fontdb::Database {
         self.font_matches_cache.clear();
+        // A face added here may cover a cluster no face covered before.
+        self.missing_clusters.clear();
         &mut self.db
     }
 
@@ -318,6 +329,63 @@ impl FontSystem {
                 }
             })
             .clone()
+    }
+
+    /// How many faces font fallback has shaped a run with after the run's
+    /// first face, since this system was created. For tests.
+    #[doc(hidden)]
+    pub fn fallback_shape_count(&self) -> u64 {
+        self.fallback_shapes
+    }
+
+    /// How many faces have been loaded (or failed to load) at any weight.
+    /// For tests.
+    #[doc(hidden)]
+    pub fn loaded_font_count(&self) -> usize {
+        self.font_cache.len()
+    }
+
+    pub(crate) fn count_fallback_shape(&mut self) {
+        self.fallback_shapes = self.fallback_shapes.wrapping_add(1);
+    }
+
+    /// Whether every one of `clusters` is known to have no glyph in any face.
+    pub(crate) fn all_clusters_missing<'c>(
+        &self,
+        mut clusters: impl Iterator<Item = &'c str>,
+    ) -> bool {
+        clusters.all(|cluster| self.missing_clusters.contains(cluster))
+    }
+
+    /// Remember `cluster` as having no glyph in any face, after a fallback
+    /// walk of every face left it missing.
+    pub(crate) fn remember_missing_cluster(&mut self, cluster: &str) {
+        if cluster.len() > super::coverage::MISSING_CLUSTER_MAX_BYTES
+            || cluster.chars().any(super::coverage::shaper_substitutes)
+            || self.missing_clusters.contains(cluster)
+        {
+            return;
+        }
+        if self.missing_clusters.len() >= super::coverage::MISSING_CLUSTERS_LIMIT {
+            self.missing_clusters.clear();
+        }
+        self.missing_clusters.insert(cluster.into());
+    }
+
+    /// Whether face `id` maps any of `chars`, read from its character map
+    /// without loading the face for shaping.
+    pub(crate) fn face_maps_any(&mut self, id: fontdb::ID, chars: &[char]) -> bool {
+        // SAFETY: as in `get_font`, which maps the same file the same way: the
+        // mapping is shared with every face of that file and is only read.
+        #[cfg(feature = "std")]
+        unsafe {
+            self.db.make_shared_face_data(id);
+        }
+        self.db
+            .with_face_data(id, |data, index| {
+                super::coverage::face_maps_any(data, index, chars)
+            })
+            .unwrap_or(true)
     }
 
     pub fn is_monospace(&self, id: fontdb::ID) -> bool {
