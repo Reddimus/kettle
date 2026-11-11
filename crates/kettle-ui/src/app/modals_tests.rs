@@ -763,6 +763,34 @@ fn a_lone_busy_pane_prompts_only_under_the_default_policy() {
     assert!(!super::close_needs_prompt(AskBeforeClosing::Never, 5, 5, || super::LonePaneJob::Busy));
 }
 
+/// The titlebar ✕ and Alt+F4 ask for a one-pane window that runs a program
+/// under the default policy, as Terminal.app and iTerm2 do on their close
+/// button, and only then: an idle or unreadable lone pane closes at once, a
+/// window of several panes still closes without asking unless the policy is
+/// `always`, and `multiple-terminals` and `never` keep the old exemption.
+#[test]
+fn the_titlebar_close_asks_for_a_lone_busy_pane_under_the_default() {
+    use super::LonePaneJob::{Busy, Idle, Unknown};
+    use kettle_config::AskBeforeClosing;
+    let titlebar = |policy: AskBeforeClosing, scope: usize, busy: usize, job| {
+        super::titlebar_close_consults_policy(policy, scope)
+            && super::close_needs_prompt(policy, scope, busy, || job)
+    };
+    let default = kettle_config::Config::default().ask_before_closing;
+    assert!(titlebar(default, 1, 1, Busy));
+    assert!(titlebar(default, 1, 0, Busy));
+    assert!(!titlebar(default, 1, 1, Idle));
+    assert!(!titlebar(default, 1, 1, Unknown));
+    assert!(!titlebar(default, 3, 3, Busy), "several panes close without asking");
+
+    assert!(titlebar(AskBeforeClosing::Always, 1, 1, Idle));
+    assert!(titlebar(AskBeforeClosing::Always, 3, 1, Idle));
+    for policy in [AskBeforeClosing::MultipleTerminals, AskBeforeClosing::Never] {
+        assert!(!titlebar(policy, 1, 1, Busy), "{policy:?}");
+        assert!(!titlebar(policy, 3, 3, Busy), "{policy:?}");
+    }
+}
+
 #[test]
 fn confirm_close_decides_through_the_shared_policy() {
     let src = include_str!("modals.rs");

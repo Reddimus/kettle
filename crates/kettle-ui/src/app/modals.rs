@@ -1043,7 +1043,8 @@ impl App {
     ///
     /// The titlebar ✕ and Alt+F4 are the exception. They are OS window-destroy
     /// requests rather than Kettle commands, so `WindowEvent::CloseRequested`
-    /// reaches this only under `ask-before-closing = always`.
+    /// reaches this only when [`titlebar_close_consults_policy`] allows it:
+    /// under `always`, or for a one-pane window under `busy-or-multiple`.
     pub(super) fn confirm_close(
         &mut self,
         ws: &mut WindowState,
@@ -2776,6 +2777,23 @@ pub(super) fn close_needs_prompt(
         return true;
     }
     scope == 1 && policy.asks_for_busy_single_pane() && lone_job() == LonePaneJob::Busy
+}
+
+/// Whether the titlebar ✕ or Alt+F4 consults `ask-before-closing` at all.
+///
+/// Those gestures are OS window-destroy requests, not Kettle commands. A
+/// window of several panes closes without asking unless the policy is
+/// `always`, because the OSC 133 busy count calls every shell without
+/// integration busy and would put a question on nearly every such window.
+/// A one-pane window under `busy-or-multiple` is decided by the PTY in
+/// [`close_needs_prompt`], which has no such false positive, so the gesture
+/// asks exactly when a program other than the pane's shell would die.
+pub(super) fn titlebar_close_consults_policy(
+    policy: kettle_config::AskBeforeClosing,
+    scope: usize,
+) -> bool {
+    policy == kettle_config::AskBeforeClosing::Always
+        || (scope == 1 && policy.asks_for_busy_single_pane())
 }
 
 /// What the PTY says about the one pane a close would take.

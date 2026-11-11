@@ -93,29 +93,28 @@ fn every_close_gesture_asks_before_closing() {
 
     // The titlebar ✕ and Alt+F4 are the ONE exception, and it is
     // deliberate: they are OS window-destroy requests rather than Kettle
-    // commands, so they close without asking. `ask-before-closing = always`
-    // is the opt-in that restores the question, and pinning that gate here
-    // is what stops the exception from silently widening into "the ✕ never
-    // asks, whatever you configured".
-    let close_requested = after("WindowEvent::CloseRequested => {", 2400);
-    // Pin the whole comparison, not just the enum name. Checking only that
-    // `AskBeforeClosing::Always` appears somewhere in the arm would pass a
-    // reversed `!=`, which inverts the entire policy: `always` would close
-    // silently while every other setting prompted.
+    // commands, so a window of several panes closes without asking unless
+    // `ask-before-closing = always`. A one-pane window under the default
+    // `busy-or-multiple` still asks when the PTY shows a running program.
+    // `titlebar_close_consults_policy` holds that rule (its truth table is
+    // tested in modals_tests.rs); pinning the gate here is what stops the
+    // exception from silently widening into "the ✕ never asks, whatever you
+    // configured", or narrowing back to `always` only.
+    let close_requested = after("WindowEvent::CloseRequested => {", 2600);
     let gate = [
-        "self.cfg.ask_before_closing ",
-        "== kettle_config::AskBeforeClosing::Always",
+        "if titlebar_close_consults_policy(",
+        "self.cfg.ask_before_closing, scope)",
     ]
     .concat();
     assert!(
         close_requested.contains(&gate),
-        "the titlebar ✕ / Alt+F4 close must prompt exactly when \
-             `ask-before-closing` IS `always`"
+        "the titlebar ✕ / Alt+F4 close must ask through \
+             `titlebar_close_consults_policy`"
     );
     assert!(
-        close_requested.contains("self.confirm_close("),
-        "the `always` branch of the ✕ close must route through the shared \
-             confirm_close gate rather than raising its own dialog"
+        close_requested.contains("&& self.confirm_close("),
+        "the ✕ close must route through the shared confirm_close gate \
+             rather than raising its own dialog"
     );
     // Both tab-bar close gestures (the ✕ hit and middle-click) funnel
     // through one hit test, written once for real mouse input and once for
