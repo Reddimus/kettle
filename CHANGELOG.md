@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Each row of the theme picker shows a small strip of that theme's colours:
+  its background, its text colour and six accent colours. In a narrow window
+  the strip is dropped before a theme's name is shortened.
+
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
   and kitty do. Lines are whole pixels sized from the font's underline, so

@@ -2223,7 +2223,7 @@ fn push_picker_accessibility(
             }
             // The painted hint, such as a shortcut or a theme's appearance.
             if !row.hint.is_empty() {
-                option.set_description(row.hint.clone());
+                option.set_description(row.hint.trim().to_string());
             }
             if !row.enabled {
                 option.set_disabled();
@@ -2326,7 +2326,7 @@ pub(super) fn modal_accessibility_projection(
             if row.hint == SUBMENU_SIGN {
                 node.set_has_popup(accesskit::HasPopup::Menu);
             } else if !row.hint.is_empty() {
-                node.set_description(row.hint.clone());
+                node.set_description(row.hint.trim().to_string());
             }
             if !row.enabled {
                 node.set_disabled();
@@ -2783,7 +2783,7 @@ pub(super) fn nest_context_menu_accessibility(
             let mut item = Node::new(Role::MenuItem);
             item.set_label(row.label.clone());
             if !row.hint.is_empty() && row.hint != SUBMENU_SIGN {
-                item.set_description(row.hint.clone());
+                item.set_description(row.hint.trim().to_string());
             }
             if row.enabled {
                 item.add_action(AccessibilityAction::Focus);
@@ -3285,6 +3285,7 @@ mod context_menu_nesting_tests {
             picker_header_height: 0.0,
             anchor,
             rows: vec![ContextMenuRow {
+                swatches: None,
                 matched_chars: None,
                 label: label.into(),
                 separator: false,
@@ -3397,6 +3398,7 @@ mod context_menu_nesting_tests {
         let mut menu = panel("Split", (40.0, 60.0));
         menu.rows[0].hint = SUBMENU_SIGN.to_string();
         menu.rows.push(ContextMenuRow {
+            swatches: None,
             matched_chars: None,
             label: "Paste".into(),
             separator: false,

@@ -84,6 +84,15 @@ pub struct RoundedSurfacePipeline {
 
 impl RoundedSurfacePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self::with_capacity(device, format, 32)
+    }
+
+    /// A pipeline that draws at most `capacity` surfaces a frame.
+    pub fn with_capacity(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        capacity: usize,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-rounded-surface"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -152,7 +161,6 @@ impl RoundedSurfacePipeline {
             multiview_mask: None,
             cache: None,
         });
-        let capacity = 32;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-rounded-surface-instances"),
             size: (capacity * std::mem::size_of::<RoundedSurface>()) as u64,

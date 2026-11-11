@@ -178,6 +178,7 @@ impl Renderer {
             self.menu_quads.upload_counts(),
             self.rounded_surfaces.upload_counts(),
             self.picker_surfaces.upload_counts(),
+            self.menu_swatch_surfaces.upload_counts(),
             self.toast_surfaces.upload_counts(),
             self.imgs.upload_counts(),
             self.card_base.upload_counts(),
@@ -385,6 +386,7 @@ impl Renderer {
                 ..self.transport_surface_count + self.settings_surface_count,
         );
         self.menu_quads.draw(&mut pass);
+        self.menu_swatch_surfaces.draw_range(&mut pass, 0..u32::MAX);
         self.media_receipt_img.draw(&mut pass);
         self.toast_surfaces.draw_range(&mut pass, 0..u32::MAX);
         self.menu_text_renderer

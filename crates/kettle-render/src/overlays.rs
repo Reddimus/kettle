@@ -54,6 +54,10 @@ pub struct ContextMenuRow {
     /// (e.g. `Ctrl+Shift+1`). Empty = no hint. The App computes it from the
     /// LIVE keybind map so user rebinds show their actual chord.
     pub hint: String,
+    /// Decorative colour swatches painted just left of the hint: the theme
+    /// picker's background, foreground and ANSI red through cyan. `None` on
+    /// every other row. Screen readers keep reading only the label and hint.
+    pub swatches: Option<[Rgb; menu::SWATCH_COUNT]>,
 }
 
 /// Dropdown-parity: a menu row's display-column budget — the label plus
@@ -70,6 +74,128 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
         } else {
             row.hint.width() + 2
         }
+        + if row.swatches.is_some() {
+            menu::swatch_columns()
+        } else {
+            0
+        }
+}
+
+/// Where a row's right-aligned hint starts, given its display width in pixels.
+pub(crate) fn menu_hint_left(ax: f32, panel_w: f32, hint_w: f32) -> f32 {
+    (ax + panel_w - 16.0 - hint_w).max(ax + 16.0)
+}
+
+/// The swatch squares of the row at `row_y`, left to right: just left of the
+/// hint, or at the panel's right padding when the row has no hint, and
+/// vertically centred. `None` when the row has no swatches or the strip would
+/// cross the panel's left padding.
+pub(crate) fn menu_row_swatch_rects(
+    row: &ContextMenuRow,
+    (ax, panel_w): (f32, f32),
+    (row_y, row_h): (f32, f32),
+    cw: f32,
+) -> Option<[Rect4; menu::SWATCH_COUNT]> {
+    use unicode_width::UnicodeWidthStr as _;
+
+    row.swatches?;
+    let right = if row.hint.is_empty() {
+        ax + panel_w - 16.0
+    } else {
+        menu_hint_left(ax, panel_w, row.hint.width() as f32 * cw)
+            - menu::SWATCH_GAP_COLUMNS as f32 * cw
+    };
+    let side = menu::SWATCH_SIDE * cw;
+    let pitch = menu::SWATCH_PITCH * cw;
+    let left = (right - (menu::SWATCH_COUNT - 1) as f32 * pitch - side).round();
+    if !left.is_finite() || left < ax + 16.0 || side <= 0.0 {
+        return None;
+    }
+    let top = (row_y + (row_h - side) * 0.5).round();
+    Some(std::array::from_fn(|index| {
+        (left + index as f32 * pitch, top, side, side)
+    }))
+}
+
+/// Each visible row's swatches with their colours, walking the rows exactly
+/// as `menu_chrome_quads` and the label pass do.
+pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Rect4, Rgb)> {
+    let mut out = Vec::new();
+    if !menu.rows.iter().any(|row| row.swatches.is_some()) {
+        return out;
+    }
+    let panel_w = context_menu_panel_width(menu, cw);
+    let row_h = ch + menu::ROW_PAD;
+    let sep_h = menu::SEP_H;
+    let natural_h: f32 = menu
+        .rows
+        .iter()
+        .map(|r| if r.separator { sep_h } else { row_h })
+        .sum();
+    let panel_h = if menu.panel_h_clamped > 0.0 {
+        menu.panel_h_clamped.min(natural_h)
+    } else {
+        natural_h
+    };
+    let (ax, ay) = menu.anchor;
+    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    let mut row_y = ay + inset;
+    for row in menu
+        .rows
+        .iter()
+        .skip(menu.scroll_offset.min(menu.rows.len()))
+    {
+        let h = if row.separator { sep_h } else { row_h };
+        if row_y + h > ay + inset + content_h {
+            break;
+        }
+        if let (Some(colors), Some(rects)) = (
+            row.swatches,
+            menu_row_swatch_rects(row, (ax, panel_w), (row_y, row_h), cw),
+        ) {
+            out.extend(rects.into_iter().zip(colors));
+        }
+        row_y += h;
+    }
+    out
+}
+
+/// The most swatch squares one frame paints; whole rows past it are skipped.
+pub(crate) const MENU_SWATCH_SURFACES: usize = 32 * menu::SWATCH_COUNT;
+
+/// Rounded swatch squares for every open menu level, outlined in the theme's
+/// foreground so a swatch matching the panel background stays visible.
+pub(crate) fn menu_swatch_surfaces<'a>(
+    menus: impl IntoIterator<Item = &'a ContextMenu>,
+    theme: &kettle_config::Theme,
+    cw: f32,
+    ch: f32,
+) -> Vec<crate::rounded_surface::RoundedSurface> {
+    let rgba = |c: Rgb, a| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            a,
+        ]
+    };
+    let mut out: Vec<_> = menus
+        .into_iter()
+        .flat_map(|menu| menu_swatch_rects(menu, cw, ch))
+        .map(
+            |((x, y, w, h), color)| crate::rounded_surface::RoundedSurface {
+                pos: [x, y],
+                size: [w, h],
+                fill: rgba(color, 1.0),
+                // The foreground always contrasts with the menu surface; palette 8
+                // equals the background in some themes (Solarized Dark).
+                stroke: rgba(theme.foreground, 0.45),
+                params: [(w * 0.25).min(3.0), 1.0, 0.0, 0.0],
+            },
+        )
+        .collect();
+    out.truncate(MENU_SWATCH_SURFACES);
+    out
 }
 
 /// Vertical menu panel used by the right-click menu and the command, layout,
@@ -1546,6 +1672,23 @@ pub mod menu {
     /// height to the surface (for scrollable submenus). Keeps
     /// the menu from kissing the window edge.
     pub const PANEL_BREATHING: f32 = 80.0;
+
+    /// Squares in a row's swatch strip.
+    pub const SWATCH_COUNT: usize = 8;
+    /// A swatch square's side, in cell widths.
+    pub const SWATCH_SIDE: f32 = 1.0;
+    /// From one swatch's left edge to the next, in cell widths.
+    pub const SWATCH_PITCH: f32 = 1.5;
+    /// Blank columns between the strip and the hint, or the label when a row
+    /// has no hint.
+    pub const SWATCH_GAP_COLUMNS: usize = 2;
+
+    /// Columns a swatch strip reserves in its row, gap included. The row
+    /// measure, the UI's narrow-window fit and the painter all use it.
+    pub fn swatch_columns() -> usize {
+        ((SWATCH_COUNT - 1) as f32 * SWATCH_PITCH + SWATCH_SIDE).ceil() as usize
+            + SWATCH_GAP_COLUMNS
+    }
 }
 
 // Tab-drag rendering constants, public for kettle-ui like `menu` above.
