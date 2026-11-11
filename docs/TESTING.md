@@ -3120,6 +3120,11 @@ Source guards check that AppKit only performs native application and Services eq
 leaving Kettle shortcuts on the original keyboard dispatch and terminal-writer
 path, and that resume, focus/selection dispatch and config reload reconcile the
 menu while retaining Services and Windows registration.
+`automatic_window_tabbing_is_off_before_the_event_loop_exists` checks that
+`run_with` turns AppKit's automatic window tabbing off once, before the event
+loop is built, and `move_tab_rows_agree_with_the_wrapping_mux_at_every_position`
+pins Move Tab Left / Right as enabled wherever `Mux::nudge_active_tab` moves the
+tab, the first and last tab included, since the move wraps.
 `cargo test -p kettle-ui --test macos_menu_native` runs the production menu subclass
 on the process main thread on macOS. It dispatches synthetic AppKit key events
 to native commands and a nested, registered Services menu, checks disabled

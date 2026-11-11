@@ -644,3 +644,44 @@ fn window_menu_offers_rename_and_moving_the_tab() {
         .enables(&Action::EditTabTitle)
     );
 }
+
+/// Move Tab Left and Right stay enabled on the first and last tab because
+/// the action wraps there; the menu's tab count alone must agree with what
+/// the mux does at every position, or the row would offer a silent no-op.
+#[test]
+fn move_tab_rows_agree_with_the_wrapping_mux_at_every_position() {
+    let mux_with = |tabs: u64, active: usize| {
+        let mut mux = crate::mux::Mux::new();
+        for id in 1..=tabs {
+            mux.tabs.push(crate::mux::Tab {
+                root: crate::mux::Node::Leaf(id),
+                focus: id,
+                title_override: None,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
+                lanes: Default::default(),
+            });
+        }
+        mux.active = active;
+        mux
+    };
+    for tabs in 1..=4u64 {
+        let context = Context {
+            tabs: tabs as usize,
+            ..ready()
+        };
+        for active in 0..tabs as usize {
+            for (action, delta) in [(Action::MoveTabLeft, -1), (Action::MoveTabRight, 1)] {
+                assert_eq!(
+                    context.enables(&action),
+                    mux_with(tabs, active).nudge_active_tab(delta),
+                    "{action:?} with {tabs} tabs, active {active}"
+                );
+            }
+        }
+    }
+}

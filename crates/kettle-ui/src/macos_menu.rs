@@ -80,6 +80,9 @@ impl Context {
         match action {
             Action::Copy => self.pane && self.clipboard && (!self.smart_copy || self.selection),
             Action::Paste => self.pane && self.clipboard && self.writable,
+            // The moves wrap at the ends of the bar (`Mux::nudge_active_tab`),
+            // so with two tabs every position moves and the active index is
+            // not needed here.
             Action::NextTab | Action::PrevTab | Action::MoveTabLeft | Action::MoveTabRight => {
                 self.tabs > 1
             }
