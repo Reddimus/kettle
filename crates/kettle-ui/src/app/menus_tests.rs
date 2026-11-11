@@ -157,15 +157,11 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
 /// dispatchable, no click mapping, survives filter_disabled.
 #[test]
 fn info_rows_are_inert_but_visible() {
-    let info = ContextMenuItem::Info {
-        label: "kettle 9.9.9".to_string(),
-    };
+    let info = ContextMenuItem::info("kettle 9.9.9");
     assert!(!super::item_is_dispatchable(&info));
     assert!(super::item_to_click(&info, 0).is_none());
     let kept = filter_disabled(vec![
-        ContextMenuItem::Info {
-            label: "x".to_string(),
-        },
+        ContextMenuItem::info("x"),
         ContextMenuItem::Separator,
         item("Copy version info", true),
     ]);
@@ -1293,7 +1289,7 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
     ] {
         let tr = kettle_i18n::Translator::new(language);
         let items = App::shell_menu_items(None, &tr);
-        assert!(matches!(items.as_slice(), [ContextMenuItem::Info {label}] if label == text));
+        assert!(matches!(items.as_slice(), [ContextMenuItem::Info { label, .. }] if label == text));
     }
     assert_eq!(
         pending.request(1, 1, Some(&shells)),
@@ -1326,9 +1322,7 @@ fn loading_shell_menu_survives_construction_and_can_refresh() {
             ContextMenuItem::NewTabShell { argv, .. } if argv == &["test-shell"])));
         assert!(!App::shell_menu_is_loading(&[], &tr));
         assert!(!App::shell_menu_is_loading(
-            &[ContextMenuItem::Info {
-                label: "About".into(),
-            }],
+            &[ContextMenuItem::info("About")],
             &tr
         ));
     }

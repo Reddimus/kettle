@@ -2682,6 +2682,9 @@ plural = "count"
 [messages.link_open_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status, link-single-click enabled."
 
+[messages.mouse_override_hint]
+context = "crates/kettle-ui/src/app/notices.rs and menus.rs: brief pane notice after a right-click went to a program that uses the mouse (a full-screen editor, htop, tmux), and the first row of the menu Shift+right-click opens over such a program. Shift is the keyboard key. Also names a screen-reader live region. Never name the product."
+
 [messages.link_open_command_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
 

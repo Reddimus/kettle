@@ -1216,7 +1216,7 @@ impl App {
                         ContextMenuItem::UrlItem { label, .. } => *label,
                         ContextMenuItem::Media { label, .. }
                         | ContextMenuItem::Preview { label, .. } => *label,
-                        ContextMenuItem::Info { label } => label.as_str(),
+                        ContextMenuItem::Info { label, .. } => label.as_str(),
                         ContextMenuItem::Separator => "",
                     };
                     let row = serde_json::json!({

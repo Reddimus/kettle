@@ -107,11 +107,12 @@ impl App {
         );
         let mut notices = Vec::new();
         for (id, partition) in self.pane_layout(ws, self.area(ws)) {
+            let mouse_hint = ws.mouse_override_hint.pane() == Some(id);
             let Some(pane) = ws
                 .mux
                 .panes
                 .get(&id)
-                .filter(|pane| pane.held || pane.osc52_notice.message.is_some())
+                .filter(|pane| pane.held || pane.osc52_notice.message.is_some() || mouse_hint)
             else {
                 continue;
             };
@@ -133,7 +134,11 @@ impl App {
                 )
             } else {
                 (
-                    pane.osc52_notice.message.clone().unwrap_or_default(),
+                    pane.osc52_notice.message.clone().unwrap_or_else(|| {
+                        self.ui_text
+                            .text(kettle_i18n::Text::MouseOverrideHint)
+                            .into()
+                    }),
                     String::new(),
                     self.ui_text
                         .text(kettle_i18n::Text::NoticeDismiss)
@@ -227,8 +232,10 @@ impl App {
                     return;
                 };
                 if !pane.held {
-                    if !primary {
-                        pane.osc52_notice.message = None;
+                    // Dismiss what the notice showed: the clipboard notice
+                    // comes before the Shift hint.
+                    if !primary && pane.osc52_notice.message.take().is_none() {
+                        ws.mouse_override_hint.dismiss();
                     }
                 } else if primary {
                     let rect = self

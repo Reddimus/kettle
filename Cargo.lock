@@ -2516,6 +2516,7 @@ name = "kettle-ui"
 version = "5.9.0"
 dependencies = [
  "accesskit",
+ "accesskit_consumer",
  "accesskit_winit",
  "alacritty_terminal",
  "anyhow",

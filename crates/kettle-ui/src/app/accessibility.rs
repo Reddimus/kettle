@@ -155,11 +155,12 @@ impl App {
             ));
             let mut nodes = modal.nodes;
             nodes.push((ACCESSIBILITY_ROOT_ID, root));
+            let focus = modal_focus_in_tree(modal.focus, &nodes).unwrap_or(ACCESSIBILITY_ROOT_ID);
             return TreeUpdate {
                 nodes,
                 tree: None,
                 tree_id: TreeId::ROOT,
-                focus: modal.focus.unwrap_or(ACCESSIBILITY_ROOT_ID),
+                focus,
             };
         }
         let area = self.area(ws);
@@ -767,15 +768,10 @@ impl App {
             &self.ui_text,
         );
         nest_context_menu_accessibility(&mut modal, ws, overlay, self.menu_cell(ws).1);
-        if ws.context_menu.is_some()
-            && let Some(menu) = overlay.context_menu.as_ref()
-        {
-            let (_, ch) = self.menu_cell(ws);
-            bound_context_menu_accessibility(&mut modal, menu, ch, 2);
-        }
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
+        let modal_focus = modal_focus_in_tree(modal_focus, &nodes);
         let mut root = Node::new(Role::Window);
         root.set_label(self.ui_text.text(kettle_i18n::Text::A11yWindow));
         root.set_children(children);
@@ -2058,6 +2054,23 @@ pub(super) fn modal_accessibility_diagnostic_label<'a>(
     node.label()
 }
 
+/// The modal focus a finished tree of `nodes` can name: the node the modal
+/// projection chose while it is still in `nodes`, else the open context
+/// menu while that is, else none, so the caller's own default applies.
+/// AccessKit rejects a tree whose focus is not one of its nodes, and a pass
+/// after the projection can take the chosen node out, as joining a wrapped
+/// sentence does with the lines that continue it.
+pub(super) fn modal_focus_in_tree(
+    focus: Option<NodeId>,
+    nodes: &[(NodeId, Node)],
+) -> Option<NodeId> {
+    let held = |target: &NodeId| nodes.iter().any(|(id, _)| id == target);
+    let focus = focus?;
+    Some(focus)
+        .filter(held)
+        .or(Some(accessibility_modal_id(2, 0)).filter(held))
+}
+
 pub(super) struct ModalAccessibilityProjection {
     pub(super) roots: Vec<NodeId>,
     pub(super) nodes: Vec<(NodeId, Node)>,
@@ -2783,7 +2796,9 @@ fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
     node
 }
 
-/// Preserve the drill-in path as actual menu/menu-item ancestry for assistive technology.
+/// Finish the open menu for assistive technology: bound its rows where they
+/// are painted, read a wrapped sentence as one item, and preserve the
+/// drill-in path as actual menu/menu-item ancestry.
 pub(super) fn nest_context_menu_accessibility(
     projection: &mut ModalAccessibilityProjection,
     ws: &WindowState,
@@ -2797,6 +2812,10 @@ pub(super) fn nest_context_menu_accessibility(
     if !projection.nodes.iter().any(|(id, _)| *id == current_id) {
         return;
     }
+    if let Some(panel) = overlay.context_menu.as_ref() {
+        bound_context_menu_accessibility(projection, panel, cell_h, 2);
+    }
+    join_wrapped_info_accessibility(projection, &menu.items, 2);
     for (index, item) in menu.items.iter().enumerate() {
         if matches!(item, ContextMenuItem::Submenu { .. })
             && let Some((_, node)) = projection
@@ -2842,6 +2861,7 @@ pub(super) fn nest_context_menu_accessibility(
         parent_menu.set_children(children);
         projection.nodes.push((menu_id, parent_menu));
         bound_context_menu_accessibility(projection, panel, cell_h, kind);
+        join_wrapped_info_accessibility(projection, &parent.items, kind);
         child = menu_id;
     }
     if child != current_id {
@@ -2850,6 +2870,81 @@ pub(super) fn nest_context_menu_accessibility(
                 *root = child;
             }
         }
+    }
+}
+
+/// Give assistive technology a sentence the menu wrapped over several Info
+/// rows as one item: the first line's node is named with the whole sentence
+/// and covers every line, and the nodes of the lines that continue it leave
+/// the tree. A focus on one of those lines, where hovering it puts the
+/// highlight, moves to the first. Node ids stay the row index plus one, so
+/// the rows after the sentence keep theirs. Run it after the menu of `kind`
+/// is bounded.
+fn join_wrapped_info_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    items: &[ContextMenuItem],
+    kind: u64,
+) {
+    let mut first = 0;
+    while first < items.len() {
+        let ContextMenuItem::Info {
+            label,
+            continued: false,
+        } = &items[first]
+        else {
+            first += 1;
+            continue;
+        };
+        let mut sentence = label.clone();
+        let mut end = first + 1;
+        while let Some(ContextMenuItem::Info {
+            label,
+            continued: true,
+        }) = items.get(end)
+        {
+            sentence.push(' ');
+            sentence.push_str(label);
+            end += 1;
+        }
+        if end > first + 1 {
+            let lines: Vec<NodeId> = (first..end)
+                .map(|index| accessibility_modal_id(kind, index + 1))
+                .collect();
+            let shown = projection
+                .nodes
+                .iter()
+                .filter(|(id, node)| lines.contains(id) && !node.is_hidden())
+                .filter_map(|(_, node)| node.bounds())
+                .reduce(|all, line| all.union(line));
+            let continuations = &lines[1..];
+            projection
+                .nodes
+                .retain(|(id, _)| !continuations.contains(id));
+            if projection
+                .focus
+                .is_some_and(|focus| continuations.contains(&focus))
+            {
+                projection.focus = Some(lines[0]);
+            }
+            for (id, node) in &mut projection.nodes {
+                if *id == lines[0] {
+                    node.set_label(sentence.clone());
+                    if let Some(bounds) = shown {
+                        node.set_bounds(bounds);
+                        node.clear_hidden();
+                    }
+                } else if *id == accessibility_modal_id(kind, 0) {
+                    let children: Vec<NodeId> = node
+                        .children()
+                        .iter()
+                        .copied()
+                        .filter(|child| !continuations.contains(child))
+                        .collect();
+                    node.set_children(children);
+                }
+            }
+        }
+        first = end;
     }
 }
 

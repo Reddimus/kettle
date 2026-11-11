@@ -679,7 +679,10 @@ impl App {
         // Preferences submenu: runtime-mutable settings + the Advanced…
         // escape hatch.
         self.append_preferences_submenu_items(&mut items);
-        let items = grouped_terminal_menu(items, tr);
+        let mut items = grouped_terminal_menu(items, tr);
+        let shift_over_tracking = shift_menu_hint_due(ws, offer_copied, in_focused_pane, &self.cfg);
+        let info_columns = self.context_menu_info_columns(ws, &items);
+        prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -766,14 +769,7 @@ impl App {
             .max()
             .unwrap_or(0) as f32;
         let panel_w = kettle_render::menu::panel_width(max_columns, cw);
-        let (sw, sh) = ws
-            .renderer
-            .as_ref()
-            .map(|r| {
-                let (w, h) = r.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
+        let (sw, sh) = self.context_menu_surface(ws);
         if !context_menu_surface_can_fit_row((sw, sh), (cw, ch)) {
             ws.context_menu = None;
             if let Some(window) = &ws.window {
@@ -801,6 +797,33 @@ impl App {
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
+    }
+
+    /// The surface a menu opens on, in physical pixels.
+    fn context_menu_surface(&self, ws: &WindowState) -> (f32, f32) {
+        ws.renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0))
+    }
+
+    /// How many columns an Info line may take in a menu of `items`, measured
+    /// as `show_context_menu` measures the panel.
+    fn context_menu_info_columns(&self, ws: &WindowState, items: &[ContextMenuItem]) -> usize {
+        let items = filter_disabled(items.to_vec());
+        let hints = self.menu_item_hints(&items);
+        let widest = items
+            .iter()
+            .zip(hints.iter())
+            .map(|(item, hint)| context_menu_item_columns(item, hint))
+            .max()
+            .unwrap_or(0);
+        let (cw, _) = self.menu_cell(ws);
+        let (sw, _) = self.context_menu_surface(ws);
+        context_menu_info_columns(widest, sw, cw)
     }
 
     /// The renderer's FRACTIONAL cell metrics, for menu geometry. `cell_px`
@@ -924,20 +947,12 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
         let v = &self.version_line;
-        let mut items = vec![ContextMenuItem::Info {
-            label: format!("kettle {v}"),
-        }];
+        let mut items = vec![ContextMenuItem::info(format!("kettle {v}"))];
         let facts = crate::update_notice::fact_rows(&self.update_facts, &tr);
         if facts.is_empty() {
-            items.push(ContextMenuItem::Info {
-                label: tr.text(T::AboutUpdateUnknown).to_string(),
-            });
+            items.push(ContextMenuItem::info(tr.text(T::AboutUpdateUnknown)));
         }
-        items.extend(
-            facts
-                .into_iter()
-                .map(|label| ContextMenuItem::Info { label }),
-        );
+        items.extend(facts.into_iter().map(ContextMenuItem::info));
         items.extend([
             ContextMenuItem::Separator,
             ContextMenuItem::UrlItem {
@@ -985,9 +1000,9 @@ impl App {
     ) -> Vec<ContextMenuItem> {
         match shells {
             Some(shells) => Self::new_tab_menu_items(shells, tr),
-            None => vec![ContextMenuItem::Info {
-                label: tr.text(kettle_i18n::Text::MenuDetectingShells).to_string(),
-            }],
+            None => vec![ContextMenuItem::info(
+                tr.text(kettle_i18n::Text::MenuDetectingShells),
+            )],
         }
     }
 
@@ -995,7 +1010,7 @@ impl App {
         items: &[ContextMenuItem],
         tr: &kettle_i18n::Translator,
     ) -> bool {
-        matches!(items, [ContextMenuItem::Info { label }]
+        matches!(items, [ContextMenuItem::Info { label, .. }]
             if label == tr.text(kettle_i18n::Text::MenuDetectingShells))
     }
 
@@ -2143,7 +2158,21 @@ pub(super) enum ContextMenuItem {
     /// mnemonic, and maps to no click.
     Info {
         label: String,
+        /// This line goes on with the sentence of the Info line above it,
+        /// one the menu wrapped to its width. Assistive technology reads the
+        /// whole sentence as that first line, and skips this one.
+        continued: bool,
     },
+}
+
+impl ContextMenuItem {
+    /// A static information line of its own.
+    pub(super) fn info(label: impl Into<String>) -> Self {
+        Self::Info {
+            label: label.into(),
+            continued: false,
+        }
+    }
 }
 
 /// The card a media menu row acts on, and the shelf item it showed when the
@@ -2255,7 +2284,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
         ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
             (label, "", false)
         }
-        ContextMenuItem::Info { label } => (label, "", false),
+        ContextMenuItem::Info { label, .. } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
     label.width()
@@ -2864,6 +2893,82 @@ impl PendingShellAction {
     }
 }
 
+/// Whether the terminal menu opening now leads with the Shift hint: Shift
+/// opened it (`offer_copied`; a menu opened from the keyboard never has it)
+/// inside the focused pane, whose program has the mouse, so a plain
+/// right-click would have gone to the program. With `putty-paste-style` on,
+/// Shift+right-click pastes rather than opening the menu, so the hint's
+/// advice would be wrong and no menu leads with it, however it was opened.
+pub(super) fn shift_menu_hint_due(
+    ws: &WindowState,
+    offer_copied: bool,
+    in_focused_pane: bool,
+    cfg: &Config,
+) -> bool {
+    offer_copied
+        && in_focused_pane
+        && !cfg.putty_paste_style
+        && ws
+            .mux
+            .active_focus()
+            .is_some_and(|pane| super::pointer::program_tracks_mouse(ws, pane))
+}
+
+/// Lead a grouped terminal menu with the Shift hint, as rows that do
+/// nothing, when Shift opened it over a program that has the mouse. The
+/// sentence is wrapped to `columns` (see `context_menu_info_columns`), one
+/// Info row per line, so it neither widens the menu nor loses its end to the
+/// ellipsis a row wider than the panel gets. Every line after the first is
+/// marked `continued`, so assistive technology reads the sentence once, whole.
+pub(super) fn prepend_mouse_override_row(
+    items: &mut Vec<ContextMenuItem>,
+    shift_over_tracking: bool,
+    columns: usize,
+    tr: kettle_i18n::Translator,
+) {
+    if shift_over_tracking {
+        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), columns);
+        let rows = lines
+            .into_iter()
+            .enumerate()
+            .map(|(line, label)| ContextMenuItem::Info {
+                label,
+                continued: line > 0,
+            })
+            .chain(std::iter::once(ContextMenuItem::Separator));
+        items.splice(0..0, rows);
+    }
+}
+
+/// The columns an Info line may take in a menu whose widest other row takes
+/// `widest_row`: that row's width, or the panel's minimum width if wider, but
+/// never more than a panel on a `surface_w`-pixel surface can show.
+pub(super) fn context_menu_info_columns(widest_row: usize, surface_w: f32, cell_w: f32) -> usize {
+    let natural = kettle_render::menu::panel_width(widest_row as f32, cell_w);
+    let (room, _) = clamp_context_menu_panel((f32::INFINITY, 0.0), (surface_w, 0.0));
+    kettle_render::menu::panel_columns(natural.min(room), cell_w).max(1)
+}
+
+/// Break `text` at spaces into lines at most `columns` wide. A word wider
+/// than that keeps a line of its own.
+pub(super) fn wrap_menu_info(text: &str, columns: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.width() + 1 + word.width() > columns {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 /// Bound the terminal menu by categories, independently of optional commands.
 pub(super) fn grouped_terminal_menu(
     items: Vec<ContextMenuItem>,
@@ -3161,7 +3266,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
         }
         // Dropdown parity: Info renders as a dimmed
         // (disabled-style) static line.
-        ContextMenuItem::Info { label } => ContextMenuRow {
+        ContextMenuItem::Info { label, .. } => ContextMenuRow {
             toggle: None,
             swatches: None,
             matched_chars: None,
