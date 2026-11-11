@@ -35,10 +35,6 @@ pub struct HorizontalTabContent {
     pub hint: Option<Rect4>,
 }
 
-pub fn tab_shortcut_hint(index: usize, macos: bool) -> Option<String> {
-    (macos && index < 9).then(|| format!("Cmd+{}", index + 1))
-}
-
 /// Hidden controls reserve no hint or close space; title and activity take priority.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
@@ -425,10 +421,6 @@ mod tests {
             assert!(dot.hint.is_none());
             assert_eq!(dot.close, full.close);
         }
-        assert_eq!(tab_shortcut_hint(0, true).as_deref(), Some("Cmd+1"));
-        assert_eq!(tab_shortcut_hint(8, true).as_deref(), Some("Cmd+9"));
-        assert!(tab_shortcut_hint(9, true).is_none());
-        assert!(tab_shortcut_hint(0, false).is_none());
     }
 
     #[test]
@@ -696,7 +688,7 @@ mod tests {
         for cell_scale in [0.5, 1.0, 2.0] {
             let terminal_cell_width = natural_advance * cell_scale;
             let text_advance = terminal_cell_width / cell_scale;
-            let hint = tab_shortcut_hint(0, true).unwrap();
+            let hint = "⌘1".to_string();
             let content = horizontal_tab_content_layout(
                 (0.0, 0.0, 320.0, 32.0),
                 true,
