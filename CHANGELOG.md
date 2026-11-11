@@ -306,6 +306,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Screen readers read terminal text word by word. Orca's word echo repeated
+  the whole row, prompt included, after every typed word, because Kettle's
+  accessible text marked no word boundaries; terminal rows and text fields now
+  do.
 - Combining marks that their font does not position sit on their letter. In
   `Z̤̈`, which macOS draws in San Francisco because the bundled JetBrains Mono
   lacks the diaeresis below, the upper diaeresis no longer overlaps the
