@@ -270,6 +270,7 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
         Action::ToggleCopyOnSelect,
         Action::ToggleMouseHide,
         Action::SetAskBeforeClosingAlways,
+        Action::SetAskBeforeClosingBusyOrMultiple,
         Action::SetAskBeforeClosingMultiple,
         Action::SetAskBeforeClosingNever,
         Action::SetBellOff,
@@ -295,6 +296,9 @@ fn preferences_submenu_contains_all_user_facing_toggles() {
             Action::ToggleCopyOnSelect => "toggle_copy_on_select",
             Action::ToggleMouseHide => "toggle_mouse_hide",
             Action::SetAskBeforeClosingAlways => "set_ask_before_closing_always",
+            Action::SetAskBeforeClosingBusyOrMultiple => {
+                "set_ask_before_closing_busy_or_multiple"
+            }
             Action::SetAskBeforeClosingMultiple => "set_ask_before_closing_multiple",
             Action::SetAskBeforeClosingNever => "set_ask_before_closing_never",
             Action::SetBellOff => "set_bell_off",
@@ -1603,4 +1607,28 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
         ContextMenuItem::Submenu { items, .. }
             if items.iter().any(|row| matches!(row, ContextMenuItem::Item { action: Action::Reset, .. }))
     )));
+}
+
+/// The confirm-close radio labels name what each mode asks about, never one
+/// gesture: since `busy-or-multiple` became the default, the titlebar close of
+/// a one-pane window that runs a program asks under it too, so a label that
+/// claimed the titlebar for `always` alone would mislead.
+#[test]
+fn confirm_close_radio_labels_do_not_single_out_the_titlebar() {
+    use kettle_i18n::Text;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        for text in [
+            Text::MenuPrefConfirmAlways,
+            Text::MenuPrefConfirmBusyOrMultiple,
+            Text::MenuPrefConfirmMultiple,
+            Text::MenuPrefConfirmNever,
+        ] {
+            let label = tr.text(text).to_lowercase();
+            assert!(
+                !label.contains("titlebar") && !label.contains("barra de título"),
+                "{language:?}: {label:?}"
+            );
+        }
+    }
 }

@@ -127,6 +127,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Closing a single pane, or a tab or window holding only one, asks first when a
+  program is running in it, as Terminal.app and iTerm2 do: a job such as
+  `sleep 600` or an editor started from the shell, or the pane's own program
+  when it was started as something other than a shell (`vim`, `ssh` or a script
+  as its command). That includes the titlebar close button and Alt+F4 on a
+  one-pane window; a window holding several panes still closes from the
+  titlebar at once unless the setting is `always`. An idle shell still closes
+  at once.
+  This is the new default, `ask-before-closing = busy-or-multiple`, which also
+  appears in the Preferences menu and the command palette. The menu's `always`
+  row now reads "Confirm close: always", since the titlebar is no longer
+  special to it alone. A config that sets
+  `multiple-terminals` keeps asking only when more than one pane would close.
+  Windows keeps the old behaviour for a single pane.
 - Tabs show their go-to-tab shortcut on every platform, taken from the key
   bindings: Alt+1 to Alt+9 on Linux and Windows, ⌘1 to ⌘9 on macOS, or whatever
   key you bound instead. Linux tabs showed none before, and macOS showed a fixed

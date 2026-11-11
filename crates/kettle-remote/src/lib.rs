@@ -412,6 +412,42 @@ impl ProcessTree for sysinfo::System {
     }
 }
 
+/// One process's argv, read on the calling thread.
+///
+/// For a single question asked at a single moment, such as whether the
+/// program that owns a pane's terminal is a shell, where the background
+/// snapshot may be older than the job. One bounded read (`/proc/PID/cmdline`
+/// on Linux, `KERN_PROCARGS2` on macOS) under the scanner's per-file and
+/// per-process caps. `None` for a process that is gone, owned by another
+/// user, over a cap, or on a platform without such a read. Callers must not
+/// log the result: an argv can hold private data.
+pub fn process_argv(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::path::Path::new("/proc").join(pid.to_string());
+        let owner = std::fs::metadata(&dir).ok()?.uid();
+        if owner != std::fs::metadata("/proc/self").ok()?.uid() {
+            return None;
+        }
+        let ProcFileRead::Complete(bytes) = read_proc_file_charged(&dir.join("cmdline"), &mut 0)
+        else {
+            return None;
+        };
+        let parsed = parse_proc_argv(&bytes);
+        parsed.complete.then_some(parsed.argv)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::read_process_argv(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Detect the remote-session context for the pane rooted at `child_pid`.
 ///
 /// Walks the process tree breadth-first from `child_pid` (the process

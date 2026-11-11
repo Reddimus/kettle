@@ -183,7 +183,8 @@ impl App {
     ) {
         use kettle_render::WindowControl as C;
         if action == C::Close {
-            // Match the native close button's opt-in confirmation policy.
+            // Ask exactly as the native close button does
+            // (`titlebar_close_consults_policy`).
             self.window_event_inner(ws, event_loop, WindowEvent::CloseRequested);
         } else if let Some(window) = &ws.window {
             match action {

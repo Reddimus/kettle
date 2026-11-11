@@ -562,9 +562,11 @@ impl App {
             Action::ToggleMouseHide,
         ));
         inner.push(ContextMenuItem::Separator);
-        // Close-confirmation radio. `always` is worded to say that it also
-        // covers the titlebar close, because that gesture ignores the other
-        // two policies by design.
+        // Close-confirmation radio. Each label names what its mode asks
+        // about, not which gestures ask: the titlebar close follows its own
+        // rule (`titlebar_close_consults_policy`), asking under `always`, and
+        // under the default `busy-or-multiple` for a one-pane window that runs
+        // a program, so no label singles out the titlebar.
         let ask_before_closing = self.cfg.ask_before_closing;
         inner.push(dyn_item(
             format!(
@@ -573,6 +575,14 @@ impl App {
                 tr.text(T::MenuPrefConfirmAlways)
             ),
             Action::SetAskBeforeClosingAlways,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}{}",
+                r(ask_before_closing == kettle_config::AskBeforeClosing::BusyOrMultiple),
+                tr.text(T::MenuPrefConfirmBusyOrMultiple)
+            ),
+            Action::SetAskBeforeClosingBusyOrMultiple,
         ));
         inner.push(dyn_item(
             format!(
@@ -3321,6 +3331,7 @@ fn compact_preferences(
                     | Action::SetScrollbarAuto
                     | Action::SetScrollbarNever => Some(0),
                     Action::SetAskBeforeClosingAlways
+                    | Action::SetAskBeforeClosingBusyOrMultiple
                     | Action::SetAskBeforeClosingMultiple
                     | Action::SetAskBeforeClosingNever => Some(1),
                     Action::SetBellOff

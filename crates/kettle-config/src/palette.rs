@@ -71,6 +71,10 @@ pub fn commands() -> Vec<(Text, Action)> {
             SetAskBeforeClosingAlways,
         ),
         (
+            T::PaletteSetAskBeforeClosingBusyOrMultiple,
+            SetAskBeforeClosingBusyOrMultiple,
+        ),
+        (
             T::PaletteSetAskBeforeClosingMultiple,
             SetAskBeforeClosingMultiple,
         ),
@@ -390,6 +394,7 @@ mod tests {
             SetScrollbarAuto,
             SetScrollbarNever,
             SetAskBeforeClosingAlways,
+            SetAskBeforeClosingBusyOrMultiple,
             SetAskBeforeClosingMultiple,
             SetAskBeforeClosingNever,
             ToggleCursorBlink,
@@ -554,6 +559,7 @@ mod tests {
                 | SetScrollbarAuto
                 | SetScrollbarNever
                 | SetAskBeforeClosingAlways
+                | SetAskBeforeClosingBusyOrMultiple
                 | SetAskBeforeClosingMultiple
                 | SetAskBeforeClosingNever
                 | ToggleCursorBlink
