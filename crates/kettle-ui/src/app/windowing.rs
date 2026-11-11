@@ -164,7 +164,7 @@ impl App {
             // native material. A runtime toggle takes full effect in newly
             // opened windows, as documented by the setting itself.
             .with_transparent(
-                kettle_render::window_requires_alpha_surface(&self.cfg) || self.cfg.window_blur,
+                crate::window_state::SurfaceCaps::for_config(&self.cfg).transparent_window(),
             )
             // Show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
@@ -488,6 +488,7 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        ws.surface_caps = crate::window_state::SurfaceCaps::for_config(&self.cfg);
         self.sync_macos_titlebar(&mut ws);
         ws.native_caption_drag = ws
             .window
