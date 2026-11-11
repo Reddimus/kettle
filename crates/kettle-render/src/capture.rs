@@ -164,6 +164,9 @@ pub fn capture_png_with_annotation(
         // render pass can always call `draw` / `render` on them; empty uploads
         // are a no-op. Mirrors the live `Renderer`.
         let mut menu_quads_pipe = QuadPipeline::new(&device, format);
+        let mut menu_surfaces_pipe =
+            crate::rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let mut menu_surfaces = Vec::new();
         let mut menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
@@ -657,6 +660,15 @@ pub fn capture_png_with_annotation(
                 a11y_label: None,
                 picker_header_height: 0.0,
             };
+            menu_surfaces = crate::overlays::menu_level_surfaces(
+                &menu,
+                theme,
+                cfg.resolved_accent(theme),
+                (cw, ch),
+                1.0,
+                &mut chrome::Colors::default(),
+                format.is_srgb(),
+            );
             menu_q.extend(menu_chrome_quads(
                 &menu,
                 theme,
@@ -664,7 +676,6 @@ pub fn capture_png_with_annotation(
                 cw,
                 ch,
                 &mut chrome::Colors::default(),
-                format.is_srgb(),
             ));
 
             // Text areas — one TextBuffer per non-separator row.
@@ -767,6 +778,7 @@ pub fn capture_png_with_annotation(
                 ));
             }
         }
+        menu_surfaces_pipe.upload(&device, &queue, [wf, hf], &menu_surfaces);
         menu_quads_pipe.upload(&device, &queue, [wf, hf], &menu_q);
         menu_text_renderer.prepare(
             &device,
@@ -852,6 +864,7 @@ pub fn capture_png_with_annotation(
             // the live `Renderer::render_frame`. Cheap no-ops for the
             // `DebugScene::Default` path because both uploads are
             // empty.
+            menu_surfaces_pipe.draw_range(&mut pass, 0..u32::MAX);
             menu_quads_pipe.draw(&mut pass);
             menu_text_renderer.render(&atlas, &vp, &mut pass)?;
         }

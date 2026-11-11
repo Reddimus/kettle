@@ -5834,6 +5834,316 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
     }
 }
 
+/// One menu level as the UI projects it: clamped to its natural size.
+fn menu_level(
+    anchor: (f32, f32),
+    labels: &[&str],
+    highlight: usize,
+    (width, row_h): (f32, f32),
+) -> ContextMenu {
+    ContextMenu {
+        picker_header_height: 0.0,
+        anchor,
+        rows: labels
+            .iter()
+            .map(|label| ContextMenuRow {
+                swatches: None,
+                matched_chars: None,
+                label: (*label).into(),
+                separator: false,
+                enabled: true,
+                hint: String::new(),
+            })
+            .collect(),
+        highlight,
+        scroll_offset: 0,
+        panel_w_clamped: width,
+        panel_h_clamped: labels.len() as f32 * row_h,
+        a11y_label: None,
+    }
+}
+
+/// How much darker than `base` a pixel is, summed over its channels.
+fn darkening(frame: &image::RgbaImage, (x, y): (u32, u32), base: Rgb) -> i32 {
+    let p = frame.get_pixel(x, y);
+    [base.r, base.g, base.b]
+        .into_iter()
+        .zip(p.0)
+        .map(|(want, got)| want as i32 - got as i32)
+        .sum()
+}
+
+/// Every open menu level, and a picker's card, is a rounded panel on a soft
+/// shadow, with an inset rounded selection in place of a full-width tint and
+/// a 2-pixel accent rail. The corners show what lies beneath, the shadow
+/// fades out over several pixels and is heavier below the panel, and the
+/// selection leaves the row's edges and the panel's edge clear. A picker's
+/// query and caret still show in its header. Every check is collected, so a
+/// failure lists each property that broke.
+#[test]
+fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
+        eprintln!("menu chrome check skipped: no GPU adapter");
+        return;
+    };
+    // A light theme makes the faint shadow measurable in 8-bit pixels.
+    cfg.theme = kettle_config::Theme::by_name("Builtin Light");
+    let theme = cfg.theme.clone();
+    let bg = theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 200.0;
+    let parent = menu_level((40.0, 40.0), &["Copy", "Split", "Find"], 1, (width, row_h));
+    let child = menu_level((330.0, 40.0 + row_h), &["Right", "Down"], 1, (width, row_h));
+    let picker = ContextMenu {
+        picker_header_height: 30.0,
+        ..menu_level(
+            (40.0, 70.0),
+            &["Nord", "Dracula", "Solarized"],
+            1,
+            (width, row_h),
+        )
+    };
+    let field = TextFieldOverlay {
+        picker_header: true,
+        text: "dra".into(),
+        cursor_byte: 3,
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (48.0, 44.0, width - 16.0, 22.0),
+        prefix: String::new(),
+        hint: String::new(),
+        accent_palette: 4,
+    };
+    let mut colors = chrome::Colors::default();
+    let selected = colors.surface(bg, cfg.resolved_accent(&theme), 0.18, true);
+    let snap = snapshot_of(20, 4, b"");
+    let menus = Overlay {
+        context_menu: Some(child),
+        context_menu_parents: vec![parent],
+        ..focused(false)
+    };
+    let pickers = Overlay {
+        context_menu: Some(picker),
+        text_field: Some(field.clone()),
+        ..focused(false)
+    };
+    let close = |p: &image::Rgba<u8>, c: Rgb| {
+        [c.r, c.g, c.b]
+            .into_iter()
+            .zip(p.0)
+            .all(|(want, got)| want.abs_diff(got) <= 2)
+    };
+    let mut failures = Vec::new();
+    for (what, overlay) in [("menu", &menus), ("picker", &pickers)] {
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 260)], overlay);
+        for level in overlay
+            .context_menu_parents
+            .iter()
+            .chain(overlay.context_menu.iter())
+        {
+            let (x, y, w, h) = level.card_rect();
+            let (x0, y0, x1, y1) = (x as u32, y as u32, (x + w) as u32 - 1, (y + h) as u32 - 1);
+            let edge = darkening(&frame, (x0 + w as u32 / 2, y0), bg);
+            if edge <= 60 {
+                failures.push(format!("{what} at {x}: top edge is not drawn ({edge})"));
+            }
+            for corner in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+                let corner_dark = darkening(&frame, corner, bg);
+                if corner_dark >= edge / 2 {
+                    failures.push(format!(
+                        "{what} at {x}: corner {corner:?} is square ({corner_dark} vs edge {edge})"
+                    ));
+                }
+            }
+            // A soft shadow fades out step by step to the right of the panel.
+            let mid = y0 + h as u32 / 2;
+            let fade: Vec<i32> = [0, 2, 4, 7, 13]
+                .into_iter()
+                .map(|d| darkening(&frame, (x1 + 1 + d, mid), bg))
+                .collect();
+            if !(fade.windows(2).all(|pair| pair[0] > pair[1]) && fade[3] > 0 && fade[4] <= 1) {
+                failures.push(format!("{what} at {x}: shadow is not a soft fade {fade:?}"));
+            }
+            let (above, below) = (
+                darkening(&frame, (x0 + w as u32 / 2, y0 - 3), bg),
+                darkening(&frame, (x0 + w as u32 / 2, y1 + 3), bg),
+            );
+            if below <= above {
+                failures.push(format!(
+                    "{what} at {x}: shadow below {below} is not heavier than above {above}"
+                ));
+            }
+            // The selection is inset from the row and rounded: the rail and
+            // the row's top edge show the panel, its middle the selection.
+            let row_y = level.anchor.1 + level.highlight as f32 * row_h;
+            let row_mid = (row_y + row_h * 0.5) as u32;
+            let probes = [
+                ((x0 + 2, row_mid), bg, "rail"),
+                ((x0 + w as u32 / 2, (row_y + 1.0) as u32), bg, "row top"),
+                ((x0 + 8, row_mid), selected, "selection"),
+                ((x1 - 8, row_mid), selected, "selection end"),
+                ((x1 - 2, row_mid), bg, "right edge"),
+            ];
+            for ((px, py), want, part) in probes {
+                let p = frame.get_pixel(px, py);
+                if !close(p, want) {
+                    failures.push(format!(
+                        "{what} at {x}: {part} at ({px}, {py}) is {p:?}, want {want:?}"
+                    ));
+                }
+            }
+        }
+        if overlay.text_field.is_some() {
+            // The query's ink and its caret sit above the picker's card.
+            let ink = (44..66)
+                .flat_map(|y| (48..160).map(move |x| (x, y)))
+                .filter(|&(x, y)| darkening(&frame, (x, y), bg) > 150)
+                .count();
+            if ink < 20 {
+                failures.push(format!("picker: the query is hidden ({ink} ink pixels)"));
+            }
+            let (cx, cy, cw, ch) = renderer.measure_text_field(&field).caret;
+            let caret = frame.get_pixel((cx + cw * 0.5) as u32, (cy + ch * 0.5) as u32);
+            if !close(caret, theme.foreground) {
+                failures.push(format!("picker: the caret is hidden ({caret:?})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An open menu covers a toast beneath it, panel and labels alike, as it
+/// covers the terminal.
+#[test]
+fn an_open_menu_covers_a_toast_beneath_it() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(800, 600) else {
+        eprintln!("menu over toast check skipped: no GPU adapter");
+        return;
+    };
+    let bg = cfg.theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let geometry = update_toast_geometry(
+        (800.0, 600.0),
+        0.0,
+        1.0,
+        (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        ),
+        7,
+        "v6.0.0 is available.",
+    )
+    .unwrap();
+    let (tx, ty, tw, th) = geometry.rect;
+    let rows = ((th + 40.0) / row_h).ceil() as usize;
+    let labels = vec![""; rows];
+    let menu = menu_level(
+        (tx - 20.0, ty - 20.0),
+        &labels,
+        usize::MAX,
+        (tw + 40.0, row_h),
+    );
+    let overlay = Overlay {
+        update_toast: Some(UpdateToastOverlay {
+            geometry,
+            message: "v6.0.0 is available.".into(),
+            details: "Details".into(),
+            close: "\u{00d7}".into(),
+            opacity: 1.0,
+            focused: None,
+        }),
+        context_menu: Some(menu),
+        ..focused(false)
+    };
+    let snap = snapshot_of(80, 24, b"");
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
+    let shows: Vec<_> = (ty as u32..(ty + th) as u32)
+        .flat_map(|y| (tx as u32..(tx + tw) as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = frame.get_pixel(x, y);
+            [bg.r, bg.g, bg.b]
+                .into_iter()
+                .zip(p.0)
+                .any(|(want, got)| want.abs_diff(got) > 2)
+        })
+        .collect();
+    assert!(
+        shows.is_empty(),
+        "{} toast pixels show through the menu, first at {:?}",
+        shows.len(),
+        shows.first()
+    );
+}
+
+/// A submenu is a layer above its parent: its panel covers the parent's
+/// selection and labels where they overlap, and its shadow falls over the
+/// parent's labels next to it rather than under them.
+#[test]
+fn submenu_covers_its_parents_selection_labels_and_shadowed_edge() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 220) else {
+        eprintln!("submenu layering check skipped: no GPU adapter");
+        return;
+    };
+    let bg = cfg.theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let long = "MMMMMMMMMMMMMMMMMMMMMMMM";
+    let parent = || menu_level((40.0, 20.0), &[long, long, long, long], 1, (320.0, row_h));
+    // Clamped against the parent, as at a window edge: the child's top sits
+    // inside the parent's selected row and its bottom edge eight pixels into
+    // the next row's label.
+    let child_top = 20.0 + row_h + 8.0;
+    let child = menu_level((120.0, child_top), &["A"], usize::MAX, (200.0, row_h));
+    let child_bottom = (child_top + row_h) as u32;
+    let snap = snapshot_of(20, 4, b"");
+    let alone = Overlay {
+        context_menu: Some(parent()),
+        ..focused(false)
+    };
+    let nested = Overlay {
+        context_menu: Some(child),
+        context_menu_parents: vec![parent()],
+        ..focused(false)
+    };
+    let without = capture(&mut renderer, &cfg, &[pane(&snap, 480, 220)], &alone);
+    let with = capture(&mut renderer, &cfg, &[pane(&snap, 480, 220)], &nested);
+    let luminance = |p: &image::Rgba<u8>| p[0] as u32 + p[1] as u32 + p[2] as u32;
+    // Inside the child, clear of its own label, only its panel shows.
+    for y in (child_top as u32 + 3)..(20 + 2 * row_h as u32 - 2) {
+        for x in 160..312 {
+            let p = with.get_pixel(x, y);
+            assert!(
+                [bg.r, bg.g, bg.b]
+                    .into_iter()
+                    .zip(p.0)
+                    .all(|(want, got)| want.abs_diff(got) <= 2),
+                "parent selection or label shows through the submenu at ({x}, {y}): {p:?}"
+            );
+        }
+    }
+    // Just below the child, the parent's label ink sits under its shadow.
+    let band = |frame: &image::RgbaImage| {
+        let mut brightest = 0;
+        for y in child_bottom + 1..child_bottom + 6 {
+            for x in 128..250 {
+                brightest = brightest.max(luminance(frame.get_pixel(x, y)));
+            }
+        }
+        brightest
+    };
+    let (bare, shadowed) = (band(&without), band(&with));
+    assert!(
+        bare > luminance(&image::Rgba([bg.r, bg.g, bg.b, 255])) + 120,
+        "the parent's label is in the probe band ({bare})"
+    );
+    assert!(
+        shadowed + 12 <= bare,
+        "the parent's label paints over the submenu's shadow: {shadowed} vs {bare} unshadowed"
+    );
+}
+
 #[test]
 fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     use alacritty_terminal::selection::SelectionRange;

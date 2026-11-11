@@ -2820,7 +2820,7 @@ pub(super) fn nest_context_menu_accessibility(
     }
 }
 
-fn bound_context_menu_accessibility(
+pub(super) fn bound_context_menu_accessibility(
     projection: &mut ModalAccessibilityProjection,
     menu: &ContextMenu,
     cell_h: f32,

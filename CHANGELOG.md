@@ -127,6 +127,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Kettle's own menus look more like the system's. The right-click menu and
+  its submenus are rounded panels on a soft shadow, as the command palette,
+  theme and other pickers now are too, and in all of them the highlighted row
+  is a rounded, inset highlight instead of a full-width tint with an accent
+  bar. An open submenu covers its parent's highlight and labels, shadow
+  included, where the two overlap, and an open menu covers a notification
+  beneath it. Fonts, row heights and where each row responds to the mouse are
+  unchanged.
 - Tabs show their go-to-tab shortcut on every platform, taken from the key
   bindings: Alt+1 to Alt+9 on Linux and Windows, ⌘1 to ⌘9 on macOS, or whatever
   key you bound instead. Linux tabs showed none before, and macOS showed a fixed

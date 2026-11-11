@@ -3635,6 +3635,24 @@ labels land **on top of** the panel background. If the menu's opaque panel
 quad drew in the dimming pass (`overlay_quads`) after its labels were
 rendered, it would paint over them and leave the menu blank.
 
+Each open menu level, and a picker's card, is a rounded panel (about 10
+logical pixels) on a shadow of four concentric low-opacity rounded layers,
+with the highlighted row drawn as an inset rounded selection. These are
+`RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
+the picker's header divider and the scroll arrows stay flat quads. The scene
+pass draws the levels root first, one layer each: the level's surfaces, its
+quads, its swatches, then its labels in a `TextRenderer` of its own
+(`menu_level_text`, ranges in `menu_level_draws`). A submenu therefore covers
+its parent's selection, labels and edge wherever it overlaps them, shadow
+included, as it does when clamped against the window edge. The chrome quads
+queued before the first level, the receipt thumbnail and the toasts draw before
+the levels, so an open menu covers them; their text, in the shared menu text
+pass (hint labels, receipts, completion, toasts), still draws after every level
+and is cut out of each panel, a picker's header included. Only the radii, shadow and
+selection inset follow the scale factor: rows, paddings, hit testing and
+screen-reader bounds keep `menu::row_height` and the row walk
+`context_menu_row_rects`, which the UI's tests hold to the painted rows.
+
 The cursor pass draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad and the
 pane text and card layers, and below lanes, menus and the paste receipt, so

@@ -1604,3 +1604,162 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
             if items.iter().any(|row| matches!(row, ContextMenuItem::Item { action: Action::Reset, .. }))
     )));
 }
+
+/// Paint, pointer hit testing and screen-reader bounds agree on every row of
+/// every open level, in a scrolled, cut panel as well: the rect the renderer
+/// lays a row out in is the rect a click picks that row from and the rect a
+/// screen reader is given. The rounded chrome changes none of them.
+#[test]
+fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
+    use super::accessibility::{
+        accessibility_modal_id, bound_context_menu_accessibility, modal_accessibility_projection,
+        nest_context_menu_accessibility,
+    };
+    use super::menus::context_menu_click_at;
+    use super::{ContextMenu, ContextMenuClick, ContextMenuLevel, ContextMenuState};
+    let cell = (8.0, 17.0);
+    let row_h = kettle_render::menu::row_height(cell.1);
+    let actions = [
+        Action::Copy,
+        Action::Paste,
+        Action::SplitRight,
+        Action::SplitDown,
+        Action::NewTab,
+        Action::ClosePane,
+        Action::SelectAll,
+        Action::NewWindow,
+    ];
+    // Two separators break up the leaves; the panel shows five rows' worth.
+    let mut items: Vec<ContextMenuItem> = actions
+        .iter()
+        .map(|action| ContextMenuItem::Item {
+            label: "Leaf",
+            action: action.clone(),
+            enabled: true,
+        })
+        .collect();
+    items.insert(3, ContextMenuItem::Separator);
+    items.insert(7, ContextMenuItem::Separator);
+    let parent_items = vec![
+        ContextMenuItem::Submenu {
+            label: "Split".into(),
+            items: items.clone(),
+        },
+        ContextMenuItem::Separator,
+        ContextMenuItem::Submenu {
+            label: "More".into(),
+            items: items.clone(),
+        },
+    ];
+    let panel = |items: &[ContextMenuItem], anchor, scroll_offset, height| ContextMenu {
+        anchor,
+        rows: items
+            .iter()
+            .map(|item| kettle_render::ContextMenuRow {
+                swatches: None,
+                matched_chars: None,
+                label: "Leaf".into(),
+                separator: matches!(item, ContextMenuItem::Separator),
+                enabled: true,
+                hint: String::new(),
+            })
+            .collect(),
+        highlight: 0,
+        scroll_offset,
+        panel_w_clamped: 200.0,
+        panel_h_clamped: height,
+        a11y_label: None,
+        picker_header_height: 0.0,
+    };
+    let parent = panel(&parent_items, (40.0, 30.0), 0, 2.0 * row_h + 8.0);
+    let active = panel(&items, (300.0, 30.0), 2, 5.0 * row_h);
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.context_menu = Some(ContextMenuState {
+        anchor: active.anchor,
+        anchor_scale: 1.0,
+        items: items.clone(),
+        highlight: 2,
+        drill_stack: vec![ContextMenuLevel {
+            anchor: parent.anchor,
+            anchor_scale: 1.0,
+            items: parent_items,
+            highlight: 0,
+            scroll_offset: 0,
+        }],
+        scroll_offset: active.scroll_offset,
+        typeahead_buf: String::new(),
+        typeahead_until: None,
+    });
+    let overlay = kettle_render::Overlay {
+        context_menu: Some(panel(&items, active.anchor, 2, 5.0 * row_h)),
+        context_menu_parents: vec![panel(
+            &ws.context_menu.as_ref().unwrap().drill_stack[0].items,
+            parent.anchor,
+            0,
+            2.0 * row_h + 8.0,
+        )],
+        ..kettle_render::Overlay::default()
+    };
+    let mut projection =
+        modal_accessibility_projection(&overlay, (800.0, 600.0), cell, 1.0, &EN_TEXT);
+    // As the window's accessibility tree builds it.
+    nest_context_menu_accessibility(&mut projection, &ws, &overlay, cell.1);
+    bound_context_menu_accessibility(
+        &mut projection,
+        overlay.context_menu.as_ref().unwrap(),
+        cell.1,
+        2,
+    );
+    let bounds = |kind: u64, index: usize| {
+        projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == accessibility_modal_id(kind, index + 1))
+            .and_then(|(_, node)| node.bounds())
+    };
+    let menu = ws.context_menu.as_ref().unwrap();
+    for (kind, level, depth) in [(2, &active, None), (40, &parent, Some(0))] {
+        let painted = kettle_render::context_menu_row_rects(level, cell);
+        assert!(!painted.is_empty());
+        let mut items_hit = 0;
+        for (index, (x, y, w, h)) in painted {
+            let separator = level.rows[index].separator;
+            if !separator {
+                assert_eq!(
+                    bounds(kind, index),
+                    Some(accesskit::Rect::new(
+                        x as f64,
+                        y as f64,
+                        (x + w) as f64,
+                        (y + h) as f64
+                    )),
+                    "screen-reader bounds of row {index} at depth {depth:?}"
+                );
+            }
+            for cursor in [
+                (x, y),
+                (x + w * 0.5, y + h * 0.5),
+                (x + w - 0.25, y + h - 0.25),
+            ] {
+                let click = context_menu_click_at(menu, &active, &overlay.context_menu_parents, cursor, row_h, 0);
+                match (click, depth) {
+                    (None, _) => assert!(separator, "row {index} misses at {cursor:?}"),
+                    (Some(ContextMenuClick::Action(action)), None) => {
+                        assert!(!separator);
+                        let ContextMenuItem::Item { action: want, .. } = &items[index] else {
+                            panic!("row {index} is not a leaf");
+                        };
+                        assert_eq!(&action, want, "row {index} at {cursor:?}");
+                        items_hit += 1;
+                    }
+                    (Some(ContextMenuClick::ParentRow { depth: hit, index: row }), Some(d)) => {
+                        assert_eq!((hit, row), (d, index), "parent row at {cursor:?}");
+                        items_hit += 1;
+                    }
+                    _ => panic!("row {index} at {cursor:?} resolved to the wrong level"),
+                }
+            }
+        }
+        assert!(items_hit > 0);
+    }
+}

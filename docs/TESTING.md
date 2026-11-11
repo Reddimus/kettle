@@ -1855,6 +1855,19 @@ fallback, monochrome presentation and cached cursor frames. Tests that cannot
 obtain a GPU report an explicit `GRAPHEME_*_GPU_SKIP`; a portable test pass does
 not establish pixel coverage.
 
+Menu chrome is pinned by headless GPU pixels. `kettle-render`'s
+`menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow` checks each open
+menu level and a picker card for rounded corners, a shadow that fades out and
+sits heavier below, an inset selection with no accent rail, and a picker query
+and caret above the card. `submenu_covers_its_parents_selection_labels_and_shadowed_edge`
+checks that a submenu's panel and shadow cover its parent's selection and
+labels, and `an_open_menu_covers_a_toast_beneath_it` that menus cover toasts.
+`menu_visual` checks that the corners of everything the menu changed stay
+untouched. `kettle-ui`'s `painted_menu_rows_match_hit_testing_and_accessibility_bounds`
+holds pointer hit testing and screen-reader bounds to the renderer's painted
+rows, `kettle_render::context_menu_row_rects`. Without a GPU the pixel tests
+print a skip and pass.
+
 `kettle-render`'s `emoji_shaping_tests` use only the bundled JetBrains Mono
 Nerd Font for default-emoji/VS16 raster measurements, VS15 exclusion,
 aspect-ratio fitting and single-image fallback. A separate host-font test

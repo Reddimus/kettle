@@ -118,15 +118,35 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
         8.0,
         16.0,
         &mut crate::chrome::Colors::default(),
-        true,
     );
-    assert!(!quads.is_empty());
     assert!(quads.iter().all(|quad| {
         quad.pos.iter().all(|value| value.is_finite())
             && quad
                 .size
                 .iter()
                 .all(|value| value.is_finite() && *value >= 0.0)
+    }));
+    let surfaces = |menu: &ContextMenu| {
+        super::overlays::menu_level_surfaces(
+            menu,
+            &theme,
+            kettle_config::Rgb::new(1, 2, 3),
+            (8.0, 16.0),
+            2.0,
+            &mut crate::chrome::Colors::default(),
+            true,
+        )
+    };
+    let tiny = surfaces(&menu);
+    assert!(!tiny.is_empty(), "a tiny panel still paints");
+    assert!(tiny.iter().all(|surface| {
+        surface
+            .pos
+            .iter()
+            .chain(&surface.params)
+            .all(|v| v.is_finite())
+            && surface.size.iter().all(|v| v.is_finite() && *v >= 0.0)
+            && surface.params[0] <= surface.size[0].min(surface.size[1]) * 0.5 + 10.0 * 2.0
     }));
 
     let invalid = ContextMenu {
@@ -141,10 +161,10 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
             8.0,
             16.0,
             &mut crate::chrome::Colors::default(),
-            true,
         )
         .is_empty()
     );
+    assert!(surfaces(&invalid).is_empty());
 }
 
 #[test]
@@ -188,7 +208,6 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
             8.0,
             16.0,
             &mut crate::chrome::Colors::default(),
-            true,
         )
         .into_iter()
         .filter(|quad| quad.size[1] == 2.0 && quad.size[0] < 20.0 && quad.color[3] == 1.0)
@@ -229,7 +248,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             picker_header_height: 0.0,
         };
         let (inset, _) = menu::scroll_content(280.0, panel_h, 28.0);
-        // Shadow, panel and four border quads precede the two arrows.
+        // The panel is a rounded surface; the quads are the two arrows.
         let quads = menu_chrome_quads(
             &menu,
             &theme,
@@ -237,13 +256,9 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             8.0,
             16.0,
             &mut crate::chrome::Colors::default(),
-            true,
         );
-        assert_eq!(quads.len(), 12);
-        for (arrow, top) in [
-            (&quads[6..9], 10.0),
-            (&quads[9..12], 10.0 + panel_h - inset),
-        ] {
+        assert_eq!(quads.len(), 6);
+        for (arrow, top) in [(&quads[0..3], 10.0), (&quads[3..6], 10.0 + panel_h - inset)] {
             for q in arrow {
                 assert!(
                     q.pos[1] >= top && q.pos[1] + q.size[1] <= top + inset + 0.0001,
@@ -290,47 +305,126 @@ fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
     );
 }
 
+/// Whether `(px, py)` lies inside the rounded rect `(x, y, w, h)` of corner
+/// `radius`, shrunk by `inset` on every side.
+fn inside_rounded(
+    (px, py): (f32, f32),
+    (x, y, w, h): (f32, f32, f32, f32),
+    radius: f32,
+    inset: f32,
+) -> bool {
+    let (x, y, w, h) = (x + inset, y + inset, w - 2.0 * inset, h - 2.0 * inset);
+    let r = (radius - inset).max(0.0);
+    if px < x - 1e-3 || py < y - 1e-3 || px > x + w + 1e-3 || py > y + h + 1e-3 {
+        return false;
+    }
+    let cx = px.clamp(x + r, x + w - r);
+    let cy = py.clamp(y + r, y + h - r);
+    (px - cx).hypot(py - cy) <= r + 1e-3
+}
+
+/// A picker's card holds its header and rows; a plain menu's panel holds its
+/// rows. Both are rounded at about 10 logical pixels with a one-pixel edge,
+/// sit on a layered shadow, and keep the selection's rounded corners inside
+/// their own at every scale, including on the first and last rows.
 #[test]
-fn picker_surface_encloses_header_and_selection_stays_inside_rounded_corners() {
+fn menu_and_picker_panels_are_rounded_and_keep_the_selection_inside() {
     let theme = kettle_config::Theme::default();
-    let menu = ContextMenu {
+    let row = |label: &str| ContextMenuRow {
+        swatches: None,
+        label: label.into(),
+        separator: false,
+        enabled: true,
+        hint: String::new(),
+        matched_chars: None,
+    };
+    let level = |labels: &[&str], highlight, (w, h, header)| ContextMenu {
         anchor: (140.0, 100.0),
-        rows: vec![ContextMenuRow {
-            swatches: None,
-            label: "one".into(),
-            separator: false,
-            enabled: true,
-            hint: String::new(),
-            matched_chars: None,
-        }],
-        highlight: 0,
+        rows: labels.iter().map(|label| row(label)).collect(),
+        highlight,
         scroll_offset: 0,
-        panel_w_clamped: 360.0,
-        panel_h_clamped: 28.0,
-        picker_header_height: 30.0,
+        panel_w_clamped: w,
+        panel_h_clamped: h,
+        picker_header_height: header,
         a11y_label: None,
     };
-    let surfaces = super::overlays::picker_surfaces(&menu, &theme, 8.0).unwrap();
-    assert_eq!(surfaces[1].pos, [140.0, 70.0]);
-    assert_eq!(surfaces[1].size, [360.0, 58.0]);
-    assert_eq!(surfaces[1].params[..2], [8.0, 1.0]);
-    let quads = menu_chrome_quads(
-        &menu,
-        &theme,
-        theme.accent,
-        8.0,
-        16.0,
-        &mut super::chrome::Colors::default(),
-        true,
-    );
-    assert!(quads.iter().any(|quad| quad.pos[1] > 125.0));
-    for quad in quads.iter().filter(|quad| quad.pos[1] > 125.0) {
-        assert!(
-            quad.pos[0] > 141.0,
-            "the selected rail must not square off the lower corner"
-        );
-        assert!(quad.pos[0] + quad.size[0] < 499.0);
-        assert!(quad.pos[1] + quad.size[1] <= 127.0);
+    let picker = |highlight| level(&["one", "two"], highlight, (360.0, 56.0, 30.0));
+    let plain = |highlight| level(&["Copy", "Paste", "Find"], highlight, (0.0, 0.0, 0.0));
+    let surfaces_of = |menu: &ContextMenu, scale: f32, cell: (f32, f32)| {
+        super::overlays::menu_level_surfaces(
+            menu,
+            &theme,
+            theme.accent,
+            cell,
+            scale,
+            &mut super::chrome::Colors::default(),
+            true,
+        )
+    };
+    let layers = super::overlays::MENU_SHADOW_LAYERS.len();
+    let surfaces = surfaces_of(&picker(1), 1.0, (8.0, 16.0));
+    assert_eq!(surfaces.len(), layers + 2, "shadow, card and selection");
+    let card = surfaces[layers];
+    assert_eq!(card.pos, [140.0, 70.0]);
+    assert_eq!(card.size, [360.0, 86.0]);
+    assert_eq!(card.params[..2], [10.0, 1.0]);
+    for scale in [1.0_f32, 1.25, 1.5, 2.0, 3.0] {
+        for (make, rows, cell) in [
+            (&picker as &dyn Fn(usize) -> ContextMenu, 2, (8.0, 16.0)),
+            (&plain, 3, (8.0, 16.0)),
+            (&plain, 3, (9.6, 19.0)),
+        ] {
+            for highlight in 0..rows {
+                let menu = make(highlight);
+                let surfaces = surfaces_of(&menu, scale, cell);
+                assert_eq!(surfaces.len(), layers + 2);
+                let (shadow, panel, selection) =
+                    (&surfaces[..layers], surfaces[layers], surfaces[layers + 1]);
+                let rect = |s: &crate::rounded_surface::RoundedSurface| {
+                    (s.pos[0], s.pos[1], s.size[0], s.size[1])
+                };
+                assert_eq!(panel.params[0], 10.0 * scale);
+                // Every layer is larger than the panel, faint, and no two
+                // share an outline: the edge fades instead of stepping once.
+                for layer in shadow {
+                    let (x, y, w, h) = rect(layer);
+                    assert!(w > panel.size[0] && h > panel.size[1]);
+                    assert!(x < panel.pos[0] && y < panel.pos[1] + h);
+                    assert!(layer.fill[3] > 0.0 && layer.fill[3] <= 0.12);
+                }
+                for pair in shadow.windows(2) {
+                    assert!(pair[0].size[0] > pair[1].size[0], "widest layer first");
+                }
+                let (sx, sy, sw, sh) = rect(&selection);
+                let r = selection.params[0];
+                let row_rect = super::overlays::context_menu_row_rects(&menu, cell)
+                    .into_iter()
+                    .find(|(i, _)| *i == highlight)
+                    .unwrap()
+                    .1;
+                assert!(sx > row_rect.0 && sx + sw < row_rect.0 + row_rect.2);
+                assert!(sy > row_rect.1 && sy + sh < row_rect.1 + row_rect.3);
+                assert!(
+                    sx <= menu.anchor.0 + 16.0 - 4.0,
+                    "selection reaches past the label start"
+                );
+                for step in 0..=18 {
+                    let angle = step as f32 * std::f32::consts::FRAC_PI_2 / 18.0;
+                    let (dx, dy) = (angle.cos() * r, angle.sin() * r);
+                    for (cx, cy, ox, oy) in [
+                        (sx + r, sy + r, -dx, -dy),
+                        (sx + sw - r, sy + r, dx, -dy),
+                        (sx + r, sy + sh - r, -dx, dy),
+                        (sx + sw - r, sy + sh - r, dx, dy),
+                    ] {
+                        assert!(
+                            inside_rounded((cx + ox, cy + oy), rect(&panel), panel.params[0], 1.0),
+                            "scale {scale}, row {highlight}: selection corner leaves the panel"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
