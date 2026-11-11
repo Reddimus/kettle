@@ -868,10 +868,12 @@ pub enum AskBeforeClosing {
     /// most-cautious mode).
     Always,
     /// `busy-or-multiple`, the default: everything `MultipleTerminals` asks,
-    /// and also a close of a single pane whose terminal another program
-    /// owns, such as `sleep` or an editor started from the shell (Terminal.app
-    /// and iTerm2 ask there too). It is a mode of its own so that an explicit
-    /// `multiple-terminals` keeps meaning exactly what it did.
+    /// and also a close of a single pane while a program is running in it:
+    /// a job its shell started, such as `sleep` or an editor (Terminal.app
+    /// and iTerm2 ask there too), or the pane's own program when that is not
+    /// an idle interactive shell, such as a pane started as `vim` or `ssh`.
+    /// It is a mode of its own so that an explicit `multiple-terminals` keeps
+    /// meaning exactly what it did.
     #[default]
     BusyOrMultiple,
     /// Show the dialog only when ≥2 panes/tabs would be killed.
@@ -1173,9 +1175,10 @@ impl AskBeforeClosing {
         }
     }
 
-    /// Whether closing exactly one pane asks when a program other than the
-    /// pane's own shell owns its terminal. kettle-ui decides that from the
-    /// PTY at close time; only `BusyOrMultiple` asks it.
+    /// Whether closing exactly one pane asks while a program is running in
+    /// it: a job its shell started, or the pane's own program when that is
+    /// not an idle interactive shell. kettle-ui decides that from the PTY at
+    /// close time; only `BusyOrMultiple` asks it.
     pub fn asks_for_busy_single_pane(self) -> bool {
         self == AskBeforeClosing::BusyOrMultiple
     }
