@@ -6019,6 +6019,99 @@ fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A picker's pinned status band sits inside its card, and the shared menu
+/// text pass is cut out of every card, so the band's lines must draw with
+/// the card's own labels. Each line shows in the secondary text colour; the
+/// same band with blank lines stays clean, so the ink is the status text.
+#[test]
+fn picker_status_band_text_draws_inside_its_card() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 280) else {
+        eprintln!("picker status band check skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let bg = theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 360.0;
+    let text_cell = (
+        renderer.overlay_text_cell_width(),
+        renderer.overlay_text_line_height(),
+    );
+    let status = MenuStatus::new(
+        "Profiles weren't ready.\nEnter run / Tab select / Esc cancel",
+        width,
+        text_cell,
+    );
+    assert!(status.lines.len() >= 2, "{:?}", status.lines);
+    let picker = |status: MenuStatus| ContextMenu {
+        picker_header_height: 30.0,
+        status: Some(status),
+        ..menu_level(
+            (40.0, 140.0),
+            &["Nord", "Dracula", "Solarized"],
+            usize::MAX,
+            (width, row_h),
+        )
+    };
+    let shown = picker(status);
+    let band = shown.status_rect().expect("status band");
+    let (cx, cy, cw, ch) = shown.card_rect();
+    assert!(
+        cy + 30.0 <= band.1 && band.1 + band.3 <= cy + ch && cx <= band.0 && band.2 <= cw,
+        "band {band:?} outside card {:?}",
+        (cx, cy, cw, ch)
+    );
+    let status = shown.status.as_ref().expect("status");
+    let lines: Vec<Rect4> = (0..status.lines.len())
+        .map(|index| status.line_rect(band, index))
+        .collect();
+    let blank = picker(MenuStatus {
+        lines: vec![String::new(); status.lines.len()],
+        line_height: status.line_height,
+    });
+    assert_eq!(blank.status_rect(), Some(band));
+    let snap = snapshot_of(20, 4, b"");
+    let ink = chrome::Colors::default().secondary(theme.foreground, bg);
+
+    let overlay = Overlay {
+        context_menu: Some(shown),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 280)], &overlay);
+    for (index, &line) in lines.iter().enumerate() {
+        assert_glyph_painted(
+            &frame,
+            line,
+            (bg, ink),
+            chrome::TEXT_CONTRAST,
+            &format!("status line {index}"),
+        );
+    }
+
+    let overlay = Overlay {
+        context_menu: Some(blank),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 280)], &overlay);
+    for (index, &(x, y, w, h)) in lines.iter().enumerate() {
+        let stray = (y as u32..(y + h) as u32)
+            .flat_map(|py| (x as u32..(x + w) as u32).map(move |px| (px, py)))
+            .filter(|&(px, py)| {
+                let p = frame.get_pixel(px, py);
+                [bg.r, bg.g, bg.b]
+                    .into_iter()
+                    .zip(p.0)
+                    .any(|(want, got)| want.abs_diff(got) > 2)
+            })
+            .count();
+        assert_eq!(
+            stray, 0,
+            "blank status line {index} shows {stray} ink pixels"
+        );
+    }
+}
+
 /// An open menu covers a toast beneath it, panel and labels alike, as it
 /// covers the terminal.
 #[test]
