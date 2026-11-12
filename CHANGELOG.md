@@ -429,7 +429,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   cells. Cursor movement, wrapping and insertion follow the corrected widths.
 
 - Programming ligatures and URLs draw every character again in grapheme
-  mode: `//`, `->`, `!=` and `===` no longer lose their left half.
+  mode: `//`, `->`, `!=`, `===` and the `::` in C++'s `std::cout` no longer
+  lose their left half.
+- With grapheme clustering (mode 2027) on, a block cursor over a single
+  character whose glyph is wider than its cell, such as a Nerd Font icon, no
+  longer cuts the icon off at the cell's edge.
 - A new window whose shell clears the screen at startup no longer gains a
   blank line above the prompt when the window grows.
 - Arch and Homebrew packages ship the renderer license texts from the

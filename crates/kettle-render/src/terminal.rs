@@ -796,7 +796,11 @@ impl Renderer {
                         } else {
                             1
                         },
-                        clustered: flags.contains(Flags::GRAPHEME),
+                        // Mode 2027 flags every printed cell, even a lone
+                        // ASCII scalar. Only a cell with attached marks is
+                        // a cluster; the rest draw as with the mode off, so
+                        // a ligature or overhanging glyph keeps its ink.
+                        clustered: flags.contains(Flags::GRAPHEME) && !marks.is_empty(),
                         text_presentation,
                         single_image: cluster_needs_single_image(flags, dc, marks),
                     },
