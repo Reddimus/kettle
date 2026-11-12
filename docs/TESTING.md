@@ -1922,7 +1922,9 @@ and caret above the card. `submenu_covers_its_parents_selection_labels_and_shado
 checks that a submenu's panel and shadow cover its parent's selection and
 labels, `submenu_edge_hides_its_parents_selection_and_labels` that its bordered
 edge is opaque where it crosses them, and `an_open_menu_covers_a_toast_beneath_it`
-that menus cover toasts.
+that menus cover toasts. `picker_status_band_text_draws_inside_its_card` checks
+that a picker's pinned status lines show in the secondary text colour inside its
+card, where the shared menu text pass is cut out.
 `menu_visual` checks that the corners of everything the menu changed stay
 untouched. `kettle-ui`'s `painted_menu_rows_match_hit_testing_and_accessibility_bounds`
 holds pointer hit testing and screen-reader bounds to the renderer's painted
