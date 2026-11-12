@@ -164,6 +164,9 @@ pub fn capture_png_with_annotation(
         // render pass can always call `draw` / `render` on them; empty uploads
         // are a no-op. Mirrors the live `Renderer`.
         let mut menu_quads_pipe = QuadPipeline::new(&device, format);
+        let mut menu_surfaces_pipe =
+            crate::rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let mut menu_surfaces = Vec::new();
         let mut menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
@@ -577,6 +580,7 @@ pub fn capture_png_with_annotation(
             let tr = Translator::default();
             let rows = vec![
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuCopy).into(),
@@ -585,6 +589,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuPaste).into(),
@@ -593,6 +598,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: String::new(),
@@ -601,6 +607,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuSplitRight).into(),
@@ -609,6 +616,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuSplitDown).into(),
@@ -617,6 +625,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuClosePane).into(),
@@ -625,6 +634,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: String::new(),
@@ -633,6 +643,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
+                    toggle: None,
                     swatches: None,
                     matched_chars: None,
                     label: tr.text(Text::MenuNewTab).into(),
@@ -657,6 +668,15 @@ pub fn capture_png_with_annotation(
                 a11y_label: None,
                 picker_header_height: 0.0,
             };
+            menu_surfaces = crate::overlays::menu_level_surfaces(
+                &menu,
+                theme,
+                cfg.resolved_accent(theme),
+                (cw, ch),
+                1.0,
+                &mut chrome::Colors::default(),
+                format.is_srgb(),
+            );
             menu_q.extend(menu_chrome_quads(
                 &menu,
                 theme,
@@ -664,13 +684,12 @@ pub fn capture_png_with_annotation(
                 cw,
                 ch,
                 &mut chrome::Colors::default(),
-                format.is_srgb(),
             ));
 
             // Text areas — one TextBuffer per non-separator row.
             // Positioning mirrors the live renderer's menu block.
             let panel_w = context_menu_panel_width(&menu, cw);
-            let row_h = ch + 12.0;
+            let row_h = crate::overlays::menu::row_height(ch);
             let sep_h = 8.0_f32;
             let (ax, ay) = menu.anchor;
             // Allocate buffers first (one per row, separators get an
@@ -767,6 +786,7 @@ pub fn capture_png_with_annotation(
                 ));
             }
         }
+        menu_surfaces_pipe.upload(&device, &queue, [wf, hf], &menu_surfaces);
         menu_quads_pipe.upload(&device, &queue, [wf, hf], &menu_q);
         menu_text_renderer.prepare(
             &device,
@@ -852,6 +872,7 @@ pub fn capture_png_with_annotation(
             // the live `Renderer::render_frame`. Cheap no-ops for the
             // `DebugScene::Default` path because both uploads are
             // empty.
+            menu_surfaces_pipe.draw_range(&mut pass, 0..u32::MAX);
             menu_quads_pipe.draw(&mut pass);
             menu_text_renderer.render(&atlas, &vp, &mut pass)?;
         }

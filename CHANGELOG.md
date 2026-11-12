@@ -8,9 +8,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Renaming a tab and moving it to a new window no longer need the right-click
+  menu or a tab drag. The command palette lists "Rename tab…" beside its
+  existing "Move tab to new window", and on macOS the menu bar's Window menu
+  has Rename Tab…, Move Tab Left, Move Tab Right and Move Tab to New Window.
+  The move rows are unavailable while the window has one tab, and Move Tab to
+  New Window also while `detachable-tabs = false`. No new default shortcuts.
+
 - Each row of the theme picker shows a small strip of that theme's colours:
   its background, its text colour and six accent colours. In a narrow window
   the strip is dropped before a theme's name is shortened.
+
+- When a program that uses the mouse, such as Vim, htop or tmux, takes a
+  right-click, a short notice on its pane says to hold Shift to select text
+  or open the menu. It shows once each time a program turns the mouse on, and
+  at most once every 30 seconds in a window, and not at all with
+  `putty-paste-style` on, where Shift+right-click pastes. The menu that
+  Shift+right-click opens over such a program starts with the same sentence,
+  wrapped to the menu's width, and a screen reader reads it as one item.
 
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
@@ -36,6 +51,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Screen readers find each pane's place in its scrollback as a vertical scroll
   bar, and can move it a line at a time or straight to a line.
+
+- The context menu's Read only row and the Preferences check boxes and
+  choices reach screen readers as check box and radio menu items that carry
+  whether they are on. On Linux and Windows their names no longer start with
+  the check mark or dot drawn before them; on macOS the names keep the mark,
+  because it is still how VoiceOver hears the state. The menu looks the same,
+  and a row's shortcut is still given as its description.
 
 - A zoomed pane keeps its titlebar and shows how many panes the zoom hides and
   the key that restores them, in English and Spanish.
@@ -127,6 +149,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Kettle's own menus look more like the system's. The right-click menu and
+  its submenus are rounded panels on a soft shadow, as the command palette,
+  theme and other pickers now are too, and in all of them the highlighted row
+  is a rounded, inset highlight instead of a full-width tint with an accent
+  bar. An open submenu covers its parent's highlight and labels, shadow
+  included, where the two overlap, and an open menu covers a notification
+  beneath it. Fonts, row heights and where each row responds to the mouse are
+  unchanged.
 - Closing a single pane, or a tab or window holding only one, asks first when a
   program is running in it, as Terminal.app and iTerm2 do: a job such as
   `sleep 600` or an editor started from the shell, or the pane's own program
@@ -330,6 +360,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
+  Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing
+  was left on, so under the "Prefer tabs when opening documents" system
+  setting (by default, while in full screen) a new Kettle window, such as a
+  tab moved to a new window, could open as an AppKit tab of another Kettle
+  window, and AppKit could add its own tab items, a second Move Tab to New
+  Window among them, to the Window menu.
 
 - A screen of characters that no installed font covers no longer freezes the
   window for seconds, and terminal queries such as cursor-position reports

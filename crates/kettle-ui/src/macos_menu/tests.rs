@@ -17,6 +17,7 @@ fn ready() -> Context {
         smart_copy: true,
         writable: true,
         renderer: true,
+        detachable_tabs: true,
     }
 }
 
@@ -101,7 +102,15 @@ fn complete_structure_in_english_and_spanish() {
                 "Enter Full Screen",
                 "Toggle quick terminal"
             ],
-            vec!["Next Tab", "Previous Tab"],
+            vec![
+                "Next Tab",
+                "Previous Tab",
+                "|",
+                "Rename Tab…",
+                "Move Tab Left",
+                "Move Tab Right",
+                "Move Tab to New Window"
+            ],
         ]
     );
     assert_eq!(
@@ -157,7 +166,15 @@ fn complete_structure_in_english_and_spanish() {
                 "Entrar en pantalla completa",
                 "Mostrar u ocultar la terminal rápida"
             ],
-            vec!["Pestaña siguiente", "Pestaña anterior"],
+            vec![
+                "Pestaña siguiente",
+                "Pestaña anterior",
+                "|",
+                "Cambiar el nombre de la pestaña…",
+                "Mover la pestaña a la izquierda",
+                "Mover la pestaña a la derecha",
+                "Mover la pestaña a una ventana nueva"
+            ],
         ]
     );
     let commands = |menus: Vec<Menu>| {
@@ -223,6 +240,10 @@ fn complete_structure_in_english_and_spanish() {
             Action::ToggleQuickTerminal,
             Action::NextTab,
             Action::PrevTab,
+            Action::EditTabTitle,
+            Action::MoveTabLeft,
+            Action::MoveTabRight,
+            Action::MoveTabToNewWindow,
         ]
     );
 }
@@ -290,6 +311,9 @@ fn enabled_state_follows_existing_action_semantics() {
                         | Action::Paste
                         | Action::NextTab
                         | Action::PrevTab
+                        | Action::MoveTabLeft
+                        | Action::MoveTabRight
+                        | Action::MoveTabToNewWindow
                         | Action::ToggleZoom
                 ),
                 "{action:?}"
@@ -311,6 +335,7 @@ fn enabled_state_follows_existing_action_semantics() {
         .enables(&Action::Copy)
     );
     assert!(one.enables(&Action::ClosePane)); // closes the tab with one pane
+    assert!(one.enables(&Action::EditTabTitle));
     assert!(one.enables(&Action::StartSearch));
     for row in empty_menu_model(
         &Translator::new(Language::En),
@@ -578,4 +603,85 @@ fn profile_inventory_dispatch_stays_cached_during_blocked_refresh() {
     let worker = inventory.worker.take().unwrap();
     drop(inventory);
     worker.join().unwrap();
+}
+
+/// Rename and move-to-new-window are reachable from the Window menu, in both
+/// languages, through the same actions the keymap and palette dispatch. The
+/// move is offered only when another tab stays behind and tabs may detach.
+#[test]
+fn window_menu_offers_rename_and_moving_the_tab() {
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let model = empty_menu_model(&tr, &Bindings::new(), ready());
+        let window = model.last().unwrap();
+        assert_eq!(window.title, tr.text(T::MacosMenuWindow));
+        for (text, action) in [
+            (T::MacosMenuRenameTab, Action::EditTabTitle),
+            (T::MacosMenuMoveTabToNewWindow, Action::MoveTabToNewWindow),
+        ] {
+            assert!(
+                window.rows.iter().any(|row| matches!(
+                    row,
+                    Row::Item { title, command: Command::Kettle(a), enabled: true, .. }
+                        if *a == action && title == tr.text(text)
+                )),
+                "{language:?}: {action:?}"
+            );
+        }
+    }
+    let enabled = |context: Context| context.enables(&Action::MoveTabToNewWindow);
+    assert!(enabled(ready()));
+    assert!(!enabled(Context { tabs: 1, ..ready() }));
+    assert!(!enabled(Context {
+        detachable_tabs: false,
+        ..ready()
+    }));
+    assert!(
+        Context {
+            detachable_tabs: false,
+            ..ready()
+        }
+        .enables(&Action::EditTabTitle)
+    );
+}
+
+/// Move Tab Left and Right stay enabled on the first and last tab because
+/// the action wraps there; the menu's tab count alone must agree with what
+/// the mux does at every position, or the row would offer a silent no-op.
+#[test]
+fn move_tab_rows_agree_with_the_wrapping_mux_at_every_position() {
+    let mux_with = |tabs: u64, active: usize| {
+        let mut mux = crate::mux::Mux::new();
+        for id in 1..=tabs {
+            mux.tabs.push(crate::mux::Tab {
+                root: crate::mux::Node::Leaf(id),
+                focus: id,
+                title_override: None,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+                scaled_zoom_owner: false,
+                generated_group_name: None,
+                lanes: Default::default(),
+            });
+        }
+        mux.active = active;
+        mux
+    };
+    for tabs in 1..=4u64 {
+        let context = Context {
+            tabs: tabs as usize,
+            ..ready()
+        };
+        for active in 0..tabs as usize {
+            for (action, delta) in [(Action::MoveTabLeft, -1), (Action::MoveTabRight, 1)] {
+                assert_eq!(
+                    context.enables(&action),
+                    mux_with(tabs, active).nudge_active_tab(delta),
+                    "{action:?} with {tabs} tabs, active {active}"
+                );
+            }
+        }
+    }
 }

@@ -298,10 +298,15 @@ title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
-Edit, View and Window menus, actions, separators, enabled state and live Cmd
-shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+Edit, View and Window menus (the Window menu carries the tab commands: next,
+previous, rename, move left, right and to a new window), actions, separators,
+enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
-Services and the Windows menu each time. Menu text follows the configured
+Services and the Windows menu each time. AppKit's automatic window tabbing is
+turned off before the event loop launches AppKit
+(`disable_automatic_window_tabbing`), since Kettle's tabs live inside one
+NSWindow and AppKit could otherwise merge Kettle windows into native tabs
+and add its own tab items to that Windows menu. Menu text follows the configured
 language on reload; other UI surfaces still require a restart. The root NSMenu
 only performs native application equivalents (unless the keymap owns them).
 Kettle equivalents are declined so the original event reaches winit's modal
@@ -3366,14 +3371,17 @@ flowchart LR
     text --> cursor["Fallback cursors and focused cursor glyph"]
     cursor --> lanes["Preview lane surfaces, images and text"]
     lanes --> overlay["Lane dimming and scrollbar"]
-    overlay --> menu["Menu chrome and receipt image"]
-    menu --> toast["Rounded update-toast surfaces"]
-    toast --> labels["Menu and settings text"]
+    overlay --> chrome["Settings surfaces, pre-menu chrome quads, receipt image and toast surfaces"]
+    chrome --> levels["Each menu level in turn: surfaces, quads, swatches, labels"]
+    levels --> post["Post-level quads: picker caret and selection"]
+    post --> labels["Chrome and settings text"]
 ```
 
 Update toasts use a separate instance of the existing rounded-surface pipeline
 for their body and two controls. Its bounded batch cannot consume media-control
-capacity, and it draws below the shared chrome text. Surface uploads are
+capacity. It draws after the receipt image and before every open menu level, so
+an open menu covers a toast; the toast's text is in the shared chrome-text pass
+after the levels, cut out of each menu panel. Surface uploads are
 retained and counted with the other pipelines. Shared toast geometry supplies
 the rounded contour for pointer ownership and hover pauses, while accessibility
 keeps rectangular control bounds.
@@ -3631,9 +3639,30 @@ adjust). The Background settings page edits the image path through an inline tex
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
 The menu chrome and menu text passes own the right-click context menu so its
-labels land **on top of** the panel background. If the menu's opaque panel
-quad drew in the dimming pass (`overlay_quads`) after its labels were
-rendered, it would paint over them and leave the menu blank.
+labels land **on top of** the panel background. If a level's opaque rounded
+panel surface drew after its labels, in the dimming pass (`overlay_quads`) or
+a later surface batch, it would paint over them and leave the menu blank.
+
+Each open menu level, and a picker's card, is a rounded panel (about 10
+logical pixels) on a shadow of four concentric low-opacity rounded layers,
+with the highlighted row drawn as an inset rounded selection. The panel's
+border is blended over the panel colour and drawn opaque, because the shader
+leaves the fill out of the border band; a translucent border would let the
+level beneath show through the edge. These are
+`RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
+the picker's header divider and the scroll arrows stay flat quads. The scene
+pass draws the levels root first, one layer each: the level's surfaces, its
+quads, its swatches, then its labels in a `TextRenderer` of its own
+(`menu_level_text`, ranges in `menu_level_draws`). A submenu therefore covers
+its parent's selection, labels and edge wherever it overlaps them, shadow
+included, as it does when clamped against the window edge. The chrome quads
+queued before the first level, the receipt thumbnail and the toasts draw before
+the levels, so an open menu covers them; their text, in the shared menu text
+pass (hint labels, receipts, completion, toasts), still draws after every level
+and is cut out of each panel, a picker's header included. Only the radii, shadow and
+selection inset follow the scale factor: rows, paddings, hit testing and
+screen-reader bounds keep `menu::row_height` and the row walk
+`context_menu_row_rects`, which the UI's tests hold to the painted rows.
 
 The cursor pass draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad and the
@@ -5010,6 +5039,24 @@ Ancestor text is clipped under child panels. AccessKit nests the child Menu
 under the expanded parent MenuItem, with actions on visible ancestor rows.
 Menus have no editable text or IME caret; paste consent reuses the existing
 confirmation layout and IME ownership rules.
+
+A row that toggles a setting, such as Read only or a Preferences choice,
+carries a `MenuToggle` (check box or radio, on or off) beside its label. The
+painted label still starts with the state's marker (`✓ `, two spaces, `● ` or
+`○ `), built from that state, so the two cannot drift. AccessKit gets a
+MenuItemCheckBox or MenuItemRadio with the toggled state. A row's shortcut is
+set as AccessKit's keyboard shortcut and kept as its description: the locked
+adapters (`accesskit_macos` 0.27, `accesskit_unix` 0.24 through
+`accesskit_atspi_common` 0.21, `accesskit_windows` 0.35) do not pass the
+shortcut property to the platform, so the description is what screen readers
+announce. AT-SPI has CheckMenuItem and RadioMenuItem with the checked state,
+and UIA has check box and radio button controls, so on Linux and Windows the
+name drops the marker. On macOS both toggle roles are AXMenuItem, the adapter
+sets no AXMenuItemMarkChar, and the state is only the item's boolean AXValue,
+which VoiceOver is not known to speak for a menu item; there the name keeps
+the painted marker (`MENU_TOGGLE_MARK_IN_NAME`), as it always has, so the
+state is still read. Separators stay out of the tree, because AccessKit's
+only separator role, Splitter, is an AXSplitter on macOS.
 
 ### Automatic shell startup and command outcomes
 

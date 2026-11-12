@@ -180,6 +180,7 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_copied"
                         | "osc52_denied_read"
                         | "osc52_denied_write"
+                        | "mouse_override_hint"
                 )
         })
         .cloned()
@@ -196,6 +197,23 @@ fn every_spanish_message_has_a_review_status() {
         sorted, expected,
         "second-pass keys must be exactly the sensitive ones"
     );
+}
+
+/// The Shift hint shows over whatever program has the mouse, so it speaks
+/// of that program and the key, never of the product.
+#[test]
+fn the_mouse_override_hint_does_not_name_the_product() {
+    for catalogue in [
+        include_str!("../locales/en.toml"),
+        include_str!("../locales/es.toml"),
+    ] {
+        let table: toml::Table = catalogue.parse().unwrap();
+        let text = table["mouse_override_hint"]
+            .as_str()
+            .expect("mouse_override_hint is a plain message");
+        assert!(text.contains("Shift"), "{text}");
+        assert!(!text.to_lowercase().contains("kettle"), "{text}");
+    }
 }
 
 /// No Spanish message is left in English, formatted and plural ones included,

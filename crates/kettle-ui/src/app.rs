@@ -1200,6 +1200,9 @@ mod ui_text_drift_tests;
 mod hint_action_tests;
 
 #[cfg(test)]
+mod mouse_override_hint_tests;
+
+#[cfg(test)]
 mod program_link_tests;
 
 #[cfg(test)]

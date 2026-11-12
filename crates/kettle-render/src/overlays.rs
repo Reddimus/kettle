@@ -58,6 +58,40 @@ pub struct ContextMenuRow {
     /// picker's background, foreground and ANSI red through cyan. `None` on
     /// every other row. Screen readers keep reading only the label and hint.
     pub swatches: Option<[Rgb; menu::SWATCH_COUNT]>,
+    /// A check box or radio row's state. The painted label still starts with
+    /// the state's [`MenuToggle::marker`], so the menu looks as it always
+    /// has; screen readers take the state from here, and outside macOS the
+    /// name without it.
+    /// `None` on every row that is not a toggle.
+    pub toggle: Option<MenuToggle>,
+}
+
+/// The state of a menu row that toggles a setting: a check box (on or off)
+/// or one choice of a radio group (selected or not).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MenuToggle {
+    Check(bool),
+    Radio(bool),
+}
+
+impl MenuToggle {
+    /// Whether the box is checked or the choice is selected.
+    pub fn is_on(self) -> bool {
+        match self {
+            Self::Check(on) | Self::Radio(on) => on,
+        }
+    }
+
+    /// The two-column marker painted before the row's label: `✓ ` or two
+    /// spaces for a check box, `● ` or `○ ` for a radio choice.
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Check(true) => "✓ ",
+            Self::Check(false) => "  ",
+            Self::Radio(true) => "● ",
+            Self::Radio(false) => "○ ",
+        }
+    }
 }
 
 /// Dropdown-parity: a menu row's display-column budget — the label plus
@@ -125,7 +159,7 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
         return out;
     }
     let panel_w = context_menu_panel_width(menu, cw);
-    let row_h = ch + menu::ROW_PAD;
+    let row_h = menu::row_height(ch);
     let sep_h = menu::SEP_H;
     let natural_h: f32 = menu
         .rows
@@ -1434,29 +1468,21 @@ pub(crate) fn scroll_arrow_glyphs(vertical: bool) -> (&'static str, &'static str
     }
 }
 
-/// Build the right-click context-menu chrome quads — shadow, panel
-/// background, 1-px border on each edge, per-row highlight bg + 2-px
-/// accent strip, and inter-row separator lines. Pure: takes the menu
-/// state + theme + cell metrics, returns the quads in draw order
-/// (shadow first so the bg paints over it; bg second so the border
-/// sits on its edge; etc.).
-///
-/// Shared between [`Renderer::render_frame`] and [`capture_png_with`]
-/// so the live menu and the headless visual-regression screenshot
-/// produce identical pixels.
-pub(crate) fn menu_chrome_quads(
-    menu: &ContextMenu,
-    theme: &kettle_config::Theme,
-    accent: Rgb,
-    cw: f32,
-    ch: f32,
-    colors: &mut chrome::Colors,
-    linear: bool,
-) -> Vec<QuadInstance> {
-    let mut out: Vec<QuadInstance> = Vec::new();
+/// One menu level's panel in surface pixels, as the painter, the label pass
+/// and the swatches lay it out. `None` when the geometry cannot be painted.
+struct MenuPanel {
+    ax: f32,
+    ay: f32,
+    panel_w: f32,
+    panel_h: f32,
+    inset: f32,
+    content_h: f32,
+    row_h: f32,
+}
+
+fn menu_panel(menu: &ContextMenu, cw: f32, ch: f32) -> Option<MenuPanel> {
     let panel_w = context_menu_panel_width(menu, cw);
-    let row_h = ch + 12.0;
-    let sep_h = 8.0_f32;
+    let row_h = menu::row_height(ch);
     // Terminator menu UX: natural panel height (sum of every row) may exceed
     // the surface. App-side `context_menu_geometry` already computed the
     // clamped height; if non-zero we honor it, otherwise use the unclamped
@@ -1464,7 +1490,7 @@ pub(crate) fn menu_chrome_quads(
     let natural_h: f32 = menu
         .rows
         .iter()
-        .map(|r| if r.separator { sep_h } else { row_h })
+        .map(|r| if r.separator { menu::SEP_H } else { row_h })
         .sum();
     let panel_h = if menu.panel_h_clamped > 0.0 {
         menu.panel_h_clamped.min(natural_h)
@@ -1479,9 +1505,77 @@ pub(crate) fn menu_chrome_quads(
         || panel_w <= 0.0
         || panel_h <= 0.0
     {
-        return out;
+        return None;
     }
     let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    Some(MenuPanel {
+        ax,
+        ay,
+        panel_w,
+        panel_h,
+        inset,
+        content_h,
+        row_h,
+    })
+}
+
+/// Each painted row of one menu level with its rect, separators included, in
+/// paint order. Scrolled-off rows and rows that would cross the cut edge are
+/// left out. Chrome, labels and the selection all walk this list, and the
+/// UI's hit testing and accessibility bounds must produce the same rects.
+pub fn context_menu_row_rects(menu: &ContextMenu, (cw, ch): (f32, f32)) -> Vec<(usize, Rect4)> {
+    let Some(panel) = menu_panel(menu, cw, ch) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut row_y = panel.ay + panel.inset;
+    let bottom = panel.ay + panel.inset + panel.content_h;
+    let start = menu.scroll_offset.min(menu.rows.len());
+    for (i, row) in menu.rows.iter().enumerate().skip(start) {
+        let h = if row.separator {
+            menu::SEP_H
+        } else {
+            panel.row_h
+        };
+        if row_y + h > bottom {
+            break;
+        }
+        out.push((i, (panel.ax, row_y, panel.panel_w, h)));
+        row_y += h;
+    }
+    out
+}
+
+/// Build a menu level's flat chrome quads: the picker's header divider, the
+/// separator lines and the scroll arrows at a cut edge. The panel, its shadow
+/// and the selection are rounded surfaces from [`menu_level_surfaces`], drawn
+/// just before these.
+///
+/// Shared between [`Renderer::render_frame`] and [`capture_png_with`]
+/// so the live menu and the headless visual-regression screenshot
+/// produce identical pixels.
+pub(crate) fn menu_chrome_quads(
+    menu: &ContextMenu,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    cw: f32,
+    ch: f32,
+    colors: &mut chrome::Colors,
+) -> Vec<QuadInstance> {
+    let mut out: Vec<QuadInstance> = Vec::new();
+    let Some(MenuPanel {
+        ax,
+        ay,
+        panel_w,
+        panel_h,
+        inset,
+        content_h,
+        row_h,
+    }) = menu_panel(menu, cw, ch)
+    else {
+        return out;
+    };
+    let sep_h = menu::SEP_H;
     let (clipped_top, clipped_bottom) =
         context_menu_clip_indicators(&menu.rows, menu.scroll_offset, content_h, row_h, sep_h);
 
@@ -1494,81 +1588,19 @@ pub(crate) fn menu_chrome_quads(
             theme.palette[8],
             0.65,
         ));
-    } else {
-        // Soft drop shadow — offset 4 px down-right at low opacity for
-        // depth (GTK / iTerm2 convention).
-        out.push(rect(
-            ax + 4.0,
-            ay + 4.0,
-            panel_w,
-            panel_h,
-            Rgb::new(0, 0, 0),
-            0.35,
-        ));
-        // Panel background — theme.background opaque so the menu inherits
-        // the pane bg color the user is calibrated for.
-        out.push(rect(ax, ay, panel_w, panel_h, theme.background, 1.0));
-        // 1-px border in dim chrome, each edge separate so a future tweak
-        // can color them individually if needed.
-        out.push(rect(ax, ay, panel_w, 1.0, theme.palette[8], 0.65));
-        out.push(rect(
-            ax,
-            ay + panel_h - 1.0,
-            panel_w,
-            1.0,
-            theme.palette[8],
-            0.65,
-        ));
-        out.push(rect(ax, ay, 1.0, panel_h, theme.palette[8], 0.65));
-        out.push(rect(
-            ax + panel_w - 1.0,
-            ay,
-            1.0,
-            panel_h,
-            theme.palette[8],
-            0.65,
-        ));
     }
-
-    // Per-row highlight + separators. Skip scrolled-off
-    // rows; stop drawing when we'd go past panel_h.
-    let mut row_y = ay + inset;
-    let start = menu.scroll_offset.min(menu.rows.len());
-    for (i, row) in menu.rows.iter().enumerate().skip(start) {
-        let h = if row.separator { sep_h } else { row_h };
-        if row_y + h > ay + inset + content_h {
-            break;
-        }
-        if row.separator {
-            out.push(rect(
-                ax + 12.0,
-                row_y + sep_h * 0.5 - 0.5,
-                (panel_w - 24.0).max(0.0),
-                1.0,
-                theme.palette[8],
-                0.55,
-            ));
-            row_y += sep_h;
-            continue;
-        }
-        if i == menu.highlight && row.enabled {
-            // Soft accent tint across the row.
-            out.push(rect(
-                ax + 1.0,
-                row_y,
-                (panel_w - 2.0).max(0.0),
-                row_h,
-                accent,
-                0.18,
-            ));
-            // 2-px accent strip on the left of the highlighted row —
-            // same pattern as the active-tab accent strip and
-            // the focused-pane border.
-            let selected_bg = colors.surface(theme.background, accent, 0.18, linear);
-            let rail = colors.icon(accent, selected_bg);
-            out.push(rect(ax + 1.0, row_y, 2.0, row_h, rail, 1.0));
-        }
-        row_y += row_h;
+    for (_, (_, row_y, _, _)) in context_menu_row_rects(menu, (cw, ch))
+        .into_iter()
+        .filter(|(i, _)| menu.rows[*i].separator)
+    {
+        out.push(rect(
+            ax + 12.0,
+            row_y + sep_h * 0.5 - 0.5,
+            (panel_w - 24.0).max(0.0),
+            1.0,
+            theme.palette[8],
+            0.55,
+        ));
     }
     let arrow = colors.icon(accent, theme.background);
     for (visible, top, down) in [
@@ -1588,8 +1620,123 @@ pub(crate) fn menu_chrome_quads(
             out.push(rect(center - width * 0.5, y, width, step_h, arrow, 1.0));
         }
     }
-    if menu.picker_header_height > 0.0 {
-        clip_picker_bottom_corners(&mut out, menu.card_rect());
+    out
+}
+
+/// Corner radius of a menu or picker panel, in logical pixels.
+pub(crate) const MENU_PANEL_RADIUS: f32 = 10.0;
+/// The selection's inset from the row's sides and from its top and bottom,
+/// in logical pixels. The side inset stops short of the labels, which start
+/// 16 physical pixels in at every scale.
+pub(crate) const MENU_SELECTION_INSET: (f32, f32) = (5.0, 2.0);
+const MENU_SELECTION_MAX_INSET_X: f32 = 10.0;
+/// The selection's corner radius, in logical pixels.
+pub(crate) const MENU_SELECTION_RADIUS: f32 = 5.0;
+/// The panel's shadow, as concentric rounded layers from the tightest out:
+/// how far each spreads past the panel and drops below it, in logical
+/// pixels, and its opacity. Stacked, they darken most at the panel's edge and
+/// fade out over about ten pixels, more below the panel than above it.
+pub(crate) const MENU_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
+    (1.0, 1.0, 0.10),
+    (3.0, 2.0, 0.07),
+    (6.0, 4.0, 0.05),
+    (10.0, 6.0, 0.035),
+];
+/// The most rounded surfaces one level paints: its shadow, panel and selection.
+pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 2;
+/// Levels whose surfaces fit in one frame. Kettle's own menus nest a few
+/// levels deep at most; a deeper stack paints only its deepest levels' panels.
+pub(crate) const MENU_SURFACE_LEVELS: usize = 16;
+pub(crate) const MENU_SURFACES: usize = MENU_LEVEL_SURFACES * MENU_SURFACE_LEVELS;
+
+/// The rounded surfaces of one menu or picker level, in draw order: a soft
+/// layered shadow, the bordered panel, then the highlighted row's inset
+/// selection. The selection is filled with the opaque colour the label pass
+/// resolves its text contrast against. Only the radii, the shadow and the
+/// selection's inset follow `scale`; rows, paddings and hit targets do not.
+pub(crate) fn menu_level_surfaces(
+    menu: &ContextMenu,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    (cw, ch): (f32, f32),
+    scale: f32,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Vec<crate::rounded_surface::RoundedSurface> {
+    use crate::rounded_surface::RoundedSurface;
+    let rgba = |c: Rgb, a| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            a,
+        ]
+    };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let panel = menu_panel(menu, cw, ch);
+    let card = if menu.picker_header_height > 0.0 {
+        // A picker's card holds its query header above the rows.
+        let (x, rows_y) = menu.anchor;
+        Some((
+            x,
+            rows_y - menu.picker_header_height,
+            context_menu_panel_width(menu, cw),
+            menu.picker_header_height + menu.panel_h_clamped,
+        ))
+    } else {
+        panel.as_ref().map(|p| (p.ax, p.ay, p.panel_w, p.panel_h))
+    };
+    let Some((x, y, w, h)) = card
+        .filter(|&(x, y, w, h)| [x, y, w, h].iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0)
+    else {
+        return Vec::new();
+    };
+    let radius = (MENU_PANEL_RADIUS * scale).min(w * 0.5).min(h * 0.5);
+    let mut out = Vec::with_capacity(MENU_LEVEL_SURFACES);
+    for &(spread, drop, alpha) in MENU_SHADOW_LAYERS.iter().rev() {
+        let (spread, drop) = (spread * scale, drop * scale);
+        out.push(RoundedSurface {
+            pos: [x - spread, y - spread + drop],
+            size: [w + 2.0 * spread, h + 2.0 * spread],
+            fill: rgba(Rgb::new(0, 0, 0), alpha),
+            stroke: [0.0; 4],
+            params: [radius + spread, 0.0, 0.0, 0.0],
+        });
+    }
+    // The border is blended over the panel colour here and drawn opaque: the
+    // shader leaves the panel's fill out of its border band, so a
+    // translucent stroke would let the parent level, the terminal and this
+    // level's own shadow show through the edge.
+    let border = colors.surface(theme.background, theme.palette[8], 0.65, linear);
+    out.push(RoundedSurface {
+        pos: [x, y],
+        size: [w, h],
+        fill: rgba(theme.background, 1.0),
+        stroke: rgba(border, 1.0),
+        params: [radius, 1.0, 0.0, 0.0],
+    });
+    let selected = context_menu_row_rects(menu, (cw, ch))
+        .into_iter()
+        .find(|(i, _)| *i == menu.highlight)
+        .filter(|(i, _)| menu.rows[*i].enabled && !menu.rows[*i].separator);
+    if let Some((_, (rx, ry, rw, rh))) = selected {
+        let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
+        let inset_y = (MENU_SELECTION_INSET.1 * scale).min(rh * 0.15);
+        let (sw, sh) = (rw - 2.0 * inset_x, rh - 2.0 * inset_y);
+        if sw > 0.0 && sh > 0.0 {
+            let fill = colors.surface(theme.background, accent, 0.18, linear);
+            out.push(RoundedSurface {
+                pos: [rx + inset_x, ry + inset_y],
+                size: [sw, sh],
+                fill: rgba(fill, 1.0),
+                stroke: [0.0; 4],
+                params: [(MENU_SELECTION_RADIUS * scale).min(sh * 0.5), 0.0, 0.0, 0.0],
+            });
+        }
     }
     out
 }
@@ -1634,6 +1781,11 @@ pub mod menu {
     /// `ROW_PAD` = total row height (~28-32 px on default cell
     /// metrics, a comfortable click target).
     pub const ROW_PAD: f32 = 12.0;
+    /// Height of one selectable menu row for a text cell height. Paint, hit
+    /// testing and accessibility bounds all take their row height from here.
+    pub fn row_height(cell_h: f32) -> f32 {
+        cell_h + ROW_PAD
+    }
     /// Separator row height. Smaller than a regular row so the menu
     /// reads as grouped without wasting vertical space.
     pub const SEP_H: f32 = 8.0;
@@ -1765,89 +1917,8 @@ pub(crate) fn menu_match_key(row: &ContextMenuRow, accent: Rgb) -> u64 {
     hash.finish()
 }
 
-pub(crate) fn picker_surfaces(
-    menu: &ContextMenu,
-    theme: &kettle_config::Theme,
-    cw: f32,
-) -> Option<[crate::rounded_surface::RoundedSurface; 2]> {
-    if menu.picker_header_height <= 0.0 {
-        return None;
-    }
-    let (x, rows_y) = menu.anchor;
-    let y = rows_y - menu.picker_header_height;
-    let w = context_menu_panel_width(menu, cw);
-    let h = menu.picker_header_height + menu.panel_h_clamped;
-    let rgba = |c: Rgb, a| {
-        [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            a,
-        ]
-    };
-    let shape = |x, y, fill, stroke, border| crate::rounded_surface::RoundedSurface {
-        pos: [x, y],
-        size: [w, h],
-        fill,
-        stroke,
-        params: [8.0, border, 0.0, 0.0],
-    };
-    Some([
-        shape(
-            x + 4.0,
-            y + 4.0,
-            rgba(Rgb::new(0, 0, 0), 0.35),
-            [0.0; 4],
-            0.0,
-        ),
-        shape(
-            x,
-            y,
-            rgba(theme.background, 1.0),
-            rgba(theme.palette[8], 0.65),
-            1.0,
-        ),
-    ])
-}
-
-/// Row quads sit above the rounded surface, so clip the last row's tint and
-/// rail to its inner corners instead of squaring off the card when selected.
-fn clip_picker_bottom_corners(quads: &mut Vec<QuadInstance>, (x, y, w, h): Rect4) {
-    let bottom = y + h - 1.0;
-    let radius = 7.0_f32.min((w - 2.0) * 0.5).max(0.0);
-    let corner_top = bottom - radius;
-    let original = std::mem::take(quads);
-    for quad in original {
-        let end = quad.pos[1] + quad.size[1];
-        if end <= corner_top {
-            quads.push(quad);
-            continue;
-        }
-        let mut push = |top: f32, end: f32, inset: f32| {
-            let top = top.max(quad.pos[1]);
-            let end = end.min(quad.pos[1] + quad.size[1]);
-            let left = quad.pos[0].max(x + 1.0 + inset);
-            let right = (quad.pos[0] + quad.size[0]).min(x + w - 1.0 - inset);
-            if end > top && right > left {
-                quads.push(QuadInstance {
-                    pos: [left, top],
-                    size: [right - left, end - top],
-                    ..quad
-                });
-            }
-        };
-        push(quad.pos[1], corner_top, 0.0);
-        for step in 0..radius.ceil() as usize {
-            let top = corner_top + step as f32;
-            let end = (top + 1.0).min(bottom);
-            let dy = ((top + end) * 0.5 - corner_top).min(radius);
-            let inset = radius - (radius * radius - dy * dy).max(0.0).sqrt();
-            push(top, end, inset);
-        }
-    }
-}
-
-/// Earlier ancestor labels must not paint through a later submenu's surface.
+/// Chrome text drawn after the menu levels (hint labels, receipts, completion)
+/// must not paint through a menu panel.
 pub(crate) fn exclude_menu_text(areas: &mut Vec<super::TextArea<'_>>, hole: Rect4) {
     let original = std::mem::take(areas);
     for area in original {

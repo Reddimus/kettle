@@ -124,7 +124,7 @@ fn preview_lanes_draw_between_the_terminal_and_the_overlays() {
     let lane_images = at("lanes.draw(&mut pass);");
     let lane_text = at("self.lane_text_renderer\n            .render(");
     let overlay = at("self.overlay_quads.draw(&mut pass);");
-    let menus = at("self.menu_quads.draw(&mut pass);");
+    let menus = at("self.menu_quads.draw_range(&mut pass, 0..first);");
     assert!(terminal_text < lane_quads && cursor < lane_quads);
     assert!(lane_quads < lane_images && lane_images < lane_text);
     assert!(lane_text < overlay && overlay < menus);

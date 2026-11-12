@@ -812,6 +812,9 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 [messages.palette_move_tab_right]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MoveTabRight action."
 
+[messages.palette_rename_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the EditTabTitle action, which opens the inline editor for the active tab's title. The ellipsis says an editor opens."
+
 [messages.palette_move_tab_to_new_window]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MoveTabToNewWindow action."
 
@@ -2439,6 +2442,18 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar next tab title or 
 [messages.macos_menu_previous_tab]
 context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar previous tab title or command. Kettle is the product name; Shell names the shell menu."
 
+[messages.macos_menu_rename_tab]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu command that opens the inline editor for the active tab's title (Action::EditTabTitle). The ellipsis says an editor opens."
+
+[messages.macos_menu_move_tab_left]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu command that moves the active tab one place left in the tab bar."
+
+[messages.macos_menu_move_tab_right]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu command that moves the active tab one place right in the tab bar."
+
+[messages.macos_menu_move_tab_to_new_window]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu command that moves the active tab, with its running programs, into a new window."
+
 [messages.confirm_paste_heading]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.confirm_paste_body]
@@ -2687,6 +2702,9 @@ plural = "count"
 
 [messages.link_open_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status, link-single-click enabled."
+
+[messages.mouse_override_hint]
+context = "crates/kettle-ui/src/app/notices.rs and menus.rs: brief pane notice after a right-click went to a program that uses the mouse (a full-screen editor, htop, tmux), and the first row of the menu Shift+right-click opens over such a program. Shift is the keyboard key. Also names a screen-reader live region. Never name the product."
 
 [messages.link_open_command_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
