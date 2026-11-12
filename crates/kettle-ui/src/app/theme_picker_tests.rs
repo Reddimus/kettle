@@ -592,7 +592,7 @@ fn picker_result_presses_select_the_visible_row() {
         let menu = project(&ws);
         assert_eq!(menu.anchor, (176.0, 78.0));
         assert_eq!(menu.picker_header_height, 30.0);
-        let row_h = 16.0 + kettle_render::menu::ROW_PAD;
+        let row_h = kettle_render::menu::row_height(16.0);
         let (inset, _) = kettle_render::menu::scroll_content(
             menu.rows.len() as f32 * row_h,
             menu.panel_h_clamped,
@@ -854,6 +854,7 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
     let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
     for template in &list.rows {
         let row = || kettle_render::ContextMenuRow {
+            toggle: None,
             swatches: template.swatches,
             matched_chars: None,
             label: template.label.clone(),

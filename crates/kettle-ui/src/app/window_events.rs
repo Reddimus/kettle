@@ -28,33 +28,37 @@ impl App {
         match event {
             WindowEvent::CloseRequested => {
                 // The titlebar ✕ and Alt+F4 ask the window manager to destroy a
-                // window; they are not Kettle commands. Ordinary applications
-                // veto that only for unsaved document state, and a terminal has
-                // no authoritative dirty bit ("a process exists" is not "work
-                // would be lost"). A veto would also make the gesture
-                // nondeterministic, and because `shell_idle()` reports busy for
-                // any pane without OSC 133 integration, EVERY multi-pane window
-                // would prompt. So this gesture closes.
+                // window; they are not Kettle commands. A window of several
+                // panes closes without asking unless `ask-before-closing =
+                // always`: `shell_idle()` reports busy for any pane without
+                // OSC 133 integration, so asking there would put a question on
+                // nearly every multi-pane window.
                 //
-                // `ask-before-closing = always` is the opt-in for people who
-                // want the question here, and the only policy that still asks
-                // it. The keybind close actions (`ClosePane`, `CloseTab`,
-                // `CloseWindow`) are Kettle commands, not OS requests, and keep
-                // the full policy. Ask BEFORE any of the teardown below, so the
-                // session is not saved and the recorder not finished while the
-                // user is still deciding.
-                if self.cfg.ask_before_closing == kettle_config::AskBeforeClosing::Always {
-                    let (scope, busy) = window_close_scope(ws);
-                    if self.confirm_close(
+                // A one-pane window has no such false positive under
+                // `busy-or-multiple`: `confirm_close` asks the PTY whether a
+                // program other than an idle interactive shell owns the
+                // terminal, either a job the shell started or the pane's own
+                // program when that is not an interactive shell (a pane
+                // started as `vim` or `ssh`), so the gesture asks exactly when
+                // a program would die, as Terminal.app and iTerm2 do on their
+                // close button.
+                // `titlebar_close_consults_policy` holds that rule. The keybind
+                // close actions (`ClosePane`, `CloseTab`, `CloseWindow`) are
+                // Kettle commands and keep the full policy. Ask BEFORE any of
+                // the teardown below, so the session is not saved and the
+                // recorder not finished while the user is still deciding.
+                let (scope, busy) = window_close_scope(ws);
+                if titlebar_close_consults_policy(self.cfg.ask_before_closing, scope)
+                    && self.confirm_close(
                         ws,
                         scope,
                         busy,
                         ConfirmAction::CloseWindow {
                             drop_panes: DropPanes::No,
                         },
-                    ) {
-                        return;
-                    }
+                    )
+                {
+                    return;
                 }
                 self.close_window_now(ws, DropPanes::No);
             }

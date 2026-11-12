@@ -43,8 +43,8 @@ use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
 use batching::cell_locked_glyph_offset;
 use batching::{
-    GlyphPositioning, SharedPipelines, builtin_glyph_at, builtin_glyph_instance, clip_quads,
-    completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
+    GlyphPositioning, MenuLevelDraw, SharedPipelines, builtin_glyph_at, builtin_glyph_instance,
+    clip_quads, completion_text_damage_key, context_menu_text_damage_key, emit_cell_locked_glyphs,
     pane_outline, prepared_text_areas_damage_key, push_ime_preedit_quads, rect,
     text_bounds_for_rect, text_layout_damage_key, text_overlay_requires_continuous_prepare,
 };
@@ -111,11 +111,11 @@ use overlays::input_bar_colors;
 pub use overlays::{
     ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
     MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, MenuStatus, NotificationGeometry, Overlay, StatusBar, TabActivity,
-    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    WindowControl, WindowControlButton, format_media_size, hint_label_rect,
-    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    notification_geometry_with_notices, persistent_notice_geometry,
+    MediaPasteReceiptOverlay, MenuStatus, MenuToggle, NotificationGeometry, Overlay, StatusBar,
+    TabActivity, TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit,
+    UpdateToastOverlay, WindowControl, WindowControlButton, context_menu_row_rects,
+    format_media_size, hint_label_rect, media_paste_receipt_geometry, menu, menu_row_chars,
+    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
     persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
     toast_text_rows, update_toast_geometry,
 };
@@ -676,16 +676,25 @@ pub struct Renderer {
     /// *on top of* the panel bg.
     menu_quads: QuadPipeline,
     /// Dedicated TextRenderer for the text drawn over `menu_quads`
-    /// (context-menu rows, settings lines, the resize chip, ...). Shares
+    /// (settings lines, the resize chip, hint labels, ...; menu rows have
+    /// `menu_level_text`). Shares
     /// `atlas` + `viewport` with `text_renderer` (glyphon allows multiple
     /// renderers against one atlas); rendered after `menu_quads` so menu labels
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
     rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
     toast_surfaces: rounded_surface::RoundedSurfacePipeline,
-    picker_surfaces: rounded_surface::RoundedSurfacePipeline,
+    /// Every open menu or picker level's shadow, panel and selection, drawn
+    /// level by level (`menu_level_draws`).
+    menu_surfaces: rounded_surface::RoundedSurfacePipeline,
     /// Menu row swatches, drawn above the row highlight and below row text.
     menu_swatch_surfaces: rounded_surface::RoundedSurfacePipeline,
+    /// Each open menu level's slice of `menu_surfaces`, `menu_quads` and
+    /// `menu_swatch_surfaces`, root first.
+    menu_level_draws: Vec<MenuLevelDraw>,
+    /// Each open menu level's labels, drawn after that level's chrome and
+    /// before the next level, so a submenu covers its parent's text.
+    menu_level_text: Vec<TextRenderer>,
     transport_surface_count: u32,
     settings_surface_count: u32,
     confirmation_text_renderer: TextRenderer,
@@ -1137,9 +1146,9 @@ impl Renderer {
             ));
         }
         // Third quad pass, drawn after `over` so the right-click context
-        // menu's bg/shadow/border/highlight sit on top of every other UI
-        // element. `menu_text_renderer` draws the menu labels after this pass,
-        // on top of the panel bg.
+        // menu's chrome sits on top of every other UI element. Each menu
+        // level's slice of it draws between that level's rounded surfaces and
+        // its labels (`menu_level_draws`).
         //
         // The per-frame buffers below (menu_q / over / image items /
         // image-live sets) are deliberately allocated fresh each frame, unlike
@@ -2883,7 +2892,7 @@ impl Renderer {
                 self.context_menu_match_keys.resize(row_count, 0);
                 // Row height matches a comfortable click target (~28-32 px
                 // on default cell metrics).
-                let row_h = ch + 12.0;
+                let row_h = menu::row_height(ch);
                 for (index, row) in menu.rows.iter().enumerate() {
                     let i = row_base + index;
                     if row.separator {
@@ -4531,68 +4540,75 @@ impl Renderer {
             }
         }
 
-        // Right-click context menu, drawn in its own final pass. Chrome quads
-        // go to `menu_q` (drawn after `over` via `self.menu_quads.draw`); row
-        // labels go to `menu_areas` (drawn by a dedicated
-        // `self.menu_text_renderer.render` call after the menu quads), so the
-        // opaque panel bg stays under the menu text.
-        let mut menu_row_base = 0;
-        for menu in overlay
+        // Each open menu level, root first, is its own layer: its rounded
+        // shadow, panel and selection, then its flat chrome quads and
+        // swatches, then its labels in a text renderer of its own. A submenu
+        // therefore covers its parent's selection, labels and edge wherever
+        // it overlaps them, shadow included. The chrome text already in
+        // `menu_areas` draws after every level, so it is cut out of each
+        // panel instead.
+        let mut menu_surfaces: Vec<rounded_surface::RoundedSurface> = Vec::new();
+        let mut menu_swatches: Vec<rounded_surface::RoundedSurface> = Vec::new();
+        let mut menu_level_draws: Vec<MenuLevelDraw> = Vec::new();
+        let mut menu_level_areas: Vec<Vec<TextArea>> = Vec::new();
+        let menu_levels: Vec<&ContextMenu> = overlay
             .context_menu_parents
             .iter()
             .chain(overlay.context_menu.iter())
-        {
-            overlays::exclude_menu_text(&mut menu_areas, menu.rows_rect());
+            .collect();
+        let surfaced_from = menu_levels
+            .len()
+            .saturating_sub(overlays::MENU_SURFACE_LEVELS);
+        let linear = self.config.format.is_srgb();
+        let mut menu_row_base = 0;
+        for (level, menu) in menu_levels.into_iter().enumerate() {
+            // A picker's card includes its header.
+            overlays::exclude_menu_text(&mut menu_areas, menu.card_rect());
             let accent = self.ui_accent(cfg, theme);
-            let chrome = menu_chrome_quads(
+            let surfaces_start = menu_surfaces.len() as u32;
+            if level >= surfaced_from {
+                menu_surfaces.extend(overlays::menu_level_surfaces(
+                    menu,
+                    theme,
+                    accent,
+                    (cw, ch),
+                    self.scale,
+                    &mut self.chrome_colors,
+                    linear,
+                ));
+            }
+            let quads_start = menu_q.len() as u32;
+            menu_q.extend(menu_chrome_quads(
                 menu,
                 theme,
                 accent,
                 cw,
                 ch,
                 &mut self.chrome_colors,
-                self.config.format.is_srgb(),
+            ));
+            let swatches_start = menu_swatches.len() as u32;
+            let room = overlays::MENU_SWATCH_SURFACES.saturating_sub(menu_swatches.len());
+            menu_swatches.extend(
+                overlays::menu_swatch_surfaces([menu], theme, cw, ch)
+                    .into_iter()
+                    .take(room),
             );
-            menu_q.extend(chrome);
-            // Row labels — collected into `menu_areas` so the second
-            // TextRenderer can prepare them as their own batch.
+            menu_level_draws.push(MenuLevelDraw {
+                surfaces: surfaces_start..menu_surfaces.len() as u32,
+                quads: quads_start..menu_q.len() as u32,
+                swatches: swatches_start..menu_swatches.len() as u32,
+            });
+            // Row labels, laid out by the same row walk as the chrome.
             let panel_w = context_menu_panel_width(menu, cw);
-            let row_h = ch + 12.0;
-            let sep_h = 8.0_f32;
-            let (ax, ay) = menu.anchor;
-            // Skip scrolled-off rows + stop drawing when
-            // the next row would extend past the clamped panel
-            // height. Keeps text rendering in lockstep with the
-            // chrome-quad loop above.
-            let natural_h: f32 = menu
-                .rows
-                .iter()
-                .map(|r| if r.separator { sep_h } else { row_h })
-                .sum();
-            let panel_h_eff = if menu.panel_h_clamped > 0.0 {
-                menu.panel_h_clamped.min(natural_h)
-            } else {
-                natural_h
-            };
-            let (inset, content_h) = menu::scroll_content(natural_h, panel_h_eff, row_h);
-            let start = menu.scroll_offset.min(menu.rows.len());
-            let mut row_y = ay + inset;
-            for (i, row) in menu.rows.iter().enumerate().skip(start) {
-                let h = if row.separator { sep_h } else { row_h };
-                if row_y + h > ay + inset + content_h {
-                    break;
-                }
+            let mut areas = Vec::new();
+            for (i, (ax, row_y, _, row_h)) in overlays::context_menu_row_rects(menu, (cw, ch)) {
+                let row = &menu.rows[i];
                 if row.separator {
-                    row_y += sep_h;
                     continue;
                 }
                 let background = if i == menu.highlight && row.enabled {
-                    self.chrome_colors.surface(
-                        theme.background,
-                        self.ui_accent(cfg, theme),
-                        0.18,
-                        self.config.format.is_srgb(),
-                    )
+                    self.chrome_colors
+                        .surface(theme.background, accent, 0.18, linear)
                 } else {
                     theme.background
                 };
@@ -4607,7 +4623,7 @@ impl Renderer {
                     right: (ax + panel_w) as i32,
                     bottom: (row_y + row_h) as i32,
                 };
-                menu_areas.push(TextArea {
+                areas.push(TextArea {
                     buffer: &self.context_menu_buffers[menu_row_base + i],
                     left: ax + 16.0,
                     top: row_y + 6.0,
@@ -4626,7 +4642,7 @@ impl Renderer {
                     };
                     let hint_w =
                         unicode_width::UnicodeWidthStr::width(row.hint.as_str()) as f32 * cw;
-                    menu_areas.push(TextArea {
+                    areas.push(TextArea {
                         buffer: &self.context_menu_hint_buffers[menu_row_base + i],
                         left: overlays::menu_hint_left(ax, panel_w, hint_w),
                         top: row_y + 6.0,
@@ -4636,8 +4652,9 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
-                row_y += row_h;
             }
+            // The pinned status band is part of this level's card, so its
+            // lines draw with the level's own labels.
             if let Some(status) = &menu.status {
                 let band = menu.status_rect().expect("status band");
                 let fg = self
@@ -4645,7 +4662,7 @@ impl Renderer {
                     .secondary(theme.foreground, theme.background);
                 for index in 0..status.lines.len() {
                     let (x, y, w, h) = status.line_rect(band, index);
-                    menu_areas.push(TextArea {
+                    areas.push(TextArea {
                         buffer: &self.context_menu_buffers[menu_row_base + menu.rows.len() + index],
                         left: x,
                         top: y,
@@ -4661,6 +4678,7 @@ impl Renderer {
                     });
                 }
             }
+            menu_level_areas.push(areas);
             menu_row_base += menu.text_buffer_count();
         }
 
@@ -5122,6 +5140,10 @@ impl Renderer {
             // list changes, so the text-area identity alone cannot detect new
             // labels or descriptions.
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
+            menu_level_areas.len().hash(&mut h);
+            for areas in &menu_level_areas {
+                prepared_text_areas_damage_key(areas).hash(&mut h);
+            }
             prepared_text_areas_damage_key(&confirmation_areas).hash(&mut h);
             self.confirmation_text.key().hash(&mut h);
             bytemuck::cast_slice::<rounded_surface::RoundedSurface, u8>(&settings_surfaces)
@@ -5331,6 +5353,30 @@ impl Renderer {
                 menu_areas,
                 &mut self.swash,
             )?;
+            // One renderer per open menu level, drawn between that level's
+            // chrome and the next level. Renderers past the open levels are
+            // kept for reuse and are not drawn.
+            while self.menu_level_text.len() < menu_level_areas.len() {
+                self.menu_level_text.push(TextRenderer::new(
+                    &mut self.atlas,
+                    &self.gpu.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ));
+            }
+            for (renderer, areas) in self.menu_level_text.iter_mut().zip(menu_level_areas) {
+                self.chrome_prepares += 1;
+                self.text_prepares += 1;
+                renderer.prepare(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash,
+                )?;
+            }
         }
         // A mapped instance buffer becomes writable again only through a poll
         // (or a submit) after the frames that drew from it have finished.
@@ -5605,33 +5651,15 @@ impl Renderer {
         );
         self.toast_surfaces
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &toast_surfaces);
-        let picker_surfaces = overlay
-            .context_menu
-            .as_ref()
-            .and_then(|menu| overlays::picker_surfaces(menu, theme, cw));
-        self.picker_surfaces.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            picker_surfaces
-                .as_ref()
-                .map_or(&[][..], |surfaces| &surfaces[..]),
-        );
-        let menu_swatches = overlays::menu_swatch_surfaces(
-            overlay
-                .context_menu_parents
-                .iter()
-                .chain(overlay.context_menu.iter()),
-            theme,
-            cw,
-            ch,
-        );
+        self.menu_surfaces
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_surfaces);
         self.menu_swatch_surfaces.upload(
             &self.gpu.device,
             &self.gpu.queue,
             [sw, sh],
             &menu_swatches,
         );
+        self.menu_level_draws = menu_level_draws;
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
 

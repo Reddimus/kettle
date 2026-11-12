@@ -9,7 +9,7 @@
 //!
 //! This test renders the menu via the headless
 //! `capture_png_with(.., DebugScene::ContextMenu)` path and asserts
-//! two invariants:
+//! three invariants:
 //!
 //! 1. The menu PNG differs from the no-menu PNG by enough pixels that
 //!    it's clearly drawing *something* (a blank-menu regression
@@ -17,6 +17,11 @@
 //!    rect, because the panel bg color equals the pane bg color).
 //! 2. Inside the menu area, enough pixels approximately match
 //!    `theme.foreground` to be real label glyphs — not just chrome.
+//! 3. The panel and its shadow have rounded corners: the four corner
+//!    pixels of everything the menu changed are left as they were. The
+//!    old square panel on a hard offset shadow changed all four. This
+//!    replaced no stored image; the scene's pixels moved only at the
+//!    panel's edge, its corners, its shadow and its selection.
 //!
 //! Both invariants share one test so each `cargo test` run spins up
 //! only one pair of wgpu adapters. Four concurrent devices on the
@@ -77,7 +82,7 @@ fn context_menu_renders_visibly_with_text() {
         }
     }
     // Floor at 1000 pixels — well below the ~5000+ pixels a real
-    // menu render adds (panel ≈ 180×190 = 34_200 px; the shadow +
+    // menu render adds (panel ≈ 180×190 = 34_200 px; the soft shadow +
     // border + 6 label rows + 2 separators each contribute hundreds
     // more), but well above the 0 a blank menu would produce.
     assert!(
@@ -125,4 +130,25 @@ fn context_menu_renders_visibly_with_text() {
         "found only {fg_count_in_menu_area} foreground-leaning pixels in the \
          menu area — likely the blank-menu regression. Expected ≥ 200."
     );
+
+    // --- Invariant 3: rounded panel on a rounded, soft shadow.
+    //
+    // Every layer of the shadow is a rounded rect a little larger than the
+    // panel, so the box around everything the menu changed has untouched
+    // corners. A square panel or a square offset shadow fills them.
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for (x, y, b) in menu_px.enumerate_pixels() {
+        if default_px.get_pixel(x, y) != b {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    assert!(x0 < x1 && y0 < y1, "the menu changed no pixels");
+    for corner in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+        assert_eq!(
+            default_px.get_pixel(corner.0, corner.1),
+            menu_px.get_pixel(corner.0, corner.1),
+            "corner {corner:?} of the menu's changed area ({x0}, {y0})..({x1}, {y1}) \
+             is painted: the panel or its shadow is square"
+        );
+    }
 }

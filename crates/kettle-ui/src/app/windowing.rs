@@ -1496,12 +1496,9 @@ impl App {
             .map(|(seq, window)| (*seq, window.last_title.clone()))
             .collect();
         destinations.sort_unstable_by_key(|(seq, _)| *seq);
-        let mut items = vec![ContextMenuItem::Info {
-            label: self
-                .ui_text
-                .text(kettle_i18n::Text::PaletteMoveTabToWindow)
-                .to_owned(),
-        }];
+        let mut items = vec![ContextMenuItem::info(
+            self.ui_text.text(kettle_i18n::Text::PaletteMoveTabToWindow),
+        )];
         for (window, title) in destinations {
             let title: String = sanitize_title(&title).chars().take(200).collect();
             items.push(ContextMenuItem::WindowChoice {
@@ -1511,12 +1508,10 @@ impl App {
             });
         }
         if items.len() == 1 {
-            items.push(ContextMenuItem::Info {
-                label: self
-                    .ui_text
-                    .text(kettle_i18n::Text::WindowTransferNoTargets)
-                    .to_owned(),
-            });
+            items.push(ContextMenuItem::info(
+                self.ui_text
+                    .text(kettle_i18n::Text::WindowTransferNoTargets),
+            ));
         }
         self.close_all_modals(ws);
         self.show_context_menu(ws, items, 0.0, 0.0);
@@ -2175,6 +2170,27 @@ pub(super) fn disable_app_state_restoration() {
     // SAFETY: `registerDefaults:` copies a property-list dictionary of
     // NSString keys, and this runs on the main thread before AppKit starts.
     unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
+/// Opt every Kettle window out of AppKit's automatic window tabbing before
+/// the application launches. Kettle's tabs are its own, drawn in one
+/// NSWindow by the mux; no code calls AppKit's native-tab API. Neither does
+/// winit unless it is handed a tabbing identifier, so AppKit's defaults
+/// applied: tabbing allowed, `tabbingMode` automatic, and one generated
+/// identifier for windows of the same class. Under the "Prefer tabs" system
+/// setting, a new Kettle window, a detached tab among them, could then open
+/// as a native tab of another, and AppKit can add its own tab items (Move Tab
+/// to New Window among them) to the Windows menu beside Kettle's.
+#[cfg(target_os = "macos")]
+pub(super) fn disable_automatic_window_tabbing() {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        log::warn!("window tabbing: opt-out called off the main thread");
+        return;
+    };
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
 }
 
 pub(super) fn rounded_window_corner_policy(

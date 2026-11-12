@@ -23,6 +23,7 @@ impl App {
                     smart_copy: self.cfg.smart_copy,
                     writable: ws.is_some_and(|ws| paste_is_writable(ws, self.windows.values())),
                     renderer: ws.is_some_and(|ws| ws.renderer.is_some()),
+                    detachable_tabs: self.cfg.detachable_tabs,
                 };
             crate::macos_menu::sync(&self.proxy, &self.cfg, context, &self.profile_inventory);
         }

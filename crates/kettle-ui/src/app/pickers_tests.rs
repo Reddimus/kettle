@@ -56,7 +56,7 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
     assert_eq!(menu.highlight, 20);
     assert!(menu.scroll_offset > 0);
     let visible_rows =
-        (menu.panel_h_clamped / (16.0 + kettle_render::menu::ROW_PAD)).floor() as usize;
+        (menu.panel_h_clamped / kettle_render::menu::row_height(16.0)).floor() as usize;
     assert!(
         (menu.scroll_offset..menu.scroll_offset + visible_rows).contains(&menu.highlight),
         "the command Enter will run must remain inside the visible row window"
@@ -163,7 +163,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
         0.0,
     )
     .unwrap();
-    let row_h = 16.0 + kettle_render::menu::ROW_PAD;
+    let row_h = kettle_render::menu::row_height(16.0);
     let (inset, _) = kettle_render::menu::scroll_content(
         menu.rows.len() as f32 * row_h,
         menu.panel_h_clamped,
@@ -232,7 +232,7 @@ fn picker_header_and_rows_share_geometry_below_top_chrome() {
             for cell in [(8.0, 16.0), (16.0, 32.0)] {
                 let geometry = super::picker_card_geometry(surface, cell, top, 2).unwrap();
                 let (x, y, w, h) = geometry.header;
-                assert_eq!(geometry.rows, (x, y + h, w, 2.0 * (cell.1 + 12.0)));
+                assert_eq!(geometry.rows, (x, y + h, w, 2.0 * kettle_render::menu::row_height(cell.1)));
                 assert!((2.0 * x + w - surface.0).abs() < 0.01);
                 assert!(x >= 16.0 && w <= 720.0 && w >= 360.0_f32.min(surface.0 - 32.0));
                 assert!((y - top - 24.0_f32.max((surface.1 - top) * 0.08)).abs() < 0.01);
@@ -318,6 +318,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         );
     }
     let mut row = ContextMenuRow {
+        toggle: None,
         swatches: None,
         label: "año abcdefghijklmnop".into(),
         matched_chars: Some(vec![0..3, 6..19]),

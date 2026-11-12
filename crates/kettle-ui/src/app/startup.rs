@@ -359,6 +359,8 @@ impl App {
         crate::paste_image::sweep_stale();
         #[cfg(target_os = "macos")]
         disable_app_state_restoration();
+        #[cfg(target_os = "macos")]
+        disable_automatic_window_tabbing();
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         crate::startup_trace::mark(crate::startup_trace::Phase::EventLoopBuilt);
         event_loop.set_control_flow(ControlFlow::Wait);

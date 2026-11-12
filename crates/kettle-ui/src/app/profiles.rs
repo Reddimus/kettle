@@ -72,9 +72,7 @@ fn profile_choices(profiles: &[String]) -> Vec<ContextMenuItem> {
 }
 
 fn profile_pending_item(tr: &Translator) -> ContextMenuItem {
-    ContextMenuItem::Info {
-        label: tr.text(T::MenuProfilesPending).to_string(),
-    }
+    ContextMenuItem::info(tr.text(T::MenuProfilesPending))
 }
 
 pub(super) fn profile_launch_items(
@@ -90,6 +88,7 @@ pub(super) fn profile_launch_items(
             label: label.shown(tr).to_string(),
             action,
             enabled: true,
+            toggle: None,
         })
         .collect()
 }

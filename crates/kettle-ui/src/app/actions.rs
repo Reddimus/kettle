@@ -477,9 +477,10 @@ impl App {
                 }
             }
             Action::ClosePane => {
-                // Prompt per pane when ask_before_closing = Always.
-                // MultipleTerminals doesn't prompt (single pane); see
-                // `should_prompt` for the matrix. Ghostty
+                // Prompt per pane when ask_before_closing = Always, and under
+                // the default BusyOrMultiple when a job owns this pane's
+                // terminal. MultipleTerminals doesn't prompt (single pane); see
+                // `close_needs_prompt` for the matrix. Ghostty
                 // `confirm-close-surface` parity: a pane idle at an
                 // integrated-shell prompt has no work to lose, so skip the
                 // confirm. Plain shells (no OSC 133 marks) never report idle.
@@ -821,6 +822,10 @@ impl App {
             Action::SetAskBeforeClosingAlways => {
                 self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::Always;
                 self.persist_pref("ask-before-closing", "always");
+            }
+            Action::SetAskBeforeClosingBusyOrMultiple => {
+                self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::BusyOrMultiple;
+                self.persist_pref("ask-before-closing", "busy-or-multiple");
             }
             Action::SetAskBeforeClosingMultiple => {
                 self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::MultipleTerminals;

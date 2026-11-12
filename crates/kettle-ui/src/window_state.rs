@@ -476,6 +476,67 @@ pub(crate) struct ImePreeditSession {
     pub(crate) empty_after_focus: bool,
 }
 
+/// How long the Shift hint stays on its pane.
+pub(crate) const MOUSE_OVERRIDE_HINT_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(6);
+/// The shortest time between two Shift hints in one window.
+pub(crate) const MOUSE_OVERRIDE_HINT_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The notice that Shift keeps a click for selection and the menu while a
+/// program has mouse reporting on. It shows after a plain right-click went to
+/// such a program: once per pane for each time the program turns reporting
+/// on (the pane's own flag), and at most once every
+/// `MOUSE_OVERRIDE_HINT_GAP` in a window.
+#[derive(Debug, Default)]
+pub(crate) struct MouseOverrideHint {
+    last_shown: Option<std::time::Instant>,
+    showing: Option<(u64, std::time::Instant)>,
+}
+
+impl MouseOverrideHint {
+    /// A plain right-click press went to the program in `pane`. Show the hint
+    /// unless the pane had it this session or the window had one too
+    /// recently. A hint the window holds back leaves the pane unmarked, so
+    /// it can still have its own later.
+    pub(crate) fn right_click_reported(
+        &mut self,
+        pane: u64,
+        pane_hinted: &mut bool,
+        now: std::time::Instant,
+    ) -> bool {
+        if *pane_hinted
+            || self
+                .last_shown
+                .is_some_and(|at| now.saturating_duration_since(at) < MOUSE_OVERRIDE_HINT_GAP)
+        {
+            return false;
+        }
+        *pane_hinted = true;
+        self.last_shown = Some(now);
+        self.showing = Some((pane, now + MOUSE_OVERRIDE_HINT_LIFETIME));
+        true
+    }
+
+    /// The pane the hint shows on, until it expires or is dismissed.
+    pub(crate) fn pane(&self) -> Option<u64> {
+        self.showing.map(|(pane, _)| pane)
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.showing.map(|(_, until)| until)
+    }
+
+    /// Take the hint down; a dismissed hint still counts for the gap.
+    pub(crate) fn dismiss(&mut self) -> bool {
+        self.showing.take().is_some()
+    }
+
+    /// Take the hint down once its time is up, saying whether it was.
+    pub(crate) fn expire(&mut self, now: std::time::Instant) -> bool {
+        self.deadline().is_some_and(|until| now >= until) && self.dismiss()
+    }
+}
+
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
 const MEDIA_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1358,6 +1419,9 @@ pub(crate) struct WindowState {
     /// while the transient size chip is visible; expires
     /// `RESIZE_OVERLAY_DURATION` after the last resize event.
     pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
+    /// The Shift hint over a program that uses the mouse; see
+    /// `MouseOverrideHint`.
+    pub(crate) mouse_override_hint: MouseOverrideHint,
     /// The first `Resized` after window creation is the initial
     /// placement, not a user resize — `resize-overlay = after-first`
     /// (the default) skips it.
@@ -1713,6 +1777,7 @@ impl WindowState {
             accent: None,
             last_typed: None,
             resize_overlay: None,
+            mouse_override_hint: MouseOverrideHint::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),
@@ -1741,6 +1806,42 @@ mod tests {
         ws.native_pointer = Some(pointer);
         ws.resume_native_pointer();
         assert_eq!(ws.cursor, pointer);
+    }
+
+    /// The first plain right-click a program reports raises the hint; the
+    /// same pane does not raise it again while its program keeps the mouse,
+    /// and no pane raises another in the window for 30 s.
+    #[test]
+    fn the_mouse_override_hint_is_once_per_pane_session_and_every_30_s_per_window() {
+        let now = std::time::Instant::now();
+        let mut hint = MouseOverrideHint::default();
+        let (mut first, mut second) = (false, false);
+        assert!(hint.right_click_reported(1, &mut first, now));
+        assert!(first);
+        assert_eq!(hint.pane(), Some(1));
+        let later = now + std::time::Duration::from_secs(1);
+        assert!(!hint.right_click_reported(1, &mut first, later));
+        assert!(!hint.right_click_reported(2, &mut second, later));
+        assert!(!second, "a hint the window held back leaves the pane free");
+        assert_eq!(hint.pane(), Some(1), "a held-back hint takes no turn");
+        assert!(!hint.expire(now + std::time::Duration::from_secs(5)));
+        assert!(hint.expire(now + MOUSE_OVERRIDE_HINT_LIFETIME));
+        assert_eq!(hint.pane(), None);
+        let after_gap = now + MOUSE_OVERRIDE_HINT_GAP;
+        assert!(
+            !hint.right_click_reported(1, &mut first, after_gap),
+            "once per session"
+        );
+        assert!(hint.right_click_reported(2, &mut second, after_gap));
+        assert_eq!(hint.pane(), Some(2));
+        assert!(hint.dismiss());
+        assert_eq!(hint.deadline(), None);
+        // The program turned reporting off and on again: a new session, but
+        // the dismissed hint still holds the window's gap.
+        first = false;
+        let soon = after_gap + std::time::Duration::from_secs(1);
+        assert!(!hint.right_click_reported(1, &mut first, soon));
+        assert!(hint.right_click_reported(1, &mut first, after_gap + MOUSE_OVERRIDE_HINT_GAP));
     }
 
     fn moving_tab(pane: u64) -> crate::mux::Tab {

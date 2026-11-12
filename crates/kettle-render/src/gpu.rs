@@ -761,7 +761,11 @@ impl Renderer {
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
-        let picker_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let menu_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
+            &device,
+            format,
+            crate::overlays::MENU_SURFACES,
+        );
         let menu_swatch_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
             &device,
             format,
@@ -944,8 +948,10 @@ impl Renderer {
             menu_text_renderer,
             rounded_surfaces,
             toast_surfaces,
-            picker_surfaces,
+            menu_surfaces,
             menu_swatch_surfaces,
+            menu_level_draws: Vec::new(),
+            menu_level_text: Vec::new(),
             transport_surface_count: 0,
             settings_surface_count: 0,
             confirmation_text_renderer,

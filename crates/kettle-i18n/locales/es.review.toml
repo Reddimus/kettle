@@ -157,6 +157,11 @@ macos_menu_zoom_pane = "draft"
 macos_menu_fullscreen = "draft"
 macos_menu_next_tab = "draft"
 macos_menu_previous_tab = "draft"
+macos_menu_rename_tab = "draft"
+macos_menu_move_tab_left = "draft"
+macos_menu_move_tab_right = "draft"
+macos_menu_move_tab_to_new_window = "draft"
+palette_rename_tab = "draft"
 settings_a11y_search = "draft"
 settings_description_field_agent_previews = "draft"
 settings_description_field_agent_previews_claude_code = "draft"
@@ -473,7 +478,8 @@ menu_pref_bell_attention = "accepted"
 menu_pref_bell_both = "accepted"
 menu_pref_bell_off = "accepted"
 menu_pref_bell_visual = "accepted"
-menu_pref_confirm_always = "accepted"
+menu_pref_confirm_always = "draft"
+menu_pref_confirm_busy_or_multiple = "draft"
 menu_pref_confirm_multiple = "accepted"
 menu_pref_confirm_never = "accepted"
 menu_pref_copy_on_select = "accepted"
@@ -642,6 +648,7 @@ palette_select_to_bottom = "accepted"
 palette_select_to_top = "accepted"
 palette_send_newline = "accepted"
 palette_set_ask_before_closing_always = "accepted"
+palette_set_ask_before_closing_busy_or_multiple = "draft"
 palette_set_ask_before_closing_multiple = "accepted"
 palette_set_ask_before_closing_never = "accepted"
 palette_set_bell_attention = "accepted"
@@ -942,6 +949,7 @@ scrollback_a11y_position = "draft"
 settings_hint_reset = "draft"
 a11y_output_lines = "draft"
 a11y_main_menu = "draft"
+mouse_override_hint = "draft"
 
 [second-pass]
 keys = [
@@ -1081,4 +1089,5 @@ keys = [
     "menu_a11y_update",
     "update_a11y_failed",
     "update_a11y_restart",
+    "mouse_override_hint",
 ]

@@ -959,10 +959,15 @@ impl Renderer {
         )
     }
 
-    /// Whether an image, outline, rounded toast or menu swatch can paint inside
-    /// `near`. Their shading is interpolated, so it does not crop exactly.
+    /// Whether an image, outline, rounded toast, menu surface or menu swatch
+    /// can paint inside `near`. Their shading is interpolated, so it does not
+    /// crop exactly. A menu surface's bounds include its whole shadow.
     fn inexact_draws_touch(&self, near: PixelBox) -> bool {
-        for pipeline in [&self.toast_surfaces, &self.menu_swatch_surfaces] {
+        for pipeline in [
+            &self.toast_surfaces,
+            &self.menu_surfaces,
+            &self.menu_swatch_surfaces,
+        ] {
             if pipeline.uploaded().is_none_or(|mut surfaces| {
                 surfaces
                     .any(|surface| PixelBox::bounding(surface.pos, surface.size).intersects(near))

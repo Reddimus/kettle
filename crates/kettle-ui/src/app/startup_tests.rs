@@ -825,6 +825,39 @@ fn app_state_restoration_is_off_before_the_event_loop_exists() {
     );
 }
 
+/// Kettle's tabs live inside one NSWindow, so AppKit's own window tabbing
+/// must stay off: left on, the "Prefer tabs" system setting could open a new
+/// Kettle window as a native tab of another, and AppKit can add its own tab
+/// items, a second Move Tab to New Window among them, to the Windows menu.
+/// The class flag is set once, before the event loop launches AppKit and
+/// long before the first window or Windows menu exists.
+#[test]
+fn automatic_window_tabbing_is_off_before_the_event_loop_exists() {
+    let src = production_source();
+    let run = src
+        .split("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+        .nth(1)
+        .expect("run_with");
+    let call = "disable_automatic_window_tabbing();";
+    assert_eq!(src.matches(call).count(), 1, "one opt-out, at launch");
+    let disable = run
+        .find(call)
+        .expect("run_with must turn off AppKit's automatic window tabbing");
+    let build = run
+        .find("EventLoop::<UserEvent>::with_user_event().build()")
+        .expect("run_with builds the event loop");
+    assert!(
+        disable < build,
+        "tabbing must be off before AppKit launches"
+    );
+    let body = src
+        .split("fn disable_automatic_window_tabbing() {")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the opt-out is defined in windowing.rs");
+    assert!(body.contains("NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);"));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn app_state_restoration_registers_apple_persistence_off() {

@@ -48,7 +48,7 @@ fn start_refresh(fixture: &BlockedInventory, call: usize) {
 }
 
 fn assert_pending(items: &[ContextMenuItem], tr: &Translator) {
-    assert!(matches!(items, [ContextMenuItem::Info { label }]
+    assert!(matches!(items, [ContextMenuItem::Info { label, .. }]
         if label == tr.text(T::MenuProfilesPending)));
     assert!(!item_is_dispatchable(&items[0]));
     assert!(item_to_click(&items[0], 0).is_none());
@@ -225,13 +225,14 @@ fn item_snapshot(items: &[ContextMenuItem]) -> Vec<String> {
                 label,
                 action,
                 enabled,
+                ..
             } => format!("{label}:{action:?}:{enabled}"),
             ContextMenuItem::Submenu { label, items } => {
                 format!("{label}:{:?}", item_snapshot(items))
             }
             ContextMenuItem::NewTabShell { label, argv } => format!("{label}:{argv:?}"),
             ContextMenuItem::ProfileChoice { label, profile } => format!("{label}:{profile}"),
-            ContextMenuItem::Info { label } => format!("info:{label}"),
+            ContextMenuItem::Info { label, .. } => format!("info:{label}"),
             ContextMenuItem::Separator => "separator".into(),
             _ => panic!("unexpected fixture row"),
         })

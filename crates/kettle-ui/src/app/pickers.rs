@@ -168,6 +168,7 @@ pub(super) fn command_picker_list(
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: kettle_config::palette::matched_char_positions(
                     query,
@@ -202,6 +203,7 @@ pub(super) fn command_picker_list(
         PickerList {
             status,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr
@@ -232,6 +234,7 @@ pub(super) fn layout_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: layouts[index].clone(),
@@ -249,6 +252,7 @@ pub(super) fn layout_picker_list(
         PickerList {
             status: None,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr.text(label).to_string(),
@@ -376,6 +380,7 @@ pub(super) fn theme_picker_list(
                 ""
             };
             ContextMenuRow {
+                toggle: None,
                 swatches: Some(
                     *swatches
                         .entry(name)
@@ -403,6 +408,7 @@ pub(super) fn theme_picker_list(
         return PickerList {
             status: None,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr.text(Text::PickerNoMatchingTheme).to_string(),
@@ -538,6 +544,7 @@ pub(super) fn ssh_picker_list(
     let rows = ranked
         .iter()
         .map(|&index| ContextMenuRow {
+            toggle: None,
             swatches: None,
             matched_chars: None,
             label: hosts[index].0.clone(),
@@ -550,6 +557,7 @@ pub(super) fn ssh_picker_list(
         PickerList {
             status: None,
             rows: vec![ContextMenuRow {
+                toggle: None,
                 swatches: None,
                 matched_chars: None,
                 label: tr
@@ -642,7 +650,7 @@ fn picker_card_geometry_with_status(
     let x = (sw - width) * 0.5;
     let remaining = (sh - top_chrome).max(0.0);
     let header_h = ch + kettle_render::menu::PICKER_HEADER_PAD;
-    let row_h = ch + kettle_render::menu::ROW_PAD;
+    let row_h = kettle_render::menu::row_height(ch);
     let spacing = remaining - header_h - status_height - row_h;
     if spacing < 0.0 {
         return None;
@@ -699,7 +707,7 @@ pub(super) fn picker_context_menu(
             .map_or(0.0, kettle_render::MenuStatus::height),
     )?;
     let (x, y, width, height) = geometry.rows;
-    let row_height = cell.1 + kettle_render::menu::ROW_PAD;
+    let row_height = kettle_render::menu::row_height(cell.1);
     let max_columns = kettle_render::menu::panel_columns(width, cell.0);
     // The strip is one column: when any row is too narrow for it, no row keeps it.
     if list
@@ -799,7 +807,7 @@ pub(super) fn open_picker_list(
 fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Option<usize> {
     let (px, py) = (cursor.0 as f32, cursor.1 as f32);
     let (x, y) = menu.anchor;
-    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let row_h = kettle_render::menu::row_height(cell_h);
     let (inset, content_h) = kettle_render::menu::scroll_content(
         menu.rows.len() as f32 * row_h,
         menu.panel_h_clamped,
@@ -831,7 +839,7 @@ pub(super) fn apply_picker_pointer(
     if px < x || px >= x + w || py < y || py >= y + h {
         return false;
     }
-    let row_h = cell_h + kettle_render::menu::ROW_PAD;
+    let row_h = kettle_render::menu::row_height(cell_h);
     let (inset, content_h) =
         kettle_render::menu::scroll_content(menu.rows.len() as f32 * row_h, h, row_h);
     let selected = if matches!(event, PickerPointer::Press)

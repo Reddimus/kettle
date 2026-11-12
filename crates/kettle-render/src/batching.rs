@@ -7,6 +7,16 @@ use super::{
     cell_locked_pen_x, imgpipe, quad,
 };
 
+/// One open menu level's instances: its rounded surfaces, flat chrome quads
+/// and swatches. The scene pass draws them, then the level's labels, before
+/// the next level.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MenuLevelDraw {
+    pub surfaces: std::ops::Range<u32>,
+    pub quads: std::ops::Range<u32>,
+    pub swatches: std::ops::Range<u32>,
+}
+
 /// Text/layout damage key for the context-menu renderer.
 ///
 /// The highlighted row is deliberately excluded: moving the pointer changes
@@ -183,7 +193,7 @@ impl Renderer {
             self.overlay_quads.upload_counts(),
             self.menu_quads.upload_counts(),
             self.rounded_surfaces.upload_counts(),
-            self.picker_surfaces.upload_counts(),
+            self.menu_surfaces.upload_counts(),
             self.menu_swatch_surfaces.upload_counts(),
             self.toast_surfaces.upload_counts(),
             self.imgs.upload_counts(),
@@ -382,19 +392,37 @@ impl Renderer {
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // Lane dimming and scrollbars sit above the complete lane.
         self.overlay_quads.draw(&mut pass);
-        // Menu chrome sits above terminal content. The receipt thumbnail is
-        // then composited below the shared chrome-text pass, so its own labels
-        // and the context-menu labels both remain readable above images.
-        self.picker_surfaces.draw_range(&mut pass, 0..u32::MAX);
+        // Menu chrome sits above terminal content. The chrome quads queued
+        // before the first menu level, the receipt thumbnail and the toasts
+        // draw first, so every open menu covers them. Their labels are in the
+        // shared chrome-text pass below, cut out of each menu panel, which
+        // keeps them readable above the thumbnail. Each open menu level is a
+        // layer of its own: its rounded surfaces, its quads, its swatches and
+        // then its labels, before the next level, so a submenu covers its
+        // parent's selection and text. The quads queued after the last level
+        // (a picker's caret and selection) draw above them.
         self.rounded_surfaces.draw_range(
             &mut pass,
             self.transport_surface_count
                 ..self.transport_surface_count + self.settings_surface_count,
         );
-        self.menu_quads.draw(&mut pass);
-        self.menu_swatch_surfaces.draw_range(&mut pass, 0..u32::MAX);
+        let levels = &self.menu_level_draws;
+        let first = levels.first().map_or(u32::MAX, |level| level.quads.start);
+        let last = levels.last().map_or(u32::MAX, |level| level.quads.end);
+        self.menu_quads.draw_range(&mut pass, 0..first);
         self.media_receipt_img.draw(&mut pass);
         self.toast_surfaces.draw_range(&mut pass, 0..u32::MAX);
+        for (index, level) in levels.iter().enumerate() {
+            self.menu_surfaces
+                .draw_range(&mut pass, level.surfaces.clone());
+            self.menu_quads.draw_range(&mut pass, level.quads.clone());
+            self.menu_swatch_surfaces
+                .draw_range(&mut pass, level.swatches.clone());
+            if let Some(text) = self.menu_level_text.get(index) {
+                text.render(&self.atlas, &self.viewport, &mut pass)?;
+            }
+        }
+        self.menu_quads.draw_range(&mut pass, last..u32::MAX);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         self.rounded_surfaces.draw_range(

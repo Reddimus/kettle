@@ -1187,7 +1187,7 @@ impl App {
         let context_menu = target.context_menu.as_ref().and_then(|menu| {
             let ((ax, ay), (panel_w, panel_h)) = self.context_menu_geometry(target)?;
             let (_, ch) = self.menu_cell(target);
-            let row_h = ch + kettle_render::menu::ROW_PAD;
+            let row_h = kettle_render::menu::row_height(ch);
             let sep_h = kettle_render::menu::SEP_H;
             let (inset, content_h) =
                 context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
@@ -1216,7 +1216,7 @@ impl App {
                         ContextMenuItem::UrlItem { label, .. } => *label,
                         ContextMenuItem::Media { label, .. }
                         | ContextMenuItem::Preview { label, .. } => *label,
-                        ContextMenuItem::Info { label } => label.as_str(),
+                        ContextMenuItem::Info { label, .. } => label.as_str(),
                         ContextMenuItem::Separator => "",
                     };
                     let row = serde_json::json!({

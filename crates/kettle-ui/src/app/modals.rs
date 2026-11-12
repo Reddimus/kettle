@@ -1073,7 +1073,8 @@ impl App {
     ///
     /// The titlebar ✕ and Alt+F4 are the exception. They are OS window-destroy
     /// requests rather than Kettle commands, so `WindowEvent::CloseRequested`
-    /// reaches this only under `ask-before-closing = always`.
+    /// reaches this only when [`titlebar_close_consults_policy`] allows it:
+    /// under `always`, or for a one-pane window under `busy-or-multiple`.
     pub(super) fn confirm_close(
         &mut self,
         ws: &mut WindowState,
@@ -1081,13 +1082,20 @@ impl App {
         busy: usize,
         on_confirm: ConfirmAction,
     ) -> bool {
-        // The two questions are deliberately separate. `busy == 0` is the
-        // all-idle skip — nothing is running, so there is nothing to lose and
-        // no reason to interrupt. The single-vs-multiple decision then uses
-        // the TOTAL scope, not the busy count, so a 3-pane tab with one busy
-        // pane still prompts under `multiple-terminals` instead of silently
-        // taking all three.
-        if busy == 0 || !self.cfg.ask_before_closing.should_prompt(scope) {
+        let lone_pane = lone_pane_in_scope(ws, scope, &on_confirm);
+        let configured_shell = self.cfg.shell.as_deref();
+        let prompt = close_needs_prompt(self.cfg.ask_before_closing, scope, busy, || {
+            lone_pane
+                .and_then(|id| ws.mux.panes.get(&id))
+                .map_or(LonePaneJob::Unknown, |pane| {
+                    if pane.held {
+                        LonePaneJob::Idle
+                    } else {
+                        lone_pane_job(&pane.term, pane.path_argv(), configured_shell)
+                    }
+                })
+        });
+        if !prompt {
             return false;
         }
         use kettle_i18n::Text;
@@ -2773,6 +2781,236 @@ pub(super) fn window_close_scope(ws: &WindowState) -> (usize, usize) {
             .filter(|p| !p.held && !p.term.shell_idle())
             .count(),
     )
+}
+
+/// Whether a close raises the `ask-before-closing` question.
+///
+/// The first two questions are deliberately separate. `busy == 0` is the
+/// all-idle skip: nothing is running, so there is nothing to lose and no
+/// reason to interrupt. The single-vs-multiple decision then uses the TOTAL
+/// scope, not the busy count, so a 3-pane tab with one busy pane still
+/// prompts under `multiple-terminals` instead of silently taking all three.
+///
+/// `busy` comes from OSC 133, which counts every shell without integration as
+/// busy, so it cannot tell a lone `sleep 600` from a lone idle prompt. Under
+/// `busy-or-multiple` a close of exactly one pane therefore asks the PTY
+/// instead, through `lone_job`, which is called only then: the other modes
+/// keep their behaviour exactly, and the syscalls run only when they matter.
+pub(super) fn close_needs_prompt(
+    policy: kettle_config::AskBeforeClosing,
+    scope: usize,
+    busy: usize,
+    lone_job: impl FnOnce() -> LonePaneJob,
+) -> bool {
+    if busy > 0 && policy.should_prompt(scope) {
+        return true;
+    }
+    scope == 1 && policy.asks_for_busy_single_pane() && lone_job() == LonePaneJob::Busy
+}
+
+/// Whether the titlebar ✕ or Alt+F4 consults `ask-before-closing` at all.
+///
+/// Those gestures are OS window-destroy requests, not Kettle commands. A
+/// window of several panes closes without asking unless the policy is
+/// `always`, because the OSC 133 busy count calls every shell without
+/// integration busy and would put a question on nearly every such window.
+/// A one-pane window under `busy-or-multiple` is decided by the PTY in
+/// [`close_needs_prompt`], which has no such false positive, so the gesture
+/// asks exactly when a program would die: a job the pane's shell started, or
+/// the pane's own program when that is not an interactive shell (a pane
+/// started as `vim` or `ssh`).
+pub(super) fn titlebar_close_consults_policy(
+    policy: kettle_config::AskBeforeClosing,
+    scope: usize,
+) -> bool {
+    policy == kettle_config::AskBeforeClosing::Always
+        || (scope == 1 && policy.asks_for_busy_single_pane())
+}
+
+/// What the PTY says about the one pane a close would take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LonePaneJob {
+    /// A program other than an idle interactive shell owns the terminal: a
+    /// job the shell started, or the pane's own program when that is not an
+    /// interactive shell (`vim`, `ssh`, a script).
+    Busy,
+    /// An interactive shell owns it at its prompt, or the pane's program has
+    /// already exited.
+    Idle,
+    /// The PTY could not say (or this is Windows). Treated as idle, which is
+    /// what every single-pane close did before `busy-or-multiple`, so a pane
+    /// that cannot be read never gains a question it cannot justify.
+    Unknown,
+}
+
+/// The pane a one-pane close would take, named by the confirm action so it is
+/// the pane the gesture pointed at.
+pub(super) fn lone_pane_in_scope(
+    ws: &WindowState,
+    scope: usize,
+    on_confirm: &ConfirmAction,
+) -> Option<u64> {
+    if scope != 1 {
+        return None;
+    }
+    match on_confirm {
+        ConfirmAction::ClosePane(id) => Some(*id),
+        ConfirmAction::CloseTabHolding(anchor) => match anchor.as_slice() {
+            [id] => Some(*id),
+            _ => None,
+        },
+        ConfirmAction::CloseWindow { .. } => match ws.mux.panes.keys().collect::<Vec<_>>()[..] {
+            [id] => Some(*id),
+            _ => None,
+        },
+        ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => None,
+    }
+}
+
+/// Sample, at close time, whether a program other than an idle interactive
+/// shell owns the pane's terminal.
+///
+/// "The child" is the pane's spawned process: a shell, a program started
+/// with `-e` or a profile command (`vim`, `ssh`, a script), or a wrapper such
+/// as `login -pfl`, `/usr/bin/env` or a custom script. Both the PTY's
+/// foreground process group and the child's group are read now, from the PTY
+/// and the kernel; the background process snapshot is not used, because it
+/// can predate a job started a second ago.
+///
+/// When the child's group owns the terminal, the pane is idle only when the
+/// child is an interactive shell and, if OSC 133 integration has marked a
+/// prompt in this pane, the shell is at its prompt. Otherwise the child is
+/// the program itself, or a non-interactive wrapper running commands in its
+/// own group, and closing the pane ends it. The child's current argv is read
+/// for this, so an `env zsh` launch that became `zsh` is a shell and a shell
+/// that ran `exec vim` is not; the launch argv stands in when it cannot be
+/// read.
+///
+/// When another group owns the terminal and the child is an interactive
+/// shell, that group is a job. A wrapper that does not `exec` leaves the real
+/// shell as its child, and an interactive shell puts itself in a process
+/// group of its own, so the groups differ while the shell sits at its prompt.
+/// For such a child, the pane is still idle when the foreground group's
+/// leader is a login shell (`argv[0]` starting with `-`) or an interactive
+/// shell, by basename in `/etc/shells` or the configured `shell`, and, when
+/// OSC 133 integration has marked a prompt in this pane, the shell is at its
+/// prompt. A shell running a script or a `-c` command is a job.
+///
+/// Windows keeps the old behaviour: ConPTY has no foreground process group.
+pub(super) fn lone_pane_job(
+    term: &kettle_core::Terminal,
+    launch_argv: &[String],
+    configured_shell: Option<&str>,
+) -> LonePaneJob {
+    #[cfg(unix)]
+    {
+        let integration_running = term.shell_integration_seen() && !term.shell_at_prompt();
+        let shells = std::cell::OnceCell::new();
+        let etc_shells = || shells.get_or_init(read_etc_shells).as_str();
+        classify_lone_pane_job(
+            term.foreground_job(),
+            integration_running,
+            || {
+                let live = term.child_pid().and_then(kettle_remote::process_argv);
+                let argv = live.as_deref().unwrap_or(launch_argv);
+                argv_is_interactive_shell(argv, etc_shells(), configured_shell)
+            },
+            |leader| {
+                kettle_remote::process_argv(leader).is_some_and(|argv| {
+                    argv_is_interactive_shell(&argv, etc_shells(), configured_shell)
+                })
+            },
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (term, launch_argv, configured_shell);
+        LonePaneJob::Unknown
+    }
+}
+
+/// The pure decision behind [`lone_pane_job`]. `child_is_shell` says whether
+/// the pane's spawned child is an interactive shell; `leader_is_shell` runs
+/// only for a foreground group that is not the child's, under a child that
+/// is not a shell.
+#[cfg(any(unix, test))]
+pub(super) fn classify_lone_pane_job(
+    job: kettle_core::ForegroundJob,
+    integration_running: bool,
+    child_is_shell: impl FnOnce() -> bool,
+    leader_is_shell: impl FnOnce(u32) -> bool,
+) -> LonePaneJob {
+    use kettle_core::ForegroundJob;
+    match job {
+        ForegroundJob::Unknown => LonePaneJob::Unknown,
+        // The child owns the terminal. It is the prompt only when it is an
+        // interactive shell that integration, if any, shows at its prompt;
+        // otherwise it is the program (`vim`, `ssh`, a script) or a
+        // non-interactive wrapper running its commands in its own group.
+        ForegroundJob::Child => {
+            if !integration_running && child_is_shell() {
+                LonePaneJob::Idle
+            } else {
+                LonePaneJob::Busy
+            }
+        }
+        // The spawned child is the shell, so any other group is a job.
+        ForegroundJob::Other(_) if child_is_shell() => LonePaneJob::Busy,
+        ForegroundJob::Other(_) if integration_running => LonePaneJob::Busy,
+        ForegroundJob::Other(leader) if leader_is_shell(leader) => LonePaneJob::Idle,
+        ForegroundJob::Other(_) => LonePaneJob::Busy,
+    }
+}
+
+/// Whether `argv` is an interactive shell: a login shell, or a program named
+/// in `/etc/shells`, by the configured `shell` or among the shells Kettle
+/// knows, that runs no script or `-c` command.
+#[cfg(any(unix, test))]
+pub(super) fn argv_is_interactive_shell(
+    argv: &[String],
+    etc_shells: &str,
+    configured_shell: Option<&str>,
+) -> bool {
+    fn basename(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
+    }
+    let Some(argv0) = argv.first() else {
+        return false;
+    };
+    let login = argv0.starts_with('-');
+    let name = basename(argv0.strip_prefix('-').unwrap_or(argv0));
+    if name.is_empty() {
+        return false;
+    }
+    let listed = etc_shells
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(|line| basename(line) == name);
+    let configured = configured_shell.is_some_and(|shell| basename(shell.trim()) == name);
+    // The known-shell check also reads the flags, so `bash script.sh` and
+    // `sh -c '...'` are jobs even though bash and sh are shells.
+    let mut named = argv.to_vec();
+    named[0] = name.to_string();
+    let known_interactive = kettle_remote::shell_launch_is_interactive(&named);
+    if login || listed || configured {
+        // A shell Kettle cannot parse the flags of counts only when bare.
+        argv.len() == 1 || known_interactive
+    } else {
+        known_interactive
+    }
+}
+
+/// `/etc/shells`, bounded; empty when it cannot be read.
+#[cfg(unix)]
+fn read_etc_shells() -> String {
+    use std::io::Read;
+    const MAX_ETC_SHELLS_BYTES: u64 = 64 * 1024;
+    let mut text = String::new();
+    if let Ok(file) = std::fs::File::open("/etc/shells") {
+        let _ = file.take(MAX_ETC_SHELLS_BYTES).read_to_string(&mut text);
+    }
+    text
 }
 
 /// Pure helper that maps a (current_focus, num_buttons,

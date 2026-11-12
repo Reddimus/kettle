@@ -70,6 +70,8 @@ pub(crate) struct Context {
     pub smart_copy: bool,
     pub writable: bool,
     pub renderer: bool,
+    /// The `detachable-tabs` config key; off, a tab cannot leave its window.
+    pub detachable_tabs: bool,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -81,7 +83,14 @@ impl Context {
         match action {
             Action::Copy => self.pane && self.clipboard && (!self.smart_copy || self.selection),
             Action::Paste => self.pane && self.clipboard && self.writable,
-            Action::NextTab | Action::PrevTab => self.tabs > 1,
+            // The moves wrap at the ends of the bar (`Mux::nudge_active_tab`),
+            // so with two tabs every position moves and the active index is
+            // not needed here.
+            Action::NextTab | Action::PrevTab | Action::MoveTabLeft | Action::MoveTabRight => {
+                self.tabs > 1
+            }
+            // A lone tab moved out would leave the same window behind.
+            Action::MoveTabToNewWindow => self.detachable_tabs && self.tabs > 1,
             Action::ToggleZoom => self.zoomed || self.panes > 1,
             Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
                 self.renderer
@@ -263,6 +272,11 @@ pub(crate) fn menu_model_with_profiles(
             vec![
                 item(T::MacosMenuNextTab, Action::NextTab),
                 item(T::MacosMenuPreviousTab, Action::PrevTab),
+                Sep,
+                item(T::MacosMenuRenameTab, Action::EditTabTitle),
+                item(T::MacosMenuMoveTabLeft, Action::MoveTabLeft),
+                item(T::MacosMenuMoveTabRight, Action::MoveTabRight),
+                item(T::MacosMenuMoveTabToNewWindow, Action::MoveTabToNewWindow),
             ],
             true,
         ),
