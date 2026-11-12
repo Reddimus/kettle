@@ -468,7 +468,9 @@ fn submenu_surfaces_clip_ancestor_labels_into_disjoint_rectangles() {
     );
 }
 
-// Source regression for parent RED/GREEN demonstration; UNRUN here.
+/// The rounded panel a picker's level draws covers its pinned status band:
+/// it fails when `menu_level_surfaces` sizes the card from the header and
+/// rows alone, as it did before the band joined the card.
 #[test]
 fn pinned_status_shares_card_surface_bounds_but_has_no_action_index() {
     let mut menu = ContextMenu {
