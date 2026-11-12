@@ -6058,7 +6058,10 @@ fn picker_status_band_text_draws_inside_its_card() {
     let band = shown.status_rect().expect("status band");
     let (cx, cy, cw, ch) = shown.card_rect();
     assert!(
-        cy + 30.0 <= band.1 && band.1 + band.3 <= cy + ch && cx <= band.0 && band.2 <= cw,
+        cy + 30.0 <= band.1
+            && band.1 + band.3 <= cy + ch
+            && cx <= band.0
+            && band.0 + band.2 <= cx + cw,
         "band {band:?} outside card {:?}",
         (cx, cy, cw, ch)
     );
