@@ -106,6 +106,7 @@ impl App {
             || ws.context_menu.is_some()
             || ws.pressed_new_tab
             || ws.pressed_new_tab_menu
+            || ws.pressed_settings
             || ws.pressed_window_control.is_some()
         {
             return None;
@@ -116,13 +117,15 @@ impl App {
         if ws.hovered_new_tab_menu && !controls.is_empty() {
             return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
         }
-        new_tab_tooltip(
-            ws.hovered_new_tab_menu
-                .then_some(NewTabHoverTarget::Menu)
-                .or_else(|| ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)),
-            &self.ui_text,
-            kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, &Action::NewTab).as_deref(),
-        )
+        let target = if ws.hovered_settings {
+            Some(NewTabHoverTarget::Settings)
+        } else if ws.hovered_new_tab_menu {
+            Some(NewTabHoverTarget::Menu)
+        } else {
+            ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
+        };
+        let shortcut = target.and_then(|target| chrome_button_shortcut(&self.cfg.keybinds, target));
+        new_tab_tooltip(target, &self.ui_text, shortcut.as_deref())
     }
 
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
@@ -209,6 +212,7 @@ impl App {
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
+            settings_rect,
             strip,
             layout,
         } = horizontal_tab_geometry(
@@ -344,9 +348,9 @@ impl App {
             new_tab_menu: arrow_rect,
             hovered_new_tab: ws.hovered_new_tab,
             hovered_new_tab_menu: ws.hovered_new_tab_menu,
-            settings: (0.0, 0.0, 0.0, 0.0),
-            hovered_settings: false,
-            pressed_settings: false,
+            settings: settings_rect,
+            hovered_settings: ws.hovered_settings,
+            pressed_settings: ws.pressed_settings,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
@@ -950,18 +954,53 @@ pub(super) fn horizontal_new_tab_controls(
     (menu, plus, reserve)
 }
 
+/// The Settings gear that leads the `▾ +` pair in a macOS title bar, the
+/// size of `menu` and set apart from it by a gap twice theirs, so it reads
+/// as its own control rather than a third segment of the split button.
+/// `▾` and `+` stay where they were. The gear shows only while the lane
+/// still keeps `min_tab` for tabs beside every control; the tab count never
+/// decides, as extra tabs scroll. Returns the rect and the reservation it
+/// adds, both zero when hidden.
+pub(super) fn titlebar_settings_control(
+    menu: kettle_render::Rect4,
+    lane_width: f32,
+    reserve: f32,
+    scale: f32,
+    min_tab: f32,
+) -> (kettle_render::Rect4, f32) {
+    let gap = 8.0 * scale;
+    let side = menu.2;
+    let extra = side + gap;
+    if side <= 0.0 || lane_width - reserve - extra < min_tab.max(1.0) {
+        return ((0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+    ((menu.0 - gap - side, menu.1, side, menu.3), extra)
+}
+
+/// The live shortcut a strip control's tooltip names: whatever key runs the
+/// control's action, so it follows a rebind and is gone when unbound.
+pub(super) fn chrome_button_shortcut(
+    bindings: &kettle_config::keybinds::Bindings,
+    target: NewTabHoverTarget,
+) -> Option<String> {
+    let action = match target {
+        NewTabHoverTarget::Settings => Action::OpenSettings,
+        NewTabHoverTarget::Menu | NewTabHoverTarget::Plus => Action::NewTab,
+    };
+    kettle_config::keybinds::ui_hint_label(bindings, &action)
+}
+
 pub(super) fn new_tab_tooltip(
     target: Option<NewTabHoverTarget>,
     tr: &kettle_i18n::Translator,
     shortcut: Option<&str>,
 ) -> Option<String> {
-    match target? {
-        NewTabHoverTarget::Menu => Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
-        NewTabHoverTarget::Plus => {
-            let label = tr.text(kettle_i18n::Text::MenuNewTab);
-            Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
-        }
-    }
+    let label = match target? {
+        NewTabHoverTarget::Menu => return Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
+        NewTabHoverTarget::Plus => tr.text(kettle_i18n::Text::MenuNewTab),
+        NewTabHoverTarget::Settings => tr.text(kettle_i18n::Text::SettingsA11yTitle),
+    };
+    Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
 }
 
 /// Split the trailing new-tab button into `(arrow_left, plus_right)`
@@ -982,10 +1021,31 @@ pub(super) fn split_new_tab_button(
 pub(super) enum NewTabHoverTarget {
     Menu,
     Plus,
+    /// The Settings gear that leads the pair in a macOS title bar.
+    Settings,
+}
+
+/// Whether `(x, y)` is on the title bar's Settings gear, when it has one.
+pub(super) fn settings_button_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.settings.2 > 0.0 && bar.settings.3 > 0.0 && rect_contains(bar.settings, x, y)
+}
+
+/// The action a primary release ends a press on the Settings gear with:
+/// Settings, as Cmd+, opens it, but only when the release lands on the gear
+/// too, so dragging off it cancels like any button.
+pub(super) fn settings_release_action(
+    pressed: bool,
+    bar: &TabBar,
+    x: f32,
+    y: f32,
+) -> Option<Action> {
+    (pressed && settings_button_at(bar, x, y)).then_some(Action::OpenSettings)
 }
 
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
-    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+    if settings_button_at(bar, x, y) {
+        Some(NewTabHoverTarget::Settings)
+    } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
         Some(NewTabHoverTarget::Plus)
@@ -1247,6 +1307,8 @@ pub(super) fn horizontal_tab_lane(band: Rect, reservations: (f32, f32)) -> Rect 
 pub(super) struct HorizontalTabGeometry {
     pub arrow_rect: Rect,
     pub plus_rect: Rect,
+    /// The macOS title bar's Settings gear, zero elsewhere.
+    pub settings_rect: Rect,
     pub strip: f32,
     pub layout: TabStripLayout,
 }
@@ -1261,11 +1323,20 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, button_w) = if linux {
+    let (arrow_rect, plus_rect, mut button_w) = if linux {
         linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
     } else {
         horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
     };
+    // Only a macOS title bar gets the gear: Linux's header and plain strips
+    // keep Settings in their `≡` / `▾` menus.
+    let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
+    if titlebar && !linux {
+        let (rect, extra) =
+            titlebar_settings_control(arrow_rect, lane.2, button_w, scale, cfg.tab_min_width);
+        settings_rect = rect;
+        button_w += extra;
+    }
     let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
     let layout = if titlebar {
         titlebar_tab_layout(
@@ -1290,6 +1361,7 @@ pub(super) fn horizontal_tab_geometry(
     HorizontalTabGeometry {
         arrow_rect,
         plus_rect,
+        settings_rect,
         strip,
         layout,
     }

@@ -1856,7 +1856,12 @@ side and its line at the button's height, so a glyph stays centred and
 unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
 square (growing with the band height), a 4 pt
-inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
+inter-button gap, a 4 pt leading gap and an 8 pt outside margin. In a macOS
+title bar `titlebar_settings_control` adds a Settings gear the size of `▾`, 8 pt
+before it, without moving `▾ +`; it shows only while the lane still keeps
+`tab-min-width` beside every control (never by tab count). The gear is drawn as
+alpha quads from `tab_strip::gear_mask`, not a font glyph, and opens Settings on
+a release over it. Titlebar height
 is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
 clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
 band height. Tooltips use translated action names and the live keymap shortcut,

@@ -1757,6 +1757,7 @@ impl App {
             ws.hovered_tab_idx,
             ws.hovered_new_tab,
             ws.hovered_new_tab_menu,
+            ws.hovered_settings,
         );
         ws.hovered_tab_idx = bar.hovered_tab_idx;
         ws.hovered_close_idx =
@@ -1773,20 +1774,21 @@ impl App {
         let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
         ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
         ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
+        ws.hovered_settings = new_tab_hover == Some(NewTabHoverTarget::Settings);
         if prior_hover
             != (
                 ws.hovered_close_idx,
                 ws.hovered_tab_idx,
                 ws.hovered_new_tab,
                 ws.hovered_new_tab_menu,
+                ws.hovered_settings,
             )
             && let Some(window) = &ws.window
         {
             window.request_redraw();
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
-        let new_tab_hover_icon =
-            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
+        let new_tab_hover_icon = new_tab_hover.is_some().then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {

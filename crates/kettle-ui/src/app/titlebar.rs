@@ -62,6 +62,7 @@ pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
         && ![
             bar.new_tab,
             bar.new_tab_menu,
+            bar.settings,
             bar.scroll_left,
             bar.scroll_right,
         ]

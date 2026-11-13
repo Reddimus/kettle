@@ -1275,6 +1275,10 @@ pub(crate) struct WindowState {
     pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
+    /// The pointer is over, or pressed, the macOS title bar's Settings gear.
+    /// A press opens Settings on a release over the gear.
+    pub(crate) hovered_settings: bool,
+    pub(crate) pressed_settings: bool,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1486,6 +1490,14 @@ impl WindowState {
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
         self.preview_overlay = Some(overlay);
+    }
+
+    /// Drop the Settings gear's hover and press when the pointer leaves the
+    /// window or the window loses focus, so a release elsewhere never opens
+    /// Settings and the gear never stays lit.
+    pub(crate) fn forget_settings_button(&mut self) {
+        self.hovered_settings = false;
+        self.pressed_settings = false;
     }
 
     /// Point `cursor` back at the physical pointer before a native button or
@@ -1736,6 +1748,8 @@ impl WindowState {
             pressed_new_tab_menu: false,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            hovered_settings: false,
+            pressed_settings: false,
             context_menu_a11y_label: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,

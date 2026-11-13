@@ -8,6 +8,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- On macOS, the title bar shows a Settings gear before the new-tab `▾ +`
+  buttons, so Settings is one click away in every window. Clicking it opens
+  Settings, as Cmd+, does; its tooltip names whichever key opens Settings,
+  and screen readers call it Settings (Configuración in Spanish). The gear
+  sits apart from `▾ +`, which do not move, and it hides only when the
+  window is too narrow to keep a tab beside it. Windows and Linux keep
+  Settings in their `▾` and `≡` menus.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

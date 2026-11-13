@@ -89,7 +89,8 @@ A zoomed pane keeps its titlebar, which shows how many panes the zoom hides
 and the key that restores them.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
-below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
+below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`; the gear before `▾ +` in the title
+bar opens Settings too. Run
 `kettle --list-keybinds` for the full map. The macOS Shell, Edit, View and
 Window menus expose common actions and show their current Cmd shortcuts,
 including config overrides. See

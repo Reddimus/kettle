@@ -1274,7 +1274,7 @@ args = [{ name = "category", type = "str" }]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the list of Settings rows."
 
 [messages.settings_a11y_title]
-context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known."
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known. Also the name and tooltip of the gear button that opens Settings in the macOS title bar (crates/kettle-ui/src/app/accessibility.rs tab_accessibility_projection, app/chrome.rs new_tab_tooltip)."
 
 [messages.settings_active_gpu]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."

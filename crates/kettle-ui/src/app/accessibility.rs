@@ -1323,6 +1323,8 @@ impl App {
                     self.activate_window_control(ws, control.action, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
                     self.handle_action(ws, Action::NewTab, event_loop);
+                } else if request.target_node == ACCESSIBILITY_TAB_SETTINGS_ID {
+                    self.handle_action(ws, Action::OpenSettings, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -3297,6 +3299,8 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+/// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
+const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
 
 pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
     NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))
@@ -3363,6 +3367,11 @@ pub(super) fn tab_accessibility_projection(
             } else {
                 kettle_i18n::Text::A11yMainMenu
             }),
+        ),
+        (
+            ACCESSIBILITY_TAB_SETTINGS_ID,
+            bar.settings,
+            tr.text(kettle_i18n::Text::SettingsA11yTitle),
         ),
     ] {
         if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {

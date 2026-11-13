@@ -276,6 +276,7 @@ impl App {
                 ws.pressed_new_tab_menu = false;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                ws.forget_settings_button();
                 ws.hovered_window_control = None;
                 ws.pressed_window_control = None;
                 ws.search.hovered_control = None;
@@ -756,7 +757,14 @@ impl App {
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
-                    if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
+                    if settings_button_at(&bar, px, py) {
+                        // The Settings gear opens on release, like a native
+                        // button; a middle press does nothing.
+                        ws.pressed_settings = bcode == 0;
+                    } else if bcode == 0
+                        && bar.new_tab_menu.2 > 0.0
+                        && in_bar(bar.new_tab_menu, px, py)
+                    {
                         // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
@@ -1047,6 +1055,19 @@ impl App {
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
+                }
+                if button == MouseButton::Left && ws.pressed_settings {
+                    ws.pressed_settings = false;
+                    let bar = self.tab_bar(ws);
+                    let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    ws.held_buttons.end_own(0);
+                    if let Some(action) = settings_release_action(true, &bar, x, y) {
+                        self.handle_action(ws, action, event_loop);
+                    }
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
                 }
                 if button == MouseButton::Left
                     && let Some(action) = ws.pressed_window_control.take()
@@ -1398,6 +1419,7 @@ impl App {
                     ws.titlebar_click = None;
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
+                    ws.forget_settings_button();
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
                     // Retire the blink layer so the next frame paints the steady

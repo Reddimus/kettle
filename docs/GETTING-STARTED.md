@@ -30,6 +30,8 @@ A single-tab window hides the tab strip by default. Creating another tab shows
 it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
 expose their tab titles, selected tab, Close buttons, New tab, and New tab menu
 to screen readers. The menu button beside `+` opens shell choices and shortcuts.
+On macOS, where the tabs sit in the title bar, a gear before `▾ +` opens
+Settings, as `Cmd+,` does; screen readers call it Settings.
 
 If the shell or directly launched command fails, its pane stays open with
 "Process exited with code N". Press **Enter** or click **Restart** to run the
