@@ -82,7 +82,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
-| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background: a theme colour short of that becomes a stronger tint of the same hue. A selected cell with a program-set background keeps that fill where it also meets 3:1 there, and gets one worked out against its own background where it does not. Unfocused windows use a neutral grey fill at least 2:1 against the background. Text and decorations meet 4.5:1 against the fill. In a translucent window, the macOS and Windows default, the ratios are measured against the background as it shows over a light or dark desktop (see [Selection and history controls](#selection-and-history-controls)). A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
+| `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background: a theme colour short of that becomes a stronger tint of the same hue. A selected cell with a program-set background keeps that fill where it also meets 3:1 there, and gets one worked out against its own background where it does not. Unfocused windows use a neutral grey fill at least 2:1 against the background and at least 1.3:1 quieter than the focused fill. Text and decorations meet 4.5:1 against the fill. In a translucent window, the macOS and Windows default, the ratios are measured against the background as it shows over a light or dark desktop (see [Selection and history controls](#selection-and-history-controls)). A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Search text follows the selection contrast rule: a readable explicit foreground has priority, then readable cell ink, then the strongest fallback. Quick-select labels default to the theme background |
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
@@ -556,9 +556,10 @@ moves a key into the main table without changing its parser arm.
 The theme's selection colour is used as the active fill when it has at least
 3:1 contrast against the terminal background. Otherwise Kettle lightens or
 darkens it, keeping its hue and saturation, until it does. When the window
-loses focus the fill turns a neutral grey at least 2:1 from the background,
-as a selection in an inactive macOS window does, so the selection changes
-colour as well as strength. A selected cell that a program gave its own background keeps the
+loses focus the fill turns a neutral grey at least 2:1 from the background
+and at least 1.3:1 quieter than the focused fill, as a selection in an
+inactive macOS window does, so the selection changes colour as well as
+strength. A selected cell that a program gave its own background keeps the
 same fill where it also has that contrast against the cell's background, so
 one selection across a status line or a powerline prompt stays one colour.
 Where it does not, as where the program's background matches the fill, that
@@ -571,13 +572,17 @@ With `background-opacity` below `1.0` (the macOS and Windows default is
 window. Kettle cannot see the desktop, so it measures the selection against
 the background as it would show over white (for a selection lighter than the
 background) or black (for a darker one), the backdrop that leaves the least
-contrast. The unfocused grey keeps 2:1 against that. The focused fill
-strengthens toward 3:1 only as far as its text keeps 4.5:1 and stays light on
-a dark theme or dark on a light one, so over a bright page it can stop short
-of 3:1: TokyoNight Night at `0.86` reaches about 2.4:1 there. With nothing
-behind the background to show (opacity `1.0`, macOS Reduce Transparency, the
-starfield or an image wallpaper that covers the window) the ratios are
-measured against the background colour itself.
+contrast. The focused fill strengthens toward 3:1 there, moving away from the
+background on the side it already sits, only as far as its text keeps 4.5:1
+and stays light on a dark theme or dark on a light one, so over a bright page
+it can stop short of 3:1. The unfocused grey aims for 2:1 against the same
+backdrop but stays 1.3:1 quieter than the focused fill, so it stops short
+too: TokyoNight Night at `0.86` reaches about 2.4:1 focused and 1.85:1
+unfocused there. Where the background as shown would pass the selection
+itself, as TokyoNight Night's does over white below about `0.65`, and with
+nothing behind the background to show (opacity `1.0`, macOS Reduce
+Transparency, the starfield or an image wallpaper that covers the window), the
+ratios are measured against the background colour itself.
 
 Text, underlines, strikeouts and link decorations on a highlight meet 4.5:1
 against its effective fill, including dim, ANSI, indexed and truecolour text.

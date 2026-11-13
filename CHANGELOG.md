@@ -157,15 +157,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - When a window loses focus its selection turns a neutral grey, as a
   selection in an inactive macOS window does, instead of a dimmer shade of
-  the same colour, so it changes colour as well as strength. With the
-  window's background see-through (the macOS and Windows default), selection
-  colours are now chosen against the background as it shows over the
-  desktop, not against the theme's solid colour: the unfocused grey stays at
-  least 2:1 from it, about 1.3:1 before, and on macOS and Windows the
-  focused colour is a little stronger than before (lighter on a dark theme,
-  darker on a light one), while selected text keeps at least 4.5:1. Linux,
-  at 99% opacity, changes by about 1%. An opaque window, and one under
-  macOS Reduce Transparency, keeps the focused colours it had.
+  the same colour, so it changes colour as well as strength. The grey stays
+  at least 2:1 from the theme's background and at least 1.3:1 quieter than
+  the focused colour. With the window's background see-through (the macOS
+  and Windows default), selection colours are now chosen against the
+  background as it shows over the desktop, not against the theme's solid
+  colour. There the unfocused grey reaches about 2:1 where the focused
+  colour leaves room for it (TokyoNight Night at 86% opacity: 1.85:1, from
+  1.31:1 before), and the focused colour moves a little further from the
+  background, on the side it already sits, while selected text keeps at
+  least 4.5:1. Where the background as shown would pass the selection
+  itself, as TokyoNight Night's does over a white page below about 65%
+  opacity, both colours stay those of an opaque window. Linux, at 99%
+  opacity, changes by about 1%. An opaque window, and one under macOS
+  Reduce Transparency, keeps the focused colours it had.
 
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,

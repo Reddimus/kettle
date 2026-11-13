@@ -387,7 +387,7 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
 /// Against a see-through window's background, as the desktop behind it shows,
 /// the fill strengthens only as far as its text stays at least 4.5:1 and keeps
 /// its light or dark ink. With the default dark theme at 86% opacity over a
-/// white page that stops near 2.46:1. That is accepted: the selected text
+/// white page that stops at 2.42:1. That is accepted: the selected text
 /// carries the information at 4.5:1, the fill still reaches 3:1 against the
 /// theme's own background, and it is stronger than the 1.95:1 an unadjusted
 /// fill shows there.
@@ -405,17 +405,28 @@ const SELECTION_TEXT_CONTRAST: f64 = 4.5;
 /// desktop is unknown, so a selection lighter than the background is measured
 /// against the background over white and a darker one over black: the backdrop
 /// that leaves it least contrast.
+///
+/// Where that backdrop shows the background past the selection itself, as a
+/// dark theme below about 65% opacity over white does, the selection is
+/// measured against `background` instead. Measured there, strengthening would
+/// turn a dark theme's light selection dark and leave it almost the theme's
+/// own background colour.
 pub(crate) fn selection_contrast_target(background: Rgb, selection: Rgb, alpha: f64) -> Rgb {
     if alpha >= 1.0 {
         return background;
     }
-    let backdrop = if color::relative_luminance(selection) >= color::relative_luminance(background)
-    {
+    let lighter = |a: Rgb, b: Rgb| color::relative_luminance(a) >= color::relative_luminance(b);
+    let backdrop = if lighter(selection, background) {
         Rgb::new(255, 255, 255)
     } else {
         Rgb::new(0, 0, 0)
     };
-    color::over(backdrop, background, alpha.max(0.0), false)
+    let shown = color::over(backdrop, background, alpha.max(0.0), false);
+    if lighter(selection, shown) == lighter(selection, background) {
+        shown
+    } else {
+        background
+    }
 }
 
 /// The theme's selection colour where it stands out from `background`;
@@ -473,7 +484,7 @@ pub(crate) fn selection_fill_against(
     if let Some(fill) = cache.inactive_fills.get(&key) {
         return *fill;
     }
-    let fill = neutral_selection(theme, active, target);
+    let fill = neutral_selection(theme, active, background, target);
     cache.inactive_fills.insert(key, fill);
     fill
 }
@@ -548,37 +559,73 @@ fn strengthened_selection(theme: &kettle_config::Theme, base: Rgb, target: Rgb) 
     if lo > 0.0 { at(lo) } else { base }
 }
 
-/// The unfocused selection: the grey nearest `target` that reaches
-/// [`INACTIVE_SELECTION_CONTRAST`] against it, on the same side as the focused
-/// `active` fill, and no further than its text keeps [`keeps_selection_ink`].
-fn neutral_selection(theme: &kettle_config::Theme, active: Rgb, target: Rgb) -> Rgb {
-    let lighter = color::relative_luminance(active) >= color::relative_luminance(target);
-    let target_luminance = color::relative_luminance(target);
-    let greys = (0..=255u8).map(|v| Rgb::new(v, v, v)).filter(|grey| {
-        let luminance = color::relative_luminance(*grey);
+/// How much brighter or darker, as a contrast ratio, a focused selection
+/// stays than its unfocused grey, so focus shows by strength and not only by
+/// hue. Over a see-through background the grey gives up its 2:1 to keep it.
+const SELECTION_FOCUS_SEPARATION: f64 = 1.3;
+
+/// The unfocused selection: a grey on the focused `active` fill's side of the
+/// theme `background` and at least [`SELECTION_FOCUS_SEPARATION`] quieter
+/// than `active`. Of those it is the one nearest `target`, the background as
+/// shown, that reaches [`INACTIVE_SELECTION_CONTRAST`] beyond it, or the one
+/// nearest `active` when none does; then no further out than its text keeps
+/// [`keeps_selection_ink`].
+fn neutral_selection(
+    theme: &kettle_config::Theme,
+    active: Rgb,
+    background: Rgb,
+    target: Rgb,
+) -> Rgb {
+    let luminance = color::relative_luminance;
+    let lighter = luminance(active) >= luminance(background);
+    let beyond = |grey: Rgb, of: Rgb| {
         if lighter {
-            luminance > target_luminance
+            luminance(grey) > luminance(of)
         } else {
-            luminance < target_luminance
+            luminance(grey) < luminance(of)
         }
-    });
+    };
+    let greys = (0..=255u8).map(|v| Rgb::new(v, v, v));
     let greys: Vec<Rgb> = if lighter {
         greys.collect()
     } else {
         greys.rev().collect()
     };
-    let Some(reached) = greys
+    let candidates: Vec<Rgb> = greys
         .iter()
-        .position(|grey| color::contrast_ratio(*grey, target) >= INACTIVE_SELECTION_CONTRAST)
-    else {
-        return greys.last().copied().unwrap_or(target);
-    };
-    greys[..=reached]
-        .iter()
-        .rev()
-        .find(|grey| keeps_selection_ink(theme, active, **grey))
         .copied()
-        .unwrap_or(greys[reached])
+        .filter(|grey| {
+            beyond(*grey, background)
+                && beyond(active, *grey)
+                && color::contrast_ratio(active, *grey) >= SELECTION_FOCUS_SEPARATION
+        })
+        .collect();
+    let reached = candidates
+        .iter()
+        .position(|grey| {
+            beyond(*grey, target)
+                && color::contrast_ratio(*grey, target) >= INACTIVE_SELECTION_CONTRAST
+        })
+        .or(candidates.len().checked_sub(1));
+    if let Some(reached) = reached {
+        return candidates[..=reached]
+            .iter()
+            .rev()
+            .find(|grey| keeps_selection_ink(theme, active, **grey))
+            .copied()
+            .unwrap_or(candidates[reached]);
+    }
+    // A fill too close to the background for a grey to fit between them:
+    // the grey whose contrast with each is the same.
+    let middle = ((luminance(active) + 0.05) * (luminance(background) + 0.05)).sqrt() - 0.05;
+    greys
+        .into_iter()
+        .min_by(|a, b| {
+            (luminance(*a) - middle)
+                .abs()
+                .total_cmp(&(luminance(*b) - middle).abs())
+        })
+        .unwrap_or(active)
 }
 
 /// A pane's selection fills for one frame, resolved against its default

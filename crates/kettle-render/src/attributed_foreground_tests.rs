@@ -733,7 +733,8 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
             );
             // 2:1 from the background as shown, unless on the next grey out
             // the selected text would fall below 4.5:1 or switch from light
-            // to dark (or back).
+            // to dark (or back), or the grey would come within 1.3:1 of the
+            // focused fill.
             let shown = color::contrast_ratio(row, target);
             let lighter = color::relative_luminance(row) > color::relative_luminance(target);
             let next = if lighter {
@@ -750,12 +751,17 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
                     (black, white)
                 };
             let capped = color::contrast_ratio(ink_side, next) < 4.5
-                || color::contrast_ratio(other_side, next) > color::contrast_ratio(ink_side, next);
+                || color::contrast_ratio(other_side, next) > color::contrast_ratio(ink_side, next)
+                || color::contrast_ratio(fills.row(true), next) < 1.3;
             assert!(
                 shown >= 2.0 || capped,
                 "{name} at {alpha}: {row:?} is {shown:.2}:1 from {target:?}"
             );
-            assert!(shown >= 1.9, "{name} at {alpha}: {row:?} is {shown:.2}:1");
+            let own = color::contrast_ratio(row, theme.background);
+            assert!(
+                own >= 2.0,
+                "{name} at {alpha}: {row:?} is {own:.2}:1 from the theme background"
+            );
             for program_bg in [theme.background, theme.palette[1], theme.palette[4], row] {
                 let cell = fills.cell(
                     CellHighlight::InactiveSelection,
@@ -775,7 +781,8 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
 
 /// TokyoNight Night at the macOS and Windows default opacity of 86%, over a
 /// white page: the background shows as #3a3b44, against which the old fills
-/// measured 1.95:1 focused and 1.31:1 unfocused.
+/// measured 1.95:1 focused and 1.31:1 unfocused. The grey stops short of 2:1
+/// there so that it stays 1.3:1 quieter than the focused fill.
 #[test]
 fn selections_are_measured_against_a_see_through_background_as_shown() {
     use super::theme::{PaneSelectionFills, selection_contrast_target};
@@ -793,10 +800,12 @@ fn selections_are_measured_against_a_see_through_background_as_shown() {
         fills.row(true)
     );
     assert!(
-        unfocused >= 2.0,
+        unfocused >= 1.8,
         "unfocused {:?} at {unfocused:.2}:1",
         fills.row(false)
     );
+    assert_eq!(fills.row(true), Rgb::new(93, 115, 180));
+    assert_eq!(fills.row(false), Rgb::new(99, 99, 99));
     let (hue, saturation, _) = color::hsl(theme.selection_background);
     let (fill_hue, fill_saturation, _) = color::hsl(fills.row(true));
     assert!(hue_distance(hue, fill_hue) < 0.05);
@@ -817,6 +826,11 @@ fn selected_text_stays_readable_on_see_through_and_opaque_fills() {
         for alpha in [1.0, 0.99, 0.86, 0.5] {
             let mut cache = MinimumContrastCache::default();
             let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
+            let unfocused = fills.row(false);
+            assert!(
+                unfocused.r == unfocused.g && unfocused.g == unfocused.b,
+                "{unfocused:?} at {alpha}"
+            );
             for (highlight, fill) in [
                 (CellHighlight::Selection, fills.row(true)),
                 (CellHighlight::InactiveSelection, fills.row(false)),
@@ -865,6 +879,11 @@ fn an_opaque_window_keeps_the_theme_selection() {
         .row(true)
     };
     assert_eq!(fills(1.0), Rgb::new(77, 100, 166));
+    assert_ne!(
+        fills(0.86),
+        fills(1.0),
+        "a see-through window is measured as shown"
+    );
     cfg.background_opacity = 0.86;
     let pre = wgpu::CompositeAlphaMode::PreMultiplied;
     assert_eq!(
@@ -885,21 +904,93 @@ fn an_opaque_window_keeps_the_theme_selection() {
     assert!(selection_backdrop_alpha(&cfg, pre, false, false) < 1.0);
 }
 
-/// A theme whose selection colour is nearly grey still tells a focused
-/// selection from an unfocused one by brightness.
+/// An unfocused selection is a grey at least 1.3:1 quieter than the focused
+/// fill, between it and the background, in every bundled theme and at the
+/// see-through opacities where the focused fill cannot reach 3:1: at 86%
+/// Dracula's grey once matched its focused fill.
 #[test]
-fn a_near_grey_selection_keeps_focused_and_unfocused_apart() {
+fn unfocused_selection_stays_quieter_than_focused_in_every_bundled_theme() {
     use super::theme::PaneSelectionFills;
-    let theme = Theme::default();
-    assert_eq!(theme.selection_background, Rgb::new(0x58, 0x5b, 0x70));
-    for alpha in [1.0, 0.99] {
-        let fills = PaneSelectionFills::new(
-            &theme,
-            theme.background,
-            alpha,
-            &mut MinimumContrastCache::default(),
+    assert_eq!(
+        Theme::default().selection_background,
+        Rgb::new(0x58, 0x5b, 0x70)
+    );
+    let between = |low: Rgb, mid: Rgb, high: Rgb| {
+        let (low, mid, high) = (
+            color::relative_luminance(low),
+            color::relative_luminance(mid),
+            color::relative_luminance(high),
         );
-        let ratio = color::contrast_ratio(fills.row(true), fills.row(false));
-        assert!(ratio >= 1.3, "at {alpha}: {ratio:.2}");
+        (low < mid && mid < high) || (high < mid && mid < low)
+    };
+    let themes = Theme::list()
+        .into_iter()
+        .map(|name| (name.to_string(), Theme::by_name(name)))
+        .chain([("default".to_string(), Theme::default())]);
+    for (name, theme) in themes {
+        for alpha in [1.0, 0.99, 0.86, 0.7, 0.65, 0.6, 0.5, 0.3] {
+            let fills = PaneSelectionFills::new(
+                &theme,
+                theme.background,
+                alpha,
+                &mut MinimumContrastCache::default(),
+            );
+            let (focused, unfocused) = (fills.row(true), fills.row(false));
+            assert!(
+                unfocused.r == unfocused.g && unfocused.g == unfocused.b,
+                "{name} at {alpha}: {unfocused:?}"
+            );
+            let ratio = color::contrast_ratio(focused, unfocused);
+            assert!(
+                ratio >= 1.3,
+                "{name} at {alpha}: {focused:?} and {unfocused:?} are {ratio:.2}:1"
+            );
+            assert!(
+                between(theme.background, unfocused, focused),
+                "{name} at {alpha}: {unfocused:?} is not between {:?} and {focused:?}",
+                theme.background
+            );
+        }
+    }
+}
+
+/// A see-through window never turns a selection toward its background.
+/// Over white, a dark theme's background shows lighter than its selection
+/// below about 65% opacity; strengthening toward 3:1 against that turned
+/// TokyoNight Night's selection a dark navy 1.26:1 from its own background.
+#[test]
+fn a_see_through_selection_keeps_its_side_of_the_theme_background() {
+    use super::theme::PaneSelectionFills;
+    let themes = Theme::list()
+        .into_iter()
+        .map(|name| (name.to_string(), Theme::by_name(name)))
+        .chain([("default".to_string(), Theme::default())]);
+    for (name, theme) in themes {
+        let base =
+            color::with_min_contrast_same_hue(theme.selection_background, theme.background, 3.0);
+        let lighter =
+            |c: Rgb| color::relative_luminance(c) > color::relative_luminance(theme.background);
+        for alpha in [0.99, 0.86, 0.7, 0.65, 0.6, 0.5, 0.3] {
+            let fills = PaneSelectionFills::new(
+                &theme,
+                theme.background,
+                alpha,
+                &mut MinimumContrastCache::default(),
+            );
+            let focused = fills.row(true);
+            assert_eq!(
+                lighter(focused),
+                lighter(base),
+                "{name} at {alpha}: {focused:?} crossed the background from {base:?}"
+            );
+            let (now, was) = (
+                color::contrast_ratio(focused, theme.background),
+                color::contrast_ratio(base, theme.background),
+            );
+            assert!(
+                now >= was - 0.01,
+                "{name} at {alpha}: {focused:?} is {now:.2}:1 from the background, {base:?} {was:.2}:1"
+            );
+        }
     }
 }
