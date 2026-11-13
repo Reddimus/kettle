@@ -33,9 +33,6 @@ pub(super) fn should_zoom_font(ctrl: bool, notches: i32, disabled: bool) -> Opti
 #[allow(dead_code)] // doc-only reference + layout-helper test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
-/// The tab bar's band: where it draws and where a dragged tab docks. A bottom
-/// bar sits above the search bar and a bottom status bar. A side strip excludes
-/// search and status bands, so the docking target matches what is painted.
 /// Whether a font-size change shows the size chip: always, unless the user
 /// turned the chip off. `after-first` only skips the window's first
 /// placement, which a font change never is.
@@ -55,6 +52,9 @@ pub(super) fn font_size_chip_label(
     tr.font_size_chip(&size.to_string(), cols as u64, rows as u64)
 }
 
+/// The tab bar's band: where it draws and where a dragged tab docks. A bottom
+/// bar sits above the search bar and a bottom status bar. A side strip excludes
+/// search and status bands, so the docking target matches what is painted.
 pub(super) fn tab_band_rect(
     surface: (u32, u32),
     pos: TabBarPos,

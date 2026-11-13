@@ -1051,6 +1051,9 @@ impl App {
                 }
             }
         }
+        // The font size chip's live region comes and goes, and changes text,
+        // with no other change to the tree.
+        overlay.resize_overlay_text.hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
