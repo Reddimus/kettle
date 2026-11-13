@@ -42,14 +42,16 @@ pub(super) fn font_size_chip_shown(mode: kettle_config::ResizeOverlayMode) -> bo
 
 /// The size chip's text after a font-size change, such as "Font size 14 ·
 /// 80×24". The size is written as a person would: whole sizes without a
-/// decimal point, others to one decimal place.
+/// decimal separator, others to one decimal place with the language's
+/// separator ("13.5", "13,5"). Settings shows the configured size rounded
+/// to whole pixels, so it has no separator to match.
 pub(super) fn font_size_chip_label(
     tr: &kettle_i18n::Translator,
     size: f32,
     (cols, rows): (usize, usize),
 ) -> String {
     let size = (size * 10.0).round() / 10.0;
-    tr.font_size_chip(&size.to_string(), cols as u64, rows as u64)
+    tr.font_size_chip(&tr.decimal(size), cols as u64, rows as u64)
 }
 
 /// After a font-size change the user asked for, the size chip names the new

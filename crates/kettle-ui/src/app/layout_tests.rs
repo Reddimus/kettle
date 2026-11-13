@@ -599,6 +599,15 @@ fn font_size_changes_show_the_size_and_grid_on_the_chip() {
         font_size_chip_label(&en, 13.1_f32 + 1.0, (1, 1)),
         "Font size 14.1 · 1×1"
     );
+    // Spanish writes a fractional size with a decimal comma.
+    assert_eq!(
+        font_size_chip_label(&es, 13.5, (120, 40)),
+        "Tamaño de fuente 13,5 · 120×40"
+    );
+    assert_eq!(
+        font_size_chip_label(&es, 13.1_f32 + 1.0, (1, 1)),
+        "Tamaño de fuente 14,1 · 1×1"
+    );
 }
 
 /// `resize-overlay = never` keeps the chip off for font changes too; the
