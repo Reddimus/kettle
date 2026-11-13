@@ -703,19 +703,31 @@ impl SessionWriter {
         lock.lock().expect("session save lock").snapshot = Some(SaveJob::RemoveContent(path));
         ready.notify_one();
     }
+
+    /// Write the last pending snapshot and stop the worker, returning only
+    /// once that write is on disk.
+    ///
+    /// A write already in progress finishes first, then the latest pending
+    /// one, and nothing after it: a submit after this is never written. The
+    /// process may leave through `exit()` the moment this returns (AppKit
+    /// does after `terminate:`), which skips every destructor, so the join
+    /// cannot be left to `Drop`. Calling it again does nothing.
+    pub(crate) fn finish(&mut self) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let (lock, ready) = &*self.pending;
+        lock.lock().expect("session save lock").closing = true;
+        ready.notify_one();
+        if worker.join().is_err() {
+            log::warn!("session save worker panicked");
+        }
+    }
 }
 
 impl Drop for SessionWriter {
     fn drop(&mut self) {
-        let (lock, ready) = &*self.pending;
-        lock.lock().expect("session save lock").closing = true;
-        ready.notify_one();
-        // The last pending snapshot follows any write already in progress.
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            log::warn!("session save worker panicked");
-        }
+        self.finish();
     }
 }
 
@@ -1254,6 +1266,78 @@ mod tests {
 
         assert_eq!(written_rx.into_iter().collect::<Vec<_>>(), vec![1, 1000]);
         assert_eq!(load_from_path(&path).unwrap().active, 1000);
+    }
+
+    /// A writer whose sink takes long enough that a caller which does not
+    /// wait for it returns well before the snapshot reaches `path`.
+    fn slow_writer(path: PathBuf) -> SessionWriter {
+        SessionWriter::with_sink(move |session, _| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            save_to_path(&session, &path).unwrap();
+        })
+        .unwrap()
+    }
+
+    /// `finish` returns only after the last submitted snapshot is on disk,
+    /// while the writer is still alive: quitting through AppKit calls
+    /// `exit()` straight after, and the `Drop` that used to do this never
+    /// runs.
+    #[test]
+    fn finish_returns_after_the_last_snapshot_is_written() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let mut writer = slow_writer(path.clone());
+        writer.submit(
+            Session {
+                active: 7,
+                ..Session::default()
+            },
+            None,
+        );
+        writer.finish();
+        assert_eq!(load_from_path(&path).map(|s| s.active), Some(7));
+        // A second finish, and the drop after it, have nothing left to do.
+        writer.finish();
+        drop(writer);
+        assert_eq!(load_from_path(&path).map(|s| s.active), Some(7));
+    }
+
+    const FINISH_EXIT_CHILD: &str = "KETTLE_SESSION_FINISH_EXIT_CHILD";
+
+    /// The quit path itself: submit, `finish`, then `std::process::exit`,
+    /// which runs no destructor. The snapshot must be on disk when the child
+    /// is gone.
+    #[test]
+    fn a_snapshot_finished_before_process_exit_is_on_disk() {
+        if let Some(path) = std::env::var_os(FINISH_EXIT_CHILD) {
+            let mut writer = slow_writer(PathBuf::from(path));
+            writer.submit(
+                Session {
+                    active: 3,
+                    ..Session::default()
+                },
+                None,
+            );
+            writer.finish();
+            std::process::exit(0);
+        }
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::tests::a_snapshot_finished_before_process_exit_is_on_disk",
+                "--nocapture",
+            ])
+            .env(FINISH_EXIT_CHILD, &path)
+            .output()
+            .expect("re-exec the test binary");
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(load_from_path(&path).map(|s| s.active), Some(3));
     }
 
     /// An unchanged session must not be written again, and a changed one must.
