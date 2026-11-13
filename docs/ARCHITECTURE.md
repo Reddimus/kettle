@@ -2472,25 +2472,61 @@ prompt in separate writes in any shell, so learning from it would settle every
 shell.
 
 On macOS, a pane whose typed-text echo split within `ECHO_SETTLE` (3 ms) keeps
-its later typed-text echoes settled for `SPLIT_MEMORY` (5 s). Such an echo
-paints when its second write lands, or at its first wake plus `ECHO_SETTLE`,
-whichever comes first, instead of at once. The pane's output latch stays
-closed from the first wake until the frame acknowledges it, so the second
-write lands with no new wake and the settled frame paints both.
+its later typed-text echoes settled for `SPLIT_MEMORY` (5 s). Such an echo is
+held at its first wake instead of painting at once. It paints when the UI
+thread handles the wake its second write raises, or at its first wake plus
+`ECHO_SETTLE`, whichever comes first.
 
-Because that write raises no wake, the settle polls for it:
+The settle is event-driven:
 - `note_keystroke` records each followed pane's output generation with the
-  key.
-- While the settle is armed, `about_to_wait` reads the echo's panes'
-  generations at least every `SETTLE_POLL_STEP` (250 µs).
-- Once every learned pane the key reached is two publications past the key,
-  the frame is requested (`settled_early`). That includes a pane of a
-  broadcast that had not published yet at the first wake. A pane whose echoes
-  do not split is not waited for.
-- If both writes landed before the UI thread reached the first wake, the echo
-  paints at once without arming.
+  key: the key's baseline.
+- The first wake leaves the pane's output latch closed. Arming the settle
+  reopens it (`plan_typed_echo_paint`), acknowledging first and reading the
+  generation after, so the second write either shows in that read or raises
+  a fresh wake.
+- The typed Wakeup arm hands each wake to the armed settle. Once every
+  learned pane the key reached is two publications past its baseline, the
+  frame is requested (`settled_early`). That includes a pane of a broadcast
+  that had not published yet at the first wake, whose latch each wake
+  reopens until it completes. A pane whose echoes do not split is not waited
+  for.
+- If every write landed before the UI thread reached the first wake, the
+  echo paints at once without arming, and counts as neither kind of settle.
+- `about_to_wait` waits once, for the deadline. No step polls the
+  generations.
 - The probe never saw more than two writes for one key. A third would land
   after the paint and count as an intermediate frame.
+
+Reopening the latch early keeps the output coalescer's latch rule. The latch
+gates wakes, not output, so opening it early can add a wake but never lose
+one. It is reopened only inside the typing window, where the coalescer is
+already bypassed, and only for panes still short of their second write: at
+most two extra wakes per pane and keystroke. The app's shared wake latch is
+cleared before each Wakeup fans out, so a publication during that Wakeup
+queues the next one. The redraw still acknowledges every pane before its
+snapshot; that leaves an open latch open and clears a pending one, as for
+any wake that races a frame.
+
+Counting publications cannot tell whose they are:
+- A key sent before the previous key's echo in that pane had published
+  shares its baseline: the previous echo's first write would count as this
+  echo's second. zsh-autosuggestions does this in a burst, cancelling one
+  key's suggestion fetch when the next key arrives. `key_sent` marks such a
+  pane's baseline uncertain, and only the deadline releases its settle.
+- The settle can still reach two publications before the echo's second write.
+  The first write can be split across two PTY reads, each of which
+  publishes. The previous key's late write, its suggestion arriving after
+  this key went out to a pane that looked quiet, can land after this key's
+  baseline. An asynchronous prompt redraw, such as a theme's async git
+  status, can publish in between. Each releases the settle early, and the
+  echo's real second write then paints in a frame of its own, as without the
+  settle. Releasing at the number of publications seen when the pane's split
+  was learned was considered and not adopted: it cannot tell those
+  publications apart either.
+- A later keystroke whose echo joins the armed paint adds its learned panes
+  to the armed key's, and the paint then follows that keystroke. It waits for
+  every pane of both keys, so neither echo paints half-written.
+- A pane that closes mid-settle is never complete, and the deadline paints.
 
 An echo that arrives in one write still waits the full `ECHO_SETTLE`: until
 the deadline nothing tells it apart from the first half of a split. In the
@@ -2508,12 +2544,15 @@ outlast their deadline, against 4 with the fixed 3 ms.
 The settle is a single phase (`Idle`, `Armed { deadline, key }`, `Queued`)
 with these rules:
 - The deadline is never extended. A deadline that is due counts as the
-  deadline (`settled_echoes`), even if the echo has also completed.
-- `about_to_wait` polls it under the coalescer's guards. With nothing pending
-  the poll returns before them. A hidden window or a pending frame recovery
-  cancels it rather than waking for a redraw that would return early. A wait
-  is at least 100 µs, never zero, and at most 250 µs while armed, so one
-  settle costs at most about a dozen loop turns.
+  deadline (`settled_echoes`), even if the echo has also completed, whether
+  `about_to_wait` or a wake finds it.
+- `about_to_wait` checks it under the coalescer's guards. With nothing
+  pending the check returns before them. A hidden window or a pending frame
+  recovery cancels it rather than waking for a redraw that would return
+  early. A settle that already requested its frame was counted when it
+  requested it. While armed it asks for one wake, at the deadline, never
+  sooner than 100 µs from now, so a timer that fires early cannot spin the
+  loop.
 - `Queued` ends when the next redraw callback begins, even one that returns
   early, so a failed redraw is not retried every turn.
 - A typed wake that finds it `Queued` requests the redraw again.
@@ -2538,9 +2577,9 @@ effects:
 The A/B also found the cost. In the autosuggestions shell, 99% of echoes on
 suggestion-changing text were settled, each waiting the full 3 ms, single
 writes included. That failed the preregistered criterion of no cost for
-single-write echoes. Early release was added after the A/B. It, and how
-closely macOS honours sub-millisecond `WaitUntil` steps, have not been
-measured live.
+single-write echoes. Early release was added after the A/B, first by polling
+and then event-driven as described above. Neither has been measured live, so
+how much sooner a split echo paints is not known.
 
 `ECHO_SETTLE` comes from a headless PTY probe of oh-my-zsh with
 zsh-autosuggestions: 97% of 192 split echoes spanned 3 ms or less. It stays

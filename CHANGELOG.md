@@ -153,32 +153,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   echo), `intermediate_frames` (frames that showed the half-written state of a
   split echo), `late_superseded_frames` (frames replaced within one refresh
   rather than within 3 ms), `settled_echoes` (waits that ran to the 3 ms
-  deadline) and `settled_early` (waits that ended when the echo's second write
-  arrived). They count only typed characters and backspaces sent to a pane
-  with nothing left unpainted, and only that pane's output: Enter, Tab,
-  arrows, control keys, pastes, other panes' output and type-ahead while a
-  pane prints are left out. Counts only, never text.
+  deadline) and `settled_early` (waits that ended when Kettle handled the
+  wake of the echo's second write). They count only typed characters and
+  backspaces sent to a pane with nothing left unpainted, and only that pane's
+  output: Enter, Tab, arrows, control keys, pastes, other panes' output and
+  type-ahead while a pane prints are left out. Counts only, never text.
 
 ### Changed
 
 - On macOS, Kettle waits up to 3 ms before painting a typed echo from a pane
   whose echoes have been arriving in two writes, so both writes can land in
-  one frame. It paints as soon as the second write arrives; only an echo that
-  comes in one write waits the full 3 ms. zsh-autosuggestions redraws each key
-  that changes its suggestion in two writes about a millisecond apart, first
-  without the gray suggestion and then with the new one, and Kettle could
-  present the first on its own for a whole refresh. A pane starts waiting when
-  the echo of a typed character or backspace arrives in two writes within
-  3 ms, and stops 5 seconds after the last such echo. Only typed characters
+  one frame. The second write wakes Kettle, and Kettle paints when it handles
+  that wake; only an echo that comes in one write waits the full 3 ms, and so
+  does a key typed before the previous key's echo has arrived.
+  zsh-autosuggestions redraws each key that changes its suggestion in two
+  writes about a millisecond apart, first without the gray suggestion and
+  then with the new one, and Kettle could present the first on its own for a
+  whole refresh. A pane starts waiting when the echo of a typed character or
+  backspace arrives in two writes within 3 ms, and stops 5 seconds after the
+  last such echo. Only typed characters
   and backspaces wait: Enter, Tab, arrows and other control keys are painted
   at once, even in a pane that waits, and so is type-ahead while the pane is
   still printing. A paste of any length never starts a wait or teaches a pane
   to wait. Shells that echo each typed key in one write are painted at once,
   as before. `ui_geometry.typed_echo.settled_echoes` counts the waits that ran
   to their deadline, and `settled_early` those that ended at the second write.
-  In a live comparison on macOS with zsh-autosuggestions, the 3 ms wait cut
-  the frames that showed a half-written echo from about one per split echo to
-  one in twenty.
+  In a live comparison on macOS with zsh-autosuggestions, a build that always
+  waited the full 3 ms, before the wait could end early, cut the frames that
+  showed a half-written echo from about one per split echo to one in twenty.
+  Ending the wait at the second write has not been measured live.
 
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
