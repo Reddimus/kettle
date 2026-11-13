@@ -2136,7 +2136,8 @@ impl DeferredGraphicsJournal {
     ) {
         if processor.sync_timeout().sync_timeout().is_some() {
             self.defer_output(processor, DeferredOutput::CommandMark(boundary));
-        } else if let Ok(term) = term.lock() {
+        } else if let Ok(mut term) = term.lock() {
+            disarm_restore_guard_at_prompt(&boundary, &mut term);
             self.apply_command_mark(boundary, &term);
         }
     }
@@ -2867,6 +2868,7 @@ fn apply_sync_marker(
             return;
         }
         DeferredOutput::CommandMark(boundary) => {
+            disarm_restore_guard_at_prompt(&boundary, term);
             deferred.apply_command_mark(boundary, term);
             return;
         }
@@ -2951,6 +2953,31 @@ fn finish_deferred_sync(context: &mut SyncGraphicsContext<'_>) {
     }
 }
 
+/// Parse a session-restore seed into a fresh terminal, then arm the restore
+/// clear guard at the row below the divider so a shell's startup `clear` does
+/// not push the restored rows out of view. Windows stays unarmed: ConPTY
+/// repaints its own buffer with absolute cursor positions, which has not been
+/// verified against the guard.
+pub(crate) fn seed_restored_content(
+    term: &mut Term<EventProxy>,
+    content: &str,
+    user_input: &Arc<AtomicBool>,
+) {
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(term, content.as_bytes());
+    if cfg!(not(windows)) {
+        term.arm_restore_clear_guard(user_input.clone());
+    }
+}
+
+/// The first prompt mark ends the shell's startup, and with it the guard's
+/// window, in wire order with the surrounding output.
+fn disarm_restore_guard_at_prompt(boundary: &command_marks::Boundary, term: &mut Term<EventProxy>) {
+    if matches!(boundary, command_marks::Boundary::PromptStart) {
+        term.disarm_restore_clear_guard();
+    }
+}
+
 /// Advance terminal bytes and replay deferred graphics at their exact
 /// synchronized-output byte offsets.
 fn advance_terminal_bytes(
@@ -2974,6 +3001,9 @@ fn advance_terminal_bytes_with_commit_hook(
 ) {
     let batch = {
         let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !bytes.is_empty() {
+            term.note_restore_clear_guard_output();
+        }
         processor.advance_with_sync_markers(&mut *term, bytes, &mut |term, id| {
             apply_sync_marker(
                 term,
@@ -3638,6 +3668,9 @@ pub struct Terminal {
     prompts: Arc<Mutex<std::collections::VecDeque<u64>>>,
     command_marks: Arc<Mutex<command_marks::CommandMarks>>,
     prompt_seen: Arc<AtomicBool>,
+    /// Set by the UI when user input is queued. The restore clear guard reads
+    /// it under the terminal lock, so the UI never locks the terminal for it.
+    restore_guard_input: Arc<AtomicBool>,
     /// Terminator parity (`command_notify.py` plugin):
     /// OSC 133 OutputStart timestamp — set when `OutputStart` fires,
     /// cleared when the matching `CommandEnd` fires. The reader
@@ -5936,9 +5969,9 @@ impl Terminal {
             tconf.semantic_escape_chars = wd.to_string();
         }
         let mut term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
+        let restore_guard_input = Arc::new(AtomicBool::new(false));
         if let Some(content) = launch.initial_content {
-            let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
-            parser.advance(&mut term, content.as_bytes());
+            seed_restored_content(&mut term, content, &restore_guard_input);
         }
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
@@ -7254,6 +7287,7 @@ impl Terminal {
             prompts,
             command_marks,
             prompt_seen,
+            restore_guard_input,
             output_started_at,
             command_generation,
             command_finished,
@@ -7463,6 +7497,20 @@ impl Terminal {
             Ok(_) => ForegroundJob::Other(foreground),
             Err(_) => ForegroundJob::Unknown,
         }
+    }
+
+    /// Record that user input was queued for this pane. A restore clear guard
+    /// still armed disarms the next time the reader thread parses output, so
+    /// the shell's startup `clear` after a keystroke behaves as usual.
+    pub fn note_restore_guard_user_input(&self) {
+        self.restore_guard_input.store(true, Ordering::Release);
+    }
+
+    /// Whether the restore clear guard is armed; for tests and diagnostics.
+    pub fn restore_clear_guard_armed(&self) -> bool {
+        self.term
+            .lock()
+            .is_ok_and(|term| term.restore_clear_guard_armed())
     }
 
     /// Whether OSC 133 shell integration has ever marked a prompt in this

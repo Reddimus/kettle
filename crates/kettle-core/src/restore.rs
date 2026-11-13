@@ -580,30 +580,18 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn restore_is_seeded_before_the_real_child_can_write() {
+    fn spawn_seeded(seed: &str, script: &str) -> crate::Terminal {
         use crate::{
             CursorShape, LaunchOverrides, PtyGeometry, Terminal, TerminalCapabilities,
             WorkingDirectoryPolicy,
         };
-        let seed = replay(
-            &[("saved output".into(), false, vec![])],
-            "Restored divider",
-            40,
-            false,
-        )
-        .unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let terminal = Terminal::new_with_launch_environment(
-            &[
-                "/bin/sh".into(),
-                "-c".into(),
-                "printf 'new shell output'; read wait".into(),
-            ],
+        Terminal::new_with_launch_environment(
+            &["/bin/sh".into(), "-c".into(), script.into()],
             None,
             1000,
             0,
-            PtyGeometry::from_cell_size(40, 4, 8, 16),
+            PtyGeometry::from_cell_size(40, 6, 8, 16),
             false,
             CursorShape::Block,
             None,
@@ -611,7 +599,7 @@ mod tests {
             "truecolor",
             &[],
             &LaunchOverrides {
-                initial_content: Some(&seed),
+                initial_content: Some(seed),
                 ..Default::default()
             },
             false,
@@ -623,31 +611,126 @@ mod tests {
             Arc::new(|| {}),
             None,
         )
-        .expect("restore ordering PTY fixture");
+        .expect("restore PTY fixture")
+    }
+
+    #[cfg(unix)]
+    fn wait_for_row(terminal: &crate::Terminal, row: i32, first: char) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let grid = terminal.term.lock().unwrap();
-            if grid.grid()[Point::new(Line(2), Column(0))].c == 'n' {
-                assert_eq!(grid.grid()[Point::new(Line(0), Column(0))].c, 's');
-                assert_eq!(grid.grid()[Point::new(Line(1), Column(0))].c, 'R');
-                assert!(
-                    grid.grid()[Point::new(Line(0), Column(0))]
-                        .flags
-                        .contains(Flags::DIM)
-                );
-                assert!(
-                    !grid.grid()[Point::new(Line(2), Column(0))]
-                        .flags
-                        .contains(Flags::DIM)
-                );
-                break;
-            }
-            drop(grid);
+        while terminal.term.lock().unwrap().grid()[Point::new(Line(row), Column(0))].c != first {
             assert!(
                 std::time::Instant::now() < deadline,
-                "child output never arrived"
+                "child output never reached row {row}"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    fn one_row_seed() -> String {
+        replay(
+            &[("saved output".into(), false, vec![])],
+            "Restored divider",
+            40,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_is_seeded_before_the_real_child_can_write() {
+        let terminal = spawn_seeded(&one_row_seed(), "printf 'new shell output'; read wait");
+        wait_for_row(&terminal, 2, 'n');
+        let grid = terminal.term.lock().unwrap();
+        assert_eq!(grid.grid()[Point::new(Line(0), Column(0))].c, 's');
+        assert_eq!(grid.grid()[Point::new(Line(1), Column(0))].c, 'R');
+        assert!(
+            grid.grid()[Point::new(Line(0), Column(0))]
+                .flags
+                .contains(Flags::DIM)
+        );
+        assert!(
+            !grid.grid()[Point::new(Line(2), Column(0))]
+                .flags
+                .contains(Flags::DIM)
+        );
+    }
+
+    /// Runs on every platform, Windows CI included: Windows parses the seed
+    /// but leaves the guard unarmed, so a startup clear behaves as before.
+    #[test]
+    fn restore_seed_arms_the_clear_guard_except_on_windows() {
+        let mut term = terminal();
+        let input = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::term::seed_restored_content(&mut term, &one_row_seed(), &input);
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(0)));
+        assert_eq!(term.restore_clear_guard_armed(), !cfg!(windows));
+        Processor::new().advance(&mut term, b"\x1b[H\x1b[2Jprompt$ ");
+        let first: String = (0..3)
+            .map(|row| term.grid()[Point::new(Line(row), Column(0))].c)
+            .collect();
+        if cfg!(windows) {
+            assert_eq!(first, "p  ");
+            assert_eq!(term.history_size(), 2);
+        } else {
+            assert_eq!(first, "sRp");
+            assert_eq!(term.history_size(), 0);
+            assert!(
+                term.grid()[Point::new(Line(0), Column(0))]
+                    .flags
+                    .contains(Flags::DIM)
+            );
+        }
+    }
+
+    /// A shell that clears at startup, through the real spawn and reader
+    /// path, in the byte orders `tput clear`, macOS `clear` and ncurses 6.6
+    /// `clear` send.
+    #[cfg(unix)]
+    #[test]
+    fn restore_survives_a_startup_clear_in_each_byte_order() {
+        for clear in [
+            "\\033[H\\033[2J",
+            "\\033[3J\\033[H\\033[2J",
+            "\\033[H\\033[2J\\033[3J",
+        ] {
+            let terminal = spawn_seeded(
+                &one_row_seed(),
+                &format!("printf '{clear}prompt$ '; read wait"),
+            );
+            wait_for_row(&terminal, 2, 'p');
+            let term = terminal.term.lock().unwrap();
+            assert_eq!(
+                term.grid()[Point::new(Line(0), Column(0))].c,
+                's',
+                "{clear}"
+            );
+            assert_eq!(
+                term.grid()[Point::new(Line(1), Column(0))].c,
+                'R',
+                "{clear}"
+            );
+            assert_eq!(
+                term.grid().cursor.point,
+                Point::new(Line(2), Column(8)),
+                "{clear}"
+            );
+            assert_eq!(term.history_size(), 0, "{clear}");
+        }
+    }
+
+    /// Once the shell has drawn a prompt, its startup is over; a clear after
+    /// the first OSC 133 A prompt mark behaves as it always did.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_mark_before_the_clear_disarms_the_guard() {
+        let terminal = spawn_seeded(
+            &one_row_seed(),
+            "printf '\\033]133;A\\007'; printf '\\033[H\\033[2Jprompt$ '; read wait",
+        );
+        wait_for_row(&terminal, 0, 'p');
+        let term = terminal.term.lock().unwrap();
+        assert_eq!(term.history_size(), 2);
+        assert!(!term.restore_clear_guard_armed());
     }
 }
