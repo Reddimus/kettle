@@ -271,6 +271,7 @@ impl App {
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = None;
                 ws.leave_tab_bar();
+                self.track_titlebar_pointer(ws, TitlebarPointer::Leave);
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -286,6 +287,7 @@ impl App {
             WindowEvent::CursorEntered { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_reenter_window();
+                self.track_titlebar_entry(ws);
                 ws.selection_autoscroll_edge = 0;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -295,6 +297,10 @@ impl App {
                 ws.link_hover_key = Some(current_links_scan_key(ws));
                 ws.cursor = position;
                 ws.native_pointer = Some(position);
+                // Before AppKit sees a press here, hold the window still over
+                // a title-bar control.
+                let at = (position.x as f32, position.y as f32);
+                self.track_titlebar_pointer(ws, TitlebarPointer::Move(at.0, at.1));
                 ws.selection_autoscroll_edge = 0;
                 // A press the lane took owns the pointer's motion until its
                 // release: it resizes the lane or pans its item, and nothing
@@ -524,6 +530,10 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left {
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Press(at.0, at.1));
+                }
                 // A fresh press while torn-drag tracking is live. For a NATIVE
                 // drag any client press means the tracking is stale (the OS
                 // modal loop / WM grab swallows presses mid-drag) — abandon,
@@ -1040,6 +1050,10 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left {
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
+                }
                 if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
@@ -1404,6 +1418,8 @@ impl App {
                 }
                 if !f {
                     ws.release_titlebar_buttons();
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                     ws.titlebar_click = None;
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;

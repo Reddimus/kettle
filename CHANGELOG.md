@@ -403,6 +403,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, title-bar buttons no longer drag the window. AppKit moved the
+  window with any press in the title bar, so a press on the Settings gear,
+  `▾`, `+` or a tab's close button that was dragged off came back over the
+  button with the window, and a release there opened Settings. Dragging a
+  tab in a window with several tabs moved the window too, instead of
+  reordering the tab or tearing it off. Empty title-bar space and a lone
+  tab still move the window, and a double-click on empty space still zooms
+  it.
+
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
   the same wallpaper exception as the bar itself, and vertical tabs follow

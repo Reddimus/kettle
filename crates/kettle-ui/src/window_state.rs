@@ -945,6 +945,11 @@ pub(crate) struct WindowState {
     pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
     pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
+    /// The primary button is down in this window, as title-bar tracking saw.
+    pub(crate) titlebar_pressed: bool,
+    /// Kettle made the window unmovable because the pointer is over, or
+    /// pressed, a title-bar control; see `titlebar_hold_after`.
+    pub(crate) titlebar_window_held: bool,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -1665,6 +1670,8 @@ impl WindowState {
             pressed_window_control: None,
             hovered_window_control: None,
             titlebar_click: None,
+            titlebar_pressed: false,
+            titlebar_window_held: false,
             native_material: None,
             accessibility: None,
             accessibility_key: None,
