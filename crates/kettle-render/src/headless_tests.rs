@@ -5689,7 +5689,7 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
                 let (x, y, iw, ih) =
                     glyph_ink(&frame, middle, background).unwrap_or_else(|| panic!("{case}"));
                 assert!(
-                    iw >= 14.0 * scale && ih >= 14.0 * scale,
+                    iw >= 12.0 * scale && ih >= 12.0 * scale,
                     "{case}: gear ink {iw}x{ih} is too small to read"
                 );
                 assert!(

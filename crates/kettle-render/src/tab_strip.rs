@@ -263,7 +263,7 @@ pub(crate) fn horizontal_tab_quads(
 }
 
 /// Side of the Settings gear's ink box at 1x, in pixels.
-const GEAR_SIDE: f32 = 16.0;
+const GEAR_SIDE: f32 = 14.0;
 
 /// Coverage of a gear `side` pixels square, row by row, 0..=255. Drawn
 /// rather than shaped: U+2699 can fall back to a colour emoji and its weight
@@ -272,7 +272,7 @@ const GEAR_SIDE: f32 = 16.0;
 pub(crate) fn gear_mask(side: u32) -> Vec<u8> {
     const SAMPLES: u32 = 4;
     let s = side as f32;
-    let (outer, body, hole, half_tooth) = (0.48 * s, 0.32 * s, 0.16 * s, 0.105 * s);
+    let (outer, body, hole, half_tooth) = (0.48 * s, 0.32 * s, 0.19 * s, 0.105 * s);
     let centre = s * 0.5;
     let inside = |x: f32, y: f32| {
         let (dx, dy) = (x - centre, y - centre);
@@ -306,6 +306,23 @@ pub(crate) fn gear_mask(side: u32) -> Vec<u8> {
     mask
 }
 
+/// A gear's coverage for one side length, kept between frames.
+#[derive(Default)]
+pub(crate) struct GearMask {
+    side: u32,
+    mask: Vec<u8>,
+}
+
+impl GearMask {
+    fn get(&mut self, side: u32) -> &[u8] {
+        if self.side != side || self.mask.is_empty() {
+            self.mask = gear_mask(side);
+            self.side = side;
+        }
+        &self.mask
+    }
+}
+
 /// The Settings gear in `ink`, centred in `button` and snapped to whole
 /// pixels, as one quad per run of equal coverage. Nothing for a zero rect.
 pub(crate) fn push_settings_gear(
@@ -313,6 +330,7 @@ pub(crate) fn push_settings_gear(
     button: Rect4,
     ink: Rgb,
     scale: f32,
+    cache: &mut GearMask,
 ) {
     let (x, y, w, h) = button;
     if w <= 0.0 || h <= 0.0 {
@@ -327,8 +345,7 @@ pub(crate) fn push_settings_gear(
     let left = (x + (w - side) * 0.5).round();
     let top = (y + (h - side) * 0.5).round();
     let n = side as u32;
-    let mask = gear_mask(n);
-    for (row, line) in mask.chunks(n as usize).enumerate() {
+    for (row, line) in cache.get(n).chunks(n as usize).enumerate() {
         let mut start = 0;
         while start < line.len() {
             let coverage = line[start];
@@ -1105,6 +1122,17 @@ mod window_control_tests {
                 assert_eq!(tooltip_anchor(&bar), bar.band);
             }
         }
+    }
+
+    #[test]
+    fn settings_gear_mask_is_kept_per_side_length() {
+        let mut cache = GearMask::default();
+        assert_eq!(cache.get(16), gear_mask(16).as_slice());
+        let first = cache.mask.as_ptr();
+        cache.get(16);
+        assert_eq!(cache.mask.as_ptr(), first, "re-rasterized at the same side");
+        assert_eq!(cache.get(32).len(), 32 * 32);
+        assert_eq!(cache.side, 32);
     }
 
     #[test]

@@ -627,6 +627,9 @@ pub struct Renderer {
     new_tab_arrow_buffer: TextBuffer,
     tab_tooltip_buffer: TextBuffer,
     tab_tooltip_text: String,
+    /// The Settings gear's coverage at its last side length, so a frame
+    /// reuses it instead of rasterizing the gear again.
+    settings_gear_mask: tab_strip::GearMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -1580,7 +1583,13 @@ impl Renderer {
                     let ink = self
                         .chrome_colors
                         .tab_text(ink, background, overlay.window_focused);
-                    tab_strip::push_settings_gear(&mut quads, tabbar.settings, ink, self.scale);
+                    tab_strip::push_settings_gear(
+                        &mut quads,
+                        tabbar.settings,
+                        ink,
+                        self.scale,
+                        &mut self.settings_gear_mask,
+                    );
                 }
             }
             // Drag-in-progress ghost. While the user holds a
