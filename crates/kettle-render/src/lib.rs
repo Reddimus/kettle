@@ -43,7 +43,7 @@ pub use theme_picker::{
     FooterInk, FooterLine, FooterRun, MINIMUM_CONTRAST_STEPS, Readability, ThemeFollow,
     ThemeFooterLayout, ThemePickerFooter, ThemeSlot, contrast_button_text, minimum_contrast_token,
     step_minimum_contrast, theme_follow_label, theme_footer_description, theme_footer_height,
-    theme_footer_layout, theme_footer_min_columns, theme_readability,
+    theme_footer_layout, theme_footer_min_columns, theme_footer_slots, theme_readability,
 };
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};

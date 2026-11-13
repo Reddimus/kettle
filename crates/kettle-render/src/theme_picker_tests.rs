@@ -438,3 +438,92 @@ fn a_new_contrast_value_repaints_the_button_in_place() {
     }
     assert!(buttons[0] != buttons[1], "the button still says Off");
 }
+
+/// Each side on the status line is a target that covers its own label and
+/// theme, in the painter's columns, and holds the edited side's underline;
+/// a screen reader hears the same words. A fixed theme has no sides.
+#[test]
+fn each_side_on_the_status_line_is_a_target_over_its_own_words() {
+    for tr in [&EN, &ES] {
+        for (cw, ch) in [(8.4, 17.0), (16.8, 34.0)] {
+            let f = footer(
+                "TokyoNight Night",
+                ThemeFollow::System,
+                Some(ThemeSlot::Light),
+            );
+            let layout = theme_footer_layout(&f, tr, (0.0, 100.0, 720.0), (cw, ch));
+            let line = layout.lines.last().expect("the themes line");
+            let text = line.text();
+            let slots: Vec<ThemeSlot> = layout.slot_chips.iter().map(|&(_, s)| s).collect();
+            assert_eq!(slots, [ThemeSlot::Dark, ThemeSlot::Light]);
+            let spoken = crate::theme_footer_slots(&f, tr);
+            for ((rect, slot), (spoken_slot, words, editing)) in
+                layout.slot_chips.iter().zip(&spoken)
+            {
+                assert_eq!(slot, spoken_slot);
+                assert_eq!(*editing, *slot == ThemeSlot::Light);
+                // The painted words, from the label to the gap before the
+                // next side; a long name may be shortened there.
+                let label = words.split(' ').next().unwrap();
+                let start = text
+                    .find(label)
+                    .unwrap_or_else(|| panic!("{label} in {text:?}"));
+                let end = text[start..].find("   ").map_or(text.len(), |e| start + e);
+                assert!(words.starts_with(text[start..end].trim_end_matches('…')));
+                let x = line.left + columns(&text[..start]) as f32 * cw;
+                let right = x + columns(&text[start..end]) as f32 * cw;
+                assert!(
+                    rect.0 <= x + 0.5 && rect.0 + rect.2 >= right - 0.5,
+                    "{words}"
+                );
+                assert!(rect.1 <= line.top && rect.1 + rect.3 >= line.top + ch);
+            }
+            let (dark, light) = (layout.slot_chips[0].0, layout.slot_chips[1].0);
+            assert!(dark.0 + dark.2 <= light.0, "the sides overlap");
+            let (ux, _, uw, _) = layout.slot_underline.expect("the edited side");
+            assert!(ux >= light.0 && ux + uw <= light.0 + light.2 + 0.5);
+        }
+    }
+    let fixed = footer("TokyoNight Night", ThemeFollow::Fixed, None);
+    let layout = theme_footer_layout(&fixed, &EN, (0.0, 100.0, 720.0), (8.4, 17.0));
+    assert!(layout.slot_chips.is_empty());
+    assert!(crate::theme_footer_slots(&fixed, &EN).is_empty());
+}
+
+/// Choosing the other side changes no words on the status line, only where
+/// its mark and underline are; the next frame draws them under that side.
+#[test]
+fn choosing_the_other_side_repaints_its_underline() {
+    let _serialized = crate::gpu_tests::gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(720, 560) else {
+        eprintln!("side underline check skipped: no GPU adapter");
+        return;
+    };
+    cfg.theme = Theme::by_name("Dracula");
+    let snap = snapshot_of(20, 4, b"");
+    let row_h = menu::row_height(renderer.cell_h);
+    let cell = (renderer.cell_w, renderer.cell_h);
+    let mut under_light = Vec::new();
+    let mut area = None;
+    for editing in [ThemeSlot::Dark, ThemeSlot::Light] {
+        let mut f = footer("Dracula", ThemeFollow::System, Some(editing));
+        f.height = theme_footer_height(cell.1, true, 2);
+        let picker = picker_with_footer(f, (640.0, row_h));
+        let layout = picker.picker_footer_layout(&EN, cell).expect("a layout");
+        let (x, y, w, h) = *area.get_or_insert(layout.slot_chips[1].0);
+        let overlay = Overlay {
+            context_menu: Some(picker),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 720, 560)], &overlay);
+        let pixels: Vec<[u8; 4]> = (y as u32..(y + h) as u32 + 2)
+            .flat_map(|py| (x as u32..(x + w) as u32).map(move |px| (px, py)))
+            .map(|(px, py)| frame.get_pixel(px, py).0)
+            .collect();
+        under_light.push(pixels);
+    }
+    assert!(
+        under_light[0] != under_light[1],
+        "the light side shows no underline"
+    );
+}

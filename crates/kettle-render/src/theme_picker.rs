@@ -309,6 +309,9 @@ pub struct ThemeFooterLayout {
     pub slot_underline: Option<Rect4>,
     /// The minimum-contrast button; a click steps it.
     pub contrast_button: Option<Rect4>,
+    /// Each side's label and theme on the status line; a click edits that
+    /// side. Empty for a fixed theme.
+    pub slot_chips: Vec<(Rect4, ThemeSlot)>,
     pub lines: Vec<FooterLine>,
     pub readability: Readability,
 }
@@ -391,6 +394,25 @@ pub fn theme_footer_description(footer: &ThemePickerFooter, tr: &Translator) -> 
     parts.join(", ")
 }
 
+/// The sides on the status line, each with what a screen reader hears for
+/// it (its label and theme, as painted) and whether a pick saves to it.
+/// Empty for a fixed theme, which has no sides.
+pub fn theme_footer_slots(
+    footer: &ThemePickerFooter,
+    tr: &Translator,
+) -> Vec<(ThemeSlot, String, bool)> {
+    if footer.follow == ThemeFollow::Fixed {
+        return Vec::new();
+    }
+    [ThemeSlot::Dark, ThemeSlot::Light]
+        .into_iter()
+        .zip(slot_texts(footer, tr))
+        .map(|(slot, (label, name, editing))| {
+            (slot, format!("{label} {}", tr.theme_name(&name)), editing)
+        })
+        .collect()
+}
+
 /// The status line's theme labels, names and whether each is being edited.
 fn slot_texts(footer: &ThemePickerFooter, tr: &Translator) -> Vec<(&'static str, String, bool)> {
     if footer.follow == ThemeFollow::Fixed {
@@ -470,6 +492,7 @@ pub fn theme_footer_layout(
         slot_mark: None,
         slot_underline: None,
         contrast_button: None,
+        slot_chips: Vec::new(),
         lines: Vec::new(),
         readability,
     };
@@ -637,6 +660,11 @@ pub fn theme_footer_layout(
         };
         names[longest] = elide(&names[longest], cols - 1);
     }
+    let sides = if footer.follow == ThemeFollow::Fixed {
+        [None, None]
+    } else {
+        [Some(ThemeSlot::Dark), Some(ThemeSlot::Light)]
+    };
     let mut runs = Vec::new();
     let mut col = 0;
     for (index, ((label, _, editing), name)) in slots.iter().zip(&names).enumerate() {
@@ -662,6 +690,15 @@ pub fn theme_footer_layout(
                 (text_top + ch + 1.0).round(),
                 underline_cols as f32 * cw,
                 2.0,
+            ));
+        }
+        if let Some(slot) = sides[index] {
+            let cols = SLOT_MARK_COLS + columns(label) + 1 + columns(name);
+            let chip_left = (left + col as f32 * cw).round();
+            let chip_right = (left + (col + cols) as f32 * cw).min(left + inner);
+            layout.slot_chips.push((
+                (chip_left, top + 1.0, chip_right - chip_left, pitch - 2.0),
+                slot,
             ));
         }
         runs.push(FooterRun {
