@@ -767,17 +767,16 @@ pub(super) fn apply_picker_pointer(
         return false;
     }
     let row_h = kettle_render::menu::row_height(cell_h);
-    let (inset, content_h) = kettle_render::menu::picker_scroll_content(h);
+    let (_, content_h) = kettle_render::menu::picker_scroll_content(h);
     let selected = if matches!(event, PickerPointer::Press)
         && let Some(row) = picker_result_row(menu, cell_h, (ws.cursor.x, ws.cursor.y))
     {
         row
     } else {
-        let delta = match event {
-            PickerPointer::Wheel(delta) => delta,
-            _ if inset > 0.0 && py < y + inset => -1,
-            _ if inset > 0.0 && py >= y + inset + content_h => 1,
-            _ => return false,
+        // Pickers have no arrow strips at their cut edges; only the wheel
+        // scrolls them.
+        let PickerPointer::Wheel(delta) = event else {
+            return false;
         };
         let visible = ((content_h / row_h).floor() as usize)
             .max(1)
