@@ -123,14 +123,6 @@ impl SentKey {
     fn follows(&self, pane: u64) -> bool {
         self.panes.iter().any(|&(id, _)| id == pane)
     }
-
-    /// Whether `pane` has published a split echo's writes since this key:
-    /// `generation` is at least two publications past the key's.
-    fn echo_complete(&self, pane: u64, generation: u64) -> bool {
-        self.panes.iter().any(|&(id, at_key)| {
-            id == pane && generation.saturating_sub(at_key) >= SPLIT_ECHO_PUBLICATIONS
-        })
-    }
 }
 
 /// Where a window's settled echo paint is.
@@ -389,20 +381,24 @@ impl TypedEcho {
             .is_some_and(|(origin, _)| origin.panes.iter().any(|&(id, ..)| self.learned(id, now)))
     }
 
-    /// Whether every pane of the current echo that settles has published
-    /// twice since the keystroke, by `generation`: its split echo is all in
-    /// the grid, so waiting longer gains nothing. A pane of a broadcast whose
-    /// echoes do not split is not waited for.
+    /// Whether every pane the current echo's keystroke is followed in, and
+    /// whose echoes split, has published twice since the keystroke, by
+    /// `generation`: its split echo is all in the grid, so waiting longer
+    /// gains nothing. That includes a pane of a broadcast that had not
+    /// published yet at the echo's first wake. A pane whose echoes do not
+    /// split is not waited for.
     fn echo_complete(&self, now: Instant, generation: impl Fn(u64) -> Option<u64>) -> bool {
-        self.current_echo().is_some_and(|(origin, key)| {
-            let mut learned = origin
+        self.current_echo().is_some_and(|(_, key)| {
+            let mut learned = key
                 .panes
                 .iter()
-                .filter(|&&(id, ..)| self.learned(id, now))
+                .filter(|&&(id, _)| self.learned(id, now))
                 .peekable();
             learned.peek().is_some()
-                && learned.all(|&(id, ..)| {
-                    generation(id).is_some_and(|current| key.echo_complete(id, current))
+                && learned.all(|&(id, at_key)| {
+                    generation(id).is_some_and(|current| {
+                        current.saturating_sub(at_key) >= SPLIT_ECHO_PUBLICATIONS
+                    })
                 })
         })
     }
@@ -1256,5 +1252,23 @@ mod tests {
             "pane 3 never splits and is not waited for"
         );
         assert_eq!(echo.counts().settled_early, 1);
+        echo.redraw_started();
+        echo.frame_sampled();
+
+        // Pane 2 had not published at all when pane 1's first write woke the
+        // window: pane 1 finishing first must not paint pane 2 half-written.
+        let last = next + ms(50);
+        echo.key_sent(last, [typed(1, 14), typed(2, 24)]);
+        assert!(echo.typed_wake(Some(last), [(1, 15, Some(last))]));
+        assert_eq!(echo.plan_paint(last, true, true), EchoPaint::Settle);
+        let poll = |echo: &mut TypedEcho, two: u64| {
+            echo.poll_settle(last + ms(1), false, |id| {
+                Some(if id == 1 { 16 } else { two })
+            })
+        };
+        assert_eq!(poll(&mut echo, 24), SettlePoll::Wait(SETTLE_POLL_STEP));
+        assert_eq!(poll(&mut echo, 25), SettlePoll::Wait(SETTLE_POLL_STEP));
+        assert_eq!(poll(&mut echo, 26), SettlePoll::Request);
+        assert_eq!(echo.counts().settled_early, 2);
     }
 }

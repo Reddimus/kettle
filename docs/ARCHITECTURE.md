@@ -2483,9 +2483,10 @@ Because that write raises no wake, the settle polls for it:
   key.
 - While the settle is armed, `about_to_wait` reads the echo's panes'
   generations at least every `SETTLE_POLL_STEP` (250 µs).
-- Once every learned pane of the echo is two publications past the key, the
-  frame is requested (`settled_early`). A pane of a broadcast whose echoes do
-  not split is not waited for.
+- Once every learned pane the key reached is two publications past the key,
+  the frame is requested (`settled_early`). That includes a pane of a
+  broadcast that had not published yet at the first wake. A pane whose echoes
+  do not split is not waited for.
 - If both writes landed before the UI thread reached the first wake, the echo
   paints at once without arming.
 - The probe never saw more than two writes for one key. A third would land
