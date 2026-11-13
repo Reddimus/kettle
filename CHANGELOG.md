@@ -383,6 +383,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The outlines of Settings' fields, choices and switches, the search
+  field, the category arrows and an off switch's knob were about 1.5:1. They
+  now keep 3:1 against the panel and, on the highlighted row, against the
+  highlight. The panel's own outline and divider stay quiet.
+
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
   the same wallpaper exception as the bar itself, and vertical tabs follow

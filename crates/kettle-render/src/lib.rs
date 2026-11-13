@@ -4660,17 +4660,16 @@ impl Renderer {
                 self.overlay_text_cell_width(),
             );
             let acc = self.ui_accent(cfg, theme);
-            let selected = self.chrome_colors.surface(
-                theme.background,
+            let settings::SettingsColors {
+                selected,
+                border,
+                control,
+                selected_control,
+            } = settings::settings_colors(
+                theme,
                 acc,
-                0.18,
                 self.config.format.is_srgb(),
-            );
-            let border = self.chrome_colors.surface(
-                theme.background,
-                theme.palette[8],
-                0.65,
-                self.config.format.is_srgb(),
+                &mut self.chrome_colors,
             );
             let rail = self.chrome_colors.icon(acc, selected);
             // Ink on a switched-on toggle: whichever theme end stands out more
@@ -4733,27 +4732,33 @@ impl Renderer {
                 .into_iter()
                 .flatten()
             {
-                shape(rect, theme.background, 1.0, border, 1.0, 4.0);
+                shape(rect, theme.background, 1.0, control, 1.0, 4.0);
             }
             shape(
                 layout.search_rect,
                 theme.background,
                 1.0,
-                if set.search_focused { acc } else { border },
+                if set.search_focused { acc } else { control },
                 1.0,
                 4.0,
             );
             for row in &layout.rows {
-                if row.index == set.focused_row && !set.search_focused {
+                let row_selected = row.index == set.focused_row && !set.search_focused;
+                if row_selected {
                     shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
                 }
+                let control = if row_selected {
+                    selected_control
+                } else {
+                    control
+                };
                 let data = &set.rows[row.index];
                 let on = data.control == SettingsControl::Toggle(true) && !data.disabled;
                 shape(
                     row.chip_rect,
                     if on { acc } else { theme.background },
                     1.0,
-                    border,
+                    control,
                     1.0,
                     if matches!(data.control, SettingsControl::Toggle(_)) {
                         row.chip_rect.3 / 2.0
@@ -4767,7 +4772,7 @@ impl Renderer {
                     let (x, y, w, h) = row.chip_rect;
                     let d = settings_toggle_knob(h);
                     let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
-                    let fill = if on { on_ink } else { border };
+                    let fill = if on { on_ink } else { control };
                     shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
                 }
             }
@@ -6033,6 +6038,9 @@ mod pane_buffer_lifecycle_tests;
 
 #[cfg(test)]
 mod search_bar_tests;
+
+#[cfg(test)]
+mod chrome_contrast_sweep_tests;
 
 #[cfg(test)]
 mod completion_panel_tests;
