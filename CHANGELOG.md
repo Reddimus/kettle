@@ -8,6 +8,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Vi mode can select whole lines and blocks from the keyboard, as Vim does:
+  `V` starts a line selection and `Ctrl+v` a block (rectangular) selection
+  at the vi cursor, beside `v` for characters. Pressing another of the three
+  turns the current selection into that kind, and the same key again ends
+  it. `y` copies whole lines or the selected columns of each row.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

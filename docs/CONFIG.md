@@ -951,8 +951,10 @@ cursor position).
 
 **Vi-mode**: `toggle_vi_mode` (`vi_mode` / `vi`) — enter keyboard-driven
 copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
-`0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `y` yanks it to
-the clipboard, `Esc` exits. See `man kettle` for the full keymap.
+`0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `V` a
+line selection and `Ctrl+v` a block selection (pressing another of the three
+switches the selection to that kind, the same one again ends it), `y` yanks it
+to the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state;
 like `clear_history`, it acts on Kettle's terminal, not the program in it,

@@ -4274,7 +4274,8 @@ still clear the ring rather than guessing which history row survived.
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
 selection, and renders the captured native state. The UI's `ViState` stores
-only the owning pane and whether visual selection is active. This single-owner
+only the owning pane and whether visual selection is active; the visual kind
+(`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
 invalidation consistent with the grid.
 
