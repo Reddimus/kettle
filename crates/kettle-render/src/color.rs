@@ -410,15 +410,103 @@ pub(crate) fn with_min_contrast_at_coverage(
 /// itself instead of a greyer one. Lightness ends at white and black, so this
 /// reaches every ratio `with_min_contrast` reaches.
 pub(crate) fn with_min_contrast_same_hue(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
+    min_contrast_along(fg, bg, min_ratio, same_hue_toward(fg))
+}
+
+/// `fg` with its HSL lightness moved `t` of the way to `target`'s (white or
+/// black), keeping its hue and saturation.
+fn same_hue_toward(fg: Rgb) -> impl Fn(Rgb, f64) -> Rgb {
     let (hue, saturation, lightness) = hsl(fg);
-    min_contrast_along(fg, bg, min_ratio, |target, t| {
+    move |target, t| {
         let end = if target == Rgb::new(255, 255, 255) {
             1.0
         } else {
             0.0
         };
         from_hsl(hue, saturation, lightness + (end - lightness) * t)
-    })
+    }
+}
+
+/// `fg` moved toward white or black until it reaches `min_ratio` against
+/// both `first` and `second`: in the same hue when `keep_hue`, as
+/// [`with_min_contrast_same_hue`] does, otherwise blended as
+/// [`with_min_contrast`] does.
+///
+/// Resolving against one surface and then the other does not settle when
+/// `fg` sits between them, so this measures the weaker of the two contrasts
+/// in one search. That reaches `min_ratio` whenever white or black does.
+/// When neither does, the surfaces sit on either side of the colours that
+/// could pass: contrast depends only on luminance, and the weaker contrast
+/// peaks between them, where the two are equal. The colour is moved toward
+/// that peak, stopping at the first colour that passes. When even the peak
+/// falls short, the better of `fg`, the better end and the peak is returned,
+/// so the result is never worse than `fg`.
+pub(crate) fn with_min_contrast_on_both(
+    fg: Rgb,
+    first: Rgb,
+    second: Rgb,
+    min_ratio: f64,
+    keep_hue: bool,
+) -> Rgb {
+    let ratio = |ink: Rgb| contrast_ratio(ink, first).min(contrast_ratio(ink, second));
+    let hue_path = same_hue_toward(fg);
+    let toward = |target: Rgb, t: f64| {
+        if keep_hue {
+            hue_path(target, t)
+        } else {
+            blend(fg, target, t)
+        }
+    };
+    let end = min_contrast_measured(fg, min_ratio, toward, ratio);
+    if ratio(end) >= min_ratio {
+        return end;
+    }
+
+    // Both ends fall short. The luminance with equal contrast against both
+    // surfaces is the geometric mean of their `L + 0.05`.
+    let peak =
+        ((relative_luminance(first) + 0.05) * (relative_luminance(second) + 0.05)).sqrt() - 0.05;
+    let brighten = relative_luminance(fg) < peak;
+    let target = if brighten {
+        Rgb::new(255, 255, 255)
+    } else {
+        Rgb::new(0, 0, 0)
+    };
+    // Both paths move luminance monotonically, so bisect for the peak.
+    let past_peak = |t: f64| {
+        let l = relative_luminance(toward(target, t));
+        if brighten { l >= peak } else { l <= peak }
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        if past_peak(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let t_peak = hi;
+    if ratio(toward(target, t_peak)) >= min_ratio {
+        // On the way to the peak the weaker contrast can only fall and then
+        // rise, and `fg` fails, so it crosses `min_ratio` once.
+        let (mut lo, mut hi) = (0.0_f64, t_peak);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if ratio(toward(target, mid)) >= min_ratio {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        return toward(target, hi);
+    }
+    [end, toward(target, lo), toward(target, t_peak)]
+        .into_iter()
+        .fold(
+            fg,
+            |best, ink| if ratio(ink) > ratio(best) { ink } else { best },
+        )
 }
 
 /// Hue in sextants (`0.0..6.0`), saturation and lightness (`0.0..=1.0`).

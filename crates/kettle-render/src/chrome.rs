@@ -240,13 +240,14 @@ pub(crate) fn activity_ink(theme: &kettle_config::Theme, kind: crate::TabActivit
 }
 
 /// The active tab's bar. It sits on the tab and against the strip around
-/// it, so it reaches `ICON_CONTRAST` against both: resolved first against
-/// whichever it is weaker on, then checked again against the other. A
-/// focused window keeps the accent's hue (broadcast's yellow, a window's own
-/// accent); an unfocused one turns it a neutral grey that is still the
-/// strongest mark in the strip, unlike the hover fill it once matched.
-/// `active_bg` is the terminal's opaque colour, the stated approximation for
-/// a translucent background.
+/// it, so it is resolved once against the weaker of the two and reaches
+/// `ICON_CONTRAST` on both whenever any colour can. Over some wallpapers none
+/// can, and the bar then takes the best weaker contrast it can find, never
+/// worse than its starting colour. A focused window keeps the accent's hue
+/// (broadcast's yellow, a window's own accent); an unfocused one turns it a
+/// neutral grey that is still the strongest mark in the strip, unlike the
+/// hover fill it once matched. `active_bg` is the terminal's opaque colour,
+/// the stated approximation for a translucent background.
 pub(crate) fn tab_accent(
     raw: Rgb,
     strip: Rgb,
@@ -254,27 +255,12 @@ pub(crate) fn tab_accent(
     foreground: Rgb,
     focused: bool,
 ) -> Rgb {
-    let mut ink = if focused {
+    let ink = if focused {
         raw
     } else {
         color::over(foreground, strip, 0.5, false)
     };
-    for _ in 0..3 {
-        let weaker = if color::contrast_ratio(ink, strip) <= color::contrast_ratio(ink, active_bg) {
-            strip
-        } else {
-            active_bg
-        };
-        if color::contrast_ratio(ink, weaker) >= ICON_CONTRAST {
-            break;
-        }
-        ink = if focused {
-            color::with_min_contrast_same_hue(ink, weaker, ICON_CONTRAST)
-        } else {
-            color::with_min_contrast(ink, weaker, ICON_CONTRAST)
-        };
-    }
-    ink
+    color::with_min_contrast_on_both(ink, strip, active_bg, ICON_CONTRAST, focused)
 }
 
 /// The hover fill shared by everything on the strip: tabs, window controls,
@@ -727,6 +713,171 @@ mod tab_chrome_tests {
         assert!(
             failures.is_empty(),
             "{} failing bars: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+
+    /// Over a wallpaper the strip is the theme's grey, black, white or the
+    /// wallpaper's average, and can sit on the far side of the accent from
+    /// the active tab. Contrast depends only on luminance, so the best any
+    /// colour can do against both is white, black or the luminance between
+    /// them with equal contrast to each; whenever that reaches 3:1 the bar
+    /// does too, keeping a focused accent's hue, and when it cannot the bar
+    /// is never worse than its starting colour. Resolving against one surface
+    /// at a time left Adventure Time's broadcast bar at 1.25:1 on the active
+    /// tab and made TokyoNight Night's `#5f5fff` worse than it was.
+    #[test]
+    fn tab_accent_reaches_3_to_1_over_wallpapers() {
+        use kettle_config::{BackgroundType, ChromeBackground};
+        // Configured `accent-color` values a theme does not choose.
+        let arbitrary = [
+            Rgb::new(0x5f, 0x5f, 0xff),
+            Rgb::new(0xff, 0x00, 0x00),
+            Rgb::new(0x00, 0xff, 0x00),
+            Rgb::new(0x80, 0x80, 0x80),
+            Rgb::new(0xff, 0xd7, 0x00),
+            Rgb::new(0x1e, 0x90, 0xff),
+            Rgb::new(0x22, 0x55, 0xaa),
+            Rgb::new(0xaa, 0x33, 0x55),
+        ];
+        let weaker = |ink: Rgb, strip: Rgb, tab: Rgb| {
+            color::contrast_ratio(ink, strip).min(color::contrast_ratio(ink, tab))
+        };
+        let best_possible = |strip: Rgb, tab: Rgb| {
+            let (a, b) = (
+                color::relative_luminance(strip) + 0.05,
+                color::relative_luminance(tab) + 0.05,
+            );
+            let (dark, light) = (a.min(b), a.max(b));
+            (1.05 / light).max(dark / 0.05).max((light / dark).sqrt())
+        };
+        let hue_gap = |a: f64, b: f64| {
+            let d = (a - b).rem_euclid(6.0);
+            d.min(6.0 - d)
+        };
+        // Wallpapers reduced to the average `chrome-background = auto` samples.
+        let wallpaper = |pixels: &[Rgb]| {
+            let rgba: Vec<u8> = pixels.iter().flat_map(|c| [c.r, c.g, c.b, 255]).collect();
+            color::average_color(&rgba)
+        };
+        let levels = [0u8, 51, 102, 153, 204, 255];
+        let mut averages = Vec::new();
+        for r in levels {
+            for g in levels {
+                for b in levels {
+                    averages.push(wallpaper(&[Rgb::new(r, g, b)]));
+                }
+            }
+        }
+        averages.push(wallpaper(&[Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]));
+        averages.push(wallpaper(&[Rgb::new(90, 60, 120), Rgb::new(20, 10, 40)]));
+        averages.push(wallpaper(&[
+            Rgb::new(250, 240, 200),
+            Rgb::new(200, 220, 255),
+        ]));
+
+        let mut failures = Vec::new();
+        let mut cases = 0usize;
+        let mut check = |label: &str, theme: &kettle_config::Theme, strip: Rgb| {
+            let tab = theme.background;
+            let mut raws = vec![
+                ("theme accent".to_string(), theme.accent),
+                ("broadcast".to_string(), theme.palette[3]),
+            ];
+            raws.extend(arbitrary.map(|c| (format!("accent-color {c:?}"), c)));
+            raws.extend(
+                kettle_config::peacock_pool(theme)
+                    .into_iter()
+                    .map(|c| (format!("per-window accent {c:?}"), c)),
+            );
+            let reachable = best_possible(strip, tab) >= ICON_CONTRAST + 0.01;
+            for (source, raw) in &raws {
+                for focused in [true, false] {
+                    cases += 1;
+                    let start = if focused {
+                        *raw
+                    } else {
+                        color::over(theme.foreground, strip, 0.5, false)
+                    };
+                    let bar = tab_accent(*raw, strip, tab, theme.foreground, focused);
+                    let got = weaker(bar, strip, tab);
+                    let start_ratio = weaker(start, strip, tab);
+                    if reachable && got < ICON_CONTRAST - 1e-6 {
+                        failures.push(format!("{label}: {source} (focused {focused}) {got:.2}:1"));
+                    } else if got < start_ratio - 1e-6 {
+                        failures.push(format!(
+                            "{label}: {source} (focused {focused}) {got:.2}:1, \
+                             worse than its start {start_ratio:.2}:1"
+                        ));
+                    }
+                    let (raw_hue, raw_saturation, _) = color::hsl(*raw);
+                    let (hue, saturation, lightness) = color::hsl(bar);
+                    // Hue is defined only for a visible tint; below 32
+                    // levels of chroma, 8-bit rounding alone moves it.
+                    let chroma = bar.r.max(bar.g).max(bar.b) - bar.r.min(bar.g).min(bar.b);
+                    let tinted = raw_saturation >= 0.25
+                        && saturation >= 0.25
+                        && chroma >= 32
+                        && (0.1..=0.9).contains(&lightness);
+                    if focused && tinted && hue_gap(hue, raw_hue) > 0.05 {
+                        failures.push(format!(
+                            "{label}: {source} moved hue {raw_hue:.3} -> {hue:.3} ({bar:?})"
+                        ));
+                    }
+                }
+            }
+        };
+
+        let names = kettle_config::Theme::list();
+        let mut cfg = kettle_config::Config {
+            background_type: BackgroundType::Image,
+            ..kettle_config::Config::default()
+        };
+        for mode in [
+            ChromeBackground::Theme,
+            ChromeBackground::Black,
+            ChromeBackground::White,
+            ChromeBackground::Auto,
+        ] {
+            cfg.chrome_background = mode;
+            for name in &names {
+                let theme = kettle_config::Theme::by_name(name);
+                // Every average for the five themes the review measured, and
+                // a spread for the rest.
+                let full = [
+                    "TokyoNight Night",
+                    "Kettle Day",
+                    "Catppuccin Latte",
+                    "Adventure Time",
+                    "3024 Day",
+                ]
+                .contains(name);
+                let picked: Vec<Rgb> = if full || mode != ChromeBackground::Auto {
+                    averages.clone()
+                } else {
+                    averages.iter().copied().step_by(23).collect()
+                };
+                let mut strips: Vec<Rgb> = picked
+                    .into_iter()
+                    .map(|average| crate::resolve_chrome_bg(&cfg, &theme, Some(average)))
+                    .collect();
+                strips.sort_by_key(|c| (c.r, c.g, c.b));
+                strips.dedup();
+                for strip in strips {
+                    check(&format!("{name} {mode:?} strip {strip:?}"), &theme, strip);
+                }
+            }
+        }
+        assert!(cases > 50_000, "the sweep ran {cases} cases");
+        assert!(
+            failures.is_empty(),
+            "{} failing bars of {cases}: {}",
             failures.len(),
             failures
                 .iter()

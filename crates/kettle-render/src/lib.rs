@@ -1351,7 +1351,8 @@ impl Renderer {
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
             // Broadcast's warning yellow or the window's accent, at 3:1 on
-            // the active tab and the strip; grey in an unfocused window.
+            // the active tab and the strip where the colours allow it; grey
+            // in an unfocused window.
             let tab_accent = chrome::tab_accent(
                 if tabbar.broadcast {
                     theme.palette[3]
