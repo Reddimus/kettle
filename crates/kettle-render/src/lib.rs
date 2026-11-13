@@ -905,6 +905,7 @@ impl Renderer {
             .find(|p| p.focused)
             .and_then(|p| color::resolve_query(257, theme, &p.snap.colors))
             .unwrap_or(theme.background);
+        let translucent_window = composed_bg_alpha(cfg) < 1.0;
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
         let cw = self.cell_w;
@@ -2240,13 +2241,19 @@ impl Renderer {
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
             let accent = cfg.search_background.unwrap_or(theme.palette[3]);
 
+            let (bar_fill, bar_alpha) = search::search_bar_layer(
+                theme,
+                translucent_window,
+                self.config.format.is_srgb(),
+                &mut self.chrome_colors,
+            );
             quads.push(rect(
                 geometry.rect.0,
                 geometry.rect.1,
                 geometry.rect.2,
                 geometry.rect.3,
-                theme.palette[8],
-                0.98,
+                bar_fill,
+                bar_alpha as f32,
             ));
             // A distinct editor well survives low-contrast themes. All button
             // rectangles get a subtle surface; the focused one uses the same
@@ -2335,30 +2342,15 @@ impl Renderer {
                     editor_clusters =
                         segment_clusters(&self.search_segment_buffers[index], &segment);
                 }
-                let bar =
-                    self.chrome_colors
-                        .surface(theme.background, theme.palette[8], 0.98, linear);
-                let background = match segment.control {
-                    Some(SearchControl::Editor) => {
-                        self.chrome_colors
-                            .surface(bar, theme.background, 0.72, linear)
-                    }
-                    Some(control) => {
-                        let (fill, alpha) = if search.focused == control {
-                            (accent, SEARCH_FOCUSED_FILL_ALPHA)
-                        } else {
-                            (theme.background, 0.28)
-                        };
-                        let fill = self
-                            .chrome_colors
-                            .surface(bar, fill, f64::from(alpha), linear);
-                        tint_of(control).map_or(fill, |(tint, alpha)| {
-                            self.chrome_colors
-                                .surface(fill, tint, f64::from(alpha), linear)
-                        })
-                    }
-                    None => bar,
-                };
+                let background = search::search_segment_fill(
+                    theme,
+                    accent,
+                    segment.control,
+                    search.focused,
+                    segment.control.and_then(tint_of),
+                    linear,
+                    &mut self.chrome_colors,
+                );
                 let color = Some(self.chrome_colors.text(
                     if segment.control == Some(search.focused)
                         && search.focused != SearchControl::Editor

@@ -388,6 +388,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   now keep 3:1 against the panel and, on the highlighted row, against the
   highlight. The panel's own outline and divider stay quiet.
 
+- The search bar's "No matches" fell to 4.45:1 on a translucent window,
+  because the terminal showed through the bar. Over a translucent terminal
+  the bar is now drawn opaque, in the colour it always had over the theme's
+  background.
+
 - The "↓ N lines" button's label reached 4.5:1 only at full ink, passing by
   a rounding step (4.503:1 in TokyoNight Night). It now keeps 4.5:1 at the
   edges of its strokes too. In a few themes the button's fill moves slightly
