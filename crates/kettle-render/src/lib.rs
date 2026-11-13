@@ -909,11 +909,20 @@ impl Renderer {
             .and_then(|p| color::resolve_query(257, theme, &p.snap.colors))
             .unwrap_or(theme.background);
         // The active horizontal tab is the terminal's own surface: as
-        // translucent as the window, unless its text needs it more opaque.
-        let active_tab_alpha =
-            chrome::text_surface_alpha(default_bg, composed_bg_alpha(cfg), color::PLATFORM_WHITE);
-        let active_tab_backing =
-            color::Backing::translucent(default_bg, active_tab_alpha, color::PLATFORM_WHITE);
+        // translucent as the window, unless its text needs it a little more
+        // opaque. Over Kettle's own wallpapers it never is: the tab would
+        // show as a seam.
+        let active_tab_alpha = chrome::text_surface_alpha(
+            default_bg,
+            composed_bg_alpha(cfg),
+            color::PLATFORM_BACKDROP_LIFT,
+            cfg.background_type == kettle_config::BackgroundType::Solid,
+        );
+        let active_tab_backing = color::Backing::translucent(
+            default_bg,
+            active_tab_alpha,
+            color::PLATFORM_BACKDROP_LIFT,
+        );
         let translucent_window = composed_bg_alpha(cfg) < 1.0;
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
@@ -3452,8 +3461,9 @@ impl Renderer {
         }
         for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
             let (x, y, w, h) = pill.rect;
-            let (fill, ink) =
-                scrollback::scrollback_pill_colors(theme, self.config.format.is_srgb());
+            let (fill, ink) = self
+                .chrome_colors
+                .scrollback_pill(theme, self.config.format.is_srgb());
             tab_strip::rounded_fill(
                 &mut menu_q,
                 (x, y, w, h),
@@ -4204,13 +4214,13 @@ impl Renderer {
                     default_color: gc(title_fg),
                     custom_glyphs: &[],
                 });
-                if let Some((hint_rect, _)) = &s.hint {
-                    let hint_fg = self.chrome_colors.tab_hint(
-                        fg,
-                        tab_background,
-                        tab_backing,
-                        overlay.window_focused,
-                    );
+                // The Cmd+N hints are for the keyboard in a focused window.
+                // An unfocused one keeps their lane, so nothing moves when
+                // focus returns, but does not paint them.
+                if overlay.window_focused
+                    && let Some((hint_rect, _)) = &s.hint
+                {
+                    let hint_fg = self.chrome_colors.tab_hint(fg, tab_background, tab_backing);
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,

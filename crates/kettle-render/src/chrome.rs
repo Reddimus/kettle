@@ -8,6 +8,10 @@ pub(crate) const ICON_CONTRAST: f64 = 3.0;
 // inactive tab titles, tab close glyphs and menu shortcut hints.
 pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 
+/// The jump button's colours, keyed by the theme colours and blend mode
+/// they came from.
+type PillColors = (([u32; 3], bool), (Rgb, Rgb));
+
 #[derive(Default)]
 pub(crate) struct Colors {
     cache: MinimumContrastCache,
@@ -18,6 +22,7 @@ pub(crate) struct Colors {
     inactive: std::collections::HashMap<([u32; 3], u32, bool), Rgb>,
     markers: std::collections::HashMap<([u32; 2], bool), Rgb>,
     backed: std::collections::HashMap<([u32; 3], u64, bool), Rgb>,
+    pub(crate) pill: Option<PillColors>,
 }
 
 impl Colors {
@@ -44,6 +49,29 @@ impl Colors {
         palette
     }
 
+    /// The jump-to-bottom button's fill and label
+    /// ([`crate::scrollback::scrollback_pill_colors`]), resolved once per
+    /// theme rather than every frame.
+    pub(crate) fn scrollback_pill(
+        &mut self,
+        theme: &kettle_config::Theme,
+        linear: bool,
+    ) -> (Rgb, Rgb) {
+        let key = (
+            [theme.palette[0], theme.background, theme.foreground]
+                .map(MinimumContrastCache::color_key),
+            linear,
+        );
+        if let Some((saved, colors)) = self.pill
+            && saved == key
+        {
+            return colors;
+        }
+        let colors = crate::scrollback::scrollback_pill_colors(theme, linear);
+        self.pill = Some((key, colors));
+        colors
+    }
+
     pub(crate) fn text(&mut self, fg: Rgb, bg: Rgb) -> Rgb {
         self.resolve(fg, bg, TEXT_CONTRAST)
     }
@@ -57,8 +85,8 @@ impl Colors {
         }
     }
 
-    /// A tab's title or Cmd+N hint. An unfocused window fades it halfway
-    /// toward the tab, but it still names the tab, so it keeps the text floor.
+    /// A tab's title. An unfocused window fades it halfway toward the tab,
+    /// but it still names the tab, so it keeps the text floor.
     pub(crate) fn tab_label(&mut self, fg: Rgb, bg: Rgb, focused: bool) -> Rgb {
         if focused {
             self.text(fg, bg)
@@ -107,16 +135,10 @@ impl Colors {
         self.on(ink, backing, TEXT_CONTRAST)
     }
 
-    /// A tab's Cmd+N shortcut hint, quieter than its title.
-    pub(crate) fn tab_hint(
-        &mut self,
-        fg: Rgb,
-        surface: Rgb,
-        backing: color::Backing,
-        focused: bool,
-    ) -> Rgb {
+    /// A tab's Cmd+N shortcut hint, quieter than its title. It is for the
+    /// keyboard in a focused window; an unfocused one does not paint it.
+    pub(crate) fn tab_hint(&mut self, fg: Rgb, surface: Rgb, backing: color::Backing) -> Rgb {
         let ink = self.muted(fg, surface);
-        let ink = self.tab_label(ink, surface, focused);
         self.on(ink, backing, TEXT_CONTRAST)
     }
 
@@ -348,23 +370,38 @@ pub(crate) fn tab_accent(
     color::with_min_contrast_on_both(ink, strip, active_bg, ICON_CONTRAST, focused)
 }
 
+/// How much more opaque than the window [`text_surface_alpha`] may make a
+/// surface. More than this shows as a seam against the terminal around it.
+pub(crate) const MAX_TEXT_SURFACE_RAISE: f64 = 0.1;
+
 /// The opacity a translucent surface needs under chrome text. Behind a
-/// translucent window lies anything from black to `white`, and on a mid-tone
-/// theme no ink clears `TEXT_CONTRAST` over that whole span. The surface keeps
-/// the window's opacity whenever some ink can; otherwise it takes the least
-/// opacity at which one can.
-pub(crate) fn text_surface_alpha(surface: Rgb, window_alpha: f64, white: [f64; 3]) -> f64 {
+/// translucent window lies anything from black to white, raised by `lift`,
+/// and on a mid-tone theme no ink clears `TEXT_CONTRAST` over that whole span.
+/// The surface keeps the window's opacity whenever some ink can. Otherwise,
+/// when `may_raise`, it takes the least opacity at which one can, but at most
+/// [`MAX_TEXT_SURFACE_RAISE`] more than the window's; past that, and over
+/// Kettle's own wallpapers (`may_raise` false), the text is best effort.
+pub(crate) fn text_surface_alpha(
+    surface: Rgb,
+    window_alpha: f64,
+    lift: [f64; 3],
+    may_raise: bool,
+) -> f64 {
     let window_alpha = window_alpha.clamp(0.0, 1.0);
     let reachable = |alpha: f64| {
-        let backing = color::Backing::translucent(surface, alpha, white);
+        let backing = color::Backing::translucent(surface, alpha, lift);
         [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
             .into_iter()
             .any(|ink| backing.weakest_contrast(ink) >= TEXT_CONTRAST)
     };
-    if reachable(window_alpha) {
+    if !may_raise || reachable(window_alpha) {
         return window_alpha;
     }
-    let (mut lo, mut hi) = (window_alpha, 1.0_f64);
+    let cap = (window_alpha + MAX_TEXT_SURFACE_RAISE).min(1.0);
+    if !reachable(cap) {
+        return cap;
+    }
+    let (mut lo, mut hi) = (window_alpha, cap);
     for _ in 0..16 {
         let mid = (lo + hi) / 2.0;
         if reachable(mid) {

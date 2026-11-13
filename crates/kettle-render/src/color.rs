@@ -513,23 +513,26 @@ pub(crate) fn with_min_contrast_on_both(
 /// that pixel, not the ink, is the strongest a stem may show.
 pub(crate) const STEM_COVERAGE: f64 = 248.0 / 255.0;
 
-/// The brightest backdrop a translucent window can show, per channel, on the
-/// scale where white is 255: plain white.
-pub(crate) const PLAIN_WHITE: [f64; 3] = [255.0; 3];
+/// How far a window server lifts a translucent window's backdrop, per channel,
+/// on the scale where white is 255: not at all.
+pub(crate) const NO_BACKDROP_LIFT: [f64; 3] = [0.0; 3];
 
-/// The same on macOS, where the window server's blur brightens what it
-/// samples. Calibrated from the 6.0.0 release comparison's capture of
-/// TokyoNight Night at 0.86 over a pure white bar (`ux/r14/mac/kettle/
-/// C02-over-backdrop.png`, x 2-60, y 720-811). Its most common and brightest
-/// pixel there, (61, 64, 74), is what a backdrop of (267.4, 282.1, 279.8)
-/// gives; [`PLAIN_WHITE`] gives (59, 60, 71). Rounded up.
-pub(crate) const MACOS_BLURRED_WHITE: [f64; 3] = [268.0, 283.0, 280.0];
+/// The same on macOS, where the window shows a little more than the plain
+/// composite at both ends. In the 6.0.0 release comparison's capture of
+/// TokyoNight Night at 0.86 (`ux/r14/mac/kettle/C02-over-backdrop.png`) the
+/// terminal measured (25, 28, 38) over the black bar (x 1240-1270), where the
+/// straight-alpha composite is (22, 23, 33), and (61, 64, 74) over the white
+/// bar (x 2-60, y 720-811), where it is (58, 59, 68): about +(3, 5, 5) at
+/// both ends. Seen through the 14% the window lets through, that is a
+/// backdrop lifted by (18.9, 34.1, 38.0) and (21.0, 36.3, 40.1); this is the
+/// larger, rounded up. One capture, in the dark appearance, backs it.
+pub(crate) const MACOS_BACKDROP_LIFT: [f64; 3] = [21.0, 37.0, 41.0];
 
-/// The white extreme of the backdrop on this platform.
-pub(crate) const PLATFORM_WHITE: [f64; 3] = if cfg!(target_os = "macos") {
-    MACOS_BLURRED_WHITE
+/// The backdrop lift on this platform.
+pub(crate) const PLATFORM_BACKDROP_LIFT: [f64; 3] = if cfg!(target_os = "macos") {
+    MACOS_BACKDROP_LIFT
 } else {
-    PLAIN_WHITE
+    NO_BACKDROP_LIFT
 };
 
 /// What a surface can look like on screen. An opaque surface shows its own
@@ -557,21 +560,21 @@ impl Backing {
     }
 
     /// `color` left at `alpha` in the window's surface, over backdrops from
-    /// black to `white` ([`PLATFORM_WHITE`] for the live window). The scene is
-    /// premultiplied, and the window server adds `(1 - alpha)` of the
-    /// backdrop to the stored, sRGB-encoded value. That value is
-    /// `alpha * color` on a plain target and the encoding of `alpha` times
-    /// its linear light on an sRGB one. The second is never darker, so the
-    /// extremes take the first over black and the second over white, whatever
-    /// the target. A macOS capture of TokyoNight Night at 0.86 over a white
-    /// and a black bar measured within a few levels of these.
-    pub(crate) fn translucent(color: Rgb, alpha: f64, white: [f64; 3]) -> Self {
+    /// black to white, each raised by `lift` ([`PLATFORM_BACKDROP_LIFT`] for
+    /// the live window). The window server adds `(1 - alpha)` of the backdrop
+    /// to the stored, sRGB-encoded value. With straight alpha, which macOS is
+    /// presented (see `theme::surface_clear_color`), and on any plain target,
+    /// that value is `alpha * color`; premultiplied on an sRGB target it is
+    /// the encoding of `alpha` times the colour's linear light. The second is
+    /// never darker, so the extremes take the first over black and the second
+    /// over white, covering every path.
+    pub(crate) fn translucent(color: Rgb, alpha: f64, lift: [f64; 3]) -> Self {
         let alpha = alpha.clamp(0.0, 1.0);
         if alpha >= 1.0 {
             return Self::opaque(color);
         }
-        let channel = |value: u8, backdrop: Option<f64>| -> u8 {
-            let stored = if backdrop.is_some() {
+        let channel = |value: u8, white: bool, lift: f64| -> u8 {
+            let stored = if white {
                 let light = alpha * srgb_to_linear(value);
                 255.0
                     * if light <= 0.0031308 {
@@ -582,20 +585,21 @@ impl Backing {
             } else {
                 alpha * f64::from(value)
             };
-            (stored + (1.0 - alpha) * backdrop.unwrap_or(0.0))
+            let backdrop = if white { 255.0 } else { 0.0 } + lift;
+            (stored + (1.0 - alpha) * backdrop)
                 .round()
                 .clamp(0.0, 255.0) as u8
         };
         Self {
             over_black: Rgb::new(
-                channel(color.r, None),
-                channel(color.g, None),
-                channel(color.b, None),
+                channel(color.r, false, lift[0]),
+                channel(color.g, false, lift[1]),
+                channel(color.b, false, lift[2]),
             ),
             over_white: Rgb::new(
-                channel(color.r, Some(white[0])),
-                channel(color.g, Some(white[1])),
-                channel(color.b, Some(white[2])),
+                channel(color.r, true, lift[0]),
+                channel(color.g, true, lift[1]),
+                channel(color.b, true, lift[2]),
             ),
             translucent: true,
         }

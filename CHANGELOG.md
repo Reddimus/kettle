@@ -408,23 +408,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - The outlines of Settings' fields, choices and switches, the search
   field, the category arrows and an off switch's knob were about 1.5:1. They
-  now keep 3:1 against the panel and, on the highlighted row, against the
-  highlight. The panel's own outline and divider stay quiet.
+  now keep 3:1 against the panel (3.0:1 in TokyoNight Night). On the
+  highlighted row they are brighter, keeping 3:1 against the highlight too
+  (6.2:1 against the panel there). The panel's own outline and divider stay
+  quiet.
 
-- On a translucent window, the default on macOS and Windows, text on the
-  active tab was checked against the theme's background rather than what the
-  window shows over the desktop. Over a light desktop the Cmd+N hint fell to
-  about 3.2:1. In a focused window the title, hint and close glyph now keep
-  4.5:1 against the tab as it shows over a black or a white backdrop. On
-  macOS, where the window blur brightens a white backdrop by a few levels,
-  that white is calibrated from a capture over a pure white bar. A few
-  mid-tone themes (Blue Dolphin, Grass and Hot Dog Stand, and on macOS also
-  Fairyfloss) draw the active tab slightly more opaque at 86%, since no text
-  colour could reach 4.5:1 over that span.
+- On a translucent window, text on the active tab was checked against the
+  theme's background rather than what the window shows over the desktop.
+  Over a light desktop the Cmd+N hint fell to about 3.2:1 at macOS's default
+  86%. In a focused window the title, hint and close glyph now keep 4.5:1
+  against the tab as it shows over a black or a white backdrop. On macOS,
+  which shows a translucent window a few levels brighter at both ends, the
+  backdrop is lifted by the amount one capture measured. Where no text colour
+  can reach 4.5:1, the active tab is drawn up to 10% more opaque over a solid
+  background; at 86% that is Blue Dolphin, Grass and Hot Dog Stand, and on
+  macOS also Fairyfloss and Ocean. It is never raised over an image,
+  starfield or transparent background, where it would show as a seam, and
+  past that limit the text is as clear as it can be. Linux's default 99%
+  window is translucent too, so its tab hints move by up to 7 levels.
 
 - In an unfocused window, tab titles and Cmd+N hints were dimmed to 3:1, as
-  low as 2.5:1 on a translucent window. They are still dimmed, but keep
-  4.5:1, because they name the tabs. The +, ▾ and × glyphs keep their 3:1.
+  low as 2.5:1 on a translucent window. Titles are still dimmed, but keep
+  4.5:1, because they name the tabs. The hints, which are for the keyboard,
+  are no longer drawn until the window is focused again; their space stays,
+  so nothing moves. The +, ▾ and × glyphs keep their 3:1.
 
 - The search bar's "No matches" fell to 4.45:1 on a translucent window,
   because the terminal showed through the bar. Over a translucent terminal

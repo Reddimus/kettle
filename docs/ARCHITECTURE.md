@@ -3723,27 +3723,34 @@ in the terminal engine; Kettle's bounded copy helper applies the same policy
 to manual copy, copy on selection and vi yank.
 
 Chrome text is different: Kettle chooses it, so it is held to its floors on
-screen. A surface left at alpha `a` shows the stored, premultiplied pixel plus
-`1 - a` of whatever is behind the window, which can be anything from black to
-white. On macOS the window blur brightens white by a few levels, so
-`color::PLATFORM_WHITE` there is `MACOS_BLURRED_WHITE`, calibrated from the
-6.0.0 comparison's capture over a pure white bar; elsewhere it is plain white.
-`color::Backing` keeps a surface's two extremes, its composite over a
-black and over that white backdrop, and `Colors::on` floors an ink chosen against
-the surface's own colour against both, one 8-bit level wider each way for the
-GPU's and the window server's rounding. The ink stays on its side of the
-surface, so light text stays light. An opaque surface is unchanged, and an ink
-that already clears both extremes does not move. The active horizontal tab is
-the terminal surface at the window's opacity; on the few mid-tone themes where
-no ink can clear the text floor over that span,
-`chrome::text_surface_alpha` makes it just opaque enough. The search bar,
-which was 98% opaque, is drawn opaque over a translucent terminal in the
+screen. A surface left at alpha `a` shows its stored pixel plus `1 - a` of
+whatever is behind the window, which can be anything from black to white. The
+stored pixel is `a` times the colour with straight alpha (how macOS is
+presented) or on a plain target, and the encoding of `a` times its linear light
+when premultiplied on an sRGB target; `color::Backing` takes the darker over
+black and the lighter over white, so it covers every path. macOS shows a
+translucent window a few levels brighter at both ends than that, so there the
+backdrop is lifted by `color::MACOS_BACKDROP_LIFT`, derived from one
+dark-appearance capture in the 6.0.0 comparison; elsewhere
+`PLATFORM_BACKDROP_LIFT` is zero. `Colors::on` floors an ink chosen against
+the surface's own colour against both extremes, one 8-bit level wider each way
+for the GPU's and the window server's rounding. The ink stays on its side of
+the surface, so light text stays light. An opaque surface is unchanged, and an
+ink that already clears both extremes does not move; Linux's default 0.99
+window is translucent, so inks resolved exactly to the floor there move by up
+to 7 levels. The active horizontal tab is the terminal surface at the window's
+opacity. Where no ink can clear the text floor over that span,
+`chrome::text_surface_alpha` makes it more opaque, by at most
+`MAX_TEXT_SURFACE_RAISE` (0.1) and only over a solid background; over an image,
+starfield or transparent background, and past the cap, the text is best effort.
+At the default 0.86 that raises three mid-tone themes, five on macOS. The search
+bar, which was 98% opaque, is drawn opaque over a translucent terminal in the
 colour it has over the theme's background, so its labels do not depend on the
-backdrop. Its labels, the tab title, the Cmd+N hint and the close glyph are
-swept over every bundled theme at 0.86, 0.99 and opaque in
-`chrome_contrast_sweep_tests`. The tab accent bar, the jump-to-bottom pill's
-fill and terminal text, including `minimum-contrast`, are still resolved
-against the opaque colour.
+backdrop. An unfocused window does not paint the tabs' Cmd+N hints but keeps
+their lanes, so titles do not move. These labels are swept over every bundled
+theme at 0.86, 0.7, 0.43, 0.99 and opaque in `chrome_contrast_sweep_tests`.
+The tab accent bar, the jump-to-bottom pill's fill and terminal text, including
+`minimum-contrast`, are still resolved against the opaque colour.
 
 ### Cursor patch
 
@@ -5241,8 +5248,8 @@ grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
 28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
 hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
 New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
-dimmed; tab titles and shortcut hints keep 4.5:1 when dimmed, since they
-still name the tabs. Outer corners remain square.
+dimmed; tab titles keep 4.5:1 when dimmed, since they still name the tabs,
+and an unfocused window paints no shortcut hints. Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`

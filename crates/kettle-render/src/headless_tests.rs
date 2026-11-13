@@ -5275,6 +5275,80 @@ fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
     }
 }
 
+/// An unfocused window paints no Cmd+N hints: they are for the keyboard in
+/// a focused one. Their lane stays reserved, so the title does not move when
+/// focus comes and goes.
+#[test]
+fn an_unfocused_window_hides_tab_hints_without_moving_titles() {
+    let _serialized = gpu_test_guard();
+    let cfg = Config {
+        background_opacity: 1.0,
+        ..gpu_test_config()
+    };
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("tab hint visibility skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let snap = snapshot_of(20, 2, b"");
+    let mut tabs = TabBar::hidden();
+    tabs.height = (renderer.cell_h + 12.0).max(28.0).round();
+    tabs.band = (0.0, 0.0, 480.0, tabs.height);
+    tabs.new_tab = (440.0, 0.0, tabs.height, tabs.height);
+    tabs.new_tab_menu = (400.0, 0.0, tabs.height, tabs.height);
+    for idx in 0..2 {
+        let rect = (8.0 + idx as f32 * 190.0, 0.0, 190.0, tabs.height);
+        let hint = format!("Alt+{}", idx + 1);
+        let content = horizontal_tab_content_layout(
+            rect,
+            true,
+            true,
+            0.0,
+            "shell",
+            Some(&hint),
+            renderer.cell_w,
+        );
+        tabs.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: content.title,
+            hint: content.hint.map(|lane| (lane, hint)),
+            close: content.close,
+            title: "shell".into(),
+            path: None,
+            active: idx == 0,
+            activity: TabActivity::Normal,
+        });
+    }
+    // The lanes less the tab's accent bar along the top and a margin below.
+    let inner = |(x, y, w, h): (f32, f32, f32, f32)| (x, y + 6.0, w, h - 12.0);
+    let (hint, _) = tabs.segments[0]
+        .hint
+        .clone()
+        .expect("a 190 px tab has room for its hint");
+    let (hint, title) = (inner(hint), inner(tabs.segments[0].title_rect));
+    let mut boxes = Vec::new();
+    for window_focused in [true, false] {
+        let mut terminal = pane(&snap, 480, 160);
+        terminal.rect = (0.0, tabs.height, 480.0, 160.0 - tabs.height);
+        terminal.terminal = terminal.rect;
+        let overlay = Overlay {
+            window_focused,
+            ..Overlay::default()
+        };
+        let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+        let hint_ink = glyph_ink(&frame, hint, theme.background);
+        assert_eq!(
+            hint_ink.is_some(),
+            window_focused,
+            "focused={window_focused}: hint ink {hint_ink:?}"
+        );
+        boxes.push(glyph_ink(&frame, title, theme.background).expect("the title is painted"));
+    }
+    assert_eq!(boxes[0], boxes[1], "the title moved when focus changed");
+}
+
 /// The pixel box the ink in `rect` spans against `background`. Ink is any
 /// pixel more than 24 levels from the background.
 fn glyph_ink(frame: &image::RgbaImage, rect: Rect4, background: Rgb) -> Option<Rect4> {
