@@ -730,8 +730,10 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
 fn a_scheduled_pick_saves_to_the_side_the_schedule_wears_in_every_mode() {
     use kettle_config::ThemeMode;
     use kettle_render::ThemeSlot;
-    let mut cfg = kettle_config::Config::default();
-    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    let mut cfg = kettle_config::Config {
+        theme_schedule: kettle_config::parse_theme_schedule("19:00 dark,07:00 light"),
+        ..Default::default()
+    };
     assert!(cfg.theme_schedule.is_some());
     for mode in [
         ThemeMode::Explicit,
@@ -1507,9 +1509,11 @@ fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
         (kettle_config::ThemeMode::Auto, "dark-theme"),
         (kettle_config::ThemeMode::Explicit, "theme"),
     ] {
-        let mut cfg = kettle_config::Config::default();
-        cfg.theme_mode = mode;
-        cfg.minimum_contrast = 4.5;
+        let cfg = kettle_config::Config {
+            theme_mode: mode,
+            minimum_contrast: 4.5,
+            ..Default::default()
+        };
         for tr in [&EN, &ES] {
             let mut ws = WindowState::new(0, Mux::new());
             ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
@@ -1580,7 +1584,7 @@ fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
     // Every bundled theme's row index stays below the lowest footer node.
     let themes = Theme::look_order(true).len() + Theme::look_order(false).len();
     assert!(themes + 3 < super::PICKER_CONTRAST_A11Y_INDEX);
-    assert!(super::PICKER_CONTRAST_A11Y_INDEX < super::PICKER_FOOTER_A11Y_INDEX);
+    const { assert!(super::PICKER_CONTRAST_A11Y_INDEX < super::PICKER_FOOTER_A11Y_INDEX) };
     let src = production_source();
     let action = src
         .split("fn handle_accessibility_action(")
@@ -1617,9 +1621,11 @@ fn tab_and_shift_tab_switch_sides_when_the_picker_has_them() {
         );
     }
     // A fixed theme with a schedule still has sides, and Tab toggles them.
-    let mut cfg = kettle_config::Config::default();
-    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
-    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    let cfg = kettle_config::Config {
+        theme_mode: kettle_config::ThemeMode::Explicit,
+        theme_schedule: kettle_config::parse_theme_schedule("19:00 dark,07:00 light"),
+        ..Default::default()
+    };
     let active = theme_pick_key(&cfg, Some(false));
     assert_eq!(active, "light-theme");
     let mut picker = state("", 0, &cfg.light_theme.clone());
@@ -1723,8 +1729,10 @@ fn tab_and_shift_tab_switch_sides_when_the_picker_has_them() {
 #[test]
 fn tab_in_a_fixed_theme_moves_rows_as_before() {
     use super::{ThemePickerTab, theme_pick_key, theme_picker_tab};
-    let mut cfg = kettle_config::Config::default();
-    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let cfg = kettle_config::Config {
+        theme_mode: kettle_config::ThemeMode::Explicit,
+        ..Default::default()
+    };
     let save = theme_pick_key(&cfg, Some(true));
     assert_eq!(save, "theme");
     assert_eq!(
