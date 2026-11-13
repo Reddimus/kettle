@@ -1447,4 +1447,12 @@ fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
         .unwrap();
     assert!(action.contains("accessibility_theme_slot(request.target_node)"));
     assert!(action.contains("self.switch_theme_slot(ws, slot);"));
+    // A screen reader's click is a user event, past `window_event`'s
+    // preview sync, so switching previews the side's theme itself.
+    let switch = src
+        .split("fn switch_theme_slot(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(switch.contains("self.sync_theme_preview(ws);"));
 }

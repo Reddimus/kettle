@@ -2179,8 +2179,9 @@ impl App {
     /// next listed ratio and save it, as the Settings row does. It is not part
     /// of the picker's preview, so Esc leaves it as set.
     /// Edit `slot`'s theme in the open theme picker (see
-    /// `switch_theme_picker_slot`); the post-event `sync_theme_preview`
-    /// previews it.
+    /// `switch_theme_picker_slot`) and preview it now: a screen reader's
+    /// click arrives as a user event, which skips `window_event`'s preview
+    /// sync.
     pub(super) fn switch_theme_slot(
         &mut self,
         ws: &mut WindowState,
@@ -2190,6 +2191,7 @@ impl App {
             return;
         };
         if switch_theme_picker_slot(state, &self.cfg, slot, &self.ui_text) {
+            self.sync_theme_preview(ws);
             ws.accessibility_pending = true;
             if let Some(window) = &ws.window {
                 window.request_redraw();
