@@ -615,6 +615,9 @@ pub(super) struct PickerGeometry {
 /// Rows the theme picker paints whole, at most. It has the room: nothing
 /// else is open, and a longer list shows more of the themes' looks at once.
 const THEME_PICKER_MAX_VISIBLE_ROWS: usize = 14;
+/// Rows the theme picker keeps however short the window: its footer gives
+/// way first.
+const THEME_PICKER_MIN_VISIBLE_ROWS: usize = 4;
 
 /// How many whole rows a list of `total` rows `rows_h` high paints.
 fn painted_rows(total: usize, rows_h: f32, row_h: f32) -> usize {
@@ -634,10 +637,9 @@ pub(super) fn picker_card_geometry(
 }
 
 /// [`picker_card_geometry`] for the theme picker: up to 14 rows, then its
-/// footer in the room left. The sample card needs room for 8 rows besides
-/// (or the whole list); without it the status line keeps at least 4 rows,
-/// first as two lines and then as one, before it goes too. The header is
-/// where every picker has it.
+/// footer in the room left. The footer gives way so the list keeps at least
+/// 4 rows (or the whole list): the sample card goes first, then one status
+/// line, then the other. The header is where every picker has it.
 /// `fits` says whether the card and the status lines fit a given width.
 pub(super) fn theme_picker_card_geometry(
     surface: (f32, f32),
@@ -699,7 +701,7 @@ fn picker_card_geometry_with(
         .find_map(|(sample, lines)| {
             let footer_h = kettle_render::theme_footer_height(ch, sample, lines);
             let rows_h = picker_rows_height(row_count, cap, available - footer_h, row_h);
-            let want = row_count.min(if sample { PICKER_MAX_VISIBLE_ROWS } else { 4 });
+            let want = row_count.min(THEME_PICKER_MIN_VISIBLE_ROWS);
             (rows_h + footer_h <= available + 0.01
                 && painted_rows(row_count, rows_h, row_h) >= want)
                 .then_some(((sample, lines, footer_h), rows_h))

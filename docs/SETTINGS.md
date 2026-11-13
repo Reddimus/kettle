@@ -253,10 +253,11 @@ Light, Dark or Fixed theme) and names the dark and the light theme, with a
 dot and an underline on the side a pick saves to; a fixed theme shows only
 **Theme:**. The **Contrast:** button on it steps `minimum-contrast` through
 Off, 3:1, 4.5:1 and 7:1 and saves it at once, like the Settings row. It is
-not part of the preview: Esc puts back the theme only, not the contrast. On
-a short window the card is left out first, then one status line; a window
-too narrow for them leaves them out rather than cutting them. The list shows
-up to 14 rows, and a screen reader reads the card and status as one line.
+not part of the preview: Esc puts back the theme only, not the contrast. The
+footer gives way so the list keeps at least four rows: on a short window the
+card is left out first, then one status line. A window too narrow for them
+leaves them out rather than cutting them. The list shows up to 14 rows, and a
+screen reader reads the card and status as one line.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,

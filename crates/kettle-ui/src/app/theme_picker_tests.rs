@@ -1093,7 +1093,8 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
 }
 
 /// A short window drops the sample card first, then a status line, and the
-/// list keeps at least four rows.
+/// list keeps at least four rows; a window of 600 pixels already shows the
+/// card.
 #[test]
 fn a_short_window_drops_the_theme_sample_before_the_rows() {
     use super::{open_picker_list, picker_context_menu};
@@ -1115,10 +1116,11 @@ fn a_short_window_drops_the_theme_sample_before_the_rows() {
         let parts = menu.picker_footer.as_ref().map_or((false, 0), |footer| {
             (footer.show_sample, footer.status_lines)
         });
-        if parts.0 {
-            assert!(painted >= 8, "{height}: card with {painted} rows");
-        } else if parts.1 > 0 {
-            assert!(painted >= 4, "{height}: status with {painted} rows");
+        if parts.1 > 0 {
+            assert!(painted >= 4, "{height}: footer with {painted} rows");
+        }
+        if height >= 600 {
+            assert!(parts.0, "{height}: no sample card");
         }
         let card = menu.card_rect();
         assert!(card.1 + card.3 <= height as f32 + 0.01, "{height}");
