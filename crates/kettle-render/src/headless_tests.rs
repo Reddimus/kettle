@@ -7108,13 +7108,64 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
     );
 }
 
+/// A picker header's key hint reaches the frame in secondary text, the
+/// colour `text_field_slot_color` gives the hint slot, not muted grey.
+#[test]
+fn a_picker_header_paints_its_key_hint_as_secondary_text() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
+        eprintln!("PICKER_HEADER_GPU_SKIP: no GPU adapter on this host");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 440.0;
+    let field = TextFieldOverlay {
+        picker_header: true,
+        placeholder: String::new(),
+        text: String::new(),
+        cursor_byte: 0,
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (40.0, 40.0, width, 30.0),
+        prefix: "  > ".into(),
+        hint: "Esc".into(),
+        accent_palette: 5,
+    };
+    let cw = text_field_cell_width(&field, renderer.cell_w, renderer.cell_h);
+    let hint = text_field_rects(&field, cw)[2];
+    assert!(hint.2 > 0.0, "the hint has a slot");
+    let overlay = Overlay {
+        context_menu: Some(ContextMenu {
+            picker_header_height: 30.0,
+            ..menu_level((40.0, 70.0), &["New tab", "Close tab"], 0, (width, row_h))
+        }),
+        text_field: Some(field),
+        ..focused(false)
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 260)], &overlay);
+    let theme = &cfg.theme;
+    let mut colors = chrome::Colors::default();
+    let secondary = overlays::picker_header_secondary_color(theme, &mut colors);
+    let floor = chrome::SECONDARY_TEXT_CONTRAST
+        .min(color::contrast_ratio(theme.foreground, theme.background));
+    assert_glyph_painted(
+        &frame,
+        hint,
+        (theme.background, secondary),
+        floor,
+        "picker key hint",
+    );
+}
+
 /// An empty picker query paints its placeholder in the editor slot, in the
 /// secondary text colour; typing replaces it, and other fields paint none.
 #[test]
 fn an_empty_picker_query_paints_its_placeholder() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
-        eprintln!("placeholder check skipped: no GPU adapter");
+        eprintln!("PICKER_HEADER_GPU_SKIP: no GPU adapter on this host");
         return;
     };
     cfg.theme = kettle_config::Theme::by_name("Builtin Dark");

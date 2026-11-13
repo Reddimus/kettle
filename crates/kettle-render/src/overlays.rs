@@ -2046,6 +2046,25 @@ pub(crate) fn picker_header_secondary_color(
     colors.secondary(theme.foreground, theme.background)
 }
 
+/// The colour of text field slot `slot` (0 prefix, 1 editor, 2 key hint, as
+/// [`crate::text_field_rects`] orders them). A picker header paints its query
+/// as text and its key hint as secondary text; other fields use `fg`.
+pub(crate) fn text_field_slot_color(
+    picker: bool,
+    slot: usize,
+    theme: &kettle_config::Theme,
+    fg: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    if !picker {
+        fg
+    } else if slot == 2 {
+        picker_header_secondary_color(theme, colors)
+    } else {
+        colors.text(theme.foreground, theme.background)
+    }
+}
+
 /// The colour of a picker row's matched characters: the accent, moved only as
 /// far as it must to read at 4.5:1 on the row's own surface. The accent is
 /// close in lightness to the selection fill it tints, so the selected row

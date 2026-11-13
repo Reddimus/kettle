@@ -2,6 +2,7 @@ use super::overlays::{
     MENU_PANEL_RADIUS, MENU_SELECTION_INSET, menu_hint_left, menu_level_surfaces,
     menu_row_background, menu_row_selected, menu_row_swatch_rects, menu_row_text_color,
     picker_header_secondary_color, picker_scroll_thumb, picker_scroll_thumb_color,
+    text_field_slot_color,
 };
 use super::{ContextMenu, ContextMenuRow, chrome::Colors, context_menu_row_rects, menu};
 use kettle_config::{Rgb, Theme};
@@ -192,4 +193,31 @@ fn picker_hint_and_empty_state_read_as_secondary_text() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The painter colours a text field's slots through `text_field_slot_color`:
+/// a picker header's key hint is secondary text and its prefix and query are
+/// text, in every bundled theme; any other field keeps the colour it is given.
+#[test]
+fn picker_key_hint_slot_is_secondary_text() {
+    let other = Rgb::new(1, 2, 3);
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let mut colors = Colors::default();
+        let secondary = picker_header_secondary_color(&theme, &mut colors);
+        let text = colors.text(theme.foreground, theme.background);
+        let slot = |picker, slot, colors: &mut Colors| {
+            text_field_slot_color(picker, slot, &theme, other, colors)
+        };
+        assert_eq!(slot(true, 2, &mut colors), secondary, "{name} key hint");
+        assert_eq!(slot(true, 0, &mut colors), text, "{name} prefix");
+        assert_eq!(slot(true, 1, &mut colors), text, "{name} query");
+        for index in 0..3 {
+            assert_eq!(
+                slot(false, index, &mut colors),
+                other,
+                "{name} slot {index}"
+            );
+        }
+    }
 }

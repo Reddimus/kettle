@@ -4859,18 +4859,13 @@ impl Renderer {
                         bottom: (slot.1 + slot.3) as i32,
                     },
                     default_color: {
-                        let color = if picker {
-                            if index == 2 {
-                                overlays::picker_header_secondary_color(
-                                    theme,
-                                    &mut self.chrome_colors,
-                                )
-                            } else {
-                                self.chrome_colors.text(theme.foreground, theme.background)
-                            }
-                        } else {
-                            fg
-                        };
+                        let color = overlays::text_field_slot_color(
+                            picker,
+                            index,
+                            theme,
+                            fg,
+                            &mut self.chrome_colors,
+                        );
                         GColor::rgb(color.r, color.g, color.b)
                     },
                     custom_glyphs: &[],
