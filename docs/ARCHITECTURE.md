@@ -488,12 +488,28 @@ using `use super::*;` to share the parent scope:
 | `modals`, `pickers`, `hints`, `settings_text` | dialog ownership and input; picker projections; hint targets; translated settings notes |
 | `accessibility` | accessibility identifiers, projections, tree and actions |
 | `config_reload`, `sessions` | config watchers, reloads and themes; session save and restore |
+| `exit` | the once-only exit teardown, from `exiting` or after `run_app` |
 | `system_opener`, `update_toast` | bounded desktop launches; transient update notifications |
 
 Session saves pass their opt-in gate before snapshotting. One worker performs
 serialization, comparison and durable replacement with one replaceable pending
 snapshot; it holds no queue lock during filesystem work. Shutdown drains the
 latest snapshot after any write already in progress and waits for completion.
+
+A quit through AppKit's `terminate:` (Cmd+Q, the Dock's or app menu's Quit,
+logout, shutdown) never returns from `run_app`: winit calls
+`ApplicationHandler::exiting` and AppKit then calls `exit()`, which runs no
+destructor. So `exiting` hands a running recording its tail, saves the session
+once more through `save_session` and its gates when a window other than the
+quick terminal still has tabs, and runs the exit teardown. It first waits at
+most 300 ms for the recorder to write its tail, then deletes pasted screenshots
+and the image, document and video viewer copies, then waits at most 1.5 s for
+the session write (`SessionWriter::finish_timed`) and flushes notifications for
+at most 250 ms, so a stalled disk or a hung network home cannot hold a quit,
+logout or shutdown for more than about 2 s. A session write given up on leaves
+the previous file whole, because each write is an atomic replace. The same
+teardown runs after `run_app` returns; a flag makes the first call the only
+one.
 
 The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
 fixtures and includes the tests split out of its original body, preserving their

@@ -369,6 +369,7 @@ include!("clipboard_tests.rs");
 include!("config_reload_tests.rs");
 include!("ctl_tests.rs");
 include!("cursor_tests.rs");
+include!("exit_tests.rs");
 include!("focus_tests.rs");
 include!("gpu_recovery_tests.rs");
 include!("ime_tests.rs");

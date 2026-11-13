@@ -65,6 +65,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/ctl.rs"),
         include_str!("app/ctl_snapshot.rs"),
         include_str!("app/cursor.rs"),
+        include_str!("app/exit.rs"),
         include_str!("app/focus.rs"),
         include_str!("app/gpu_recovery.rs"),
         include_str!("app/hints.rs"),
@@ -131,6 +132,7 @@ mod clipboard;
 mod completion;
 mod ctl_snapshot;
 mod cursor;
+mod exit;
 mod focus;
 mod hints;
 mod ime;
@@ -654,6 +656,8 @@ pub struct App {
     /// When the session was last considered for writing. Drives the sweep
     /// described on [`SESSION_SWEEP`]; `None` until the first one runs.
     last_session_sweep: Option<std::time::Instant>,
+    /// Set once the exit teardown in `exit.rs` has run.
+    exit_teardown_done: bool,
 }
 
 #[cfg(test)]
@@ -1171,6 +1175,22 @@ impl ApplicationHandler<UserEvent> for App {
         runtime_tracker.set_window_count(self.windows.len());
     }
     // C1-DISPATCH-END
+
+    /// The loop is ending. On macOS a quit through `terminate:` (Cmd+Q, the
+    /// Dock's or app menu's Quit, logout, shutdown) lands here and AppKit
+    /// calls `exit()` right after, so this is the last code that runs: no
+    /// destructor does, and `run_app` never returns. Hand a running
+    /// recording its tail, save the session once more, then run the exit
+    /// teardown (`exit.rs`), which deletes the private copies and waits for
+    /// the session write. Closing the last window reaches here too, with
+    /// nothing left to save.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let runtime_tracker = self.runtime_tracker.clone();
+        let _phase = runtime_tracker.enter("exiting");
+        self.drain_recording_on_exit();
+        self.save_session_on_exit();
+        self.finish_exit();
+    }
 }
 
 /// Drift guard. The confirm dialog ("Close pane?", "Quit?") is a
