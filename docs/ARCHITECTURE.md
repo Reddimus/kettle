@@ -3674,8 +3674,11 @@ and how many status lines fit; kettle-render owns the words, layout and
 colours, so painting, the button's hit test and the footer's AccessKit text
 all come from `theme_footer_layout` and `theme_footer_description`. Each side
 on the status line is a `slot_chips` target in that layout, and the same rect
-is its AccessKit radio button's bounds (`theme_footer_slots` gives its words).
-A press or a screen reader's click sets `ThemePickerState::slot`, which
+is its AccessKit radio button's bounds (`theme_footer_slots` gives its words);
+the two radios sit in one radio group, and the layout's `contrast_button` rect
+is an AccessKit button whose click runs `step_picker_contrast`, as a press does.
+The footer's nodes take the top indices of the picker's id range, above every
+row's. A press, Tab or a screen reader's click sets `ThemePickerState::slot`, which
 re-seats the list on that side's theme but leaves the preview's baseline
 alone; at Enter, `theme_commit_plan` picks the key to save and, for the side
 the window is not on, leaves the baseline so the closed picker puts the

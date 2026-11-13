@@ -1589,6 +1589,12 @@ impl App {
             }
             return;
         }
+        if ws.theme_picker_input.is_some() && accessibility_theme_contrast(request.target_node) {
+            if request.action == AccessibilityAction::Click {
+                self.step_picker_contrast(ws);
+            }
+            return;
+        }
         if let Some(kind) = accessibility_modal_input_kind(ws)
             && [
                 accessibility_modal_id(kind, 1),
@@ -2204,7 +2210,7 @@ fn push_text_input_run(
 }
 
 /// The theme picker footer's node index, past any row's (rows start at 3).
-const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
+pub(super) const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
 /// The footer's dark and light sides, as radio buttons, just below it.
 const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
     (PICKER_FOOTER_A11Y_INDEX - 2, kettle_render::ThemeSlot::Dark),
@@ -2213,6 +2219,16 @@ const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
         kettle_render::ThemeSlot::Light,
     ),
 ];
+/// The radio group that holds the two sides, below them.
+const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
+/// The footer's Contrast button, below the group. It is the lowest footer
+/// index, so the rows below it never reach the footer's nodes.
+pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
+
+/// Whether `node` is the theme picker's Contrast button.
+pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
+    node == accessibility_modal_id(MODAL_KIND_THEMES, PICKER_CONTRAST_A11Y_INDEX)
+}
 
 /// The theme picker side whose radio button `node` is, if any.
 pub(super) fn accessibility_theme_slot(node: NodeId) -> Option<kettle_render::ThemeSlot> {
@@ -2305,13 +2321,29 @@ fn push_picker_accessibility(
         text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
         projection.nodes.push((footer_id, text));
         dialog_children.push(footer_id);
-        // Each side is a radio button: a click edits that side's theme. Its
-        // words and bounds are the painter's.
-        let chips = menu
-            .picker_footer_layout(tr, footer.cell)
-            .map(|layout| layout.slot_chips)
-            .unwrap_or_default();
-        for (slot, words, editing) in kettle_render::theme_footer_slots(footer, tr) {
+        let layout = menu.picker_footer_layout(tr, footer.cell);
+        // The Contrast button, over its painted words and rect; a click
+        // steps it as a press does.
+        let button_id = accessibility_modal_id(kind, PICKER_CONTRAST_A11Y_INDEX);
+        let mut button = Node::new(Role::Button);
+        button.set_label(kettle_render::contrast_button_text(
+            footer.minimum_contrast,
+            tr,
+        ));
+        button.add_action(AccessibilityAction::Click);
+        match layout.as_ref().and_then(|layout| layout.contrast_button) {
+            Some(rect) => button.set_bounds(bounds(rect)),
+            None => button.set_hidden(),
+        }
+        projection.nodes.push((button_id, button));
+        dialog_children.push(button_id);
+        // Each side is a radio button in one group: a click edits that
+        // side's theme. Its words and bounds are the painter's. A fixed
+        // theme has no sides, and no group.
+        let chips = layout.map(|layout| layout.slot_chips).unwrap_or_default();
+        let sides = kettle_render::theme_footer_slots(footer, tr);
+        let mut group_children = Vec::new();
+        for (slot, words, editing) in sides {
             let Some((index, _)) = PICKER_SLOT_A11Y_INDEX
                 .into_iter()
                 .find(|&(_, side)| side == slot)
@@ -2328,7 +2360,24 @@ fn push_picker_accessibility(
                 None => radio.set_hidden(),
             }
             projection.nodes.push((id, radio));
-            dialog_children.push(id);
+            group_children.push(id);
+        }
+        if !group_children.is_empty() {
+            let group_id = accessibility_modal_id(kind, PICKER_SIDES_A11Y_INDEX);
+            let mut group = Node::new(Role::RadioGroup);
+            group.set_label(kettle_render::theme_follow_label(footer.follow, tr));
+            if let Some(rect) = chips.iter().map(|&(rect, _)| rect).reduce(|a, b| {
+                let x0 = a.0.min(b.0);
+                let y0 = a.1.min(b.1);
+                let x1 = (a.0 + a.2).max(b.0 + b.2);
+                let y1 = (a.1 + a.3).max(b.1 + b.3);
+                (x0, y0, x1 - x0, y1 - y0)
+            }) {
+                group.set_bounds(bounds(rect));
+            }
+            group.set_children(group_children);
+            projection.nodes.push((group_id, group));
+            dialog_children.push(group_id);
         }
     }
     let mut dialog = Node::new(Role::Dialog);

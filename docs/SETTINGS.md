@@ -261,9 +261,10 @@ colours the terminal lifts. Below the card, a status line says how the theme is
 chosen (**Follow system**, **Follow schedule** when `theme-schedule` is set,
 Light, Dark or Fixed theme) and names the dark and the light theme, with a
 dot and an underline on the side a pick saves to (a click on a side chooses
-it; a screen reader offers both as radio buttons); a fixed theme shows only
-**Theme:**. The **Contrast:** button on it steps `minimum-contrast` through
-Off, 3:1, 4.5:1 and 7:1 and saves it at once, like the Settings row. It is
+it; a screen reader offers both as radio buttons in one group); a fixed theme
+shows only **Theme:**. The **Contrast:** button on it (a button to a screen
+reader too) steps `minimum-contrast` through Off, 3:1, 4.5:1 and 7:1 and
+saves it at once, like the Settings row. It is
 not part of the preview: Esc puts back the theme only, not the contrast. The
 footer gives way so the list keeps at least four rows: on a short window the
 card is left out first, then one status line. A window too narrow for them

@@ -1495,6 +1495,108 @@ fn switching_sides_clears_the_query_and_opens_on_that_sides_theme() {
     assert_eq!(fixed, before);
 }
 
+/// A screen reader finds the Contrast button as a button over its painted
+/// words and rect, and its click steps `minimum-contrast` as a press does.
+/// The two sides form one radio group; a fixed theme has no sides and no
+/// group. No footer node shares an id with another node or with a row.
+#[test]
+fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
+    use super::{open_picker_list, picker_context_menu};
+    let cell = (8.4, 17.0);
+    for (mode, key) in [
+        (kettle_config::ThemeMode::Auto, "dark-theme"),
+        (kettle_config::ThemeMode::Explicit, "theme"),
+    ] {
+        let mut cfg = kettle_config::Config::default();
+        cfg.theme_mode = mode;
+        cfg.minimum_contrast = 4.5;
+        for tr in [&EN, &ES] {
+            let mut ws = WindowState::new(0, Mux::new());
+            ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+            let menu = picker_context_menu(
+                open_picker_list(&ws, &cfg, key, tr, None).unwrap(),
+                (1280.0, 820.0),
+                cell,
+                32.0,
+            )
+            .unwrap();
+            let layout = menu.picker_footer_layout(tr, cell).unwrap();
+            let painted = layout.contrast_button.expect("the button fits");
+            let overlay = kettle_render::Overlay {
+                theme_picker_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            };
+            let projection =
+                modal_accessibility_projection(&overlay, (1280.0, 820.0), cell, 1.0, tr);
+            let role = |role| {
+                projection
+                    .nodes
+                    .iter()
+                    .filter(move |(_, node)| node.role() == role)
+                    .collect::<Vec<_>>()
+            };
+            let buttons = role(accesskit::Role::Button);
+            assert_eq!(buttons.len(), 1, "{mode:?}");
+            let (id, button) = buttons[0];
+            assert!(super::accessibility_theme_contrast(*id));
+            assert_eq!(
+                button.label(),
+                Some(kettle_render::contrast_button_text(4.5, tr).as_str())
+            );
+            assert!(button.supports_action(accesskit::Action::Click));
+            let bounds = button.bounds().unwrap();
+            assert_eq!(bounds.x0, f64::from(painted.0));
+            assert_eq!(bounds.y0, f64::from(painted.1));
+            assert_eq!(bounds.x1, f64::from(painted.0 + painted.2));
+            assert_eq!(bounds.y1, f64::from(painted.1 + painted.3));
+            let dialog = role(accesskit::Role::Dialog);
+            assert!(dialog[0].1.children().contains(id));
+            let groups = role(accesskit::Role::RadioGroup);
+            let radios = role(accesskit::Role::RadioButton);
+            if key == "theme" {
+                assert!(groups.is_empty() && radios.is_empty());
+            } else {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(
+                    groups[0].1.children(),
+                    radios.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    groups[0].1.label(),
+                    Some(kettle_render::theme_follow_label(
+                        kettle_render::ThemeFollow::System,
+                        tr
+                    ))
+                );
+            }
+            let mut ids: Vec<_> = projection.nodes.iter().map(|(id, _)| id.0).collect();
+            let all = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), all, "every node id is unique");
+        }
+    }
+    // Every bundled theme's row index stays below the lowest footer node.
+    let themes = Theme::look_order(true).len() + Theme::look_order(false).len();
+    assert!(themes + 3 < super::PICKER_CONTRAST_A11Y_INDEX);
+    assert!(super::PICKER_CONTRAST_A11Y_INDEX < super::PICKER_FOOTER_A11Y_INDEX);
+    let src = production_source();
+    let action = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    let contrast = action
+        .split("accessibility_theme_contrast(request.target_node)")
+        .nth(1)
+        .expect("the Contrast button takes a click")
+        .split("return;")
+        .next()
+        .unwrap();
+    assert!(contrast.contains("self.step_picker_contrast(ws);"));
+}
+
 /// In a picker with sides, Tab and Shift+Tab both switch to the other side,
 /// as a click on it would: with the system or a schedule, and in every mode
 /// a schedule overrides. The hint names the side Tab goes to. The arrows
@@ -1801,12 +1903,20 @@ fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
             assert_eq!(bounds.x0, f64::from(rect.0));
             assert_eq!(bounds.x1, f64::from(rect.0 + rect.2));
             assert!(node.supports_action(accesskit::Action::Click));
+            // The radios sit in one group, which the dialog holds.
+            let group = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::RadioGroup)
+                .unwrap();
+            assert!(group.1.children().contains(id));
             let dialog = projection
                 .nodes
                 .iter()
                 .find(|(_, node)| node.role() == accesskit::Role::Dialog)
                 .unwrap();
-            assert!(dialog.1.children().contains(id));
+            assert!(!dialog.1.children().contains(id));
+            assert!(dialog.1.children().contains(&group.0));
         }
     }
     let src = production_source();
