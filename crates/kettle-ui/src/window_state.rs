@@ -1409,10 +1409,11 @@ pub(crate) struct WindowState {
     pub(crate) accent: Option<WindowAccent>,
     /// When the user last typed bytes into a PTY in this window. Output
     /// arriving within `TYPING_ECHO_WINDOW` of a keystroke paints IMMEDIATELY
-    /// (request_redraw is vsync-coalesced, so this can't outpace the display)
     /// instead of through the output coalescer (`output_pacer`), whose
     /// WaitUntil deadline has ~16ms timer granularity on Windows and would make
-    /// held-key echo visibly stutter.
+    /// held-key echo visibly stutter. That redraw is not paced to the display
+    /// (on macOS each wake can present its own FIFO frame), so a pane whose
+    /// echoes arrive in two writes is held by `typed_echo`'s settle instead.
     pub(crate) last_typed: Option<std::time::Instant>,
     /// Typed-echo diagnostics: echoes, split echoes, and frames that showed
     /// the in-between state of a split echo (`ui_geometry.typed_echo`).

@@ -904,13 +904,18 @@ impl App {
                 // paints. Input/cursor paints don't come through here, so
                 // typing and the cursor stay immediate.
                 let now = std::time::Instant::now();
-                // Keystroke ECHO paints immediately. request_redraw is
-                // vsync-coalesced, so this can't outpace the display, and the
-                // coalescer's job (letting a NON-atomic output burst settle
-                // before the snapshot) doesn't apply to a few echoed cells.
-                // Routing echo through the WaitUntil deadline (~16ms timer
-                // granularity on Windows, frequently late) makes held-key
-                // repeat visibly stutter.
+                // Keystroke ECHO skips the coalescer: its job (letting a
+                // NON-atomic output burst settle before the snapshot) doesn't
+                // apply to a few echoed cells, and routing echo through the
+                // WaitUntil deadline (~16ms timer granularity on Windows,
+                // frequently late) makes held-key repeat visibly stutter.
+                // request_redraw merges repeated requests into one callback but
+                // is NOT paced to the display: on macOS winit dispatches it in
+                // the same run-loop pass and the surface presents FIFO with up
+                // to three drawables, so each echo wake can become its own
+                // frame. An echo the shell writes in two parts would show its
+                // first half for a refresh; the echo settle (`typed_echo`)
+                // holds such a pane's echoes for one short deadline instead.
                 if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
                     ws.output_pacer.reset();
                     observe_typed_echo(ws, now);
