@@ -301,7 +301,9 @@ macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 Edit, View, Window and Help menus (the Window menu carries the tab commands: next,
 previous, rename, move left, right and to a new window; Help, registered with
 `setHelpMenu` so macOS adds its menu search field, holds Kettle Help and
-Keyboard Shortcuts), actions, separators,
+Keyboard Shortcuts; View's full-screen item and Window's Minimize, Zoom and
+Bring All to Front are AppKit's own selectors, so the system adds no second
+full-screen item, and its title follows the focused window's state), actions, separators,
 enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. AppKit's automatic window tabbing is

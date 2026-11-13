@@ -897,6 +897,13 @@ macos_menu_move_tab_to_new_window = "Move Tab to New Window"
 macos_menu_help = "Help"
 macos_menu_kettle_help = "Kettle Help"
 macos_menu_keyboard_shortcuts = "Keyboard Shortcuts"
+macos_menu_ssh_launcher = "SSH Launcher…"
+macos_menu_quick_select = "Quick-Select Hints"
+macos_menu_quick_terminal = "Toggle Quick Terminal"
+macos_menu_minimize = "Minimize"
+macos_menu_zoom_window = "Zoom"
+macos_menu_bring_all_to_front = "Bring All to Front"
+macos_menu_exit_fullscreen = "Exit Full Screen"
 
 
 search_a11y_regex = "Use regular expressions"

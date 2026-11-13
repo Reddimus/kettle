@@ -2488,6 +2488,34 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS Help menu command that open
 [messages.macos_menu_keyboard_shortcuts]
 context = "crates/kettle-ui/src/macos_menu.rs: macOS Help menu command that opens the searchable list of every command with a keyboard shortcut. macOS title case in English; Spanish macOS menus use sentence case."
 
+
+[messages.macos_menu_ssh_launcher]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Shell menu command that opens the SSH host picker. macOS title case in English; Spanish macOS menus use sentence case."
+
+
+[messages.macos_menu_quick_select]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Edit menu command that labels the links, paths and hashes on screen so one can be picked by typing its label. macOS title case in English."
+
+
+[messages.macos_menu_quick_terminal]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS View menu command that shows or hides the drop-down quick terminal. macOS title case in English."
+
+
+[messages.macos_menu_minimize]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that minimizes the front window to the Dock, the system's standard item."
+
+
+[messages.macos_menu_zoom_window]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that toggles the front window between its size and filling the screen, the system's standard item (as the green title-bar button does with Option held). Not the pane zoom."
+
+
+[messages.macos_menu_bring_all_to_front]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that brings all of Kettle's windows in front of other apps, the system's standard item."
+
+
+[messages.macos_menu_exit_fullscreen]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS View menu title of the full-screen command while the front window is full screen; the other state reads macos_menu_fullscreen."
+
 [messages.confirm_paste_heading]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.confirm_paste_body]

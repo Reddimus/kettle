@@ -24,6 +24,9 @@ impl App {
                     writable: ws.is_some_and(|ws| paste_is_writable(ws, self.windows.values())),
                     renderer: ws.is_some_and(|ws| ws.renderer.is_some()),
                     detachable_tabs: self.cfg.detachable_tabs,
+                    fullscreen: ws
+                        .and_then(|ws| ws.window.as_ref())
+                        .is_some_and(|window| window.fullscreen().is_some()),
                 };
             crate::macos_menu::sync(&self.proxy, &self.cfg, context, &self.profile_inventory);
         }

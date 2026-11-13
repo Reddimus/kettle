@@ -56,6 +56,10 @@ fn selector_for(action: NativeAction) -> Sel {
         NativeAction::HideOthers => sel!(hideOtherApplications:),
         NativeAction::ShowAll => sel!(unhideAllApplications:),
         NativeAction::Quit => sel!(terminate:),
+        NativeAction::ToggleFullScreen => sel!(toggleFullScreen:),
+        NativeAction::Minimize => sel!(performMiniaturize:),
+        NativeAction::Zoom => sel!(performZoom:),
+        NativeAction::BringAllToFront => sel!(arrangeInFront:),
     }
 }
 

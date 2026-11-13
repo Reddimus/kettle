@@ -166,6 +166,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The macOS menu bar reads like a Mac app's. View has one Enter Full Screen
+  item, on Control-Command-F, that reads Exit Full Screen while the window
+  is full screen; before, View listed Kettle's item and the system's both.
+  F11 and the green button still toggle the same full screen. Shell lists
+  Split Left and Split Up beside Split Right and Split Down. Window starts
+  with the system's Minimize (Command-M) and Zoom and ends with Bring All to
+  Front. English titles are in title case: SSH Launcher…, Quick-Select Hints
+  and Toggle Quick Terminal. A chord you bind yourself still wins over the
+  menu's.
 - The key hint beside a picker's search field and its "No matching command"
   style messages are easier to read: they use the same clearer grey as menu
   shortcuts, at least 7:1 against the panel where the theme's own text

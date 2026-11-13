@@ -18,6 +18,12 @@ pub(crate) enum NativeAction {
     HideOthers,
     ShowAll,
     Quit,
+    /// AppKit's own full-screen toggle, sent to the key window. Having it in
+    /// the View menu keeps AppKit from adding a second Enter Full Screen.
+    ToggleFullScreen,
+    Minimize,
+    Zoom,
+    BringAllToFront,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -71,6 +77,8 @@ pub(crate) struct Context {
     pub renderer: bool,
     /// The `detachable-tabs` config key; off, a tab cannot leave its window.
     pub detachable_tabs: bool,
+    /// The focused window is full screen.
+    pub fullscreen: bool,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -99,6 +107,8 @@ impl Context {
             | Action::ClosePane
             | Action::SplitRight
             | Action::SplitDown
+            | Action::SplitLeft
+            | Action::SplitUp
             | Action::StartSearch
             | Action::HintMode => self.pane,
             _ => true,
@@ -300,10 +310,12 @@ pub(crate) fn menu_model_with_profiles(
                 },
                 item(T::MenuSaveLayout, Action::SaveLayout),
                 item(T::MenuOpenLayout, Action::OpenLayoutPicker),
-                item(T::PaletteOpenSsh, Action::OpenSsh),
+                item(T::MacosMenuSshLauncher, Action::OpenSsh),
                 Sep,
                 item(T::MenuSplitRight, Action::SplitRight),
+                item(T::MenuSplitLeft, Action::SplitLeft),
                 item(T::MenuSplitDown, Action::SplitDown),
+                item(T::MenuSplitUp, Action::SplitUp),
                 Sep,
                 item(T::MenuClosePane, Action::ClosePane),
                 item(T::MenuCloseTab, Action::CloseTab),
@@ -319,7 +331,7 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuSelectAll, Action::SelectAll),
                 Sep,
                 item(T::MacosMenuFind, Action::StartSearch),
-                item(T::PaletteHintMode, Action::HintMode),
+                item(T::MacosMenuQuickSelect, Action::HintMode),
                 Sep,
                 item(T::MacosMenuClear, Action::ClearHistory),
             ],
@@ -336,15 +348,33 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuFontReset, Action::ResetFontSize),
                 Sep,
                 item(T::MacosMenuZoomPane, Action::ToggleZoom),
-                item(T::MacosMenuFullscreen, Action::ToggleFullscreen),
-                item(T::QuickTerminalToggle, Action::ToggleQuickTerminal),
+                item(T::MacosMenuQuickTerminal, Action::ToggleQuickTerminal),
+                Sep,
+                // AppKit's own item, so the system adds no second one. The
+                // title follows the focused window; F11 and the green button
+                // toggle the same native full screen.
+                native(
+                    if context.fullscreen {
+                        T::MacosMenuExitFullscreen
+                    } else {
+                        T::MacosMenuFullscreen
+                    },
+                    NativeAction::ToggleFullScreen,
+                    chord('f', Mods::CTRL),
+                ),
             ],
             false,
         ),
-        // No Minimize, Zoom Window or Bring All to Front Action exists.
         menu(
             T::MacosMenuWindow,
             vec![
+                native(
+                    T::MacosMenuMinimize,
+                    NativeAction::Minimize,
+                    chord('m', Mods::empty()),
+                ),
+                native(T::MacosMenuZoomWindow, NativeAction::Zoom, None),
+                Sep,
                 item(T::MacosMenuNextTab, Action::NextTab),
                 item(T::MacosMenuPreviousTab, Action::PrevTab),
                 Sep,
@@ -352,6 +382,12 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuMoveTabLeft, Action::MoveTabLeft),
                 item(T::MacosMenuMoveTabRight, Action::MoveTabRight),
                 item(T::MacosMenuMoveTabToNewWindow, Action::MoveTabToNewWindow),
+                Sep,
+                native(
+                    T::MacosMenuBringAllToFront,
+                    NativeAction::BringAllToFront,
+                    None,
+                ),
             ],
             true,
         ),

@@ -18,6 +18,7 @@ fn ready() -> Context {
         writable: true,
         renderer: true,
         detachable_tabs: true,
+        fullscreen: false,
     }
 }
 
@@ -71,10 +72,12 @@ fn complete_structure_in_english_and_spanish() {
                 "New Tab with Profile",
                 "Save Layout…",
                 "Open Layout…",
-                "SSH launcher",
+                "SSH Launcher…",
                 "|",
                 "Split Right",
+                "Split Left",
                 "Split Down",
+                "Split Up",
                 "|",
                 "Close Pane",
                 "Close Tab",
@@ -86,7 +89,7 @@ fn complete_structure_in_english_and_spanish() {
                 "Select All",
                 "|",
                 "Find…",
-                "Quick-select hints",
+                "Quick-Select Hints",
                 "|",
                 "Clear Scrollback"
             ],
@@ -99,17 +102,23 @@ fn complete_structure_in_english_and_spanish() {
                 "Reset Font Size",
                 "|",
                 "Zoom Pane",
-                "Enter Full Screen",
-                "Toggle quick terminal"
+                "Toggle Quick Terminal",
+                "|",
+                "Enter Full Screen"
             ],
             vec![
+                "Minimize",
+                "Zoom",
+                "|",
                 "Next Tab",
                 "Previous Tab",
                 "|",
                 "Rename Tab…",
                 "Move Tab Left",
                 "Move Tab Right",
-                "Move Tab to New Window"
+                "Move Tab to New Window",
+                "|",
+                "Bring All to Front"
             ],
             vec!["Kettle Help", "Keyboard Shortcuts"],
         ]
@@ -136,10 +145,12 @@ fn complete_structure_in_english_and_spanish() {
                 "Nueva pestaña con perfil",
                 "Guardar diseño…",
                 "Abrir diseño…",
-                "Lanzador SSH",
+                "Lanzador SSH…",
                 "|",
                 "Dividir a la derecha",
+                "Dividir a la izquierda",
                 "Dividir hacia abajo",
+                "Dividir hacia arriba",
                 "|",
                 "Cerrar panel",
                 "Cerrar pestaña",
@@ -164,17 +175,23 @@ fn complete_structure_in_english_and_spanish() {
                 "Restablecer el tamaño de letra",
                 "|",
                 "Ampliar panel",
-                "Entrar en pantalla completa",
-                "Mostrar u ocultar la terminal rápida"
+                "Mostrar u ocultar la terminal rápida",
+                "|",
+                "Entrar en pantalla completa"
             ],
             vec![
+                "Minimizar",
+                "Zoom",
+                "|",
                 "Pestaña siguiente",
                 "Pestaña anterior",
                 "|",
                 "Cambiar el nombre de la pestaña…",
                 "Mover la pestaña a la izquierda",
                 "Mover la pestaña a la derecha",
-                "Mover la pestaña a una ventana nueva"
+                "Mover la pestaña a una ventana nueva",
+                "|",
+                "Traer todo al frente"
             ],
             vec!["Ayuda de Kettle", "Atajos de teclado"],
         ]
@@ -222,7 +239,9 @@ fn complete_structure_in_english_and_spanish() {
             Action::OpenLayoutPicker,
             Action::OpenSsh,
             Action::SplitRight,
+            Action::SplitLeft,
             Action::SplitDown,
+            Action::SplitUp,
             Action::ClosePane,
             Action::CloseTab,
             Action::CloseWindow,
@@ -238,7 +257,6 @@ fn complete_structure_in_english_and_spanish() {
             Action::DecreaseFontSize,
             Action::ResetFontSize,
             Action::ToggleZoom,
-            Action::ToggleFullscreen,
             Action::ToggleQuickTerminal,
             Action::NextTab,
             Action::PrevTab,
@@ -728,6 +746,133 @@ fn move_tab_rows_agree_with_the_wrapping_mux_at_every_position() {
                     mux_with(tabs, active).nudge_active_tab(delta),
                     "{action:?} with {tabs} tabs, active {active}"
                 );
+            }
+        }
+    }
+}
+
+/// The menu bar follows macOS conventions: one full-screen item, AppKit's own,
+/// on Control-Command-F unless the keymap owns that chord, titled for the
+/// focused window's state; all four splits in Shell; the system's Minimize,
+/// Zoom and Bring All to Front in Window; and English titles in title case.
+#[test]
+fn menu_bar_follows_macos_conventions() {
+    let fullscreen_items = |model: &[Menu]| {
+        model
+            .iter()
+            .flat_map(|menu| menu.rows.iter().map(move |row| (menu.title, row)))
+            .filter_map(|(menu, row)| match row {
+                Row::Item {
+                    title,
+                    command: Command::Native(NativeAction::ToggleFullScreen),
+                    shortcut,
+                    ..
+                } => Some((menu, title.clone(), *shortcut)),
+                Row::Item {
+                    command: Command::Kettle(Action::ToggleFullscreen),
+                    ..
+                } => Some((menu, "duplicate".into(), None)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let ctrl_cmd_f = Trigger::new(Mods::SUPER | Mods::CTRL, Key::Char('f'));
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for fullscreen in [false, true] {
+            let context = Context {
+                fullscreen,
+                ..ready()
+            };
+            let model = empty_menu_model(&tr, &Bindings::new(), context);
+            let title = tr.text(if fullscreen {
+                T::MacosMenuExitFullscreen
+            } else {
+                T::MacosMenuFullscreen
+            });
+            assert_eq!(
+                fullscreen_items(&model),
+                [(
+                    tr.text(T::MacosMenuView),
+                    title.to_string(),
+                    Some(ctrl_cmd_f)
+                )],
+                "{language:?} fullscreen={fullscreen}"
+            );
+        }
+        let model = empty_menu_model(&tr, &Bindings::new(), ready());
+        let shell = &model[1];
+        let splits: Vec<_> = kettle_actions(&shell.rows)
+            .into_iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    Action::SplitRight | Action::SplitLeft | Action::SplitDown | Action::SplitUp
+                )
+            })
+            .collect();
+        assert_eq!(
+            splits,
+            [
+                &Action::SplitRight,
+                &Action::SplitLeft,
+                &Action::SplitDown,
+                &Action::SplitUp
+            ]
+        );
+        let window = model.iter().find(|menu| menu.windows).unwrap();
+        let natives: Vec<_> = window
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item {
+                    command: Command::Native(action),
+                    shortcut,
+                    ..
+                } => Some((*action, *shortcut)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            natives,
+            [
+                (
+                    NativeAction::Minimize,
+                    Some(Trigger::new(Mods::SUPER, Key::Char('m')))
+                ),
+                (NativeAction::Zoom, None),
+                (NativeAction::BringAllToFront, None),
+            ]
+        );
+    }
+    // A chord the keymap owns is not taken by the native item.
+    let bindings = Bindings::from([(ctrl_cmd_f, Action::NewTab)]);
+    let model = empty_menu_model(&Translator::new(Language::En), &bindings, ready());
+    assert_eq!(fullscreen_items(&model)[0].2, None);
+    // English titles are in title case: every word but a short preposition,
+    // article or conjunction starts with a capital, hyphenated parts too.
+    let minor = [
+        "a", "an", "and", "as", "at", "for", "in", "of", "on", "or", "the", "to", "with",
+    ];
+    let model = empty_menu_model(&Translator::new(Language::En), &Bindings::new(), ready());
+    for menu in &model {
+        for row in &menu.rows {
+            let title = match row {
+                Row::Item { title, .. } => title.as_str(),
+                Row::Submenu { title, .. } | Row::Services(title) => title,
+                Row::Separator => continue,
+            };
+            for (index, word) in title.split(' ').enumerate() {
+                if index > 0 && minor.contains(&word) {
+                    continue;
+                }
+                for part in word.split('-') {
+                    assert!(
+                        part.chars().next().is_some_and(|c| !c.is_lowercase()),
+                        "{:?} in {title:?}",
+                        menu.title
+                    );
+                }
             }
         }
     }
