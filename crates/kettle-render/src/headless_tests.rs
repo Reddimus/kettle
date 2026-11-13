@@ -7234,7 +7234,6 @@ fn an_empty_picker_query_paints_its_placeholder() {
     );
 }
 
-
 /// Background tabs' activity markers reach the frame as three shapes beside
 /// their titles, at 1x and 2x and in a dark and a light theme: a filled
 /// disc for output, a ring once it stopped and a triangle for the bell.
