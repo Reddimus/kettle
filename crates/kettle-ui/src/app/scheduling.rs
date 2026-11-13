@@ -39,7 +39,8 @@ pub(super) fn window_is_render_hidden(ws: &WindowState) -> bool {
 /// window or a pending frame recovery cancels it rather than requesting a
 /// redraw that would return early or waking with nothing to do. With nothing
 /// pending it returns before the guards, so an idle window makes no
-/// visibility call on each turn.
+/// visibility call on each turn. While armed it reads the echo's panes'
+/// output generations, so a split echo paints once its second write lands.
 pub(super) fn poll_echo_settle(
     ws: &mut WindowState,
     now: std::time::Instant,
@@ -48,7 +49,12 @@ pub(super) fn poll_echo_settle(
         return crate::typed_echo::SettlePoll::Idle;
     }
     let blocked = window_is_render_hidden(ws) || ws.frame_recovery.has_pending();
-    ws.typed_echo.poll_settle(now, blocked)
+    // The echo's second write raises no wake while the pane's latch is
+    // closed, so the poll reads the generation itself.
+    let panes = &ws.mux.panes;
+    ws.typed_echo.poll_settle(now, blocked, |id| {
+        panes.get(&id).map(|pane| pane.term.output_generation())
+    })
 }
 
 /// Fallback output frame budget when the platform cannot identify the current

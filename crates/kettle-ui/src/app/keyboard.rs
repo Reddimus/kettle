@@ -157,10 +157,12 @@ pub(super) fn note_keystroke(ws: &mut WindowState, at: std::time::Instant, recip
         at,
         recipients.iter().filter_map(|id| {
             let pane = panes.get(id)?;
+            let generation = pane.term.output_generation();
             Some(crate::typed_echo::KeyTarget {
                 pane: *id,
                 typed_text: pane.last_input_was_typed_text(),
-                quiet: seen.get(id).copied().unwrap_or(0) == pane.term.output_generation(),
+                quiet: seen.get(id).copied().unwrap_or(0) == generation,
+                generation,
             })
         }),
     );
