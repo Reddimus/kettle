@@ -276,6 +276,18 @@ mod tests {
                         bg,
                         ICON_CONTRAST,
                     ),
+                    (
+                        "picker key hint/placeholder/empty-state message",
+                        colors.secondary(fg, bg),
+                        bg,
+                        TEXT_CONTRAST,
+                    ),
+                    (
+                        "picker scrollbar thumb",
+                        colors.icon(crate::dim_blend(fg, bg), bg),
+                        bg,
+                        ICON_CONTRAST,
+                    ),
                 ];
                 for active in [false, true] {
                     for hovered in [false, true] {

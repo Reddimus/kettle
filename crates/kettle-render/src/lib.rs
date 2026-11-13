@@ -339,7 +339,7 @@ mod dim_blend_tests;
 mod context_menu_row_width_tests;
 
 #[cfg(test)]
-mod picker_scroll_thumb_tests;
+mod picker_chrome_tests;
 
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
@@ -4600,11 +4600,13 @@ impl Renderer {
                     &mut self.chrome_colors,
                     linear,
                 );
-                let fg = if row.enabled {
-                    self.chrome_colors.text(theme.foreground, background)
-                } else {
-                    self.chrome_colors.muted(theme.foreground, background)
-                };
+                let fg = overlays::menu_row_text_color(
+                    menu,
+                    row,
+                    theme,
+                    background,
+                    &mut self.chrome_colors,
+                );
                 let bounds = TextBounds {
                     left: ax as i32,
                     top: row_y as i32,
@@ -4848,7 +4850,10 @@ impl Renderer {
                     default_color: {
                         let color = if picker {
                             if index == 2 {
-                                self.chrome_colors.muted(theme.foreground, theme.background)
+                                overlays::picker_header_secondary_color(
+                                    theme,
+                                    &mut self.chrome_colors,
+                                )
                             } else {
                                 self.chrome_colors.text(theme.foreground, theme.background)
                             }

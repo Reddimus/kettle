@@ -2017,6 +2017,35 @@ pub(crate) fn menu_row_background(
     }
 }
 
+/// The colour of a menu row's label on `background`. A picker's disabled row
+/// is its empty-state message ("No matching command"), which people read, so
+/// it is secondary text; a context menu's disabled row is an unavailable
+/// command and stays muted.
+pub(crate) fn menu_row_text_color(
+    menu: &ContextMenu,
+    row: &ContextMenuRow,
+    theme: &kettle_config::Theme,
+    background: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    if row.enabled {
+        colors.text(theme.foreground, background)
+    } else if menu.picker_header_height > 0.0 {
+        colors.secondary(theme.foreground, background)
+    } else {
+        colors.muted(theme.foreground, background)
+    }
+}
+
+/// The colour of a picker header's key hint and placeholder: secondary
+/// text, quieter than the query but clearer than muted chrome.
+pub(crate) fn picker_header_secondary_color(
+    theme: &kettle_config::Theme,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    colors.secondary(theme.foreground, theme.background)
+}
+
 /// The colour of a picker row's matched characters: the accent, moved only as
 /// far as it must to read at 4.5:1 on the row's own surface. The accent is
 /// close in lightness to the selection fill it tints, so the selected row

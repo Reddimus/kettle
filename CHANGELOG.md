@@ -149,6 +149,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The key hint beside a picker's search field and its "No matching command"
+  style messages are easier to read: they use the same clearer grey as menu
+  shortcuts, at least 7:1 against the panel where the theme's own text
+  reaches that, instead of about 4.5:1. Unavailable rows in right-click menus
+  stay dimmed.
 - The command palette and the theme, layout and SSH pickers show eight full
   rows starting right under the search field when the list is longer than
   that, instead of six rows under an empty strip, and a thin scrollbar thumb

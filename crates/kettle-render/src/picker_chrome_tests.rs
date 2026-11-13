@@ -1,6 +1,7 @@
 use super::overlays::{
     MENU_PANEL_RADIUS, MENU_SELECTION_INSET, menu_hint_left, menu_level_surfaces,
-    menu_row_swatch_rects, picker_scroll_thumb, picker_scroll_thumb_color,
+    menu_row_background, menu_row_selected, menu_row_swatch_rects, menu_row_text_color,
+    picker_header_secondary_color, picker_scroll_thumb, picker_scroll_thumb_color,
 };
 use super::{ContextMenu, ContextMenuRow, chrome::Colors, context_menu_row_rects, menu};
 use kettle_config::{Rgb, Theme};
@@ -139,4 +140,56 @@ fn picker_scroll_thumb_is_drawn_last_at_three_to_one() {
         surfaces.len(),
         super::overlays::MENU_SHADOW_LAYERS.len() + 2
     );
+}
+
+/// A picker's key hint and its empty-state message are read, not skimmed past:
+/// secondary text, at 7:1 or the theme's own text contrast when that is lower,
+/// in every bundled theme and both blend spaces. A context menu's disabled
+/// command stays muted.
+#[test]
+fn picker_hint_and_empty_state_read_as_secondary_text() {
+    let message = || ContextMenuRow {
+        toggle: None,
+        swatches: None,
+        matched_chars: None,
+        label: "No matching command".into(),
+        separator: false,
+        enabled: false,
+        hint: String::new(),
+    };
+    let mut list = picker(1, 0);
+    list.rows = vec![message()];
+    let mut context = picker(1, 0);
+    context.rows = vec![message()];
+    context.picker_header_height = 0.0;
+    let mut failures = Vec::new();
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let (fg, bg) = (theme.foreground, theme.background);
+        let floor =
+            super::color::contrast_ratio(fg, bg).min(super::chrome::SECONDARY_TEXT_CONTRAST);
+        for linear in [false, true] {
+            let mut colors = Colors::default();
+            let background = menu_row_background(
+                menu_row_selected(&list, 0),
+                &theme,
+                theme.accent,
+                &mut colors,
+                linear,
+            );
+            let row = menu_row_text_color(&list, &list.rows[0], &theme, background, &mut colors);
+            let hint = picker_header_secondary_color(&theme, &mut colors);
+            for (role, color, surface) in [("empty state", row, background), ("key hint", hint, bg)]
+            {
+                let ratio = super::color::contrast_ratio(color, surface);
+                if ratio + 0.01 < floor {
+                    failures.push(format!("{name} {role}: {ratio:.2}:1 < {floor:.2}:1"));
+                }
+            }
+            let disabled =
+                menu_row_text_color(&context, &context.rows[0], &theme, background, &mut colors);
+            assert_eq!(disabled, colors.muted(fg, background), "{name}");
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
