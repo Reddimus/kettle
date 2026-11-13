@@ -232,7 +232,8 @@ pub fn rank_entries(
 /// [`rank_entries`] with each kept row's matched chars.
 ///
 /// A row matches strongly when each scattered piece of the query starts a
-/// word (see [`fuzzy::align_strong`]). While any row
+/// word, or a query of four or more chars runs contiguously anywhere (see
+/// [`fuzzy::align_strong`]). While any row
 /// matches strongly, rows the query only lies scattered through are left out,
 /// so `font` lists the font-size commands and not `Focus next pane`; with no
 /// strong match every subsequence match is listed.
@@ -807,6 +808,36 @@ mod tests {
             .collect()
     }
 
+    /// Whether `query` lies in `label` with each char at a word start (after
+    /// a separator or at a camelCase hump) or right after the previous one,
+    /// by exhaustive search.
+    fn word_aligned(query: &str, label: &str) -> bool {
+        fn search(
+            q: &[char],
+            c: &[char],
+            lower: &[char],
+            from: usize,
+            prev: Option<usize>,
+        ) -> bool {
+            let Some((&first, rest)) = q.split_first() else {
+                return true;
+            };
+            (from..c.len()).any(|ci| {
+                let start = ci == 0
+                    || matches!(c[ci - 1], '-' | '_' | '.' | ' ' | '/' | ':')
+                    || (c[ci - 1].is_lowercase() && c[ci].is_uppercase());
+                lower[ci] == first
+                    && (start || prev == Some(ci.wrapping_sub(1)))
+                    && search(rest, c, lower, ci + 1, Some(ci))
+            })
+        }
+        let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+        let q: Vec<char> = query.chars().map(fold).collect();
+        let c: Vec<char> = label.chars().collect();
+        let lower: Vec<char> = c.iter().copied().map(fold).collect();
+        search(&q, &c, &lower, 0, None)
+    }
+
     /// Weak matches drop out while a strong one exists: `font` runs a font
     /// command, not `Focus next pane`, which it lies scattered through. With
     /// no strong match, every match stays.
@@ -838,9 +869,31 @@ mod tests {
         assert!(tab.contains(&Action::NextTab) && tab.contains(&Action::DuplicateTab));
         // Whitespace typed in the query does not make the match weak.
         assert_eq!(top("sp ri", &EN)[0], Action::SplitRight);
-        // A run that starts mid-word is weak: while "Take screenshot" starts
-        // a word with it, "screen" leaves out "Toggle fullscreen".
-        assert_eq!(top("screen", &EN), [Action::TakeScreenshot]);
+        // A run of four or more chars is strong even mid-word, so "screen"
+        // keeps "Toggle fullscreen"; a shorter one is not, so "scr" drops it
+        // while "Take screenshot" starts a word with it.
+        let screen = top("screen", &EN);
+        assert!(screen.contains(&Action::TakeScreenshot), "{screen:?}");
+        assert!(screen.contains(&Action::ToggleFullscreen), "{screen:?}");
+        let scr = top("scr", &EN);
+        assert!(scr.contains(&Action::TakeScreenshot), "{scr:?}");
+        assert!(!scr.contains(&Action::ToggleFullscreen), "{scr:?}");
+        // Up to three chars, the rows kept are exactly those whose label has
+        // an alignment with every char at a word start or after the previous
+        // one, found here by exhaustive search.
+        for query in ["e", "t", "ne"] {
+            let mut kept: Vec<_> = top(query, &EN);
+            let mut words: Vec<_> = commands()
+                .into_iter()
+                .filter(|(label, _)| word_aligned(query, EN.text(*label)))
+                .map(|(_, action)| action)
+                .collect();
+            assert!(!words.is_empty(), "{query:?}");
+            let key = |action: &Action| format!("{action:?}");
+            kept.sort_by_key(key);
+            words.sort_by_key(key);
+            assert_eq!(kept, words, "{query:?}");
+        }
         // A single letter keeps only rows with a word starting with it.
         let e = top("e", &EN);
         let cmds = commands();

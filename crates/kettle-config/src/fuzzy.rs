@@ -16,6 +16,9 @@
 const MAX_ALIGNED_PATTERN: usize = 64;
 /// Longest candidate, in chars, aligned exactly.
 const MAX_ALIGNED_CANDIDATE: usize = 256;
+/// Shortest pattern that is strong as one contiguous run starting mid-word.
+/// Shorter ones lie inside too many words to narrow the list.
+const MIN_MIDWORD_RUN: usize = 4;
 
 /// One way `pattern` lies in a candidate: its score and the Unicode scalar
 /// positions of the matched chars, in order.
@@ -44,11 +47,19 @@ pub fn align(pattern: &str, candidate: &str) -> Option<Alignment> {
 
 /// The best alignment in which every matched char starts a word (the first
 /// char, one after a separator, or a camelCase hump), continues the previous
-/// match, or matches whitespace typed in the pattern. `None` when some char
-/// lies mid-word apart from the one before it, as `font` does in `Focus next
-/// pane` and `screen` in `fullscreen`.
+/// match, or matches whitespace typed in the pattern; or else, for a pattern
+/// of at least [`MIN_MIDWORD_RUN`] chars, the pattern as one contiguous run
+/// anywhere, as `screen` lies in `fullscreen`. `None` when the pattern only
+/// lies scattered through the middles of words, as `font` does in `Focus
+/// next pane`, or is a shorter run inside one, as `scr` is in `fullscreen`.
 pub fn align_strong(pattern: &str, candidate: &str) -> Option<Alignment> {
-    Matcher::new(pattern, candidate)?.best(true)
+    let matcher = Matcher::new(pattern, candidate)?;
+    let words = matcher.best(true);
+    let run = matcher.best_run();
+    match (words, run) {
+        (Some(words), Some(run)) if run.score > words.score => Some(run),
+        (words, run) => words.or(run),
+    }
 }
 
 struct Matcher {
@@ -184,6 +195,32 @@ impl Matcher {
         Some(self.finish(total, positions))
     }
 
+    /// The best placement of a pattern of at least [`MIN_MIDWORD_RUN`] chars
+    /// as one contiguous run.
+    fn best_run(&self) -> Option<Alignment> {
+        let m = self.pat.len();
+        if m < MIN_MIDWORD_RUN || m > self.cand.len() {
+            return None;
+        }
+        (0..=self.cand.len() - m)
+            .filter(|&start| self.lower[start..start + m] == self.pat[..])
+            .map(|start| {
+                let total = (start..start + m)
+                    .map(|ci| self.bonus(ci, ci > start))
+                    .sum();
+                (total, start)
+            })
+            // Strict `>` keeps the earliest run on a tie.
+            .fold(
+                None,
+                |acc: Option<(i32, usize)>, (total, start)| match acc {
+                    Some((t, _)) if t >= total => acc,
+                    _ => Some((total, start)),
+                },
+            )
+            .map(|(total, start)| self.finish(total, (start..start + m).collect()))
+    }
+
     /// The first occurrence of each pattern char, in order.
     fn greedy(&self) -> Alignment {
         let mut positions = Vec::with_capacity(self.pat.len());
@@ -201,10 +238,13 @@ impl Matcher {
     }
 
     fn is_strong(&self, positions: &[usize]) -> bool {
-        positions
+        let words = positions
             .iter()
             .enumerate()
-            .all(|(pi, &ci)| (pi > 0 && positions[pi - 1] + 1 == ci) || self.may_start_run(pi, ci))
+            .all(|(pi, &ci)| (pi > 0 && positions[pi - 1] + 1 == ci) || self.may_start_run(pi, ci));
+        words
+            || (positions.len() >= MIN_MIDWORD_RUN
+                && positions.windows(2).all(|pair| pair[0] + 1 == pair[1]))
     }
 }
 
@@ -301,7 +341,8 @@ mod tests {
     }
 
     /// A strong alignment starts each scattered piece at a word and continues
-    /// it contiguously; whitespace typed in the pattern counts as a word start.
+    /// it contiguously, or is a run of at least four chars anywhere;
+    /// whitespace typed in the pattern counts as a word start.
     #[test]
     fn strong_alignments_start_words_and_run_contiguously() {
         assert_eq!(align_strong("font", "Focus next pane"), None);
@@ -310,11 +351,19 @@ mod tests {
             align_strong("font", "Reset font size").map(|a| a.positions),
             Some(vec![6, 7, 8, 9])
         );
-        // A run that starts mid-word is weak, whole or in part, wherever it
-        // ends.
-        assert_eq!(align_strong("screen", "Toggle fullscreen"), None);
-        assert_eq!(align_strong("ulls", "Toggle fullscreen"), None);
-        assert!(align("screen", "Toggle fullscreen").is_some());
+        // A run of four or more chars is strong wherever it starts; a
+        // shorter one that starts mid-word is weak.
+        assert_eq!(
+            align_strong("screen", "Toggle fullscreen").map(|a| a.positions),
+            Some((11..17).collect())
+        );
+        assert_eq!(
+            align_strong("ulls", "Toggle fullscreen").map(|a| a.positions),
+            Some((8..12).collect())
+        );
+        assert_eq!(align_strong("scr", "Toggle fullscreen"), None);
+        assert_eq!(align_strong("ull", "Toggle fullscreen"), None);
+        assert!(align("scr", "Toggle fullscreen").is_some());
         // The space in the query need not sit at a word start.
         assert_eq!(
             align_strong("sp ri", "Split right").map(|a| a.positions),
@@ -332,8 +381,8 @@ mod tests {
         assert_eq!(align_strong("ab", "xaby"), None);
         // Past the exact-alignment bounds the same rule judges the first match.
         let pad = "x".repeat(MAX_ALIGNED_CANDIDATE);
-        assert!(align_strong("full", &format!("{pad} fullscreen")).is_some());
-        assert_eq!(align_strong("screen", &format!("{pad} fullscreen")), None);
+        assert!(align_strong("screen", &format!("{pad} fullscreen")).is_some());
+        assert_eq!(align_strong("scr", &format!("{pad} fullscreen")), None);
         assert_eq!(align_strong("", "anything").map(|a| a.score), Some(0));
     }
 
