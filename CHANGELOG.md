@@ -365,8 +365,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the
   accent-tinted highlight, at about 3.5:1. They now keep at least 4.5:1 on
-  every row in every bundled theme, and are bold so they still stand out where
-  a theme's accent is its text colour.
+  every row in every bundled theme.
 
 - On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
   Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing

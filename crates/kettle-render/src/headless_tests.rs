@@ -7075,20 +7075,14 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
             let expected = want[usize::from(row == highlight)];
             let shaped: Vec<_> = renderer.context_menu_buffers[row]
                 .layout_runs()
-                .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.color_opt, g.font_id)))
+                .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.color_opt)))
                 .collect();
             assert!(!shaped.is_empty());
-            for (start, color, font) in shaped {
+            for (start, color) in shaped {
                 let matched = (start < 5).then(|| gc(expected));
                 assert_eq!(
                     color, matched,
                     "row {row} byte {start} with row {highlight} selected"
-                );
-                let weight = renderer.font_system.db().face(font).unwrap().weight;
-                assert_eq!(
-                    weight >= fontdb::Weight::BOLD,
-                    start < 5,
-                    "row {row} byte {start} is shaped at {weight:?}"
                 );
             }
         }
@@ -7099,11 +7093,15 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
             .map(|buffer| buffer.layout_runs().map(|run| run.line_w).sum::<f32>())
             .collect::<Vec<_>>()
     };
-    let bold = widths(&renderer);
+    let matched = widths(&renderer);
     let overlay = Overlay {
         context_menu: Some(level(0, false)),
         ..focused(false)
     };
     capture(&mut renderer, &cfg, &[pane(&snap, 480, 220)], &overlay);
-    assert_eq!(bold, widths(&renderer), "bold matches keep the row's width");
+    assert_eq!(
+        matched,
+        widths(&renderer),
+        "matched characters keep the row's width"
+    );
 }

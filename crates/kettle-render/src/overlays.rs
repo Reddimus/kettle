@@ -1953,13 +1953,12 @@ pub(crate) fn menu_match_color(
     colors.text(accent, background)
 }
 
-/// How a row's matched characters are shaped: in [`menu_match_color`], and
-/// bold. Colour alone cannot carry the match: some themes' accent is their
-/// foreground, and on a selection fill both can be pushed to the same colour.
+/// How a row's matched characters are shaped: in [`menu_match_color`], at the
+/// label's own weight. A bold face is not guaranteed to exist for the
+/// configured family, and a fallback face would change the label's width and
+/// break its ellipsis, so the match is carried by colour alone.
 pub(crate) fn menu_match_attrs<'a>(base: &glyphon::Attrs<'a>, matched: Rgb) -> glyphon::Attrs<'a> {
-    base.clone()
-        .color(super::gc(matched))
-        .weight(glyphon::Weight::BOLD)
+    base.clone().color(super::gc(matched))
 }
 
 /// Re-shape key for a row's matched spans; `matched` is the colour they are

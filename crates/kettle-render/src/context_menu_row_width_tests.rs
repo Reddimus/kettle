@@ -680,11 +680,11 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
                     }
                     let attrs = menu_match_attrs(&glyphon::Attrs::new(), matched);
                     if attrs.color_opt != Some(super::gc(matched))
-                        || attrs.weight != glyphon::Weight::BOLD
+                        || attrs.weight != glyphon::Weight::NORMAL
                     {
                         failures.push(format!(
                             "{name} selected={selected}: match is shaped {:?} {:?}, \
-                             not bold {matched:?}",
+                             not {matched:?} at the label's weight",
                             attrs.weight, attrs.color_opt
                         ));
                     }
