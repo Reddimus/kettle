@@ -692,7 +692,11 @@ impl App {
             | Action::ToggleBroadcastOff
             | Action::ToggleBroadcastGroup
             | Action::ToggleBroadcastWindow
-            | Action::ToggleBroadcastPanesInTab => self.apply_broadcast_action(ws, &action),
+            | Action::ToggleBroadcastPanesInTab => {
+                if !self.apply_broadcast_action(ws, &action) {
+                    return;
+                }
+            }
             Action::ToggleZoom => {
                 // A tab with one pane has nothing to expand: entering zoom
                 // there would only leave a hidden flag that the first split

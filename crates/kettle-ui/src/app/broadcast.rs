@@ -215,8 +215,10 @@ impl App {
         }
     }
 
-    /// Run a broadcast action on `ws`.
-    pub(super) fn apply_broadcast_action(&self, ws: &mut WindowState, action: &Action) {
+    /// Run a broadcast action on `ws`. False when it had nothing to do: a
+    /// group toggle while the focused pane has no group, which then skips the
+    /// rest of the action's dispatch as it always has.
+    pub(super) fn apply_broadcast_action(&self, ws: &mut WindowState, action: &Action) -> bool {
         let focused_group = ws.mux.focused().and_then(|p| p.group_name.clone());
         match broadcast_scope_after(
             action,
@@ -226,12 +228,17 @@ impl App {
         ) {
             Some(scope) => {
                 self.set_broadcast_scope(ws, scope);
+                true
             }
-            None if matches!(action, Action::ToggleBroadcastGroup) => log::info!(
-                "toggle-broadcast-group: focused pane has no group_name; \
-                 use Action::CreateGroup or Action::GroupTab first"
-            ),
-            None => {}
+            None => {
+                if matches!(action, Action::ToggleBroadcastGroup) {
+                    log::info!(
+                        "toggle-broadcast-group: focused pane has no group_name; \
+                         use Action::CreateGroup or Action::GroupTab first"
+                    );
+                }
+                false
+            }
         }
     }
 }

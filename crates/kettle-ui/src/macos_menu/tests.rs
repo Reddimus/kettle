@@ -465,6 +465,8 @@ fn native_items_retain_the_command_they_were_built_with() {
     assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
     assert!(native.contains("invocation.action.clone()"));
     assert!(!native.contains("sender.tag()"));
+    // The model's checkmark reaches AppKit; nothing else shows it.
+    assert!(native.contains("item.setState(if *checked {"));
 }
 
 #[test]

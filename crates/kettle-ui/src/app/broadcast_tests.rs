@@ -235,6 +235,14 @@ fn group_cleanup_goes_through_the_helper_and_is_free_when_unchanged() {
         .find("if ws.mux.broadcast == scope {")
         .expect("early return");
     assert!(first < helper.find("request_redraw").expect("redraw"));
+    // A group toggle with nothing to toggle skips the rest of the dispatch.
+    let arm = source
+        .split("| Action::ToggleBroadcastPanesInTab => {")
+        .nth(1)
+        .expect("broadcast arm");
+    assert!(arm.trim_start().starts_with(
+        "if !self.apply_broadcast_action(ws, &action) {\n                    return;"
+    ));
     for owner in ["fn hoover_groups(", "fn hoover_mapped_groups("] {
         let body = source.split(owner).nth(1).expect(owner);
         let body = &body[..body.find("\n    }\n").unwrap_or(body.len())];

@@ -197,7 +197,7 @@ fn broadcast_default_picks_the_scope_the_group_chord_turns_on() {
         .nth(1)
         .expect("the broadcast toggle arm is present");
     assert!(
-        arm[..arm.find("=>").unwrap() + 60].contains("self.apply_broadcast_action(ws, &action)"),
+        arm[..arm.find("=>").unwrap() + 120].contains("self.apply_broadcast_action(ws, &action)"),
         "the toggle arm must run the shared broadcast transition"
     );
     let apply = src
