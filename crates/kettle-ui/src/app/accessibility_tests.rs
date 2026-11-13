@@ -1824,3 +1824,68 @@ fn background_tab_labels_name_their_activity() {
         "tab labels feed the tree hash"
     );
 }
+
+/// The close question names a busy program to screen readers through the
+/// dialog's description, cleaned of anything that could spoof or hide text.
+#[test]
+fn close_question_reads_the_cleaned_program_name() {
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let program = super::close_program_label("/usr/bin/sl\u{200B}eep\u{202E}gpj\u{7}")
+        .expect("a visible name");
+    let body =
+        super::close_dialog_body(&tr, &super::ConfirmAction::ClosePane(1), 1, Some(&program));
+    let overlay = kettle_render::Overlay {
+        confirm_dialog: Some(kettle_render::ConfirmDialogOverlay {
+            body,
+            hover_idx: None,
+            pressed_idx: None,
+            scroll: 0,
+            heading: "Close this pane?".into(),
+            buttons: vec![
+                kettle_render::ConfirmDialogButton {
+                    label: "Cancel".into(),
+                    destructive: false,
+                },
+                kettle_render::ConfirmDialogButton {
+                    label: "Close pane".into(),
+                    destructive: true,
+                },
+            ],
+            focus_idx: 0,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+    let dialog = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::AlertDialog)
+        .expect("confirm dialog node");
+    let description = dialog.1.description().expect("the body is the description");
+    assert!(description.contains("The program sleep is still running."), "{description:?}");
+    assert!(
+        !description
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{202E}' | '\u{200B}')),
+        "{description:?}"
+    );
+}
+
+/// ctl diagnostics for an open close question carry its geometry and button
+/// labels, never its body, which can name the program a pane is running.
+#[test]
+fn ctl_close_question_geometry_never_carries_the_body() {
+    let src = production_source();
+    let block = src
+        .split_once("let confirmation = diagnostic_overlay.confirm_dialog")
+        .expect("ctl confirmation geometry")
+        .1
+        .split_once("let modal_name =")
+        .expect("ctl modal name follows")
+        .0;
+    assert!(block.contains("\"body_rect\""));
+    assert!(!block.contains("dialog.body"));
+    assert!(!block.contains("dialog.heading"));
+    assert!(!block.contains("program"));
+}

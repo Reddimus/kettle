@@ -369,6 +369,7 @@ confirm_button_close_tab = "draft"
 confirm_button_close_window = "draft"
 confirm_close_consequences = "draft"
 confirm_close_both_panes = "draft"
+confirm_close_running = "draft"
 confirm_rebind_generic = "draft"
 confirm_action_send_text = "draft"
 confirm_action_custom = "draft"
@@ -1022,6 +1023,7 @@ keys = [
     "confirm_button_close_window",
     "confirm_close_consequences",
     "confirm_close_both_panes",
+    "confirm_close_running",
     "confirm_rebind_generic",
     "confirm_action_send_text",
     "confirm_action_custom",

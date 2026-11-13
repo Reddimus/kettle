@@ -69,6 +69,10 @@ context = "crates/kettle-ui/src/app.rs: Body explaining possible consequences of
 [messages.confirm_close_both_panes]
 context = "crates/kettle-ui/src/app.rs: Scope summary for closing a tab or window containing exactly two panes."
 
+[messages.confirm_close_running]
+context = "crates/kettle-ui/src/app/modals.rs: The whole body of a close question when exactly one pane would close and a program other than an idle shell owns its terminal. program is that program's name only (for example sleep or vim), never its arguments; it is shown unquoted."
+args = [{ name = "program", type = "str" }]
+
 [messages.confirm_rebind_generic]
 context = "crates/kettle-ui/src/app.rs: Rebind body when safe action labels are equal and cannot distinguish the actions."
 
