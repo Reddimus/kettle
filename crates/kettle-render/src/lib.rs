@@ -100,6 +100,8 @@ use labels::{
 };
 /// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
 pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
+/// Space around the size chip's text, in pixels.
+const RESIZE_CHIP_PAD: f32 = 14.0;
 /// Size of a tab's close `×` relative to its title.
 pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
@@ -2790,8 +2792,9 @@ impl Renderer {
             // glyphs shaped at the old monitor's scale. Both calls early-out
             // when unchanged, like the other chrome buffers.
             self.resize_overlay_buffer.set_metrics(metrics);
-            self.resize_overlay_buffer
-                .set_size(Some(sw), Some(ch * 2.0));
+            // One line, never wrapped: a caption wider than the window at a
+            // large font is drawn smaller instead (below).
+            self.resize_overlay_buffer.set_size(None, Some(ch * 2.0));
             if self.resize_overlay_text != label {
                 self.resize_overlay_buffer.set_text(
                     &label,
@@ -2803,6 +2806,23 @@ impl Renderer {
             }
             self.resize_overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+            let width = self
+                .resize_overlay_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            // The chip's padding inside, and as much again to the window edge.
+            let room = (sw - 4.0 * RESIZE_CHIP_PAD).max(1.0);
+            if width > room {
+                let fit = room / width;
+                self.resize_overlay_buffer
+                    .set_metrics(glyphon::Metrics::new(
+                        metrics.font_size * fit,
+                        metrics.line_height * fit,
+                    ));
+                self.resize_overlay_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
@@ -3542,9 +3562,11 @@ impl Renderer {
                 .map(|run| run.line_w)
                 .fold(0.0_f32, f32::max)
                 .max(cw);
-            let pad = 14.0_f32;
+            let pad = RESIZE_CHIP_PAD;
             let chip_w = (label_w.ceil() + pad * 2.0).min(sw);
-            let chip_h = ch + pad;
+            // A caption drawn smaller to fit gets a chip as much shorter.
+            let fit = (self.resize_overlay_buffer.metrics().font_size / metrics.font_size).min(1.0);
+            let chip_h = ch * fit + pad;
             let cx = (sw - chip_w) / 2.0;
             let cy = (sh - chip_h) / 2.0;
             menu_q.push(rect(cx, cy, chip_w, chip_h, theme.palette[0], 0.92));

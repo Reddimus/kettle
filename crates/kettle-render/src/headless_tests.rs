@@ -5757,6 +5757,58 @@ fn resize_chip_fits_a_font_size_caption() {
     }
 }
 
+/// At a large font in a small window a caption wider than the window is
+/// drawn smaller, on one line, whole inside a chip inside the window.
+#[test]
+fn resize_chip_caption_fits_a_narrow_window_at_a_large_font() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 48.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 240, 1.0, false).unwrap()
+    else {
+        eprintln!("resize chip fit check skipped: no GPU adapter");
+        return;
+    };
+    let caption = "Tamaño de fuente 48 · 7×3";
+    let snap = snapshot_of(7, 3, b"");
+    let overlay = Overlay {
+        resize_overlay: Some((7, 3)),
+        resize_overlay_text: Some(caption.into()),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 240)], &overlay);
+    assert_eq!(
+        renderer.resize_overlay_buffer.layout_runs().count(),
+        1,
+        "the caption wrapped"
+    );
+    let width = renderer
+        .resize_overlay_buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        width + 56.0 <= 480.5,
+        "caption {width} px does not fit 480 px"
+    );
+    // The outline's left and right edges are both on screen.
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    let edges = (0..frame.height()).find_map(|y| {
+        let xs: Vec<u32> = (0..frame.width())
+            .filter(|&x| {
+                let p = frame.get_pixel(x, y);
+                Rgb::new(p[0], p[1], p[2]) == accent
+            })
+            .collect();
+        (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+    });
+    let (left, right) = edges.expect("the chip's outline");
+    assert!(
+        left >= 10 && right <= 470,
+        "chip {left}..{right} reaches the window edge"
+    );
+}
+
 /// A side bar draws its tabs' close glyph from the same enlarged buffer as a
 /// top bar, so it grew too. At the default font and a large one the `✕`
 /// must stay inside the chip that shows the button (its square less 5 px a
