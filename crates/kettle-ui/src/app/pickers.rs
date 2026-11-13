@@ -743,9 +743,12 @@ pub(super) fn theme_picker_footer(
         "dark-theme" => Some(ThemeSlot::Dark),
         _ => None,
     };
-    let sample = theme_picker_selection(state, tr)
-        .map(|name| cfg.theme_by_name(name))
-        .unwrap_or_else(|| cfg.theme.clone());
+    // The window already wears the highlighted theme while it previews, so
+    // the open picker does not parse a theme on every frame.
+    let sample = match theme_picker_selection(state, tr) {
+        Some(name) if name != cfg.theme_name => cfg.theme_by_name(name),
+        _ => cfg.theme.clone(),
+    };
     let mut footer = kettle_render::ThemePickerFooter {
         follow,
         editing,
