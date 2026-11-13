@@ -44,17 +44,11 @@ pub fn align(pattern: &str, candidate: &str) -> Option<Alignment> {
 
 /// The best alignment in which every matched char starts a word (the first
 /// char, one after a separator, or a camelCase hump), continues the previous
-/// match, or matches whitespace typed in the pattern; or else the pattern as
-/// one contiguous run anywhere. `None` when the pattern only lies scattered
-/// through the middles of words, as `font` does in `Focus next pane`.
+/// match, or matches whitespace typed in the pattern. `None` when some char
+/// lies mid-word apart from the one before it, as `font` does in `Focus next
+/// pane` and `screen` in `fullscreen`.
 pub fn align_strong(pattern: &str, candidate: &str) -> Option<Alignment> {
-    let matcher = Matcher::new(pattern, candidate)?;
-    let words = matcher.best(true);
-    let run = matcher.best_run();
-    match (words, run) {
-        (Some(words), Some(run)) if run.score > words.score => Some(run),
-        (words, run) => words.or(run),
-    }
+    Matcher::new(pattern, candidate)?.best(true)
 }
 
 struct Matcher {
@@ -190,31 +184,6 @@ impl Matcher {
         Some(self.finish(total, positions))
     }
 
-    /// The best placement of the whole pattern as one contiguous run.
-    fn best_run(&self) -> Option<Alignment> {
-        let m = self.pat.len();
-        if m == 0 || m > self.cand.len() {
-            return None;
-        }
-        (0..=self.cand.len() - m)
-            .filter(|&start| self.lower[start..start + m] == self.pat[..])
-            .map(|start| {
-                let total = (start..start + m)
-                    .map(|ci| self.bonus(ci, ci > start))
-                    .sum();
-                (total, start)
-            })
-            // Strict `>` keeps the earliest run on a tie.
-            .fold(
-                None,
-                |acc: Option<(i32, usize)>, (total, start)| match acc {
-                    Some((t, _)) if t >= total => acc,
-                    _ => Some((total, start)),
-                },
-            )
-            .map(|(total, start)| self.finish(total, (start..start + m).collect()))
-    }
-
     /// The first occurrence of each pattern char, in order.
     fn greedy(&self) -> Alignment {
         let mut positions = Vec::with_capacity(self.pat.len());
@@ -232,11 +201,10 @@ impl Matcher {
     }
 
     fn is_strong(&self, positions: &[usize]) -> bool {
-        let words = positions
+        positions
             .iter()
             .enumerate()
-            .all(|(pi, &ci)| (pi > 0 && positions[pi - 1] + 1 == ci) || self.may_start_run(pi, ci));
-        words || positions.windows(2).all(|pair| pair[0] + 1 == pair[1])
+            .all(|(pi, &ci)| (pi > 0 && positions[pi - 1] + 1 == ci) || self.may_start_run(pi, ci))
     }
 }
 
@@ -332,36 +300,40 @@ mod tests {
         }
     }
 
-    /// A strong alignment starts each scattered piece at a word, or is one
-    /// contiguous run; whitespace typed in the pattern counts as a word start.
+    /// A strong alignment starts each scattered piece at a word and continues
+    /// it contiguously; whitespace typed in the pattern counts as a word start.
     #[test]
-    fn strong_alignments_start_words_or_run_contiguously() {
+    fn strong_alignments_start_words_and_run_contiguously() {
         assert_eq!(align_strong("font", "Focus next pane"), None);
         assert!(align("font", "Focus next pane").is_some());
         assert_eq!(
             align_strong("font", "Reset font size").map(|a| a.positions),
             Some(vec![6, 7, 8, 9])
         );
-        // A contiguous run in the middle of a word is strong.
-        assert_eq!(
-            align_strong("screen", "Toggle fullscreen").map(|a| a.positions),
-            Some((11..17).collect())
-        );
+        // A run that starts mid-word is weak, whole or in part, wherever it
+        // ends.
+        assert_eq!(align_strong("screen", "Toggle fullscreen"), None);
+        assert_eq!(align_strong("ulls", "Toggle fullscreen"), None);
+        assert!(align("screen", "Toggle fullscreen").is_some());
         // The space in the query need not sit at a word start.
         assert_eq!(
             align_strong("sp ri", "Split right").map(|a| a.positions),
             Some(vec![0, 1, 5, 6, 7])
         );
         assert_eq!(align_strong("split", "Broadcast input to all panes"), None);
-        // A strong alignment may score below the best one; it is still found.
-        let best = align("ab", "a-xab").unwrap();
-        let strong = align_strong("ab", "a-xab").unwrap();
-        assert_eq!(best.positions, vec![0, 4]);
-        assert_eq!(strong.positions, vec![3, 4]);
-        assert!(strong.score < best.score);
+        assert_eq!(align_strong("ab", "a-xab"), None);
+        assert_eq!(
+            align_strong("ab", "xab a-b").map(|a| a.positions),
+            Some(vec![4, 6])
+        );
         let strong = align_strong("ab", "ax-b").unwrap();
         assert_eq!(strong.positions, vec![0, 3]);
         assert_eq!(align_strong("ab", "axyb"), None);
+        assert_eq!(align_strong("ab", "xaby"), None);
+        // Past the exact-alignment bounds the same rule judges the first match.
+        let pad = "x".repeat(MAX_ALIGNED_CANDIDATE);
+        assert!(align_strong("full", &format!("{pad} fullscreen")).is_some());
+        assert_eq!(align_strong("screen", &format!("{pad} fullscreen")), None);
         assert_eq!(align_strong("", "anything").map(|a| a.score), Some(0));
     }
 

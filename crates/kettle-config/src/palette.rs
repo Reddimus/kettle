@@ -231,8 +231,8 @@ pub fn rank_entries(
 
 /// [`rank_entries`] with each kept row's matched chars.
 ///
-/// A row matches strongly when the query starts a word at each scattered
-/// piece or runs contiguously (see [`fuzzy::align_strong`]). While any row
+/// A row matches strongly when each scattered piece of the query starts a
+/// word (see [`fuzzy::align_strong`]). While any row
 /// matches strongly, rows the query only lies scattered through are left out,
 /// so `font` lists the font-size commands and not `Focus next pane`; with no
 /// strong match every subsequence match is listed.
@@ -838,11 +838,21 @@ mod tests {
         assert!(tab.contains(&Action::NextTab) && tab.contains(&Action::DuplicateTab));
         // Whitespace typed in the query does not make the match weak.
         assert_eq!(top("sp ri", &EN)[0], Action::SplitRight);
-        // A contiguous run inside a word is strong.
-        assert!(top("screen", &EN).contains(&Action::ToggleFullscreen));
+        // A run that starts mid-word is weak: while "Take screenshot" starts
+        // a word with it, "screen" leaves out "Toggle fullscreen".
+        assert_eq!(top("screen", &EN), [Action::TakeScreenshot]);
+        // A single letter keeps only rows with a word starting with it.
+        let e = top("e", &EN);
+        let cmds = commands();
+        for (label, action) in &cmds {
+            let words_start_e = EN
+                .text(*label)
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word.starts_with(['e', 'E']));
+            assert_eq!(e.contains(action), words_start_e, "{action:?} for \"e\"");
+        }
         // A single letter still lists every row with a word starting with it.
         let t = top("t", &EN);
-        let cmds = commands();
         for (label, action) in &cmds {
             let words_start_t = EN
                 .text(*label)

@@ -1775,7 +1775,7 @@ pickers share one top-centred rounded card below the top chrome. Its query heade
 and results use one geometry for paint, pointer input, control diagnostics,
 AccessKit bounds and the IME caret. The fuzzy matcher scores each label by its
 best alignment, and while any row matches strongly (each scattered piece of
-the query starts a word, or the query runs contiguously) the palette leaves
+the query starts a word) the palette leaves
 out rows the query only lies scattered through. Command labels accent the
 characters of the alignment that ranked the row; English alias matches in
 Spanish have no accent unless the displayed label also matches. The whole card counts
