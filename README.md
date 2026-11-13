@@ -301,8 +301,10 @@ detected URLs and paths have no underline, so a screen full of them stays
 quiet; `link-underline = always` gives them a thin, dim one. Explicit OSC 8
 links always rest with a dotted underline. Inside a selection or search match
 an underline keeps its shape but is drawn thin in the colour of the text above
-it, so it does not compete with the highlight. The destination pill moves away
-from the link and disappears when you leave, scroll, type, or change focus.
+it, so it does not compete with the highlight. A hovered link that is partly
+selected keeps its resting look, and dragging a selection hovers no links.
+The destination pill moves away from the link and disappears when you leave,
+scroll, type, or change focus.
 `link-single-click` changes its gesture from Cmd-click (macOS) or Ctrl-click
 to a plain click.
 

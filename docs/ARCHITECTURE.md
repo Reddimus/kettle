@@ -5146,7 +5146,9 @@ do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
-remains visible. Hint actions and their legend share `hint_action`; OSC 8
+remains visible. A selection drag suspends hover in `link_under_native_pointer`,
+and `link_rects` clears the hover flag of a link group any of whose cells is
+selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are

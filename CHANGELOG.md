@@ -362,6 +362,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A link no longer draws its hover underline across text you have selected.
+  While a selection is being dragged, the links it passes over show no
+  underline, "click to open" hint or hand cursor. Once the button is
+  released, a selected link keeps its hint and hand cursor, and its underline
+  comes back when the selection is cleared. ⌘-click and Ctrl+click still open
+  it.
+
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the
   accent-tinted highlight, at about 3.5:1. They now keep at least 4.5:1 on

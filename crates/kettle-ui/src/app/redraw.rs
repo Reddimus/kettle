@@ -94,18 +94,14 @@ impl App {
             projected
         };
         // Hovering any segment of a link wrapped across rows lights them all.
+        // The selection is read only while a link is hovered, so a frame with
+        // no hover takes no extra terminal lock.
         let hovered_group = self.hovered_link_at_cursor(ws).map(|link| link.group);
-        let links = ws
-            .links
-            .iter()
-            .map(|l| kettle_render::LinkRect {
-                col: l.start_col,
-                row: l.row,
-                width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
-                hover: hovered_group == Some(l.group),
-                explicit: l.explicit,
-            })
-            .collect();
+        let links = link_rects(
+            &ws.links,
+            hovered_group,
+            hovered_group.and_then(|_| focused_selection_range(ws)),
+        );
 
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
