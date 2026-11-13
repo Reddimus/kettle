@@ -1577,7 +1577,7 @@ impl Renderer {
                     let (ink, background) = if tabbar.hovered_settings {
                         (
                             accent,
-                            chrome::tab_detail(
+                            chrome::strip_hover(
                                 chrome_strip_bg,
                                 theme.foreground,
                                 tabbar.pressed_settings,
