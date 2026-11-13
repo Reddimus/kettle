@@ -176,7 +176,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Minimize and Zoom are off while the window is full screen, as in other
   apps. English titles are in title case: SSH Launcher…, Quick-Select Hints
   and Toggle Quick Terminal. A chord you bind yourself still wins over the
-  menu's.
+  menu's. When Command-M and Control-Command-F are not bound in Kettle, macOS
+  takes them for the menu before Kettle sees them, so programs running in
+  Kettle and keybind capture in Settings don't receive them.
 - The key hint beside a picker's search field and its "No matching command"
   style messages are easier to read: they use the same clearer grey as menu
   shortcuts, at least 7:1 against the panel where the theme's own text
