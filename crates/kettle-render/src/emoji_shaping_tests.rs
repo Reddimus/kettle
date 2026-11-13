@@ -223,6 +223,16 @@ fn programming_ligature_url_preserves_shaped_ink() {
 }
 
 #[test]
+fn programming_ligature_double_colon_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("::");
+}
+
+#[test]
+fn programming_ligature_scope_resolution_preserves_shaped_ink() {
+    assert_ligature_ink_is_preserved("std::cout;");
+}
+
+#[test]
 fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
     use super::batching::{GlyphPositioning, cell_locked_glyph_offset, emit_positioned_glyphs};
     use super::glyphpipe::GlyphSlot;

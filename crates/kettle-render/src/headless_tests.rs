@@ -4368,6 +4368,100 @@ fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear()
     }
 }
 
+/// Mode 2027 flags every printed cell as a grapheme, but only a cell that
+/// holds more than one scalar is a cluster to the renderer.
+#[test]
+fn grapheme_mode_marks_only_multi_scalar_cells_as_clusters() {
+    use super::geometry::GridGlyphCell;
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_SINGLE_SCALAR_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.text_renderer = TextRendererMode::Grid;
+    let snap = snapshot_of(20, 4, "\x1b[?2027hstd::cout; e\u{301}\x1b[?25l".as_bytes());
+    let _frame = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&snap, 640, 180)],
+        &focused(false),
+    );
+    let mut cells = std::collections::BTreeMap::new();
+    for run in renderer.pane_buffers[0].layout_runs() {
+        for glyph in run.glyphs.iter().filter(|_| run.line_i == 0) {
+            if let Some(cell) = GridGlyphCell::from_metadata(glyph.metadata) {
+                cells.insert(cell.column, cell.clustered);
+            }
+        }
+    }
+    eprintln!("GRAPHEME_SINGLE_SCALAR_GPU: cells={cells:?}");
+    for column in [0, 3, 4, 9] {
+        assert_eq!(
+            cells.get(&column),
+            Some(&false),
+            "column {column} holds one scalar"
+        );
+    }
+    assert_eq!(cells.get(&11), Some(&true), "e + U+0301 is a cluster");
+}
+
+/// A cell holding one scalar draws the same with or without mode 2027: the
+/// `::` ligature keeps both colons, and a block cursor over a glyph whose ink
+/// overhangs its cell is not narrowed to that cell.
+#[test]
+fn grapheme_mode_draws_single_scalar_cells_as_without_it() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
+        eprintln!("GRAPHEME_SINGLE_SCALAR_GPU_SKIP: no adapter");
+        return;
+    };
+    cfg.text_renderer = TextRendererMode::Grid;
+    cfg.theme.foreground = Rgb::new(255, 255, 255);
+    cfg.theme.background = Rgb::new(0, 0, 0);
+    cfg.theme.cursor = Rgb::new(0, 255, 0);
+    cfg.theme.cursor_text = Rgb::new(255, 0, 0);
+    let frame = |renderer: &mut Renderer, text: &str, cursor: bool| {
+        let snap = snapshot_of(20, 4, text.as_bytes());
+        let frame = capture(renderer, &cfg, &[pane(&snap, 640, 180)], &focused(cursor));
+        if cursor {
+            assert!(
+                renderer.pending_cursor_glyph.is_some(),
+                "{text:?}: block cursor must be exercised"
+            );
+        }
+        frame
+    };
+    // U+F120 is a Nerd Font icon about 1.7 cells wide in the bundled face.
+    for (body, cursor) in [
+        ("std::cout;\x1b[?25l", false),
+        ("std::cout;\x1b[1;5H\x1b[2 q", true),
+        ("\u{f120}   \x1b[1;1H\x1b[2 q", true),
+    ] {
+        let plain = frame(&mut renderer, &format!("\x1b[?2027l{body}"), cursor);
+        if body.starts_with('\u{f120}') {
+            // The case only tests something while the icon's ink reaches
+            // past its own cell: the next cell holds a space.
+            let (cw, ch) = (renderer.cell_w, renderer.cell_h);
+            let x0 = (cfg.padding_x + cw).ceil() as u32;
+            let x1 = (cfg.padding_x + 2.0 * cw).floor() as u32;
+            let (y0, y1) = (cfg.padding_y as u32, (cfg.padding_y + ch) as u32);
+            let overhang = (x0..x1)
+                .flat_map(|x| (y0..y1).map(move |y| (x, y)))
+                .filter(|&(x, y)| plain.get_pixel(x, y).0[..3] != [0, 0, 0])
+                .count();
+            assert!(overhang > 0, "fixture: U+F120 must overhang its cell");
+        }
+        let clustered = frame(&mut renderer, &format!("\x1b[?2027h{body}"), cursor);
+        let differing = plain
+            .pixels()
+            .zip(clustered.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        eprintln!("GRAPHEME_SINGLE_SCALAR_GPU: {body:?} differing={differing}");
+        assert_eq!(differing, 0, "{body:?}: mode 2027 changed the drawing");
+    }
+}
+
 #[test]
 fn grapheme_replacement_stays_consistent_under_a_cursor_on_cached_frames() {
     let _serial = gpu_test_guard();
