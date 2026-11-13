@@ -905,6 +905,10 @@ impl Renderer {
             .find(|p| p.focused)
             .and_then(|p| color::resolve_query(257, theme, &p.snap.colors))
             .unwrap_or(theme.background);
+        // The active horizontal tab is the terminal's own surface: as
+        // translucent as the window, unless its text needs it more opaque.
+        let active_tab_alpha = chrome::text_surface_alpha(default_bg, composed_bg_alpha(cfg));
+        let active_tab_backing = color::Backing::translucent(default_bg, active_tab_alpha);
         let translucent_window = composed_bg_alpha(cfg) < 1.0;
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
@@ -1370,7 +1374,7 @@ impl Renderer {
                     tabbar,
                     (0.0, by, sw, tabbar.height),
                     theme,
-                    (default_bg, composed_bg_alpha(cfg) as f32),
+                    (default_bg, active_tab_alpha as f32),
                     chrome_strip_bg,
                     tab_accent,
                     cfg.tab_bar_pos,
@@ -4158,14 +4162,18 @@ impl Renderer {
                     chrome_strip_bg,
                     theme.foreground,
                 );
-                let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
-                    self.chrome_colors.text(fg, tab_background)
+                let tab_backing = if s.active && !cfg.tab_bar_pos.is_vertical() {
+                    active_tab_backing
                 } else {
-                    self.chrome_colors.secondary(fg, tab_background)
+                    color::Backing::opaque(tab_background)
                 };
-                let title_fg =
-                    self.chrome_colors
-                        .tab_text(title_fg, tab_background, overlay.window_focused);
+                let title_fg = self.chrome_colors.tab_title(
+                    fg,
+                    tab_background,
+                    tab_backing,
+                    s.active || cfg.tab_bar_pos.is_vertical(),
+                    overlay.window_focused,
+                );
                 let (centered_left, label_top) = tab_strip::tab_label_origin(
                     s.title_rect,
                     &self.tab_texts[bi],
@@ -4186,10 +4194,10 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
                 if let Some((hint_rect, _)) = &s.hint {
-                    let hint_fg = self.chrome_colors.muted(fg, tab_background);
-                    let hint_fg = self.chrome_colors.tab_text(
-                        hint_fg,
+                    let hint_fg = self.chrome_colors.tab_hint(
+                        fg,
                         tab_background,
+                        tab_backing,
                         overlay.window_focused,
                     );
                     areas.push(TextArea {
@@ -4272,20 +4280,33 @@ impl Renderer {
                     (s.active, hovered),
                     self.config.format.is_srgb(),
                 );
-                let (close_fg, close_background) = if cfg.tab_bar_pos.is_vertical() {
-                    (close_fg, close_background)
+                // The hover chip is opaque; a resting glyph sits on the tab.
+                let (close_fg, close_background, close_backing) = if cfg.tab_bar_pos.is_vertical() {
+                    (
+                        close_fg,
+                        close_background,
+                        color::Backing::opaque(close_background),
+                    )
                 } else if hovered {
                     let background = color::over(tab_background, theme.foreground, 0.06, false);
-                    (self.chrome_colors.text(fg, background), background)
+                    (
+                        self.chrome_colors.text(fg, background),
+                        background,
+                        color::Backing::opaque(background),
+                    )
                 } else {
                     (
                         self.chrome_colors.secondary(fg, tab_background),
                         tab_background,
+                        tab_backing,
                     )
                 };
-                let close_fg =
-                    self.chrome_colors
-                        .tab_text(close_fg, close_background, overlay.window_focused);
+                let close_fg = self.chrome_colors.tab_close(
+                    close_fg,
+                    close_background,
+                    close_backing,
+                    overlay.window_focused,
+                );
                 let (close_left, close_top) =
                     centered_text_origin((cx, cy, ccw, cch), (close_w, close_ch));
                 areas.push(TextArea {

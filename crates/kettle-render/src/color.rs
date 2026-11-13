@@ -513,6 +513,158 @@ pub(crate) fn with_min_contrast_on_both(
 /// that pixel, not the ink, is the strongest a stem may show.
 pub(crate) const STEM_COVERAGE: f64 = 248.0 / 255.0;
 
+/// What a surface can look like on screen. An opaque surface shows its own
+/// colour. A translucent one shows whatever lies behind the window through
+/// it, so it is described by its two extremes: the surface over a black
+/// backdrop and over a white one. Contrast against a fixed ink falls toward
+/// whichever extreme is nearer the ink in luminance, so an ink that clears a
+/// floor against both extremes, from outside the span between them, clears it
+/// over every backdrop in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Backing {
+    pub(crate) over_black: Rgb,
+    pub(crate) over_white: Rgb,
+    /// Whether the backdrop shows through.
+    pub(crate) translucent: bool,
+}
+
+impl Backing {
+    pub(crate) const fn opaque(color: Rgb) -> Self {
+        Self {
+            over_black: color,
+            over_white: color,
+            translucent: false,
+        }
+    }
+
+    /// `color` left at `alpha` in the window's surface. The scene is
+    /// premultiplied, and the window server adds `(1 - alpha)` of the
+    /// backdrop to the stored, sRGB-encoded value. That value is
+    /// `alpha * color` on a plain target and the encoding of `alpha` times
+    /// its linear light on an sRGB one. The second is never darker, so the
+    /// extremes take the first over black and the second over white, whatever
+    /// the target. A macOS capture of TokyoNight Night at 0.86 over a white
+    /// and a black bar measured within a few levels of these.
+    pub(crate) fn translucent(color: Rgb, alpha: f64) -> Self {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if alpha >= 1.0 {
+            return Self::opaque(color);
+        }
+        let channel = |value: u8, white: bool| -> u8 {
+            let stored = if white {
+                let light = alpha * srgb_to_linear(value);
+                255.0
+                    * if light <= 0.0031308 {
+                        light * 12.92
+                    } else {
+                        1.055 * light.powf(1.0 / 2.4) - 0.055
+                    }
+            } else {
+                alpha * f64::from(value)
+            };
+            let backdrop = if white { 255.0 } else { 0.0 };
+            (stored + (1.0 - alpha) * backdrop)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        let at = |white| {
+            Rgb::new(
+                channel(color.r, white),
+                channel(color.g, white),
+                channel(color.b, white),
+            )
+        };
+        Self {
+            over_black: at(false),
+            over_white: at(true),
+            translucent: true,
+        }
+    }
+
+    /// The lowest contrast `ink` has over any backdrop: one when its
+    /// luminance falls inside the span, where some backdrop matches it.
+    pub(crate) fn weakest_contrast(self, ink: Rgb) -> f64 {
+        self.weakest(ink, false)
+    }
+
+    /// The span's ends, or with `spare`, one 8-bit level further out each
+    /// way on a translucent surface: the GPU and the window server each round
+    /// the composite.
+    fn ends(self, spare: bool) -> (Rgb, Rgb) {
+        if !(spare && self.translucent) {
+            return (self.over_black, self.over_white);
+        }
+        let step = |c: Rgb, up: bool| {
+            let f = |v: u8| {
+                if up {
+                    v.saturating_add(1)
+                } else {
+                    v.saturating_sub(1)
+                }
+            };
+            Rgb::new(f(c.r), f(c.g), f(c.b))
+        };
+        (step(self.over_black, false), step(self.over_white, true))
+    }
+
+    fn weakest(self, ink: Rgb, spare: bool) -> f64 {
+        let (dark, light) = self.ends(spare);
+        let (low, high) = (relative_luminance(dark), relative_luminance(light));
+        let ink_luminance = relative_luminance(ink);
+        if ink_luminance > low.min(high) && ink_luminance < low.max(high) {
+            return 1.0;
+        }
+        contrast_ratio(ink, dark).min(contrast_ratio(ink, light))
+    }
+}
+
+/// `ink` unchanged when it already clears `minimum` on everything `backing`
+/// can show, otherwise moved until it does.
+///
+/// On an opaque surface it moves toward white or black, whichever gets there
+/// with the smaller change, as [`with_min_contrast`] does. On a translucent
+/// one it stays on its side of the surface, so light text stays light: it
+/// moves toward white or black, whichever it is already nearer, until it
+/// clears `minimum` with a rounding step to spare, or without one where that
+/// side cannot spare it, or as far as that side goes.
+pub(crate) fn with_min_contrast_on_backing(ink: Rgb, backing: Backing, minimum: f64) -> Rgb {
+    let toward = |target, t| blend(ink, target, t);
+    if !backing.translucent {
+        return min_contrast_measured(ink, minimum, toward, |ink| backing.weakest(ink, false));
+    }
+    if backing.weakest(ink, false) >= minimum {
+        return ink;
+    }
+    let (dark, light) = (
+        relative_luminance(backing.over_black),
+        relative_luminance(backing.over_white),
+    );
+    let ink_luminance = relative_luminance(ink);
+    let target = if ink_luminance >= dark.max(light) {
+        Rgb::new(255, 255, 255)
+    } else if ink_luminance <= dark.min(light) {
+        Rgb::new(0, 0, 0)
+    } else {
+        return min_contrast_measured(ink, minimum, toward, |ink| backing.weakest(ink, false));
+    };
+    let Some(spare) = [true, false]
+        .into_iter()
+        .find(|&spare| backing.weakest(target, spare) >= minimum)
+    else {
+        return target;
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        if backing.weakest(toward(target, mid), spare) >= minimum {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    toward(target, hi)
+}
+
 /// Hue in sextants (`0.0..6.0`), saturation and lightness (`0.0..=1.0`).
 pub(crate) fn hsl(c: Rgb) -> (f64, f64, f64) {
     let [r, g, b] = [c.r, c.g, c.b].map(|v| f64::from(v) / 255.0);

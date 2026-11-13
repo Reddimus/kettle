@@ -433,8 +433,8 @@ mod tests {
         for statement in [
             "let plus_fg = self.chrome_colors.tab_text(plus_fg, background, overlay.window_focused);",
             "let arrow_fg = self.chrome_colors.tab_text(arrow_fg, background, overlay.window_focused);",
-            "let close_fg = self.chrome_colors.tab_text(close_fg, close_background, overlay.window_focused);",
-            "let hint_fg = self.chrome_colors.muted(fg, tab_background);",
+            "let close_fg = self.chrome_colors.tab_close(close_fg, close_background, close_backing, overlay.window_focused,);",
+            "let hint_fg = self.chrome_colors.tab_hint(fg, tab_background, tab_backing, overlay.window_focused,);",
         ] {
             assert!(
                 source

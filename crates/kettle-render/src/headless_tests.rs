@@ -5496,8 +5496,9 @@ fn tab_strip_legibility_at(font_size: f32) {
             (tabs.segments[1].title_rect, tabs.segments[1].close);
         let fg = theme.foreground;
         // The renderer's roles: inactive titles and resting close glyphs are
-        // secondary text, the strip's controls primary, and an unfocused
-        // window dims both toward the 3:1 floor.
+        // secondary text, the strip's controls primary. An unfocused window
+        // dims its glyphs toward the 3:1 floor, but its titles only to the
+        // text floor, since they still name the tabs.
         let mut colors = chrome::Colors::default();
         let secondary_floor = chrome::SECONDARY_TEXT_CONTRAST
             .min(color::contrast_ratio(fg, strip))
@@ -5537,14 +5538,16 @@ fn tab_strip_legibility_at(font_size: f32) {
                 );
                 continue;
             }
-            let (secondary, control, floors) = if window_focused {
+            let (title, secondary, control, floors) = if window_focused {
                 (
+                    colors.secondary(fg, strip),
                     colors.secondary(fg, strip),
                     colors.text(fg, strip),
                     (secondary_floor, chrome::TEXT_CONTRAST),
                 )
             } else {
                 (
+                    colors.tab_title(fg, strip, color::Backing::opaque(strip), false, false),
                     colors.tab_text(rest_close, strip, false),
                     colors.tab_text(fg, strip, false),
                     (chrome::ICON_CONTRAST, chrome::ICON_CONTRAST),
@@ -5553,8 +5556,12 @@ fn tab_strip_legibility_at(font_size: f32) {
             assert_glyph_painted(
                 &frame,
                 inactive_title,
-                (strip, secondary),
-                floors.0,
+                (strip, title),
+                if window_focused {
+                    floors.0
+                } else {
+                    chrome::TEXT_CONTRAST
+                },
                 &format!("{case}: inactive title"),
             );
             // Smallest ink side, with a pixel to spare for rasterizer edges.

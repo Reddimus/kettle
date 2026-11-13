@@ -388,6 +388,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   now keep 3:1 against the panel and, on the highlighted row, against the
   highlight. The panel's own outline and divider stay quiet.
 
+- On a translucent window, the default on macOS and Windows, text on the
+  active tab was checked against the theme's background rather than what the
+  window shows over the desktop. Over a light desktop the Cmd+N hint fell to
+  about 3.2:1. In a focused window the title, hint and close glyph now keep
+  4.5:1 against the tab as it shows over a black or a white backdrop. Three
+  mid-tone themes (Blue Dolphin, Grass and Hot Dog Stand) draw the active
+  tab slightly more opaque at 86%, since no text colour could reach 4.5:1
+  over that span.
+
+- In an unfocused window, tab titles and Cmd+N hints were dimmed to 3:1, as
+  low as 2.5:1 on a translucent window. They are still dimmed, but keep
+  4.5:1, because they name the tabs. The +, ▾ and × glyphs keep their 3:1.
+
 - The search bar's "No matches" fell to 4.45:1 on a translucent window,
   because the terminal showed through the bar. Over a translucent terminal
   the bar is now drawn opaque, in the colour it always had over the theme's

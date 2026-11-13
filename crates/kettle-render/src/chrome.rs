@@ -17,6 +17,7 @@ pub(crate) struct Colors {
     completion: Option<([u32; 5], crate::CompletionPalette)>,
     inactive: std::collections::HashMap<([u32; 3], u32, bool), Rgb>,
     markers: std::collections::HashMap<([u32; 2], bool), Rgb>,
+    backed: std::collections::HashMap<([u32; 3], u64, bool), Rgb>,
 }
 
 impl Colors {
@@ -54,6 +55,90 @@ impl Colors {
         } else {
             self.resolve(color::over(fg, bg, 0.5, false), bg, 3.0)
         }
+    }
+
+    /// A tab's title or Cmd+N hint. An unfocused window fades it halfway
+    /// toward the tab, but it still names the tab, so it keeps the text floor.
+    pub(crate) fn tab_label(&mut self, fg: Rgb, bg: Rgb, focused: bool) -> Rgb {
+        if focused {
+            self.text(fg, bg)
+        } else {
+            self.resolve(color::over(fg, bg, 0.5, false), bg, TEXT_CONTRAST)
+        }
+    }
+
+    /// `ink`, chosen against a surface's own colour, floored at `minimum`
+    /// against everything the surface can show on screen. An ink already
+    /// resolved against an opaque surface comes back unchanged, so only
+    /// translucent surfaces move it.
+    pub(crate) fn on(&mut self, ink: Rgb, backing: color::Backing, minimum: f64) -> Rgb {
+        let key = (
+            [ink, backing.over_black, backing.over_white].map(MinimumContrastCache::color_key),
+            minimum.to_bits(),
+            backing.translucent,
+        );
+        if let Some(color) = self.backed.get(&key) {
+            return *color;
+        }
+        let color = color::with_min_contrast_on_backing(ink, backing, minimum);
+        if self.backed.len() >= 4096 {
+            self.backed.clear();
+        }
+        self.backed.insert(key, color);
+        color
+    }
+
+    /// A tab's title on `surface`, its fill as painted, which `backing`
+    /// shows on screen. `prominent` is the active tab, or any vertical tab.
+    pub(crate) fn tab_title(
+        &mut self,
+        fg: Rgb,
+        surface: Rgb,
+        backing: color::Backing,
+        prominent: bool,
+        focused: bool,
+    ) -> Rgb {
+        let ink = if prominent {
+            self.text(fg, surface)
+        } else {
+            self.secondary(fg, surface)
+        };
+        let ink = self.tab_label(ink, surface, focused);
+        self.on(ink, backing, TEXT_CONTRAST)
+    }
+
+    /// A tab's Cmd+N shortcut hint, quieter than its title.
+    pub(crate) fn tab_hint(
+        &mut self,
+        fg: Rgb,
+        surface: Rgb,
+        backing: color::Backing,
+        focused: bool,
+    ) -> Rgb {
+        let ink = self.muted(fg, surface);
+        let ink = self.tab_label(ink, surface, focused);
+        self.on(ink, backing, TEXT_CONTRAST)
+    }
+
+    /// A tab's close glyph, `ink` on `surface`: text-strong in a focused
+    /// window, an icon's floor in an unfocused one.
+    pub(crate) fn tab_close(
+        &mut self,
+        ink: Rgb,
+        surface: Rgb,
+        backing: color::Backing,
+        focused: bool,
+    ) -> Rgb {
+        let ink = self.tab_text(ink, surface, focused);
+        self.on(
+            ink,
+            backing,
+            if focused {
+                TEXT_CONTRAST
+            } else {
+                ICON_CONTRAST
+            },
+        )
     }
 
     pub(crate) fn muted(&mut self, fg: Rgb, bg: Rgb) -> Rgb {
@@ -261,6 +346,34 @@ pub(crate) fn tab_accent(
         color::over(foreground, strip, 0.5, false)
     };
     color::with_min_contrast_on_both(ink, strip, active_bg, ICON_CONTRAST, focused)
+}
+
+/// The opacity a translucent surface needs under chrome text. Behind a
+/// translucent window lies anything from black to white, and on a mid-tone
+/// theme no ink clears `TEXT_CONTRAST` over that whole span. The surface keeps
+/// the window's opacity whenever some ink can; otherwise it takes the least
+/// opacity at which one can.
+pub(crate) fn text_surface_alpha(surface: Rgb, window_alpha: f64) -> f64 {
+    let window_alpha = window_alpha.clamp(0.0, 1.0);
+    let reachable = |alpha: f64| {
+        let backing = color::Backing::translucent(surface, alpha);
+        [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
+            .into_iter()
+            .any(|ink| backing.weakest_contrast(ink) >= TEXT_CONTRAST)
+    };
+    if reachable(window_alpha) {
+        return window_alpha;
+    }
+    let (mut lo, mut hi) = (window_alpha, 1.0_f64);
+    for _ in 0..16 {
+        let mid = (lo + hi) / 2.0;
+        if reachable(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// The hover fill shared by everything on the strip: tabs, window controls,
