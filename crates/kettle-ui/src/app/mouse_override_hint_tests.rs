@@ -506,7 +506,7 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
         };
         let mut projection =
             modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &tr);
         check(&projection, 2, (40.0, 60.0));
         assert_eq!(projection.focus, Some(accessibility_modal_id(2, copy + 1)));
 
@@ -534,7 +534,7 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
         };
         let mut projection =
             modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &tr);
         check(&projection, 40, (40.0, 60.0));
     }
 }
@@ -620,7 +620,7 @@ fn hovering_a_continued_line_of_the_hint_keeps_the_tree_valid() {
                 };
                 let mut projection =
                     modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-                nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+                nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &tr);
                 let first = accessibility_modal_id(2, 1);
                 assert_eq!(
                     projection.focus,
@@ -719,7 +719,7 @@ fn separate_info_lines_are_read_one_by_one() {
     };
     let mut projection =
         modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-    nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+    nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &tr);
     let labels: Vec<Option<&str>> = projected_items(&projection, 2)
         .iter()
         .map(|(_, node)| node.label())

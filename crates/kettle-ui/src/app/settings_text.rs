@@ -116,8 +116,9 @@ pub(super) fn agent_previews_note(
     }
 }
 
-/// The Settings footer: each key followed by what it does. The keys are the
-/// same in every language; the vim keys show when `vim-menu-nav` is on.
+/// The Settings footer: each key followed by what it does, the groups apart
+/// by ` · ` as in the picker hints. The keys are the same in every language;
+/// the vim keys show when `vim-menu-nav` is on.
 pub(super) fn settings_hints(tr: &kettle_i18n::Translator, vim_nav: bool) -> String {
     use kettle_i18n::Text;
     let hints: &[(&str, Text)] = if vim_nav {
@@ -142,7 +143,7 @@ pub(super) fn settings_hints(tr: &kettle_i18n::Translator, vim_nav: bool) -> Str
         .iter()
         .map(|(keys, what)| format!("{keys} {}", tr.text(*what)))
         .collect::<Vec<_>>()
-        .join("    ")
+        .join(" · ")
 }
 
 /// A GPU kind from the renderer's adapter info, in the UI's language. An

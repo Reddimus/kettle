@@ -742,3 +742,86 @@ fn only_visible_rows_with_swatches_paint_them() {
         assert_eq!(surface.params[1], 1.0, "a 1 px outline");
     }
 }
+
+/// A command-palette row's matched characters read at WCAG AA (4.5:1) on the
+/// row's own surface, the selected row's accent-tinted fill included, in
+/// every bundled theme with its own accent and every Peacock accent, in both
+/// blend spaces. They are also bold: in some themes the accent is the
+/// foreground, so colour alone cannot show the match.
+#[test]
+fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
+    use super::chrome::{Colors, TEXT_CONTRAST};
+    use super::overlays::{
+        menu_level_surfaces, menu_match_attrs, menu_match_color, menu_row_selected,
+    };
+    use kettle_config::Theme;
+
+    let row = |label: &str| ContextMenuRow {
+        toggle: None,
+        swatches: None,
+        label: label.into(),
+        separator: false,
+        enabled: true,
+        hint: String::new(),
+        matched_chars: Some(std::iter::once(0..5).collect()),
+    };
+    let menu = ContextMenu {
+        anchor: (140.0, 100.0),
+        rows: vec![row("Split automatically"), row("Split up (new pane above)")],
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 360.0,
+        panel_h_clamped: 56.0,
+        picker_header_height: 30.0,
+        a11y_label: None,
+    };
+    assert!(menu_row_selected(&menu, 0) && !menu_row_selected(&menu, 1));
+    let mut failures = Vec::new();
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let mut accents = vec![theme.accent];
+        accents.extend(kettle_config::peacock_pool(&theme));
+        for accent in accents {
+            for linear in [false, true] {
+                let mut colors = Colors::default();
+                // The selection is the level's last surface; read its fill
+                // back rather than restating how it is blended.
+                let surfaces = menu_level_surfaces(
+                    &menu,
+                    &theme,
+                    accent,
+                    (8.0, 16.0),
+                    1.0,
+                    &mut colors,
+                    linear,
+                );
+                let fill = surfaces.last().expect("selection surface").fill;
+                let to_u8 = |c: f32| (c * 255.0).round() as u8;
+                let selection =
+                    kettle_config::Rgb::new(to_u8(fill[0]), to_u8(fill[1]), to_u8(fill[2]));
+                for (index, surface) in [(0, selection), (1, theme.background)] {
+                    let selected = menu_row_selected(&menu, index);
+                    let matched = menu_match_color(selected, &theme, accent, &mut colors, linear);
+                    let ratio = super::color::contrast_ratio(matched, surface);
+                    if ratio < TEXT_CONTRAST {
+                        failures.push(format!(
+                            "{name} accent {accent:?} linear={linear} selected={selected}: \
+                             match {matched:?} on {surface:?} is {ratio:.2}:1"
+                        ));
+                    }
+                    let attrs = menu_match_attrs(&glyphon::Attrs::new(), matched);
+                    if attrs.color_opt != Some(super::gc(matched))
+                        || attrs.weight != glyphon::Weight::NORMAL
+                    {
+                        failures.push(format!(
+                            "{name} selected={selected}: match is shaped {:?} {:?}, \
+                             not {matched:?} at the label's weight",
+                            attrs.weight, attrs.color_opt
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

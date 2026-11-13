@@ -540,7 +540,8 @@ fn every_close_confirmation_mode_is_a_radio_that_is_on_when_configured() {
 }
 
 /// A row's shortcut is AccessKit's keyboard shortcut and stays its spoken
-/// description; a submenu's arrow is neither.
+/// description. A submenu row has no shortcut and is described as a submenu,
+/// not by the arrow it is painted with.
 #[test]
 fn a_menu_shortcut_is_both_the_shortcut_and_the_description() {
     let items = [
@@ -562,8 +563,12 @@ fn a_menu_shortcut_is_both_the_shortcut_and_the_description() {
     assert_eq!(copy.description(), Some("Ctrl+Shift+C"));
     let (_, submenu) = &nodes[1];
     assert_eq!(submenu.keyboard_shortcut(), None);
-    assert_eq!(submenu.description(), None);
+    assert_eq!(
+        submenu.description(),
+        Some(EN.text(kettle_i18n::Text::MenuA11ySubmenu))
+    );
     assert_eq!(submenu.has_popup(), Some(accesskit::HasPopup::Menu));
+    assert_eq!(submenu.is_expanded(), Some(false));
 }
 
 /// Drilled into a radio group, the Preferences panel behind it is still in
@@ -614,7 +619,7 @@ fn a_parent_panel_keeps_its_check_box_states() {
     };
     let mut projection =
         super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN);
-    super::nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+    super::nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &EN);
     for (name, painted_label, toggled) in [
         ("Cursor blink", "  Cursor blink", Toggled::False),
         ("Copy on select", "✓ Copy on select", Toggled::True),

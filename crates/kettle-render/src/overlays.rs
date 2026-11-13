@@ -1772,14 +1772,13 @@ pub(crate) fn menu_level_surfaces(
     });
     let selected = context_menu_row_rects(menu, (cw, ch))
         .into_iter()
-        .find(|(i, _)| *i == menu.highlight)
-        .filter(|(i, _)| menu.rows[*i].enabled && !menu.rows[*i].separator);
+        .find(|(i, _)| menu_row_selected(menu, *i));
     if let Some((_, (rx, ry, rw, rh))) = selected {
         let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
         let inset_y = (MENU_SELECTION_INSET.1 * scale).min(rh * 0.15);
         let (sw, sh) = (rw - 2.0 * inset_x, rh - 2.0 * inset_y);
         if sw > 0.0 && sh > 0.0 {
-            let fill = colors.surface(theme.background, accent, 0.18, linear);
+            let fill = menu_selection_fill(theme, accent, colors, linear);
             out.push(RoundedSurface {
                 pos: [rx + inset_x, ry + inset_y],
                 size: [sw, sh],
@@ -1977,7 +1976,68 @@ pub(crate) fn menu_label_spans(row: &ContextMenuRow) -> Vec<(&str, bool)> {
         .collect()
 }
 
-pub(crate) fn menu_match_key(row: &ContextMenuRow, accent: Rgb) -> u64 {
+/// Whether row `index` of `menu` paints the inset selection: the highlighted
+/// row, when it is an enabled item. The surface, label and match passes all
+/// ask this one question so they cannot disagree about which row is selected.
+pub(crate) fn menu_row_selected(menu: &ContextMenu, index: usize) -> bool {
+    index == menu.highlight
+        && menu
+            .rows
+            .get(index)
+            .is_some_and(|row| row.enabled && !row.separator)
+}
+
+/// The opaque fill behind the selected row, which its text is resolved against.
+pub(crate) fn menu_selection_fill(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    colors.surface(theme.background, accent, 0.18, linear)
+}
+
+/// The surface a menu row's text sits on.
+pub(crate) fn menu_row_background(
+    selected: bool,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    if selected {
+        menu_selection_fill(theme, accent, colors, linear)
+    } else {
+        theme.background
+    }
+}
+
+/// The colour of a picker row's matched characters: the accent, moved only as
+/// far as it must to read at 4.5:1 on the row's own surface. The accent is
+/// close in lightness to the selection fill it tints, so the selected row
+/// needs this most.
+pub(crate) fn menu_match_color(
+    selected: bool,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    let background = menu_row_background(selected, theme, accent, colors, linear);
+    colors.text(accent, background)
+}
+
+/// How a row's matched characters are shaped: in [`menu_match_color`], at the
+/// label's own weight. A bold face is not guaranteed to exist for the
+/// configured family, and a fallback face would change the label's width and
+/// break its ellipsis, so the match is carried by colour alone.
+pub(crate) fn menu_match_attrs<'a>(base: &glyphon::Attrs<'a>, matched: Rgb) -> glyphon::Attrs<'a> {
+    base.clone().color(super::gc(matched))
+}
+
+/// Re-shape key for a row's matched spans; `matched` is the colour they are
+/// baked with, so moving the selection reshapes the rows it leaves and enters.
+pub(crate) fn menu_match_key(row: &ContextMenuRow, matched: Rgb) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::hash::DefaultHasher::new();
     row.matched_chars.hash(&mut hash);
@@ -1986,7 +2046,7 @@ pub(crate) fn menu_match_key(row: &ContextMenuRow, accent: Rgb) -> u64 {
         .as_ref()
         .is_some_and(|ranges| !ranges.is_empty())
     {
-        (accent.r, accent.g, accent.b).hash(&mut hash);
+        (matched.r, matched.g, matched.b).hash(&mut hash);
     }
     hash.finish()
 }

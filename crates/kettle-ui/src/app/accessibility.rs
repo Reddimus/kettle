@@ -769,7 +769,13 @@ impl App {
                 .map_or(1.0, |window| window.scale_factor() as f32),
             &self.ui_text,
         );
-        nest_context_menu_accessibility(&mut modal, ws, overlay, self.menu_cell(ws).1);
+        nest_context_menu_accessibility(
+            &mut modal,
+            ws,
+            overlay,
+            self.menu_cell(ws).1,
+            &self.ui_text,
+        );
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
@@ -2384,7 +2390,7 @@ pub(super) fn modal_accessibility_projection(
                 continue;
             }
             let id = accessibility_modal_id(2, index + 1);
-            let node = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
+            let node = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME, tr);
             if index == menu.highlight {
                 highlighted = Some(id);
             }
@@ -2805,8 +2811,13 @@ const MENU_TOGGLE_MARK_IN_NAME: bool = cfg!(target_os = "macos");
 /// [`MENU_TOGGLE_MARK_IN_NAME`]). A shortcut is set as the keyboard shortcut
 /// and kept as the description: the locked AccessKit adapters for macOS,
 /// AT-SPI and Windows do not pass the shortcut property on, so the
-/// description is what VoiceOver, Orca and Narrator read.
-fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
+/// description is what VoiceOver, Orca and Narrator read. A row that opens a
+/// submenu is marked by [`mark_context_submenu_row`].
+fn context_menu_item_node(
+    row: &ContextMenuRow,
+    mark_in_name: bool,
+    tr: &kettle_i18n::Translator,
+) -> Node {
     let (role, label) = match row.toggle {
         Some(toggle) => (
             match toggle {
@@ -2829,7 +2840,7 @@ fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
         node.set_toggled(accesskit::Toggled::from(toggle.is_on()));
     }
     if row.hint == SUBMENU_SIGN {
-        node.set_has_popup(accesskit::HasPopup::Menu);
+        mark_context_submenu_row(&mut node, false, tr);
     } else if !row.hint.is_empty() {
         let shortcut = row.hint.trim();
         node.set_keyboard_shortcut(shortcut);
@@ -2844,6 +2855,21 @@ fn context_menu_item_node(row: &ContextMenuRow, mark_in_name: bool) -> Node {
     node
 }
 
+/// Mark a menu row that opens a submenu. The popup and expanded states say so
+/// to UIA, but the locked AccessKit adapters for AT-SPI and macOS pass neither
+/// on, so there the row would be a plain menu item. The row is therefore also
+/// described as a submenu, in the UI's language, in place of the ▸ it is
+/// painted with. On macOS the description becomes AXHelp, which VoiceOver
+/// speaks as a delayed hint while hints are on. On Windows the description is
+/// the UIA full description, so it repeats what the ExpandCollapse pattern
+/// already says; that duplication is accepted to keep one marking for every
+/// platform.
+fn mark_context_submenu_row(node: &mut Node, expanded: bool, tr: &kettle_i18n::Translator) {
+    node.set_has_popup(accesskit::HasPopup::Menu);
+    node.set_expanded(expanded);
+    node.set_description(tr.text(kettle_i18n::Text::MenuA11ySubmenu));
+}
+
 /// Finish the open menu for assistive technology: bound its rows where they
 /// are painted, read a wrapped sentence as one item, and preserve the
 /// drill-in path as actual menu/menu-item ancestry.
@@ -2852,6 +2878,7 @@ pub(super) fn nest_context_menu_accessibility(
     ws: &WindowState,
     overlay: &Overlay,
     cell_h: f32,
+    tr: &kettle_i18n::Translator,
 ) {
     let Some(menu) = &ws.context_menu else {
         return;
@@ -2871,8 +2898,7 @@ pub(super) fn nest_context_menu_accessibility(
                 .iter_mut()
                 .find(|(id, _)| *id == accessibility_modal_id(2, index + 1))
         {
-            node.set_has_popup(accesskit::HasPopup::Menu);
-            node.set_expanded(false);
+            mark_context_submenu_row(node, false, tr);
         }
     }
     let mut child = current_id;
@@ -2890,13 +2916,12 @@ pub(super) fn nest_context_menu_accessibility(
                 continue;
             }
             let id = accessibility_modal_id(kind, index + 1);
-            let mut item = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME);
+            let mut item = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME, tr);
             if matches!(
                 parent.items.get(index),
                 Some(ContextMenuItem::Submenu { .. })
             ) {
-                item.set_has_popup(accesskit::HasPopup::Menu);
-                item.set_expanded(index == parent.highlight);
+                mark_context_submenu_row(&mut item, index == parent.highlight, tr);
                 if index == parent.highlight {
                     item.set_children(vec![child]);
                 }
@@ -3569,10 +3594,13 @@ mod context_menu_nesting_tests {
         );
     }
 
-    /// A row that opens a submenu says so through its popup state; the
-    /// drawn sign is not read out as a description. A shortcut still is.
+    /// A row that opens a submenu says so to every screen reader. The popup
+    /// and expanded states reach UIA only: the locked AT-SPI and macOS
+    /// adapters drop both, so Orca and VoiceOver read the row's description,
+    /// which names it a submenu in the UI's language rather than reading out
+    /// the drawn sign. A shortcut row keeps its shortcut as the description.
     #[test]
-    fn a_submenu_row_opens_a_menu_rather_than_describing_its_arrow() {
+    fn a_submenu_row_is_described_as_a_submenu_to_every_screen_reader() {
         let mut menu = panel("Split", (40.0, 60.0));
         menu.rows[0].hint = SUBMENU_SIGN.to_string();
         menu.rows.push(ContextMenuRow {
@@ -3588,22 +3616,29 @@ mod context_menu_nesting_tests {
             context_menu: Some(menu),
             ..Overlay::default()
         };
-        let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-        let projection =
-            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-        let node = |index: usize| {
-            &projection
-                .nodes
-                .iter()
-                .find(|(id, _)| *id == accessibility_modal_id(2, index))
-                .unwrap()
-                .1
-        };
-        assert_eq!(node(1).label(), Some("Split"));
-        assert_eq!(node(1).has_popup(), Some(accesskit::HasPopup::Menu));
-        assert_eq!(node(1).description(), None);
-        assert_eq!(node(2).has_popup(), None);
-        assert_eq!(node(2).description(), Some("⌘V"));
+        for (language, submenu) in [
+            (kettle_i18n::Language::En, "Submenu"),
+            (kettle_i18n::Language::Es, "Submenú"),
+        ] {
+            let tr = kettle_i18n::Translator::new(language);
+            let projection =
+                modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+            let node = |index: usize| {
+                &projection
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == accessibility_modal_id(2, index))
+                    .unwrap()
+                    .1
+            };
+            assert_eq!(node(1).label(), Some("Split"));
+            assert_eq!(node(1).has_popup(), Some(accesskit::HasPopup::Menu));
+            assert_eq!(node(1).is_expanded(), Some(false));
+            assert_eq!(node(1).description(), Some(submenu), "{language:?}");
+            assert_eq!(node(2).has_popup(), None);
+            assert_eq!(node(2).is_expanded(), None);
+            assert_eq!(node(2).description(), Some("⌘V"));
+        }
     }
 
     /// Both namings of a toggle row, whatever host runs the test: with the
@@ -3613,6 +3648,7 @@ mod context_menu_nesting_tests {
     #[test]
     fn a_toggle_row_keeps_its_marker_in_the_name_only_when_asked() {
         use kettle_render::MenuToggle;
+        let tr = kettle_i18n::Translator::default();
         assert_eq!(MENU_TOGGLE_MARK_IN_NAME, cfg!(target_os = "macos"));
         for (toggle, role, painted, plain) in [
             (
@@ -3644,7 +3680,7 @@ mod context_menu_nesting_tests {
             let mut row = panel(painted, (40.0, 60.0)).rows.remove(0);
             row.toggle = toggle;
             for (mark_in_name, name) in [(true, painted), (false, plain)] {
-                let node = context_menu_item_node(&row, mark_in_name);
+                let node = context_menu_item_node(&row, mark_in_name, &tr);
                 assert_eq!(node.role(), role, "{painted:?}");
                 assert_eq!(node.label(), Some(name), "{painted:?}, {mark_in_name}");
                 assert_eq!(
@@ -3691,7 +3727,7 @@ mod context_menu_nesting_tests {
         let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         let mut projection =
             modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
-        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+        nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &tr);
         let parent_id = accessibility_modal_id(40, 0);
         let item_id = accessibility_modal_id(40, 1);
         assert_eq!(projection.roots, vec![parent_id]);
@@ -3703,6 +3739,7 @@ mod context_menu_nesting_tests {
             .1;
         assert_eq!(parent_item.has_popup(), Some(accesskit::HasPopup::Menu));
         assert_eq!(parent_item.is_expanded(), Some(true));
+        assert_eq!(parent_item.description(), Some("Submenu"));
         assert_eq!(parent_item.children(), &[accessibility_modal_id(2, 0)]);
         assert_eq!(
             parent_item.bounds(),

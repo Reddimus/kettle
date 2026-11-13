@@ -950,6 +950,7 @@ settings_hint_reset = "draft"
 a11y_output_lines = "draft"
 a11y_main_menu = "draft"
 mouse_override_hint = "draft"
+menu_a11y_submenu = "draft"
 
 [second-pass]
 keys = [
@@ -1061,6 +1062,7 @@ keys = [
     "media_lane_a11y_zoom_in",
     "media_lane_a11y_zoom_out",
     "menu_a11y_about",
+    "menu_a11y_submenu",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",
