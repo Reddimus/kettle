@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Settings › Appearance has a Minimum contrast row after Theme, for
+  `minimum-contrast`: Off, 3:1, 4.5:1 or 7:1. A ratio set by hand in the
+  config, such as 2.5, shows as it is until you step it.
+
 - The theme picker shows more under its list. A sample card draws the
   highlighted theme as the terminal would: a prompt, an `ls -l` listing, a
   diff and all 16 palette colours, with your colour overrides and

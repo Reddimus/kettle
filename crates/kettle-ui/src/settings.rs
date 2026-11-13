@@ -203,6 +203,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldTabMinWidth => Text::SettingsDescriptionFieldTabMinWidth,
         Text::SettingsFieldTheme => Text::SettingsDescriptionFieldTheme,
         Text::SettingsFieldAppearance => Text::SettingsDescriptionFieldAppearance,
+        Text::SettingsFieldMinimumContrast => Text::SettingsDescriptionFieldMinimumContrast,
         Text::SettingsFieldUpdateCheckInterval => Text::SettingsDescriptionFieldUpdateCheckInterval,
         Text::SettingsFieldRestoreSession => Text::SettingsDescriptionFieldRestoreSession,
         Text::SettingsFieldRestoreScrollbackLines => {
@@ -625,6 +626,18 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                         labels: None,
                     },
                 },
+                // The theme picker's Contrast button steps the same values.
+                choice(
+                    T::SettingsFieldMinimumContrast,
+                    "minimum-contrast",
+                    &["0", "3", "4.5", "7"],
+                    &[
+                        Label::Text(T::SettingsValueOff),
+                        Label::Name(Cow::Borrowed("3:1")),
+                        Label::Name(Cow::Borrowed("4.5:1")),
+                        Label::Name(Cow::Borrowed("7:1")),
+                    ],
+                ),
                 number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
                 number(
                     T::SettingsFieldBackgroundOpacity,
@@ -1069,6 +1082,7 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 None => match (field.key, cur.as_str()) {
                     ("tab-bar-position", "left") => tr.text(T::SettingsValueLeft).to_string(),
                     ("tab-bar-position", "right") => tr.text(T::SettingsValueRight).to_string(),
+                    ("minimum-contrast", ratio) => format!("{ratio}:1"),
                     _ => cur.clone(),
                 },
             }
@@ -1192,6 +1206,14 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
         // light and a dark palette.
         FieldKind::Choice { .. } if field.key == "theme" => {
             kettle_config::Theme::cycle_popular_by_look(&cfg.theme_name, dir >= 0).to_string()
+        }
+        // A ratio set by hand between two steps (2.5) moves to its neighbour
+        // rather than wrapping from the list's start.
+        FieldKind::Choice { .. } if field.key == "minimum-contrast" => {
+            kettle_render::minimum_contrast_token(kettle_render::step_minimum_contrast(
+                cfg.minimum_contrast,
+                dir >= 0,
+            ))
         }
         FieldKind::Choice { values, .. } => {
             let cur = read_choice(cfg, field.key);
@@ -1482,6 +1504,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
+        "minimum-contrast" => kettle_render::minimum_contrast_token(cfg.minimum_contrast),
         "theme-mode" => match cfg.theme_mode {
             kettle_config::ThemeMode::Auto => "auto",
             kettle_config::ThemeMode::Light => "light",
@@ -1828,8 +1851,12 @@ mod tests {
                     assert_eq!(values.len(), labels.len());
                     for (token, label) in values.iter().zip(*labels) {
                         let label = label.show(&EN);
+                        // A ratio such as 4.5:1 has no case to give.
                         assert!(
-                            label.chars().next().is_some_and(char::is_uppercase),
+                            label
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit()),
                             "{label}"
                         );
                         if *token == "auto" && !matches!(field.key, "update-policy" | "theme-mode")
@@ -2077,6 +2104,40 @@ mod tests {
 
         cfg.scrollback_bytes = 500_000;
         assert_eq!(read(&cfg, &bytes, &EN), "<1 MB");
+    }
+
+    /// The Appearance page's minimum-contrast row steps Off, 3:1, 4.5:1, 7:1
+    /// and back to Off, each value a config token that reads back the same;
+    /// a ratio set by hand (2.5) shows as it is and steps to its neighbour.
+    #[test]
+    fn minimum_contrast_row_round_trips_and_keeps_a_hand_set_ratio() {
+        let cats = categories(&[]);
+        let (index, field) = cats[0]
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.key == "minimum-contrast")
+            .expect("an Appearance row");
+        assert_eq!(cats[0].fields[index - 1].key, "theme", "right after Theme");
+        let mut cfg = Config::default();
+        let mut shown = vec![read(&cfg, field, &EN)];
+        for _ in 0..4 {
+            let token = next_value(&cfg, field, 1);
+            cfg = Config::parse_text(&format!("minimum-contrast = {token}"));
+            shown.push(read(&cfg, field, &EN));
+        }
+        assert_eq!(shown, ["Off", "3:1", "4.5:1", "7:1", "Off"]);
+        assert_eq!(next_value(&Config::default(), field, -1), "7");
+        let hand = Config::parse_text("minimum-contrast = 2.5");
+        assert_eq!(read(&hand, field, &EN), "2.5:1");
+        assert_eq!(read(&hand, field, &ES), "2.5:1");
+        assert_eq!(next_value(&hand, field, 1), "3");
+        assert_eq!(next_value(&hand, field, -1), "0");
+        assert_eq!(
+            read(&Config::default(), field, &ES),
+            ES.text(Text::SettingsValueOff)
+        );
+        assert_eq!(default_value(field).as_deref(), Some("0"));
     }
 
     #[test]
