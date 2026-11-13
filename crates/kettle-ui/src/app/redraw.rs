@@ -179,17 +179,7 @@ impl App {
                 Some(with_preedit(&state.query)),
                 picker_hint(
                     tr,
-                    &[
-                        (
-                            "Enter",
-                            theme_picker_enter_hint(
-                                self.theme_picker_key_for(ws),
-                                self.theme_pick_key(),
-                            ),
-                        ),
-                        ("↑↓", T::PickerHintSelect),
-                        ("Esc", T::PickerHintRestore),
-                    ],
+                    &theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key()),
                 ),
                 Some(theme_picker_list_with_footer(
                     state,

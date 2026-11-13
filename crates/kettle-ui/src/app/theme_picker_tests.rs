@@ -1304,6 +1304,41 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
         super::theme_picker_enter_hint("dark-theme", "dark-theme"),
         kettle_i18n::Text::PickerHintKeep
     );
+    // The longer Enter hint still leaves the query its room in the
+    // narrowest header (the header drops a hint that does not fit beside
+    // the query), in Spanish, at 1x and 2x; the painter and the projection
+    // (IME, hit test and screen reader) build the same hint.
+    for tr in [&EN, &ES] {
+        for (cw, width) in [(8.4, 360.0), (16.8, 720.0), (8.4, 720.0)] {
+            let field = kettle_render::TextFieldOverlay {
+                picker_header: true,
+                text: "Tokyo".into(),
+                cursor_byte: 5,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, width, 32.0),
+                prefix: super::theme_picker_appearance_prefix(key, tr),
+                hint: super::picker_hint(tr, &super::theme_picker_hints(key, "dark-theme")),
+                accent_palette: 5,
+            };
+            let [prefix, editor, hint] = kettle_render::text_field_rects(&field, cw);
+            assert!(editor.2 >= 6.0 * cw, "{width} {cw}: {editor:?}");
+            assert!(prefix.0 + prefix.2 <= editor.0 + 0.01);
+            assert!(editor.0 + editor.2 <= hint.0 + 0.01);
+            assert!(hint.0 + hint.2 <= width + 0.01);
+        }
+    }
+    let source = production_source();
+    for builder in ["fn modal_text_projection(", "fn overlay("] {
+        let body = source.split(builder).nth(1).unwrap();
+        let body = body.split("\n    }\n").next().unwrap();
+        assert!(
+            body.contains(
+                "theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key())"
+            ),
+            "{builder}"
+        );
+    }
     assert!(switch_theme_picker_slot(
         &mut picker,
         &cfg,

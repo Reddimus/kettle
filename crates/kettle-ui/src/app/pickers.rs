@@ -566,6 +566,21 @@ pub(super) fn switch_theme_picker_slot(
     true
 }
 
+/// The theme picker's key hint, for the painted header and its projection
+/// alike: Enter keeps the pick, or only saves it for the side the window is
+/// not on (see [`theme_picker_enter_hint`]).
+pub(super) fn theme_picker_hints(
+    save_key: &str,
+    active: &str,
+) -> [(&'static str, kettle_i18n::Text); 3] {
+    use kettle_i18n::Text;
+    [
+        ("Enter", theme_picker_enter_hint(save_key, active)),
+        ("↑↓", Text::PickerHintSelect),
+        ("Esc", Text::PickerHintRestore),
+    ]
+}
+
 /// What Enter does in the theme picker's key hint: keep the pick, or only
 /// save it for the side the window is not on.
 pub(super) fn theme_picker_enter_hint(save_key: &str, active: &str) -> kettle_i18n::Text {

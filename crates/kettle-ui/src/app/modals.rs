@@ -271,6 +271,8 @@ impl App {
                 .is_some_and(|nav| nav.search_focused)
         {
             use kettle_i18n::Text as T;
+            let theme_hints =
+                theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key());
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
                 &[
                     ("Enter", T::PickerHintRun),
@@ -278,11 +280,7 @@ impl App {
                     ("Esc", T::PickerHintCancel),
                 ]
             } else if ws.theme_picker_input.is_some() {
-                &[
-                    ("Enter", T::PickerHintKeep),
-                    ("↑↓", T::PickerHintSelect),
-                    ("Esc", T::PickerHintRestore),
-                ]
+                &theme_hints
             } else if ws.layout_picker_input.is_some() {
                 &[
                     ("Enter", T::PickerHintSpawn),
