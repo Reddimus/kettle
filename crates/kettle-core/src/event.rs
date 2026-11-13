@@ -38,9 +38,9 @@ pub struct OutputWakeGate {
     state: AtomicU8,
     waker: Waker,
     /// When the latest publication happened, in nanoseconds after
-    /// [`publication_epoch`] plus one; zero means never. Coalesced and
-    /// quiesced publications are stamped too, so the UI can tell how far apart
-    /// the writes of one burst were even when only the first woke it.
+    /// [`publication_epoch`] plus one; zero means never. Every publication is
+    /// stamped, coalesced and quiesced ones too, so the UI can tell how far
+    /// apart the writes of one burst were even when only the first woke it.
     published_ns: AtomicU64,
 }
 
@@ -63,9 +63,10 @@ impl OutputWakeGate {
     }
 
     /// When output was last published, whether or not that publication woke
-    /// the UI. A reader that has just seen a newer output generation can still
-    /// read the previous stamp: the PTY reader bumps the generation, then calls
-    /// [`Self::request`], which stores this stamp.
+    /// the UI. The PTY reader stores this stamp before it bumps the output
+    /// generation, so a reader that loads a generation and then this stamp
+    /// gets a time at least as new as that generation's publication. It may be
+    /// a later publication's whose generation it has not seen yet.
     pub fn last_publication(&self) -> Option<std::time::Instant> {
         match self.published_ns.load(Ordering::Acquire) {
             0 => None,
@@ -74,9 +75,10 @@ impl OutputWakeGate {
         }
     }
 
-    /// Publish output damage. Returns `true` only when the caller owns a newly
-    /// queued wake; duplicate output while that wake is pending is coalesced.
-    pub fn request(&self) -> bool {
+    /// Stamp a publication with the current time. Call it before the output
+    /// generation's `Release` increment, so a reader that acquires the new
+    /// generation also sees this stamp (see [`Self::last_publication`]).
+    pub fn stamp_publication(&self) {
         let since_epoch = publication_epoch().elapsed().as_nanos();
         self.published_ns.store(
             u64::try_from(since_epoch)
@@ -84,6 +86,13 @@ impl OutputWakeGate {
                 .saturating_add(1),
             Ordering::Release,
         );
+    }
+
+    /// Publish output damage. Returns `true` only when the caller owns a newly
+    /// queued wake; duplicate output while that wake is pending is coalesced.
+    /// The publication's time is stamped separately, before the generation
+    /// moves ([`Self::stamp_publication`]).
+    pub fn request(&self) -> bool {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             let (next, should_wake) = if current & OUTPUT_WAKE_ENABLED != 0 {
@@ -1025,6 +1034,7 @@ mod tests {
         assert_eq!(gate.last_publication(), None);
 
         let before = std::time::Instant::now();
+        gate.stamp_publication();
         assert!(gate.request());
         let first = gate
             .last_publication()
@@ -1034,6 +1044,7 @@ mod tests {
         // A second write while the wake is pending is coalesced into that wake,
         // but its time is what tells the UI the burst was split.
         std::thread::sleep(std::time::Duration::from_millis(2));
+        gate.stamp_publication();
         assert!(!gate.request());
         let coalesced = gate.last_publication().expect("stamped");
         assert!(
@@ -1043,6 +1054,7 @@ mod tests {
 
         gate.set_enabled(false);
         std::thread::sleep(std::time::Duration::from_millis(2));
+        gate.stamp_publication();
         assert!(!gate.request());
         assert!(
             gate.last_publication().expect("stamped")
