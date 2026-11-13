@@ -1417,26 +1417,41 @@ fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
     assert_eq!(tab_button_action(accessibility_tab_id(7, false)), None);
 }
 
-/// A tab torn off a macOS title bar lands where a lone tab is painted, which
-/// ends before the gear: drag-out and the painted strip share one geometry.
+/// A tab torn off a macOS title bar is held by its pointer in the lone tab
+/// the new window paints: centred on that window, at least
+/// `tab-min-width` wide, and clear of the Settings gear. The torn window's
+/// grip once assumed `▾ +` alone, so in a narrow window it held the pointer
+/// in a full-width tab that ran under the gear.
 #[test]
-fn torn_off_tab_lands_where_the_titlebar_paints_a_lone_tab_beside_the_gear() {
-    use super::chrome::{horizontal_tab_geometry, tear_off_destination_tab};
+fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_lone_tab_beside_the_gear() {
+    use super::chrome::{titlebar_settings_control, titlebar_tear_off_grab_x};
     let cfg = kettle_config::Config::default();
-    let buttons = crate::window_buttons::ButtonLayout::default();
-    for scale in [1.0, 2.0] {
-        for width in [400.0, 1280.0] {
+    let buttons = crate::window_buttons::ButtonLayout {
+        left: Vec::new(),
+        right: Vec::new(),
+    };
+    for scale in [1.0_f32, 2.0] {
+        for width in (500..=660).step_by(4).map(|w| w as f32).chain([1280.0]) {
             let band = macos_titlebar_lane(width, scale);
-            let painted = horizontal_tab_geometry(band, scale, (false, true), (1, 0), &cfg);
-            let destination = tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons);
-            let x = band.0 + painted.layout.xs[0].expect("the lone tab shows");
-            assert_eq!(
-                destination,
-                (x, band.1, painted.layout.last_width, band.3),
-                "{width}px @{scale}x"
+            let case = format!("{width}pt @{scale}x");
+            let (menu, _, reserve) = super::horizontal_new_tab_controls(band, scale, true);
+            let (gear, _) =
+                titlebar_settings_control(menu, band.2, reserve, scale, cfg.tab_min_width);
+            assert!(gear.2 > 0.0, "{case}: no gear");
+            let in_tab = f64::from(32.0 * scale);
+            let grab = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, in_tab);
+            let x = (grab - in_tab) as f32;
+            // A tab centred on the window from `x` is this wide.
+            let centre = width * scale * 0.5;
+            let tab_w = 2.0 * (centre - x);
+            assert!(x >= band.0, "{case}: grip under the traffic lights at {x}");
+            assert!(tab_w >= cfg.tab_min_width, "{case}: tab {tab_w} px wide");
+            assert!(
+                x + tab_w <= gear.0 + 0.01,
+                "{case}: the held tab ends at {} under the gear at {}",
+                x + tab_w,
+                gear.0
             );
-            assert!(painted.settings_rect.2 > 0.0, "{width}px @{scale}x: no gear");
-            assert!(destination.0 + destination.2 <= painted.settings_rect.0);
         }
     }
 }

@@ -1421,7 +1421,8 @@ pub(super) fn horizontal_tab_geometry(
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+/// The lone tab a torn-off window's title bar paints, in its own `band`:
+/// the tab its pointer grip is measured into, on every platform.
 pub(super) fn tear_off_destination_tab(
     cfg: &Config,
     band: Rect,
@@ -1445,6 +1446,20 @@ pub(super) fn tear_off_destination_tab(
         geometry.layout.last_width,
         band.3,
     )
+}
+
+/// How far along a torn window's title bar its pointer holds it: `in_tab`
+/// into the lone tab the destination paints, which leaves room for the
+/// macOS Settings gear and the Linux header's window buttons.
+pub(super) fn titlebar_tear_off_grab_x(
+    cfg: &Config,
+    band: Rect,
+    header: (bool, bool),
+    scale: f32,
+    buttons: &crate::window_buttons::ButtonLayout,
+    in_tab: f64,
+) -> f64 {
+    f64::from(tear_off_destination_tab(cfg, band, header, scale, buttons).0) + in_tab
 }
 
 /// The shortcut shown on tab `index`: whatever key the bindings give "go to
