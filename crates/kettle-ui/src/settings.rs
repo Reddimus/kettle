@@ -633,9 +633,9 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["0", "3", "4.5", "7"],
                     &[
                         Label::Text(T::SettingsValueOff),
-                        Label::Name(Cow::Borrowed("3:1")),
-                        Label::Name(Cow::Borrowed("4.5:1")),
-                        Label::Name(Cow::Borrowed("7:1")),
+                        Label::Name(Cow::Borrowed("3")),
+                        Label::Name(Cow::Borrowed("4.5")),
+                        Label::Name(Cow::Borrowed("7")),
                     ],
                 ),
                 number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
@@ -1082,7 +1082,6 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 None => match (field.key, cur.as_str()) {
                     ("tab-bar-position", "left") => tr.text(T::SettingsValueLeft).to_string(),
                     ("tab-bar-position", "right") => tr.text(T::SettingsValueRight).to_string(),
-                    ("minimum-contrast", ratio) => format!("{ratio}:1"),
                     _ => cur.clone(),
                 },
             }
@@ -1851,7 +1850,7 @@ mod tests {
                     assert_eq!(values.len(), labels.len());
                     for (token, label) in values.iter().zip(*labels) {
                         let label = label.show(&EN);
-                        // A ratio such as 4.5:1 has no case to give.
+                        // A ratio such as 4.5 has no case to give.
                         assert!(
                             label
                                 .chars()
@@ -2106,9 +2105,9 @@ mod tests {
         assert_eq!(read(&cfg, &bytes, &EN), "<1 MB");
     }
 
-    /// The Appearance page's minimum-contrast row steps Off, 3:1, 4.5:1, 7:1
-    /// and back to Off, each value a config token that reads back the same;
-    /// a ratio set by hand (2.5) shows as it is and steps to its neighbour.
+    /// The Appearance page's minimum-contrast row steps Off, 3, 4.5, 7 and
+    /// back to Off, each value a config token that reads back the same; a
+    /// ratio set by hand (2.5) shows as it is and steps to its neighbour.
     #[test]
     fn minimum_contrast_row_round_trips_and_keeps_a_hand_set_ratio() {
         let cats = categories(&[]);
@@ -2126,11 +2125,11 @@ mod tests {
             cfg = Config::parse_text(&format!("minimum-contrast = {token}"));
             shown.push(read(&cfg, field, &EN));
         }
-        assert_eq!(shown, ["Off", "3:1", "4.5:1", "7:1", "Off"]);
+        assert_eq!(shown, ["Off", "3", "4.5", "7", "Off"]);
         assert_eq!(next_value(&Config::default(), field, -1), "7");
         let hand = Config::parse_text("minimum-contrast = 2.5");
-        assert_eq!(read(&hand, field, &EN), "2.5:1");
-        assert_eq!(read(&hand, field, &ES), "2.5:1");
+        assert_eq!(read(&hand, field, &EN), "2.5");
+        assert_eq!(read(&hand, field, &ES), "2.5");
         assert_eq!(next_value(&hand, field, 1), "3");
         assert_eq!(next_value(&hand, field, -1), "0");
         assert_eq!(
