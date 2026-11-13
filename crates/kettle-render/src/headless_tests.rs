@@ -7031,3 +7031,79 @@ fn default_emoji_without_a_selector_asks_for_the_colour_face() {
     assert_eq!(family_at("\u{231a}", 0), glyphon::Family::Name(family));
     assert_ne!(family_at("\u{231a}", 1), glyphon::Family::Name(family));
 }
+
+/// The command palette shapes a row's matched characters in the colour the
+/// row's own surface needs, so the selected row's matches read on its
+/// accent-tinted fill, and moving the selection reshapes the rows it leaves
+/// and enters. Matches are in the bold face, which keeps the row's width.
+#[test]
+fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 220) else {
+        eprintln!("palette match colour check skipped: no GPU adapter");
+        return;
+    };
+    let row_h = menu::row_height(renderer.cell_h);
+    let level = |highlight, matches: bool| {
+        let mut menu = menu_level(
+            (40.0, 20.0),
+            &["Split automatically", "Split up"],
+            highlight,
+            (320.0, row_h),
+        );
+        for row in &mut menu.rows {
+            row.matched_chars = matches.then(|| std::iter::once(0..5).collect());
+        }
+        menu
+    };
+    let picker = |highlight| level(highlight, true);
+    let theme = &cfg.theme;
+    let accent = renderer.ui_accent(&cfg, theme);
+    let linear = renderer.config.format.is_srgb();
+    let mut colors = chrome::Colors::default();
+    let want = [false, true]
+        .map(|selected| overlays::menu_match_color(selected, theme, accent, &mut colors, linear));
+    assert_ne!(want[0], want[1], "the selected row needs its own colour");
+    let snap = snapshot_of(20, 4, b"");
+    for highlight in [0, 1, 0] {
+        let overlay = Overlay {
+            context_menu: Some(picker(highlight)),
+            ..focused(false)
+        };
+        capture(&mut renderer, &cfg, &[pane(&snap, 480, 220)], &overlay);
+        for row in 0..2 {
+            let expected = want[usize::from(row == highlight)];
+            let shaped: Vec<_> = renderer.context_menu_buffers[row]
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.color_opt, g.font_id)))
+                .collect();
+            assert!(!shaped.is_empty());
+            for (start, color, font) in shaped {
+                let matched = (start < 5).then(|| gc(expected));
+                assert_eq!(
+                    color, matched,
+                    "row {row} byte {start} with row {highlight} selected"
+                );
+                let weight = renderer.font_system.db().face(font).unwrap().weight;
+                assert_eq!(
+                    weight >= fontdb::Weight::BOLD,
+                    start < 5,
+                    "row {row} byte {start} is shaped at {weight:?}"
+                );
+            }
+        }
+    }
+    let widths = |renderer: &Renderer| {
+        renderer.context_menu_buffers[..2]
+            .iter()
+            .map(|buffer| buffer.layout_runs().map(|run| run.line_w).sum::<f32>())
+            .collect::<Vec<_>>()
+    };
+    let bold = widths(&renderer);
+    let overlay = Overlay {
+        context_menu: Some(level(0, false)),
+        ..focused(false)
+    };
+    capture(&mut renderer, &cfg, &[pane(&snap, 480, 220)], &overlay);
+    assert_eq!(bold, widths(&renderer), "bold matches keep the row's width");
+}

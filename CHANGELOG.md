@@ -362,6 +362,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The command palette's matched characters are readable on the highlighted
+  row again, where the accent colour on the accent-tinted highlight gave only
+  about 3.5:1. They now keep at least 4.5:1 on every row in every bundled
+  theme, and are bold so they still stand out where a theme's accent is its
+  text colour.
+
 - On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
   Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing
   was left on, so under the "Prefer tabs when opening documents" system
