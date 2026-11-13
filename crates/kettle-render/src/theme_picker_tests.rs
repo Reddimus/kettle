@@ -88,6 +88,23 @@ fn theme_readability_follows_the_terminals_contrast_lift() {
     let lifted = theme_readability(&theme, 4.5);
     assert!(lifted.lowest >= 4.5 - 0.05, "{name}: {:.2}", lifted.lowest);
     assert!(lifted.lifted > 0);
+    // A colour lifted to the minimum never reads below it: the readout
+    // rounds a ratio within a hair of the step up, not down.
+    for minimum in [3.0_f32, 4.5, 7.0] {
+        for name in Theme::list() {
+            let r = theme_readability(&Theme::by_name(name), minimum);
+            let reached = r.lowest >= f64::from(minimum) - 0.01;
+            let shown: f64 = crate::theme_picker::ratio_text(r.lowest)
+                .trim_end_matches(":1")
+                .parse()
+                .unwrap();
+            assert!(
+                !reached || shown >= f64::from(minimum),
+                "{name} at {minimum}: {:.4} reads {shown}",
+                r.lowest
+            );
+        }
+    }
     // The production cell path gives the same ink.
     let mut cache = MinimumContrastCache::default();
     assert_eq!(
@@ -356,4 +373,42 @@ fn the_sample_card_paints_the_highlighted_themes_colours() {
             }
         }
     }
+}
+
+/// The contrast button's words change in place: "Contrast: Off" and
+/// "Contrast: 3:1" are as wide, in the same buffer at the same spot, so only
+/// the footer's own damage key makes the next frame show the new value.
+#[test]
+fn a_new_contrast_value_repaints_the_button_in_place() {
+    let _serialized = crate::gpu_tests::gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(720, 560) else {
+        eprintln!("contrast button check skipped: no GPU adapter");
+        return;
+    };
+    cfg.theme = Theme::by_name("Dracula");
+    let snap = snapshot_of(20, 4, b"");
+    let row_h = menu::row_height(renderer.cell_h);
+    let cell = (renderer.cell_w, renderer.cell_h);
+    let mut buttons = Vec::new();
+    for minimum in [0.0, 3.0] {
+        let mut f = footer("Dracula", ThemeFollow::System, Some(ThemeSlot::Dark));
+        f.minimum_contrast = minimum;
+        f.height = theme_footer_height(cell.1, true, 2);
+        let picker = picker_with_footer(f, (640.0, row_h));
+        let (x, y, w, h) = picker
+            .picker_footer_layout(&EN, cell)
+            .and_then(|layout| layout.contrast_button)
+            .expect("the button");
+        let overlay = Overlay {
+            context_menu: Some(picker),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 720, 560)], &overlay);
+        let pixels: Vec<[u8; 4]> = (y as u32 + 2..(y + h) as u32 - 2)
+            .flat_map(|py| (x as u32 + 2..(x + w) as u32 - 2).map(move |px| (px, py)))
+            .map(|(px, py)| frame.get_pixel(px, py).0)
+            .collect();
+        buttons.push(pixels);
+    }
+    assert!(buttons[0] != buttons[1], "the button still says Off");
 }

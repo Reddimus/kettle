@@ -153,8 +153,10 @@ pub fn minimum_contrast_token(value: f32) -> String {
     text
 }
 
-/// A ratio as people read it, such as `4.5:1`.
-fn ratio_text(ratio: f64) -> String {
+/// A ratio as people read it, such as `4.5:1`, rounded down so a theme
+/// never reads better than it is. The minimum-contrast lift reaches its
+/// ratio exactly, so a lifted colour still reads as the minimum.
+pub(crate) fn ratio_text(ratio: f64) -> String {
     format!("{:.1}:1", (ratio * 10.0).floor() / 10.0)
 }
 

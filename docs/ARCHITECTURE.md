@@ -3664,6 +3664,21 @@ selection inset follow the scale factor: rows, paddings, hit testing and
 screen-reader bounds keep `menu::row_height` and the row walk
 `context_menu_row_rects`, which the UI's tests hold to the painted rows.
 
+The theme picker's card also holds a footer under its rows
+(`ContextMenu::picker_footer`, `crates/kettle-render/src/theme_picker.rs`): a
+sample of the highlighted theme with its contrast readout, and a status line
+with the theme mode, both sides' themes and a minimum-contrast button. The UI
+fills in `ThemePickerFooter` from the config and decides, with
+`theme_footer_height` and the footer's own minimum columns, whether the card
+and how many status lines fit; kettle-render owns the words, layout and
+colours, so painting, the button's hit test and the footer's AccessKit text
+all come from `theme_footer_layout` and `theme_footer_description`. Sample
+text goes through the same `MinimumContrastCache::resolve` as cell text. The
+card, its palette squares, marks and the button outline are swatch-layer
+rounded surfaces; each footer line is a rich-text buffer whose words and
+colours feed the chrome damage hash, because a new value or sample can change
+a line in place.
+
 The cursor pass draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad and the
 pane text and card layers, and below lanes, menus and the paste receipt, so
