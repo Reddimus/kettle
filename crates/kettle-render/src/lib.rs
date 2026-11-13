@@ -4214,23 +4214,19 @@ impl Renderer {
                         centered_left,
                         self.scale,
                     )
+                    && let Some(ink) = chrome::activity_ink(theme, s.activity)
                 {
-                    let ink = match s.activity {
-                        TabActivity::Bell => Some(theme.palette[3]),
-                        TabActivity::Output => Some(theme.palette[6]),
-                        TabActivity::Silent => Some(theme.palette[8]),
-                        TabActivity::Normal => None,
-                    };
-                    if let Some(ink) = ink {
-                        tab_strip::activity_marker_quads(
-                            &mut quads,
-                            s.activity,
-                            marker,
-                            self.scale,
-                            ink,
-                            tab_background,
-                        );
-                    }
+                    let ink =
+                        self.chrome_colors
+                            .tab_marker(ink, tab_background, overlay.window_focused);
+                    tab_strip::activity_marker_quads(
+                        &mut quads,
+                        s.activity,
+                        marker,
+                        self.scale,
+                        ink,
+                        tab_background,
+                    );
                 }
                 // `✕` close glyph — separate text area so we can color
                 // it independently of the title. Bright on hover, dim

@@ -16,6 +16,7 @@ pub(crate) struct Colors {
     surfaces: std::collections::HashMap<([u32; 2], u64, bool), Rgb>,
     completion: Option<([u32; 5], crate::CompletionPalette)>,
     inactive: std::collections::HashMap<([u32; 3], u32, bool), Rgb>,
+    markers: std::collections::HashMap<([u32; 2], bool), Rgb>,
 }
 
 impl Colors {
@@ -149,6 +150,28 @@ impl Colors {
         self.surface(base, top, alpha, linear)
     }
 
+    /// A background tab's activity marker on the tab's own fill: at least
+    /// `ICON_CONTRAST`, reached by moving only the ink's lightness so the
+    /// theme's cyan stays cyan and its yellow stays yellow. An unfocused
+    /// window fades it halfway toward the tab first, never below the floor.
+    pub(crate) fn tab_marker(&mut self, ink: Rgb, bg: Rgb, focused: bool) -> Rgb {
+        let key = ([ink, bg].map(MinimumContrastCache::color_key), focused);
+        if let Some(color) = self.markers.get(&key) {
+            return *color;
+        }
+        let ink = if focused {
+            ink
+        } else {
+            color::over(ink, bg, 0.5, false)
+        };
+        let color = color::with_min_contrast_same_hue(ink, bg, ICON_CONTRAST);
+        if self.markers.len() >= 4096 {
+            self.markers.clear();
+        }
+        self.markers.insert(key, color);
+        color
+    }
+
     pub(crate) fn icon(&mut self, fg: Rgb, bg: Rgb) -> Rgb {
         self.resolve(fg, bg, ICON_CONTRAST)
     }
@@ -201,6 +224,18 @@ impl Colors {
             self.cache.clear();
         }
         self.cache.resolve(fg, bg, minimum)
+    }
+}
+
+/// The theme colour a background tab's activity marker starts from: cyan for
+/// new output, the dim chrome grey once it stopped, yellow for the bell.
+pub(crate) fn activity_ink(theme: &kettle_config::Theme, kind: crate::TabActivity) -> Option<Rgb> {
+    use crate::TabActivity;
+    match kind {
+        TabActivity::Output => Some(theme.palette[6]),
+        TabActivity::Silent => Some(theme.palette[8]),
+        TabActivity::Bell => Some(theme.palette[3]),
+        TabActivity::Normal => None,
     }
 }
 
@@ -609,6 +644,72 @@ mod tab_chrome_tests {
                 tab_detail(strip, theme.foreground, false)
             );
         }
+    }
+
+    /// Every activity marker reaches 3:1 on the tab behind it, hovered or
+    /// not and in a focused or unfocused window, and a focused window's
+    /// marker keeps the theme colour's hue and saturation. TokyoNight Night's Silent grey
+    /// was 2.04:1 on its strip, Catppuccin Latte's bell yellow 2.04:1.
+    #[test]
+    fn tab_activity_markers_keep_3_to_1_and_their_hue() {
+        use crate::TabActivity;
+        let cfg = kettle_config::Config::default();
+        let mut failures = Vec::new();
+        let hue_gap = |a: f64, b: f64| {
+            let d = (a - b).rem_euclid(6.0);
+            d.min(6.0 - d)
+        };
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let mut colors = Colors::default();
+            for (surface, bg) in [
+                ("strip", strip),
+                ("hovered tab", tab_detail(strip, theme.foreground, false)),
+            ] {
+                for kind in [TabActivity::Output, TabActivity::Silent, TabActivity::Bell] {
+                    let raw = activity_ink(&theme, kind).expect("a marked state has ink");
+                    for focused in [true, false] {
+                        let ink = colors.tab_marker(raw, bg, focused);
+                        let ratio = color::contrast_ratio(ink, bg);
+                        if ratio < ICON_CONTRAST - 1e-6 {
+                            failures.push(format!(
+                                "{name}: {kind:?} on {surface} (focused {focused}) {ratio:.2}:1"
+                            ));
+                        }
+                        let (raw_hue, raw_saturation, _) = color::hsl(raw);
+                        let (hue, saturation, lightness) = color::hsl(ink);
+                        // Hue is defined only for a visible tint.
+                        let tinted = raw_saturation >= 0.25
+                            && saturation >= 0.25
+                            && (0.1..=0.9).contains(&lightness);
+                        // Blending toward white or black keeps the hue but
+                        // greys the tint, so saturation is held too.
+                        if focused
+                            && tinted
+                            && (hue_gap(hue, raw_hue) > 0.05
+                                || (saturation - raw_saturation).abs() > 0.05)
+                        {
+                            failures.push(format!(
+                                "{name}: {kind:?} on {surface} moved hue {raw_hue:.3} -> {hue:.3}, \
+                                 saturation {raw_saturation:.3} -> {saturation:.3}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failing markers: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
 
     /// Inactive tab titles, resting close glyphs and menu shortcut hints sit

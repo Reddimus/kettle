@@ -700,6 +700,13 @@ mod tests {
             .0;
         assert!(block.contains("tab_strip::activity_marker_rect("));
         assert!(block.contains("tab_strip::activity_marker_quads("));
+        // Marker ink is resolved against the tab it sits on.
+        assert!(block.contains("chrome::activity_ink(theme, s.activity)"));
+        let compact = block.split_whitespace().collect::<String>();
+        assert!(compact.contains("self.chrome_colors.tab_marker(ink,tab_background,"));
+        for raw in ["theme.palette[3]", "theme.palette[6]", "theme.palette[8]"] {
+            assert!(!block.contains(raw), "raw marker ink {raw}");
+        }
         assert!(!block.contains(">= 20.0"));
         assert!(!block.contains("centered_left - 10.0"));
     }
