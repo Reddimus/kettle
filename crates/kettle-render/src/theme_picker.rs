@@ -81,7 +81,7 @@ impl ThemePickerFooter {
 
 /// Columns the sample card's lines and the status lines need at least, in
 /// `tr`'s words: every sample line and the readout whole, the contrast button
-/// whole, the mode at least [`FOLLOW_MIN_COLS`] columns, and each theme name
+/// whole, the mode at least `FOLLOW_MIN_COLS` columns, and each theme name
 /// at least four columns.
 pub fn theme_footer_min_columns(footer: &ThemePickerFooter, tr: &Translator) -> (usize, usize) {
     // The widest readout any theme gives, so the card does not come and go
@@ -309,7 +309,7 @@ pub struct ThemeFooterLayout {
     pub squares: Vec<(Rect4, usize)>,
     /// The square of the lowest-contrast colour, after the readout.
     pub lowest_square: Option<(Rect4, usize)>,
-    /// A mark after the readout when a colour is below [`LOW_CONTRAST`].
+    /// A mark after the readout when a colour is below `LOW_CONTRAST`.
     pub low_mark: Option<Rect4>,
     /// The line above the status lines.
     pub divider: Option<Rect4>,
