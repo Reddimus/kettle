@@ -121,6 +121,9 @@ config_notice_missing_equals = "draft"
 notice_dismiss = "draft"
 a11y_tab_list = "draft"
 a11y_tab_close = "draft"
+a11y_tab_new_output = "draft"
+a11y_tab_bell = "draft"
+a11y_tab_output_stopped = "draft"
 a11y_new_tab_menu = "draft"
 
 quick_terminal_toggle = "draft"
@@ -999,6 +1002,9 @@ keys = [
     "notice_dismiss",
     "a11y_tab_list",
     "a11y_tab_close",
+    "a11y_tab_new_output",
+    "a11y_tab_bell",
+    "a11y_tab_output_stopped",
     "a11y_new_tab_menu",
     "settings_a11y_search",
     "media_viewer_a11y",

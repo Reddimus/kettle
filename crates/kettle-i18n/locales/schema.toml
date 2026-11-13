@@ -2547,6 +2547,18 @@ context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exi
 context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
 args = [{ name = "title", type = "str" }]
 
+[messages.a11y_tab_new_output]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows new output since the tab was last viewed (a filled dot). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_tab_bell]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows the terminal bell rang (a triangle). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_tab_output_stopped]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows its watched output went quiet (a ring). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
 [messages.a11y_new_tab_menu]
 context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
 
