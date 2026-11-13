@@ -1,0 +1,1903 @@
+[
+ {
+  "id": "c01-larger-header-controls",
+  "category": "C01",
+  "title": "Header new-tab and options glyphs grow, 5.5:1 to 11.3:1 contrast",
+  "caption": "5.9.0 drew the options caret at 5x4 px and the new-tab + at 7x7 px on a (65,72,104) chip, at 5.5:1. 6.0.0 draws the caret at 8x8 px and the + at 14x13 px on the header, at 11.3:1.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   1180,
+   0,
+   100,
+   64
+  ],
+  "scale": 4,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1240,
+     39,
+     32,
+     10
+    ],
+    "label": "5 and 7 px, 5.5:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1214,
+     8,
+     50,
+     16
+    ],
+    "label": "8 and 14 px, 11.3:1"
+   }
+  ],
+  "objective_basis": "Old caret x1241-1245, y42-45, (192,202,245) on (65,72,104) = 5.53:1; old + x1263-1269, y41-47, (191,201,244) = 5.48:1. New caret x1216-1223, y12-19; new + x1249-1262, y10-22; both (192,202,245) on (20,21,29) = 11.26:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c01-no-blank-first-row",
+  "category": "C01",
+  "title": "A new window's first prompt is on row 1, not row 2",
+  "caption": "In every freshly launched 5.9.0 window the first row was empty and the prompt sat on row 2. In 6.0.0 the prompt is on row 1. With the shorter header, the first prompt moves from y 80 to y 44.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   0,
+   30,
+   420,
+   90
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     4,
+     59,
+     400,
+     18
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     330,
+     104,
+     250,
+     70
+    ],
+    "label": "empty row 1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     8,
+     41,
+     148,
+     21
+    ],
+    "label": "prompt on row 1"
+   }
+  ],
+  "objective_basis": "Prompt glyph bounding box on (52,55,65): old x8-147, y80-95 (row 2; row 1 glyph tops are y64-66 in C02-focused, C21-bidi and C23-escape-suite, pitch about 16.2 px); y58-79 holds no text. The same row-2 prompt (top y80) is in old C13-marks, C21-es-window, C24-bad-config-0 and C19-after-restart, each a fresh launch per receipts.jsonl. New prompt top y44 (row 1) in all five.",
+  "kind": "visual"
+ },
+ {
+  "id": "c01-titlebar-tabs",
+  "category": "C01",
+  "title": "Window chrome shrinks from 58 px to 32 px",
+  "caption": "5.9.0 drew the native 32 px title bar, then a separate 23 px tab strip and an accent line, 58 px in all, plus a 1 px accent frame round the window. 6.0.0 puts the traffic lights, the tab and the new-tab and options controls in one 32 px header, so the terminal starts 26 px higher.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   0,
+   0,
+   1280,
+   110
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     160,
+     0,
+     1116,
+     58
+    ],
+    "label": "58 px chrome"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     160,
+     0,
+     1116,
+     32
+    ],
+    "label": "32 px header"
+   }
+  ],
+  "objective_basis": "Vertical run at x=300. Old: y0-31 title bar (41,41,42), y32 line (42,43,53), y33-55 tab strip (26,27,38), y56 accent (118,157,235), y57 blend, terminal (52,55,65) from y58. New: y0-31 header (20,21,29), terminal from y32. Old 1 px accent (122,162,247) at x=1279 and y=819; new has terminal background there. The UCS results file (C23-ucs.yaml) gives the grid as 162x46 in 5.9.0 and 161x47 in 6.0.0 for the same 1280x820 window.",
+  "kind": "measured"
+ },
+ {
+  "id": "c02-unfocused-cursor",
+  "category": "C02",
+  "title": "An unfocused window keeps a hollow cursor at the prompt",
+  "caption": "With another window in front, 5.9.0 drew no cursor. 6.0.0 draws a steady 8x16 px hollow outline, so the typing position stays visible.",
+  "old": "C02-unfocused.png",
+  "new": "C02-unfocused.png",
+  "crop": [
+   0,
+   676,
+   260,
+   96
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     152,
+     712,
+     18,
+     20
+    ],
+    "label": "no cursor"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     158,
+     692,
+     18,
+     20
+    ],
+    "label": "hollow cursor"
+   }
+  ],
+  "objective_basis": "Old C02-focused: 8x16 block (192,202,245) at x156-163, y714-729; old C02-unfocused: none of that colour in x150-175, y711-734. 5.9.0 source e58e367b9 crates/kettle-render/src/terminal.rs:830 reads 'Cursor: hidden with the window unfocused', so this is not blink phase. New C02-focused: block at x160-167, y694-709; new C02-unfocused: 1 px outline of the same 8x16 cell (47 px). The same holds in C09-unfocused-selection-and-cursor: no cursor in 5.9.0, a hollow outline in 6.0.0.",
+  "kind": "visual"
+ },
+ {
+  "id": "c04-zoom-indicator",
+  "category": "C04",
+  "title": "A zoomed pane says it is zoomed, how many panes hide, and how to restore",
+  "caption": "After the same zoom of a 3-pane tab, 5.9.0 showed the pane with no title strip and no sign that 2 panes were hidden. 6.0.0 keeps a strip that reads 'Zoomed · 2 panes hidden', the restore shortcut, the title and the size.",
+  "old": "C04-zoomed.png",
+  "new": "C04-zoomed.png",
+  "crop": [
+   0,
+   0,
+   640,
+   90
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     0,
+     33,
+     476,
+     20
+    ],
+    "label": "zoom state + restore key"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     420,
+     80,
+     300,
+     62
+    ],
+    "label": "no zoom indicator"
+   }
+  ],
+  "objective_basis": "Receipts: both runs pressed ctrl+shift+x (action=zoom) after split_right and split_down. New: accent strip (122,162,247) x0-1279, y33-52, text '⤢ Zoomed · 2 panes hidden · ⌃⇧X restores  fixture  161x45' (x~14-465). Old: tab strip ends at y57 and the terminal starts at y58 with no strip; the only title on screen is the tab's '1: fixture'.",
+  "kind": "visual"
+ },
+ {
+  "id": "c05-match-highlight",
+  "category": "C05",
+  "title": "Palette highlights the characters that match the query",
+  "caption": "With 'split' typed, 5.9.0 drew every result label in plain text. 6.0.0 colours the matching characters, such as 'Split' and 'splits', in the accent blue, at 6.79:1 on the list background.",
+  "old": "C05-palette-split.png",
+  "new": "C05-palette-split.png",
+  "crop": [
+   270,
+   90,
+   600,
+   712
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     295,
+     157,
+     44,
+     18
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     292,
+     299,
+     330,
+     48
+    ],
+    "label": "matched letters in blue"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     450,
+     621,
+     44,
+     19
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     330,
+     520,
+     455,
+     618
+    ],
+    "label": "plain text"
+   }
+  ],
+  "objective_basis": "Pure accent (122,162,247) pixels in the unselected result rows: new 131 in x285-700, y172-345 (about 180 over the whole card; 'Split' on rows 2-5, 'splits', and scattered letters in later rows), (122,162,247) on (26,27,38) = 6.79:1; old 0 in the result list x440-700, y612-780, where labels such as 'Split up' are (192,202,245) throughout. Same query typed in both runs (receipts).",
+  "kind": "measured"
+ },
+ {
+  "id": "c06-reset-hint",
+  "category": "C06",
+  "title": "Settings footer adds a 'Del reset' key",
+  "caption": "5.9.0's footer listed field, change, ends, category and close, with no reset key. 6.0.0's footer adds 'Del reset': Delete or Backspace returns the highlighted setting to its default.",
+  "old": "C06-settings-0.png",
+  "new": "C06-settings-0.png",
+  "crop": [
+   300,
+   540,
+   760,
+   190
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     742,
+     700,
+     92,
+     18
+    ],
+    "label": "Del reset"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     340,
+     558,
+     536,
+     22
+    ],
+    "label": "no reset key"
+   }
+  ],
+  "objective_basis": "Old footer x344-872, y562-577: '↑↓/jk field  ↔/hl change  g/G ends  Tab category  Esc close'. New footer x431-1022, y702-716: '↑↓/jk field · ↔/hl change · g/G ends · Del reset · Tab category · Esc close'. CHANGELOG 6.0.0: 'Delete or Backspace resets the highlighted setting to its default, and the footer says so.'",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-value-controls",
+  "category": "C06",
+  "title": "Settings values are drawn as controls: choice arrows, fields and switches",
+  "caption": "5.9.0 printed every value as plain text in one column ('On', 'Block', '13 pt'). 6.0.0 draws choices between ‹ › arrows, numbers in boxed fields and on/off settings as switches.",
+  "old": "C06-settings-0.png",
+  "new": "C06-settings-0.png",
+  "crop": [
+   110,
+   60,
+   1170,
+   700
+  ],
+  "scale": 0.75,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     998,
+     132,
+     98,
+     530
+    ],
+    "label": "arrows, fields, switches"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     570,
+     336,
+     70,
+     200
+    ],
+    "label": "plain text"
+   }
+  ],
+  "objective_basis": "New Appearance page: 4 choice controls with ‹ › (Appearance, Theme, Cursor shape, Unfocused cursor), 4 boxed fields (13 px, 86%, 12 px, 10 s) and 3 accent (122,162,247) switches (Window blur, Cursor blink, Show pane titlebars, at y~320-359, 520-559, 620-659). Old: 9 values as unboxed text in one column, no control glyphs.",
+  "kind": "visual"
+ },
+ {
+  "id": "c08-box-drawing",
+  "category": "C08",
+  "title": "Box-drawing lines are single 1 px strokes with no soft edge",
+  "caption": "5.9.0 drew box-drawing characters from the font: each line was a bright pixel plus a half-bright one, so the two boxes held 75 colours. 6.0.0 draws them itself as 1 px lines in one colour.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   176,
+   150,
+   104
+  ],
+  "scale": 4,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     10,
+     214,
+     4,
+     38
+    ],
+    "label": "2 px soft"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     14,
+     181,
+     3,
+     36
+    ],
+    "label": "1 px"
+   }
+  ],
+  "objective_basis": "Two boxes on the background (52,55,65). Old x11-139, y215-251: 75 distinct colours; left stroke (179,188,227) at x11 and (166,174,209) at x12, then (86,91,107) at x13-14; top stroke (86,91,107) at y217 above (192,202,245) at y218. New x15-125, y182-215: 2 colours; left stroke one pixel (192,202,245) at x15 with background beside it.",
+  "kind": "measured"
+ },
+ {
+  "id": "c08-emoji-clusters",
+  "category": "C08",
+  "title": "Skin-tone and ZWJ emoji draw as one glyph, and VS16 emoji in colour",
+  "caption": "The same emoji line was printed in both runs. 5.9.0 split the skin-toned thumbs-up into a thumb and a skin swatch, the woman technologist into a woman and a laptop, and the family into three faces, and drew the red heart and smiling face as monochrome text glyphs. 6.0.0 draws each sequence as one glyph and the heart and smiling face in colour.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   236,
+   380,
+   84
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     84,
+     270,
+     116,
+     20
+    ],
+    "label": "7 glyphs for 3 emoji"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     294,
+     270,
+     30,
+     20
+    ],
+    "label": "text glyphs"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     88,
+     242,
+     62,
+     20
+    ],
+    "label": "3 glyphs"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     228,
+     242,
+     40,
+     20
+    ],
+    "label": "colour"
+   }
+  ],
+  "objective_basis": "Fixture line (panel/fixture/torture.sh): 'Emoji: 😀 👍🏽 👩‍💻 👨‍👩‍👧 🏳️‍🌈 🇯🇵 🇪🇸 ❤️ ☺️ ⌚ 🫖'. Read at 3.5x zoom. Old row y~270-288: thumb x~86-99 plus a separate skin swatch x~102-114, woman x~125-134 plus laptop x~140-154, three faces x~164-197; heart x~297-304 and smiling face x~311-320 in the text colour only. New row y~242-260: one toned thumb x~90-101, one technologist x~114-126, one family glyph x~136-147 (a grey silhouette, as Apple draws it), red heart x~230-245 (180 saturated px), colour smiling face x~254-268 (195). Old heart and smiling face have 0 saturated pixels. Segmented into blobs: 15 for 11 emoji in 5.9.0, 11 in 6.0.0. Flags render as flags in both builds.",
+  "kind": "visual"
+ },
+ {
+  "id": "c09-link-hover-pill",
+  "category": "C09",
+  "title": "A hovered link shows its destination and how to open it",
+  "caption": "Both drags end with the pointer on a URL. 5.9.0 shows nothing more. 6.0.0 shows a status pill at the bottom left with the URL, https://example.org/docs/page18, and the hint to Command-click it, and underlines the hovered URL.",
+  "old": "C09-block-selected.png",
+  "new": "C09-block-selected.png",
+  "crop": [
+   0,
+   315,
+   520,
+   505
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "circle",
+    "xy": [
+     376,
+     320,
+     16,
+     16
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     0,
+     800,
+     394,
+     18
+    ],
+    "label": "destination + open hint"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     0,
+     796,
+     400,
+     22
+    ],
+    "label": "nothing shown"
+   }
+  ],
+  "objective_basis": "Drag end (30%,40%) = window point (384,328). Old: row y324-338 is page17, URL span x250-492, so the pointer is on a URL; x0-700, y740-815 holds only background and the window edge. New: pill x0-393, y800-817, text (192,202,245) on (26,27,38) = 10.59:1; the hovered row's underline (122,162,247) spans x386-495 at y335. The pill was added after 5.9.0 (commit 6436c1f7d, 'show where a hovered link goes').",
+  "kind": "visual"
+ },
+ {
+  "id": "c09-option-drag-block",
+  "category": "C09",
+  "title": "Option-drag selects a rectangle",
+  "caption": "The same Option-drag from 10%,20% to 30%,40% of the window made an ordinary stream selection in 5.9.0: from mid-row to the right edge, full rows, then the start of the last row. 6.0.0 selects an 11-row by 33-column block, as Terminal.app does.",
+  "old": "C09-block-selected.png",
+  "new": "C09-block-selected.png",
+  "crop": [
+   0,
+   150,
+   640,
+   200
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     600,
+     345,
+     381,
+     332
+    ],
+    "label": "stream: wraps rows"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     129,
+     158,
+     257,
+     178
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     600,
+     250,
+     390,
+     250
+    ],
+    "label": "block, 33 x 11 cells"
+   }
+  ],
+  "objective_basis": "Selection fill extent per row. Old (40,52,87): first row x125-1271 (y162-177), middle rows x8-1271, last row x8-381 (y324-338). New (77,100,166): x129-385 on every row, y158-335. Receipts log the same drag with mods 'alt' in both runs. Commit 36b5ba232 ('select a block with Option-drag on macOS') explains the old result: selection read modifiers that hide Option unless macos-option-as-alt maps it.",
+  "kind": "measured"
+ },
+ {
+  "id": "c09-selection-contrast",
+  "category": "C09",
+  "title": "Selection fill contrast rises from 1.03:1 to 2.09:1",
+  "caption": "macOS windows are translucent by default and the selection fill is opaque. 5.9.0's fill (#283457) was darker than the see-through background and nearly the same luminance, 1.03:1. 6.0.0's (#4d64a6) measures 2.09:1 against the same captured background (as captured at the default 86% window opacity).",
+  "old": "C09-shift-extended.png",
+  "new": "C09-shift-extended.png",
+  "crop": [
+   0,
+   150,
+   640,
+   140
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     520,
+     182,
+     110,
+     50
+    ],
+    "label": "1.03:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     520,
+     182,
+     110,
+     50
+    ],
+    "label": "2.09:1"
+   }
+  ],
+  "objective_basis": "Captured background (52,55,65) in both builds (sampled at x900 y100, x1100 y700, x640 y780; identical). Fill: old (40,52,87) = 1.03:1, new (77,100,166) = 2.09:1. Against the theme's opaque (26,27,38) the same fills are 1.40:1 and 3.00:1. Same fills in C09-block-selected.",
+  "kind": "measured"
+ },
+ {
+  "id": "c09-unfocused-selection",
+  "category": "C09",
+  "title": "An unfocused window's selection gets its own fill, 1.03:1 to 1.40:1",
+  "caption": "With another window in front, 5.9.0 kept its focused fill, 1.03:1 against the captured background. 6.0.0 switches to a separate unfocused fill at 1.40:1, quieter than its 2.09:1 focused fill but still visible. (As captured at the default 86% window opacity.)",
+  "old": "C09-unfocused-selection-and-cursor.png",
+  "new": "C09-unfocused-selection-and-cursor.png",
+  "crop": [
+   0,
+   150,
+   640,
+   110
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     520,
+     176,
+     110,
+     40
+    ],
+    "label": "1.03:1, focused fill"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     520,
+     170,
+     110,
+     40
+    ],
+    "label": "1.40:1, own fill"
+   }
+  ],
+  "objective_basis": "Unfocused selection fill: old (40,52,87), the same as its focused fill; new (60,75,122), distinct from its focused (77,100,166). Background (52,55,65) in both. Receipts log backdrop mode 'front' before both captures.",
+  "kind": "measured"
+ },
+ {
+  "id": "c10-match-contrast",
+  "category": "C10",
+  "title": "Other search matches rise from 1.03:1 to 2.09:1 contrast",
+  "caption": "5.9.0 filled the non-current matches with #283457, 1.03:1 against the captured background: they read as plain text. 6.0.0 fills them with #4d64a6, 2.09:1. The current match keeps the same amber fill. (As captured at the default 86% window opacity.)",
+  "old": "C10-find-matches.png",
+  "new": "C10-find-matches.png",
+  "crop": [
+   0,
+   30,
+   300,
+   180
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     224,
+     80,
+     42,
+     100
+    ],
+    "label": "1.03:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     228,
+     60,
+     42,
+     100
+    ],
+    "label": "2.09:1"
+   }
+  ],
+  "objective_basis": "Non-current match fill vs background (52,55,65): old (40,52,87) = 1.03:1 (39,788 px, x78-264, y64-762); new (77,100,166) = 2.09:1 (40,704 px, x82-268, y44-758). Current match (224,175,104) in both, 5.94:1. Same query, 122 matches.",
+  "kind": "measured"
+ },
+ {
+  "id": "c10-match-counter",
+  "category": "C10",
+  "title": "Search shows the current match and total",
+  "caption": "5.9.0's search bar showed no match count. 6.0.0 shows the current match and the total, 35/122, next to the query.",
+  "old": "C10-find-matches.png",
+  "new": "C10-find-matches.png",
+  "crop": [
+   0,
+   744,
+   1280,
+   76
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     324,
+     797,
+     54,
+     20
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     480,
+     752,
+     380,
+     800
+    ],
+    "label": "35/122: current and total"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     480,
+     752,
+     400,
+     800
+    ],
+    "label": "no count"
+   }
+  ],
+  "objective_basis": "New text '35/122' at x328-373, y800-814 in (192,202,245) on (65,72,104), 5.53:1. Old bar: query field x70-561, then Prev, Next, Wrap, Case, Enter: Next and Close; no count anywhere in y796-814.",
+  "kind": "visual"
+ },
+ {
+  "id": "c10-regex-toggle",
+  "category": "C10",
+  "title": "Search bar gains a Regex toggle beside Case",
+  "caption": "The 5.9.0 search bar offered Prev, Next, Wrap and Case. 6.0.0 adds a 'Regex: On' toggle between Case and Enter: Next.",
+  "old": "C10-find-matches.png",
+  "new": "C10-find-matches.png",
+  "crop": [
+   560,
+   744,
+   720,
+   76
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     838,
+     796,
+     78,
+     21
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1040,
+     752,
+     918,
+     798
+    ],
+    "label": "Regex toggle"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     812,
+     796,
+     216,
+     21
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     1040,
+     752,
+     1030,
+     798
+    ],
+    "label": "Case, then Enter"
+   }
+  ],
+  "objective_basis": "New controls, x: Prev 485-529, Next 555-598, Wrap 628-689, Case 714-798 (+ arrow 817-820), Regex: On 843-911, Enter: Next 941-1024. Old: Prev 587-631, Next 656-700, Wrap 729-790, Case 816-899 (+ arrow 918-922), Enter: Next 941-1024; no Regex control.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c11-jump-to-bottom",
+  "category": "C11",
+  "title": "A scrolled-up pane shows a '360 lines' button back to the bottom",
+  "caption": "After the same single wheel step, 5.9.0 showed nothing about the offset. 6.0.0 shows a button with a down arrow reading '360 lines' at the bottom right.",
+  "old": "C11-scrolled-up.png",
+  "new": "C11-scrolled-up.png",
+  "crop": [
+   900,
+   640,
+   380,
+   180
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1166,
+     790,
+     101,
+     25
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1000,
+     720,
+     1162,
+     798
+    ],
+    "label": "jump back: 360 lines"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     1000,
+     760,
+     1160,
+     800
+    ],
+    "label": "nothing shown"
+   }
+  ],
+  "objective_basis": "Receipts: one wheel event at (0.5,0.5) in both. New pill x1168-1265, y792-813, fill (102,103,108), text (224,229,250). Old: x1150-1268, y770-815 is background only. Last visible line 99641 in both frames.",
+  "kind": "visual"
+ },
+ {
+  "id": "c12-hints-help",
+  "category": "C12",
+  "title": "Hint mode shows a help line with its keys",
+  "caption": "In hint mode, 5.9.0 showed only the labels. 6.0.0 adds a bottom line: 'Label: copy text / open URL · Shift+label: copy text · Esc to cancel'.",
+  "old": "C12-hints.png",
+  "new": "C12-hints.png",
+  "crop": [
+   0,
+   700,
+   700,
+   120
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     0,
+     801,
+     540,
+     19
+    ],
+    "label": "keys explained"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     600,
+     760,
+     560,
+     806
+    ],
+    "label": "no help"
+   }
+  ],
+  "objective_basis": "New text x0-535, y804-818, (192,202,245) on (26,27,38), 10.59:1. Old: no pixel in x20-1250, y790-816 differs from the background by more than 30.",
+  "kind": "visual"
+ },
+ {
+  "id": "c12-hints-labels",
+  "category": "C12",
+  "title": "Hint labels no longer cover URL text",
+  "caption": "5.9.0 drew every quick-select label as two letters over the start of its URL, hiding 'ht' on all 40 rows. 6.0.0 puts the URL labels in blank cells: two-letter labels after the URL (rows 1-16), one-letter labels in the space before it (rows 17-40).",
+  "old": "C12-hints.png",
+  "new": "C12-hints.png",
+  "crop": [
+   160,
+   270,
+   400,
+   70
+  ],
+  "scale": 2.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     248,
+     290,
+     20,
+     48
+    ],
+    "label": "covers 'ht'"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     490,
+     270,
+     22,
+     34
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     530,
+     328,
+     510,
+     302
+    ],
+    "label": "after the URL"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     244,
+     302,
+     10,
+     16
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     166,
+     333,
+     244,
+     316
+    ],
+    "label": "before it"
+   }
+  ],
+  "objective_basis": "Read at 2.5x zoom. Old: amber (224,175,104) label cells at x~250-265 on every URL row (y64-729), over the URL's first two letters. New: rows 1-16 carry two-letter labels after the URL end (x~494-510), rows 17-40 a single letter in the blank cell before 'https' (x~246-252); the URL text is fully visible on every row. The prompt's label still covers one character in 6.0.0 ('~' under 'a'; 5.9.0 covered '~/' with 'sy').",
+  "kind": "visual"
+ },
+ {
+  "id": "c13-activity-dot",
+  "category": "C13",
+  "title": "Background-tab activity dot sits by the title, 259 px to 4 px",
+  "caption": "While a command ran in background tab 1, 5.9.0 drew its activity mark at the tab's left edge, 259 px from the title. 6.0.0 draws the dot 4 px before the title, and its contrast with the surrounding fill rises from 5.21:1 to 10.60:1.",
+  "old": "C13-long-command-background.png",
+  "new": "C13-long-command-background.png",
+  "crop": [
+   0,
+   0,
+   640,
+   80
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     5,
+     43,
+     11,
+     10
+    ],
+    "label": "259 px from title"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     157,
+     11,
+     10,
+     10
+    ],
+    "label": "4 px from title"
+   }
+  ],
+  "objective_basis": "Old: mark (125,207,255) x6-14, y44-51 on the tab fill (65,72,104), 5.21:1; title '1: fixture' starts at x274. New: dot x159-164, y13-18 on (20,21,29), 10.60:1; title's leftmost ink at x169.",
+  "kind": "measured"
+ },
+ {
+  "id": "c13-exit-status-ticks",
+  "category": "C13",
+  "title": "Finished commands leave a red or green exit tick at the right edge",
+  "caption": "After true, false and ls, 5.9.0 drew nothing at the right edge. 6.0.0 draws a red tick for false (exit 1) and a green tick for ls. The first command, true, got no tick.",
+  "old": "C13-marks.png",
+  "new": "C13-marks.png",
+  "crop": [
+   0,
+   30,
+   1280,
+   110
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1268,
+     52,
+     12,
+     26
+    ],
+    "label": "exit ticks"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1240,
+     58,
+     36,
+     70
+    ],
+    "label": "no marks"
+   }
+  ],
+  "objective_basis": "New: (247,118,142) at x1272-1277, y55-58 and (158,206,106) at x1272-1277, y73-74. The ticks sit on a track scaled to the grid, not on the text rows; in C13-new-tab-cwd a row-1 'pwd' puts its green tick at x1272-1277, y39-40, which maps red to 'false' (row 2) and green to 'ls' (row 3). Old: no pixel other than background (52,55,65) in x1240-1278, y58-800.",
+  "kind": "measured"
+ },
+ {
+  "id": "c13-inactive-title-contrast",
+  "category": "C13",
+  "title": "Inactive tab titles go from 5.53:1 to 7.05:1 contrast",
+  "caption": "5.9.0 drew the inactive tab title on a raised (65,72,104) fill at 5.53:1. 6.0.0 draws it on the header background at 7.05:1, above the 7:1 AAA level.",
+  "old": "C13-new-tab-cwd.png",
+  "new": "C13-new-tab-cwd.png",
+  "crop": [
+   100,
+   0,
+   560,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     272,
+     36,
+     80,
+     14
+    ],
+    "label": "5.53:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     162,
+     7,
+     57,
+     15
+    ],
+    "label": "7.05:1"
+   }
+  ],
+  "objective_basis": "Old inactive title (192,202,245) on (65,72,104) = 5.53:1. New inactive title (152,160,194) on (20,21,29) = 7.05:1. The header sits outside the translucent terminal area in both builds.",
+  "kind": "measured"
+ },
+ {
+  "id": "c13-tab-shortcut-hints",
+  "category": "C13",
+  "title": "Tabs show their Command-1 and Command-2 shortcuts",
+  "caption": "5.9.0's tabs showed an index and the title ('1: fixture'). 6.0.0 shows the title and each tab's go-to-tab key, Command-1 and Command-2, written with the macOS command symbol.",
+  "old": "C13-new-tab-cwd.png",
+  "new": "C13-new-tab-cwd.png",
+  "crop": [
+   0,
+   0,
+   1280,
+   64
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     300,
+     7,
+     22,
+     16
+    ],
+    "label": "Cmd-1 hint"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     575,
+     7,
+     21,
+     16
+    ],
+    "label": "Cmd-2 hint"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     270,
+     35,
+     84,
+     17
+    ],
+    "label": "no shortcut"
+   }
+  ],
+  "objective_basis": "New hint text '⌘1' x303-318, y10-19, (121,126,146) on (20,21,29) = 4.51:1; '⌘2' x578-592 on the active tab. Old tabs hold '1: fixture' (x274-349) and '2: fixture' (x889-965) and a close box, no other text. Same hints in new C13-long-command-background.",
+  "kind": "visual"
+ },
+ {
+  "id": "c15-bell-dot",
+  "category": "C15",
+  "title": "Background-tab bell dot sits by the title, 234 px to 5 px",
+  "caption": "When background tab 2 rang the bell, 5.9.0 drew its mark at the tab's left edge, 234 px from the title. 6.0.0 draws the dot 5 px before the title, and its contrast with the surrounding fill rises from 4.47:1 to 9.09:1.",
+  "old": "C15-bell-background-tab.png",
+  "new": "C15-bell-background-tab.png",
+  "crop": [
+   380,
+   0,
+   640,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     644,
+     42,
+     13,
+     12
+    ],
+    "label": "234 px from title"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     431,
+     11,
+     10,
+     10
+    ],
+    "label": "5 px from title"
+   }
+  ],
+  "objective_basis": "Old: mark (224,175,104) x646-654, y44-51 on the tab fill (65,72,104), 4.47:1; title '2: fixture' starts at x889. New: dot x433-438, y13-18 on (20,21,29), 9.09:1; title starts at x444.",
+  "kind": "measured"
+ },
+ {
+  "id": "c16-link-menu-fits",
+  "category": "C16",
+  "title": "The right-click menu on a link fits without scrolling",
+  "caption": "On a link, 5.9.0's menu showed 22 of its 24 rows with a scroll arrow at the bottom; Settings… and Preferences were out of view. 6.0.0's link menu has 15 rows, all visible, with Open Link and Copy Link Address first.",
+  "old": "C16-context-menu-link.png",
+  "new": "C16-context-menu-link.png",
+  "crop": [
+   300,
+   60,
+   300,
+   760
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     436,
+     765,
+     26,
+     14
+    ],
+    "label": "scroll arrow"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     318,
+     374,
+     222,
+     444
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     420,
+     200,
+     430,
+     368
+    ],
+    "label": "15 rows, all shown"
+   }
+  ],
+  "objective_basis": "Old menu border x321-576, y74-781; scroll arrow (122,162,247) x443-454, y770-775; last visible row 'Theme…'. Old C16-context-menu-empty lists Theme…, Settings… and Preferences at the end, so 2 rows were hidden. New border x321-537, y376-815; rows Open Link, Copy Link Address, Copy, Paste, Select All, Quick-select hints, Find…, Clear Scrollback and 7 submenus.",
+  "kind": "visual"
+ },
+ {
+  "id": "c16-vim-shift-hint",
+  "category": "C16",
+  "title": "Shift+right-click over vim starts the menu with a 'Hold Shift' explanation",
+  "caption": "Over vim with its mouse mode on, Shift+right-click opens Kettle's menu in both builds. 5.9.0's starts with Paste. 6.0.0's starts with 'Hold Shift to select text or open the menu while a program uses the mouse'.",
+  "old": "C16-tui-override-menu.png",
+  "new": "C16-tui-override-menu.png",
+  "crop": [
+   120,
+   130,
+   280,
+   240
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     140,
+     209,
+     164,
+     102
+    ],
+    "label": "explains the gesture"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     142,
+     143,
+     230,
+     18
+    ],
+    "label": "starts with Paste"
+   }
+  ],
+  "objective_basis": "New: four wrapped lines x144-299, y213-307 inside the menu (x129-322), (126,131,151) on (26,27,38), 4.54:1. Old: first row 'Paste' x145-369, y147-156. The same header appears in new C16-tui-override-menu-on-selection.",
+  "kind": "visual"
+ },
+ {
+  "id": "c19-restored-session",
+  "category": "C19",
+  "title": "Relaunch restores the previous output and directory",
+  "caption": "After Cmd+Q and relaunch with each build's default restore setting, 5.9.0 opened a fresh prompt in ~/project and Shift+Page Up showed nothing earlier. 6.0.0 reopens in ~/project/src, where the session was left, and Shift+Page Up shows the earlier command and its output, dimmed, above a 'Restored' divider. Per the CHANGELOG, 6.0.0's default (auto) restores on macOS when 'Close windows when quitting an application' is off, and this capture restored; 5.9.0 restored only with restore-session = true.",
+  "old": "C19-after-restart-history.png",
+  "new": "C19-after-restart-history.png",
+  "crop": [
+   0,
+   30,
+   700,
+   150
+  ],
+  "scale": 1.25,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     78,
+     160,
+     20
+    ],
+    "label": "fresh, ~/project"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     600,
+     70,
+     548,
+     70
+    ],
+    "label": "restored output, dimmed"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     450,
+     108,
+     250,
+     113
+    ],
+    "label": "Restored divider"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     450,
+     140,
+     204,
+     133
+    ],
+    "label": "cwd ~/project/src"
+   }
+  ],
+  "objective_basis": "The harness drops the panel's pinned restore-session = false for this task, so each build runs its default (5.9.0 e58e367b9 crates/kettle-config/src/lib.rs:3082 restore_session: false). Old after Shift+Page Up: only 'fixture:~/project$' (x8-163, y80-96). New: 'cd src && printf ...', 'restore-marker alpha', 'restore-marker beta' and the old prompt at y44-105 in (109,115,142); 'Restored · <date time>' y106-121; live prompt 'fixture:~/project/src$' y125-139. C19-before-restart ends at 'fixture:~/project/src$' in both runs.",
+  "kind": "visual"
+ },
+ {
+  "id": "c20-ax-tab-strip",
+  "category": "C20",
+  "title": "The tab strip and scrollback are in the macOS accessibility tree",
+  "caption": "In 5.9.0 the window's accessibility tree held the terminal text area and the system window buttons. 6.0.0 adds a 'Tabs' tab group with a selected 'fixture' tab, the buttons 'New tab' and 'New tab menu', and a 'Scrollback' scroll bar, so VoiceOver can reach them.",
+  "old": "C20-window.png",
+  "new": "C20-window.png",
+  "crop": [
+   0,
+   0,
+   1280,
+   64
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     456,
+     0,
+     368,
+     32
+    ],
+    "label": "tab 'fixture'"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1206,
+     2,
+     66,
+     28
+    ],
+    "label": "New tab, New tab menu"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     0,
+     33,
+     1280,
+     24
+    ],
+    "label": "not in tree"
+   }
+  ],
+  "objective_basis": "C20-ax-tree.json. Old: AXWindow > AXGroup > AXTextArea 'fixture', plus the close, minimize and full-screen buttons and an AXStaticText 'fixture' (the title), which 6.0.0 no longer exposes. New: AXGroup holds AXTabGroup 'Tabs' {AXRadioButton/AXTabButton 'fixture' value=true, AXButton 'New tab', AXButton 'New tab menu'} and AXTextArea 'fixture' with child AXScrollBar 'Scrollback'.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c21-bidi-rtl-order",
+  "category": "C21",
+  "title": "Hebrew and Arabic display right to left",
+  "caption": "5.9.0 drew right-to-left text in stored order from left to right, so the first letter of the Hebrew phrase (shin) sat at its left end. 6.0.0 draws Unicode bidi display order: shin is at the right end, final mem at the left, and the Arabic lines reorder the same way.",
+  "old": "C21-bidi.png",
+  "new": "C21-bidi.png",
+  "crop": [
+   0,
+   18,
+   420,
+   126
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     108,
+     64,
+     9,
+     13
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     300,
+     20,
+     120,
+     62
+    ],
+    "label": "shin first"
+   },
+   {
+    "on": "new",
+    "shape": "circle",
+    "xy": [
+     112,
+     44,
+     9,
+     13
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     300,
+     20,
+     124,
+     42
+    ],
+    "label": "final mem first"
+   }
+  ],
+  "objective_basis": "The fixture stores 'שלום עולם' (SHIN LAMED VAV FINAL-MEM / AYIN VAV LAMED FINAL-MEM) after 'Latin first: ' (13 cells). Leftmost Hebrew cell: old x~109-116, y64-77 is shin (three prongs); new x~113-120, y44-57 is final mem (closed box), with shin rightmost. The same reversal shows in the Urdu and Yiddish rows of C23-ucs-detect.",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-context-menu-edit-actions",
+  "category": "C21",
+  "title": "Context menu adds Copiar, Seleccionar todo and Buscar, and shrinks from 22 rows to 13",
+  "caption": "With nothing selected, 5.9.0's Spanish context menu had 22 rows, ran to 3 px above the window's bottom edge, and had no Copiar, Seleccionar todo or Buscar. 6.0.0 lists Copiar (disabled with nothing selected), Pegar, Seleccionar todo, Selección rápida, Buscar and Borrar el historial first and groups the rest into 7 submenus: 13 rows, 375 px tall.",
+  "old": "C21-es-context-menu.png",
+  "new": "C21-es-context-menu.png",
+  "crop": [
+   0,
+   130,
+   640,
+   690
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     440,
+     300,
+     356,
+     300
+    ],
+    "label": "22 rows, 678 px"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     30,
+     373,
+     322,
+     158
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     440,
+     440,
+     356,
+     440
+    ],
+    "label": "Copiar, Seleccionar todo, Buscar"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     440,
+     640,
+     364,
+     640
+    ],
+    "label": "7 submenus"
+   }
+  ],
+  "objective_basis": "Rows read from the frames. Old: Pegar … Preferencias, 22 rows; menu x27-353, border y138-815 (window bottom y819). New: 13 rows; menu x27-360, border y369-743; Copiar (126,131,151), Pegar (192,202,245). Submenu rows: Dividir, Panel, Pestaña, Ventana, Título, Grupo, Apariencia.",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-font-size-unit",
+  "category": "C21",
+  "title": "Font size is shown in px, its real unit, not pt",
+  "caption": "5.9.0's Settings showed the font size as '13 pt', though font-size is measured in logical pixels. 6.0.0 shows '13 px' and describes it as 'Ajustar el tamaño de la fuente de la terminal en píxeles lógicos.' The macOS default stays 13.",
+  "old": "C21-es-settings-0.png",
+  "new": "C21-es-settings-0.png",
+  "crop": [
+   430,
+   225,
+   670,
+   200
+  ],
+  "scale": 1.2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     601,
+     362,
+     46,
+     18
+    ],
+    "label": "13 pt"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1023,
+     234,
+     68,
+     26
+    ],
+    "label": "13 px"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     434,
+     260,
+     510,
+     20
+    ],
+    "label": "píxeles lógicos"
+   }
+  ],
+  "objective_basis": "Old value text '13 pt' at x605-642, y365-377. New value '13 px' x1025-1088, y236-257 and description x437-940, y263-276. CHANGELOG 6.0.0: 'Settings and --check-config label font sizes in logical px.'",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c21-menu-shortcuts",
+  "category": "C21",
+  "title": "Menu shortcuts: macOS symbols, 4.54:1 to 7.03:1",
+  "caption": "5.9.0 spelled shortcuts out in mixed order ('Cmd+V', 'Shift+Cmd+D', 'Ctrl+Shift+A') at 4.54:1. 6.0.0 writes them with the macOS modifier symbols, as the system menu bar does, at 7.03:1. The command palette changed the same way, for example 'Cmd+W' and 'Ctrl+PageDown'.",
+  "old": "C21-es-context-menu.png",
+  "new": "C21-es-context-menu.png",
+  "crop": [
+   130,
+   136,
+   240,
+   410
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     294,
+     144,
+     54,
+     18
+    ],
+    "label": "Cmd+V, 4.54:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     322,
+     400,
+     28,
+     18
+    ],
+    "label": "symbols, 7.03:1"
+   }
+  ],
+  "objective_basis": "Hint text vs the menu background (26,27,38): old (126,131,151) = 4.54:1 ('Cmd+V', 'Ctrl+Shift+A', 'Shift+Cmd+D', 'Cmd+,'); new (156,165,201) = 7.03:1 ('⌘C', '⌘V', '⌃⇧H', '⌘F', '⌘K'). C21-es-palette: old 'Cmd+T', 'Cmd+W', 'Ctrl+PageDown' at 4.54:1; new '⌘T', '⌘W', '⌃PageDown' at 7.03:1. Old orders modifiers both Shift-before-Cmd and Ctrl-before-Shift.",
+  "kind": "measured"
+ },
+ {
+  "id": "c21-narrow-palette-hints",
+  "category": "C21",
+  "title": "In a 640 px window the palette keeps the Enter hint",
+  "caption": "At 640 px wide, 5.9.0's palette footer dropped to '(Esc cancelar)'. 6.0.0 still shows '(Enter ejecutar · Esc cancelar)' in the card's query row; it drops only the Tab and arrow-key hint that its wide palette shows.",
+  "old": "C21-es-narrow.png",
+  "new": "C21-es-narrow.png",
+  "crop": [
+   0,
+   60,
+   640,
+   460
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     530,
+     497,
+     108,
+     21
+    ],
+    "label": "Esc only"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     152,
+     76,
+     332,
+     22
+    ],
+    "label": "Enter and Esc kept"
+   }
+  ],
+  "objective_basis": "Frame text. Old: footer bar y490-519, hint text x533-635, y500-516 reads '(Esc cancelar)'. New: card x134-505, y69-336; hint text x155-481, y78-95 reads '(Enter ejecutar · Esc cancelar)'. The 1280 px captures show '(Enter ejecutar · Esc cancelar)' in 5.9.0, so the narrow width dropped it. 6.0.0's 1280 px palette also lists 'Tab/↑↓ seleccionar', which the narrow one omits.",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-palette-query-beside-results",
+  "category": "C21",
+  "title": "Palette query moves from 369 px to 50 px from the results",
+  "caption": "In 5.9.0 the command palette's query caret sat in a full-width bar at the window's bottom-left corner, 369 px from the first result. In 6.0.0 the query is the top row of the results card, 50 px from the first result, and its hint adds the Tab and arrow keys for selecting.",
+  "old": "C21-es-palette.png",
+  "new": "C21-es-palette.png",
+  "crop": [
+   0,
+   0,
+   1280,
+   820
+  ],
+  "scale": 0.6,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     2,
+     794,
+     60,
+     24
+    ],
+    "label": "query"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     320,
+     580,
+     640,
+     24
+    ],
+    "label": "first result"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     282,
+     94,
+     716,
+     76
+    ],
+    "label": "query beside results"
+   }
+  ],
+  "objective_basis": "Caret to the first result's text start. Old: caret x33, y796-816 in a bar spanning y794-819 and the full width; first result text x333-431, y585-598; distance √(300²+215²) ≈ 369 px. New: caret x315, y97-122 inside the card (x279-1000, y94-355); first result x298-397, y151-164; distance √(17²+47²) ≈ 50 px.",
+  "kind": "measured"
+ },
+ {
+  "id": "c21-settings-help-and-search",
+  "category": "C21",
+  "title": "Spanish Settings adds a search field, categories and per-row help",
+  "caption": "5.9.0's Spanish Settings showed a label and a value per row under 8 category tabs. 6.0.0 adds a 'Buscar configuración' field, 11 categories in a sidebar, and a Spanish sentence under each of the 11 Apariencia rows.",
+  "old": "C21-es-settings-0.png",
+  "new": "C21-es-settings-0.png",
+  "crop": [
+   170,
+   85,
+   940,
+   655
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     258,
+     293,
+     630,
+     21
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     700,
+     270,
+     700,
+     291
+    ],
+    "label": "8 tabs, no search field"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     258,
+     338,
+     772,
+     196
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     950,
+     650,
+     950,
+     540
+    ],
+    "label": "label and value only"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     189,
+     100,
+     220,
+     32
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     600,
+     126,
+     412,
+     124
+    ],
+    "label": "search field"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     189,
+     140,
+     220,
+     308
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     200,
+     500,
+     230,
+     454
+    ],
+    "label": "11 categories"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     433,
+     648,
+     464,
+     20
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     195,
+     600,
+     430,
+     658
+    ],
+    "label": "help under every row"
+   }
+  ],
+  "objective_basis": "Frame text. Old panel x240-1039, y255-599: 8 tabs (Apariencia … Atajos) at y297-310, 9 rows with a label and a value, no input field. New panel x170-1109, y85-739: field 'Buscar configuración' x191-406, y102-129; sidebar x191-406, y142-445 with 11 categories (adds Texto / Renderizado, Sesiones, Terminal rápida); 11 rows, each with a description line, such as 'Mostrar la barra de título sobre cada panel de la terminal.' (boxed, x437-893, y651-664) in (126,131,151) on (26,27,38) = 4.54:1.",
+  "kind": "visual"
+ },
+ {
+  "id": "c23-sgr53-overline",
+  "category": "C23",
+  "title": "SGR 53 overline is drawn",
+  "caption": "In the escape suite's SGR line, 'over' (SGR 53) had no line above it in 5.9.0. 6.0.0 draws a 1 px overline across it, so all seven styles on the line render as named.",
+  "old": "C23-escape-suite.png",
+  "new": "C23-escape-suite.png",
+  "crop": [
+   300,
+   36,
+   180,
+   70
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     366,
+     58,
+     34,
+     20
+    ],
+    "label": "no overline"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     369,
+     42,
+     35,
+     16
+    ],
+    "label": "overline"
+   }
+  ],
+  "objective_basis": "Old: no pixel with luminance > 0.3 in x360-410, y58-68, above the 'over' glyphs at y69-76. New: 31 px of (192,202,245) at y44, x371-401, above the glyphs at y49-56.",
+  "kind": "visual"
+ },
+ {
+  "id": "c24-config-error-notice",
+  "category": "C24",
+  "title": "Bad config shows a notice with file, line and allowed range",
+  "caption": "With an out-of-range font-size and an unknown key in the config, 5.9.0 showed nothing in the window. 6.0.0 shows 'Config settings ignored' naming config:4 (expects 5 to 72) and config:5 (unknown setting), with Open Config and Dismiss buttons, and it was still there 7.1 s later.",
+  "old": "C24-bad-config-0.png",
+  "new": "C24-bad-config-0.png",
+  "crop": [
+   0,
+   0,
+   1100,
+   170
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     258,
+     34,
+     764,
+     90
+    ],
+    "label": "names line, key, range"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     258,
+     60,
+     764,
+     84
+    ],
+    "label": "nothing shown"
+   }
+  ],
+  "objective_basis": "New frame text 'Config settings ignored:', 'config:4 font-size: expects a number from 5 to 72', 'config:5 not-a-key: unknown setting', buttons 'Open Config' and 'Dismiss' (notice x260-1019, y36-120). Old: x200-1100, y58-160 holds only background. C24-bad-config-late-0 was captured 7.1 s after the first frame in both runs (receipts) and shows the same notice in 6.0.0 and nothing in 5.9.0.",
+  "kind": "visual"
+ }
+]
