@@ -397,6 +397,36 @@ fn a_selection_drag_hovers_no_link_and_release_restores_it() {
     );
 }
 
+/// The link under the pointer is not hovered while a drag selects, and
+/// nothing else redraws or resets the cursor when the button comes up. The
+/// release that ends a drag does both, so the hint and hand cursor return
+/// without the pointer moving.
+#[test]
+fn releasing_a_selection_drag_restores_the_hovered_link_at_once() {
+    let source = include_str!("window_events.rs");
+    let release = source
+        .split_once("if selection_release_matches(ws.selection_button, bcode) {")
+        .expect("native selection release")
+        .1;
+    let release = release
+        .split_once("\n                }\n")
+        .expect("release body")
+        .0;
+    let dragged = release
+        .find("let dragged = ws.selection_dragged;")
+        .expect("the drag flag is read before the gesture clears it");
+    let finish = release
+        .find("self.finish_selection_gesture(ws);")
+        .expect("the gesture is finished");
+    let restore = release
+        .split_once("if dragged {")
+        .expect("a drag restores the hover")
+        .1;
+    assert!(dragged < finish);
+    assert!(restore.contains("self.sync_cursor_icon(ws);"));
+    assert!(restore.contains("w.request_redraw();"));
+}
+
 #[test]
 fn a_selected_hovered_link_loses_its_underline_until_the_selection_clears() {
     let links = [link(2, 70, 79, 0), link(3, 0, 9, 0), link(5, 10, 20, 1)];
