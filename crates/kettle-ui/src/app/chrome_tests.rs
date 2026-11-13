@@ -1044,6 +1044,7 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                     arrow_rect,
                     plus_rect,
                     settings_rect,
+                    layout,
                     ..
                 } = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
                 let (menu, plus, _) = super::horizontal_new_tab_controls(lane, scale, true);
@@ -1059,6 +1060,21 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                     "{case}: gear outside the band"
                 );
                 assert!(settings_rect.1 + settings_rect.3 <= lane.1 + lane.3 + 0.01);
+                // The tabs give the gear its room: none reaches under it.
+                for (i, x) in layout.xs.iter().enumerate() {
+                    let Some(x) = x else { continue };
+                    let w = if i + 1 == tabs {
+                        layout.last_width
+                    } else {
+                        layout.width
+                    };
+                    assert!(
+                        lane.0 + x + w <= settings_rect.0 + 0.01,
+                        "{case}: tab {i} ends at {} past the gear at {}",
+                        lane.0 + x + w,
+                        settings_rect.0
+                    );
+                }
             }
             // No gear on a plain strip or in a Kettle-drawn GNOME header.
             for header in [(false, false), (true, true), (true, false)] {
