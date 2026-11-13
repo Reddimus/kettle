@@ -56,6 +56,47 @@ pub fn scrollback_pill(
     })
 }
 
+/// The pill's fill, 3:1 off the terminal, and its label's ink. The label is
+/// held to `TEXT_CONTRAST` at the painted stem pixel, not only at full ink, so
+/// it does not pass by a rounding step. Where no ink can do that on the 3:1
+/// fill, the fill steps back toward the terminal until one can: the label
+/// names the button, so it outranks the fill's edge.
+pub(crate) fn scrollback_pill_colors(
+    theme: &kettle_config::Theme,
+    linear: bool,
+) -> (kettle_config::Rgb, kettle_config::Rgb) {
+    use crate::{chrome, color};
+    let ink_on = |fill: kettle_config::Rgb| {
+        color::with_min_contrast_at_coverage(
+            theme.foreground,
+            fill,
+            chrome::TEXT_CONTRAST,
+            color::STEM_COVERAGE,
+            linear,
+        )
+    };
+    let clears = |fill: kettle_config::Rgb| {
+        let stem = color::over(fill, ink_on(fill), color::STEM_COVERAGE, linear);
+        color::contrast_ratio(stem, fill) >= chrome::TEXT_CONTRAST
+    };
+    let raised = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
+    let toward_terminal = |t: f64| color::over(raised, theme.background, t, false);
+    let mut fill = raised;
+    if !clears(fill) {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if clears(toward_terminal(mid)) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        fill = toward_terminal(hi);
+    }
+    (fill, ink_on(fill))
+}
+
 pub fn scrollbar_draw_width(configured: f32, scale: f32, hovered: bool) -> f32 {
     let width = configured.clamp(2.0, 40.0);
     (if hovered { width.max(10.0) } else { width }) * scale
