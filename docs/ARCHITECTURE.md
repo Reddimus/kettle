@@ -2487,8 +2487,10 @@ these rules:
 - `Queued` ends when the next redraw callback begins, even one that returns
   early, so a failed redraw is not retried every turn.
 - A typed wake that finds it `Queued` requests the redraw again.
-- Output after a later keystroke that would not settle on its own (Enter, a
-  paste, another pane) paints at once instead of waiting for the armed paint.
+- Output after a later keystroke that would not settle on its own (Enter,
+  Tab, a key into another pane) paints at once instead of waiting for the
+  armed paint. A paste is not a keystroke: it never arms the settle, and its
+  output takes the ordinary output path.
 
 That a split echo shows as two presented frames, and that the settle merges
 them into one, is inferred from the code paths above (winit's redraw dispatch

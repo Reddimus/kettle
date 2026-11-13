@@ -168,11 +168,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   for a whole refresh. A pane starts waiting when the echo of a typed
   character or backspace arrives in two writes within 3 ms, and stops 5
   seconds after the last such echo. Only typed characters and backspaces
-  wait: Enter, Tab, arrows, other control keys and pastes of any length are
-  painted at once, even in a pane that waits, and so is type-ahead while the
-  pane is still printing. Shells that echo each typed key in one write are
-  painted at once, as before. `ui_geometry.typed_echo.settled_echoes` counts
-  the waits that ran to their deadline.
+  wait: Enter, Tab, arrows and other control keys are painted at once, even
+  in a pane that waits, and so is type-ahead while the pane is still
+  printing. A paste of any length never starts a wait or teaches a pane to
+  wait. Shells that echo each typed key in one write are painted at once, as
+  before. `ui_geometry.typed_echo.settled_echoes` counts the waits that ran
+  to their deadline.
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
   theme and other pickers now are too, and in all of them the highlighted row
