@@ -1726,7 +1726,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
     let mut projection =
         modal_accessibility_projection(&overlay, (800.0, 600.0), cell, 1.0, &EN_TEXT);
     // As the window's accessibility tree builds it.
-    nest_context_menu_accessibility(&mut projection, &ws, &overlay, cell.1);
+    nest_context_menu_accessibility(&mut projection, &ws, &overlay, cell.1, &EN_TEXT);
     let node = |kind: u64, index: usize| {
         projection
             .nodes

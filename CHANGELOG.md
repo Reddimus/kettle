@@ -361,6 +361,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Orca and VoiceOver say that the right-click menu's Split, Pane, Tab,
+  Window, Title, Group and Appearance rows open a submenu. They read those
+  rows as plain commands, since the submenu state reached only Windows.
+
 - On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
   Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing
   was left on, so under the "Prefer tabs when opening documents" system

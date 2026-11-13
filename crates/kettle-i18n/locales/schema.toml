@@ -165,6 +165,9 @@ context = "crates/kettle-ui/src/app/menus.rs open_about_panel: screen-reader nam
 [messages.menu_a11y_terminal]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 
+[messages.menu_a11y_submenu]
+context = "crates/kettle-ui/src/app/accessibility.rs mark_context_submenu_row: screen-reader description of a right-click menu row, such as Split or Appearance, that opens a further menu of its own; it stands in for the ▸ drawn at the row's end. A noun, as the platform names such a menu."
+
 [messages.menu_about]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
 

@@ -613,7 +613,7 @@ fn a_parent_panel_keeps_its_check_box_states() {
     };
     let mut projection =
         super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN);
-    super::nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0);
+    super::nest_context_menu_accessibility(&mut projection, &ws, &overlay, 16.0, &EN);
     for (name, painted_label, toggled) in [
         ("Cursor blink", "  Cursor blink", Toggled::False),
         ("Copy on select", "✓ Copy on select", Toggled::True),
