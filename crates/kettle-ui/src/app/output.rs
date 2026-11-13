@@ -188,7 +188,9 @@ pub(super) fn observe_typed_echo(ws: &mut WindowState, now: std::time::Instant) 
     let panes = &ws.mux.panes;
     ws.typed_echo.observe(now, ws.last_typed, |id| {
         panes.get(&id).map(|pane| {
-            // Generation first: a stamp read after it is at least as new.
+            // Generation first: the PTY reader stamps a publication before it
+            // bumps the generation, so the stamp read after it is at least as
+            // new as that generation's publication.
             let generation = pane.term.output_generation();
             (generation, pane.term.output_published_at())
         })
@@ -196,7 +198,10 @@ pub(super) fn observe_typed_echo(ws: &mut WindowState, now: std::time::Instant) 
 }
 
 /// Record an output wake inside the typing window with the panes whose
-/// output this window has not painted. Returns whether it starts a new echo.
+/// output this window has not painted. Returns whether it is the first wake
+/// of the last keystroke's echo: `typed_echo` keeps only the panes
+/// `note_keystroke` recorded for that keystroke (typed text into a pane with
+/// nothing unpainted), so a sibling's output or a stream is never its echo.
 pub(super) fn note_typed_echo_wake(ws: &mut WindowState) -> bool {
     let seen = &ws.seen_output_gen;
     let panes = &ws.mux.panes;
@@ -207,11 +212,6 @@ pub(super) fn note_typed_echo_wake(ws: &mut WindowState) -> bool {
             (seen.get(id).copied().unwrap_or(0) != generation)
                 .then(|| (*id, generation, pane.term.output_published_at()))
         }),
-        |id| {
-            panes
-                .get(&id)
-                .is_some_and(|pane| pane.last_input_was_typed_text())
-        },
     )
 }
 

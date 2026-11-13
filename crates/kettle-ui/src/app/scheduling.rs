@@ -37,11 +37,16 @@ pub(super) fn window_is_render_hidden(ws: &WindowState) -> bool {
 
 /// Poll the typed-echo settle under the output coalescer's guards: a hidden
 /// window or a pending frame recovery cancels it rather than requesting a
-/// redraw that would return early or waking with nothing to do.
+/// redraw that would return early or waking with nothing to do. With nothing
+/// pending it returns before the guards, so an idle window makes no
+/// visibility call on each turn.
 pub(super) fn poll_echo_settle(
     ws: &mut WindowState,
     now: std::time::Instant,
 ) -> crate::typed_echo::SettlePoll {
+    if !ws.typed_echo.settle_pending() {
+        return crate::typed_echo::SettlePoll::Idle;
+    }
     let blocked = window_is_render_hidden(ws) || ws.frame_recovery.has_pending();
     ws.typed_echo.poll_settle(now, blocked)
 }

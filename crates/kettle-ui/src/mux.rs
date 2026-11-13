@@ -1009,10 +1009,11 @@ pub struct Pane {
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
     user_input_generation: AtomicU64,
-    /// Whether the last input queued here was typed text: one key's worth of
-    /// printable characters or a backspace, not Enter, Tab, a control chord,
-    /// an escape sequence or a paste. Only such keys teach the typed-echo
-    /// settle that this pane's echoes split (see `crate::typed_echo`).
+    /// Whether the last keyboard or paste input queued here was typed text:
+    /// one key's worth of printable characters or a backspace, not Enter, Tab,
+    /// a control chord, an escape sequence or a paste of any length. The
+    /// window reads it when it records a keystroke; only typed text is
+    /// followed by the typed-echo counts and settle (see `crate::typed_echo`).
     last_input_typed_text: AtomicBool,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
@@ -1118,7 +1119,6 @@ impl Pane {
         self.last_input_typed_text.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn input_generation(&self) -> u64 {
         self.user_input_generation.load(Ordering::Relaxed)
     }
@@ -1235,6 +1235,33 @@ impl Pane {
     }
 
     pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        let typed_text = crate::typed_echo::is_typed_text(&bytes);
+        self.feed_user_input(bytes, typed_text)
+    }
+
+    /// Write a paste, or keys replayed in one block after one, as user input.
+    /// It is the same input as [`Self::feed_input`] except that it is never
+    /// typed text, however short: a paste is not one keystroke, so it never
+    /// teaches or arms the typed-echo settle (`crate::typed_echo`).
+    pub fn feed_paste(&self, bytes: &[u8]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
+            return result;
+        }
+        if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        self.feed_paste_shared(Arc::from(bytes))
+    }
+
+    /// [`Self::feed_paste`] for a payload shared between panes.
+    pub fn feed_paste_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.feed_user_input(bytes, false)
+    }
+
+    fn feed_user_input(&self, bytes: Arc<[u8]>, typed_text: bool) -> PaneInputResult {
         if let Some(result) = pane_input_policy(
             !self.held && self.pty_input.failed(),
             self.read_only || self.held,
@@ -1249,7 +1276,7 @@ impl Pane {
                     self.pty_input
                         .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
-                self.record_typed_text(result, crate::typed_echo::is_typed_text(input));
+                self.record_typed_text(result, typed_text);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -4932,7 +4959,7 @@ impl Mux {
                     raw.get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, false)))
                 };
                 // Paste is user input — read-only panes drop it.
-                let result = p.feed_input_shared(bytes.clone());
+                let result = p.feed_paste_shared(bytes.clone());
                 delivery.record_for(id, receipt_pane, result);
             }
         }
@@ -4997,7 +5024,7 @@ impl Mux {
                 .or_insert_with(|| {
                     Arc::<[u8]>::from(crate::input::paste_payload(&text, bracketed))
                 });
-            let result = pane.feed_input_shared(bytes.clone());
+            let result = pane.feed_paste_shared(bytes.clone());
             delivery.record_for(id, receipt_pane, result);
         }
         delivery
@@ -6175,7 +6202,13 @@ mod node_tests {
             PaneInputResult::Queued
         );
         assert!(!pane.last_input_was_typed_text(), "a batch with Tab is not");
-        for _ in 4..PTY_INPUT_QUEUE_DEPTH {
+        assert_eq!(pane.feed_input(b"a"), PaneInputResult::Queued);
+        assert_eq!(pane.feed_paste(b"ab"), PaneInputResult::Queued);
+        assert!(
+            !pane.last_input_was_typed_text(),
+            "a paste is never typed text, however short"
+        );
+        for _ in 6..PTY_INPUT_QUEUE_DEPTH {
             assert_eq!(pane.feed_input(b"x"), PaneInputResult::Queued);
         }
         // A full queue refuses Enter inside the admission closure.

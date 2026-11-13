@@ -511,19 +511,30 @@ fn typed_echo_diagnostics_sample_under_the_lock_and_observe_each_present() {
     ));
 }
 
+/// A typed-text key into quiet `pane`.
+fn typed_into(pane: u64) -> crate::typed_echo::KeyTarget {
+    crate::typed_echo::KeyTarget {
+        pane,
+        typed_text: true,
+        quiet: true,
+    }
+}
+
 /// A window armed with a settled echo the way the typed Wakeup arm arms it:
 /// pane 1's previous echo split, and this keystroke's echo just woke.
 fn armed_echo_window(key: std::time::Instant) -> WindowState {
     use crate::typed_echo::EchoPaint;
     use std::time::Duration;
     let mut ws = WindowState::new(0, crate::mux::Mux::new());
-    ws.typed_echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true);
+    ws.typed_echo.key_sent(key, [typed_into(1)]);
+    ws.typed_echo.typed_wake(Some(key), [(1, 11, Some(key))]);
     let second = key + Duration::from_millis(1);
     ws.typed_echo
         .observe(second, Some(key), |_| Some((12, Some(second))));
     let next = key + Duration::from_millis(50);
     ws.last_typed = Some(next);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true);
+    ws.typed_echo.key_sent(next, [typed_into(1)]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))]);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Settle
@@ -540,7 +551,7 @@ fn echo_settle_paints_once_at_an_unextended_deadline() {
     let mut ws = armed_echo_window(key);
     // A second wake 1 ms later (another pane) keeps the first deadline.
     let later = armed + Duration::from_millis(1);
-    assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))], |_| true));
+    assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))]));
     assert_eq!(
         ws.typed_echo.plan_paint(later, false, true),
         EchoPaint::Settle
@@ -619,7 +630,8 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     // The next keystroke's echo arms again.
     let next = due + Duration::from_millis(40);
     ws.last_typed = Some(next);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))], |_| true);
+    ws.typed_echo.key_sent(next, [typed_into(1)]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Settle
@@ -629,7 +641,9 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     let mut ws = armed_echo_window(key);
     assert_eq!(super::poll_echo_settle(&mut ws, due), SettlePoll::Request);
     let next = due + Duration::from_millis(40);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))], |_| true);
+    ws.last_typed = Some(next);
+    ws.typed_echo.key_sent(next, [typed_into(1)]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Now
@@ -670,4 +684,146 @@ fn echo_settle_is_wired_with_the_coalescer_guards() {
     assert!(redraw.contains(
         "self.acknowledge_output_wakes(ws);\n        // A settled echo paints in this frame, whatever requested it.\n        ws.typed_echo.frame_sampled();"
     ));
+}
+
+/// The settle is macOS only; every other platform paints echo at once.
+#[test]
+fn echo_settle_is_enabled_on_macos_only() {
+    assert_eq!(super::ECHO_SETTLE_ENABLED, cfg!(target_os = "macos"));
+}
+
+/// Every keystroke stamp goes through `note_keystroke`, which reads the
+/// pane's typed-text flag and quiet state per recipient; the echo wake keeps
+/// only that keystroke's panes; and an idle settle poll returns before the
+/// visibility guards.
+#[test]
+fn typed_echo_follows_the_keystrokes_own_panes() {
+    let src = production_source();
+    let note = src
+        .split_once("fn note_keystroke(")
+        .expect("keystrokes are noted in one place")
+        .1;
+    let note = &note[..note.find("\n}\n").expect("note_keystroke end")];
+    assert!(note.contains("typed_text: pane.last_input_was_typed_text(),"));
+    assert!(note.contains(
+        "quiet: seen.get(id).copied().unwrap_or(0) == pane.term.output_generation(),"
+    ));
+    assert_eq!(
+        src.matches("last_typed = Some(").count(),
+        1,
+        "only note_keystroke opens the typing window"
+    );
+    assert!(note.contains("ws.last_typed = Some(at);"));
+    let wake = src
+        .split_once("fn note_typed_echo_wake(")
+        .expect("typed wakes are noted")
+        .1;
+    let wake = &wake[..wake.find("\n}\n").expect("note_typed_echo_wake end")];
+    assert!(wake.contains("ws.typed_echo.typed_wake(\n        ws.last_typed,"));
+    // Pastes and keys replayed after one are never typed text.
+    for paste in [
+        "Some(pane.feed_paste(&bytes))",
+        "let result = pane.feed_paste(&bytes);",
+        "let delivered = pane.feed_paste(bytes);",
+    ] {
+        assert!(src.contains(paste), "{paste}");
+    }
+    let poll = src
+        .split_once("fn poll_echo_settle(")
+        .expect("settle poll")
+        .1;
+    let idle = poll
+        .find("if !ws.typed_echo.settle_pending() {")
+        .expect("an idle settle returns early");
+    let hidden = poll
+        .find("window_is_render_hidden(ws)")
+        .expect("the poll checks visibility");
+    assert!(idle < hidden, "check idle before any visibility call");
+}
+
+/// Through the real keystroke helper on a real pane: a typed key into a quiet
+/// pane learns its split and arms the next typed key; Enter, a paste, a
+/// pane with unpainted output and a sibling recipient neither learn nor arm.
+#[cfg(unix)]
+#[test]
+fn the_keystroke_helper_arms_only_typed_text_into_a_quiet_pane() {
+    use crate::typed_echo::EchoPaint;
+    use std::time::Duration;
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(
+        &cfg,
+        kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+        std::sync::Arc::new(|| {}),
+        &["/bin/cat".to_owned()],
+        None,
+    )
+    .expect("PTY fixture");
+    let id = mux.active_focus().expect("pane");
+    // Keep input off the PTY so the pane's output stays still.
+    let _input = mux
+        .panes
+        .get_mut(&id)
+        .expect("pane")
+        .capture_input_for_test();
+    let mut ws = WindowState::new(0, mux);
+    let base = ws.mux.panes[&id].term.output_generation();
+    ws.seen_output_gen.insert(id, base);
+    let ms = Duration::from_millis;
+    let send = |ws: &mut WindowState, bytes: &[u8], paste: bool, at| {
+        let pane = &ws.mux.panes[&id];
+        let result = if paste {
+            pane.feed_paste(bytes)
+        } else {
+            pane.feed_input(bytes)
+        };
+        assert!(result.is_queued());
+        super::note_keystroke(ws, at, &[id]);
+    };
+    let wake = |ws: &mut WindowState, at, generation| {
+        let new_echo = ws.typed_echo.typed_wake(Some(at), [(id, generation, Some(at))]);
+        ws.typed_echo.plan_paint(at, new_echo, true)
+    };
+
+    // A typed key whose echo splits teaches the pane.
+    let key = std::time::Instant::now();
+    send(&mut ws, b"g", false, key);
+    assert_eq!(ws.last_typed, Some(key));
+    assert_eq!(wake(&mut ws, key, base + 1), EchoPaint::Now);
+    let second = key + ms(1);
+    assert_eq!(
+        ws.typed_echo
+            .observe(second, Some(key), |_| Some((base + 2, Some(second)))),
+        Some(id)
+    );
+
+    // Enter, a short unbracketed paste, and a sibling recipient: at once.
+    let mut at = key;
+    for (bytes, paste) in [(&b"\r"[..], false), (b"ab", true)] {
+        at += ms(50);
+        send(&mut ws, bytes, paste, at);
+        assert_eq!(wake(&mut ws, at, base + 3), EchoPaint::Now, "{bytes:?}");
+    }
+    at += ms(50);
+    assert!(ws.mux.panes[&id].feed_input(b"h").is_queued());
+    super::note_keystroke(&mut ws, at, &[id + 1]);
+    assert_eq!(wake(&mut ws, at, base + 3), EchoPaint::Now, "sibling");
+
+    // A typed key while the pane has unpainted output: at once.
+    ws.seen_output_gen.insert(id, base + 1);
+    at += ms(50);
+    send(&mut ws, b"h", false, at);
+    assert_eq!(wake(&mut ws, at, base + 3), EchoPaint::Now, "streaming");
+    assert!(!ws.typed_echo.settle_pending());
+
+    // A typed key into the quiet, learned pane settles.
+    ws.seen_output_gen.insert(id, base);
+    at += ms(50);
+    send(&mut ws, b"i", false, at);
+    assert_eq!(wake(&mut ws, at, base + 3), EchoPaint::Settle);
+    ws.mux.kill_children();
 }

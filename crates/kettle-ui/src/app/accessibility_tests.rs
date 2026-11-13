@@ -309,6 +309,7 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"echoes\": echo_counts.echoes",
         "\"split_echoes\": echo_counts.split_echoes",
         "\"frames_presented\": echo_counts.frames_presented",
+        "\"output_frames\": echo_counts.output_frames",
         "\"intermediate_frames\": echo_counts.intermediate_frames",
         "\"late_superseded_frames\": echo_counts.late_superseded_frames",
         "\"settled_echoes\": echo_counts.settled_echoes",
