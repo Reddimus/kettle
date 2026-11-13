@@ -540,13 +540,18 @@ pub(super) fn theme_commit_plan(
     }
 }
 
-/// Edit `slot`'s theme in the open picker: the list opens on that side's
-/// theme, ticks it and highlights it, and the window previews it. The
-/// preview's baseline, which Esc restores, stays the theme from before the
-/// picker. Returns whether anything changed.
+/// Edit `slot`'s theme in the open picker, while `active` (from
+/// `theme_pick_key`) is the side the window wears: the list opens on that
+/// side's theme, ticks it and highlights it, and the window previews it. A
+/// typed query is cleared, so the list shows that theme instead of keeping
+/// a match from the other side, which Enter would then save for this one.
+/// The preview's baseline, which Esc restores, stays the theme from before
+/// the picker. The side the picker already saves to, and a fixed theme,
+/// which has no sides, change nothing. Returns whether anything changed.
 pub(super) fn switch_theme_picker_slot(
     state: &mut crate::window_state::ThemePickerState,
     cfg: &Config,
+    active: &'static str,
     slot: kettle_render::ThemeSlot,
     tr: &kettle_i18n::Translator,
 ) -> bool {
@@ -554,11 +559,14 @@ pub(super) fn switch_theme_picker_slot(
         kettle_render::ThemeSlot::Dark => &cfg.dark_theme,
         kettle_render::ThemeSlot::Light => &cfg.light_theme,
     };
-    if state.slot == Some(slot) && state.opened_on == *theme {
+    if active == "theme" || theme_picker_save_key(Some(state), active) == theme_slot_key(slot) {
         return false;
     }
     state.slot = Some(slot);
     state.opened_on = theme.clone();
+    state
+        .query
+        .replace_all("", crate::modal_input::MAX_MODAL_INPUT_BYTES);
     state.selected = theme_picker_matches(&state.query, &state.opened_on, tr)
         .iter()
         .position(|(name, _)| name.eq_ignore_ascii_case(theme.trim()))

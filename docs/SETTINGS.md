@@ -231,8 +231,8 @@ theme:** or **dark theme:**. Following the system saves a pick to the active
 side and keeps following. Forced Light/Dark modes also update their own side;
 Fixed theme writes `theme`. With `theme-schedule` set, the schedule picks the
 side, so a pick saves to the side it wears now, whatever the mode. To change the other side's theme, click its name on
-the status line under the list: the list moves to that side's theme and the
-window previews it, and Enter (shown as "save for light appearance" or "save
+the status line under the list: the list moves to that side's theme (clearing
+anything typed) and the window previews it, and Enter (shown as "save for light appearance" or "save
 for dark appearance") writes `light-theme` or `dark-theme` only and puts the
 window back on the theme it wore. Esc still puts back the theme you started
 with. With nothing typed, the themes of your current theme's appearance come

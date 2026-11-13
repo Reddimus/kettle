@@ -821,7 +821,7 @@ fn a_system_switch_while_editing_the_other_side_keeps_that_side() {
     let mut ws = WindowState::new(1, Mux::new());
     super::begin_theme_picker(&mut ws, live(&cfg.dark_theme));
     let picker = ws.theme_picker_input.as_mut().unwrap();
-    switch_theme_picker_slot(picker, &cfg, ThemeSlot::Light, &tr);
+    switch_theme_picker_slot(picker, &cfg, "dark-theme", ThemeSlot::Light, &tr);
     let before = picker.clone();
     assert_eq!(
         theme_commit_plan(picker, &cfg, Some(true)),

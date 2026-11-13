@@ -1330,6 +1330,7 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
     assert!(switch_theme_picker_slot(
         &mut picker,
         &cfg,
+        "dark-theme",
         ThemeSlot::Light,
         &EN
     ));
@@ -1349,6 +1350,7 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
     assert!(!switch_theme_picker_slot(
         &mut picker,
         &cfg,
+        "dark-theme",
         ThemeSlot::Light,
         &EN
     ));
@@ -1403,6 +1405,7 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
     assert!(switch_theme_picker_slot(
         &mut picker,
         &cfg,
+        "dark-theme",
         ThemeSlot::Dark,
         &EN
     ));
@@ -1425,6 +1428,69 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
     );
 }
 
+/// A query typed for one side does not survive a switch to the other: the
+/// list moves to that side's theme, so Enter cannot save a match from the
+/// query, an unrelated theme, for the new side. The side the picker already
+/// saves to keeps the query and the highlighted row, and a fixed theme has
+/// no sides to switch to.
+#[test]
+fn switching_sides_clears_the_query_and_opens_on_that_sides_theme() {
+    use super::{switch_theme_picker_slot, theme_commit_plan};
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config::default();
+    let mut picker = state("dracula", 0, &cfg.dark_theme.clone());
+    assert_eq!(theme_picker_selection(&picker, &EN), Some("Dracula"));
+    // The side it saves to already: nothing changes.
+    let before = picker.clone();
+    assert!(!switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker, before);
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(picker.query.text(), "");
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.light_theme.as_str())
+    );
+    let plan = theme_commit_plan(&picker, &cfg, Some(true));
+    assert_eq!(plan.key, "light-theme");
+    // Back to the dark side with a new query: it clears again.
+    picker.query = "nord".into();
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker.query.text(), "");
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.dark_theme.as_str())
+    );
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let mut fixed = state("dracula", 0, "TokyoNight Night");
+    let before = fixed.clone();
+    assert!(!switch_theme_picker_slot(
+        &mut fixed,
+        &cfg,
+        "theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(fixed, before);
+}
+
 /// The window previews the light side while it is edited, Esc puts back the
 /// theme from before the picker, and a pick for the side the window is not on
 /// leaves the baseline in place, so closing the picker puts that theme back.
@@ -1436,7 +1502,13 @@ fn a_pick_for_the_other_side_puts_the_window_back_on_its_theme() {
     let mut ws = WindowState::new(0, Mux::new());
     begin_theme_picker(&mut ws, live(&cfg.dark_theme));
     let picker = ws.theme_picker_input.as_mut().unwrap();
-    super::switch_theme_picker_slot(picker, &cfg, kettle_render::ThemeSlot::Light, &EN);
+    super::switch_theme_picker_slot(
+        picker,
+        &cfg,
+        "dark-theme",
+        kettle_render::ThemeSlot::Light,
+        &EN,
+    );
     let previewed = settle(&mut ws, &cfg.dark_theme);
     assert_eq!(previewed, cfg.light_theme);
     // Enter for the light side: the picker closes and the baseline stays.

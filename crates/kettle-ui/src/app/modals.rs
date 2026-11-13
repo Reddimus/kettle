@@ -2180,10 +2180,11 @@ impl App {
         ws: &mut WindowState,
         slot: kettle_render::ThemeSlot,
     ) {
+        let active = self.theme_pick_key();
         let Some(state) = ws.theme_picker_input.as_mut() else {
             return;
         };
-        if switch_theme_picker_slot(state, &self.cfg, slot, &self.ui_text) {
+        if switch_theme_picker_slot(state, &self.cfg, active, slot, &self.ui_text) {
             self.sync_theme_preview(ws);
             ws.accessibility_pending = true;
             if let Some(window) = &ws.window {
