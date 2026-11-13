@@ -2171,11 +2171,6 @@ impl App {
         }
     }
 
-    /// Persist `new_val` for `key_str` from Settings, with the companion keys
-    /// and restart notes some settings need, then reload.
-    /// The theme picker's contrast button: step `minimum-contrast` to the
-    /// next listed ratio and save it, as the Settings row does. It is not part
-    /// of the picker's preview, so Esc leaves it as set.
     /// Edit `slot`'s theme in the open theme picker (see
     /// `switch_theme_picker_slot`) and preview it now: a screen reader's
     /// click arrives as a user event, which skips `window_event`'s preview
@@ -2197,6 +2192,9 @@ impl App {
         }
     }
 
+    /// The theme picker's contrast button: step `minimum-contrast` to the
+    /// next listed ratio and save it, as the Settings row does. It is not part
+    /// of the picker's preview, so Esc leaves it as set.
     pub(super) fn step_picker_contrast(&mut self, ws: &mut WindowState) {
         let next = kettle_render::step_minimum_contrast(self.cfg.minimum_contrast, true);
         self.settings_store(
@@ -2210,6 +2208,8 @@ impl App {
         }
     }
 
+    /// Persist `new_val` for `key_str` from Settings, with the companion keys
+    /// and restart notes some settings need, then reload.
     fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
         // Freezing the active palette must survive a reload, including a config
         // that still has a different fixed theme from before system following.
