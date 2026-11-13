@@ -1657,6 +1657,7 @@ impl App {
                     "output_frames": echo_counts.output_frames,
                     "intermediate_frames": echo_counts.intermediate_frames,
                     "late_superseded_frames": echo_counts.late_superseded_frames,
+                    "settled_echoes": echo_counts.settled_echoes,
                 },
                 // Who draws the blink: the GPU, or the window server's layer
                 // (macOS). Timing, geometry and counts only.

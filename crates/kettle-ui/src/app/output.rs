@@ -894,6 +894,7 @@ impl App {
                     // one-shot repair deadline is armed.
                     // Output bursts must not bypass timeout backoff.
                     ws.output_pacer.reset();
+                    ws.typed_echo.quiesce();
                     return;
                 }
                 // Coalesce rapid PTY-output paints to ~one per
@@ -913,8 +914,11 @@ impl App {
                 if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
                     ws.output_pacer.reset();
                     observe_typed_echo(ws, now);
-                    note_typed_echo_wake(ws);
-                    if let Some(w) = &ws.window {
+                    let new_echo = note_typed_echo_wake(ws);
+                    if ws.typed_echo.plan_paint(now, new_echo, ECHO_SETTLE_ENABLED)
+                        == crate::typed_echo::EchoPaint::Now
+                        && let Some(w) = &ws.window
+                    {
                         w.request_redraw();
                     }
                 } else if should_defer_output_paint(

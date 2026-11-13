@@ -12,6 +12,13 @@
 //! Times come from each pane's publication stamp
 //! (`Terminal::output_published_at`), not from when the UI thread gets to a
 //! wake, which can be after a whole frame of rendering.
+//!
+//! The echo settle acts on those counts. Once a pane's echo has split, its
+//! later echoes paint [`ECHO_SETTLE`] after their first wake instead of at
+//! once. The pane's output latch stays closed from that wake until the frame
+//! samples output, so the second write lands in the grid without another wake
+//! and the settled frame shows both. A pane whose echoes arrive in one write
+//! never arms it and pays nothing.
 
 use std::time::{Duration, Instant};
 
@@ -24,6 +31,46 @@ use std::time::{Duration, Instant};
 /// within 3 ms. Every longer span came with a stalled first write under heavy
 /// load. It must stay below the 4 ms minimum output frame budget.
 pub(crate) const ECHO_SETTLE: Duration = Duration::from_millis(3);
+
+/// How long one split echo keeps a pane's later echoes settled. In the probe
+/// about one key in four split, so while someone types, splits recur well
+/// inside this; a pause longer than this costs one unsettled split.
+pub(crate) const SPLIT_MEMORY: Duration = Duration::from_secs(5);
+
+/// Panes remembered as splitting. Entries also expire after
+/// [`SPLIT_MEMORY`], so a closed pane's entry goes away by itself.
+const MAX_SPLIT_PANES: usize = 8;
+
+/// Where a window's settled echo paint is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SettlePhase {
+    #[default]
+    Idle,
+    /// An echo waits for its paint at this deadline. Never extended.
+    Armed(Instant),
+    /// The deadline passed and a redraw was requested from winit.
+    Queued,
+}
+
+/// What a typed output wake does now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EchoPaint {
+    /// Request a redraw now, as every typed echo did before the settle.
+    Now,
+    /// Leave it to the settle deadline.
+    Settle,
+}
+
+/// What `about_to_wait` does for the settle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettlePoll {
+    /// Nothing pending: no redraw, no wake.
+    Idle,
+    /// Wake after this long. Never zero.
+    Wait(Duration),
+    /// The deadline passed: request a redraw.
+    Request,
+}
 
 /// Counts since the window opened. Counts only, never content.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +92,8 @@ pub(crate) struct TypedEchoCounts {
     /// Output frames superseded the same way, later than [`ECHO_SETTLE`] but
     /// within one output frame budget: on screen for about one refresh.
     pub(crate) late_superseded_frames: u64,
+    /// Echoes whose paint the settle delayed.
+    pub(crate) settled_echoes: u64,
 }
 
 /// One pane's output at a sample: id, output generation, publication time.
@@ -76,6 +125,9 @@ pub(crate) struct TypedEcho {
     watch: Option<FrameWatch>,
     /// Generations the frame being drawn captured, reused across frames.
     captured: Vec<(u64, u64)>,
+    settle: SettlePhase,
+    /// Panes whose echo last split, and when.
+    split_panes: Vec<(u64, Instant)>,
 }
 
 impl TypedEcho {
@@ -127,9 +179,10 @@ impl TypedEcho {
                 let gap = latest?.saturating_duration_since(first?);
                 (now_generation > generation && gap <= ECHO_SETTLE).then_some(id)
             });
-            if split_pane.is_some() {
+            if let Some(pane) = split_pane {
                 origin.split = true;
                 self.counts.split_echoes += 1;
+                self.remember_split(pane, now);
             }
         }
         if let Some(watch) = self.watch.take() {
@@ -158,6 +211,96 @@ impl TypedEcho {
             }
         }
         split_pane
+    }
+
+    fn remember_split(&mut self, pane: u64, now: Instant) {
+        self.split_panes
+            .retain(|&(id, at)| id != pane && now.saturating_duration_since(at) <= SPLIT_MEMORY);
+        if self.split_panes.len() >= MAX_SPLIT_PANES {
+            self.split_panes.remove(0);
+        }
+        self.split_panes.push((pane, now));
+    }
+
+    /// Whether this echo's panes split recently enough to settle it.
+    fn echo_splits(&self, now: Instant) -> bool {
+        self.origin.as_ref().is_some_and(|origin| {
+            origin.panes.iter().any(|&(id, ..)| {
+                self.split_panes.iter().any(|&(pane, at)| {
+                    pane == id && now.saturating_duration_since(at) <= SPLIT_MEMORY
+                })
+            })
+        })
+    }
+
+    /// Decide how a typed output wake paints. `new_echo` is what
+    /// [`Self::typed_wake`] returned for it; `settles` is whether this
+    /// platform settles echoes at all.
+    pub(crate) fn plan_paint(&mut self, now: Instant, new_echo: bool, settles: bool) -> EchoPaint {
+        match self.settle {
+            // Another pane's wake, or a racing one: the armed paint takes it,
+            // and the deadline never moves.
+            SettlePhase::Armed(_) => return EchoPaint::Settle,
+            // Requesting again is idempotent and covers a redraw winit never
+            // delivered, so an echo cannot get stuck behind it.
+            SettlePhase::Queued => return EchoPaint::Now,
+            SettlePhase::Idle => {}
+        }
+        // A later write of the same keystroke is the rest of a split echo.
+        // Holding it back would only keep the half-written frame up longer.
+        if !settles || !new_echo || !self.echo_splits(now) {
+            return EchoPaint::Now;
+        }
+        self.settle = SettlePhase::Armed(now + ECHO_SETTLE);
+        self.counts.settled_echoes += 1;
+        EchoPaint::Settle
+    }
+
+    /// Poll the settle from `about_to_wait`. `blocked` carries the output
+    /// coalescer's guards: the window is hidden or a frame recovery is
+    /// pending. Either cancels the settle instead of waking for a redraw that
+    /// would return early. The output stays unpainted, and the window's
+    /// restore wake or the recovery redraw paints it.
+    pub(crate) fn poll_settle(&mut self, now: Instant, blocked: bool) -> SettlePoll {
+        match self.settle {
+            SettlePhase::Idle => SettlePoll::Idle,
+            SettlePhase::Armed(_) | SettlePhase::Queued if blocked => {
+                self.settle = SettlePhase::Idle;
+                SettlePoll::Idle
+            }
+            SettlePhase::Queued => SettlePoll::Idle,
+            SettlePhase::Armed(at) if now >= at => {
+                self.settle = SettlePhase::Queued;
+                SettlePoll::Request
+            }
+            SettlePhase::Armed(at) => SettlePoll::Wait(
+                at.saturating_duration_since(now)
+                    .max(Duration::from_millis(1)),
+            ),
+        }
+    }
+
+    /// A redraw callback began. It consumes a queued request even when it
+    /// returns before drawing, so a failed redraw is not retried every turn.
+    pub(crate) fn redraw_started(&mut self) {
+        if self.settle == SettlePhase::Queued {
+            self.settle = SettlePhase::Idle;
+        }
+    }
+
+    /// A frame is about to sample output: any settled echo paints in it.
+    pub(crate) fn frame_sampled(&mut self) {
+        self.settle = SettlePhase::Idle;
+    }
+
+    /// Output wakes were quiesced (hidden, recovering, or no renderer).
+    pub(crate) fn quiesce(&mut self) {
+        self.settle = SettlePhase::Idle;
+    }
+
+    /// Whether a settled paint is still to come; blocks the blink handoff.
+    pub(crate) fn settle_pending(&self) -> bool {
+        self.settle != SettlePhase::Idle
     }
 
     /// Start recording the generations a frame captures.
@@ -344,6 +487,93 @@ mod tests {
         assert!(!echo.typed_wake(Some(key), [(1, 12, Some(key + ms(1)))]));
         assert!(echo.typed_wake(Some(key + ms(40)), [(1, 13, Some(key + ms(41)))]));
         assert_eq!(echo.counts().echoes, 2);
+    }
+
+    /// Key 1's echo splits; returns the time key 2 is pressed.
+    fn learn_split(echo: &mut TypedEcho, key: Instant) -> Instant {
+        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))]));
+        assert_eq!(echo.plan_paint(key, true, true), EchoPaint::Now);
+        let second = key + ms(1);
+        assert_eq!(
+            echo.observe(second, Some(key), |_| Some((12, Some(second)))),
+            Some(1)
+        );
+        key + ms(50)
+    }
+
+    #[test]
+    fn only_a_pane_whose_echo_split_settles_its_later_echoes() {
+        let key = Instant::now();
+        let mut echo = TypedEcho::default();
+        // One write per key: never settled.
+        for n in 0..3 {
+            let at = key + ms(40 * n);
+            assert!(echo.typed_wake(Some(at), [(1, 10 + n, Some(at))]));
+            assert_eq!(echo.plan_paint(at, true, true), EchoPaint::Now);
+        }
+        let next = learn_split(&mut echo, key + ms(200));
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert_eq!(echo.plan_paint(next, true, true), EchoPaint::Settle);
+        assert_eq!(echo.counts().settled_echoes, 1);
+        assert_eq!(
+            echo.poll_settle(next, false),
+            SettlePoll::Wait(ECHO_SETTLE),
+            "the paint waits the settle from the first wake"
+        );
+
+        // Another pane's echo is not settled by pane 1's history.
+        let mut other = TypedEcho::default();
+        let next = learn_split(&mut other, key);
+        assert!(other.typed_wake(Some(next), [(2, 5, Some(next))]));
+        assert_eq!(other.plan_paint(next, true, true), EchoPaint::Now);
+    }
+
+    #[test]
+    fn split_evidence_expires_and_other_platforms_never_settle() {
+        let key = Instant::now();
+        let mut echo = TypedEcho::default();
+        let next = learn_split(&mut echo, key);
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert_eq!(echo.plan_paint(next, true, false), EchoPaint::Now);
+
+        let late = key + ms(1) + SPLIT_MEMORY + ms(1);
+        assert!(echo.typed_wake(Some(late), [(1, 14, Some(late))]));
+        assert_eq!(echo.plan_paint(late, true, true), EchoPaint::Now);
+    }
+
+    #[test]
+    fn a_split_inside_a_settled_echo_keeps_the_pane_settled() {
+        let key = Instant::now();
+        let mut echo = TypedEcho::default();
+        let next = learn_split(&mut echo, key);
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert_eq!(echo.plan_paint(next, true, true), EchoPaint::Settle);
+        // The second write raises no wake; the settled frame sees it.
+        let second = next + ms(1);
+        echo.frame_sampled();
+        assert_eq!(
+            echo.observe(next + ms(3), Some(next), |_| Some((14, Some(second)))),
+            Some(1)
+        );
+        // Past the first split's memory, inside the second's.
+        let much_later = key + ms(1) + SPLIT_MEMORY + ms(10);
+        assert!(echo.typed_wake(Some(much_later), [(1, 15, Some(much_later))]));
+        assert_eq!(echo.plan_paint(much_later, true, true), EchoPaint::Settle);
+    }
+
+    #[test]
+    fn the_split_memory_is_bounded() {
+        let now = Instant::now();
+        let mut echo = TypedEcho::default();
+        for pane in 0..100 {
+            echo.remember_split(pane, now);
+        }
+        echo.remember_split(5, now);
+        assert_eq!(echo.split_panes.len(), MAX_SPLIT_PANES);
+        assert_eq!(
+            echo.split_panes.iter().filter(|(id, _)| *id == 5).count(),
+            1
+        );
     }
 
     #[test]

@@ -311,6 +311,7 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"frames_presented\": echo_counts.frames_presented",
         "\"intermediate_frames\": echo_counts.intermediate_frames",
         "\"late_superseded_frames\": echo_counts.late_superseded_frames",
+        "\"settled_echoes\": echo_counts.settled_echoes",
     ] {
         assert!(body.contains(needle), "ui_geometry lost {needle:?}");
     }

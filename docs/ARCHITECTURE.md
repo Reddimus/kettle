@@ -2437,6 +2437,46 @@ matcher tolerance with saved forward and reverse regex work before the real
 publication helper runs. The UI frame regression exercises the lost link-cache
 invalidation and the post-presentation retry under that interleaving.
 
+### Typed echo
+
+Output within `TYPING_ECHO_WINDOW` (150 ms) of a keystroke skips the output
+coalescer and requests a redraw at once. `request_redraw` is not paced to the
+display on macOS: winit dispatches the redraw in the same run-loop pass, and the
+Metal surface presents FIFO with up to three drawables. A shell that answers
+one key with two writes therefore gets two frames, and the first stays on
+screen for a whole refresh. zsh-autosuggestions in its default async mode does
+this on each key that changes the suggestion: the first write erases the old
+gray suggestion, the second, about a millisecond later, draws the new one.
+
+`crate::typed_echo` handles it in two parts. Each output publication is
+stamped in the pane's `OutputWakeGate`, waking or not
+(`Terminal::output_published_at`). The diagnostics then judge splits by
+publication time, not by when the UI thread sees a wake, which can be after a
+whole frame of rendering. A frame's generations are sampled under each pane's
+terminal lock during capture, because the staged cutoff above predates the
+capture. `ui_geometry.typed_echo` reports the counts.
+
+On macOS, a pane whose echo split within `ECHO_SETTLE` (3 ms) keeps its later
+echoes settled for `SPLIT_MEMORY` (5 s). Such an echo paints at its first wake
+plus `ECHO_SETTLE`, instead of at once. The pane's output latch stays closed
+from that wake until the frame acknowledges it, so the second write lands with
+no new wake and the settled frame paints both. Shells that write each echo
+once never arm the settle and pay nothing. The settle is a single phase
+(`Idle`, `Armed(deadline)`, `Queued`) with these rules:
+- The deadline is never extended.
+- `about_to_wait` polls it under the coalescer's guards. A hidden window or a
+  pending frame recovery cancels it rather than waking for a redraw that would
+  return early.
+- `Queued` ends when the next redraw callback begins, even one that returns
+  early, so a failed redraw is not retried every turn.
+- A typed wake that finds it `Queued` requests the redraw again.
+
+`ECHO_SETTLE` comes from a headless PTY probe of oh-my-zsh with
+zsh-autosuggestions: 97% of 192 split echoes spanned 3 ms or less. It stays
+below the 4 ms minimum output budget. Windows keeps the immediate path, since
+its timers are too coarse for the deadline. X11 and Wayland keep it too until
+it is measured there.
+
 ### Character protection
 
 A cell's protection bit is separate from its visual SGR attributes. DECSCA

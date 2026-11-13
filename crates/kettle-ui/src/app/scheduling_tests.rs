@@ -144,6 +144,14 @@ fn typed_echo_bypasses_the_output_coalescer() {
         ),
         "the Wakeup arm must paint echo immediately"
     );
+    // Immediately unless the echo settle holds it: the typed arm asks the
+    // settle, and requests the redraw itself on `Now`.
+    assert!(
+        src.contains(
+            "if ws.typed_echo.plan_paint(now, new_echo, ECHO_SETTLE_ENABLED)\n                        == crate::typed_echo::EchoPaint::Now\n                        && let Some(w) = &ws.window\n                    {\n                        w.request_redraw();"
+        ),
+        "the Wakeup arm must paint unsettled echo immediately"
+    );
 }
 
 #[test]
@@ -499,6 +507,167 @@ fn typed_echo_diagnostics_sample_under_the_lock_and_observe_each_present() {
         "defer_output_racing_frame(ws);\n            // Output published while this frame rendered supersedes it.\n            observe_typed_echo(ws, std::time::Instant::now());"
     ));
     assert!(src.contains(
-        "ws.output_pacer.reset();\n                    observe_typed_echo(ws, now);\n                    note_typed_echo_wake(ws);"
+        "ws.output_pacer.reset();\n                    observe_typed_echo(ws, now);\n                    let new_echo = note_typed_echo_wake(ws);"
+    ));
+}
+
+/// A window armed with a settled echo the way the typed Wakeup arm arms it:
+/// pane 1's previous echo split, and this keystroke's echo just woke.
+fn armed_echo_window(key: std::time::Instant) -> WindowState {
+    use crate::typed_echo::EchoPaint;
+    use std::time::Duration;
+    let mut ws = WindowState::new(0, crate::mux::Mux::new());
+    ws.typed_echo.typed_wake(Some(key), [(1, 11, Some(key))]);
+    let second = key + Duration::from_millis(1);
+    ws.typed_echo
+        .observe(second, Some(key), |_| Some((12, Some(second))));
+    let next = key + Duration::from_millis(50);
+    ws.last_typed = Some(next);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))]);
+    assert_eq!(
+        ws.typed_echo.plan_paint(next, new_echo, true),
+        EchoPaint::Settle
+    );
+    ws
+}
+
+#[test]
+fn echo_settle_paints_once_at_an_unextended_deadline() {
+    use crate::typed_echo::{ECHO_SETTLE, EchoPaint, SettlePoll};
+    use std::time::{Duration, Instant};
+    let key = Instant::now();
+    let armed = key + Duration::from_millis(50);
+    let mut ws = armed_echo_window(key);
+    // A second wake 1 ms later (another pane) keeps the first deadline.
+    let later = armed + Duration::from_millis(1);
+    assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))]));
+    assert_eq!(
+        ws.typed_echo.plan_paint(later, false, true),
+        EchoPaint::Settle
+    );
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, later),
+        SettlePoll::Wait(ECHO_SETTLE - Duration::from_millis(1))
+    );
+    assert!(ws.typed_echo.settle_pending());
+    // Due: one request, then nothing more while it is queued.
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, armed + ECHO_SETTLE),
+        SettlePoll::Request
+    );
+    for turn in 1..4 {
+        assert_eq!(
+            super::poll_echo_settle(&mut ws, armed + ECHO_SETTLE + Duration::from_millis(turn)),
+            SettlePoll::Idle,
+            "a queued settle must not request or wake again"
+        );
+    }
+    // The frame paints it.
+    ws.typed_echo.redraw_started();
+    ws.typed_echo.frame_sampled();
+    assert!(!ws.typed_echo.settle_pending());
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, armed + Duration::from_millis(10)),
+        SettlePoll::Idle
+    );
+}
+
+#[test]
+fn echo_settle_neither_fires_nor_spins_while_hidden_or_recovering() {
+    use crate::typed_echo::{ECHO_SETTLE, SettlePoll};
+    use std::time::{Duration, Instant};
+    let key = Instant::now();
+    let due = key + Duration::from_millis(50) + ECHO_SETTLE;
+    for blocked in ["hidden", "recovering"] {
+        let mut ws = armed_echo_window(key);
+        match blocked {
+            "hidden" => ws.window_occluded = true,
+            _ => ws.frame_recovery.schedule_transient_retry(due),
+        }
+        assert!(super::window_is_render_hidden(&ws) || ws.frame_recovery.has_pending());
+        // Past the deadline: no redraw that would return early, and no
+        // zero wait that would spin the loop.
+        for turn in 0..3 {
+            assert_eq!(
+                super::poll_echo_settle(&mut ws, due + Duration::from_millis(turn)),
+                SettlePoll::Idle,
+                "{blocked}: the settle must cancel, not fire or wait"
+            );
+        }
+        // Nor does it hold the blink handoff while the window cannot paint.
+        assert!(!ws.typed_echo.settle_pending(), "{blocked}");
+    }
+}
+
+#[test]
+fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
+    use crate::typed_echo::{ECHO_SETTLE, EchoPaint, SettlePoll};
+    use std::time::{Duration, Instant};
+    let key = Instant::now();
+    let due = key + Duration::from_millis(50) + ECHO_SETTLE;
+    let mut ws = armed_echo_window(key);
+    assert_eq!(super::poll_echo_settle(&mut ws, due), SettlePoll::Request);
+    // The callback returns before acknowledging output (a DPI transition,
+    // say): it consumed the request, and the next turns stay quiet.
+    ws.typed_echo.redraw_started();
+    for turn in 1..4 {
+        assert_eq!(
+            super::poll_echo_settle(&mut ws, due + Duration::from_millis(turn)),
+            SettlePoll::Idle
+        );
+    }
+    // The next keystroke's echo arms again.
+    let next = due + Duration::from_millis(40);
+    ws.last_typed = Some(next);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
+    assert_eq!(
+        ws.typed_echo.plan_paint(next, new_echo, true),
+        EchoPaint::Settle
+    );
+
+    // A request winit never answers does not hold later echoes back.
+    let mut ws = armed_echo_window(key);
+    assert_eq!(super::poll_echo_settle(&mut ws, due), SettlePoll::Request);
+    let next = due + Duration::from_millis(40);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
+    assert_eq!(
+        ws.typed_echo.plan_paint(next, new_echo, true),
+        EchoPaint::Now
+    );
+}
+
+#[test]
+fn echo_settle_is_wired_with_the_coalescer_guards() {
+    let src = production_source();
+    // The quiesce branch clears it with the coalescer.
+    assert!(src.contains(
+        "ws.output_pacer.reset();\n                    ws.typed_echo.quiesce();\n                    return;"
+    ));
+    // about_to_wait polls it, requests on Request, folds its wait, and holds
+    // the blink handoff while it is pending.
+    assert!(src.contains("let echo_settle = poll_echo_settle(ws, now);"));
+    assert!(src.contains("|| coalesce_due\n            || echo_settle_due"));
+    assert!(src.contains(
+        "if let crate::typed_echo::SettlePoll::Wait(next) = echo_settle {"
+    ));
+    assert!(src.contains(
+        "|| ws.output_pacer.is_deferred()\n                || ws.typed_echo.settle_pending()"
+    ));
+    // redraw answers the request on entry and consumes the settle where it
+    // samples output, after every early return.
+    let redraw = src
+        .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
+        .expect("redraw")
+        .1;
+    let started = redraw
+        .find("ws.typed_echo.redraw_started();")
+        .expect("redraw answers a queued settle");
+    let first_return = redraw.find("return;").expect("redraw has early returns");
+    assert!(
+        started < first_return,
+        "the settle request must be answered before any early return"
+    );
+    assert!(redraw.contains(
+        "self.acknowledge_output_wakes(ws);\n        // A settled echo paints in this frame, whatever requested it.\n        ws.typed_echo.frame_sampled();"
     ));
 }

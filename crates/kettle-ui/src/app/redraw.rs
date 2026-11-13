@@ -8,6 +8,14 @@ use super::*;
 /// quickly.
 pub(super) const TYPING_ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Whether a pane whose typed echoes split waits `typed_echo::ECHO_SETTLE`
+/// before painting them (see `crate::typed_echo`). macOS only: its presents
+/// are not paced to the display, so a split echo paints as two frames. The
+/// same may hold on X11 and Wayland, but it is unmeasured there, and Windows
+/// timers are too coarse for a 3 ms deadline (the reason for the bypass
+/// above).
+pub(super) const ECHO_SETTLE_ENABLED: bool = cfg!(target_os = "macos");
+
 /// Pure (drift-tested in `typed_echo_bypasses_the_output_coalescer`): is
 /// `now` inside the typing-echo window after the last keystroke?
 pub(super) fn typed_recently(
@@ -607,6 +615,9 @@ impl App {
             None
         };
         Self::materialize_layer_blink(ws, std::time::Instant::now());
+        // This callback answers any settled-echo request, even if it returns
+        // before drawing.
+        ws.typed_echo.redraw_started();
         #[cfg(target_os = "linux")]
         {
             let previous = ws.linux_titlebar;
@@ -870,6 +881,8 @@ impl App {
         // Presenting without attempting a frame would strand the pacer and
         // schedule a near-zero recovery loop.
         self.acknowledge_output_wakes(ws);
+        // A settled echo paints in this frame, whatever requested it.
+        ws.typed_echo.frame_sampled();
         // Is this paint flushing coalesced PTY output? Retained until the
         // frame outcome so the flood detector advances only after
         // presentation (see `effective_output_budget`).

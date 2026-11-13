@@ -35,6 +35,17 @@ pub(super) fn window_is_render_hidden(ws: &WindowState) -> bool {
     }) || ws.window_occluded
 }
 
+/// Poll the typed-echo settle under the output coalescer's guards: a hidden
+/// window or a pending frame recovery cancels it rather than requesting a
+/// redraw that would return early or waking with nothing to do.
+pub(super) fn poll_echo_settle(
+    ws: &mut WindowState,
+    now: std::time::Instant,
+) -> crate::typed_echo::SettlePoll {
+    let blocked = window_is_render_hidden(ws) || ws.frame_recovery.has_pending();
+    ws.typed_echo.poll_settle(now, blocked)
+}
+
 /// Fallback output frame budget when the platform cannot identify the current
 /// monitor's refresh rate. This is the ceiling-rounded period of a 60 Hz
 /// display; a flat 16 ms would schedule slightly faster than a 60 Hz
@@ -819,6 +830,8 @@ impl App {
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= output_budget)
                 .unwrap_or(true);
+        let echo_settle = poll_echo_settle(ws, now);
+        let echo_settle_due = echo_settle == crate::typed_echo::SettlePoll::Request;
         // At an edge that hides the cursor, a quiet window with nothing else
         // to draw hands its blink to the window server (macOS). The blink
         // redraw requested below becomes the hand-off frame.
@@ -848,6 +861,7 @@ impl App {
             modal_steady: modal_holds_cursor_steady(ws),
             work_pending: coalesce_due
                 || ws.output_pacer.is_deferred()
+                || ws.typed_echo.settle_pending()
                 || ws.frame_recovery.has_pending()
                 || ws.pending_resize
                 || ws.accessibility_pending
@@ -880,6 +894,7 @@ impl App {
             || bg_retry_due
             || autoscroll_active
             || coalesce_due
+            || echo_settle_due
             || resize_chip_active
             || media_receipt_redraw
             || completion_hide_due
@@ -903,6 +918,9 @@ impl App {
             bg_anim_interval,
             blink_wait,
         );
+        if let crate::typed_echo::SettlePoll::Wait(next) = echo_settle {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(deadline) = ws.taskbar.retry_deadline() {
             let next = deadline
                 .saturating_duration_since(now)
