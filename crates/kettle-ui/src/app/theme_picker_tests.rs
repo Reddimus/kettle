@@ -712,6 +712,7 @@ fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
             for width in [160.0, 320.0, 800.0] {
                 let field = kettle_render::TextFieldOverlay {
                     picker_header: true,
+                    placeholder: String::new(),
                     text: "Tokyo".into(),
                     cursor_byte: 5,
                     selection: None,

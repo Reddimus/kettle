@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- The command palette's empty search field says "Type a command…" in grey
+  until you type, in the UI language. In a window too narrow for it beside the
+  key hint, it is left out rather than cut off.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

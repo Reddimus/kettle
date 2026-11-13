@@ -29,7 +29,8 @@ use labels::overlay_label_cols;
 pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
 mod text_field;
 pub use text_field::{
-    TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels, text_field_rects,
+    TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
+    text_field_placeholder, text_field_rects,
 };
 mod settings;
 mod tab_strip;
@@ -340,6 +341,11 @@ mod context_menu_row_width_tests;
 
 #[cfg(test)]
 mod picker_chrome_tests;
+
+/// The search segment buffer a text field's placeholder is shaped into; the
+/// field itself uses the first three (prefix, editor, hint).
+const TEXT_FIELD_PLACEHOLDER_SEGMENT: usize = 3;
+const _: () = assert!(TEXT_FIELD_PLACEHOLDER_SEGMENT < SEARCH_SEGMENTS);
 
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
@@ -2478,7 +2484,12 @@ impl Renderer {
                 );
                 let cw = text_field_cell_width(field, cw, metrics.line_height);
                 let (prefix, hint) = text_field::text_field_labels(field, cw);
-                for (index, text) in [(0, prefix.as_str()), (2, hint.as_str())] {
+                let placeholder = text_field::text_field_placeholder(field, cw);
+                for (index, text) in [
+                    (0, prefix.as_str()),
+                    (2, hint.as_str()),
+                    (TEXT_FIELD_PLACEHOLDER_SEGMENT, placeholder.as_str()),
+                ] {
                     text_field::shape_field_label(
                         &mut self.font_system,
                         &mut self.search_segment_buffers[index],
@@ -4862,6 +4873,25 @@ impl Renderer {
                         };
                         GColor::rgb(color.r, color.g, color.b)
                     },
+                    custom_glyphs: &[],
+                });
+            }
+            let placeholder = text_field::text_field_placeholder(field, cw);
+            if !placeholder.is_empty() {
+                let slot = slots[1];
+                let color = overlays::picker_header_secondary_color(theme, &mut self.chrome_colors);
+                menu_areas.push(TextArea {
+                    buffer: &self.search_segment_buffers[TEXT_FIELD_PLACEHOLDER_SEGMENT],
+                    left: layout.text_left,
+                    top: slot.1,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: slot.0 as i32,
+                        top: slot.1 as i32,
+                        right: (slot.0 + slot.2) as i32,
+                        bottom: (slot.1 + slot.3) as i32,
+                    },
+                    default_color: GColor::rgb(color.r, color.g, color.b),
                     custom_glyphs: &[],
                 });
             }

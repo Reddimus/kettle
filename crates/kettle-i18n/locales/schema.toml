@@ -1116,6 +1116,9 @@ context = "crates/kettle-ui/src/app.rs theme_picker_list: theme picker row when 
 [messages.picker_no_saved_layouts]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when no layout is saved. A layout is a saved arrangement of tabs and panes."
 
+[messages.picker_placeholder_command]
+context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the command palette's empty search field, saying what to type. Replaced by the query as soon as anything is typed; left out in a window too narrow for all of it."
+
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
 

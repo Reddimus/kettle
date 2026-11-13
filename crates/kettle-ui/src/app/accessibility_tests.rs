@@ -732,6 +732,7 @@ fn accessibility_reactivation_invalidates_published_tree() {
 fn modal_text_inputs_expose_their_text_and_selection() {
     let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
         picker_header: false,
+        placeholder: String::new(),
         text: text.into(),
         cursor_byte,
         selection,
@@ -980,6 +981,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: "/tmp/image.png".into(),
             cursor_byte: 4,
             selection: Some((4, 14)),
@@ -1163,6 +1165,7 @@ fn accessible_editor_characters_follow_graphemes() {
         palette_query: Some(text.into()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: text.into(),
             cursor_byte: 3,
             selection: Some((3, 14)),
@@ -1242,6 +1245,7 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         layout_picker_query: Some(String::new()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: true,
+            placeholder: String::new(),
             rect: header,
             text: String::new(),
             cursor_byte: 0,
@@ -1307,7 +1311,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
     let overlay = kettle_render::Overlay {
         settings: Some(settings),
         text_field: Some(kettle_render::TextFieldOverlay {
-            picker_header: false, text: "font".into(), cursor_byte: 4,
+            picker_header: false, text: "font".into(), cursor_byte: 4, placeholder: String::new(),
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
             horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
     };

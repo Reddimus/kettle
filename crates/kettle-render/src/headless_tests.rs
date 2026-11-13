@@ -5183,6 +5183,7 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
     };
     let field = TextFieldOverlay {
         picker_header: false,
+        placeholder: String::new(),
         text: "Rename".into(),
         cursor_byte: 3,
         selection: Some((0, 3)),
@@ -6003,6 +6004,7 @@ fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     };
     let field = TextFieldOverlay {
         picker_header: true,
+        placeholder: String::new(),
         text: "dra".into(),
         cursor_byte: 3,
         selection: None,
@@ -7103,5 +7105,80 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
         matched,
         widths(&renderer),
         "matched characters keep the row's width"
+    );
+}
+
+/// An empty picker query paints its placeholder in the editor slot, in the
+/// secondary text colour; typing replaces it, and other fields paint none.
+#[test]
+fn an_empty_picker_query_paints_its_placeholder() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
+        eprintln!("placeholder check skipped: no GPU adapter");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 440.0;
+    let picker = || ContextMenu {
+        picker_header_height: 30.0,
+        ..menu_level((40.0, 70.0), &["New tab", "Close tab"], 0, (width, row_h))
+    };
+    let field = |text: &str, placeholder: &str| TextFieldOverlay {
+        picker_header: true,
+        placeholder: placeholder.into(),
+        text: text.into(),
+        cursor_byte: text.len(),
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (40.0, 40.0, width, 30.0),
+        prefix: "  > ".into(),
+        hint: String::new(),
+        accent_palette: 5,
+    };
+    let snap = snapshot_of(20, 4, b"");
+    // The editor slot's pixels, right of where a caret or one typed glyph sits.
+    let slot = |overlay: &Overlay, renderer: &mut Renderer| {
+        let frame = capture(renderer, &cfg, &[pane(&snap, 640, 260)], overlay);
+        let field = overlay.text_field.as_ref().unwrap();
+        let cw = text_field_cell_width(field, renderer.cell_w, renderer.cell_h);
+        let (x, y, w, h) = text_field_rects(field, cw)[1];
+        let mut pixels = Vec::new();
+        for py in y as u32..(y + h) as u32 {
+            for px in (x + 4.0 * cw) as u32..(x + w) as u32 {
+                pixels.push(frame.get_pixel(px, py).0);
+            }
+        }
+        pixels
+    };
+    let with = |text: &str, placeholder: &str| Overlay {
+        context_menu: Some(picker()),
+        text_field: Some(field(text, placeholder)),
+        ..focused(false)
+    };
+    let changed = |a: &[[u8; 4]], b: &[[u8; 4]]| {
+        a.iter()
+            .zip(b)
+            .filter(|(p, q)| {
+                p.iter()
+                    .zip(q.iter())
+                    .map(|(x, y)| (*x as i32 - *y as i32).abs())
+                    .sum::<i32>()
+                    > 60
+            })
+            .count()
+    };
+    let none = slot(&with("", ""), &mut renderer);
+    let shown = slot(&with("", "Type a command…"), &mut renderer);
+    let typed = slot(&with("x", "Type a command…"), &mut renderer);
+    assert!(
+        changed(&shown, &none) > 40,
+        "placeholder not painted: {} changed pixels",
+        changed(&shown, &none)
+    );
+    assert_eq!(
+        changed(&typed, &none),
+        0,
+        "a typed query hides the placeholder"
     );
 }

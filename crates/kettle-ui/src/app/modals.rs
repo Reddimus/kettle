@@ -308,6 +308,7 @@ impl App {
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
             picker_header: picker,
+            placeholder: picker_placeholder(ws, &self.ui_text),
             text,
             cursor_byte,
             selection,
@@ -3331,6 +3332,18 @@ pub(super) fn project_modal_editor(
         selection = None;
     }
     (text, cursor, selection)
+}
+
+/// What the open picker's empty query field says it is for: the command
+/// palette's placeholder, or nothing for the other pickers. The renderer
+/// fits and paints this same translated string.
+pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator) -> String {
+    if ws.palette_input.is_some() {
+        tr.text(kettle_i18n::Text::PickerPlaceholderCommand)
+            .to_string()
+    } else {
+        String::new()
+    }
 }
 
 pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
