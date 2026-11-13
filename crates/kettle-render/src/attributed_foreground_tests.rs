@@ -693,7 +693,7 @@ fn selected_ansi_indexed_truecolour_link_and_decoration_ink_meets_aa() {
 /// strength, as macOS does.
 #[test]
 fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
-    use super::theme::PaneSelectionFills;
+    use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
     let cfg = Config::default();
     let grey = |c: Rgb| c.r == c.g && c.g == c.b;
     for name in Theme::list() {
@@ -703,6 +703,59 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
             let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
             let row = fills.row(false);
             assert!(grey(row), "{name} at {alpha}: row fill {row:?}");
+            let base = color::with_min_contrast_same_hue(
+                theme.selection_background,
+                theme.background,
+                3.0,
+            );
+            let target = super::theme::selection_contrast_target(theme.background, base, alpha);
+            // The focused fill strengthens away from the background as shown
+            // and never crosses it: Grass's dark brown once turned orange.
+            let side = |c: Rgb| color::relative_luminance(c) >= color::relative_luminance(target);
+            assert_eq!(
+                side(fills.row(true)),
+                side(base),
+                "{name} at {alpha}: {:?} crossed {target:?} from {base:?}",
+                fills.row(true)
+            );
+            let ink = resolved_highlight_foreground_cached(
+                theme.foreground,
+                row,
+                CellHighlight::InactiveSelection,
+                &cfg,
+                &theme,
+                &mut cache,
+            );
+            let text = color::contrast_ratio(ink, row);
+            assert!(
+                text >= 4.5,
+                "{name} at {alpha}: text {text:.2}:1 on {row:?}"
+            );
+            // 2:1 from the background as shown, unless on the next grey out
+            // the selected text would fall below 4.5:1 or switch from light
+            // to dark (or back).
+            let shown = color::contrast_ratio(row, target);
+            let lighter = color::relative_luminance(row) > color::relative_luminance(target);
+            let next = if lighter {
+                row.r.saturating_add(1)
+            } else {
+                row.r.saturating_sub(1)
+            };
+            let next = Rgb::new(next, next, next);
+            let (white, black) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+            let (ink_side, other_side) =
+                if color::relative_luminance(ink) > color::relative_luminance(row) {
+                    (white, black)
+                } else {
+                    (black, white)
+                };
+            let capped = color::contrast_ratio(ink_side, next) < 4.5
+                || color::contrast_ratio(other_side, next) > color::contrast_ratio(ink_side, next);
+            assert!(
+                shown >= 2.0 || capped,
+                "{name} at {alpha}: {row:?} is {shown:.2}:1 from {target:?}"
+            );
+            assert!(shown >= 1.9, "{name} at {alpha}: {row:?} is {shown:.2}:1");
             for program_bg in [theme.background, theme.palette[1], theme.palette[4], row] {
                 let cell = fills.cell(
                     CellHighlight::InactiveSelection,

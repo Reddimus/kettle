@@ -501,19 +501,42 @@ fn keeps_selection_ink(theme: &kettle_config::Theme, reference: Rgb, fill: Rgb) 
 }
 
 /// `base` made a stronger tint of its hue toward [`SELECTION_CONTRAST`]
-/// against `target`, as far as its text keeps [`keeps_selection_ink`].
+/// against `target`, as far as its text keeps [`keeps_selection_ink`]. It only
+/// moves away from `target`, on the side it is already on: crossing to the
+/// other side would swap a dark selection for a light one.
 fn strengthened_selection(theme: &kettle_config::Theme, base: Rgb, target: Rgb) -> Rgb {
-    let strong = color::with_min_contrast_same_hue(base, target, SELECTION_CONTRAST);
-    if strong == base || !keeps_selection_ink(theme, base, base) {
+    if color::contrast_ratio(base, target) >= SELECTION_CONTRAST
+        || !keeps_selection_ink(theme, base, base)
+    {
         return base;
     }
-    if keeps_selection_ink(theme, base, strong) {
-        return strong;
-    }
     let (hue, saturation, from) = color::hsl(base);
-    let (_, _, to) = color::hsl(strong);
-    let at = |t: f64| color::from_hsl(hue, saturation, from + (to - from) * t);
-    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    let end = if color::relative_luminance(base) >= color::relative_luminance(target) {
+        1.0
+    } else {
+        0.0
+    };
+    let at = |t: f64| color::from_hsl(hue, saturation, from + (end - from) * t);
+    // The least step that reaches 3:1, or the end of that side.
+    let reach = if color::contrast_ratio(at(1.0), target) >= SELECTION_CONTRAST {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if color::contrast_ratio(at(mid), target) >= SELECTION_CONTRAST {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    } else {
+        1.0
+    };
+    if keeps_selection_ink(theme, base, at(reach)) {
+        return at(reach);
+    }
+    // Otherwise the furthest step whose text still reads.
+    let (mut lo, mut hi) = (0.0_f64, reach);
     for _ in 0..14 {
         let mid = (lo + hi) / 2.0;
         if keeps_selection_ink(theme, base, at(mid)) {
