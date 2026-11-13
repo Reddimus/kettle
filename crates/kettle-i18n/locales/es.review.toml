@@ -121,6 +121,9 @@ config_notice_missing_equals = "draft"
 notice_dismiss = "draft"
 a11y_tab_list = "draft"
 a11y_tab_close = "draft"
+a11y_tab_new_output = "draft"
+a11y_tab_bell = "draft"
+a11y_tab_output_stopped = "draft"
 a11y_new_tab_menu = "draft"
 
 quick_terminal_toggle = "draft"
@@ -366,6 +369,7 @@ confirm_button_close_tab = "draft"
 confirm_button_close_window = "draft"
 confirm_close_consequences = "draft"
 confirm_close_both_panes = "draft"
+confirm_close_running = "draft"
 confirm_rebind_generic = "draft"
 confirm_action_send_text = "draft"
 confirm_action_custom = "draft"
@@ -999,6 +1003,9 @@ keys = [
     "notice_dismiss",
     "a11y_tab_list",
     "a11y_tab_close",
+    "a11y_tab_new_output",
+    "a11y_tab_bell",
+    "a11y_tab_output_stopped",
     "a11y_new_tab_menu",
     "settings_a11y_search",
     "media_viewer_a11y",
@@ -1016,6 +1023,7 @@ keys = [
     "confirm_button_close_window",
     "confirm_close_consequences",
     "confirm_close_both_panes",
+    "confirm_close_running",
     "confirm_rebind_generic",
     "confirm_action_send_text",
     "confirm_action_custom",
