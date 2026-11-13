@@ -75,6 +75,17 @@ settings_value_dark_appearance = "draft"
 settings_value_fixed_theme = "draft"
 picker_theme_for_light_appearance = "draft"
 picker_theme_for_dark_appearance = "draft"
+picker_theme_follow_schedule = "draft"
+picker_theme_dark_slot = "draft"
+picker_theme_light_slot = "draft"
+picker_theme_fixed_slot = "draft"
+picker_theme_contrast = "draft"
+picker_theme_contrast_off = "draft"
+picker_theme_text_contrast = "draft"
+picker_theme_lowest_contrast = "draft"
+picker_theme_a11y_lowest_slot = "draft"
+picker_theme_a11y_low_contrast = "draft"
+picker_theme_colours_lifted = "draft"
 settings_field_restore_session = "draft"
 settings_description_field_restore_session = "draft"
 settings_description_field_grapheme_clustering = "draft"
@@ -979,6 +990,8 @@ keys = [
 
     "picker_theme_for_light_appearance",
     "picker_theme_for_dark_appearance",
+    "picker_theme_a11y_lowest_slot",
+    "picker_theme_a11y_low_contrast",
     "confirm_paste_heading",
     "confirm_paste_body",
     "confirm_paste_one_line",

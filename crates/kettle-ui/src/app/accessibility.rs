@@ -2195,6 +2195,9 @@ fn push_text_input_run(
     nodes.push((run_id, run));
 }
 
+/// The theme picker footer's node index, past any row's (rows start at 3).
+const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
+
 fn push_picker_accessibility(
     projection: &mut ModalAccessibilityProjection,
     overlay: &Overlay,
@@ -2265,9 +2268,23 @@ fn push_picker_accessibility(
     list.set_children(list_children);
     projection.nodes.push((list_id, list));
 
+    let mut dialog_children = vec![input_id, list_id];
+    // The theme picker's footer reads as one line of text: the painted
+    // readout and status, plus what its swatch and marks show.
+    if let Some(menu) = menu
+        && let Some(footer) = menu.picker_footer.as_ref()
+    {
+        let footer_id = accessibility_modal_id(kind, PICKER_FOOTER_A11Y_INDEX);
+        let mut text = Node::new(Role::Label);
+        text.set_label(kettle_render::theme_footer_description(footer, tr));
+        let (x, y, w, h) = menu.rows_rect();
+        text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
+        projection.nodes.push((footer_id, text));
+        dialog_children.push(footer_id);
+    }
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);
-    dialog.set_children([input_id, list_id]);
+    dialog.set_children(dialog_children);
     dialog.set_bounds(menu.map_or(full_bounds, |menu| bounds(menu.card_rect())));
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
@@ -3443,6 +3460,7 @@ mod context_menu_nesting_tests {
     fn panel(label: &str, anchor: (f32, f32)) -> ContextMenu {
         ContextMenu {
             picker_header_height: 0.0,
+            picker_footer: None,
             anchor,
             rows: vec![ContextMenuRow {
                 toggle: None,

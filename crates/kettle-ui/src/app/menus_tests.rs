@@ -1465,6 +1465,7 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
         panel_h_clamped: height,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     for index in [0, 1] {
         let mut ws = WindowState::new(1, Mux::new());
@@ -1693,6 +1694,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         panel_h_clamped: height,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     let parent = panel(&parent_items, (40.0, 30.0), 0, parent_h);
     let active = panel(&items, (300.0, 30.0), 2, 5.0 * row_h);

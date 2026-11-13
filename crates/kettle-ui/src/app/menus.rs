@@ -1514,6 +1514,7 @@ impl App {
             panel_h_clamped,
             a11y_label: ws.context_menu_a11y_label.clone(),
             picker_header_height: 0.0,
+            picker_footer: None,
         })
     }
 

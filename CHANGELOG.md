@@ -8,6 +8,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- The theme picker shows more under its list. A sample card draws the
+  highlighted theme as the terminal would: a prompt, an `ls -l` listing, a
+  diff and all 16 palette colours, with your colour overrides and
+  `minimum-contrast` applied. Its last line gives the contrast of the
+  theme's text and of its least readable colour, with that colour's swatch,
+  and marks a colour below 3:1. A status line says whether the theme
+  follows the system, a schedule, a forced side or is fixed, names the dark
+  and the light theme and marks the side a pick saves to, and has a
+  Contrast button that steps `minimum-contrast` through Off, 3:1, 4.5:1
+  and 7:1. The list now shows up to 14 rows when the window has room; on a
+  short window the card goes first.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

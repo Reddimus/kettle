@@ -178,22 +178,18 @@ impl App {
             })
         } else {
             field_hit
-                || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-                    .and_then(|list| {
-                        picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
-                    })
-                    .is_some_and(|menu| {
-                        rect_contains(
-                            (
-                                menu.anchor.0,
-                                menu.anchor.1,
-                                menu.panel_w_clamped,
-                                menu.panel_h_clamped,
-                            ),
-                            x,
-                            y,
-                        )
-                    })
+                || open_picker_list(
+                    ws,
+                    &self.cfg,
+                    self.theme_pick_key(),
+                    &self.ui_text,
+                    self.update_notice().as_ref(),
+                )
+                .and_then(|list| {
+                    picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
+                })
+                // The whole card, the theme picker's footer included.
+                .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
     }
@@ -2179,6 +2175,22 @@ impl App {
 
     /// Persist `new_val` for `key_str` from Settings, with the companion keys
     /// and restart notes some settings need, then reload.
+    /// The theme picker's contrast button: step `minimum-contrast` to the
+    /// next listed ratio and save it, as the Settings row does. It is not part
+    /// of the picker's preview, so Esc leaves it as set.
+    pub(super) fn step_picker_contrast(&mut self, ws: &mut WindowState) {
+        let next = kettle_render::step_minimum_contrast(self.cfg.minimum_contrast, true);
+        self.settings_store(
+            ws,
+            "minimum-contrast",
+            kettle_render::minimum_contrast_token(next),
+        );
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
         // Freezing the active palette must survive a reload, including a config
         // that still has a different fixed theme from before system following.

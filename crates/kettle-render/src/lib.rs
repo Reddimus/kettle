@@ -38,6 +38,13 @@ pub use tab_strip::{
     HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
 };
 mod theme;
+mod theme_picker;
+pub use theme_picker::{
+    FooterInk, FooterLine, FooterRun, MINIMUM_CONTRAST_STEPS, Readability, ThemeFollow,
+    ThemeFooterLayout, ThemePickerFooter, ThemeSlot, contrast_button_text, minimum_contrast_token,
+    step_minimum_contrast, theme_follow_label, theme_footer_description, theme_footer_height,
+    theme_footer_layout, theme_footer_min_columns, theme_readability,
+};
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
 #[cfg(test)]
@@ -590,6 +597,11 @@ pub struct Renderer {
     context_menu_hint_buffers: Vec<TextBuffer>,
     /// Last text shaped into each `context_menu_hint_buffers` slot.
     context_menu_hint_texts: Vec<String>,
+    /// The theme picker footer's lines, and what each was last shaped from.
+    theme_footer_buffers: Vec<TextBuffer>,
+    theme_footer_keys: Vec<u64>,
+    /// Every footer line's key together, for the chrome's damage hash.
+    theme_footer_key: u64,
     /// Shaped settings slots, truncated to the shared layout's visible text.
     settings_buffers: Vec<TextBuffer>,
     settings_texts: Vec<(String, bool)>,
@@ -2965,6 +2977,85 @@ impl Renderer {
             }
         }
 
+        // The theme picker's footer: one buffer per line, its runs in their
+        // own colours. A line is reshaped when its words or colours change,
+        // which a new selection does by changing the sample theme.
+        {
+            let lines = overlay
+                .context_menu
+                .as_ref()
+                .and_then(|menu| {
+                    Some((
+                        menu.picker_footer.as_ref()?,
+                        menu.picker_footer_layout(&overlay.tr, (cw, ch))?,
+                    ))
+                })
+                .map(|(footer, layout)| {
+                    layout
+                        .lines
+                        .into_iter()
+                        .map(|line| {
+                            let runs: Vec<(String, Rgb)> = line
+                                .runs
+                                .into_iter()
+                                .map(|run| {
+                                    let ink = theme_picker::footer_ink(
+                                        run.ink,
+                                        footer,
+                                        theme,
+                                        &mut self.chrome_colors,
+                                        &mut self.minimum_contrast_cache,
+                                    );
+                                    (run.text, ink)
+                                })
+                                .collect();
+                            (line.bounds, runs)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            while self.theme_footer_buffers.len() < lines.len() {
+                self.theme_footer_buffers
+                    .push(TextBuffer::new(&mut self.font_system, metrics));
+            }
+            self.theme_footer_buffers.truncate(lines.len());
+            self.theme_footer_keys.resize(lines.len(), 0);
+            for (i, (bounds, runs)) in lines.iter().enumerate() {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::hash::DefaultHasher::new();
+                for (text, ink) in runs {
+                    text.hash(&mut hash);
+                    (ink.r, ink.g, ink.b).hash(&mut hash);
+                }
+                metrics.font_size.to_bits().hash(&mut hash);
+                metrics.line_height.to_bits().hash(&mut hash);
+                bounds.2.to_bits().hash(&mut hash);
+                family.hash(&mut hash);
+                let key = hash.finish();
+                let buf = &mut self.theme_footer_buffers[i];
+                if self.theme_footer_keys[i] != key {
+                    buf.set_metrics(metrics);
+                    buf.set_size(Some(bounds.2.max(1.0)), Some(ch * 2.0));
+                    let base = Attrs::new().family(Family::Name(&family));
+                    buf.set_rich_text(
+                        runs.iter()
+                            .map(|(text, ink)| (text.as_str(), base.clone().color(gc(*ink)))),
+                        &base,
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.theme_footer_keys[i] = key;
+                }
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+            self.theme_footer_key = {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::hash::DefaultHasher::new();
+                self.theme_footer_keys.hash(&mut hash);
+                hash.finish()
+            };
+        }
+
         // Shape the same clipped slots used by painting and pointer input.
         if let Some(set) = &overlay.settings {
             let layout = settings_layout(
@@ -4585,6 +4676,27 @@ impl Renderer {
                     .into_iter()
                     .take(room),
             );
+            // The theme picker's footer: its divider and underline are flat
+            // chrome; its card, squares and marks draw with the swatches.
+            let footer_layout = menu.picker_footer.as_ref().and_then(|footer| {
+                Some((footer, menu.picker_footer_layout(&overlay.tr, (cw, ch))?))
+            });
+            if let Some((footer, layout)) = &footer_layout {
+                let fc =
+                    theme_picker::footer_colors(footer, theme, accent, &mut self.chrome_colors);
+                if let Some((x, y, w, h)) = layout.divider {
+                    menu_q.push(rect(x, y, w, h, theme.palette[8], 0.65));
+                }
+                if let Some((x, y, w, h)) = layout.slot_underline {
+                    menu_q.push(rect(x, y, w, h, fc.underline, 1.0));
+                }
+                let room = overlays::MENU_SWATCH_SURFACES.saturating_sub(menu_swatches.len());
+                menu_swatches.extend(
+                    theme_picker::footer_surfaces(layout, footer, &fc, self.scale)
+                        .into_iter()
+                        .take(room),
+                );
+            }
             menu_level_draws.push(MenuLevelDraw {
                 surfaces: surfaces_start..menu_surfaces.len() as u32,
                 quads: quads_start..menu_q.len() as u32,
@@ -4642,6 +4754,25 @@ impl Renderer {
                         scale: 1.0,
                         bounds,
                         default_color: GColor::rgb(hint_fg.r, hint_fg.g, hint_fg.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+            if let Some((_, layout)) = &footer_layout {
+                for (line, buffer) in layout.lines.iter().zip(&self.theme_footer_buffers) {
+                    let (x, y, w, h) = line.bounds;
+                    areas.push(TextArea {
+                        buffer,
+                        left: line.left,
+                        top: line.top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: gc(theme.foreground),
                         custom_glyphs: &[],
                     });
                 }
@@ -5157,6 +5288,8 @@ impl Renderer {
                 context_menu_text_damage_key(Some(parent), theme.foreground, theme.background)
                     .hash(&mut h);
             }
+            // Footer lines keep their buffers when only their colours change.
+            self.theme_footer_key.hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -6085,5 +6218,7 @@ mod fallback_walk_tests;
 #[cfg(test)]
 mod emoji_shaping_tests;
 
+#[cfg(test)]
+mod theme_picker_tests;
 #[cfg(test)]
 mod update_toast_tests;

@@ -185,6 +185,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
             anchor: (0.0, 0.0),
             a11y_label: None,
             picker_header_height: 0.0,
+            picker_footer: None,
             rows: [
                 ("Copy", false, true),
                 ("", true, false),

@@ -2794,6 +2794,46 @@ context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessib
 [messages.picker_theme_for_dark_appearance]
 context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update dark-theme. Keep short; prefix is clipped separately from query."
 
+[messages.picker_theme_follow_schedule]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line: theme-schedule picks light or dark by the clock or the sun. Sibling of settings_value_follow_system. Keep short."
+
+[messages.picker_theme_dark_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line, before the name of the theme dark-theme names (the theme worn in dark appearance). A label ending in a colon; theme is masculine in Spanish."
+
+[messages.picker_theme_light_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line, before the name of the theme light-theme names (the theme worn in light appearance). A label ending in a colon; theme is masculine in Spanish."
+
+[messages.picker_theme_fixed_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line in fixed-theme mode, before the name of the one theme the window wears. A label ending in a colon."
+
+[messages.picker_theme_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker button label before the minimum-contrast value (Off, 3:1, 4.5:1, 7:1); a click steps it. Keep short."
+
+[messages.picker_theme_contrast_off]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker minimum-contrast button value when the setting is off. One short word."
+
+[messages.picker_theme_text_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout: the contrast of the theme's text colour on its background. ratio is a WCAG ratio such as 11.4:1."
+args = [{ name = "ratio", type = "str" }]
+
+[messages.picker_theme_lowest_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout, after picker_theme_text_contrast and a middle dot: the lowest contrast of the theme's 14 text colours on its background. ratio is a WCAG ratio such as 1.9:1. A swatch of that colour and its palette number follow."
+args = [{ name = "ratio", type = "str" }]
+
+[messages.picker_theme_colours_lifted]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout with minimum-contrast on: how many of the theme's text colours the terminal draws lighter or darker so they reach the minimum."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.picker_theme_a11y_lowest_slot]
+context = "crates/kettle-ui/src/app/accessibility.rs: Screen-reader text after the theme sample readout, naming the palette colour (0-15) with the lowest contrast; sighted users see a swatch."
+args = [{ name = "slot", type = "u64" }]
+
+[messages.picker_theme_a11y_low_contrast]
+context = "crates/kettle-ui/src/app/accessibility.rs: Screen-reader text for the warning mark drawn when a theme colour is below 3:1 contrast on its background."
+
+
+
 [messages.config_notice_open]
 context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
 

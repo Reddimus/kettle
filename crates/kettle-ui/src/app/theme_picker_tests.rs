@@ -412,7 +412,7 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
     let cell = (8.0, 16.0);
     let project = |ws: &WindowState| {
         picker_context_menu(
-            open_picker_list(ws, &cfg, &ES, None).unwrap(),
+            open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
             surface,
             cell,
             0.0,
@@ -495,7 +495,7 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
             PickerPointer::Press
         ));
         assert!(
-            open_picker_list(&ws, &cfg, &ES, None).is_some(),
+            open_picker_list(&ws, &cfg, "dark-theme", &ES, None).is_some(),
             "picker stays open"
         );
         assert!(ws.context_menu.is_none());
@@ -578,7 +578,7 @@ fn picker_result_presses_select_the_visible_row() {
         }
         let project = |ws: &WindowState| {
             picker_context_menu(
-                open_picker_list(ws, &cfg, &ES, None).unwrap(),
+                open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
                 (800.0, 600.0),
                 (8.0, 16.0),
                 0.0,
@@ -971,5 +971,262 @@ fn swatches_leave_the_accessible_rows_unchanged() {
                 .any(|(label, _)| label.as_deref() == Some("TokyoNight Night"))
         );
         assert_eq!(with, read(true), "{surface:?}");
+    }
+}
+
+/// The footer says what decides the theme: a schedule when one is set (it
+/// overrides following the system), the system otherwise, and the side a
+/// pick saves to is the one `theme_key` names.
+#[test]
+fn the_theme_picker_footer_names_the_schedule_over_the_system() {
+    use kettle_render::{ThemeFollow, ThemeSlot};
+    let picker = state("", 0, "TokyoNight Night");
+    let mut cfg = kettle_config::Config::default();
+    let footer = super::theme_picker_footer(&picker, &cfg, "dark-theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::System);
+    assert_eq!(footer.editing, Some(ThemeSlot::Dark));
+    assert_eq!(footer.dark_theme, cfg.dark_theme);
+    assert_eq!(footer.light_theme, cfg.light_theme);
+    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    assert!(cfg.theme_schedule.is_some());
+    let footer = super::theme_picker_footer(&picker, &cfg, "light-theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::Schedule);
+    assert_eq!(footer.editing, Some(ThemeSlot::Light));
+    cfg.theme_schedule = None;
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let footer = super::theme_picker_footer(&picker, &cfg, "theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::Fixed);
+    assert_eq!(footer.editing, None);
+    assert_eq!(footer.fixed_theme, "TokyoNight Night");
+}
+
+/// The footer's sample is the highlighted theme with the user's colour
+/// overrides, so moving the selection changes the card's colours.
+#[test]
+fn the_theme_picker_sample_follows_the_selection_with_overrides() {
+    let cfg = kettle_config::Config::parse_text("palette = 4=#123456\n");
+    let first = super::theme_picker_footer(
+        &state("dracula", 0, "TokyoNight Night"),
+        &cfg,
+        "dark-theme",
+        &EN,
+    );
+    let second = super::theme_picker_footer(
+        &state("nord", 0, "TokyoNight Night"),
+        &cfg,
+        "dark-theme",
+        &EN,
+    );
+    assert_ne!(first.sample.background, second.sample.background);
+    for footer in [&first, &second] {
+        assert_eq!(
+            footer.sample.palette[4],
+            kettle_config::Rgb::parse("#123456").unwrap()
+        );
+    }
+}
+
+/// On a 1280x820 window at 1x and 2x, in English and Spanish, the theme
+/// picker shows its sample card and both status lines and still paints at
+/// least 12 whole rows, while the command palette keeps 8. The card's top
+/// edge lies under the last painted row, and the whole card, footer
+/// included, is the picker's.
+#[test]
+fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
+    use super::{command_picker_list, open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config::default();
+    for (cell, top) in [((8.4, 17.0), 32.0), ((16.8, 34.0), 64.0)] {
+        let scale = cell.0 / 8.4;
+        let surface = (1280.0 * scale, 820.0 * scale);
+        let row_h = kettle_render::menu::row_height(cell.1);
+        for tr in [&EN, &ES] {
+            let mut ws = WindowState::new(0, Mux::new());
+            ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+            let list = open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
+            let rows = list.rows.len();
+            let menu = picker_context_menu(list, surface, cell, top).unwrap();
+            let footer = menu.picker_footer.as_ref().expect("a footer");
+            assert!(footer.show_sample, "{scale}x: card");
+            assert_eq!(footer.status_lines, 2, "{scale}x");
+            let (_, content_h) = kettle_render::menu::scroll_content(
+                rows as f32 * row_h,
+                menu.panel_h_clamped,
+                row_h,
+            );
+            let painted = (content_h / row_h + 0.001).floor() as usize;
+            assert!(painted >= 12, "{scale}x: {painted} rows");
+            assert!(painted <= 14, "{scale}x: {painted} rows");
+            assert!(
+                (content_h - painted as f32 * row_h).abs() < 0.5,
+                "{scale}x: no blank part-row"
+            );
+            let card = menu.card_rect();
+            assert!(
+                card.1 + card.3 <= surface.1 - 0.0,
+                "{scale}x: the card fits"
+            );
+            let layout = menu.picker_footer_layout(tr, cell).unwrap();
+            assert!(layout.rect.1 >= menu.anchor.1 + menu.panel_h_clamped - 0.01);
+            assert!((layout.rect.1 + layout.rect.3 - (card.1 + card.3)).abs() < 0.01);
+            assert!(layout.contrast_button.is_some(), "{scale}x");
+        }
+        let palette = picker_context_menu(
+            command_picker_list("", 0, &kettle_config::keybinds::defaults(), &EN, None, &[]),
+            surface,
+            cell,
+            top,
+        )
+        .unwrap();
+        assert!(palette.picker_footer.is_none());
+        let total = palette.rows.len();
+        let (_, content_h) = kettle_render::menu::scroll_content(
+            total as f32 * row_h,
+            palette.panel_h_clamped,
+            row_h,
+        );
+        assert_eq!(
+            (content_h / row_h + 0.001).floor() as usize,
+            8,
+            "{scale}x palette"
+        );
+    }
+}
+
+/// A short window drops the sample card first, then a status line, and the
+/// list keeps at least four rows.
+#[test]
+fn a_short_window_drops_the_theme_sample_before_the_rows() {
+    use super::{open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    let row_h = kettle_render::menu::row_height(cell.1);
+    let mut seen = std::collections::BTreeSet::new();
+    for height in (220..=820).step_by(20) {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let list = open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap();
+        let rows = list.rows.len();
+        let Some(menu) = picker_context_menu(list, (1280.0, height as f32), cell, 32.0) else {
+            continue;
+        };
+        let (_, content_h) =
+            kettle_render::menu::scroll_content(rows as f32 * row_h, menu.panel_h_clamped, row_h);
+        let painted = (content_h / row_h + 0.001).floor() as usize;
+        let parts = menu.picker_footer.as_ref().map_or((false, 0), |footer| {
+            (footer.show_sample, footer.status_lines)
+        });
+        if parts.0 {
+            assert!(painted >= 8, "{height}: card with {painted} rows");
+        } else if parts.1 > 0 {
+            assert!(painted >= 4, "{height}: status with {painted} rows");
+        }
+        let card = menu.card_rect();
+        assert!(card.1 + card.3 <= height as f32 + 0.01, "{height}");
+        seen.insert(parts);
+    }
+    assert!(seen.contains(&(true, 2)), "{seen:?}");
+    assert!(
+        seen.contains(&(false, 2)) || seen.contains(&(false, 1)),
+        "{seen:?}"
+    );
+}
+
+/// A press on the contrast button steps the setting; a press elsewhere on
+/// the footer stays in the picker; the rows are not the footer's. The
+/// pointer path saves the step through the Settings store.
+#[test]
+fn the_contrast_button_takes_its_press_and_saves_through_settings() {
+    use super::{FooterPress, open_picker_list, picker_context_menu, theme_footer_press};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+    let menu = picker_context_menu(
+        open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap(),
+        (1280.0, 820.0),
+        cell,
+        32.0,
+    )
+    .unwrap();
+    let layout = menu.picker_footer_layout(&EN, cell).unwrap();
+    let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+    let (bx, by, bw, bh) = layout.contrast_button.unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(bx + bw * 0.5, by + bh * 0.5)),
+        Some(FooterPress::Contrast)
+    );
+    let (cx, cy, _, _) = layout.card.unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(cx + 4.0, cy + 4.0)),
+        Some(FooterPress::Footer)
+    );
+    let row = menu.visible_row_rect(0).unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(row.0 + 4.0, row.1 + 4.0)),
+        None
+    );
+    let src = production_source();
+    let pointer = src
+        .split("fn picker_pointer(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(pointer.contains("self.step_picker_contrast(ws)"));
+    let step = src
+        .split("fn step_picker_contrast(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(step.contains("\"minimum-contrast\""));
+    assert!(step.contains("self.settings_store("));
+    // A press anywhere on the card counts as inside the picker.
+    let target = src
+        .split("fn modal_press_target(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(target.contains("rect_contains(menu.card_rect(), x, y)"));
+}
+
+/// A screen reader hears the footer as one line: the readout with the
+/// lowest colour's number, the mode, both sides and the contrast setting,
+/// inside the picker's dialog.
+#[test]
+fn the_theme_picker_footer_has_an_accessible_text() {
+    let cfg = kettle_config::Config::default();
+    for tr in [&EN, &ES] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let list = super::open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
+        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), 32.0).unwrap();
+        let overlay = kettle_render::Overlay {
+            theme_picker_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection =
+            modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.0), 1.0, tr);
+        let labels: Vec<String> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::Label)
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect();
+        let text = labels
+            .iter()
+            .find(|label| label.contains(tr.text(kettle_i18n::Text::PickerThemeDarkSlot)))
+            .unwrap_or_else(|| panic!("no footer text in {labels:?}"));
+        assert!(
+            text.contains("TokyoNight Night") && text.contains("Kettle Day"),
+            "{text}"
+        );
+        assert!(
+            text.contains(tr.text(kettle_i18n::Text::SettingsValueFollowSystem)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&kettle_render::contrast_button_text(0.0, tr)),
+            "{text}"
+        );
     }
 }

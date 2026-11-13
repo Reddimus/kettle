@@ -239,6 +239,24 @@ click), **right-click → Theme…**, the command palette's **Choose theme…**,
 the bindable `open_theme_picker` action. Opened from Settings, it covers the
 panel and returns to it when it closes.
 
+Under the list, a sample card shows the highlighted theme as the terminal
+would draw it: a prompt, an `ls -l` listing, a diff and all 16 palette
+colours, in the theme's own colours with your colour overrides and
+`minimum-contrast` applied. Its last line reads the contrast of the theme's
+text and of its least readable palette colour (slots 1-7 and 9-15) against
+its background, with that colour's swatch and number; a red dot follows when
+it is below 3:1, and with a minimum contrast set it also counts the colours
+the terminal lifts. Below the card, a status line says how the theme is
+chosen (**Follow system**, **Follow schedule** when `theme-schedule` is set,
+Light, Dark or Fixed theme) and names the dark and the light theme, with a
+dot and an underline on the side a pick saves to; a fixed theme shows only
+**Theme:**. The **Contrast:** button on it steps `minimum-contrast` through
+Off, 3:1, 4.5:1 and 7:1 and saves it at once, like the Settings row. It is
+not part of the preview: Esc puts back the theme only, not the contrast. On
+a short window the card is left out first, then one status line; a window
+too narrow for them leaves them out rather than cutting them. The list shows
+up to 14 rows, and a screen reader reads the card and status as one line.
+
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,
 > `keybind = ctrl+shift+e = unbind`) and check your effective bindings any

@@ -185,10 +185,10 @@ impl App {
                         ("Esc", T::PickerHintRestore),
                     ],
                 ),
-                Some(theme_picker_list(
-                    &state.query,
-                    state.selected,
-                    &state.opened_on,
+                Some(theme_picker_list_with_footer(
+                    state,
+                    &self.cfg,
+                    self.theme_pick_key(),
                     tr,
                 )),
             ),

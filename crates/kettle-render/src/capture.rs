@@ -667,6 +667,7 @@ pub fn capture_png_with_annotation(
                 panel_h_clamped: 0.0,
                 a11y_label: None,
                 picker_header_height: 0.0,
+                picker_footer: None,
             };
             menu_surfaces = crate::overlays::menu_level_surfaces(
                 &menu,
