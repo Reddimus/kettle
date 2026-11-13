@@ -323,8 +323,8 @@ pub(crate) struct MinimumContrastCache {
     pub(crate) entries: std::collections::HashMap<(u32, u32, u64), Rgb>,
     pub(crate) misses: usize,
     highlight_ink: std::collections::HashMap<[u32; 6], Rgb>,
-    active_fills: std::collections::HashMap<(u32, u32), Rgb>,
-    inactive_fills: std::collections::HashMap<(u32, u32), Rgb>,
+    active_fills: std::collections::HashMap<[u32; 6], Rgb>,
+    inactive_fills: std::collections::HashMap<[u32; 6], Rgb>,
 }
 
 impl MinimumContrastCache {
@@ -383,50 +383,249 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
 
 /// The contrast a focused selection keeps against the cell background: WCAG's
 /// 3:1 for a state a reader must tell apart from its surroundings.
+///
+/// Against a see-through window's background, as the desktop behind it shows,
+/// the fill strengthens only as far as its text stays at least 4.5:1 and keeps
+/// its light or dark ink. With the default dark theme at 86% opacity over a
+/// white page that stops at 2.42:1. That is accepted: the selected text
+/// carries the information at 4.5:1, the fill still reaches 3:1 against the
+/// theme's own background, and it is stronger than the 1.95:1 an unadjusted
+/// fill shows there.
 pub(crate) const SELECTION_CONTRAST: f64 = 3.0;
 
 /// The contrast an unfocused window's selection keeps against the background:
 /// quieter than the focused fill's 3:1, yet still plainly a selection.
 pub(crate) const INACTIVE_SELECTION_CONTRAST: f64 = 2.0;
 
+/// The contrast text keeps on any selection fill.
+const SELECTION_TEXT_CONTRAST: f64 = 4.5;
+
+/// The colour a pane's default `background` shows on screen when the window
+/// lets the desktop through at `alpha` (`1.0` for an opaque window). The
+/// desktop is unknown, so a selection lighter than the background is measured
+/// against the background over white and a darker one over black: the backdrop
+/// that leaves it least contrast.
+///
+/// Where that backdrop shows the background past the selection itself, as a
+/// dark theme below about 65% opacity over white does, the selection is
+/// measured against `background` instead. Measured there, strengthening would
+/// turn a dark theme's light selection dark and leave it almost the theme's
+/// own background colour.
+pub(crate) fn selection_contrast_target(background: Rgb, selection: Rgb, alpha: f64) -> Rgb {
+    if alpha >= 1.0 {
+        return background;
+    }
+    let lighter = |a: Rgb, b: Rgb| color::relative_luminance(a) >= color::relative_luminance(b);
+    let backdrop = if lighter(selection, background) {
+        Rgb::new(255, 255, 255)
+    } else {
+        Rgb::new(0, 0, 0)
+    };
+    let shown = color::over(backdrop, background, alpha.max(0.0), false);
+    if lighter(selection, shown) == lighter(selection, background) {
+        shown
+    } else {
+        background
+    }
+}
+
 /// The theme's selection colour where it stands out from `background`;
 /// otherwise a stronger tint of the same hue that does. Blending toward white
 /// or black instead reached 3:1 by greying the tint, which left a muted fill.
-/// The unfocused fill then moves back toward the background, retaining visible
-/// separation.
+/// The unfocused fill is a neutral grey 2:1 from the background, so losing
+/// focus changes the selection's hue as well as its strength, as macOS does.
 pub(crate) fn selection_fill(
     theme: &kettle_config::Theme,
     background: Rgb,
     focused: bool,
     cache: &mut MinimumContrastCache,
 ) -> Rgb {
-    let key = (
+    selection_fill_against(theme, background, background, focused, cache)
+}
+
+/// [`selection_fill`] for a pane whose default `background` shows as `target`
+/// on screen. Equal colours give [`selection_fill`]'s result.
+pub(crate) fn selection_fill_against(
+    theme: &kettle_config::Theme,
+    background: Rgb,
+    target: Rgb,
+    focused: bool,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    let key = [
         MinimumContrastCache::color_key(theme.selection_background),
         MinimumContrastCache::color_key(background),
-    );
-    let active = *cache.active_fills.entry(key).or_insert_with(|| {
-        color::with_min_contrast_same_hue(
-            theme.selection_background,
-            background,
-            SELECTION_CONTRAST,
-        )
-    });
+        MinimumContrastCache::color_key(target),
+        MinimumContrastCache::color_key(theme.foreground),
+        MinimumContrastCache::color_key(theme.selection_foreground)
+            | (u32::from(theme.selection_foreground_user) << 24),
+        MinimumContrastCache::color_key(theme.background),
+    ];
+    let active = match cache.active_fills.get(&key) {
+        Some(fill) => *fill,
+        None => {
+            let base = color::with_min_contrast_same_hue(
+                theme.selection_background,
+                background,
+                SELECTION_CONTRAST,
+            );
+            let fill = if target == background {
+                base
+            } else {
+                strengthened_selection(theme, base, target)
+            };
+            cache.active_fills.insert(key, fill);
+            fill
+        }
+    };
     if focused {
         return active;
     }
-    let key = (
-        MinimumContrastCache::color_key(active),
-        MinimumContrastCache::color_key(background),
-    );
     if let Some(fill) = cache.inactive_fills.get(&key) {
         return *fill;
     }
-    let fill = (1..=100)
-        .map(|percent| solid_blend(active, background, percent))
-        .find(|fill| color::contrast_ratio(*fill, background) >= INACTIVE_SELECTION_CONTRAST)
-        .unwrap_or(active);
+    let fill = neutral_selection(theme, active, background, target);
     cache.inactive_fills.insert(key, fill);
     fill
+}
+
+/// The ink a selection shows the theme's text in on `fill`.
+fn selection_ink(theme: &kettle_config::Theme, fill: Rgb) -> Rgb {
+    highlight_ink(
+        theme
+            .selection_foreground_user
+            .then_some(theme.selection_foreground),
+        theme,
+        theme.foreground,
+        fill,
+    )
+}
+
+/// Whether text on `fill` stays readable and on the same side, light or dark,
+/// as it is on `reference`: a dark theme's selection never turns to dark ink.
+fn keeps_selection_ink(theme: &kettle_config::Theme, reference: Rgb, fill: Rgb) -> bool {
+    let light =
+        |ink: Rgb, under: Rgb| color::relative_luminance(ink) > color::relative_luminance(under);
+    let (was, ink) = (selection_ink(theme, reference), selection_ink(theme, fill));
+    color::contrast_ratio(ink, fill) >= SELECTION_TEXT_CONTRAST
+        && light(was, reference) == light(ink, fill)
+}
+
+/// `base` made a stronger tint of its hue toward [`SELECTION_CONTRAST`]
+/// against `target`, as far as its text keeps [`keeps_selection_ink`]. It only
+/// moves away from `target`, on the side it is already on: crossing to the
+/// other side would swap a dark selection for a light one.
+fn strengthened_selection(theme: &kettle_config::Theme, base: Rgb, target: Rgb) -> Rgb {
+    if color::contrast_ratio(base, target) >= SELECTION_CONTRAST
+        || !keeps_selection_ink(theme, base, base)
+    {
+        return base;
+    }
+    let (hue, saturation, from) = color::hsl(base);
+    let end = if color::relative_luminance(base) >= color::relative_luminance(target) {
+        1.0
+    } else {
+        0.0
+    };
+    let at = |t: f64| color::from_hsl(hue, saturation, from + (end - from) * t);
+    // The least step that reaches 3:1, or the end of that side.
+    let reach = if color::contrast_ratio(at(1.0), target) >= SELECTION_CONTRAST {
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if color::contrast_ratio(at(mid), target) >= SELECTION_CONTRAST {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        hi
+    } else {
+        1.0
+    };
+    if keeps_selection_ink(theme, base, at(reach)) {
+        return at(reach);
+    }
+    // Otherwise the furthest step whose text still reads.
+    let (mut lo, mut hi) = (0.0_f64, reach);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        if keeps_selection_ink(theme, base, at(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo > 0.0 { at(lo) } else { base }
+}
+
+/// How much brighter or darker, as a contrast ratio, a focused selection
+/// stays than its unfocused grey, so focus shows by strength and not only by
+/// hue. Over a see-through background the grey gives up its 2:1 to keep it.
+const SELECTION_FOCUS_SEPARATION: f64 = 1.3;
+
+/// The unfocused selection: a grey on the focused `active` fill's side of the
+/// theme `background` and at least [`SELECTION_FOCUS_SEPARATION`] quieter
+/// than `active`. Of those it is the one nearest `target`, the background as
+/// shown, that reaches [`INACTIVE_SELECTION_CONTRAST`] beyond it, or the one
+/// nearest `active` when none does; then no further out than its text keeps
+/// [`keeps_selection_ink`].
+fn neutral_selection(
+    theme: &kettle_config::Theme,
+    active: Rgb,
+    background: Rgb,
+    target: Rgb,
+) -> Rgb {
+    let luminance = color::relative_luminance;
+    let lighter = luminance(active) >= luminance(background);
+    let beyond = |grey: Rgb, of: Rgb| {
+        if lighter {
+            luminance(grey) > luminance(of)
+        } else {
+            luminance(grey) < luminance(of)
+        }
+    };
+    let greys = (0..=255u8).map(|v| Rgb::new(v, v, v));
+    let greys: Vec<Rgb> = if lighter {
+        greys.collect()
+    } else {
+        greys.rev().collect()
+    };
+    let candidates: Vec<Rgb> = greys
+        .iter()
+        .copied()
+        .filter(|grey| {
+            beyond(*grey, background)
+                && beyond(active, *grey)
+                && color::contrast_ratio(active, *grey) >= SELECTION_FOCUS_SEPARATION
+        })
+        .collect();
+    let reached = candidates
+        .iter()
+        .position(|grey| {
+            beyond(*grey, target)
+                && color::contrast_ratio(*grey, target) >= INACTIVE_SELECTION_CONTRAST
+        })
+        .or(candidates.len().checked_sub(1));
+    if let Some(reached) = reached {
+        return candidates[..=reached]
+            .iter()
+            .rev()
+            .find(|grey| keeps_selection_ink(theme, active, **grey))
+            .copied()
+            .unwrap_or(candidates[reached]);
+    }
+    // A fill too close to the background for a grey to fit between them:
+    // the grey whose contrast with each is the same.
+    let middle = ((luminance(active) + 0.05) * (luminance(background) + 0.05)).sqrt() - 0.05;
+    greys
+        .into_iter()
+        .min_by(|a, b| {
+            (luminance(*a) - middle)
+                .abs()
+                .total_cmp(&(luminance(*b) - middle).abs())
+        })
+        .unwrap_or(active)
 }
 
 /// A pane's selection fills for one frame, resolved against its default
@@ -442,21 +641,31 @@ pub(crate) fn selection_fill(
 /// bright cells dropped back to the raw, darker theme colour.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PaneSelectionFills {
+    /// The pane's default background as drawn, which marks a default cell.
     background: Rgb,
     active: Rgb,
     inactive: Rgb,
 }
 
 impl PaneSelectionFills {
+    /// `backdrop_alpha` is how opaque the window shows its default background
+    /// over the desktop: `1.0` when nothing shows through.
     pub(crate) fn new(
         theme: &kettle_config::Theme,
         background: Rgb,
+        backdrop_alpha: f64,
         cache: &mut MinimumContrastCache,
     ) -> Self {
+        let base = color::with_min_contrast_same_hue(
+            theme.selection_background,
+            background,
+            SELECTION_CONTRAST,
+        );
+        let target = selection_contrast_target(background, base, backdrop_alpha);
         Self {
             background,
-            active: selection_fill(theme, background, true, cache),
-            inactive: selection_fill(theme, background, false, cache),
+            active: selection_fill_against(theme, background, target, true, cache),
+            inactive: selection_fill_against(theme, background, target, false, cache),
         }
     }
 
@@ -554,15 +763,25 @@ pub(crate) fn highlight_ink_cached(
     if let Some(fg) = cache.highlight_ink.get(&key) {
         return *fg;
     }
-    // User colours have precedence when readable, followed by the cell's ink.
-    // If neither passes, choose the strongest neutral instead of barely AA ink.
+    let fg = highlight_ink(explicit, theme, foreground, bg);
+    cache.highlight_ink.insert(key, fg);
+    fg
+}
+
+/// User colours have precedence when readable, followed by the cell's ink.
+/// If neither passes, choose the strongest neutral instead of barely AA ink.
+fn highlight_ink(
+    explicit: Option<Rgb>,
+    theme: &kettle_config::Theme,
+    foreground: Rgb,
+    bg: Rgb,
+) -> Rgb {
     for fg in explicit.into_iter().chain([foreground]) {
-        if color::contrast_ratio(fg, bg) >= 4.5 {
-            cache.highlight_ink.insert(key, fg);
+        if color::contrast_ratio(fg, bg) >= SELECTION_TEXT_CONTRAST {
             return fg;
         }
     }
-    let fg = [
+    [
         theme.selection_foreground,
         theme.foreground,
         theme.background,
@@ -571,9 +790,7 @@ pub(crate) fn highlight_ink_cached(
     ]
     .into_iter()
     .max_by(|a, b| color::contrast_ratio(*a, bg).total_cmp(&color::contrast_ratio(*b, bg)))
-    .expect("highlight candidates");
-    cache.highlight_ink.insert(key, fg);
-    fg
+    .expect("highlight candidates")
 }
 
 #[cfg(test)]
@@ -705,6 +922,26 @@ pub(crate) fn final_scene_is_uniformly_opaque(
     }
 }
 
+/// How opaque a pane's default background shows over whatever is behind the
+/// window: the composed background alpha while the desktop shows through, or
+/// `1.0` when an opaque surface, a wallpaper covering the window or the OS
+/// (macOS Reduce Transparency) leaves nothing behind it to see.
+pub(crate) fn selection_backdrop_alpha(
+    cfg: &kettle_config::Config,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    opaque_wallpaper_covers_surface: bool,
+    window_opaque: bool,
+) -> f64 {
+    if window_opaque
+        || alpha_mode == wgpu::CompositeAlphaMode::Opaque
+        || final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface)
+    {
+        1.0
+    } else {
+        composed_bg_alpha(cfg).clamp(0.0, 1.0)
+    }
+}
+
 /// A premultiplied scene needs the fullscreen unpremultiply pass only for a
 /// PostMultiplied surface and only while alpha can differ from one. At alpha 1,
 /// straight and premultiplied RGB are identical.
@@ -754,6 +991,31 @@ pub(crate) fn gc(c: Rgb) -> GColor {
 #[cfg(test)]
 mod selection_contrast_tests {
     use super::*;
+
+    /// A focused fill too close to the background for a grey to sit 1.3:1
+    /// from it still gets a grey between the two, not the background itself.
+    #[test]
+    fn an_unfocused_grey_fits_between_a_faint_fill_and_its_background() {
+        let theme = kettle_config::Theme::default();
+        let luminance = color::relative_luminance;
+        for (active, background) in [
+            (Rgb::new(60, 63, 75), Rgb::new(52, 55, 65)),
+            (Rgb::new(215, 218, 228), Rgb::new(225, 225, 228)),
+        ] {
+            assert!(color::contrast_ratio(active, background) < 1.3);
+            let grey = neutral_selection(&theme, active, background, background);
+            assert!(grey.r == grey.g && grey.g == grey.b, "{grey:?}");
+            let (low, high) = if luminance(active) > luminance(background) {
+                (background, active)
+            } else {
+                (active, background)
+            };
+            assert!(
+                luminance(low) < luminance(grey) && luminance(grey) < luminance(high),
+                "{grey:?} is not between {active:?} and {background:?}"
+            );
+        }
+    }
 
     #[test]
     fn inactive_search_fills_contrast_with_each_cell_background() {

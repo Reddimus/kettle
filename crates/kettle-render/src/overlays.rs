@@ -490,6 +490,9 @@ pub struct Overlay {
     /// Window has keyboard focus. Terminal cursors are suppressed entirely
     /// while false and resume from the unchanged DEC state when focus returns.
     pub window_focused: bool,
+    /// The OS draws the window opaque whatever its pixels' alpha, as macOS
+    /// does under Reduce Transparency, so no desktop shows behind the panes.
+    pub window_opaque: bool,
     /// The focused pane's scrollbar should paint in its bright (interacting)
     /// state because the pointer is over the scrollbar gutter or the thumb is
     /// being dragged. At rest the bar is dim. The renderer brightens a
