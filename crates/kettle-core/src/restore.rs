@@ -734,6 +734,21 @@ mod tests {
         assert!(!term.restore_clear_guard_armed());
     }
 
+    /// The same inside a synchronized update, where the prompt mark is
+    /// replayed in wire order when the update ends.
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_mark_inside_a_synchronized_update_disarms_the_guard() {
+        let terminal = spawn_seeded(
+            &one_row_seed(),
+            "printf '\\033[?2026h\\033]133;A\\007\\033[H\\033[2Jprompt$ \\033[?2026l'; read wait",
+        );
+        wait_for_row(&terminal, 0, 'p');
+        let term = terminal.term.lock().unwrap();
+        assert_eq!(term.history_size(), 2);
+        assert!(!term.restore_clear_guard_armed());
+    }
+
     /// Spawn a restored pane whose child optionally prints `x`, waits for the
     /// test to resize the pane to 10 columns, then clears.
     #[cfg(unix)]
