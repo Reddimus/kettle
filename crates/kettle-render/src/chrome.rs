@@ -1,4 +1,4 @@
-use crate::{MinimumContrastCache, color, dim_blend};
+use crate::{MinimumContrastCache, color, color::STEM_COVERAGE, dim_blend};
 use kettle_config::Rgb;
 
 // WCAG 2.2 AA: 1.4.3 (normal text) and 1.4.11 (non-text controls).
@@ -200,13 +200,13 @@ impl Colors {
         // Dimming must not take text below the floor, but it must not lift
         // text a program drew fainter than that either: an inactive pane
         // would then show it more clearly than the active one does.
-        // The bundled M's least-covered stem phase peaks at 248/255.
-        // Resolve against that painted pixel: light and dark backgrounds
-        // need different reserves, and output rounding matters too.
+        // Resolve against the painted stem pixel (`STEM_COVERAGE`): light
+        // and dark backgrounds need different reserves, and output rounding
+        // matters too.
         let original_contrast = color::contrast_ratio(fg, bg);
         let floor = TEXT_CONTRAST.min(original_contrast);
         let covered =
-            color::with_min_contrast_at_coverage(muted, background, floor, 248.0 / 255.0, linear);
+            color::with_min_contrast_at_coverage(muted, background, floor, STEM_COVERAGE, linear);
         let resolved = if color::contrast_ratio(covered, background) > original_contrast {
             self.resolve(muted, background, original_contrast)
         } else {

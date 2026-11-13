@@ -3445,8 +3445,8 @@ impl Renderer {
         }
         for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
             let (x, y, w, h) = pill.rect;
-            let fill = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
-            let ink = color::with_min_contrast(theme.foreground, fill, 4.5);
+            let (fill, ink) =
+                scrollback::scrollback_pill_colors(theme, self.config.format.is_srgb());
             tab_strip::rounded_fill(
                 &mut menu_q,
                 (x, y, w, h),

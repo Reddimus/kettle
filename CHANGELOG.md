@@ -388,6 +388,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   now keep 3:1 against the panel and, on the highlighted row, against the
   highlight. The panel's own outline and divider stay quiet.
 
+- The "↓ N lines" button's label reached 4.5:1 only at full ink, passing by
+  a rounding step (4.503:1 in TokyoNight Night). It now keeps 4.5:1 at the
+  edges of its strokes too. In a few themes the button's fill moves slightly
+  toward the terminal to make room.
+
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
   the same wallpaper exception as the bar itself, and vertical tabs follow

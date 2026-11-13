@@ -509,6 +509,10 @@ pub(crate) fn with_min_contrast_on_both(
         )
 }
 
+/// The least-covered stem phase of the bundled M peaks at 248/255 coverage, so
+/// that pixel, not the ink, is the strongest a stem may show.
+pub(crate) const STEM_COVERAGE: f64 = 248.0 / 255.0;
+
 /// Hue in sextants (`0.0..6.0`), saturation and lightness (`0.0..=1.0`).
 pub(crate) fn hsl(c: Rgb) -> (f64, f64, f64) {
     let [r, g, b] = [c.r, c.g, c.b].map(|v| f64::from(v) / 255.0);
