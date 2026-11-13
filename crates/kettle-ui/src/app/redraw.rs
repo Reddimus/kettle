@@ -94,18 +94,14 @@ impl App {
             projected
         };
         // Hovering any segment of a link wrapped across rows lights them all.
+        // The selection is read only while a link is hovered, so a frame with
+        // no hover takes no extra terminal lock.
         let hovered_group = self.hovered_link_at_cursor(ws).map(|link| link.group);
-        let links = ws
-            .links
-            .iter()
-            .map(|l| kettle_render::LinkRect {
-                col: l.start_col,
-                row: l.row,
-                width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
-                hover: hovered_group == Some(l.group),
-                explicit: l.explicit,
-            })
-            .collect();
+        let links = link_rects(
+            &ws.links,
+            hovered_group,
+            hovered_group.and_then(|_| focused_selection_range(ws)),
+        );
 
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
@@ -298,6 +294,10 @@ impl App {
         });
 
         let window_focused = ws.window_focused;
+        let window_opaque = ws
+            .native_material
+            .as_ref()
+            .is_some_and(|material| material.window_opaque());
         // Brighten the focused pane's scrollbar while the pointer is on the
         // gutter or the thumb is being dragged (overlay-scrollbar feel). The
         // scrolled-back case is decided per-pane in the renderer from the snapshot.
@@ -426,6 +426,7 @@ impl App {
                 media_scrubbing: ws.lane_drag.is_some_and(|drag| drag.scrub),
                 card_hover,
                 window_focused,
+                window_opaque,
                 scrollbar_active,
                 scrollbar_hovered_pane: ws.scrollbar_hover,
                 cursor_visible,
@@ -576,6 +577,7 @@ impl App {
             media_scrubbing: false,
             card_hover,
             window_focused,
+            window_opaque,
             scrollbar_active,
             scrollbar_hovered_pane: ws.scrollbar_hover,
             cursor_visible,

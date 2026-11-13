@@ -1179,7 +1179,16 @@ impl App {
                     return;
                 }
                 if selection_release_matches(ws.selection_button, bcode) {
+                    let dragged = ws.selection_dragged;
                     self.finish_selection_gesture(ws);
+                    // A drag hid the link under the pointer. Its hint and
+                    // hand cursor come back on release, not on the next move.
+                    if dragged {
+                        self.sync_cursor_icon(ws);
+                        if let Some(w) = &ws.window {
+                            w.request_redraw();
+                        }
+                    }
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;

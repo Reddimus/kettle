@@ -8,6 +8,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Vi mode can select whole lines and blocks from the keyboard, as Vim does:
+  `V` starts a line selection and `Ctrl+v` a block (rectangular) selection
+  at the vi cursor, beside `v` for characters. Pressing another of the three
+  turns the current selection into that kind, and the same key again ends
+  it. `y` copies whole lines or the selected columns of each row.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu
@@ -148,6 +154,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   chords.
 
 ### Changed
+
+- When a window loses focus its selection turns a neutral grey, as a
+  selection in an inactive macOS window does, instead of a dimmer shade of
+  the same colour, so it changes colour as well as strength. The grey stays
+  at least 2:1 from the theme's background and at least 1.3:1 quieter than
+  the focused colour. With the window's background see-through (the macOS
+  and Windows default), selection colours are now chosen against the
+  background as it shows over the desktop, not against the theme's solid
+  colour. There the unfocused grey reaches about 2:1 where the focused
+  colour leaves room for it (TokyoNight Night at 86% opacity: 1.85:1, from
+  1.31:1 before), and the focused colour moves a little further from the
+  background, on the side it already sits, while selected text keeps at
+  least 4.5:1. Where the background as shown would pass the selection
+  itself, as TokyoNight Night's does over a white page below about 65%
+  opacity, both colours stay those of an opaque window. Linux, at 99%
+  opacity, changes by about 1%. An opaque window, and one under macOS
+  Reduce Transparency, keeps the focused colours it had.
 
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
@@ -382,6 +405,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- A link no longer draws its hover underline across text you have selected.
+  While a selection is being dragged, the links it passes over show no
+  underline, "click to open" hint or hand cursor. Once the button is
+  released, a selected link keeps its hint and hand cursor, and its underline
+  comes back when the selection is cleared. ⌘-click and Ctrl+click still open
+  it.
 
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
