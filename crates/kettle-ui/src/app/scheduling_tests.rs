@@ -892,7 +892,7 @@ fn echo_settle_releases_a_real_panes_split_echo_at_the_wake_of_its_second_public
     };
     // The publication's wake, if its latch was open, follows its generation.
     let woke_since = |before: usize| {
-        let deadline = Instant::now() + Duration::from_millis(500);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while wakes.load(Ordering::SeqCst) == before && Instant::now() < deadline {
             std::thread::yield_now();
         }

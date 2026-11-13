@@ -907,11 +907,20 @@ mod tests {
         at + ms(50)
     }
 
-    /// The typed key at `next` to pane 1 arms the settle.
-    fn arm(echo: &mut TypedEcho, next: Instant) {
-        key(echo, next, 12);
-        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+    /// The typed key at `next` to pane 1 arms the settle, with a certain
+    /// baseline: two publications past the last key's, whose echo was in.
+    /// Returns the generation the echo's first wake saw.
+    fn arm(echo: &mut TypedEcho, next: Instant) -> u64 {
+        let base = echo
+            .key
+            .as_ref()
+            .and_then(|key| key.panes.iter().find(|key_pane| key_pane.pane == 1))
+            .map_or(12, |key_pane| key_pane.generation + 2);
+        key(echo, next, base);
+        assert!(echo.key.as_ref().unwrap().panes.iter().all(|p| p.certain));
+        assert!(echo.typed_wake(Some(next), [(1, base + 1, Some(next))]));
         assert_eq!(plan(echo, next, true, true), EchoPaint::Settle);
+        base + 1
     }
 
     #[test]
@@ -1301,9 +1310,9 @@ mod tests {
         // A wake handled at or after the deadline counts as the deadline,
         // even if the echo is also complete.
         let later = next + ms(50);
-        arm(&mut echo, later);
+        let first = arm(&mut echo, later);
         assert_eq!(
-            plan_at(&mut echo, later + ECHO_SETTLE, false, |_| Some(14)),
+            plan_at(&mut echo, later + ECHO_SETTLE, false, |_| Some(first + 1)),
             EchoPaint::Now
         );
         assert_eq!(
