@@ -277,6 +277,17 @@ pub(crate) fn tab_accent(
     ink
 }
 
+/// The hover fill shared by everything on the strip: tabs, window controls,
+/// `+` and the menu button. At 1.3:1 it shows where the pointer is but stays
+/// well under the active tab's 3:1 bar, so the active tab remains the
+/// strongest mark in the strip. A press deepens it to `tab_detail`'s 1.8:1.
+pub(crate) fn strip_hover(strip: Rgb, foreground: Rgb, pressed: bool) -> Rgb {
+    if pressed {
+        return tab_detail(strip, foreground, true);
+    }
+    color::with_min_contrast(color::over(strip, foreground, 0.06, false), strip, 1.3)
+}
+
 /// Neutral chrome details must remain visible independently of ANSI colours.
 pub(crate) fn tab_detail(strip: Rgb, foreground: Rgb, pressed: bool) -> Rgb {
     color::with_min_contrast(
@@ -745,7 +756,7 @@ mod tab_chrome_tests {
             let mut colors = Colors::default();
             for (surface, bg) in [
                 ("strip", strip),
-                ("hovered tab", tab_detail(strip, theme.foreground, false)),
+                ("hovered tab", strip_hover(strip, theme.foreground, false)),
             ] {
                 for kind in [TabActivity::Output, TabActivity::Silent, TabActivity::Bell] {
                     let raw = activity_ink(&theme, kind).expect("a marked state has ink");
@@ -807,6 +818,7 @@ mod tab_chrome_tests {
             let mut backgrounds = vec![
                 ("inactive tab", strip),
                 ("hovered inactive tab", tab_detail(strip, fg, false)),
+                ("hovered strip control", strip_hover(strip, fg, false)),
                 ("menu row", theme.background),
             ];
             // The renderer tints a selected menu row with the window's accent

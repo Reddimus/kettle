@@ -1548,7 +1548,7 @@ impl Renderer {
                     ),
                 ] {
                     if hovered {
-                        let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
+                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
@@ -4157,13 +4157,14 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
-                let tab_background = if s.active {
-                    default_bg
-                } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
-                } else {
-                    chrome_strip_bg
-                };
+                let tab_background = tab_strip::tab_title_background(
+                    s.active,
+                    tabbar.hovered_tab_idx == Some(s.idx),
+                    cfg.tab_bar_pos.is_vertical(),
+                    default_bg,
+                    chrome_strip_bg,
+                    theme.foreground,
+                );
                 let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
                     self.chrome_colors.text(fg, tab_background)
                 } else {
@@ -4317,7 +4318,7 @@ impl Renderer {
             };
             let toolbar_background = |colors: &mut chrome::Colors, hovered, pressed| {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed)
+                    chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed)
                 } else if hovered {
                     colors.surface(
                         chrome_strip_bg,

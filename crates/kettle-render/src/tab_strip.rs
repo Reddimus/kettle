@@ -263,6 +263,26 @@ pub(crate) fn rounded_fill(
     }
 }
 
+/// What a tab's title sits on: the terminal's colour on the active tab, the
+/// strip's hover fill on a hovered horizontal tab, the strip otherwise. The
+/// painter fills with it and resolves the tab's text against it.
+pub(crate) fn tab_title_background(
+    active: bool,
+    hovered: bool,
+    vertical: bool,
+    active_bg: Rgb,
+    strip: Rgb,
+    foreground: Rgb,
+) -> Rgb {
+    if active {
+        active_bg
+    } else if hovered && !vertical {
+        crate::chrome::strip_hover(strip, foreground, false)
+    } else {
+        strip
+    }
+}
+
 pub(crate) struct HorizontalTabQuads {
     pub chrome: Vec<QuadInstance>,
     /// Translucent tab backgrounds, including their opaque accent line.
@@ -285,8 +305,8 @@ pub(crate) fn horizontal_tab_quads(
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
-    let hover = crate::chrome::tab_detail(chrome, theme.foreground, false);
-    let divider = hover;
+    let hover = tab_title_background(false, true, false, background.0, chrome, theme.foreground);
+    let divider = crate::chrome::tab_detail(chrome, theme.foreground, false);
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
@@ -1133,6 +1153,92 @@ mod tests {
         }
     }
 
+    /// A hovered tab is shaded at about 1.3:1, less than half the active
+    /// tab's bar, so hovering never looks like selecting. The hover was a
+    /// 1.5:1 fill (#343641 in TokyoNight Night), as loud as the unfocused bar.
+    /// The fill painted is the colour the tab's text is resolved against.
+    #[test]
+    fn hovered_tab_is_quieter_than_the_active_accent() {
+        let cfg = kettle_config::Config::default();
+        let mut failures = Vec::new();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let mut bar = TabBar::hidden();
+            for i in 0..2 {
+                let r = (i as f32 * 160.0, 0.0, 160.0, 28.0);
+                bar.segments.push(crate::TabSeg {
+                    idx: i,
+                    rect: r,
+                    title_rect: r,
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: "shell".into(),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            bar.hovered_tab_idx = Some(1);
+            let accent = crate::chrome::tab_accent(
+                theme.accent,
+                strip,
+                theme.background,
+                theme.foreground,
+                true,
+            );
+            let quads = horizontal_tab_quads(
+                &bar,
+                (0.0, 0.0, 320.0, 28.0),
+                &theme,
+                (theme.background, 1.0),
+                strip,
+                accent,
+                TabBarPos::Top,
+                1.0,
+            );
+            let text_bg = tab_title_background(
+                false,
+                true,
+                false,
+                theme.background,
+                strip,
+                theme.foreground,
+            );
+            let painted = sample(&quads.chrome, 240.0, 14.0);
+            if painted != Some(rect(0.0, 0.0, 1.0, 1.0, text_bg, 1.0).color) {
+                failures.push(format!("{name}: painted {painted:?}, text on {text_bg:?}"));
+            }
+            let hover = crate::color::contrast_ratio(text_bg, strip);
+            let bar_ratio = crate::color::contrast_ratio(accent, strip);
+            if !(1.3 - 1e-6..=1.4).contains(&hover) || bar_ratio < 2.0 * hover {
+                failures.push(format!(
+                    "{name}: hover {hover:.2}:1, active bar {bar_ratio:.2}:1"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} themes: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        // Every hover site on the strip paints the shared token; only the
+        // tooltip's edge still uses the divider's 1.5:1 detail.
+        let source = crate::production_source();
+        assert_eq!(
+            source.matches("tab_detail(").count(),
+            1,
+            "a stray 1.5:1 hover"
+        );
+        assert!(source.contains("let edge = chrome::tab_detail(fill, theme.foreground, false);"));
+    }
+
     /// The painter builds every tab bar, horizontal and vertical, from one
     /// resolved accent.
     #[test]
@@ -1319,7 +1425,7 @@ fn window_control_colors(
     colors: &mut crate::chrome::Colors,
 ) -> (Rgb, Rgb) {
     let fill = if hovered {
-        crate::chrome::tab_detail(bg, fg, pressed)
+        crate::chrome::strip_hover(bg, fg, pressed)
     } else {
         bg
     };
@@ -1385,7 +1491,7 @@ mod window_control_tests {
                         assert_eq!(
                             fill,
                             if hovered {
-                                crate::chrome::tab_detail(bg, theme.foreground, pressed)
+                                crate::chrome::strip_hover(bg, theme.foreground, pressed)
                             } else {
                                 bg
                             }
