@@ -2,8 +2,10 @@
 fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
     let before = std::time::Instant::now();
     let input_time = before + std::time::Duration::from_millis(1);
-    let mut accepted = Some(before);
-    let mut rejected = Some(before);
+    let mut accepted = WindowState::new(0, Mux::new());
+    accepted.last_typed = Some(before);
+    let mut rejected = WindowState::new(1, Mux::new());
+    rejected.last_typed = Some(before);
     stamp_accepted_input(
         &mut accepted,
         PaneInputDelivery {
@@ -13,6 +15,7 @@ fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
             pending_accepted: false,
         },
         input_time,
+        &[],
     );
     stamp_accepted_input(
         &mut rejected,
@@ -23,16 +26,17 @@ fn echo_bypass_timestamp_only_marks_windows_that_accepted_input() {
             pending_accepted: false,
         },
         input_time,
+        &[],
     );
-    assert_eq!(accepted, Some(input_time));
-    assert_eq!(rejected, Some(before));
+    assert_eq!(accepted.last_typed, Some(input_time));
+    assert_eq!(rejected.last_typed, Some(before));
 
     let source = production_source();
     for owner in ["fn broadcast_input(", "fn write_terminal_key_event("] {
         let body = source.split(owner).nth(1).expect("delivery helper exists");
         let end = body.find("\n    }\n").unwrap_or(body.len());
         assert!(
-            body[..end].contains("stamp_accepted_input(&mut other.last_typed"),
+            body[..end].contains("stamp_accepted_input(other, "),
             "{owner} must stamp every foreign window that accepted input"
         );
     }
