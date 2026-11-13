@@ -181,6 +181,30 @@ impl App {
         )
     }
 
+    /// Arm the title bar's Settings gear when Settings is open and the
+    /// press is on it; see `settings_gear_takes_press_over_settings`.
+    pub(super) fn press_settings_gear_over_settings(
+        &self,
+        ws: &mut WindowState,
+        bcode: u8,
+    ) -> bool {
+        let on_gear = ws.settings_nav.is_some()
+            && settings_button_at(&self.tab_bar(ws), ws.cursor.x as f32, ws.cursor.y as f32);
+        if !settings_gear_takes_press_over_settings(
+            ws.settings_nav.as_ref(),
+            ws.settings_text_edit.is_some(),
+            bcode == 0,
+            on_gear,
+        ) {
+            return false;
+        }
+        ws.pressed_settings = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     pub(super) fn press_titlebar_space(
         &self,
         ws: &mut WindowState,

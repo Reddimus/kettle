@@ -1285,3 +1285,23 @@ fn leaving_the_window_forgets_the_settings_gear() {
     ws.forget_settings_button();
     assert!(!ws.hovered_settings && !ws.pressed_settings);
 }
+
+/// With Settings open, a primary press on the gear goes to the gear, not
+/// to Settings' close-on-outside-press, so its release does what Cmd+,
+/// does. Settings keeps the press while it edits text or captures a key,
+/// and anywhere off the gear.
+#[test]
+fn the_settings_gear_takes_a_press_ahead_of_open_settings() {
+    use super::chrome::settings_gear_takes_press_over_settings as takes;
+    let open = crate::settings::SettingsNav::default();
+    assert!(takes(Some(&open), false, true, true));
+    assert!(!takes(Some(&open), false, true, false), "off the gear");
+    assert!(!takes(Some(&open), false, false, true), "a middle press");
+    assert!(!takes(Some(&open), true, true, true), "editing a field");
+    let capturing = crate::settings::SettingsNav {
+        capturing: true,
+        ..Default::default()
+    };
+    assert!(!takes(Some(&capturing), false, true, true), "capturing a key");
+    assert!(!takes(None, false, true, true), "Settings closed");
+}

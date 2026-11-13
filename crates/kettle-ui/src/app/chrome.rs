@@ -1042,6 +1042,19 @@ pub(super) fn settings_release_action(
     (pressed && settings_button_at(bar, x, y)).then_some(Action::OpenSettings)
 }
 
+/// Whether a press goes to the Settings gear ahead of open Settings, which
+/// would take any press outside its panel as a request to close. A primary
+/// press on the gear arms it instead, so its release does what Cmd+, does.
+/// While Settings edits text or captures a key, Settings keeps the press.
+pub(super) fn settings_gear_takes_press_over_settings(
+    nav: Option<&crate::settings::SettingsNav>,
+    editing_text: bool,
+    primary: bool,
+    on_gear: bool,
+) -> bool {
+    primary && on_gear && !editing_text && nav.is_some_and(|nav| !nav.capturing)
+}
+
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
     if settings_button_at(bar, x, y) {
         Some(NewTabHoverTarget::Settings)
