@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Broadcast input has its own menu. The macOS Shell menu and the
+  right-click menu have a Broadcast Input submenu (Enviar la entrada a varios
+  paneles) with Off, Panes in This Tab, Panes in This Window and Panes in
+  This Group. The current scope is checked, choosing the checked row stops
+  broadcasting, and the broadcast chord's shortcut shows on the row it turns
+  on. Panes in This Group is unavailable while the focused pane has no
+  group. The checkmark also follows a group scope that ends because its last
+  pane closed.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

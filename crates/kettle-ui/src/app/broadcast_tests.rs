@@ -300,3 +300,214 @@ fn the_palette_labels_the_chord_with_the_scope_it_turns_on() {
         }
     }
 }
+
+/// The scope a Broadcast Input row turns on when it is not checked.
+fn row_scope(kind: BroadcastRowKind, focused_group: Option<&str>) -> BroadcastScope {
+    match kind {
+        BroadcastRowKind::Off => BroadcastScope::Off,
+        BroadcastRowKind::Tab => BroadcastScope::Tab,
+        BroadcastRowKind::Window => BroadcastScope::All,
+        BroadcastRowKind::Group => {
+            BroadcastScope::Group(focused_group.expect("an enabled group row").into())
+        }
+    }
+}
+
+/// Every `broadcast-default`, scope and focused-pane group: exactly one row is
+/// checked, the one for the scope; choosing it, through the dispatch's own
+/// transition, turns broadcast off; choosing any other available row turns its
+/// scope on; only the Group row is ever unavailable, and only while unchecked
+/// with no group on the focused pane; and the chord's action sits on Tab
+/// under `group`, Window under `all` and no row under `off`.
+#[test]
+fn every_broadcast_row_does_what_its_checkmark_says() {
+    use BroadcastKind as K;
+    use BroadcastRowKind as R;
+    let fleet = || BroadcastScope::Group("fleet".into());
+    for default in DEFAULTS {
+        for (kind, scope, focused_group) in [
+            (K::Off, BroadcastScope::Off, None),
+            (K::Off, BroadcastScope::Off, Some("fleet")),
+            (K::Tab, BroadcastScope::Tab, None),
+            (K::Tab, BroadcastScope::Tab, Some("fleet")),
+            (K::Window, BroadcastScope::All, None),
+            (K::Window, BroadcastScope::All, Some("fleet")),
+            (K::FocusedGroup, fleet(), Some("fleet")),
+            (K::OtherGroup, fleet(), Some("other")),
+            (K::OtherGroup, fleet(), None),
+        ] {
+            let case = format!("{default:?} {scope:?} focused in {focused_group:?}");
+            assert_eq!(BroadcastKind::of(&scope, focused_group), kind, "{case}");
+            let rows = broadcast_rows(default, kind, focused_group.is_some());
+            assert_eq!(
+                rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+                [R::Off, R::Tab, R::Window, R::Group],
+                "{case}"
+            );
+            let checked: Vec<_> = rows
+                .iter()
+                .filter(|row| row.checked)
+                .map(|row| row.kind)
+                .collect();
+            let expected = match kind {
+                K::Off => R::Off,
+                K::Tab => R::Tab,
+                K::Window => R::Window,
+                K::FocusedGroup | K::OtherGroup => R::Group,
+            };
+            assert_eq!(checked, [expected], "{case}");
+            for row in &rows {
+                let after = broadcast_scope_after(&row.action, &scope, default, focused_group);
+                if row.checked {
+                    assert!(row.enabled, "{case}: the checked {:?} row", row.kind);
+                    assert_eq!(after, Some(BroadcastScope::Off), "{case}: {row:?}");
+                } else if row.enabled {
+                    assert_eq!(
+                        after,
+                        Some(row_scope(row.kind, focused_group)),
+                        "{case}: {row:?}"
+                    );
+                } else {
+                    assert_eq!(row.kind, R::Group, "{case}");
+                    assert_eq!(focused_group, None, "{case}");
+                }
+            }
+            let chord = rows
+                .iter()
+                .filter(|row| row.action == Action::ToggleBroadcastAll)
+                .map(|row| row.kind)
+                .collect::<Vec<_>>();
+            let chord_row = match default {
+                BroadcastDefault::Group => vec![R::Tab],
+                BroadcastDefault::All => vec![R::Window],
+                BroadcastDefault::Off => vec![],
+            };
+            assert_eq!(chord, chord_row, "{case}");
+        }
+    }
+}
+
+/// The menus read the focused pane, the one the group toggle reads.
+#[test]
+fn the_menu_snapshot_reads_the_focused_panes_group() {
+    let (mux, focused, other) = crate::app::tests::title_test_split_mux();
+    let mut ws = WindowState::new(1, mux);
+    assert_eq!(ws.mux.active_focus(), Some(focused));
+    assert_eq!(BroadcastKind::of_window(&ws), (BroadcastKind::Off, false));
+    ws.mux.panes.get_mut(&other).unwrap().group_name = Some("fleet".into());
+    ws.mux.broadcast = BroadcastScope::Group("fleet".into());
+    assert_eq!(
+        BroadcastKind::of_window(&ws),
+        (BroadcastKind::OtherGroup, false)
+    );
+    ws.mux.panes.get_mut(&focused).unwrap().group_name = Some("ops".into());
+    assert_eq!(
+        BroadcastKind::of_window(&ws),
+        (BroadcastKind::OtherGroup, true)
+    );
+    ws.mux.panes.get_mut(&focused).unwrap().group_name = Some("fleet".into());
+    assert_eq!(
+        BroadcastKind::of_window(&ws),
+        (BroadcastKind::FocusedGroup, true)
+    );
+    ws.mux.broadcast = BroadcastScope::Tab;
+    assert_eq!(BroadcastKind::of_window(&ws), (BroadcastKind::Tab, true));
+
+    // The menu bar's snapshot is that reading plus `broadcast-default`.
+    let source = production_source();
+    let sync = source
+        .split("fn sync_macos_menu(")
+        .nth(1)
+        .expect("sync_macos_menu");
+    let sync = &sync[..sync.find("\n    }\n").unwrap_or(sync.len())];
+    for needle in [
+        "ws.map(BroadcastKind::of_window)",
+        "broadcast: broadcast.0",
+        "pane_group: broadcast.1",
+        "broadcast_default: self.cfg.broadcast_default",
+    ] {
+        assert!(sync.contains(needle), "{needle}");
+    }
+}
+
+/// The right-click menu offers the same rows as radio rows in a Broadcast
+/// Input submenu, in English and Spanish: the label carries the radio marker
+/// it paints, so the measured text is the painted text, and an unavailable
+/// Group row is hidden while the checked row always stays.
+#[test]
+fn the_right_click_menu_has_the_broadcast_submenu() {
+    use kettle_i18n::{Language, Text, Translator};
+    use kettle_render::MenuToggle;
+    let source = production_source();
+    let body = source
+        .split("fn context_menu_items(")
+        .nth(1)
+        .expect("context_menu_items");
+    let body = &body[..body.find("\n    }\n").unwrap_or(body.len())];
+    assert!(body.contains("BroadcastKind::of_window(ws)"));
+    assert!(body.contains("broadcast_rows(self.cfg.broadcast_default, broadcast, pane_group)"));
+    for tr in [Translator::new(Language::En), Translator::new(Language::Es)] {
+        for (kind, pane_group, shown) in [
+            (BroadcastKind::Off, false, 3),
+            (BroadcastKind::Off, true, 4),
+            (BroadcastKind::OtherGroup, false, 4),
+            (BroadcastKind::Tab, false, 3),
+        ] {
+            let rows = broadcast_rows(BroadcastDefault::Group, kind, pane_group);
+            let mut items = vec![ContextMenuItem::Item {
+                label: tr.text(Text::MenuCopy),
+                action: Action::Copy,
+                enabled: true,
+            }];
+            items.extend(rows.iter().map(|row| broadcast_menu_item(row, &tr)));
+            let grouped = grouped_terminal_menu(items, tr);
+            let inner = grouped
+                .iter()
+                .find_map(|item| match item {
+                    ContextMenuItem::Submenu { label, items }
+                        if label == tr.text(Text::MenuBroadcastInput) =>
+                    {
+                        Some(items)
+                    }
+                    _ => None,
+                })
+                .expect("a Broadcast Input submenu");
+            assert_eq!(inner.len(), shown, "{kind:?} {pane_group}");
+            for (item, row) in inner.iter().zip(rows.iter().filter(|row| row.enabled)) {
+                let ContextMenuItem::DynamicItem {
+                    label,
+                    action,
+                    enabled,
+                    toggle,
+                } = item
+                else {
+                    panic!("a broadcast row is a radio row");
+                };
+                assert_eq!(*toggle, Some(MenuToggle::Radio(row.checked)));
+                assert_eq!(
+                    *label,
+                    format!(
+                        "{}{}",
+                        MenuToggle::Radio(row.checked).marker(),
+                        tr.text(row.kind.text())
+                    )
+                );
+                assert_eq!(*action, row.action);
+                assert!(*enabled);
+            }
+            assert_eq!(
+                inner
+                    .iter()
+                    .filter(|item| matches!(
+                        item,
+                        ContextMenuItem::DynamicItem {
+                            toggle: Some(MenuToggle::Radio(true)),
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+        }
+    }
+}

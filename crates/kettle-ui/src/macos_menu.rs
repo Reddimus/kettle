@@ -36,6 +36,8 @@ pub(crate) enum Row {
         shortcut: Option<Trigger>,
         shortcut_label: Option<String>,
         enabled: bool,
+        /// Shown with a checkmark (`NSControlStateValueOn`).
+        checked: bool,
     },
     Submenu {
         title: &'static str,
@@ -69,6 +71,12 @@ pub(crate) struct Context {
     pub renderer: bool,
     /// The `detachable-tabs` config key; off, a tab cannot leave its window.
     pub detachable_tabs: bool,
+    /// What the window broadcasts to, for the Broadcast Input checkmark.
+    pub broadcast: crate::app::BroadcastKind,
+    /// The focused pane has a group, so Panes in This Group can turn on.
+    pub pane_group: bool,
+    /// The `broadcast-default` config key: which row the chord's action runs.
+    pub broadcast_default: kettle_config::BroadcastDefault,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -217,7 +225,8 @@ pub(crate) fn menu_model_with_profiles(
         .filter(|(trigger, _)| trigger.mods.contains(Mods::SUPER))
         .map(|(trigger, action)| (*trigger, action.clone()))
         .collect();
-    let item = |text, action: Action| {
+    // `available` narrows the action's own enabled state; `checked` marks it.
+    let toggle_item = |text, action: Action, available: bool, checked: bool| {
         let shortcut = command_shortcut(&command_bindings, &action).or_else(|| {
             matches!(action, Action::HintMode)
                 .then(|| command_shortcut(bindings, &action))
@@ -225,12 +234,14 @@ pub(crate) fn menu_model_with_profiles(
         });
         Row::Item {
             title: tr.text(text).to_string(),
-            enabled: context.enables(&action),
+            enabled: available && context.enables(&action),
             command: Command::Kettle(action),
             shortcut: shortcut.as_ref().map(|(trigger, _)| *trigger),
             shortcut_label: shortcut.map(|(_, label)| label),
+            checked,
         }
     };
+    let item = |text, action: Action| toggle_item(text, action, true, false);
     let native = |text, action, chord: Option<Trigger>| {
         let shortcut = chord.filter(|trigger| !bindings.contains_key(trigger));
         Row::Item {
@@ -239,6 +250,7 @@ pub(crate) fn menu_model_with_profiles(
             shortcut,
             shortcut_label: shortcut.map(|trigger| trigger.label()),
             enabled: true,
+            checked: false,
         }
     };
     let chord = |key, mods| Some(Trigger::new(mods | Mods::SUPER, Key::Char(key)));
@@ -291,6 +303,7 @@ pub(crate) fn menu_model_with_profiles(
                             command: Command::Kettle(action),
                             shortcut: None,
                             shortcut_label: None,
+                            checked: false,
                         })
                         .collect(),
                 },
@@ -298,6 +311,17 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MenuSaveLayout, Action::SaveLayout),
                 item(T::MenuOpenLayout, Action::OpenLayoutPicker),
                 item(T::PaletteOpenSsh, Action::OpenSsh),
+                Row::Submenu {
+                    title: tr.text(T::MenuBroadcastInput),
+                    rows: crate::app::broadcast_rows(
+                        context.broadcast_default,
+                        context.broadcast,
+                        context.pane_group,
+                    )
+                    .into_iter()
+                    .map(|row| toggle_item(row.kind.text(), row.action, row.enabled, row.checked))
+                    .collect(),
+                },
                 Sep,
                 item(T::MenuSplitRight, Action::SplitRight),
                 item(T::MenuSplitDown, Action::SplitDown),

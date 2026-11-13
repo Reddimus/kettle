@@ -1370,6 +1370,10 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             Action::CreateGroup,
             Action::GroupTab,
             Action::UngroupTab,
+            Action::ToggleBroadcastOff,
+            Action::ToggleBroadcastAll,
+            Action::ToggleBroadcastWindow,
+            Action::ToggleBroadcastGroup,
             Action::OpenSettings,
             Action::OpenThemePicker,
         ]

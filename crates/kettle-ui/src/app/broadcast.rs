@@ -6,7 +6,153 @@
 //! the checkmark. The broadcast actions, and the group cleanup that turns a
 //! stale group scope off from the redraw, close and title paths, all go
 //! through it. `the_broadcast_scope_has_one_writer` keeps it the only writer.
+//!
+//! [`broadcast_rows`] is the Broadcast Input submenu both the macOS menu bar
+//! and the right-click menu show: Off, Panes in This Tab, Panes in This
+//! Window and Panes in This Group, with the current scope checked.
 use super::*;
+
+/// What a window broadcasts to, seen from its focused pane. It holds no group
+/// name, so the menu bar's snapshot stays `Copy`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BroadcastKind {
+    #[default]
+    Off,
+    Tab,
+    Window,
+    /// A group the focused pane belongs to.
+    FocusedGroup,
+    /// A group the focused pane does not belong to: it is in another group or
+    /// in none.
+    OtherGroup,
+}
+
+impl BroadcastKind {
+    pub(crate) fn of(scope: &BroadcastScope, focused_group: Option<&str>) -> Self {
+        match scope {
+            BroadcastScope::Off => Self::Off,
+            BroadcastScope::Tab => Self::Tab,
+            BroadcastScope::All => Self::Window,
+            BroadcastScope::Group(name) if focused_group == Some(name.as_str()) => {
+                Self::FocusedGroup
+            }
+            BroadcastScope::Group(_) => Self::OtherGroup,
+        }
+    }
+
+    /// `ws`'s scope, and whether its focused pane has a group.
+    pub(crate) fn of_window(ws: &WindowState) -> (Self, bool) {
+        // The pane the group toggle reads (`Mux::focused`).
+        let group = ws
+            .mux
+            .active_focus()
+            .and_then(|id| ws.mux.panes.get(&id))
+            .and_then(|pane| pane.group_name.as_deref());
+        (Self::of(&ws.mux.broadcast, group), group.is_some())
+    }
+}
+
+/// One row of the Broadcast Input submenu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BroadcastRowKind {
+    Off,
+    Tab,
+    Window,
+    Group,
+}
+
+impl BroadcastRowKind {
+    pub(crate) fn text(self) -> kettle_i18n::Text {
+        use kettle_i18n::Text as T;
+        match self {
+            Self::Off => T::MenuBroadcastOff,
+            Self::Tab => T::MenuBroadcastTab,
+            Self::Window => T::MenuBroadcastWindow,
+            Self::Group => T::MenuBroadcastGroup,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BroadcastRow {
+    pub(crate) kind: BroadcastRowKind,
+    pub(crate) action: Action,
+    pub(crate) checked: bool,
+    pub(crate) enabled: bool,
+}
+
+/// The Broadcast Input rows for a window whose scope is `kind`, under
+/// `broadcast-default = default`. `pane_group` says whether the focused pane
+/// has a group.
+///
+/// The rows look like radio buttons but run the existing toggles, so choosing
+/// the checked row turns broadcast off, and choosing another switches to its
+/// scope. The chord's action (`ToggleBroadcastAll`) is the action of the row
+/// for the scope it turns on, so the row shows the chord: Tab under `group`,
+/// Window under `all`, and no row under `off`, where the chord only stops
+/// broadcasting.
+///
+/// The Group row is checked whenever a group is the target, so a row is always
+/// checked. When the focused pane is not in that group (it is in another group
+/// or in none), the group toggle would switch groups instead of stopping, so
+/// the checked row runs `ToggleBroadcastOff`; choosing it again then starts
+/// broadcasting to the focused pane's group. The Group row is unavailable only
+/// when it is unchecked and the focused pane has no group.
+pub(crate) fn broadcast_rows(
+    default: kettle_config::BroadcastDefault,
+    kind: BroadcastKind,
+    pane_group: bool,
+) -> [BroadcastRow; 4] {
+    use kettle_config::BroadcastDefault as D;
+    let row = |kind, action, checked, enabled| BroadcastRow {
+        kind,
+        action,
+        checked,
+        enabled,
+    };
+    let group_checked = matches!(
+        kind,
+        BroadcastKind::FocusedGroup | BroadcastKind::OtherGroup
+    );
+    [
+        row(
+            BroadcastRowKind::Off,
+            Action::ToggleBroadcastOff,
+            kind == BroadcastKind::Off,
+            true,
+        ),
+        row(
+            BroadcastRowKind::Tab,
+            if default == D::Group {
+                Action::ToggleBroadcastAll
+            } else {
+                Action::ToggleBroadcastPanesInTab
+            },
+            kind == BroadcastKind::Tab,
+            true,
+        ),
+        row(
+            BroadcastRowKind::Window,
+            if default == D::All {
+                Action::ToggleBroadcastAll
+            } else {
+                Action::ToggleBroadcastWindow
+            },
+            kind == BroadcastKind::Window,
+            true,
+        ),
+        row(
+            BroadcastRowKind::Group,
+            if kind == BroadcastKind::OtherGroup {
+                Action::ToggleBroadcastOff
+            } else {
+                Action::ToggleBroadcastGroup
+            },
+            group_checked,
+            group_checked || pane_group,
+        ),
+    ]
+}
 
 /// The scope a broadcast action leaves a window in, or `None` when the action
 /// changes nothing: a group toggle while the focused pane has no group, or an

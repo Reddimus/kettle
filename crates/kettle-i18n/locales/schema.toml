@@ -2635,6 +2635,21 @@ context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
 [messages.menu_new_window_profile]
 context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
 
+[messages.menu_broadcast_input]
+context = "crates/kettle-ui/src/macos_menu.rs and app/menus.rs: title of the Broadcast Input submenu in the macOS Shell menu and the right-click menu. Its rows choose which panes receive what you type. Matches the palette_toggle_broadcast_* wording (Enviar la entrada…)."
+
+[messages.menu_broadcast_off]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row, checked while input goes to the focused pane only. Choosing it stops broadcasting. Masculine: it describes the sending (el envío)."
+
+[messages.menu_broadcast_tab]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused tab. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_window]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in every tab of the window. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_group]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused pane's named group, in every window. Checked while any group is the target; unavailable when the focused pane has no group."
+
 [messages.menu_no_profiles]
 context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."
 

@@ -4,7 +4,10 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
+    NSMenuItem,
+};
 use objc2_foundation::{MainThreadMarker, NSString};
 use winit::event_loop::EventLoopProxy;
 
@@ -189,6 +192,7 @@ fn append_rows(
                 command,
                 shortcut,
                 enabled,
+                checked,
                 ..
             } => {
                 let selector = match command {
@@ -196,8 +200,15 @@ fn append_rows(
                     Command::Native(action) => selector_for(*action),
                 };
                 let item = make_item(mtm, title, selector, *shortcut);
-                // SAFETY: enabled comes from the focused window's model.
-                unsafe { item.setEnabled(*enabled) };
+                // SAFETY: enabled and checked come from the focused window's model.
+                unsafe {
+                    item.setEnabled(*enabled);
+                    item.setState(if *checked {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
                 if let Command::Kettle(action) = command {
                     let target = mtm.alloc::<MenuTarget>().set_ivars(Invocation {
                         action: action.clone(),

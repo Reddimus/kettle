@@ -300,7 +300,16 @@ macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
 Edit, View and Window menus (the Window menu carries the tab commands: next,
 previous, rename, move left, right and to a new window), actions, separators,
-enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+enabled and checked state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding).
+The Shell menu's Broadcast Input submenu and the right-click menu's Broadcast
+Input category share one row table (`app::broadcast::broadcast_rows`): Off,
+Panes in This Tab, Panes in This Window and Panes in This Group, with the
+current scope checked. The rows run the existing toggles, so the checked row
+turns broadcast off, and the chord's action is the row for the scope it turns
+on, which puts its hint there. The Group row stays checked for any group
+target; when the focused pane is not in that group it runs
+`ToggleBroadcastOff`. The menu-bar snapshot holds a `Copy` `BroadcastKind`
+instead of the group's name. AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. AppKit's automatic window tabbing is
 turned off before the event loop launches AppKit
@@ -453,6 +462,7 @@ using `use super::*;` to share the parent scope:
 | `keyboard`, `ime` | key encoding, bindings, program key ownership; composition and IME cursor geometry |
 | `pointer` | mouse reporting, wheel, selection, pane and split-divider dragging, cursor icons |
 | `actions` | action dispatch, pane/tab operations, scaled zoom and broadcast groups |
+| `broadcast` | the broadcast scope's one write path, its action transitions and the Broadcast Input menu rows |
 | `layout` | content bands, pane/grid geometry, resize and PTY pixel sizes |
 | `focus` | focus transitions, focus reports and completion cleanup |
 | `output` | PTY output and lifecycle drains, wake gates, output generations and per-window user events |
@@ -4397,7 +4407,13 @@ Other additions:
   arguments as untrusted: validate fields against their specific character sets
   and a 512-byte limit, then reject controls again before direct spawning.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
-  per-tab / per-window / cross-tab named scopes).
+  per-tab / per-window / cross-tab named scopes). `App::set_broadcast_scope`
+  is the only writer of a window's scope: the actions and the stale-group
+  cleanup (`hoover_groups`, `hoover_mapped_groups`, run from redraw, close
+  and title edits) go through it, so a change always redraws the window and
+  resyncs the macOS menu's checkmark. It returns early when the scope is
+  unchanged, which keeps the per-frame cleanup free. A source scan
+  (`the_broadcast_scope_has_one_writer`) keeps it the only writer.
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
 - **vertical tab strips** and a **wgpu offscreen-scene screenshot path**.
 - **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
