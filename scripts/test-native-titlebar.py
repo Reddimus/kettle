@@ -198,6 +198,21 @@ class TitlebarGeometryTests(unittest.TestCase):
             geometry["tab_bar"]["band"]["x"] = 0
             checker.titlebar_geometry(geometry)
 
+    def test_settings_gear_must_sit_apart_from_the_new_tab_pair(self):
+        for scale in (1, 2):
+            def gear(x, width=28):
+                return dict(x=x * scale, y=0, width=width * scale, height=28 * scale)
+
+            geometry = self.fixture(scale)
+            geometry["tab_bar"]["settings"] = gear(0, 0)
+            checker.titlebar_geometry(geometry)
+            geometry["tab_bar"]["settings"] = gear(708)
+            checker.titlebar_geometry(geometry)
+            for bad in (gear(712), gear(708, 16), gear(70)):
+                geometry["tab_bar"]["settings"] = bad
+                with self.assertRaises(AssertionError):
+                    checker.titlebar_geometry(geometry)
+
     def test_titlebar_geometry_rejects_overlap_missing_title_and_small_controls(self):
         for mutate in (
             lambda g: g["content"].update(y=0),
