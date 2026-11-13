@@ -313,7 +313,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   fits at common window widths.
 - The context menu puts the actions for what you clicked first (Copy, Paste,
   Select All, and Open or Copy Link on a link) and groups pane, tab, title
-  and appearance commands into submenus, so it no longer scrolls. On macOS,
+  and appearance commands into submenus, so it no longer scrolls. Each
+  submenu row is described to screen readers as a submenu. On macOS,
   menus and the command palette write shortcuts as ⌘V, ⇧⌘D and ⌃⇧A.
 - With grapheme clusters on (mode 2027), emoji ZWJ sequences and emoji with
   skin-tone modifiers draw as one glyph across the cluster's width, and emoji
@@ -360,6 +361,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On the highlighted row of the command palette and other pickers, the
+  characters matching the query were drawn in the accent colour over the
+  accent-tinted highlight, at about 3.5:1. They now keep at least 4.5:1 on
+  every row in every bundled theme.
 
 - On macOS, Kettle turns off AppKit's automatic window tabbing at launch.
   Kettle's tabs are its own, drawn inside one window, but AppKit's tabbing

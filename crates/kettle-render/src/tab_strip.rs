@@ -116,6 +116,25 @@ pub(crate) fn tab_label_origin(lane: Rect4, label: &str, cell: (f32, f32)) -> (f
     )
 }
 
+/// Where an overflow scroll arrow's glyph draws in its button. Down a side
+/// bar it is centred in its row. Across a top or bottom bar it keeps a 4 px
+/// lead from the button's edge and shares the tab titles' text line: the
+/// button spans the segments' band, so centring one line of tab text in it
+/// lands where `tab_label_origin` puts the titles at any bar height.
+pub(crate) fn scroll_arrow_origin(
+    button: Rect4,
+    vertical: bool,
+    glyph_width: f32,
+    line_height: f32,
+) -> (f32, f32) {
+    let (left, top) = crate::geometry::centered_text_origin(button, (glyph_width, line_height));
+    if vertical {
+        (left, top)
+    } else {
+        (button.0 + 4.0, top)
+    }
+}
+
 /// Rounded silhouettes in the existing ordered quad layer. Only the corner
 /// bands need slicing; the terminal-facing edge remains square and flush.
 pub(crate) fn rounded_fill(
@@ -782,6 +801,52 @@ mod tests {
                 assert!(!hover.iter().any(|q| q.pos[0] == 319.0 && q.size[0] == 1.0));
             }
         }
+    }
+
+    /// An overflowing top or bottom strip's `‹` / `›` share the tab titles'
+    /// text line. 6.0's 46 px GNOME header drew them 4 px under the band's
+    /// top, about 9 px above the titles centred in the same band.
+    #[test]
+    fn overflow_chevrons_centre_on_the_tab_title_line() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            // (band height, tab text line): the Linux header bar, the plain
+            // strip, and a macOS titlebar whose zoomed text is fitted down.
+            for (band, line) in [(46.0_f32, 18.0_f32), (28.0, 17.0), (28.0, 40.0)] {
+                for top in [0.0_f32, 32.0] {
+                    let (y, h) = (top * scale, band * scale);
+                    let line = line * scale * tab_text_scale(h, line * scale);
+                    let cell = (8.0 * scale, line);
+                    let segment = (8.0 * scale + h, y, 120.0 * scale, h);
+                    let content = horizontal_tab_content_layout(
+                        segment, true, true, false, "fixture", None, cell.0,
+                    );
+                    let (_, title_top) = tab_label_origin(content.title, "fixture", cell);
+                    for button in [(8.0 * scale, y, h, h), (1450.0 * scale, y, h * 0.5, h)] {
+                        let (left, chevron_top) =
+                            scroll_arrow_origin(button, false, 2.0 * cell.0, line);
+                        assert_eq!(left, button.0 + 4.0);
+                        let (chevron, title) = (chevron_top + line * 0.5, title_top + line * 0.5);
+                        assert!(
+                            (chevron - title).abs() <= 1.0,
+                            "scale {scale}, band {band} at {top}: chevron centre {chevron}, \
+                             title centre {title}"
+                        );
+                    }
+                }
+            }
+        }
+        // A side bar's `⌃` / `⌄` stay centred in their rows.
+        let row = (0.0, 40.0, 180.0, 28.0);
+        assert_eq!(
+            scroll_arrow_origin(row, true, 10.0, 16.0),
+            crate::geometry::centered_text_origin(row, (10.0, 16.0))
+        );
+        // The painter places both arrows through this helper.
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains("tab_strip::scroll_arrow_origin(rect,vertical,glyph_w,tab_ch);"));
+        assert!(!source.contains("tabbar.y+4.0"));
     }
 }
 

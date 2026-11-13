@@ -2889,6 +2889,7 @@ impl Renderer {
                 // cannot drift by a fractional cell after ellipsis.
                 let panel_w = context_menu_panel_width(menu, cw);
                 let accent = self.ui_accent(cfg, theme);
+                let linear = self.config.format.is_srgb();
                 self.context_menu_match_keys.resize(row_count, 0);
                 // Row height matches a comfortable click target (~28-32 px
                 // on default cell metrics).
@@ -2904,7 +2905,14 @@ impl Renderer {
                     // Re-shape only when the row's label actually changed. An open
                     // menu's rows are byte-stable, so blink/hover-driven redraws
                     // need no reshape.
-                    let match_key = overlays::menu_match_key(row, accent);
+                    let matched_color = overlays::menu_match_color(
+                        overlays::menu_row_selected(menu, index),
+                        theme,
+                        accent,
+                        &mut self.chrome_colors,
+                        linear,
+                    );
+                    let match_key = overlays::menu_match_key(row, matched_color);
                     if self.context_menu_texts[i] != row.label
                         || self.context_menu_match_keys[i] != match_key
                     {
@@ -2918,8 +2926,7 @@ impl Renderer {
                                     (
                                         *text,
                                         if *matched {
-                                            base.clone()
-                                                .color(GColor::rgb(accent.r, accent.g, accent.b))
+                                            overlays::menu_match_attrs(&base, matched_color)
                                         } else {
                                             base.clone()
                                         },
@@ -4400,18 +4407,17 @@ impl Renderer {
                     continue;
                 }
                 let (ax, _, aw, _) = rect;
-                let (left, top, bounds) = if vertical {
-                    let glyph_w = buffer.layout_runs().next().map_or(tab_cw, |run| run.line_w);
-                    let (left, top) = centered_text_origin(rect, (glyph_w, tab_ch));
-                    (left, top, text_bounds_for_rect(rect))
+                let glyph_w = buffer.layout_runs().next().map_or(tab_cw, |run| run.line_w);
+                let (left, top) = tab_strip::scroll_arrow_origin(rect, vertical, glyph_w, tab_ch);
+                let bounds = if vertical {
+                    text_bounds_for_rect(rect)
                 } else {
-                    let bounds = TextBounds {
+                    TextBounds {
                         left: ax as i32,
                         top: ty,
                         right: (ax + aw) as i32,
                         bottom: tb,
-                    };
-                    (ax + 4.0, tabbar.y + 4.0, bounds)
+                    }
                 };
                 areas.push(TextArea {
                     buffer,
@@ -4584,12 +4590,13 @@ impl Renderer {
                 if row.separator {
                     continue;
                 }
-                let background = if i == menu.highlight && row.enabled {
-                    self.chrome_colors
-                        .surface(theme.background, accent, 0.18, linear)
-                } else {
-                    theme.background
-                };
+                let background = overlays::menu_row_background(
+                    overlays::menu_row_selected(menu, i),
+                    theme,
+                    accent,
+                    &mut self.chrome_colors,
+                    linear,
+                );
                 let fg = if row.enabled {
                     self.chrome_colors.text(theme.foreground, background)
                 } else {
@@ -5125,8 +5132,17 @@ impl Renderer {
                 }
             }
             if let Some(menu) = overlay.context_menu.as_ref() {
-                for row in &menu.rows {
-                    overlays::menu_match_key(row, self.ui_accent(cfg, theme)).hash(&mut h);
+                let accent = self.ui_accent(cfg, theme);
+                let linear = self.config.format.is_srgb();
+                for (index, row) in menu.rows.iter().enumerate() {
+                    let matched = overlays::menu_match_color(
+                        overlays::menu_row_selected(menu, index),
+                        theme,
+                        accent,
+                        &mut self.chrome_colors,
+                        linear,
+                    );
+                    overlays::menu_match_key(row, matched).hash(&mut h);
                 }
             }
             for parent in &overlay.context_menu_parents {
