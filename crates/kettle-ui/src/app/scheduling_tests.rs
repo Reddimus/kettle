@@ -467,3 +467,38 @@ fn animation_ticks_keep_remaining_deadline_between_turns() {
     assert_eq!(next, None);
     assert!(super::terminal_animation_tick(true, now + Duration::from_secs(10), &mut next).0);
 }
+
+/// The typed-echo diagnostics must sample each pane's generation while the
+/// frame's terminal lock is held (the staged generation predates the
+/// capture), observe at every typed wake and after every present, and judge
+/// the previous frame before a new one replaces it.
+#[test]
+fn typed_echo_diagnostics_sample_under_the_lock_and_observe_each_present() {
+    let src = production_source();
+    let capture = src
+        .split_once("snaps[si].capture_with_card_marks(&g, p.inline_cards.needs_marks());")
+        .expect("redraw captures pane snapshots")
+        .1;
+    let unlock = capture.find("drop(g);").expect("capture drops the lock");
+    assert!(
+        capture[..unlock].contains(".note_capture(*id, p.term.output_generation());"),
+        "the frame's generation must be sampled under the terminal lock"
+    );
+    let presented = src
+        .split_once("ws.output_pacer.presented();")
+        .expect("redraw commits a presented frame")
+        .1;
+    let judged = presented
+        .find("observe_typed_echo(ws, presented_at);")
+        .expect("a present judges the previous typed frame");
+    let watched = presented
+        .find("ws.typed_echo.frame_presented(")
+        .expect("a present records the new typed frame");
+    assert!(judged < watched, "judge the previous frame before replacing it");
+    assert!(src.contains(
+        "defer_output_racing_frame(ws);\n            // Output published while this frame rendered supersedes it.\n            observe_typed_echo(ws, std::time::Instant::now());"
+    ));
+    assert!(src.contains(
+        "ws.output_pacer.reset();\n                    observe_typed_echo(ws, now);\n                    note_typed_echo_wake(ws);"
+    ));
+}

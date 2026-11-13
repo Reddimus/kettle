@@ -305,6 +305,12 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"mapped_uploads\": u.mapped_uploads",
         "\"mapped_writes\": u.mapped_writes",
         "\"chrome_prepares\": u.chrome_prepares",
+        "\"typed_echo\": {",
+        "\"echoes\": echo_counts.echoes",
+        "\"split_echoes\": echo_counts.split_echoes",
+        "\"frames_presented\": echo_counts.frames_presented",
+        "\"intermediate_frames\": echo_counts.intermediate_frames",
+        "\"late_superseded_frames\": echo_counts.late_superseded_frames",
     ] {
         assert!(body.contains(needle), "ui_geometry lost {needle:?}");
     }

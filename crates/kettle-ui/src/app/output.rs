@@ -182,6 +182,33 @@ fn window_has_new_output(ws: &WindowState) -> bool {
     })
 }
 
+/// Judge the typed-echo diagnostics' pending echo and frame against each
+/// pane's current output. Returns the pane whose echo this found split.
+pub(super) fn observe_typed_echo(ws: &mut WindowState, now: std::time::Instant) -> Option<u64> {
+    let panes = &ws.mux.panes;
+    ws.typed_echo.observe(now, ws.last_typed, |id| {
+        panes.get(&id).map(|pane| {
+            // Generation first: a stamp read after it is at least as new.
+            let generation = pane.term.output_generation();
+            (generation, pane.term.output_published_at())
+        })
+    })
+}
+
+/// Record an output wake inside the typing window with the panes whose
+/// output this window has not painted. Returns whether it starts a new echo.
+pub(super) fn note_typed_echo_wake(ws: &mut WindowState) -> bool {
+    let seen = &ws.seen_output_gen;
+    ws.typed_echo.typed_wake(
+        ws.last_typed,
+        ws.mux.panes.iter().filter_map(|(id, pane)| {
+            let generation = pane.term.output_generation();
+            (seen.get(id).copied().unwrap_or(0) != generation)
+                .then(|| (*id, generation, pane.term.output_published_at()))
+        }),
+    )
+}
+
 pub(super) fn defer_output_racing_frame(ws: &mut WindowState) {
     // Publication during maintenance can be coalesced into an already-served
     // wake before redraw reopens the latch. Retain a paced retry even when no
@@ -885,6 +912,8 @@ impl App {
                 // repeat visibly stutter.
                 if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
                     ws.output_pacer.reset();
+                    observe_typed_echo(ws, now);
+                    note_typed_echo_wake(ws);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }

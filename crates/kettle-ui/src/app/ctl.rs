@@ -1526,6 +1526,7 @@ impl App {
                 })
             })
             .collect::<Vec<_>>();
+        let echo_counts = target.typed_echo.counts();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1646,6 +1647,17 @@ impl App {
                         "mapped_bytes": u.mapped_bytes,
                     })
                 }),
+                // Typed echo, for comparing builds: counts only. Per keystroke,
+                // `frames_presented / echoes`; `intermediate_frames` are frames
+                // that showed the in-between state of a split echo.
+                "typed_echo": {
+                    "echoes": echo_counts.echoes,
+                    "split_echoes": echo_counts.split_echoes,
+                    "frames_presented": echo_counts.frames_presented,
+                    "output_frames": echo_counts.output_frames,
+                    "intermediate_frames": echo_counts.intermediate_frames,
+                    "late_superseded_frames": echo_counts.late_superseded_frames,
+                },
                 // Who draws the blink: the GPU, or the window server's layer
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),

@@ -888,6 +888,7 @@ impl App {
             snapshot_keys.clear();
         }
         let mut metas = Vec::with_capacity(layout.len());
+        ws.typed_echo.begin_capture();
         let home = crate::mux::home_dir_string();
         for (id, r) in &layout {
             if let Some(p) = ws.mux.panes.get(id) {
@@ -916,6 +917,9 @@ impl App {
                         snaps.push(PaneSnapshot::default());
                     }
                     snaps[si].capture_with_card_marks(&g, p.inline_cards.needs_marks());
+                    // Under the lock, unlike the staged generation above, so
+                    // output published after this capture is newer than it.
+                    ws.typed_echo.note_capture(*id, p.term.output_generation());
                     drop(g); // lock released — the render below is lock-free
                     snapshot_keys.push((
                         *id,
@@ -966,6 +970,8 @@ impl App {
         }
         snaps.truncate(metas.len());
         snapshot_keys.truncate(metas.len());
+        let captured_at = std::time::Instant::now();
+        let capture_paints_output = ws.typed_echo.capture_paints_output(&ws.seen_output_gen);
         // Hand the renderer borrows into `metas` (which lives
         // for the whole frame) instead of a second per-pane clone of the images
         // Vec / title String / group_name. `snap` borrows the pooled snapshot
@@ -1155,8 +1161,19 @@ impl App {
                             crate::startup_trace::mark(crate::startup_trace::Phase::FirstFrame);
                             crate::startup_trace::flush();
                         }
-                        ws.last_paint = Some(std::time::Instant::now());
+                        let presented_at = std::time::Instant::now();
+                        ws.last_paint = Some(presented_at);
                         ws.output_pacer.presented();
+                        // Judge the previous typed frame against this one
+                        // before this one takes its place.
+                        observe_typed_echo(ws, presented_at);
+                        ws.typed_echo.frame_presented(
+                            captured_at,
+                            typed_recently(presented_at, ws.last_typed, TYPING_ECHO_WINDOW),
+                            capture_paints_output,
+                            ws.last_typed,
+                            ws.output_frame_budget,
+                        );
                         // Track sustained-flood depth. A frame that flushed
                         // coalesced output bumps the counter; any other paint
                         // resets it. Failed presentation does neither because
@@ -1233,6 +1250,8 @@ impl App {
         }
         if presented {
             defer_output_racing_frame(ws);
+            // Output published while this frame rendered supersedes it.
+            observe_typed_echo(ws, std::time::Instant::now());
         }
         // A frame that did not present leaves the layer blinking over the
         // off-phase frame beneath it, which is still what the screen shows.

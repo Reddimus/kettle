@@ -146,6 +146,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the Window menu. Shortcuts chosen from the keyboard still go through
   Kettle's own key handling, so a program that owns the keyboard keeps its
   chords.
+- `kettle ctl ui_geometry` reports `typed_echo`, counts for comparing builds
+  while typing: keystroke echoes, echoes the shell wrote in two parts (as
+  zsh-autosuggestions does when a key changes its suggestion), frames
+  presented per keystroke, and `intermediate_frames`, frames that showed the
+  half-written state of such an echo. Counts only, never text.
 
 ### Changed
 
