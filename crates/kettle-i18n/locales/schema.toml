@@ -994,7 +994,7 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the TakeScreenshot action."
 
 [messages.palette_toggle_broadcast_all]
-context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastAll action."
+context = "crates/kettle-config/src/palette.rs commands_for(): command palette entry that toggles broadcast to every pane in the focused tab. It runs ToggleBroadcastAll (the broadcast chord) under broadcast-default = group, and ToggleBroadcastPanesInTab otherwise."
 
 [messages.palette_toggle_broadcast_group]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastGroup action."
@@ -1003,7 +1003,7 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastOff action."
 
 [messages.palette_toggle_broadcast_window]
-context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastWindow action."
+context = "crates/kettle-config/src/palette.rs commands_for(): command palette entry that toggles broadcast to every pane in the window. It runs ToggleBroadcastAll (the broadcast chord) under broadcast-default = all, and ToggleBroadcastWindow otherwise."
 
 [messages.palette_toggle_copy_on_select]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleCopyOnSelect action."
@@ -2691,8 +2691,23 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
 
-[messages.menu_new_tab_profile]
-context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu; profiles launch in a separate window/process."
+[messages.menu_new_window_profile]
+context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
+
+[messages.menu_broadcast_input]
+context = "crates/kettle-ui/src/macos_menu.rs and app/menus.rs: title of the Broadcast Input submenu in the macOS Shell menu and the right-click menu. Its rows choose which panes receive what you type. Matches the palette_toggle_broadcast_* wording (Enviar la entrada…)."
+
+[messages.menu_broadcast_off]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row, checked while input goes to the focused pane only. Choosing it stops broadcasting. Masculine: it describes the sending (el envío)."
+
+[messages.menu_broadcast_tab]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused tab. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_window]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in every tab of the window. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_group]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused pane's named group, in every window. Checked while any group is the target; unavailable when the focused pane has no group."
 
 [messages.menu_no_profiles]
 context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."

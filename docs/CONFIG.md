@@ -751,11 +751,26 @@ scrollback only; keep the visible screen unlike `reset`).
 **Broadcast**: `broadcast_all` (type to every pane in the window),
 `broadcast_off`, `broadcast_group` (type to every pane in the focused pane's
 named group — **in every window**, since a group is a set you declared and
-`group_all` already spans them; typing and pasting both follow it). The default
+`group_all` already spans them; typing and pasting both follow it),
+`broadcast_panes_in_tab` (type to every pane in the focused tab, whatever
+`broadcast-default` says; no default chord). The default
 `Ctrl+Cmd+B` (macOS), `Ctrl+Shift+G` (Windows), or `Super+G` (elsewhere) chord
 is `broadcast_tab`, which **toggles** —
 pressing it again turns broadcast off, so you never have to reach for a second
-chord to stop. Which scope it turns *on* is `broadcast-default`.
+chord to stop. Which scope it turns *on* is `broadcast-default`, and the
+command palette names the chord's row after that scope. Under
+`broadcast-default = off` the chord can only turn broadcast off.
+
+The macOS **Shell** menu and the right-click menu offer the same scopes in a
+**Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
+Window** and **Panes in This Group**. The current scope is checked, and
+choosing the checked row turns broadcast off. The chord's hint shows on the
+row it turns on: the tab under `group`, the window under `all`, and no row
+under `off`. **Panes in This Group** stays checked while any group is the
+target; when the focused pane is in another group or none, choosing it turns
+broadcast off, and choosing it again broadcasts to the focused pane's group.
+It is unavailable while the focused pane has no group: greyed in the menu bar,
+hidden in the right-click menu.
 
 A second Kettle process is its own broadcast domain. Use one process with
 several windows when a group needs to span those windows.

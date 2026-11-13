@@ -261,7 +261,7 @@ explicitly.
 Open the new-tab **▾** menu beside **+** (set `tab-bar = always` to keep it
 visible with one tab), or the macOS **Shell** menu:
 
-- **New Tab with Profile** lists the same profiles as `kettle --list-profiles`.
+- **New Window with Profile** lists the same profiles as `kettle --list-profiles`.
   Each choice opens a separate Kettle process/window with that profile, since
   profiles include application-wide settings. The empty **Create Profile…**
   action creates and opens the profiles directory; add a `NAME.config` file
@@ -277,7 +277,11 @@ visible with one tab), or the macOS **Shell** menu:
 The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
 profile, and **Broadcast input…** actions for all panes in the tab, a group or the
 window. Broadcast sends input to multiple panes; choose **Stop broadcasting
-input** when finished. Profiles and
+input** when finished. The macOS **Shell** menu and the right-click menu have a
+**Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
+Window** and **Panes in This Group**, with the current one checked; choosing the
+checked row stops broadcasting. The broadcast chord (`Ctrl+Cmd+B` on macOS,
+`Ctrl+Shift+G` on Windows, `Super+G` elsewhere) shows on the row it turns on. Profiles and
 layouts can also be selected with `--profile NAME` and `--layout NAME`.
 See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.md).
 

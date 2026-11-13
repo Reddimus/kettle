@@ -41,7 +41,7 @@ successful exits too, or `exit-behavior = close` to close every exit.
 ### Profiles, layouts and SSH
 
 The **▾** menu beside New tab and the macOS **Shell** menu offer
-**New Tab with Profile**, **Save Layout…**, **Open Layout…** and **SSH launcher**.
+**New Window with Profile**, **Save Layout…**, **Open Layout…** and **SSH launcher**.
 The command palette (`Ctrl+Shift+K`) also offers these actions and one entry
 per profile. Profiles open a separate process/window so their font, theme and
 other application settings apply safely. When none exist, **Create Profile…**

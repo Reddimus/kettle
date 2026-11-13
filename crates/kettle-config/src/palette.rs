@@ -5,6 +5,7 @@
 
 use kettle_i18n::{Language, Text, Translator};
 
+use crate::BroadcastDefault;
 use crate::fuzzy;
 use crate::keybinds::Action;
 
@@ -106,6 +107,9 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::QuickTerminalToggle, ToggleQuickTerminal),
         (T::PaletteToggleFullscreen, ToggleFullscreen),
         (T::PaletteToggleBroadcastAll, ToggleBroadcastAll),
+        // The same tab scope, whatever `broadcast-default` says;
+        // `commands_for` lists one of the two.
+        (T::PaletteToggleBroadcastAll, ToggleBroadcastPanesInTab),
         (T::PaletteToggleBroadcastGroup, ToggleBroadcastGroup),
         (T::PaletteToggleBroadcastWindow, ToggleBroadcastWindow),
         (T::PaletteToggleBroadcastOff, ToggleBroadcastOff),
@@ -167,6 +171,34 @@ pub fn commands() -> Vec<(Text, Action)> {
         commands.retain(|(_, action)| *action != PastePrimary);
     }
     commands
+}
+
+/// The palette's commands under `broadcast-default = default`. The tab and
+/// window scopes are each listed once. `ToggleBroadcastAll`, the chord's
+/// action, stands for the scope it turns on, with that scope's label, so the
+/// chord's hint sits on the row it belongs to; the scope's own toggle is then
+/// left out. Under `off` the chord can only stop broadcasting, which "Stop
+/// broadcasting input" already offers, so it is left out instead.
+pub fn commands_for(default: BroadcastDefault) -> Vec<(Text, Action)> {
+    let (chord_label, replaced) = match default {
+        BroadcastDefault::Group => (
+            Some(Text::PaletteToggleBroadcastAll),
+            Action::ToggleBroadcastPanesInTab,
+        ),
+        BroadcastDefault::All => (
+            Some(Text::PaletteToggleBroadcastWindow),
+            Action::ToggleBroadcastWindow,
+        ),
+        BroadcastDefault::Off => (None, Action::ToggleBroadcastAll),
+    };
+    commands()
+        .into_iter()
+        .filter(|(_, action)| *action != replaced)
+        .filter_map(|(label, action)| match action {
+            Action::ToggleBroadcastAll => chord_label.map(|label| (label, action)),
+            _ => Some((label, action)),
+        })
+        .collect()
 }
 
 /// Indices into `cmds` that match `query` against their labels in `tr`'s
@@ -467,6 +499,7 @@ mod tests {
             ToggleBroadcastAll,
             ToggleBroadcastGroup,
             ToggleBroadcastWindow,
+            ToggleBroadcastPanesInTab,
             ToggleBroadcastOff,
             ToggleQuickTerminal,
             ToggleFullscreen,
@@ -634,6 +667,7 @@ mod tests {
                 | ToggleBroadcastAll
                 | ToggleBroadcastGroup
                 | ToggleBroadcastWindow
+                | ToggleBroadcastPanesInTab
                 | ToggleBroadcastOff
                 | ToggleQuickTerminal
                 | ToggleFullscreen
@@ -723,6 +757,61 @@ mod tests {
     const EN: Translator = Translator::new(Language::En);
     const ES: Translator = Translator::new(Language::Es);
 
+    /// Each broadcast scope keeps a palette row under every
+    /// `broadcast-default`, and the chord's action is the row for the scope it
+    /// turns on, labelled with that scope (`labels_are_distinct_in_each_language`
+    /// checks the labels in English and Spanish). Under `group`
+    /// that is the tab, under `all` the window, and under `off`, where the
+    /// chord only stops broadcasting, it has no row.
+    #[test]
+    fn the_chord_row_follows_broadcast_default() {
+        use Action::*;
+        for (default, chord_label) in [
+            (
+                BroadcastDefault::Group,
+                Some(Text::PaletteToggleBroadcastAll),
+            ),
+            (
+                BroadcastDefault::All,
+                Some(Text::PaletteToggleBroadcastWindow),
+            ),
+            (BroadcastDefault::Off, None),
+        ] {
+            let cmds = commands_for(default);
+            assert_eq!(
+                cmds.iter()
+                    .find(|(_, action)| *action == ToggleBroadcastAll)
+                    .map(|(label, _)| *label),
+                chord_label,
+                "{default:?}"
+            );
+            for scope in [
+                Text::PaletteToggleBroadcastAll,
+                Text::PaletteToggleBroadcastWindow,
+                Text::PaletteToggleBroadcastGroup,
+                Text::PaletteToggleBroadcastOff,
+            ] {
+                assert!(
+                    cmds.iter().any(|(label, _)| *label == scope),
+                    "{default:?} lost {scope:?}"
+                );
+            }
+            let tab = cmds
+                .iter()
+                .find(|(label, _)| *label == Text::PaletteToggleBroadcastAll)
+                .map(|(_, action)| action.clone());
+            assert_eq!(
+                tab,
+                Some(if default == BroadcastDefault::Group {
+                    ToggleBroadcastAll
+                } else {
+                    ToggleBroadcastPanesInTab
+                }),
+                "{default:?}"
+            );
+        }
+    }
+
     #[test]
     fn primary_selection_paste_is_offered_only_where_it_exists() {
         let offered = commands()
@@ -783,19 +872,27 @@ mod tests {
         assert!(rank("pantalla completa", &cmds, &EN).is_empty());
     }
 
-    /// Every entry has its own label in both languages, so no two commands
-    /// read the same.
+    /// Every entry the palette shows has its own label in both languages,
+    /// under every `broadcast-default`, so no two commands read the same.
+    /// (`commands()` alone lists both tab-scope toggles under one label;
+    /// `commands_for` shows one.)
     #[test]
     fn labels_are_distinct_in_each_language() {
-        let cmds = commands();
-        for tr in [EN, ES] {
-            let mut seen = std::collections::BTreeSet::new();
-            for (label, action) in &cmds {
-                assert!(
-                    seen.insert(tr.text(*label)),
-                    "{action:?}: {}",
-                    tr.text(*label)
-                );
+        for default in [
+            BroadcastDefault::Group,
+            BroadcastDefault::All,
+            BroadcastDefault::Off,
+        ] {
+            let cmds = commands_for(default);
+            for tr in [EN, ES] {
+                let mut seen = std::collections::BTreeSet::new();
+                for (label, action) in &cmds {
+                    assert!(
+                        seen.insert(tr.text(*label)),
+                        "{default:?} {action:?}: {}",
+                        tr.text(*label)
+                    );
+                }
             }
         }
     }

@@ -44,8 +44,7 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
-        &[],
-        false,
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
     let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
         .expect("a 320x160 surface fits a picker card");
@@ -298,10 +297,9 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
-        false,
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
-    let entries = super::palette_entries(None, &es, &[]);
+    let entries = super::palette_entries(None, &es, &[], kettle_config::BroadcastDefault::default());
     let ranked = kettle_config::palette::rank_matches("ct", &entries, &es);
     assert_eq!(list.rows.len(), ranked.len());
     for (row, entry) in list.rows.iter().zip(ranked) {
@@ -334,8 +332,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
-        false,
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
     assert_eq!(empty.rows.len(), 1);
     assert!(!empty.rows[0].enabled);
@@ -352,8 +349,7 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 &kettle_config::keybinds::defaults(),
                 &EN_TEXT,
                 None,
-                &[],
-                false,
+                &[], false, kettle_config::BroadcastDefault::default(),
             );
             let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
                 .expect("a restored 120px window must retain its picker");
@@ -389,7 +385,7 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
     use super::{PickerPointer, apply_picker_pointer};
     let bindings = kettle_config::keybinds::defaults();
     let profiles: Vec<String> = (0..20).map(|i| format!("profile-{i}")).collect();
-    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles, false);
+    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles, false, kettle_config::BroadcastDefault::default());
     assert!(list.rows.len() >= 150, "{} rows", list.rows.len());
     let cell = (8.0, 16.0);
     let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len()).unwrap();
@@ -415,7 +411,7 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
     assert_eq!(menu.visible_row_rect(8), None);
     // A window with room for one or two rows still paints and hits them.
     for height in [120.0, 150.0] {
-        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false);
+        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
         let menu = picker_context_menu(list, (800.0, height), cell, 0.0).unwrap();
         let painted = kettle_render::context_menu_row_rects(&menu, cell);
         assert!(!painted.is_empty(), "height {height}");
@@ -434,8 +430,8 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
 fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
     let bindings = kettle_config::keybinds::defaults();
     for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
-        let list = command_picker_list("", 0, &bindings, &tr, None, &[], true);
-        let bound = kettle_config::palette::commands()
+        let list = command_picker_list("", 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+        let bound = kettle_config::palette::commands_for(kettle_config::BroadcastDefault::default())
             .into_iter()
             .filter(|(_, action)| {
                 kettle_config::keybinds::ui_hint_label(&bindings, action)
@@ -445,13 +441,13 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
         assert!(bound >= 10, "{bound} bound commands");
         assert_eq!(list.rows.len(), bound);
         assert!(list.rows.iter().all(|row| row.enabled && !row.hint.is_empty()));
-        let full = command_picker_list("", 0, &bindings, &tr, None, &[], false);
+        let full = command_picker_list("", 0, &bindings, &tr, None, &[], false, kettle_config::BroadcastDefault::default());
         assert!(full.rows.len() > list.rows.len());
         assert!(full.rows.iter().any(|row| row.hint.is_empty()));
         for query in ["", "tab", "split", "font"] {
-            let entries = super::palette_view_entries(None, &tr, &[], &bindings, true);
+            let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
             let ranked = kettle_config::palette::rank_entries(query, &entries, &tr);
-            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true);
+            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
             assert_eq!(list.rows.len(), ranked.len().max(1), "{query:?}");
             for (row, index) in list.rows.iter().zip(&ranked) {
                 assert_eq!(row.label, entries[*index].0.shown(&tr), "{query:?}");
@@ -490,10 +486,10 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
 fn enter_in_the_shortcut_list_runs_the_selected_bound_row() {
     let bindings = kettle_config::keybinds::defaults();
     for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
-        let entries = super::palette_view_entries(None, &tr, &[], &bindings, true);
-        let full = super::palette_view_entries(None, &tr, &[], &bindings, false);
+        let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
+        let full = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, false);
         for query in ["", "tab", "split", "font", "pane"] {
-            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true);
+            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
             let matched = kettle_config::palette::rank_entries(query, &entries, &tr).len();
             assert!(matched > 1, "{query:?} needs several rows");
             for (selected, row) in list.rows.iter().enumerate() {

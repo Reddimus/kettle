@@ -806,6 +806,7 @@ fn rows_other_than_themes_carry_no_swatches() {
             None,
             &[],
             false,
+            kettle_config::BroadcastDefault::default(),
         ),
         super::command_picker_list(
             "zzqqxxjj",
@@ -815,6 +816,7 @@ fn rows_other_than_themes_carry_no_swatches() {
             None,
             &[],
             false,
+            kettle_config::BroadcastDefault::default(),
         ),
         super::layout_picker_list("", 0, &layouts, &EN),
         super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),

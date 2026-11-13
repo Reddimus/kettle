@@ -19,6 +19,7 @@ fn ready() -> Context {
         renderer: true,
         detachable_tabs: true,
         fullscreen: false,
+        ..Context::default()
     }
 }
 
@@ -68,11 +69,12 @@ fn complete_structure_in_english_and_spanish() {
             ],
             vec![
                 "New Window",
+                "New Window with Profile",
                 "New Tab",
-                "New Tab with Profile",
                 "Save Layout…",
                 "Open Layout…",
                 "SSH Launcher…",
+                "Broadcast Input",
                 "|",
                 "Split Right",
                 "Split Left",
@@ -141,11 +143,12 @@ fn complete_structure_in_english_and_spanish() {
             ],
             vec![
                 "Nueva ventana",
+                "Nueva ventana con perfil",
                 "Nueva pestaña",
-                "Nueva pestaña con perfil",
                 "Guardar diseño…",
                 "Abrir diseño…",
                 "Lanzador SSH…",
+                "Enviar la entrada a varios paneles",
                 "|",
                 "Dividir a la derecha",
                 "Dividir a la izquierda",
@@ -529,6 +532,8 @@ fn native_items_retain_the_command_they_were_built_with() {
     assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
     assert!(native.contains("let event = match &self.route"));
     assert!(!native.contains("sender.tag()"));
+    // The model's checkmark reaches AppKit; nothing else shows it.
+    assert!(native.contains("item.setState(if *checked {"));
 }
 
 #[test]
@@ -1020,6 +1025,158 @@ fn native_window_items_route_through_kettle_in_both_menus() {
             for always in [N::Quit, N::Hide, N::BringAllToFront] {
                 assert_eq!(state(&keys, always).map(|(_, on)| on), Some(true));
             }
+        }
+    }
+}
+
+/// The Shell menu's Broadcast Input submenu, for every `broadcast-default`
+/// and scope: the checkmark is on the scope's row, the chord's hint is on the
+/// row whose action is the chord's (Tab under `group`, Window under `all`, no
+/// row under `off`), and Panes in This Group is greyed only while it is
+/// unchecked and the focused pane has no group.
+#[test]
+fn broadcast_submenu_checks_the_scope_and_shows_the_chord_on_its_row() {
+    use crate::app::BroadcastKind as K;
+    use kettle_config::BroadcastDefault as D;
+    let chord = Trigger::new(Mods::CTRL | Mods::SUPER, Key::Char('b'));
+    let off = Trigger::new(Mods::CTRL | Mods::SHIFT | Mods::SUPER, Key::Char('b'));
+    let bindings = Bindings::from([
+        (chord, Action::ToggleBroadcastAll),
+        (off, Action::ToggleBroadcastOff),
+    ]);
+    let broadcast_rows = |tr: &Translator, context: Context| {
+        let shell = menu_model_with_profiles(tr, &bindings, context, &[])
+            .into_iter()
+            .nth(1)
+            .expect("Shell menu");
+        shell
+            .rows
+            .into_iter()
+            .find_map(|row| match row {
+                Row::Submenu { title, rows } if title == tr.text(T::MenuBroadcastInput) => {
+                    Some(rows)
+                }
+                _ => None,
+            })
+            .expect("Broadcast Input submenu")
+    };
+    for (language, titles) in [
+        (
+            Language::En,
+            [
+                "Off",
+                "Panes in This Tab",
+                "Panes in This Window",
+                "Panes in This Group",
+            ],
+        ),
+        (
+            Language::Es,
+            [
+                "Desactivado",
+                "Paneles de esta pestaña",
+                "Paneles de esta ventana",
+                "Paneles de este grupo",
+            ],
+        ),
+    ] {
+        let tr = Translator::new(language);
+        for default in [D::Group, D::All, D::Off] {
+            for (kind, pane_group, checked_row) in [
+                (K::Off, false, 0),
+                (K::Tab, false, 1),
+                (K::Window, true, 2),
+                (K::FocusedGroup, true, 3),
+                (K::OtherGroup, false, 3),
+            ] {
+                let context = Context {
+                    broadcast: kind,
+                    pane_group,
+                    broadcast_default: default,
+                    ..ready()
+                };
+                let rows = broadcast_rows(&tr, context);
+                let case = format!("{language:?} {default:?} {kind:?}");
+                let mut chord_rows = Vec::new();
+                for (index, row) in rows.iter().enumerate() {
+                    let Row::Item {
+                        title,
+                        command: Command::Kettle(_),
+                        shortcut,
+                        shortcut_label,
+                        enabled,
+                        checked,
+                    } = row
+                    else {
+                        panic!("{case}: row {index} is a Kettle item");
+                    };
+                    assert_eq!(title, titles[index], "{case}");
+                    assert_eq!(*checked, index == checked_row, "{case}: row {index}");
+                    assert_eq!(
+                        *enabled,
+                        index != 3 || pane_group || index == checked_row,
+                        "{case}: row {index}"
+                    );
+                    if *shortcut == Some(chord) {
+                        assert_eq!(shortcut_label.as_deref(), Some(chord.label().as_str()));
+                        chord_rows.push(index);
+                    }
+                }
+                let expected: &[usize] = match default {
+                    D::Group => &[1],
+                    D::All => &[2],
+                    D::Off => &[],
+                };
+                assert_eq!(chord_rows, expected, "{case}");
+                assert!(
+                    matches!(&rows[0], Row::Item { shortcut: Some(s), .. } if *s == off),
+                    "{case}: Off shows the off chord"
+                );
+            }
+        }
+    }
+    // Without a focused window nothing in it can be chosen.
+    for row in broadcast_rows(&Translator::new(Language::En), Context::default()) {
+        assert!(matches!(row, Row::Item { enabled: false, .. }));
+    }
+}
+
+/// Each `broadcast-default` reaches every scope from the menu, and the
+/// chord's action stands in for the scope it turns on.
+#[test]
+fn broadcast_submenu_reaches_every_scope_under_every_default() {
+    use kettle_config::BroadcastDefault as D;
+    for (default, tab, window) in [
+        (
+            D::Group,
+            Action::ToggleBroadcastAll,
+            Action::ToggleBroadcastWindow,
+        ),
+        (
+            D::All,
+            Action::ToggleBroadcastPanesInTab,
+            Action::ToggleBroadcastAll,
+        ),
+        (
+            D::Off,
+            Action::ToggleBroadcastPanesInTab,
+            Action::ToggleBroadcastWindow,
+        ),
+    ] {
+        let context = Context {
+            broadcast_default: default,
+            pane_group: true,
+            ..ready()
+        };
+        let model = empty_menu_model(&Translator::new(Language::En), &Bindings::new(), context);
+        let actions = kettle_actions(&model[1].rows);
+        for action in [
+            &Action::ToggleBroadcastOff,
+            &tab,
+            &window,
+            &Action::ToggleBroadcastGroup,
+        ] {
+            assert!(actions.contains(&action), "{default:?} {action:?}");
         }
     }
 }

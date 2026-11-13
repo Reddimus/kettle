@@ -25,6 +25,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   until you type, in the UI language. In a window too narrow for it beside the
   key hint, it is left out rather than cut off.
 
+- Broadcast input has its own menu. The macOS Shell menu and the
+  right-click menu have a Broadcast Input submenu (Enviar la entrada a varios
+  paneles) with Off, Panes in This Tab, Panes in This Window and Panes in
+  This Group. The current scope is checked, choosing the checked row stops
+  broadcasting, and the broadcast chord's shortcut shows on the row it turns
+  on. Panes in This Group is unavailable while the focused pane has no
+  group. The checkmark also follows a group scope that ends because its last
+  pane closed.
+
 - Vi mode can select whole lines and blocks from the keyboard, as Vim does:
   `V` starts a line selection and `Ctrl+v` a block (rectangular) selection
   at the vi cursor, beside `v` for characters. Pressing another of the three
@@ -239,6 +248,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   waited the full 3 ms, before the wait could end early, cut the frames that
   showed a half-written echo from about one per split echo to one in twenty.
   Ending the wait at the second write has not been measured live.
+
+- The command palette names the broadcast chord's row after the scope it
+  turns on, so with `broadcast-default = all` it reads "Broadcast input to
+  every pane in window" instead of claiming the tab. Each scope is listed
+  once in both languages. A new `broadcast_panes_in_tab` action always
+  broadcasts to the focused tab, whatever `broadcast-default` says; it has no
+  default chord. `broadcast-default = off` still keeps the chord from turning
+  broadcast on.
+
+- The profile menu is now called New Window with Profile (Nueva ventana con
+  perfil), since each profile has always opened in a new window. In the
+  macOS Shell menu it sits right below New Window.
 
 - When a window loses focus its selection turns a neutral grey, as a
   selection in an inactive macOS window does, instead of a dimmer shade of

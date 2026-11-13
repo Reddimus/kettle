@@ -7,6 +7,7 @@ impl App {
         {
             let ws = _ws.or_else(|| self.windows.get(&self.focused_seq));
             let pane = ws.and_then(|ws| ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id)));
+            let broadcast = ws.map(BroadcastKind::of_window).unwrap_or_default();
             let context =
                 crate::macos_menu::Context {
                     window: ws.is_some_and(|ws| ws.window.is_some()),
@@ -27,6 +28,9 @@ impl App {
                     fullscreen: ws
                         .and_then(|ws| ws.window.as_ref())
                         .is_some_and(|window| window.fullscreen().is_some()),
+                    broadcast: broadcast.0,
+                    pane_group: broadcast.1,
+                    broadcast_default: self.cfg.broadcast_default,
                 };
             crate::macos_menu::sync(&self.proxy, &self.cfg, context, &self.profile_inventory);
         }

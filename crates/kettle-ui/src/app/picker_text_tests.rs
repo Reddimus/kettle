@@ -214,14 +214,45 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
 fn picker_rows_and_empty_states_follow_the_ui_language() {
     let bindings = kettle_config::keybinds::defaults();
     assert_eq!(
-        command_picker_list("", 0, &bindings, &ES, None, &[], false,).rows[0].label,
+        command_picker_list(
+            "",
+            0,
+            &bindings,
+            &ES,
+            None,
+            &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
+        )
+        .rows[0]
+            .label,
         "Nueva pestaña"
     );
-    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, &[], false);
+    let none = command_picker_list(
+        "zzzqqq",
+        0,
+        &bindings,
+        &ES,
+        None,
+        &[],
+        false,
+        kettle_config::BroadcastDefault::default(),
+    );
     assert_eq!(none.rows[0].label, "Ningún comando coincide");
     assert!(!none.rows[0].enabled);
     assert_eq!(
-        command_picker_list("zzzqqq", 0, &bindings, &EN, None, &[], false,).rows[0].label,
+        command_picker_list(
+            "zzzqqq",
+            0,
+            &bindings,
+            &EN,
+            None,
+            &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
+        )
+        .rows[0]
+            .label,
         "No matching command"
     );
 

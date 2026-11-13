@@ -1688,6 +1688,7 @@ impl App {
             self.update_notice().as_ref(),
             &self.ui_text,
             &ws.palette_profiles,
+            self.cfg.broadcast_default,
             &self.cfg.keybinds,
             ws.palette_bound_only,
         );

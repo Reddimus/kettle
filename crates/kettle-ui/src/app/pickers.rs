@@ -103,15 +103,17 @@ pub(crate) fn profile_launch_entries(
         .collect()
 }
 
-/// Commands and the profiles captured when the palette opened, followed by
-/// release notes and Dismiss while an update notice is active.
+/// Commands, with the broadcast rows `broadcast-default` picks, and the
+/// profiles captured when the palette opened, followed by release notes and
+/// Dismiss while an update notice is active.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
     profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
-    let mut entries: Vec<_> = kettle_config::palette::commands()
+    let mut entries: Vec<_> = kettle_config::palette::commands_for(broadcast_default)
         .into_iter()
         .map(|(label, action)| (PaletteLabel::Text(label), action))
         .collect();
@@ -141,10 +143,11 @@ pub(super) fn palette_view_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
     profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
     bindings: &Bindings,
     bound_only: bool,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
-    let mut entries = palette_entries(notice, tr, profiles);
+    let mut entries = palette_entries(notice, tr, profiles, broadcast_default);
     if bound_only {
         entries.retain(|(_, action)| {
             kettle_config::keybinds::ui_hint_label(bindings, action)
@@ -167,6 +170,7 @@ pub(super) fn palette_enter_action(
         .map(|&index| entries[index].1.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn command_picker_list(
     query: &str,
     selected: usize,
@@ -175,8 +179,16 @@ pub(super) fn command_picker_list(
     notice: Option<&crate::update_notice::Notice>,
     profiles: &[String],
     bound_only: bool,
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> PickerList {
-    let commands = palette_view_entries(notice, tr, profiles, bindings, bound_only);
+    let commands = palette_view_entries(
+        notice,
+        tr,
+        profiles,
+        broadcast_default,
+        bindings,
+        bound_only,
+    );
     let ranked = kettle_config::palette::rank_matches(query, &commands, tr);
     let rows = ranked
         .into_iter()
@@ -726,6 +738,7 @@ pub(super) fn open_picker_list(
             notice,
             &ws.palette_profiles,
             ws.palette_bound_only,
+            cfg.broadcast_default,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(

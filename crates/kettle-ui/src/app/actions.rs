@@ -289,18 +289,10 @@ impl App {
             .collect();
         drop(populated);
         if reset_current {
-            ws.mux.broadcast = BroadcastScope::Off;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
+            self.set_broadcast_scope(ws, BroadcastScope::Off);
         }
         for seq in reset_windows {
-            if let Some(target) = self.windows.get_mut(&seq) {
-                target.mux.broadcast = BroadcastScope::Off;
-                if let Some(window) = &target.window {
-                    window.request_redraw();
-                }
-            }
+            self.set_window_broadcast_scope(seq, BroadcastScope::Off);
         }
     }
 
@@ -323,12 +315,7 @@ impl App {
             .collect();
         drop(populated);
         for seq in reset_windows {
-            if let Some(target) = self.windows.get_mut(&seq) {
-                target.mux.broadcast = BroadcastScope::Off;
-                if let Some(window) = &target.window {
-                    window.request_redraw();
-                }
-            }
+            self.set_window_broadcast_scope(seq, BroadcastScope::Off);
         }
     }
 
@@ -705,48 +692,14 @@ impl App {
             Action::StartSearch => {
                 self.open_search(ws);
             }
-            Action::ToggleBroadcastAll => {
-                // Toggle: turn on the `broadcast-default` scope, or turn
-                // broadcast off when that scope is already on. The explicit off
-                // chord (`ToggleBroadcastOff`) still works.
-                let on = broadcast_scope_for_default(self.cfg.broadcast_default);
-                ws.mux.broadcast = if ws.mux.broadcast == on {
-                    crate::mux::BroadcastScope::Off
-                } else {
-                    on
-                };
-            }
-            Action::ToggleBroadcastOff => {
-                ws.mux.broadcast = crate::mux::BroadcastScope::Off;
-            }
-            Action::ToggleBroadcastGroup => {
-                // Toggle broadcast scope between Off and
-                // Group(focused_pane.group_name). If focused
-                // pane has no group, log + no-op.
-                let focused_group = ws.mux.focused().and_then(|p| p.group_name.clone());
-                let Some(group) = focused_group else {
-                    log::info!(
-                        "toggle-broadcast-group: focused pane has no group_name; \
-                         use Action::CreateGroup or Action::GroupTab first"
-                    );
+            Action::ToggleBroadcastAll
+            | Action::ToggleBroadcastOff
+            | Action::ToggleBroadcastGroup
+            | Action::ToggleBroadcastWindow
+            | Action::ToggleBroadcastPanesInTab => {
+                if !self.apply_broadcast_action(ws, &action) {
                     return;
-                };
-                ws.mux.broadcast = match &ws.mux.broadcast {
-                    crate::mux::BroadcastScope::Group(name) if name == &group => {
-                        crate::mux::BroadcastScope::Off
-                    }
-                    _ => crate::mux::BroadcastScope::Group(group),
-                };
-            }
-            Action::ToggleBroadcastWindow => {
-                // Toggle window-wide broadcast on/off. Unlike
-                // ToggleBroadcastAll, whose scope follows `broadcast-default`
-                // (per-tab by default), this always targets every pane in every
-                // tab.
-                ws.mux.broadcast = match &ws.mux.broadcast {
-                    crate::mux::BroadcastScope::All => crate::mux::BroadcastScope::Off,
-                    _ => crate::mux::BroadcastScope::All,
-                };
+                }
             }
             Action::ToggleZoom => {
                 // A tab with one pane has nothing to expand: entering zoom

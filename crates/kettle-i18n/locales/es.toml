@@ -932,7 +932,17 @@ settings_description_field_builtin_box_drawing = "Ajustar líneas, bloques y sep
 
 tab_new_options = "Opciones de nueva pestaña"
 
-menu_new_tab_profile = "Nueva pestaña con perfil"
+menu_new_window_profile = "Nueva ventana con perfil"
+
+menu_broadcast_input = "Enviar la entrada a varios paneles"
+
+menu_broadcast_off = "Desactivado"
+
+menu_broadcast_tab = "Paneles de esta pestaña"
+
+menu_broadcast_window = "Paneles de esta ventana"
+
+menu_broadcast_group = "Paneles de este grupo"
 
 menu_no_profiles = "Aún no hay perfiles — Crear perfil…"
 
