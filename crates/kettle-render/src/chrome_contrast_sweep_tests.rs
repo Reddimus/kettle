@@ -224,6 +224,14 @@ fn tab_inks_clear_the_measured_macos_pixels() {
     let alpha = chrome::text_surface_alpha(bg, 0.86, color::MACOS_BACKDROP_LIFT, true);
     assert_eq!(alpha, 0.86);
     let backing = Backing::translucent(bg, alpha, color::MACOS_BACKDROP_LIFT);
+    // The painter's model spans the same: the black bar at its dark end, the
+    // white bar inside its light end.
+    assert_eq!(backing.over_black, measured[0]);
+    let light = backing.over_white;
+    assert!(
+        light.r >= 61 && light.g >= 64 && light.b >= 74,
+        "the painter's light end must reach the white bar: {light:?}"
+    );
     let rest = colors.secondary(fg, bg);
     let cases = [
         (
