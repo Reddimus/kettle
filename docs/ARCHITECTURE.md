@@ -1861,7 +1861,11 @@ title bar `titlebar_settings_control` adds a Settings gear the size of `▾`, 8 
 before it, without moving `▾ +`; it shows only while the lane still keeps
 `tab-min-width` beside every control (never by tab count). The gear is drawn as
 alpha quads from `tab_strip::gear_mask`, not a font glyph, and opens Settings on
-a release over it. Titlebar height
+a release over it. The gear takes its room from the right of the strip, so
+`centre_lone_titlebar_tab` narrows a lone tab evenly about the window centre,
+down to `tab-min-width`, rather than letting it slide off centre, and a
+torn-off tab is held in that same lone tab (`tear_off_destination_tab`, shared
+with the Wayland grip). Titlebar height
 is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
 clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
 band height. Tooltips use translated action names and the live keymap shortcut,

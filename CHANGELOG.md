@@ -13,7 +13,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Settings, as Cmd+, does; its tooltip names whichever key opens Settings,
   and screen readers call it Settings (Configuración in Spanish). The gear
   sits apart from `▾ +`, which do not move, and it hides only when the
-  window is too narrow to keep a tab beside it. Windows and Linux keep
+  window is too narrow to keep a tab beside it. A lone tab stays centred
+  on the window beside it, narrowing in a narrow window. Windows and Linux keep
   Settings in their `▾` and `≡` menus.
 
 - Making the font larger or smaller, or resetting it, from the keyboard,
