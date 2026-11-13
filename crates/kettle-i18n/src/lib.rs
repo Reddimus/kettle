@@ -89,6 +89,18 @@ impl Translator {
         self.language
     }
 
+    /// `value` written as the language writes a number: a decimal point in
+    /// English (`13.5`) and a decimal comma in Spanish (`13,5`, as the
+    /// catalogue's own `1,5x`). Whole numbers have no separator. Rounding is
+    /// the caller's; this writes the shortest form that reads back as `value`.
+    pub fn decimal(&self, value: f32) -> String {
+        let text = value.to_string();
+        match self.language {
+            Language::En => text,
+            Language::Es => text.replace('.', ","),
+        }
+    }
+
     /// Development-only English expansion. This constructor does not exist in release.
     #[cfg(all(debug_assertions, any(feature = "dev-pseudo", test)))]
     pub const fn pseudo() -> Self {
@@ -112,6 +124,18 @@ include!(concat!(env!("OUT_DIR"), "/catalogue.rs"));
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimals_take_the_language_separator_and_whole_numbers_none() {
+        let en = Translator::new(Language::En);
+        let es = Translator::new(Language::Es);
+        assert_eq!(en.decimal(13.5), "13.5");
+        assert_eq!(es.decimal(13.5), "13,5");
+        assert_eq!(en.decimal(14.0), "14");
+        assert_eq!(es.decimal(14.0), "14");
+        assert_eq!(es.decimal(0.1), "0,1");
+        assert_eq!(Translator::pseudo().decimal(13.5), "13.5");
+    }
 
     #[test]
     fn incomplete_spanish_uses_english_for_every_entry() {
