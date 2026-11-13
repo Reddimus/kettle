@@ -2509,8 +2509,8 @@ any wake that races a frame.
 
 Counting publications cannot tell whose they are:
 - A key sent before the previous key's echo in that pane had published
-  shares its baseline: the previous echo's first write would count as this
-  echo's second. zsh-autosuggestions does this in a burst, cancelling one
+  shares its baseline. The previous echo's write would be counted as this
+  echo's first, and this echo's own first write as its second. zsh-autosuggestions does this in a burst, cancelling one
   key's suggestion fetch when the next key arrives. `key_sent` marks such a
   pane's baseline uncertain, and only the deadline releases its settle.
 - The settle can still reach two publications before the echo's second write.
@@ -4157,7 +4157,9 @@ non-regression claim.
   advances `deferred → queued → presenting → idle` only after a presented
   frame; a failed presentation returns to `deferred` without a busy deadline.
   The pane latch stays closed throughout a deferred interval and reopens only
-  when a real frame is about to snapshot generations. A queued wake that was
+  when a real frame is about to snapshot generations. The one exception is a
+  settled typed echo, inside the typing window where the pacer is bypassed:
+  it reopens its panes' latches when it arms (see [Typed echo](#typed-echo)). A queued wake that was
   already covered by a presented frame is acknowledged and then resampled,
   closing the race between the stale check and rearm. Visibility, recovery,
   reap, and renderer guards run before the pacer can enter `presenting`, so an
