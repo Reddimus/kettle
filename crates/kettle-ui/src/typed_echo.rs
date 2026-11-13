@@ -13,12 +13,13 @@
 //! (`Terminal::output_published_at`), not from when the UI thread gets to a
 //! wake, which can be after a whole frame of rendering.
 //!
-//! The echo settle acts on those counts. Once a pane's echo has split, its
-//! later echoes paint [`ECHO_SETTLE`] after their first wake instead of at
-//! once. The pane's output latch stays closed from that wake until the frame
-//! samples output, so the second write lands in the grid without another wake
-//! and the settled frame shows both. A pane whose echoes arrive in one write
-//! never arms it and pays nothing.
+//! The echo settle acts on those counts. Once the echo of a typed-text key
+//! (not Enter, Tab or a control chord, whose echoes split in any shell) has
+//! split, the pane's later echoes paint [`ECHO_SETTLE`] after their first
+//! wake instead of at once. The pane's output latch stays closed from that
+//! wake until the frame samples output, so the second write lands in the grid
+//! without another wake and the settled frame shows both. A pane whose typed
+//! keys echo in one write never arms it and pays nothing.
 
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,26 @@ pub(crate) const ECHO_SETTLE: Duration = Duration::from_millis(3);
 /// about one key in four split, so while someone types, splits recur well
 /// inside this; a pause longer than this costs one unsettled split.
 pub(crate) const SPLIT_MEMORY: Duration = Duration::from_secs(5);
+
+/// The most bytes one typed-text keystroke can send: a few composed
+/// characters from an input method. Anything longer is a paste.
+const MAX_TYPED_TEXT_BYTES: usize = 32;
+
+/// Whether `bytes` is one typed-text keystroke: printable characters (any
+/// UTF-8) or a lone backspace. Enter, Tab, control chords and escape
+/// sequences are not: their echoes legitimately come in several writes (Enter
+/// prints a newline, runs the command, then draws the prompt), so learning
+/// from them would settle a shell whose typing never splits.
+pub(crate) fn is_typed_text(bytes: &[u8]) -> bool {
+    match bytes {
+        [] => false,
+        [0x7f] | [0x08] => true,
+        _ => {
+            bytes.len() <= MAX_TYPED_TEXT_BYTES
+                && bytes.iter().all(|&byte| byte >= 0x20 && byte != 0x7f)
+        }
+    }
+}
 
 /// Panes remembered as splitting. Entries also expire after
 /// [`SPLIT_MEMORY`], so a closed pane's entry goes away by itself.
@@ -105,6 +126,8 @@ struct EchoOrigin {
     typed_at: Option<Instant>,
     /// Panes with new output at the echo's first wake.
     panes: Vec<PanePublication>,
+    /// Those whose last input was typed text: only their splits are learned.
+    learns: Vec<u64>,
     split: bool,
 }
 
@@ -142,6 +165,7 @@ impl TypedEcho {
         &mut self,
         last_typed: Option<Instant>,
         new_output: impl IntoIterator<Item = PanePublication>,
+        typed_text: impl Fn(u64) -> bool,
     ) -> bool {
         if self
             .origin
@@ -151,9 +175,16 @@ impl TypedEcho {
             return false;
         }
         self.counts.echoes += 1;
+        let panes: Vec<PanePublication> = new_output.into_iter().collect();
+        let learns = panes
+            .iter()
+            .map(|&(id, ..)| id)
+            .filter(|&id| typed_text(id))
+            .collect();
         self.origin = Some(EchoOrigin {
             typed_at: last_typed,
-            panes: new_output.into_iter().collect(),
+            panes,
+            learns,
             split: false,
         });
         true
@@ -182,7 +213,9 @@ impl TypedEcho {
             if let Some(pane) = split_pane {
                 origin.split = true;
                 self.counts.split_echoes += 1;
-                self.remember_split(pane, now);
+                if origin.learns.contains(&pane) {
+                    self.remember_split(pane, now);
+                }
             }
         }
         if let Some(watch) = self.watch.take() {
@@ -384,7 +417,7 @@ mod tests {
         let first = key + Duration::from_micros(600);
         let second = first + Duration::from_micros(900);
         let mut echo = TypedEcho::default();
-        assert!(echo.typed_wake(Some(key), [(1, 11, Some(first))]));
+        assert!(echo.typed_wake(Some(key), [(1, 11, Some(first))], |_| true));
         present(&mut echo, first + Duration::from_micros(200), key, 11);
         // The second write lands while the first frame is on its way.
         let found = echo.observe(second, Some(key), |_| Some((12, Some(second))));
@@ -414,7 +447,7 @@ mod tests {
         // past the settle; it was published 1 ms after the capture.
         let key = Instant::now();
         let mut echo = TypedEcho::default();
-        echo.typed_wake(Some(key), [(1, 11, Some(key + ms(1)))]);
+        echo.typed_wake(Some(key), [(1, 11, Some(key + ms(1)))], |_| true);
         present(&mut echo, key + ms(1), key, 11);
         echo.observe(key + ms(9), Some(key), |_| Some((12, Some(key + ms(2)))));
         assert_eq!(echo.counts().intermediate_frames, 1);
@@ -425,7 +458,7 @@ mod tests {
     fn output_after_the_settle_is_late_and_after_a_refresh_is_neither() {
         let key = Instant::now();
         let mut echo = TypedEcho::default();
-        echo.typed_wake(Some(key), [(1, 11, Some(key))]);
+        echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true);
         present(&mut echo, key, key, 11);
         echo.observe(key + ms(8), Some(key), |_| Some((12, Some(key + ms(8)))));
         let counts = echo.counts();
@@ -446,13 +479,13 @@ mod tests {
         let key = Instant::now();
         let next_key = key + ms(1);
         let mut echo = TypedEcho::default();
-        echo.typed_wake(Some(key), [(1, 11, Some(key))]);
+        echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true);
         present(&mut echo, key, key, 11);
         // The next key's echo is new content, not a split of the last one.
         echo.observe(next_key + ms(1), Some(next_key), |_| {
             Some((12, Some(next_key + ms(1))))
         });
-        assert!(echo.typed_wake(Some(next_key), [(1, 12, Some(next_key + ms(1)))]));
+        assert!(echo.typed_wake(Some(next_key), [(1, 12, Some(next_key + ms(1)))], |_| true));
         let counts = echo.counts();
         assert_eq!(counts.echoes, 2);
         assert_eq!(counts.split_echoes, 0);
@@ -463,7 +496,7 @@ mod tests {
     fn only_typed_frames_that_paint_output_are_watched() {
         let key = Instant::now();
         let mut echo = TypedEcho::default();
-        echo.typed_wake(Some(key), [(1, 11, Some(key))]);
+        echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true);
         // A cursor-only frame inside the typing window paints no output.
         echo.begin_capture();
         echo.note_capture(1, 10);
@@ -483,15 +516,15 @@ mod tests {
     fn later_wakes_of_one_keystroke_are_one_echo() {
         let key = Instant::now();
         let mut echo = TypedEcho::default();
-        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))]));
-        assert!(!echo.typed_wake(Some(key), [(1, 12, Some(key + ms(1)))]));
-        assert!(echo.typed_wake(Some(key + ms(40)), [(1, 13, Some(key + ms(41)))]));
+        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true));
+        assert!(!echo.typed_wake(Some(key), [(1, 12, Some(key + ms(1)))], |_| true));
+        assert!(echo.typed_wake(Some(key + ms(40)), [(1, 13, Some(key + ms(41)))], |_| true));
         assert_eq!(echo.counts().echoes, 2);
     }
 
     /// Key 1's echo splits; returns the time key 2 is pressed.
     fn learn_split(echo: &mut TypedEcho, key: Instant) -> Instant {
-        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))]));
+        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true));
         assert_eq!(echo.plan_paint(key, true, true), EchoPaint::Now);
         let second = key + ms(1);
         assert_eq!(
@@ -508,11 +541,11 @@ mod tests {
         // One write per key: never settled.
         for n in 0..3 {
             let at = key + ms(40 * n);
-            assert!(echo.typed_wake(Some(at), [(1, 10 + n, Some(at))]));
+            assert!(echo.typed_wake(Some(at), [(1, 10 + n, Some(at))], |_| true));
             assert_eq!(echo.plan_paint(at, true, true), EchoPaint::Now);
         }
         let next = learn_split(&mut echo, key + ms(200));
-        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true));
         assert_eq!(echo.plan_paint(next, true, true), EchoPaint::Settle);
         assert_eq!(echo.counts().settled_echoes, 1);
         assert_eq!(
@@ -524,7 +557,7 @@ mod tests {
         // Another pane's echo is not settled by pane 1's history.
         let mut other = TypedEcho::default();
         let next = learn_split(&mut other, key);
-        assert!(other.typed_wake(Some(next), [(2, 5, Some(next))]));
+        assert!(other.typed_wake(Some(next), [(2, 5, Some(next))], |_| true));
         assert_eq!(other.plan_paint(next, true, true), EchoPaint::Now);
     }
 
@@ -533,11 +566,11 @@ mod tests {
         let key = Instant::now();
         let mut echo = TypedEcho::default();
         let next = learn_split(&mut echo, key);
-        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true));
         assert_eq!(echo.plan_paint(next, true, false), EchoPaint::Now);
 
         let late = key + ms(1) + SPLIT_MEMORY + ms(1);
-        assert!(echo.typed_wake(Some(late), [(1, 14, Some(late))]));
+        assert!(echo.typed_wake(Some(late), [(1, 14, Some(late))], |_| true));
         assert_eq!(echo.plan_paint(late, true, true), EchoPaint::Now);
     }
 
@@ -546,7 +579,7 @@ mod tests {
         let key = Instant::now();
         let mut echo = TypedEcho::default();
         let next = learn_split(&mut echo, key);
-        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))]));
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true));
         assert_eq!(echo.plan_paint(next, true, true), EchoPaint::Settle);
         // The second write raises no wake; the settled frame sees it.
         let second = next + ms(1);
@@ -557,8 +590,49 @@ mod tests {
         );
         // Past the first split's memory, inside the second's.
         let much_later = key + ms(1) + SPLIT_MEMORY + ms(10);
-        assert!(echo.typed_wake(Some(much_later), [(1, 15, Some(much_later))]));
+        assert!(echo.typed_wake(Some(much_later), [(1, 15, Some(much_later))], |_| true));
         assert_eq!(echo.plan_paint(much_later, true, true), EchoPaint::Settle);
+    }
+
+    #[test]
+    fn only_typed_text_keys_teach_the_settle() {
+        for typed in [
+            &b"a"[..],
+            "\u{e9}".as_bytes(),
+            b" ",
+            b"\x7f",
+            b"\x08",
+            b"ab",
+        ] {
+            assert!(is_typed_text(typed), "{typed:?}");
+        }
+        for other in [
+            &b""[..],
+            b"\r",
+            b"ls\r",
+            b"\t",
+            b"\x03",
+            b"\x1b[A",
+            b"\x1b[200~pasted\x1b[201~",
+            &[b'x'; MAX_TYPED_TEXT_BYTES + 1],
+        ] {
+            assert!(!is_typed_text(other), "{other:?}");
+        }
+
+        // Enter's echo splits (newline, then the prompt) but teaches nothing,
+        // so the next typed key still paints at once.
+        let key = Instant::now();
+        let mut echo = TypedEcho::default();
+        assert!(echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| false));
+        let second = key + Duration::from_micros(200);
+        assert_eq!(
+            echo.observe(second, Some(key), |_| Some((12, Some(second)))),
+            Some(1)
+        );
+        assert_eq!(echo.counts().split_echoes, 1, "the split is still counted");
+        let next = key + ms(50);
+        assert!(echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true));
+        assert_eq!(echo.plan_paint(next, true, true), EchoPaint::Now);
     }
 
     #[test]

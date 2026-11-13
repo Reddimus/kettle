@@ -2457,7 +2457,10 @@ terminal lock during capture, because the staged cutoff above predates the
 capture. `ui_geometry.typed_echo` reports the counts.
 
 On macOS, a pane whose echo split within `ECHO_SETTLE` (3 ms) keeps its later
-echoes settled for `SPLIT_MEMORY` (5 s). Such an echo paints at its first wake
+echoes settled for `SPLIT_MEMORY` (5 s). Only the echo of a typed-text key (a
+printable character or a backspace, `typed_echo::is_typed_text`) teaches it:
+Enter prints a newline, runs the command and draws the prompt in separate
+writes in any shell, so learning from it would settle every shell. Such an echo paints at its first wake
 plus `ECHO_SETTLE`, instead of at once. The pane's output latch stays closed
 from that wake until the frame acknowledges it, so the second write lands with
 no new wake and the settled frame paints both. Shells that write each echo

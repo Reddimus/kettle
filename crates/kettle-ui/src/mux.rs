@@ -1009,6 +1009,11 @@ pub struct Pane {
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
     user_input_generation: AtomicU64,
+    /// Whether the last input queued here was typed text: one key's worth of
+    /// printable characters or a backspace, not Enter, Tab, a control chord,
+    /// an escape sequence or a paste. Only such keys teach the typed-echo
+    /// settle that this pane's echoes split (see `crate::typed_echo`).
+    last_input_typed_text: AtomicBool,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
     /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
@@ -1106,6 +1111,11 @@ impl Pane {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
         self.pty_input.user_tx = user_tx;
         move || user_rx.try_iter().map(|item| item.bytes.to_vec()).collect()
+    }
+
+    /// See `last_input_typed_text`.
+    pub(crate) fn last_input_was_typed_text(&self) -> bool {
+        self.last_input_typed_text.load(Ordering::Relaxed)
     }
 
     #[cfg(any(target_os = "linux", test))]
@@ -1239,6 +1249,7 @@ impl Pane {
                     self.pty_input
                         .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
+                self.record_typed_text(result, crate::typed_echo::is_typed_text(input));
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1269,6 +1280,9 @@ impl Pane {
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
         let reporting_mode = self.input_reporting_mode();
         let nonempty = !joined.is_empty();
+        let typed_text = inputs
+            .iter()
+            .all(|input| crate::typed_echo::is_typed_text(input));
         let joined: Arc<[u8]> = Arc::from(joined);
         self.term
             .with_keyboard_input_admission(&boundaries, joined.clone(), |echo| {
@@ -1276,6 +1290,7 @@ impl Pane {
                     .pty_input
                     .enqueue_user_with_echo(reporting_mode, joined, echo);
                 self.record_user_input(result, nonempty);
+                self.record_typed_text(result, nonempty && typed_text);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1300,6 +1315,13 @@ impl Pane {
             self.record_user_input(result, !bytes.is_empty());
             (result, result.is_queued())
         })
+    }
+
+    fn record_typed_text(&self, result: PaneInputResult, typed_text: bool) {
+        if result.is_queued() {
+            self.last_input_typed_text
+                .store(typed_text, Ordering::Relaxed);
+        }
     }
 
     fn record_user_input(&self, result: PaneInputResult, nonempty: bool) {
@@ -2587,6 +2609,7 @@ impl Mux {
                 rx,
                 pty_input,
                 user_input_generation: AtomicU64::new(0),
+                last_input_typed_text: AtomicBool::new(false),
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
@@ -6111,6 +6134,56 @@ mod node_tests {
         pane.read_only = true;
         assert_eq!(pane.feed_input(b"refused"), PaneInputResult::ReadOnly);
         assert_eq!(pane.input_generation(), after_keys);
+        mux.kill_children();
+    }
+
+    /// Only typed-text keys teach the typed-echo settle, on every keyboard
+    /// path; refused input leaves the last answer alone.
+    #[cfg(unix)]
+    #[test]
+    fn panes_remember_whether_their_last_input_was_typed_text() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let argv = vec!["/bin/cat".to_owned()];
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &argv,
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let (queue, _rx) = input_queue_fixture();
+        pane.pty_input = queue;
+        assert!(!pane.last_input_was_typed_text());
+        assert_eq!(pane.feed_input(b"g"), PaneInputResult::Queued);
+        assert!(pane.last_input_was_typed_text());
+        assert_eq!(pane.feed_input(b"\r"), PaneInputResult::Queued);
+        assert!(!pane.last_input_was_typed_text(), "Enter is not typed text");
+        assert_eq!(
+            pane.feed_key_inputs(&[b"a".to_vec(), b"\x7f".to_vec()]),
+            PaneInputResult::Queued
+        );
+        assert!(pane.last_input_was_typed_text());
+        assert_eq!(
+            pane.feed_key_inputs(&[b"a".to_vec(), b"\t".to_vec()]),
+            PaneInputResult::Queued
+        );
+        assert!(!pane.last_input_was_typed_text(), "a batch with Tab is not");
+        for _ in 4..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(pane.feed_input(b"x"), PaneInputResult::Queued);
+        }
+        // A full queue refuses Enter inside the admission closure.
+        assert_eq!(pane.feed_input(b"\r"), PaneInputResult::Backpressured);
+        assert!(
+            pane.last_input_was_typed_text(),
+            "refused input changes nothing"
+        );
         mux.kill_children();
     }
 

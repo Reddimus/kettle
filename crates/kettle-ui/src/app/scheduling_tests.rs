@@ -517,13 +517,13 @@ fn armed_echo_window(key: std::time::Instant) -> WindowState {
     use crate::typed_echo::EchoPaint;
     use std::time::Duration;
     let mut ws = WindowState::new(0, crate::mux::Mux::new());
-    ws.typed_echo.typed_wake(Some(key), [(1, 11, Some(key))]);
+    ws.typed_echo.typed_wake(Some(key), [(1, 11, Some(key))], |_| true);
     let second = key + Duration::from_millis(1);
     ws.typed_echo
         .observe(second, Some(key), |_| Some((12, Some(second))));
     let next = key + Duration::from_millis(50);
     ws.last_typed = Some(next);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))], |_| true);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Settle
@@ -540,7 +540,7 @@ fn echo_settle_paints_once_at_an_unextended_deadline() {
     let mut ws = armed_echo_window(key);
     // A second wake 1 ms later (another pane) keeps the first deadline.
     let later = armed + Duration::from_millis(1);
-    assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))]));
+    assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))], |_| true));
     assert_eq!(
         ws.typed_echo.plan_paint(later, false, true),
         EchoPaint::Settle
@@ -619,7 +619,7 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     // The next keystroke's echo arms again.
     let next = due + Duration::from_millis(40);
     ws.last_typed = Some(next);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))], |_| true);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Settle
@@ -629,7 +629,7 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     let mut ws = armed_echo_window(key);
     assert_eq!(super::poll_echo_settle(&mut ws, due), SettlePoll::Request);
     let next = due + Duration::from_millis(40);
-    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
+    let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))], |_| true);
     assert_eq!(
         ws.typed_echo.plan_paint(next, new_echo, true),
         EchoPaint::Now

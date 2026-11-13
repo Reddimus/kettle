@@ -154,14 +154,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- On macOS, a typed echo that the shell writes in two parts is painted as one
-  frame. zsh-autosuggestions redraws each key that changes its suggestion in
-  two writes about a millisecond apart, first without the gray suggestion and
-  then with the new one, and Kettle could present the first on its own for a
-  whole refresh. Once a pane's echo arrives in two writes, Kettle paints that
-  pane's echoes 3 ms after they start, so both writes land in the same frame,
-  until 5 seconds pass without another split echo. Shells that echo each key
-  in one write are painted at once, as before. `ui_geometry.typed_echo.settled_echoes` counts the
+- On macOS, Kettle waits up to 3 ms before painting a typed echo from a pane
+  whose echoes have been arriving in two writes, so both writes can land in
+  one frame. zsh-autosuggestions redraws each key that changes its suggestion
+  in two writes about a millisecond apart, first without the gray suggestion
+  and then with the new one, and Kettle could present the first on its own
+  for a whole refresh. A pane starts waiting when the echo of a typed
+  character or backspace arrives in two writes within 3 ms, and stops 5
+  seconds after the last such echo. Enter, Tab, other control keys and pastes
+  never start it, so shells that echo each typed key in one write are painted
+  at once, as before. `ui_geometry.typed_echo.settled_echoes` counts the
   delayed echoes.
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
