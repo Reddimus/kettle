@@ -4407,18 +4407,17 @@ impl Renderer {
                     continue;
                 }
                 let (ax, _, aw, _) = rect;
-                let (left, top, bounds) = if vertical {
-                    let glyph_w = buffer.layout_runs().next().map_or(tab_cw, |run| run.line_w);
-                    let (left, top) = centered_text_origin(rect, (glyph_w, tab_ch));
-                    (left, top, text_bounds_for_rect(rect))
+                let glyph_w = buffer.layout_runs().next().map_or(tab_cw, |run| run.line_w);
+                let (left, top) = tab_strip::scroll_arrow_origin(rect, vertical, glyph_w, tab_ch);
+                let bounds = if vertical {
+                    text_bounds_for_rect(rect)
                 } else {
-                    let bounds = TextBounds {
+                    TextBounds {
                         left: ax as i32,
                         top: ty,
                         right: (ax + aw) as i32,
                         bottom: tb,
-                    };
-                    (ax + 4.0, tabbar.y + 4.0, bounds)
+                    }
                 };
                 areas.push(TextArea {
                     buffer,
