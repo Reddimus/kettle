@@ -408,6 +408,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and the Silent mark in TokyoNight Night, fell below 3:1 contrast.
   Vertical tabs keep the old dots until 6.1.
 
+- When the config file is saved while the theme picker previews a theme,
+  such as by the picker's Contrast button or an edit in another app, the
+  window no longer paints one frame in the saved theme before the preview
+  comes back.
+
 - A scrolling picker (the command palette, theme, layout and SSH pickers) no
   longer leaves a blank part-row under its last result. It used to paint six
   whole rows in room for eight; it now paints eight, or the whole list when

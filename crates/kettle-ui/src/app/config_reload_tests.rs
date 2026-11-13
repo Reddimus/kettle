@@ -785,3 +785,24 @@ fn cursor_settings_are_applied_to_running_panes_on_reload() {
     let apply = src.split("fn apply_reloaded_config(").nth(1).unwrap();
     assert!(apply.contains("set_cursor_defaults(self.cfg.cursor_style, self.cfg.cursor_blink)"));
 }
+
+/// A reload installs the saved theme, and the file watcher reloads outside
+/// any window event, so the window's next frame would show the saved theme
+/// under an open picker's preview. Applying a reload puts the preview back
+/// first, after the schedule has had its say.
+#[test]
+fn a_reload_puts_an_open_pickers_preview_back_before_painting() {
+    let src = production_source();
+    let apply = src
+        .split("fn apply_reloaded_config(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("apply_reloaded_config");
+    let schedule = apply
+        .find("self.poll_theme_schedule(ws);")
+        .expect("the schedule poll");
+    let sync = apply
+        .find("self.sync_theme_preview(ws);")
+        .expect("a reload must re-apply an open picker's preview");
+    assert!(sync > schedule, "the preview wins over the schedule's pick");
+}

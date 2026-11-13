@@ -438,6 +438,11 @@ impl App {
         // A changed schedule applies the theme it picks now, not at its next
         // boundary.
         self.poll_theme_schedule(ws);
+        // A reload installs the saved theme. A window previewing a theme in
+        // its picker puts the preview back before it paints again: the
+        // picker's own Contrast button saves while it previews, and the file
+        // watcher reloads outside any window event.
+        self.sync_theme_preview(ws);
         if !self.cfg.macos_cursor_blink_layer && !ws.blink_layer.is_active() {
             Self::retire_cursor_layer(ws);
         }
