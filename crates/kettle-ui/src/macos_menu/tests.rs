@@ -67,8 +67,8 @@ fn complete_structure_in_english_and_spanish() {
             ],
             vec![
                 "New Window",
+                "New Window with Profile",
                 "New Tab",
-                "New Tab with Profile",
                 "Save Layout…",
                 "Open Layout…",
                 "SSH launcher",
@@ -131,8 +131,8 @@ fn complete_structure_in_english_and_spanish() {
             ],
             vec![
                 "Nueva ventana",
+                "Nueva ventana con perfil",
                 "Nueva pestaña",
-                "Nueva pestaña con perfil",
                 "Guardar diseño…",
                 "Abrir diseño…",
                 "Lanzador SSH",

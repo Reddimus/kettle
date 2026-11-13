@@ -916,7 +916,7 @@ settings_description_field_builtin_box_drawing = "Draw lines, blocks and Powerli
 
 tab_new_options = "New Tab Options"
 
-menu_new_tab_profile = "New Tab with Profile"
+menu_new_window_profile = "New Window with Profile"
 
 menu_no_profiles = "No profiles yet — Create Profile…"
 

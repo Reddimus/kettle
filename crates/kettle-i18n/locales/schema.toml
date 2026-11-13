@@ -2632,8 +2632,8 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
 
-[messages.menu_new_tab_profile]
-context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu; profiles launch in a separate window/process."
+[messages.menu_new_window_profile]
+context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
 
 [messages.menu_no_profiles]
 context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."

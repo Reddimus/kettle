@@ -281,9 +281,8 @@ pub(crate) fn menu_model_with_profiles(
             T::MacosMenuShell,
             vec![
                 item(T::MenuNewWindow, Action::NewWindow),
-                item(T::MenuNewTab, Action::NewTab),
                 Row::Submenu {
-                    title: tr.text(T::MenuNewTabProfile),
+                    title: tr.text(T::MenuNewWindowProfile),
                     rows: crate::app::profile_launch_entries(profiles, tr)
                         .into_iter()
                         .map(|(label, action)| Row::Item {
@@ -295,6 +294,7 @@ pub(crate) fn menu_model_with_profiles(
                         })
                         .collect(),
                 },
+                item(T::MenuNewTab, Action::NewTab),
                 item(T::MenuSaveLayout, Action::SaveLayout),
                 item(T::MenuOpenLayout, Action::OpenLayoutPicker),
                 item(T::PaletteOpenSsh, Action::OpenSsh),

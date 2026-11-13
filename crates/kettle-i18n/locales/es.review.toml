@@ -40,7 +40,7 @@ menu_open_layout = "draft"
 menu_save_layout = "draft"
 palette_launch_profile = "draft"
 menu_no_profiles = "draft"
-menu_new_tab_profile = "draft"
+menu_new_window_profile = "draft"
 
 settings_field_cursor_unfocused_style = "draft"
 settings_description_field_cursor_unfocused_style = "draft"

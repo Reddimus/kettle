@@ -258,7 +258,7 @@ explicitly.
 Open the new-tab **▾** menu beside **+** (set `tab-bar = always` to keep it
 visible with one tab), or the macOS **Shell** menu:
 
-- **New Tab with Profile** lists the same profiles as `kettle --list-profiles`.
+- **New Window with Profile** lists the same profiles as `kettle --list-profiles`.
   Each choice opens a separate Kettle process/window with that profile, since
   profiles include application-wide settings. The empty **Create Profile…**
   action creates and opens the profiles directory; add a `NAME.config` file

@@ -149,6 +149,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The profile menu is now called New Window with Profile (Nueva ventana con
+  perfil), since each profile has always opened in a new window. In the
+  macOS Shell menu it sits right below New Window.
+
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
   has stopped, and a triangle when the bell rang. The marks are larger,

@@ -899,7 +899,7 @@ impl App {
             .collect();
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Submenu {
-            label: tr.text(T::MenuNewTabProfile).to_string(),
+            label: tr.text(T::MenuNewWindowProfile).to_string(),
             items: profile_launch_entries(profiles, tr)
                 .into_iter()
                 .map(|(label, action)| ContextMenuItem::DynamicItem {
