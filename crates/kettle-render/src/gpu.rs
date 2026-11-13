@@ -853,6 +853,7 @@ impl Renderer {
             cursor_layer: None,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
+            selection_backdrop_alpha: 1.0,
             chrome_colors: chrome::Colors::default(),
             pane_line_keys: Vec::new(),
             pane_style_keys: Vec::new(),

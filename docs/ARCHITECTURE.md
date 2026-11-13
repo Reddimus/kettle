@@ -3704,8 +3704,21 @@ non-current search match keeps it wherever it meets the fill's ratio (3:1, or
 separate from resolves a fill against that background, painted over the row
 quad, and its ink resolves against that fill. A selection over a status line
 therefore stays one colour, and a plain selection draws one quad per row.
-Contrast is computed from opaque colours; a translucent window's composite
-with the desktop is not known to the renderer. In a dimmed split, highlights
+The unfocused fill is the grey nearest the background that reaches 2:1, kept
+between the background and the focused fill and at least 1.3:1 from the
+focused fill (`SELECTION_FOCUS_SEPARATION`), so it gives up 2:1 where the
+focused fill stops short.
+The desktop behind a translucent window is not known to the renderer, so
+`theme::selection_backdrop_alpha` decides whether one shows at all (not on an
+opaque surface, a covering wallpaper, or a window the OS draws opaque, which
+kettle-ui reports as `Overlay::window_opaque` from macOS Reduce Transparency).
+When one does, the row fills are measured against the background over white
+or black (`theme::selection_contrast_target`), whichever leaves the selection
+less contrast, unless that composite passes the selection, when they are
+measured against the background itself; the focused fill strengthens away
+from it on its own side, only while its text keeps 4.5:1 and its light or
+dark ink. Default cells are still recognised by the
+background colour as drawn. In a dimmed split, highlights
 resolve against backgrounds as the pane dimmer shows them, because highlight
 fills paint above the dimmer. A link underline on a highlight reuses the
 cell's resolved text ink. Per-frame colour caches include these decisions and
@@ -4283,7 +4296,8 @@ still clear the ring rather than guessing which history row survived.
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
 selection, and renders the captured native state. The UI's `ViState` stores
-only the owning pane and whether visual selection is active. This single-owner
+only the owning pane and whether visual selection is active; the visual kind
+(`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
 invalidation consistent with the grid.
 
@@ -5157,7 +5171,9 @@ do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
-remains visible. Hint actions and their legend share `hint_action`; OSC 8
+remains visible. A selection drag suspends hover in `link_under_native_pointer`,
+and `link_rects` clears the hover flag of a link group any of whose cells is
+selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are

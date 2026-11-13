@@ -65,7 +65,7 @@ pub mod url_trim;
 
 pub use alacritty_terminal::grid::{Dimensions, Scroll};
 pub use alacritty_terminal::index::{Column, Line, Point, Side};
-pub use alacritty_terminal::selection::{Selection, SelectionType};
+pub use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 pub use alacritty_terminal::term::{
     ClipboardType, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection, TermMode,
     cell::Flags, viewport_to_point,

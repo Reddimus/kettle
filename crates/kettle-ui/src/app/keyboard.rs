@@ -756,8 +756,8 @@ pub(super) fn modal_repeat_is_inert(
                     && (matches!(key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight))
                         || letter(key, &["h", "l"])))
         }
-        // `v` toggles visual mode; motions repeat.
-        ModalRepeat::ViMode => letter(key, &["v"]),
+        // `v`, `V` and Ctrl-v toggle visual mode; motions repeat.
+        ModalRepeat::ViMode => letter(key, &["v", "\u{16}"]),
         // Label letters only pick a target; nothing in hint mode moves.
         ModalRepeat::Hint => true,
     }
