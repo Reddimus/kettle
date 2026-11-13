@@ -3297,9 +3297,13 @@ it requires an unlocked desktop and cannot run in the sandbox.
 `kettle-render` covers 4.5:1 highlight ink, maximum-contrast fallbacks,
 readable user-foreground precedence, dim/link/ANSI/indexed/truecolour text,
 same-hue 3:1 focused fills on the default dark and light themes and every
-bundled theme, and inactive fills across bundled themes. Offscreen tests cover
-link and SGR decorations over selected fills; link underlines over a focused
-or unfocused selection and over a search match, drawn in the highlighted text
+bundled theme, and inactive fills across bundled themes: grey in the row and
+per-cell fills, measured against a see-through background as shown, and
+unchanged where nothing shows through; at see-through opacities from 99% to
+30%, every bundled theme's focused fill keeps its side of the background and
+its unfocused grey stays between them, 1.3:1 from the focused fill. Offscreen tests cover an unfocused
+window's grey selection pixels, link and SGR decorations over selected fills;
+link underlines over a focused or unfocused selection and over a search match, drawn in the highlighted text
 colour at their resting weight; selected cells with their own background; one
 selection fill kept across TokyoNight Night program backgrounds it separates
 from, with fills of their own only where it does not; inactive split dimming;
