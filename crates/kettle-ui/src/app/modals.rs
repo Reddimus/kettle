@@ -272,7 +272,7 @@ impl App {
         {
             use kettle_i18n::Text as T;
             let theme_hints =
-                theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key());
+                theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true);
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
                 &[
                     ("Enter", T::PickerHintRun),
@@ -320,6 +320,16 @@ impl App {
             },
         };
         let cw = self.modal_field_cell_width(ws, &field);
+        // The theme picker's Tab hint is the first part to go in a narrow header.
+        if ws.theme_picker_input.is_some() && !field.hint.is_empty() {
+            field.hint = theme_picker_header_hint(
+                &field,
+                cw,
+                &self.ui_text,
+                self.theme_picker_key_for(ws),
+                self.theme_pick_key(),
+            );
+        }
         let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
             &field.text,
@@ -2534,6 +2544,7 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
+        let save_key = self.theme_picker_key_for(ws);
         let Some(state) = ws.theme_picker_input.as_mut() else {
             return;
         };
@@ -2558,7 +2569,7 @@ impl App {
                 crate::modal_input::backspace(&mut state.query);
                 state.selected = 0;
             }
-            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+            Key::Named(NamedKey::ArrowDown) => {
                 let n = count(state);
                 step(state, true, n);
             }
@@ -2566,6 +2577,14 @@ impl App {
                 let n = count(state);
                 step(state, false, n);
             }
+            // Tab switches sides when the picker has them (see `theme_picker_tab`).
+            Key::Named(NamedKey::Tab) => match theme_picker_tab(save_key, ws.mods.shift_key()) {
+                ThemePickerTab::Side(slot) => self.switch_theme_slot(ws, slot),
+                ThemePickerTab::Row { forward } => {
+                    let n = count(state);
+                    step(state, forward, n);
+                }
+            },
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && ws.mods.control_key()

@@ -1973,8 +1973,9 @@ impl App {
                 // The theme picker sits over Settings when the Theme row
                 // opened it, so it takes the keys first.
                 if ws.theme_picker_input.is_some() {
+                    let sides = self.theme_picker_key_for(ws) != "theme";
                     if !modal_repeat_is_inert(
-                        ModalRepeat::Palette,
+                        ModalRepeat::ThemePicker { sides },
                         event.repeat,
                         &event.logical_key,
                         ws.mods.control_key(),

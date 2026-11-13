@@ -233,15 +233,15 @@ fn closing_a_modal_ends_its_composition() {
         .expect("the control plane stops when its modal closes");
     assert!(dispatch.contains("end_modal_composition(ws);"));
     // Holding the Enter that opened the picker from Settings must not
-    // pick a theme: its repeats are gated like the palette's.
+    // pick a theme, nor a held Tab flip between the sides: their repeats
+    // are gated.
     let branch = src
-        .split(
-            "if ws.theme_picker_input.is_some() {\n                    if !modal_repeat_is_inert(",
-        )
+        .split("if ws.theme_picker_input.is_some() {\n                    let sides = ")
         .nth(1)
         .and_then(|rest| rest.split("return;").next())
         .expect("the theme picker's key branch gates repeats");
-    assert!(branch.contains("ModalRepeat::Palette,"));
+    assert!(branch.contains("self.theme_picker_key_for(ws) != \"theme\";"));
+    assert!(branch.contains("ModalRepeat::ThemePicker { sides },"));
     assert!(branch.contains("self.theme_picker_key(ws, &event.logical_key, text);"));
 }
 
@@ -1381,8 +1381,12 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
                 horizontal_scroll: 0,
                 rect: (0.0, 0.0, width, 32.0),
                 prefix: super::theme_picker_appearance_prefix(key, tr),
-                hint: super::picker_hint(tr, &super::theme_picker_hints(key, "dark-theme")),
+                hint: super::picker_hint(tr, &super::theme_picker_hints(key, "dark-theme", true)),
                 accent_palette: 5,
+            };
+            let field = kettle_render::TextFieldOverlay {
+                hint: super::theme_picker_header_hint(&field, cw, tr, key, "dark-theme"),
+                ..field
             };
             let [prefix, editor, hint] = kettle_render::text_field_rects(&field, cw);
             assert!(editor.2 >= 6.0 * cw, "{width} {cw}: {editor:?}");
@@ -1397,7 +1401,7 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
         let body = body.split("\n    }\n").next().unwrap();
         assert!(
             body.contains(
-                "theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key())"
+                "theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true)"
             ),
             "{builder}"
         );
@@ -1489,6 +1493,205 @@ fn switching_sides_clears_the_query_and_opens_on_that_sides_theme() {
         &EN
     ));
     assert_eq!(fixed, before);
+}
+
+/// In a picker with sides, Tab and Shift+Tab both switch to the other side,
+/// as a click on it would: with the system or a schedule, and in every mode
+/// a schedule overrides. The hint names the side Tab goes to. The arrows
+/// keep moving rows, and the control plane's `tab` and `shift+tab` reach the
+/// same handler.
+#[test]
+fn tab_and_shift_tab_switch_sides_when_the_picker_has_them() {
+    use super::{ThemePickerTab, switch_theme_picker_slot, theme_pick_key, theme_picker_tab};
+    use kettle_render::ThemeSlot;
+    for shift in [false, true] {
+        assert_eq!(
+            theme_picker_tab("dark-theme", shift),
+            ThemePickerTab::Side(ThemeSlot::Light)
+        );
+        assert_eq!(
+            theme_picker_tab("light-theme", shift),
+            ThemePickerTab::Side(ThemeSlot::Dark)
+        );
+    }
+    // A fixed theme with a schedule still has sides, and Tab toggles them.
+    let mut cfg = kettle_config::Config::default();
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    let active = theme_pick_key(&cfg, Some(false));
+    assert_eq!(active, "light-theme");
+    let mut picker = state("", 0, &cfg.light_theme.clone());
+    for (shift, to) in [
+        (false, ThemeSlot::Dark),
+        (true, ThemeSlot::Light),
+        (true, ThemeSlot::Dark),
+        (false, ThemeSlot::Light),
+    ] {
+        let save = super::theme_picker_save_key(Some(&picker), active);
+        let ThemePickerTab::Side(slot) = theme_picker_tab(save, shift) else {
+            panic!("{save} has sides");
+        };
+        assert_eq!(slot, to);
+        assert!(switch_theme_picker_slot(
+            &mut picker,
+            &cfg,
+            active,
+            slot,
+            &EN
+        ));
+        assert_eq!(
+            super::theme_picker_save_key(Some(&picker), active),
+            super::theme_slot_key(to)
+        );
+    }
+    // The hint names the side Tab goes to, and only a picker with sides has it.
+    for (save, text) in [
+        ("dark-theme", kettle_i18n::Text::PickerHintTabLightTheme),
+        ("light-theme", kettle_i18n::Text::PickerHintTabDarkTheme),
+    ] {
+        let hints = super::theme_picker_hints(save, "dark-theme", true);
+        assert!(hints.contains(&("Tab:", text)), "{hints:?}");
+        assert_eq!(hints.last().unwrap().0, "Esc");
+        assert!(
+            !super::theme_picker_hints(save, "dark-theme", false)
+                .iter()
+                .any(|(keys, _)| keys.starts_with("Tab"))
+        );
+    }
+    assert!(
+        !super::theme_picker_hints("theme", "theme", true)
+            .iter()
+            .any(|(keys, _)| keys.starts_with("Tab"))
+    );
+    assert!(
+        super::picker_hint(
+            &EN,
+            &super::theme_picker_hints("dark-theme", "dark-theme", true)
+        )
+        .contains("Tab: light theme")
+    );
+    assert!(
+        super::picker_hint(
+            &ES,
+            &super::theme_picker_hints("light-theme", "light-theme", true)
+        )
+        .contains("Tab: tema oscuro")
+    );
+    // The control plane's tokens are the keys a keyboard sends.
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+    assert_eq!(
+        super::parse_ui_key("tab"),
+        Some((ModifiersState::empty(), Key::Named(NamedKey::Tab)))
+    );
+    assert_eq!(
+        super::parse_ui_key("shift+tab"),
+        Some((ModifiersState::SHIFT, Key::Named(NamedKey::Tab)))
+    );
+    let src = production_source();
+    let keys = src
+        .split("fn theme_picker_key(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_theme(")
+        .next()
+        .unwrap();
+    assert!(keys.contains("let save_key = self.theme_picker_key_for(ws);"));
+    let tab = keys
+        .split("Key::Named(NamedKey::Tab) =>")
+        .nth(1)
+        .expect("Tab has its own arm")
+        .split("Key::Character(s)")
+        .next()
+        .unwrap();
+    assert!(tab.contains("theme_picker_tab(save_key, ws.mods.shift_key())"));
+    assert!(tab.contains("ThemePickerTab::Side(slot) => self.switch_theme_slot(ws, slot),"));
+    assert!(tab.contains("step(state, forward, n);"));
+    let down = keys
+        .split("Key::Named(NamedKey::ArrowDown) =>")
+        .nth(1)
+        .unwrap()
+        .split("Key::Named(NamedKey::ArrowUp)")
+        .next()
+        .unwrap();
+    assert!(down.contains("step(state, true, n);"));
+}
+
+/// A fixed theme has no sides: Tab moves down a row as before, and Shift+Tab
+/// now moves up one instead of down.
+#[test]
+fn tab_in_a_fixed_theme_moves_rows_as_before() {
+    use super::{ThemePickerTab, theme_pick_key, theme_picker_tab};
+    let mut cfg = kettle_config::Config::default();
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let save = theme_pick_key(&cfg, Some(true));
+    assert_eq!(save, "theme");
+    assert_eq!(
+        theme_picker_tab(save, false),
+        ThemePickerTab::Row { forward: true }
+    );
+    assert_eq!(
+        theme_picker_tab(save, true),
+        ThemePickerTab::Row { forward: false }
+    );
+}
+
+/// The Tab hint is optional: a header too narrow for the whole hint beside
+/// the query shows it without the Tab part before it drops the hint, in
+/// English and Spanish, measured as the painter measures it.
+#[test]
+fn a_narrow_theme_picker_header_drops_the_tab_hint_first() {
+    for tr in [&EN, &ES] {
+        let full = super::picker_hint(
+            tr,
+            &super::theme_picker_hints("dark-theme", "dark-theme", true),
+        );
+        let short = super::picker_hint(
+            tr,
+            &super::theme_picker_hints("dark-theme", "dark-theme", false),
+        );
+        assert!(full.contains("Tab:") && !short.contains("Tab"));
+        let (mut saw_full, mut saw_short) = (false, false);
+        for width in (160..=1200).step_by(8) {
+            let field = kettle_render::TextFieldOverlay {
+                picker_header: true,
+                text: "Tokyo".into(),
+                cursor_byte: 5,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, width as f32, 32.0),
+                prefix: super::theme_picker_appearance_prefix("dark-theme", tr),
+                hint: full.clone(),
+                accent_palette: 5,
+            };
+            let hint = super::theme_picker_header_hint(&field, 8.0, tr, "dark-theme", "dark-theme");
+            let painted = kettle_render::text_field_labels(
+                &kettle_render::TextFieldOverlay {
+                    hint: hint.clone(),
+                    ..field.clone()
+                },
+                8.0,
+            )
+            .1;
+            let full_fits = !kettle_render::text_field_labels(&field, 8.0).1.is_empty();
+            if full_fits {
+                assert_eq!(hint, full, "{width}");
+                saw_full = true;
+            } else if !painted.is_empty() {
+                assert_eq!(hint, short, "{width}");
+                saw_short = true;
+            }
+        }
+        assert!(saw_full && saw_short);
+    }
+    let src = production_source();
+    let projection = src
+        .split("fn modal_text_projection(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(projection.contains("field.hint = theme_picker_header_hint("));
 }
 
 /// The window previews the light side while it is edited, Esc puts back the

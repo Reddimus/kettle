@@ -135,6 +135,7 @@ fn every_modal_branch_records_its_closing_key() {
         "ModalRepeat::ViMode,",
         "ModalRepeat::Hint,",
         "ModalRepeat::Palette,",
+        "ModalRepeat::ThemePicker { sides },",
         "ModalRepeat::Settings { steps },",
     ] {
         assert!(src.contains(gate), "{gate} must gate its repeats");

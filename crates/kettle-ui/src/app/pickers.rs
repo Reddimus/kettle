@@ -576,17 +576,75 @@ pub(super) fn switch_theme_picker_slot(
 
 /// The theme picker's key hint, for the painted header and its projection
 /// alike: Enter keeps the pick, or only saves it for the side the window is
-/// not on (see [`theme_picker_enter_hint`]).
+/// not on (see [`theme_picker_enter_hint`]). With `tab`, a picker with sides
+/// also says which side Tab switches to.
 pub(super) fn theme_picker_hints(
     save_key: &str,
     active: &str,
-) -> [(&'static str, kettle_i18n::Text); 3] {
+    tab: bool,
+) -> Vec<(&'static str, kettle_i18n::Text)> {
     use kettle_i18n::Text;
-    [
+    let mut hints = vec![
         ("Enter", theme_picker_enter_hint(save_key, active)),
         ("↑↓", Text::PickerHintSelect),
-        ("Esc", Text::PickerHintRestore),
-    ]
+    ];
+    if tab && let ThemePickerTab::Side(slot) = theme_picker_tab(save_key, false) {
+        hints.push((
+            "Tab:",
+            match slot {
+                kettle_render::ThemeSlot::Light => Text::PickerHintTabLightTheme,
+                kettle_render::ThemeSlot::Dark => Text::PickerHintTabDarkTheme,
+            },
+        ));
+    }
+    hints.push(("Esc", Text::PickerHintRestore));
+    hints
+}
+
+/// The theme picker header's hint in `field`, measured as the painter
+/// measures it in cells `cw` wide: the whole hint, or without its Tab part
+/// when only that fits beside the query. A header that has room for neither
+/// keeps the whole one, which the painter leaves out.
+pub(super) fn theme_picker_header_hint(
+    field: &kettle_render::TextFieldOverlay,
+    cw: f32,
+    tr: &kettle_i18n::Translator,
+    save_key: &str,
+    active: &str,
+) -> String {
+    let full = picker_hint(tr, &theme_picker_hints(save_key, active, true));
+    let fits = |hint: &String| {
+        let mut probe = field.clone();
+        probe.hint = hint.clone();
+        !kettle_render::text_field_labels(&probe, cw).1.is_empty()
+    };
+    if fits(&full) {
+        return full;
+    }
+    let short = picker_hint(tr, &theme_picker_hints(save_key, active, false));
+    if fits(&short) { short } else { full }
+}
+
+/// What Tab does in the theme picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ThemePickerTab {
+    /// Edit the other side's theme, as a click on it on the status line does.
+    Side(kettle_render::ThemeSlot),
+    /// Move the selection, down or up, as in the other pickers.
+    Row { forward: bool },
+}
+
+/// What Tab (or Shift+Tab, with `shift`) does in a theme picker that saves
+/// to `save_key`. A picker with sides switches to the other one, so both
+/// keys toggle between the two; a fixed theme has no sides, and Tab moves
+/// down a row and Shift+Tab up one. The arrows move rows either way.
+pub(super) fn theme_picker_tab(save_key: &str, shift: bool) -> ThemePickerTab {
+    use kettle_render::ThemeSlot;
+    match save_key {
+        "dark-theme" => ThemePickerTab::Side(ThemeSlot::Light),
+        "light-theme" => ThemePickerTab::Side(ThemeSlot::Dark),
+        _ => ThemePickerTab::Row { forward: !shift },
+    }
 }
 
 /// What Enter does in the theme picker's key hint: keep the pick, or only

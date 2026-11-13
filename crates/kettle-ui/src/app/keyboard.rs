@@ -694,6 +694,11 @@ pub(super) enum ModalRepeat {
     ViMode,
     Hint,
     Palette,
+    /// `sides`: the picker has a dark and a light side, which Tab switches
+    /// between, so Tab acts once per press as Enter does.
+    ThemePicker {
+        sides: bool,
+    },
     /// `steps`: the focused row is a number, which Left/Right step. On a
     /// toggle or a choice they flip or cycle it and persist each step.
     Settings {
@@ -747,6 +752,12 @@ pub(super) fn modal_repeat_is_inert(
         ModalRepeat::ConfirmDialog => !moves(key),
         // The query is typed text; only Enter runs the selection.
         ModalRepeat::Palette => matches!(key, Key::Named(NamedKey::Enter)),
+        // Like the palette, but a held Tab must not flip between the sides
+        // at the repeat rate.
+        ModalRepeat::ThemePicker { sides } => {
+            matches!(key, Key::Named(NamedKey::Enter))
+                || (sides && matches!(key, Key::Named(NamedKey::Tab)))
+        }
         // Enter and Space activate or toggle the focused row. Left/Right (and
         // vim `h`/`l`) step a number and repeat; on a toggle or a choice they
         // flip or cycle it, persisting each step, so act once per press.

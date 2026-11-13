@@ -2844,6 +2844,12 @@ context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Ente
 [messages.picker_hint_save_for_dark]
 context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Enter, while the picker edits the dark side (dark-theme) and the system is light: save the pick as the dark theme without wearing it now. Lowercase, a short phrase."
 
+[messages.picker_hint_tab_light_theme]
+context = "crates/kettle-ui/src/app/pickers.rs: theme picker key hint, after \"Tab:\", while the picker edits the dark side: Tab switches the picker to editing the light theme. Dropped first when the header is narrow. Lowercase, a short noun phrase."
+
+[messages.picker_hint_tab_dark_theme]
+context = "crates/kettle-ui/src/app/pickers.rs: theme picker key hint, after \"Tab:\", while the picker edits the light side: Tab switches the picker to editing the dark theme. Dropped first when the header is narrow. Lowercase, a short noun phrase."
+
 [messages.config_notice_open]
 context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
 

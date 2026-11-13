@@ -35,6 +35,8 @@ picker_theme_a11y_lowest_slot = "el mínimo es el color {slot} de la paleta"
 picker_theme_a11y_low_contrast = "por debajo de 3:1, difícil de leer"
 picker_hint_save_for_light = "guardar para la apariencia clara"
 picker_hint_save_for_dark = "guardar para la apariencia oscura"
+picker_hint_tab_light_theme = "tema claro"
+picker_hint_tab_dark_theme = "tema oscuro"
 settings_field_restore_session = "Restaurar sesión"
 settings_description_field_restore_session = "Automático: ajustes de macOS; restaura en Linux; no en Windows."
 

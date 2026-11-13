@@ -29,7 +29,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the system is dark: the list moves to that theme, the window previews your
   picks, and Enter (the hint reads "save for light appearance") writes only
   `light-theme` and puts the window back on its dark theme. Screen readers
-  offer both sides as radio buttons. Tab still moves to the next row.
+  offer both sides as radio buttons. Tab or Shift+Tab switches to the other
+  side too (the hint reads "Tab: light theme"), while the arrows keep moving
+  rows; with a fixed theme, which has no sides, Tab moves down a row and
+  Shift+Tab now moves up one.
 
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its

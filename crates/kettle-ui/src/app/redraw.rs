@@ -179,7 +179,7 @@ impl App {
                 Some(with_preedit(&state.query)),
                 picker_hint(
                     tr,
-                    &theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key()),
+                    &theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true),
                 ),
                 Some(theme_picker_list_with_footer(
                     state,
