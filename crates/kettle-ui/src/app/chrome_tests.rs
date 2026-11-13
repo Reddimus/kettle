@@ -1111,26 +1111,92 @@ fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
     }
 }
 
-/// A lone tab stays centred on the window with the gear in place, at the
-/// panel's first-window and narrow widths.
+/// A lone tab stays centred on the window with the gear in place. The gear
+/// takes its room from the right of the strip only, so in a window too
+/// narrow for the preferred tab beside it the tab narrows about the centre
+/// instead of sliding left of it. The sweep covers the 500-660 pt widths
+/// where that happens, at 1x and 2x and at both title-bar heights, and
+/// holds the tab at least as centred as the strip without a gear held it.
 #[test]
 fn macos_titlebar_settings_gear_keeps_a_lone_tab_centred() {
     use super::chrome::horizontal_tab_geometry;
     let cfg = kettle_config::Config::default();
-    for scale in [1.0, 2.0] {
-        for width in [640.0, 1280.0] {
-            let lane = macos_titlebar_lane(width, scale);
-            let geometry = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
-            assert!(geometry.settings_rect.2 > 0.0);
-            let x = lane.0 + geometry.layout.xs[0].expect("the lone tab shows");
-            let centre = x + geometry.layout.last_width * 0.5;
-            assert!(
-                (centre - width * scale * 0.5).abs() < 0.01,
-                "{width}px @{scale}x: lone tab centred at {centre}"
-            );
-            assert!(x + geometry.layout.last_width <= geometry.settings_rect.0);
+    let widths = (500..=660).map(|w| w as f32).chain([1280.0]);
+    for scale in [1.0_f32, 2.0] {
+        for height in [28.0_f32, 32.0] {
+            for width in widths.clone() {
+                let lane = (78.0 * scale, 0.0, (width - 78.0) * scale, height * scale);
+                let case = format!("{width}pt @{scale}x, {height}pt bar");
+                let centre_of_window = width * scale * 0.5;
+                let geometry = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+                assert!(geometry.settings_rect.2 > 0.0, "{case}: no gear");
+                let x = lane.0 + geometry.layout.xs[0].expect("the lone tab shows");
+                let w = geometry.layout.last_width;
+                assert_eq!(geometry.layout.width, w, "{case}");
+                let offset = (x + w * 0.5 - centre_of_window).abs();
+                assert!(offset < 0.01, "{case}: lone tab {offset} px off centre");
+                assert!(w >= cfg.tab_min_width, "{case}: tab {w} px wide");
+                assert!(x >= lane.0, "{case}: tab under the traffic lights");
+                assert!(
+                    x + w <= geometry.settings_rect.0 + 0.01,
+                    "{case}: tab ends at {} past the gear at {}",
+                    x + w,
+                    geometry.settings_rect.0
+                );
+                // The same strip without the gear, as the title bar laid it
+                // out before the gear: its reserve is `▾ +` alone.
+                let (_, _, reserve) = super::horizontal_new_tab_controls(lane, scale, true);
+                let before = super::titlebar_tab_layout(
+                    1,
+                    0,
+                    (lane.2 - reserve, reserve, lane.0),
+                    lane.3,
+                    cfg.tab_min_width,
+                    cfg.scroll_tabbar,
+                );
+                let before_x = lane.0 + before.xs[0].expect("the lone tab showed");
+                let before_offset = (before_x + before.last_width * 0.5 - centre_of_window).abs();
+                assert!(
+                    offset <= before_offset + 0.01,
+                    "{case}: {offset} px off centre, {before_offset} px without the gear"
+                );
+                // Where the tab already fitted, centred and at its full
+                // width, in the strip the gear leaves, it keeps that width.
+                if before_offset < 0.01 && before_x + before.last_width <= lane.0 + geometry.strip {
+                    assert_eq!(w, before.last_width, "{case}");
+                }
+            }
         }
     }
+}
+
+/// The narrowed lone tab stops at `tab-min-width`: a window too narrow for
+/// that about the centre keeps the tab at the minimum, clamped into the
+/// strip, and a strip narrower than the minimum keeps its own layout.
+#[test]
+fn a_lone_titlebar_tab_narrows_no_further_than_the_minimum() {
+    use super::chrome::{centre_lone_titlebar_tab, titlebar_tab_layout};
+    // Centred room 2 * min(160, 200 - 160) = 80, under a 120 minimum.
+    let space = (200.0, 120.0, 0.0);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!((layout.width, layout.last_width), (120.0, 120.0));
+    assert_eq!(layout.xs, vec![Some(80.0)], "clamped to end at the strip");
+    // Room for 200 about a centre at 150: narrowed to it, centred.
+    let space = (250.0, 50.0, 0.0);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!(layout.last_width, 200.0);
+    assert_eq!(layout.xs, vec![Some(50.0)]);
+    // Narrower than the minimum: untouched.
+    let space = (100.0, 50.0, 0.0);
+    let untouched = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!(
+        (layout.xs, layout.last_width, layout.arrow_left),
+        (untouched.xs, untouched.last_width, untouched.arrow_left)
+    );
 }
 
 /// Press, hover and release all use the gear's own rect: a press there is

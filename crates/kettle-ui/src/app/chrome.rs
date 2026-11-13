@@ -1266,8 +1266,7 @@ pub(super) fn titlebar_tab_layout(
         return TabStripLayout::empty(n);
     }
     let mut layout = tab_strip_layout(n, active, strip, reserve, height, min, scroll);
-    let scale = height / 28.0;
-    let preferred = (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0));
+    let preferred = titlebar_preferred_tab_width(n, height, min);
     if strip / n.max(1) as f32 >= preferred {
         layout.width = preferred;
         layout.last_width = preferred;
@@ -1281,6 +1280,40 @@ pub(super) fn titlebar_tab_layout(
         layout.arrow_right = None;
     }
     layout
+}
+
+/// The width a title-bar tab takes while the strip has room for it.
+fn titlebar_preferred_tab_width(n: usize, height: f32, min: f32) -> f32 {
+    let scale = height / 28.0;
+    (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0))
+}
+
+/// Keep a macOS title bar's lone tab centred on the window. Where the
+/// controls leave less than its preferred width on one side of the centre,
+/// the tab narrows evenly about the centre, down to `min`, rather than
+/// sliding off it; only below `min` does it clamp into the strip. A strip
+/// narrower than `min` keeps `titlebar_tab_layout`'s result. `space` and
+/// `height` are as `titlebar_tab_layout` takes them.
+pub(super) fn centre_lone_titlebar_tab(
+    layout: &mut TabStripLayout,
+    space: (f32, f32, f32),
+    height: f32,
+    min: f32,
+) {
+    let (strip, reserve, left) = space;
+    let min = min.max(1.0);
+    if layout.xs.len() != 1 || strip < min.max(2.0) {
+        return;
+    }
+    let preferred = titlebar_preferred_tab_width(1, height, min);
+    let centre = (strip + reserve - left) * 0.5;
+    let room = 2.0 * centre.min(strip - centre);
+    let width = preferred.min(room).max(min).min(strip);
+    layout.width = width;
+    layout.last_width = width;
+    layout.xs = vec![Some((centre - width * 0.5).clamp(0.0, strip - width))];
+    layout.arrow_left = None;
+    layout.arrow_right = None;
 }
 
 pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
@@ -1352,14 +1385,22 @@ pub(super) fn horizontal_tab_geometry(
     }
     let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
     let layout = if titlebar {
-        titlebar_tab_layout(
+        let space = (strip, button_w, lane.0);
+        let mut layout = titlebar_tab_layout(
             n,
             active,
-            (strip, button_w, lane.0),
+            space,
             lane.3,
             cfg.tab_min_width,
             cfg.scroll_tabbar,
-        )
+        );
+        // The gear takes its room from the right of the strip only, so a
+        // macOS lone tab narrows about the centre instead. The Linux header
+        // has no gear and keeps its layout.
+        if !linux && n == 1 {
+            centre_lone_titlebar_tab(&mut layout, space, lane.3, cfg.tab_min_width);
+        }
+        layout
     } else {
         tab_strip_layout(
             n,
