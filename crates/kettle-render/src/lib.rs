@@ -35,7 +35,9 @@ pub use text_field::{
 mod settings;
 mod tab_strip;
 mod terminal;
-pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_text_scale};
+pub use tab_strip::{
+    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+};
 mod theme;
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
@@ -1357,13 +1359,20 @@ impl Renderer {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
-            let tab_accent = if !overlay.window_focused {
-                chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
-            } else if tabbar.broadcast {
-                theme.palette[3]
-            } else {
-                self.ui_accent(cfg, theme)
-            };
+            // Broadcast's warning yellow or the window's accent, at 3:1 on
+            // the active tab and the strip where the colours allow it; grey
+            // in an unfocused window.
+            let tab_accent = chrome::tab_accent(
+                if tabbar.broadcast {
+                    theme.palette[3]
+                } else {
+                    self.ui_accent(cfg, theme)
+                },
+                chrome_strip_bg,
+                default_bg,
+                theme.foreground,
+                overlay.window_focused,
+            );
             if !cfg.tab_bar_pos.is_vertical() {
                 let tabs = tab_strip::horizontal_tab_quads(
                     tabbar,
@@ -1393,23 +1402,18 @@ impl Renderer {
                     let (x, seg_y, w, seg_h) = s.rect;
                     if s.active {
                         quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                        // When broadcast / group-input mode is on,
-                        // use a warning-yellow accent (theme palette index 3,
-                        // the standard ANSI "yellow" slot) for the active tab
-                        // so the user can't forget broadcast is enabled and
-                        // type to one pane expecting it to stay local. Other
-                        // tabs are unaffected — broadcast is scoped to the
-                        // active tab, so only the
-                        // active segment's accent flips.
-                        let accent = if tabbar.broadcast {
-                            theme.palette[3]
-                        } else {
-                            // Multi-window: the per-WINDOW accent
-                            // (Peacock pool slot, live-deduped), falling back to
-                            // explicit `accent-color` → theme signature.
-                            self.ui_accent(cfg, theme)
-                        };
-                        quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
+                        // The same bar as a horizontal strip's: broadcast's
+                        // warning yellow (only the active tab broadcasts) or
+                        // the window's accent, grey while the window is
+                        // unfocused.
+                        quads.push(rect(
+                            x,
+                            seg_y,
+                            (3.0 * self.scale).round(),
+                            seg_h,
+                            tab_accent,
+                            1.0,
+                        ));
                     }
                     // Thin separator on the right (horizontal) or
                     // bottom (vertical) of each segment. For vertical,
@@ -1554,7 +1558,7 @@ impl Renderer {
                     ),
                 ] {
                     if hovered {
-                        let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
+                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
@@ -4168,13 +4172,14 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
-                let tab_background = if s.active {
-                    default_bg
-                } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
-                } else {
-                    chrome_strip_bg
-                };
+                let tab_background = tab_strip::tab_title_background(
+                    s.active,
+                    tabbar.hovered_tab_idx == Some(s.idx),
+                    cfg.tab_bar_pos.is_vertical(),
+                    default_bg,
+                    chrome_strip_bg,
+                    theme.foreground,
+                );
                 let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
                     self.chrome_colors.text(fg, tab_background)
                 } else {
@@ -4219,23 +4224,26 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
-                if !cfg.tab_bar_pos.is_vertical() && tx - s.rect.0 >= 20.0 {
-                    let dot = match s.activity {
-                        TabActivity::Bell => Some(theme.palette[3]),
-                        TabActivity::Output => Some(theme.palette[6]),
-                        TabActivity::Silent => Some(theme.palette[8]),
-                        TabActivity::Normal => None,
-                    };
-                    if let Some(color) = dot {
-                        tab_strip::rounded_fill(
-                            &mut quads,
-                            (centered_left - 10.0, ty_px + th * 0.5 - 3.0, 6.0, 6.0),
-                            3.0,
-                            (true, true),
-                            (color, 1.0),
-                            None,
-                        );
-                    }
+                if !cfg.tab_bar_pos.is_vertical()
+                    && let Some(marker) = tab_strip::activity_marker_rect(
+                        s.rect,
+                        s.title_rect,
+                        centered_left,
+                        self.scale,
+                    )
+                    && let Some(ink) = chrome::activity_ink(theme, s.activity)
+                {
+                    let ink =
+                        self.chrome_colors
+                            .tab_marker(ink, tab_background, overlay.window_focused);
+                    tab_strip::activity_marker_quads(
+                        &mut quads,
+                        s.activity,
+                        marker,
+                        self.scale,
+                        ink,
+                        tab_background,
+                    );
                 }
                 // `✕` close glyph — separate text area so we can color
                 // it independently of the title. Bright on hover, dim
@@ -4325,7 +4333,7 @@ impl Renderer {
             };
             let toolbar_background = |colors: &mut chrome::Colors, hovered, pressed| {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed)
+                    chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed)
                 } else if hovered {
                     colors.surface(
                         chrome_strip_bg,

@@ -55,6 +55,15 @@ fn formatted_messages_keep_their_arguments_verbatim() {
         en.settings_value_not_detected("{name} \"\\\n"),
         "{name} \"\\\n (not detected)"
     );
+    assert_eq!(
+        en.confirm_close_running("a{b}"),
+        "The program a{b} is still running. Closing stops it, and unsaved work may be lost."
+    );
+    // The Spanish sentence opens with the word for "program", which the
+    // spelling check reads as an English typo, so it is matched from the name.
+    assert!(es.confirm_close_running("a{b}").ends_with(
+        " a{b} sigue en ejecución. Al cerrar se detendrá y el trabajo sin guardar puede perderse."
+    ));
 }
 
 /// Only 1 selects the singular; 0 and every larger count read as plural.
