@@ -16,6 +16,7 @@ fn state(query: &str, selected: usize, opened_on: &str) -> ThemePickerState {
         query: query.into(),
         selected,
         opened_on: opened_on.to_string(),
+        slot: None,
     }
 }
 
@@ -689,7 +690,15 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
         .split("fn ssh_key(")
         .next()
         .unwrap();
-    assert!(commit.contains("let key = self.theme_pick_key();"));
+    assert!(commit.contains("let key = plan.key;"));
+    let enter = source
+        .split("fn theme_picker_key(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_theme(")
+        .next()
+        .unwrap();
+    assert!(enter.contains("theme_commit_plan(state, &self.cfg, self.theme_active_dark())"));
     assert!(commit.contains("self.persist_pref(key, name)"));
     assert!(commit.contains("self.cfg.light_theme = name.to_string()"));
     assert!(commit.contains("self.cfg.dark_theme = name.to_string()"));
@@ -741,7 +750,9 @@ fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
     assert!(super::theme_picker_appearance_prefix("light-theme", &ES).contains("tema claro:"));
     let source = production_source();
     assert!(
-        source.contains("theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)")
+        source.contains(
+            "theme_picker_appearance_prefix(self.theme_picker_key_for(ws), &self.ui_text)"
+        )
     );
 }
 
@@ -1231,4 +1242,209 @@ fn the_theme_picker_footer_has_an_accessible_text() {
             "{text}"
         );
     }
+}
+
+/// Following a dark system, choosing the light side on the status line opens
+/// the list on the light theme, ticks and highlights it, and makes Enter save
+/// `light-theme` and put the window back on its dark theme. Choosing the
+/// dark side again saves and keeps the pick as before. A fixed theme has no
+/// sides, so `theme` is saved whatever was chosen.
+#[test]
+fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
+    use super::{ThemeCommitPlan, switch_theme_picker_slot, theme_commit_plan};
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config::default();
+    assert_eq!(cfg.theme_mode, kettle_config::ThemeMode::Auto);
+    assert_ne!(cfg.light_theme, cfg.dark_theme);
+    let dark = Some(true);
+    let mut picker = state("", 0, &cfg.dark_theme.clone());
+    picker.selected = theme_picker_start(&cfg.dark_theme);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "dark-theme",
+            restore_active: false
+        }
+    );
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(picker.slot, Some(ThemeSlot::Light));
+    assert_eq!(picker.opened_on, cfg.light_theme);
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.light_theme.as_str())
+    );
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "light-theme",
+            restore_active: true
+        }
+    );
+    assert!(!switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        ThemeSlot::Light,
+        &EN
+    ));
+    // The status line and the hint follow the chosen side.
+    let key = super::theme_picker_save_key(Some(&picker), "dark-theme");
+    assert_eq!(key, "light-theme");
+    let footer = super::theme_picker_footer(&picker, &cfg, key, &EN);
+    assert_eq!(footer.editing, Some(ThemeSlot::Light));
+    assert_eq!(
+        super::theme_picker_enter_hint(key, "dark-theme"),
+        kettle_i18n::Text::PickerHintSaveForLight
+    );
+    assert_eq!(
+        super::theme_picker_enter_hint("dark-theme", "dark-theme"),
+        kettle_i18n::Text::PickerHintKeep
+    );
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker.opened_on, cfg.dark_theme);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "dark-theme",
+            restore_active: false
+        }
+    );
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    picker.slot = Some(ThemeSlot::Light);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "theme",
+            restore_active: false
+        }
+    );
+}
+
+/// The window previews the light side while it is edited, Esc puts back the
+/// theme from before the picker, and a pick for the side the window is not on
+/// leaves the baseline in place, so closing the picker puts that theme back.
+/// `commit_theme` drops the baseline and wears the pick only for the side
+/// the window is on.
+#[test]
+fn a_pick_for_the_other_side_puts_the_window_back_on_its_theme() {
+    let cfg = kettle_config::Config::default();
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, live(&cfg.dark_theme));
+    let picker = ws.theme_picker_input.as_mut().unwrap();
+    super::switch_theme_picker_slot(picker, &cfg, kettle_render::ThemeSlot::Light, &EN);
+    let previewed = settle(&mut ws, &cfg.dark_theme);
+    assert_eq!(previewed, cfg.light_theme);
+    // Enter for the light side: the picker closes and the baseline stays.
+    ws.theme_picker_input = None;
+    assert_eq!(settle(&mut ws, &previewed), cfg.dark_theme);
+    let source = production_source();
+    let commit = source
+        .split("fn commit_theme(")
+        .nth(1)
+        .unwrap()
+        .split("fn ssh_key(")
+        .next()
+        .unwrap();
+    let keep = commit
+        .split("if !plan.restore_active {")
+        .nth(1)
+        .expect("only a pick for the active side is worn")
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(keep.contains("ws.theme_preview = None;"));
+    assert!(keep.contains("self.set_runtime_theme_name(ws, name);"));
+    assert_eq!(commit.matches("ws.theme_preview = None;").count(), 1);
+    assert_eq!(commit.matches("set_runtime_theme").count(), 1);
+}
+
+/// A press on a side of the status line chooses that side; the pointer and
+/// a screen reader's click both switch the picker through
+/// `switch_theme_slot`, and a screen reader hears each side as a radio
+/// button, checked on the side a pick saves to, over its painted words.
+#[test]
+fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
+    use super::{FooterPress, open_picker_list, picker_context_menu, theme_footer_press};
+    use kettle_render::ThemeSlot;
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    for tr in [&EN, &ES] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let menu = picker_context_menu(
+            open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap(),
+            (1280.0, 820.0),
+            cell,
+            32.0,
+        )
+        .unwrap();
+        let layout = menu.picker_footer_layout(tr, cell).unwrap();
+        let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+        assert_eq!(layout.slot_chips.len(), 2);
+        for &((x, y, w, h), slot) in &layout.slot_chips {
+            assert_eq!(
+                theme_footer_press(&menu, tr, cell, at(x + w * 0.5, y + h * 0.5)),
+                Some(FooterPress::Slot(slot))
+            );
+        }
+        let overlay = kettle_render::Overlay {
+            theme_picker_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection = modal_accessibility_projection(&overlay, (1280.0, 820.0), cell, 1.0, tr);
+        let radios: Vec<_> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::RadioButton)
+            .collect();
+        assert_eq!(radios.len(), 2);
+        for ((id, node), &(rect, slot)) in radios.iter().zip(&layout.slot_chips) {
+            assert_eq!(super::accessibility_theme_slot(*id), Some(slot));
+            let label = node.label().unwrap();
+            let side = tr.text(match slot {
+                ThemeSlot::Dark => kettle_i18n::Text::PickerThemeDarkSlot,
+                ThemeSlot::Light => kettle_i18n::Text::PickerThemeLightSlot,
+            });
+            assert!(label.starts_with(side), "{label}");
+            assert_eq!(
+                node.toggled(),
+                Some((slot == ThemeSlot::Dark).into()),
+                "{label}"
+            );
+            let bounds = node.bounds().unwrap();
+            assert_eq!(bounds.x0, f64::from(rect.0));
+            assert_eq!(bounds.x1, f64::from(rect.0 + rect.2));
+            assert!(node.supports_action(accesskit::Action::Click));
+            let dialog = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+                .unwrap();
+            assert!(dialog.1.children().contains(id));
+        }
+    }
+    let src = production_source();
+    let pointer = src
+        .split("fn picker_pointer(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(pointer.contains("FooterPress::Slot(slot) => self.switch_theme_slot(ws, slot)"));
+    let action = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(action.contains("accessibility_theme_slot(request.target_node)"));
+    assert!(action.contains("self.switch_theme_slot(ws, slot);"));
 }

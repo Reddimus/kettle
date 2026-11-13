@@ -446,6 +446,7 @@ pub(super) fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Opti
         query: Default::default(),
         selected: theme_picker_start(&opened.0),
         opened_on: opened.0.clone(),
+        slot: None,
     });
     ws.theme_preview = Some(opened);
     restore
@@ -492,6 +493,88 @@ pub(super) fn theme_preview_change(
             .as_ref()
             .filter(|(name, _)| name != live_name)
             .cloned(),
+    }
+}
+
+/// The config key that holds `slot`'s theme.
+pub(super) fn theme_slot_key(slot: kettle_render::ThemeSlot) -> &'static str {
+    match slot {
+        kettle_render::ThemeSlot::Dark => "dark-theme",
+        kettle_render::ThemeSlot::Light => "light-theme",
+    }
+}
+
+/// The key the open picker `state` saves a pick to, while `active` (from
+/// `theme_pick_key`) is the side the window wears: the side chosen on the
+/// status line, else the active one. A fixed theme has no sides.
+pub(super) fn theme_picker_save_key(
+    state: Option<&crate::window_state::ThemePickerState>,
+    active: &'static str,
+) -> &'static str {
+    match state.and_then(|state| state.slot) {
+        Some(slot) if active != "theme" => theme_slot_key(slot),
+        _ => active,
+    }
+}
+
+/// What Enter in the theme picker does with its pick: the key it saves to,
+/// and whether the window goes back to the theme it wore, because the pick
+/// is for the side the window is not on now. `active_dark` is the side the
+/// schedule or the system calls for, as `theme_pick_key` takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ThemeCommitPlan {
+    pub(super) key: &'static str,
+    pub(super) restore_active: bool,
+}
+
+pub(super) fn theme_commit_plan(
+    state: &crate::window_state::ThemePickerState,
+    cfg: &Config,
+    active_dark: Option<bool>,
+) -> ThemeCommitPlan {
+    let active = super::theme_pick_key(cfg, active_dark);
+    let key = theme_picker_save_key(Some(state), active);
+    ThemeCommitPlan {
+        key,
+        restore_active: key != active,
+    }
+}
+
+/// Edit `slot`'s theme in the open picker: the list opens on that side's
+/// theme, ticks it and highlights it, and the window previews it. The
+/// preview's baseline, which Esc restores, stays the theme from before the
+/// picker. Returns whether anything changed.
+pub(super) fn switch_theme_picker_slot(
+    state: &mut crate::window_state::ThemePickerState,
+    cfg: &Config,
+    slot: kettle_render::ThemeSlot,
+    tr: &kettle_i18n::Translator,
+) -> bool {
+    let theme = match slot {
+        kettle_render::ThemeSlot::Dark => &cfg.dark_theme,
+        kettle_render::ThemeSlot::Light => &cfg.light_theme,
+    };
+    if state.slot == Some(slot) && state.opened_on == *theme {
+        return false;
+    }
+    state.slot = Some(slot);
+    state.opened_on = theme.clone();
+    state.selected = theme_picker_matches(&state.query, &state.opened_on, tr)
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(theme.trim()))
+        .unwrap_or(0);
+    true
+}
+
+/// What Enter does in the theme picker's key hint: keep the pick, or only
+/// save it for the side the window is not on.
+pub(super) fn theme_picker_enter_hint(save_key: &str, active: &str) -> kettle_i18n::Text {
+    use kettle_i18n::Text;
+    match save_key {
+        _ if save_key == active => Text::PickerHintKeep,
+        "light-theme" => Text::PickerHintSaveForLight,
+        "dark-theme" => Text::PickerHintSaveForDark,
+        _ => Text::PickerHintKeep,
     }
 }
 
@@ -761,6 +844,7 @@ pub(super) fn theme_picker_footer(
         status_lines: 2,
         height: 0.0,
         min_columns: (0, 0),
+        cell: (0.0, 0.0),
     };
     footer.min_columns = kettle_render::theme_footer_min_columns(&footer, tr);
     footer
@@ -797,6 +881,7 @@ pub(super) fn picker_context_menu(
         footer.show_sample = sample;
         footer.status_lines = lines;
         footer.height = height;
+        footer.cell = cell;
         Some(footer)
     });
     let (x, y, width, height) = geometry.rows;
@@ -919,6 +1004,8 @@ fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Opt
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FooterPress {
     Contrast,
+    /// One side on the status line: the picker edits that side's theme.
+    Slot(kettle_render::ThemeSlot),
     Footer,
 }
 
@@ -937,6 +1024,12 @@ pub(super) fn theme_footer_press(
         .is_some_and(|button| rect_contains(button, x, y))
     {
         Some(FooterPress::Contrast)
+    } else if let Some(&(_, slot)) = layout
+        .slot_chips
+        .iter()
+        .find(|(chip, _)| rect_contains(*chip, x, y))
+    {
+        Some(FooterPress::Slot(slot))
     } else {
         rect_contains(layout.rect, x, y).then_some(FooterPress::Footer)
     }
@@ -1032,7 +1125,7 @@ impl App {
         let Some(list) = open_picker_list(
             ws,
             &self.cfg,
-            self.theme_pick_key(),
+            self.theme_picker_key_for(ws),
             &self.ui_text,
             self.update_notice().as_ref(),
         ) else {
@@ -1056,8 +1149,10 @@ impl App {
         if matches!(event, PickerPointer::Press)
             && let Some(press) = theme_footer_press(&menu, &self.ui_text, cell, ws.cursor)
         {
-            if press == FooterPress::Contrast {
-                self.step_picker_contrast(ws);
+            match press {
+                FooterPress::Contrast => self.step_picker_contrast(ws),
+                FooterPress::Slot(slot) => self.switch_theme_slot(ws, slot),
+                FooterPress::Footer => {}
             }
             return true;
         }

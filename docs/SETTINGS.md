@@ -226,12 +226,17 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter them,
 or move with ↑/↓ (and Tab); the window wears the selected theme while you
 browse. Enter keeps it and writes it to your config file, and Esc puts back the
-theme you started with. The prompt names the active appearance: **light theme:**
-or **dark theme:**. Following the system saves a pick to that side and keeps
-following. Forced Light/Dark modes also update their own side; Fixed theme
-writes `theme`. With nothing typed, the themes of your current theme's
-appearance come first, each followed by the most similar one, so the arrows
-never jump between a dark and a light palette until the end of the list; each
+theme you started with. The prompt names the side a pick saves to: **light
+theme:** or **dark theme:**. Following the system saves a pick to the active
+side and keeps following. Forced Light/Dark modes also update their own side;
+Fixed theme writes `theme`. To change the other side's theme, click its name on
+the status line under the list: the list moves to that side's theme and the
+window previews it, and Enter (shown as "save for light appearance" or "save
+for dark appearance") writes `light-theme` or `dark-theme` only and puts the
+window back on the theme it wore. Esc still puts back the theme you started
+with. With nothing typed, the themes of your current theme's appearance come
+first, each followed by the most similar one, so the arrows never jump
+between a dark and a light palette until the end of the list; each
 row says whether its theme is dark or light and shows a strip of its colours
 (background, text and six accent colours), and your current theme is ticked.
 When the window is too narrow for every row's strip, no row shows one, so names
@@ -245,12 +250,13 @@ would draw it: a prompt, an `ls -l` listing, a diff and all 16 palette
 colours, in the theme's own colours with your colour overrides and
 `minimum-contrast` applied. Its last line reads the contrast of the theme's
 text and of its least readable palette colour (slots 1-7 and 9-15) against
-its background, with that colour's swatch and number; a red dot follows when
-it is below 3:1, and with a minimum contrast set it also counts the colours
-the terminal lifts. Below the card, a status line says how the theme is
+its background, with that colour's swatch and number; a warning dot follows
+when it is below 3:1, and with a minimum contrast set it also counts the
+colours the terminal lifts. Below the card, a status line says how the theme is
 chosen (**Follow system**, **Follow schedule** when `theme-schedule` is set,
 Light, Dark or Fixed theme) and names the dark and the light theme, with a
-dot and an underline on the side a pick saves to; a fixed theme shows only
+dot and an underline on the side a pick saves to (a click on a side chooses
+it; a screen reader offers both as radio buttons); a fixed theme shows only
 **Theme:**. The **Contrast:** button on it steps `minimum-contrast` through
 Off, 3:1, 4.5:1 and 7:1 and saves it at once, like the Settings row. It is
 not part of the preview: Esc puts back the theme only, not the contrast. The

@@ -180,7 +180,13 @@ impl App {
                 picker_hint(
                     tr,
                     &[
-                        ("Enter", T::PickerHintKeep),
+                        (
+                            "Enter",
+                            theme_picker_enter_hint(
+                                self.theme_picker_key_for(ws),
+                                self.theme_pick_key(),
+                            ),
+                        ),
                         ("↑↓", T::PickerHintSelect),
                         ("Esc", T::PickerHintRestore),
                     ],
@@ -188,7 +194,7 @@ impl App {
                 Some(theme_picker_list_with_footer(
                     state,
                     &self.cfg,
-                    self.theme_pick_key(),
+                    self.theme_picker_key_for(ws),
                     tr,
                 )),
             ),

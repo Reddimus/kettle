@@ -24,6 +24,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and 7:1. The list now shows up to 14 rows when the window has room; on a
   short window the card goes first.
 
+- The theme picker can change the theme for the appearance you are not in.
+  Click the other side's name on its status line, such as "Light:" while
+  the system is dark: the list moves to that theme, the window previews your
+  picks, and Enter (the hint reads "save for light appearance") writes only
+  `light-theme` and puts the window back on its dark theme. Screen readers
+  offer both sides as radio buttons. Tab still moves to the next row.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

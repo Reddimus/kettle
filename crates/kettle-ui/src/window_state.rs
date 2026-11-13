@@ -758,13 +758,16 @@ impl MediaPasteReceiptState {
 }
 
 /// The theme picker's query and selected row, and the theme it opened on. That
-/// theme fixes the list's order while the preview changes the live theme, is
-/// ticked, and is what Esc restores.
+/// theme fixes the list's order while the preview changes the live theme and
+/// is ticked; the window's theme before the picker is what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThemePickerState {
     pub(crate) query: crate::text_editor::TextEditor,
     pub(crate) selected: usize,
     pub(crate) opened_on: String,
+    /// The side the user chose on the picker's status line; `None` edits
+    /// the side the window wears. See `theme_commit_plan`.
+    pub(crate) slot: Option<kettle_render::ThemeSlot>,
 }
 
 /// One shelf item, with shared view state for the overlay and pinned lane.

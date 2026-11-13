@@ -1581,6 +1581,14 @@ impl App {
             }
             return;
         }
+        if ws.theme_picker_input.is_some()
+            && let Some(slot) = accessibility_theme_slot(request.target_node)
+        {
+            if request.action == AccessibilityAction::Click {
+                self.switch_theme_slot(ws, slot);
+            }
+            return;
+        }
         if let Some(kind) = accessibility_modal_input_kind(ws)
             && [
                 accessibility_modal_id(kind, 1),
@@ -2197,6 +2205,22 @@ fn push_text_input_run(
 
 /// The theme picker footer's node index, past any row's (rows start at 3).
 const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
+/// The footer's dark and light sides, as radio buttons, just below it.
+const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
+    (PICKER_FOOTER_A11Y_INDEX - 2, kettle_render::ThemeSlot::Dark),
+    (
+        PICKER_FOOTER_A11Y_INDEX - 1,
+        kettle_render::ThemeSlot::Light,
+    ),
+];
+
+/// The theme picker side whose radio button `node` is, if any.
+pub(super) fn accessibility_theme_slot(node: NodeId) -> Option<kettle_render::ThemeSlot> {
+    PICKER_SLOT_A11Y_INDEX
+        .into_iter()
+        .find(|&(index, _)| accessibility_modal_id(MODAL_KIND_THEMES, index) == node)
+        .map(|(_, slot)| slot)
+}
 
 fn push_picker_accessibility(
     projection: &mut ModalAccessibilityProjection,
@@ -2281,6 +2305,31 @@ fn push_picker_accessibility(
         text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
         projection.nodes.push((footer_id, text));
         dialog_children.push(footer_id);
+        // Each side is a radio button: a click edits that side's theme. Its
+        // words and bounds are the painter's.
+        let chips = menu
+            .picker_footer_layout(tr, footer.cell)
+            .map(|layout| layout.slot_chips)
+            .unwrap_or_default();
+        for (slot, words, editing) in kettle_render::theme_footer_slots(footer, tr) {
+            let Some((index, _)) = PICKER_SLOT_A11Y_INDEX
+                .into_iter()
+                .find(|&(_, side)| side == slot)
+            else {
+                continue;
+            };
+            let id = accessibility_modal_id(kind, index);
+            let mut radio = Node::new(Role::RadioButton);
+            radio.set_label(words);
+            radio.set_toggled(editing.into());
+            radio.add_action(AccessibilityAction::Click);
+            match chips.iter().find(|&&(_, side)| side == slot) {
+                Some(&(rect, _)) => radio.set_bounds(bounds(rect)),
+                None => radio.set_hidden(),
+            }
+            projection.nodes.push((id, radio));
+            dialog_children.push(id);
+        }
     }
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);

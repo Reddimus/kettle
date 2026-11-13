@@ -155,10 +155,18 @@ impl App {
     }
 
     pub(super) fn theme_pick_key(&self) -> &'static str {
-        theme_pick_key(
-            &self.cfg,
-            self.theme_schedule_is_dark().or(self.os_theme_dark),
-        )
+        theme_pick_key(&self.cfg, self.theme_active_dark())
+    }
+
+    /// Whether the schedule, or else the system, calls for the dark side.
+    pub(super) fn theme_active_dark(&self) -> Option<bool> {
+        self.theme_schedule_is_dark().or(self.os_theme_dark)
+    }
+
+    /// The key a pick in `ws`'s open theme picker saves to: the side chosen
+    /// on its status line, else the active side (`theme_pick_key`).
+    pub(super) fn theme_picker_key_for(&self, ws: &WindowState) -> &'static str {
+        theme_picker_save_key(ws.theme_picker_input.as_ref(), self.theme_pick_key())
     }
 
     pub(super) fn os_theme_choice(&self, theme: WindowTheme) -> Option<String> {

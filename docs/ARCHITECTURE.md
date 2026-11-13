@@ -3672,7 +3672,14 @@ fills in `ThemePickerFooter` from the config and decides, with
 `theme_footer_height` and the footer's own minimum columns, whether the card
 and how many status lines fit; kettle-render owns the words, layout and
 colours, so painting, the button's hit test and the footer's AccessKit text
-all come from `theme_footer_layout` and `theme_footer_description`. Sample
+all come from `theme_footer_layout` and `theme_footer_description`. Each side
+on the status line is a `slot_chips` target in that layout, and the same rect
+is its AccessKit radio button's bounds (`theme_footer_slots` gives its words).
+A press or a screen reader's click sets `ThemePickerState::slot`, which
+re-seats the list on that side's theme but leaves the preview's baseline
+alone; at Enter, `theme_commit_plan` picks the key to save and, for the side
+the window is not on, leaves the baseline so the closed picker puts the
+window's theme back. Sample
 text goes through the same `MinimumContrastCache::resolve` as cell text. The
 card, its palette squares, marks and the button outline are swatch-layer
 rounded surfaces; each footer line is a rich-text buffer whose words and

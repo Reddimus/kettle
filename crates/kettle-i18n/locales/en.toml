@@ -33,6 +33,8 @@ picker_theme_text_contrast = "Text {ratio}"
 picker_theme_lowest_contrast = "lowest {ratio}"
 picker_theme_a11y_lowest_slot = "lowest is palette colour {slot}"
 picker_theme_a11y_low_contrast = "below 3:1, hard to read"
+picker_hint_save_for_light = "save for light appearance"
+picker_hint_save_for_dark = "save for dark appearance"
 settings_field_restore_session = "Restore session"
 settings_description_field_restore_session = "Automatic: macOS window settings; restores on Linux; off on Windows."
 

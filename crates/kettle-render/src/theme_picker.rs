@@ -55,6 +55,9 @@ pub struct ThemePickerFooter {
     pub status_lines: usize,
     /// Physical pixels under the picker's rows.
     pub height: f32,
+    /// The text cell the footer was fitted in, for laying it out where the
+    /// painter has no say, such as the accessibility tree.
+    pub cell: (f32, f32),
     /// Columns the card's lines and the status lines need, from
     /// [`theme_footer_min_columns`] in the UI's words.
     pub min_columns: (usize, usize),

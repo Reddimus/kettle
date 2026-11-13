@@ -806,3 +806,46 @@ fn a_reload_puts_an_open_pickers_preview_back_before_painting() {
         .expect("a reload must re-apply an open picker's preview");
     assert!(sync > schedule, "the preview wins over the schedule's pick");
 }
+
+/// The system turns light while the theme picker edits the light side from
+/// a dark window. The picker keeps editing the light side and its list; Esc
+/// now puts back the new light baseline, and Enter saves `light-theme` and
+/// wears the pick, since the window is on that side now.
+#[test]
+fn a_system_switch_while_editing_the_other_side_keeps_that_side() {
+    use super::{ThemeCommitPlan, switch_theme_picker_slot, theme_commit_plan};
+    use kettle_render::ThemeSlot;
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config::default();
+    let live = |name: &str| (name.to_string(), kettle_config::Theme::by_name(name));
+    let mut ws = WindowState::new(1, Mux::new());
+    super::begin_theme_picker(&mut ws, live(&cfg.dark_theme));
+    let picker = ws.theme_picker_input.as_mut().unwrap();
+    switch_theme_picker_slot(picker, &cfg, ThemeSlot::Light, &tr);
+    let before = picker.clone();
+    assert_eq!(
+        theme_commit_plan(picker, &cfg, Some(true)),
+        ThemeCommitPlan {
+            key: "light-theme",
+            restore_active: true
+        }
+    );
+    // What `apply_initial_os_theme_preference` does for each window.
+    super::rebase_theme_preview(&mut ws, &live(&cfg.light_theme));
+    let picker = ws.theme_picker_input.as_ref().unwrap();
+    assert_eq!(*picker, before);
+    assert_eq!(
+        theme_commit_plan(picker, &cfg, Some(false)),
+        ThemeCommitPlan {
+            key: "light-theme",
+            restore_active: false
+        }
+    );
+    ws.theme_picker_input = None;
+    let wearing = kettle_config::Config {
+        theme_name: "Dracula".into(),
+        ..Default::default()
+    };
+    let restored = super::theme_preview_change(&mut ws, &wearing, &tr).unwrap();
+    assert_eq!(restored.0, cfg.light_theme);
+}

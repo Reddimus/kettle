@@ -27,6 +27,7 @@ fn footer(sample: &str, follow: ThemeFollow, editing: Option<ThemeSlot>) -> Them
         status_lines: 2,
         height: theme_footer_height(17.0, true, 2),
         min_columns: (0, 0),
+        cell: (8.4, 17.0),
     }
 }
 

@@ -181,7 +181,7 @@ impl App {
                 || open_picker_list(
                     ws,
                     &self.cfg,
-                    self.theme_pick_key(),
+                    self.theme_picker_key_for(ws),
                     &self.ui_text,
                     self.update_notice().as_ref(),
                 )
@@ -213,7 +213,7 @@ impl App {
         let prefix = if ws.palette_input.is_some() {
             "  \u{2318} ".to_string()
         } else if ws.theme_picker_input.is_some() {
-            theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)
+            theme_picker_appearance_prefix(self.theme_picker_key_for(ws), &self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
             rect = kettle_render::settings_value_rect(
@@ -2178,6 +2178,25 @@ impl App {
     /// The theme picker's contrast button: step `minimum-contrast` to the
     /// next listed ratio and save it, as the Settings row does. It is not part
     /// of the picker's preview, so Esc leaves it as set.
+    /// Edit `slot`'s theme in the open theme picker (see
+    /// `switch_theme_picker_slot`); the post-event `sync_theme_preview`
+    /// previews it.
+    pub(super) fn switch_theme_slot(
+        &mut self,
+        ws: &mut WindowState,
+        slot: kettle_render::ThemeSlot,
+    ) {
+        let Some(state) = ws.theme_picker_input.as_mut() else {
+            return;
+        };
+        if switch_theme_picker_slot(state, &self.cfg, slot, &self.ui_text) {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn step_picker_contrast(&mut self, ws: &mut WindowState) {
         let next = kettle_render::step_minimum_contrast(self.cfg.minimum_contrast, true);
         self.settings_store(
@@ -2557,9 +2576,10 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 let pick = theme_picker_selection(state, &self.ui_text);
+                let plan = theme_commit_plan(state, &self.cfg, self.theme_active_dark());
                 ws.theme_picker_input = None;
                 if let Some(name) = pick {
-                    self.commit_theme(ws, name);
+                    self.commit_theme(ws, name, plan);
                 }
             }
             Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
@@ -2580,18 +2600,22 @@ impl App {
         }
     }
 
-    /// Keep `name` as the theme. Dropping the preview's baseline makes the
-    /// post-event `sync_theme_preview` keep this pick instead of restoring the
-    /// theme the picker opened on.
-    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
-        ws.theme_preview = None;
-        let key = self.theme_pick_key();
+    /// Save `name` under `plan.key`. A pick for the side the window wears
+    /// is kept: dropping the preview's baseline makes the post-event
+    /// `sync_theme_preview` keep it instead of restoring the theme the picker
+    /// opened on. A pick for the other side is only saved, and the baseline
+    /// puts the window back on the theme it wore.
+    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str, plan: ThemeCommitPlan) {
+        let key = plan.key;
         match key {
             "light-theme" => self.cfg.light_theme = name.to_string(),
             "dark-theme" => self.cfg.dark_theme = name.to_string(),
             _ => {}
         }
-        self.set_runtime_theme_name(ws, name);
+        if !plan.restore_active {
+            ws.theme_preview = None;
+            self.set_runtime_theme_name(ws, name);
+        }
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time
         // default on restore, so neither a default change nor a fresh-config

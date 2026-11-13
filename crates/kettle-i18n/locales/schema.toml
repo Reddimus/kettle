@@ -2838,7 +2838,11 @@ args = [{ name = "slot", type = "u64" }]
 [messages.picker_theme_a11y_low_contrast]
 context = "crates/kettle-ui/src/app/accessibility.rs: Screen-reader text for the warning mark drawn when a theme colour is below 3:1 contrast on its background."
 
+[messages.picker_hint_save_for_light]
+context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Enter, while the picker edits the light side (light-theme) and the system is dark: save the pick as the light theme without wearing it now. Lowercase, a short phrase."
 
+[messages.picker_hint_save_for_dark]
+context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Enter, while the picker edits the dark side (dark-theme) and the system is light: save the pick as the dark theme without wearing it now. Lowercase, a short phrase."
 
 [messages.config_notice_open]
 context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."
