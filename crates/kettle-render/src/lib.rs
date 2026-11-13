@@ -1350,13 +1350,19 @@ impl Renderer {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
-            let tab_accent = if !overlay.window_focused {
-                chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
-            } else if tabbar.broadcast {
-                theme.palette[3]
-            } else {
-                self.ui_accent(cfg, theme)
-            };
+            // Broadcast's warning yellow or the window's accent, at 3:1 on
+            // the active tab and the strip; grey in an unfocused window.
+            let tab_accent = chrome::tab_accent(
+                if tabbar.broadcast {
+                    theme.palette[3]
+                } else {
+                    self.ui_accent(cfg, theme)
+                },
+                chrome_strip_bg,
+                default_bg,
+                theme.foreground,
+                overlay.window_focused,
+            );
             if !cfg.tab_bar_pos.is_vertical() {
                 let tabs = tab_strip::horizontal_tab_quads(
                     tabbar,
@@ -1386,23 +1392,18 @@ impl Renderer {
                     let (x, seg_y, w, seg_h) = s.rect;
                     if s.active {
                         quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                        // When broadcast / group-input mode is on,
-                        // use a warning-yellow accent (theme palette index 3,
-                        // the standard ANSI "yellow" slot) for the active tab
-                        // so the user can't forget broadcast is enabled and
-                        // type to one pane expecting it to stay local. Other
-                        // tabs are unaffected — broadcast is scoped to the
-                        // active tab, so only the
-                        // active segment's accent flips.
-                        let accent = if tabbar.broadcast {
-                            theme.palette[3]
-                        } else {
-                            // Multi-window: the per-WINDOW accent
-                            // (Peacock pool slot, live-deduped), falling back to
-                            // explicit `accent-color` → theme signature.
-                            self.ui_accent(cfg, theme)
-                        };
-                        quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
+                        // The same bar as a horizontal strip's: broadcast's
+                        // warning yellow (only the active tab broadcasts) or
+                        // the window's accent, grey while the window is
+                        // unfocused.
+                        quads.push(rect(
+                            x,
+                            seg_y,
+                            (3.0 * self.scale).round(),
+                            seg_h,
+                            tab_accent,
+                            1.0,
+                        ));
                     }
                     // Thin separator on the right (horizontal) or
                     // bottom (vertical) of each segment. For vertical,

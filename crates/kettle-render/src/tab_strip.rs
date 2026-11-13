@@ -297,7 +297,8 @@ pub(crate) fn horizontal_tab_quads(
                 6.0 * scale,
                 (!bottom, bottom),
                 if tab.active { background } else { (hover, 1.0) },
-                tab.active.then_some((accent, 2.0, bottom)),
+                tab.active
+                    .then_some((accent, (3.0 * scale).round(), bottom)),
             );
             if tab.active && background.1 < 1.0 {
                 // Cut with the actual surface slices so the rounded corners'
@@ -1070,6 +1071,86 @@ mod tests {
                 assert!(!hover.iter().any(|q| q.pos[0] == 319.0 && q.size[0] == 1.0));
             }
         }
+    }
+
+    /// The active tab's bar is three device pixels per point on its outer
+    /// edge, top or bottom, and a hovered tab gets none. It was a bare 2 px,
+    /// one point on a Retina display.
+    #[test]
+    fn active_accent_is_three_scaled_pixels() {
+        let theme = kettle_config::Theme::by_name("TokyoNight Night");
+        let accent = Rgb::new(0xff, 0x00, 0xff);
+        let accent_color = rect(0.0, 0.0, 1.0, 1.0, accent, 1.0).color;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let h = (28.0 * scale).round();
+            for pos in [TabBarPos::Top, TabBarPos::Bottom] {
+                let mut bar = TabBar::hidden();
+                for i in 0..2 {
+                    let r = (i as f32 * 160.0 * scale, 0.0, 160.0 * scale, h);
+                    bar.segments.push(crate::TabSeg {
+                        idx: i,
+                        rect: r,
+                        title_rect: r,
+                        hint: None,
+                        close: (0.0, 0.0, 0.0, 0.0),
+                        title: "shell".into(),
+                        path: None,
+                        active: i == 0,
+                        activity: TabActivity::Normal,
+                    });
+                }
+                bar.hovered_tab_idx = Some(1);
+                let quads = horizontal_tab_quads(
+                    &bar,
+                    (0.0, 0.0, 320.0 * scale, h),
+                    &theme,
+                    (theme.background, 1.0),
+                    theme.palette[0],
+                    accent,
+                    pos,
+                    scale,
+                );
+                let rows: Vec<u32> = (0..h as u32)
+                    .filter(|&y| {
+                        sample(&quads.chrome, 80.0 * scale, y as f32 + 0.5) == Some(accent_color)
+                    })
+                    .collect();
+                let thickness = (3.0 * scale).round() as u32;
+                let expected: Vec<u32> = if pos == TabBarPos::Top {
+                    (0..thickness).collect()
+                } else {
+                    (h as u32 - thickness..h as u32).collect()
+                };
+                assert_eq!(rows, expected, "{scale}x, {pos:?}");
+                let hovered = bar.segments[1].rect;
+                assert!(
+                    !quads.chrome.iter().any(|q| q.color == accent_color
+                        && q.pos[0] >= hovered.0
+                        && q.pos[0] < hovered.0 + hovered.2),
+                    "{scale}x, {pos:?}: the hovered tab has no bar"
+                );
+            }
+        }
+    }
+
+    /// The painter builds every tab bar, horizontal and vertical, from one
+    /// resolved accent.
+    #[test]
+    fn tab_bars_paint_the_resolved_accent() {
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains("lettab_accent=chrome::tab_accent("));
+        let vertical = source
+            .split_once("quads.push(rect(x,seg_y,w,seg_h,default_bg,1.0));")
+            .expect("vertical active tab")
+            .1
+            .split_once("ifcfg.tab_bar_pos.is_vertical(){")
+            .expect("vertical separator follows")
+            .0;
+        assert!(vertical.contains("(3.0*self.scale).round(),seg_h,tab_accent,"));
+        assert!(!vertical.contains("theme.palette[3]"));
+        assert!(!vertical.contains("ui_accent("));
     }
 
     /// An overflowing top or bottom strip's `‹` / `›` share the tab titles'

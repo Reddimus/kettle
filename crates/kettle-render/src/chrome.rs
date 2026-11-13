@@ -239,6 +239,44 @@ pub(crate) fn activity_ink(theme: &kettle_config::Theme, kind: crate::TabActivit
     }
 }
 
+/// The active tab's bar. It sits on the tab and against the strip around
+/// it, so it reaches `ICON_CONTRAST` against both: resolved first against
+/// whichever it is weaker on, then checked again against the other. A
+/// focused window keeps the accent's hue (broadcast's yellow, a window's own
+/// accent); an unfocused one turns it a neutral grey that is still the
+/// strongest mark in the strip, unlike the hover fill it once matched.
+/// `active_bg` is the terminal's opaque colour, the stated approximation for
+/// a translucent background.
+pub(crate) fn tab_accent(
+    raw: Rgb,
+    strip: Rgb,
+    active_bg: Rgb,
+    foreground: Rgb,
+    focused: bool,
+) -> Rgb {
+    let mut ink = if focused {
+        raw
+    } else {
+        color::over(foreground, strip, 0.5, false)
+    };
+    for _ in 0..3 {
+        let weaker = if color::contrast_ratio(ink, strip) <= color::contrast_ratio(ink, active_bg) {
+            strip
+        } else {
+            active_bg
+        };
+        if color::contrast_ratio(ink, weaker) >= ICON_CONTRAST {
+            break;
+        }
+        ink = if focused {
+            color::with_min_contrast_same_hue(ink, weaker, ICON_CONTRAST)
+        } else {
+            color::with_min_contrast(ink, weaker, ICON_CONTRAST)
+        };
+    }
+    ink
+}
+
 /// Neutral chrome details must remain visible independently of ANSI colours.
 pub(crate) fn tab_detail(strip: Rgb, foreground: Rgb, pressed: bool) -> Rgb {
     color::with_min_contrast(
@@ -644,6 +682,48 @@ mod tab_chrome_tests {
                 tab_detail(strip, theme.foreground, false)
             );
         }
+    }
+
+    /// The active tab's bar reaches 3:1 against both the tab it sits on and
+    /// the strip around it, for every accent source, focused or not. The
+    /// unfocused bar was the hover fill's 1.5:1, and broadcast's yellow about
+    /// 2.2:1 in Catppuccin Latte.
+    #[test]
+    fn tab_accent_reaches_3_to_1_on_tab_and_strip() {
+        let cfg = kettle_config::Config::default();
+        let mut failures = Vec::new();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            for (source, raw) in [
+                ("theme accent", theme.accent),
+                ("configured accent", cfg.resolved_accent(&theme)),
+                ("broadcast", theme.palette[3]),
+            ] {
+                for focused in [true, false] {
+                    let bar = tab_accent(raw, strip, theme.background, theme.foreground, focused);
+                    for (surface, bg) in [("strip", strip), ("active tab", theme.background)] {
+                        let ratio = color::contrast_ratio(bar, bg);
+                        if ratio < ICON_CONTRAST - 1e-6 {
+                            failures.push(format!(
+                                "{name}: {source} (focused {focused}) on {surface} {ratio:.2}:1"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failing bars: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
 
     /// Every activity marker reaches 3:1 on the tab behind it, hovered or
