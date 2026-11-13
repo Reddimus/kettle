@@ -74,7 +74,31 @@ pub(super) fn picker_hint(
     format!("({})", parts.join(" · "))
 }
 
+/// Rows a picker paints whole, at most.
 const PICKER_MAX_VISIBLE_ROWS: usize = 8;
+
+/// The height of a picker list of `total` rows that paints as many whole rows
+/// as fit in `available`, at most `cap`. A list that scrolls also holds the
+/// arrow strip at each cut edge, so the strips are counted in and no part-row
+/// is left blank under the last painted row. A list only a row or two longer
+/// than `cap` is shown whole when that is no taller.
+pub(super) fn picker_rows_height(total: usize, cap: usize, available: f32, row_h: f32) -> f32 {
+    let scroll_h = kettle_render::menu::SCROLL_H;
+    let height = |painted: usize| {
+        if painted >= total {
+            total as f32 * row_h
+        } else {
+            painted as f32 * row_h + 2.0 * scroll_h
+        }
+    };
+    let tallest = height(total.min(cap).max(1));
+    let start = total.min((tallest / row_h).floor() as usize);
+    (1..=start)
+        .rev()
+        .map(height)
+        .find(|&h| h <= tallest && h <= available)
+        .unwrap_or(available.max(0.0))
+}
 
 /// Profile discovery is shared with `--list-profiles`; names remain config data.
 pub(crate) fn profile_launch_entries(
@@ -606,7 +630,7 @@ pub(super) fn picker_card_geometry(
     let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
     let y = top_chrome + top;
     let available = sh - bottom - y - header_h;
-    let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
+    let rows_h = picker_rows_height(row_count, PICKER_MAX_VISIBLE_ROWS, available, row_h);
     Some(PickerGeometry {
         header: (x, y, width, header_h),
         rows: (x, y + header_h, width, rows_h),

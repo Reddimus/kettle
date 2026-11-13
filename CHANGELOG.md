@@ -392,6 +392,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and the Silent mark in TokyoNight Night, fell below 3:1 contrast.
   Vertical tabs keep the old dots until 6.1.
 
+- A scrolling picker (the command palette, theme, layout and SSH pickers) no
+  longer leaves a blank part-row under its last result. It used to paint six
+  whole rows in room for eight; it now paints eight, or the whole list when
+  it is only a row longer, and the last row it paints takes a click.
+
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the
   accent-tinted highlight, at about 3.5:1. They now keep at least 4.5:1 on
