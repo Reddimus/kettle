@@ -561,3 +561,63 @@ fn closing_scaled_zoom_owner_restores_baseline_with_another_tab_remaining() {
             < finish.find("self.resize_all(&mut ws)").unwrap()
     );
 }
+
+/// Making the font larger, smaller or resetting it shows the size chip with
+/// the new size and the grid it leaves, in the user's language, and reset
+/// shows the configured size. Whole sizes have no decimal point and others
+/// no float noise.
+#[test]
+fn font_size_changes_show_the_size_and_grid_on_the_chip() {
+    use super::{font_size_after, font_size_chip_label};
+    let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    for (action, size) in [
+        (Action::IncreaseFontSize, "14"),
+        (Action::ZoomInAll, "14"),
+        (Action::DecreaseFontSize, "12"),
+        (Action::ZoomOutAll, "12"),
+        (Action::ResetFontSize, "15"),
+        (Action::ZoomNormalAll, "15"),
+    ] {
+        let after = font_size_after(&action, 13.0, 15.0);
+        assert_eq!(
+            font_size_chip_label(&en, after, (80, 24)),
+            format!("Font size {size} · 80×24"),
+            "{action:?}"
+        );
+        assert_eq!(
+            font_size_chip_label(&es, after, (80, 24)),
+            format!("Tamaño de fuente {size} · 80×24"),
+            "{action:?}"
+        );
+    }
+    assert_eq!(
+        font_size_chip_label(&en, 13.5, (120, 40)),
+        "Font size 13.5 · 120×40"
+    );
+    assert_eq!(
+        font_size_chip_label(&en, 13.1_f32 + 1.0, (1, 1)),
+        "Font size 14.1 · 1×1"
+    );
+}
+
+/// `resize-overlay = never` keeps the chip off for font changes too; the
+/// other modes show it, `after-first` included, since a font change is
+/// never the window's first placement.
+#[test]
+fn only_resize_overlay_never_hides_the_font_size_chip() {
+    use kettle_config::ResizeOverlayMode as Mode;
+    assert!(!super::font_size_chip_shown(Mode::Never));
+    assert!(super::font_size_chip_shown(Mode::AfterFirst));
+    assert!(super::font_size_chip_shown(Mode::Always));
+}
+
+/// Screen readers hear the chip's own text from a polite live region.
+#[test]
+fn the_font_size_chip_is_announced_politely() {
+    let label = "Tamaño de fuente 14 · 80×24";
+    let (_, node) = super::font_size_chip_node(label);
+    assert_eq!(node.role(), accesskit::Role::Status);
+    assert_eq!(node.label(), Some(label));
+    assert_eq!(node.live(), Some(accesskit::Live::Polite));
+}

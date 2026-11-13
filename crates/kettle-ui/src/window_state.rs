@@ -1422,6 +1422,10 @@ pub(crate) struct WindowState {
     /// while the transient size chip is visible; expires
     /// `RESIZE_OVERLAY_DURATION` after the last resize event.
     pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
+    /// What the chip says instead of the bare grid: the font size and grid
+    /// after a font-size change (`App::show_font_size_chip`). A window
+    /// resize and the chip's expiry clear it.
+    pub(crate) resize_overlay_label: Option<String>,
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
@@ -1790,6 +1794,7 @@ impl WindowState {
             accent: None,
             last_typed: None,
             resize_overlay: None,
+            resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),

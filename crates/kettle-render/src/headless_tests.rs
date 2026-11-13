@@ -5714,6 +5714,49 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
     }
 }
 
+/// The size chip is sized from the text it shows, so a font-size caption
+/// ("Font size 14 · 80×24") sits whole inside its outline instead of in a
+/// chip sized for the bare grid.
+#[test]
+fn resize_chip_fits_a_font_size_caption() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 200) else {
+        eprintln!("resize chip caption check skipped: no GPU adapter");
+        return;
+    };
+    let snap = snapshot_of(40, 8, b"");
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    // The chip's outline across its top edge: its left and right ends.
+    let outline = |frame: &image::RgbaImage| {
+        (0..frame.height())
+            .find_map(|y| {
+                let xs: Vec<u32> = (0..frame.width())
+                    .filter(|&x| {
+                        let p = frame.get_pixel(x, y);
+                        Rgb::new(p[0], p[1], p[2]) == accent
+                    })
+                    .collect();
+                (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+            })
+            .expect("the chip's outline")
+    };
+    for caption in ["Font size 14 · 80×24", "Tamaño de fuente 14 · 80×24"] {
+        let overlay = Overlay {
+            resize_overlay: Some((80, 24)),
+            resize_overlay_text: Some(caption.into()),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 200)], &overlay);
+        let (left, right) = outline(&frame);
+        let text = caption.chars().count() as f32 * renderer.cell_w;
+        assert!(
+            (right - left) as f32 >= text,
+            "{caption}: chip {left}..{right} is narrower than its {text} px text"
+        );
+        assert_eq!(renderer.resize_overlay_text, caption);
+    }
+}
+
 /// A side bar draws its tabs' close glyph from the same enlarged buffer as a
 /// top bar, so it grew too. At the default font and a large one the `✕`
 /// must stay inside the chip that shows the button (its square less 5 px a

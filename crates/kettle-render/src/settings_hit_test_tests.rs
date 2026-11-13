@@ -336,6 +336,24 @@ fn resize_chip_is_hidden_while_settings_or_a_picker_is_open() {
     assert_eq!(overlay.visible_resize_overlay(), Some((100, 37)));
 }
 
+/// The chip says what kettle-ui asked for, the font size after a font
+/// change, and the bare grid otherwise; hidden, it says nothing.
+#[test]
+fn resize_chip_text_is_the_caption_or_the_grid() {
+    let mut overlay = super::Overlay {
+        resize_overlay: Some((80, 24)),
+        ..Default::default()
+    };
+    assert_eq!(overlay.visible_resize_label().as_deref(), Some("80×24"));
+    overlay.resize_overlay_text = Some("Font size 14 · 80×24".into());
+    assert_eq!(
+        overlay.visible_resize_label().as_deref(),
+        Some("Font size 14 · 80×24")
+    );
+    overlay.settings = Some(super::SettingsOverlay::default());
+    assert_eq!(overlay.visible_resize_label(), None);
+}
+
 #[test]
 fn category_arrows_and_wheel_page_forward_and_back_without_hiding_selection() {
     for surface in [(800.0, 600.0), (560.0, 600.0), (360.0, 120.0)] {

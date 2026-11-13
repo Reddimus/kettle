@@ -5013,7 +5013,9 @@ category strip side by side. Group headings are omitted when needed to retain
 a complete focused field. Picker geometry similarly reduces outer spacing to
 retain its header and one result. The renderer uses `visible_resize_overlay`
 for both size-chip text preparation and drawing, suppressing it under Settings
-or a picker card.
+or a picker card. After a font-size action kettle-ui sets
+`Overlay::resize_overlay_text` to the translated size and grid; the chip is
+sized from the shaped text, and the same string is a polite live region.
 
 ### Paste consent and context-menu nesting
 

@@ -187,6 +187,11 @@ impl App {
                 children.push(persistent_notice_id(pane, 0));
                 nodes.extend(persistent_notice_nodes(pane, &toast));
             }
+            if let Some(label) = overlay.resize_overlay_text.as_deref() {
+                let (id, node) = font_size_chip_node(label);
+                children.push(id);
+                nodes.push((id, node));
+            }
         }
         ws.accessibility_text_rows
             .borrow_mut()
@@ -1719,6 +1724,17 @@ const ACCESSIBILITY_UPDATE_STATUS_ID: NodeId = NodeId((1 << 59) + 2);
 pub(super) const ACCESSIBILITY_UPDATE_DETAILS_ID: NodeId = NodeId((1 << 59) + 3);
 pub(super) const ACCESSIBILITY_UPDATE_DISMISS_ID: NodeId = NodeId((1 << 59) + 4);
 pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+/// The font size chip's live region.
+const ACCESSIBILITY_FONT_SIZE_ID: NodeId = NodeId((1 << 59) + 5);
+
+/// A polite live region that says what the font size chip shows, so a
+/// screen reader hears the new size and grid as the chip appears.
+pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
+    let mut status = Node::new(Role::Status);
+    status.set_label(label.to_owned());
+    status.set_live(accesskit::Live::Polite);
+    (ACCESSIBILITY_FONT_SIZE_ID, status)
+}
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
 /// stays below this bit; never by its nonce.

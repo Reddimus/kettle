@@ -687,6 +687,7 @@ impl App {
                     // scale factor on HiDPI.
                     r.set_font_size(font_size_after(&action, r.font_size(), self.cfg.font_size));
                 }
+                self.show_font_size_chip(ws);
                 // The user changed the font OUTSIDE a scaled-zoom
                 // enter/exit, so the saved pre-zoom size is now stale — drop it
                 // so a later zoom-out keeps this new chosen size instead of

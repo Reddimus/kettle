@@ -914,6 +914,7 @@ impl App {
             };
             r.set_font_size(new);
             ws.scaled_zoom_prev_font_size = None;
+            self.show_font_size_chip(ws);
             self.resize_all(ws);
             if let Some(w) = &ws.window {
                 w.request_redraw();

@@ -16,6 +16,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   window is too narrow to keep a tab beside it. Windows and Linux keep
   Settings in their `▾` and `≡` menus.
 
+- Making the font larger or smaller, or resetting it, from the keyboard,
+  the menus or Ctrl+scroll shows the new size and the grid it leaves, such
+  as "Font size 14 · 80×24", in the middle of the window for a moment, the
+  way a window resize shows its size. Screen readers announce the same
+  text. `resize-overlay = never` turns it off along with the resize chip.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu

@@ -2709,6 +2709,10 @@ context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hov
 [messages.mouse_override_hint]
 context = "crates/kettle-ui/src/app/notices.rs and menus.rs: brief pane notice after a right-click went to a program that uses the mouse (a full-screen editor, htop, tmux), and the first row of the menu Shift+right-click opens over such a program. Shift is the keyboard key. Also names a screen-reader live region. Never name the product."
 
+[messages.font_size_chip]
+context = "crates/kettle-ui/src/app/layout.rs font_size_chip_label: the chip shown in the middle of the window for a moment after the font is made larger, smaller or reset, and the screen-reader live region that announces it. size is the new font size in points, a number such as 14 or 13.5 (no unit); cols and rows are the terminal's new width in columns and height in rows. Use the same words as the Font size setting."
+args = [{ name = "size", type = "str" }, { name = "cols", type = "u64" }, { name = "rows", type = "u64" }]
+
 [messages.link_open_command_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
 
