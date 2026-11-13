@@ -172,6 +172,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   opacity, changes by about 1%. An opaque window, and one under macOS
   Reduce Transparency, keeps the focused colours it had.
 
+- Background tabs in a top or bottom tab bar mark their state with a shape
+  as well as a colour: a filled dot for new output, a ring when the output
+  has stopped, and a triangle when the bell rang. The marks are larger,
+  scale with the display instead of shrinking on Retina screens, and keep at
+  least 3:1 contrast against the tab behind them, hovered or not. Vertical
+  tabs keep the old dots until 6.1. Screen readers read the state after the
+  tab's name, for example "build, bell rang".
+
+- The active tab's bar is thicker (3 pixels, scaled) and keeps at least 3:1
+  contrast against both the tab and the strip, in broadcast mode too. Over
+  a wallpaper, some strip colours leave no colour at 3:1 against both (41
+  bundled themes under the default `chrome-background = theme`), and the
+  bar then takes the strongest contrast it can.
+  Hovering a tab or a strip button now shades it more lightly, so the active
+  tab stays the strongest mark in the strip.
+
+- When closing a tab, window or pane would stop a program running in a
+  single pane, the question names it: "The program sleep is still running."
+  Only the program's name is shown, never its arguments. Shells, programs
+  Kettle cannot read, and Windows keep the general wording.
+
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
   theme and other pickers now are too, and in all of them the highlighted row
@@ -391,6 +412,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   released, a selected link keeps its hint and hand cursor, and its underline
   comes back when the selection is cleared. ⌘-click and Ctrl+click still open
   it.
+
+- In an unfocused window, the active tab's bar was the same colour as a
+  hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
+  the same wallpaper exception as the bar itself, and vertical tabs follow
+  window focus too.
+
+- In a top or bottom tab bar, tab activity marks in several light themes,
+  and the Silent mark in TokyoNight Night, fell below 3:1 contrast.
+  Vertical tabs keep the old dots until 6.1.
 
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the

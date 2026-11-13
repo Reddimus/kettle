@@ -1054,20 +1054,46 @@ impl App {
     ) -> bool {
         let lone_pane = lone_pane_in_scope(ws, scope, &on_confirm);
         let configured_shell = self.cfg.shell.as_deref();
-        let prompt = close_needs_prompt(self.cfg.ask_before_closing, scope, busy, || {
-            lone_pane
-                .and_then(|id| ws.mux.panes.get(&id))
-                .map_or(LonePaneJob::Unknown, |pane| {
-                    if pane.held {
-                        LonePaneJob::Idle
-                    } else {
-                        lone_pane_job(&pane.term, pane.path_argv(), configured_shell)
-                    }
-                })
-        });
+        // One PTY sample decides whether to ask and names what would stop.
+        let sample = std::cell::OnceCell::new();
+        let sample_job = || {
+            *sample.get_or_init(|| {
+                lone_pane.and_then(|id| ws.mux.panes.get(&id)).map_or(
+                    (LonePaneJob::Unknown, None),
+                    |pane| {
+                        if pane.held {
+                            (LonePaneJob::Idle, None)
+                        } else {
+                            sample_lone_pane_job(&pane.term, pane.path_argv(), configured_shell)
+                        }
+                    },
+                )
+            })
+        };
+        let prompt =
+            close_needs_prompt(self.cfg.ask_before_closing, scope, busy, || sample_job().0);
         if !prompt {
             return false;
         }
+        // The busy program's name only, never its arguments. It is private:
+        // neither it nor the body is logged, and ctl diagnostics carry only
+        // the dialog's rectangles and button labels.
+        #[cfg(unix)]
+        let program = if scope == 1 {
+            sample_job().1.and_then(|pid| {
+                busy_program_label(
+                    pid,
+                    kettle_remote::process_argv,
+                    &read_etc_shells(),
+                    configured_shell,
+                )
+            })
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let program: Option<String> = None;
+        let body = close_dialog_body(&self.ui_text, &on_confirm, scope, program.as_deref());
         use kettle_i18n::Text;
         let (title, affirmative) = match &on_confirm {
             ConfirmAction::CloseWindow { .. } => (
@@ -1081,17 +1107,6 @@ impl App {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
             ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => return false,
-        };
-        let consequence = self.ui_text.text(Text::ConfirmCloseConsequences);
-        let body = if matches!(&on_confirm, ConfirmAction::ClosePane(_)) {
-            consequence.to_string()
-        } else {
-            let scope_label = if scope == 2 {
-                self.ui_text.text(Text::ConfirmCloseBothPanes).to_string()
-            } else {
-                self.ui_text.confirm_close_scope(scope as u64)
-            };
-            format!("{scope_label} {consequence}")
         };
         self.close_all_modals(ws);
         self.install_confirm_dialog(
@@ -2806,6 +2821,148 @@ pub(super) enum LonePaneJob {
     Unknown,
 }
 
+/// The close question's body. When one pane would close and the program it
+/// would stop is known, the body names that program; otherwise it is the
+/// general wording for the scope. The same string is measured, painted and
+/// read to screen readers.
+///
+/// Accepted limitations: a script shows as its interpreter (`bash` for
+/// `./deploy.sh`), a pipeline is named after its first command (`cat` for
+/// `cat f | less`), the text is not refreshed if the job exits while the
+/// question is open, and "closing stops it" is wrong for a program that
+/// ignores SIGHUP.
+pub(super) fn close_dialog_body(
+    tr: &kettle_i18n::Translator,
+    action: &ConfirmAction,
+    scope: usize,
+    program: Option<&str>,
+) -> String {
+    use kettle_i18n::Text;
+    if let Some(program) = program
+        && scope == 1
+    {
+        return tr.confirm_close_running(program);
+    }
+    let consequence = tr.text(Text::ConfirmCloseConsequences);
+    if matches!(action, ConfirmAction::ClosePane(_)) {
+        consequence.to_string()
+    } else {
+        let scope_label = if scope == 2 {
+            tr.text(Text::ConfirmCloseBothPanes).to_string()
+        } else {
+            tr.confirm_close_scope(scope as u64)
+        };
+        format!("{scope_label} {consequence}")
+    }
+}
+
+/// The name a close question shows for a program: `argv[0]`'s base name, cut
+/// at the first space or `:` (programs that rewrite `argv[0]`, such as
+/// `postgres: user db host idle`, put private detail after it), with control
+/// and bidirectional characters ending it, invisible ones gone, at most 64
+/// characters and 32 columns. `None` when nothing visible is left. `argv[0]`
+/// is untrusted: the program sets it.
+#[cfg(any(unix, test))]
+pub(super) fn close_program_label(argv0: &str) -> Option<String> {
+    // Enough for any real program name; a base character can otherwise
+    // carry hundreds of combining marks in one column.
+    const MAX_NAME_CHARS: usize = 64;
+    let name = argv0.strip_prefix('-').unwrap_or(argv0);
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let name: String = super::title::sanitize_title(name)
+        .chars()
+        .filter(|&c| !is_invisible_in_a_name(c))
+        .collect();
+    let name = name
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if crate::text_editor::display_width(name) == 0 {
+        return None;
+    }
+    let mut capped: String = name.chars().take(MAX_NAME_CHARS).collect();
+    if capped.len() < name.len() {
+        capped.push('…');
+    }
+    Some(super::menus::ellipsize_menu_label(&capped, 32))
+}
+
+/// Characters that draw nothing in a program name, so a program could use
+/// them to hide or pad what the question shows: every
+/// Default_Ignorable_Code_Point (DerivedCoreProperties.txt) and format
+/// character (General_Category Cf) as of Unicode 16.0, and U+2800 BRAILLE
+/// PATTERN BLANK, which has width but no ink. The Hangul fillers U+115F,
+/// U+1160, U+3164 and U+FFA0 are blank with width too, and are
+/// default-ignorable.
+#[cfg(any(unix, test))]
+fn is_invisible_in_a_name(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x034F
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x2800
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF0..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
+}
+
+/// The program a busy lone pane would stop, by name, or `None` for a shell
+/// (an interactive shell running integration's command is still the shell),
+/// for a process whose `argv` cannot be read, and for a name with nothing
+/// visible. Only `argv[0]` is used; the arguments may hold secrets.
+#[cfg(any(unix, test))]
+pub(super) fn busy_program_label(
+    pid: u32,
+    read_argv: impl Fn(u32) -> Option<Vec<String>>,
+    etc_shells: &str,
+    configured_shell: Option<&str>,
+) -> Option<String> {
+    let argv = read_argv(pid)?;
+    if argv_is_interactive_shell(&argv, etc_shells, configured_shell) {
+        return None;
+    }
+    close_program_label(argv.first()?)
+}
+
+/// The process a busy lone pane's verdict came from: the pane's own child
+/// when its group owns the terminal, the foreground group's leader when
+/// another group does (the job, or for a pipeline its first command).
+#[cfg(any(unix, test))]
+pub(super) fn busy_job_pid(
+    job: kettle_core::ForegroundJob,
+    decided: LonePaneJob,
+    child: Option<u32>,
+) -> Option<u32> {
+    use kettle_core::ForegroundJob;
+    match (decided, job) {
+        (LonePaneJob::Busy, ForegroundJob::Child) => child,
+        (LonePaneJob::Busy, ForegroundJob::Other(leader)) => Some(leader),
+        _ => None,
+    }
+}
+
 /// The pane a one-pane close would take, named by the confirm action so it is
 /// the pane the gesture pointed at.
 pub(super) fn lone_pane_in_scope(
@@ -2860,18 +3017,22 @@ pub(super) fn lone_pane_in_scope(
 /// prompt. A shell running a script or a `-c` command is a job.
 ///
 /// Windows keeps the old behaviour: ConPTY has no foreground process group.
-pub(super) fn lone_pane_job(
+///
+/// Alongside the verdict comes, when it is busy, the pid whose program it is
+/// ([`busy_job_pid`]), both from one sample of the PTY's foreground group.
+pub(super) fn sample_lone_pane_job(
     term: &kettle_core::Terminal,
     launch_argv: &[String],
     configured_shell: Option<&str>,
-) -> LonePaneJob {
+) -> (LonePaneJob, Option<u32>) {
     #[cfg(unix)]
     {
         let integration_running = term.shell_integration_seen() && !term.shell_at_prompt();
         let shells = std::cell::OnceCell::new();
         let etc_shells = || shells.get_or_init(read_etc_shells).as_str();
-        classify_lone_pane_job(
-            term.foreground_job(),
+        let job = term.foreground_job();
+        let decided = classify_lone_pane_job(
+            job,
             integration_running,
             || {
                 let live = term.child_pid().and_then(kettle_remote::process_argv);
@@ -2883,16 +3044,17 @@ pub(super) fn lone_pane_job(
                     argv_is_interactive_shell(&argv, etc_shells(), configured_shell)
                 })
             },
-        )
+        );
+        (decided, busy_job_pid(job, decided, term.child_pid()))
     }
     #[cfg(not(unix))]
     {
         let _ = (term, launch_argv, configured_shell);
-        LonePaneJob::Unknown
+        (LonePaneJob::Unknown, None)
     }
 }
 
-/// The pure decision behind [`lone_pane_job`]. `child_is_shell` says whether
+/// The pure decision behind [`sample_lone_pane_job`]. `child_is_shell` says whether
 /// the pane's spawned child is an interactive shell; `leader_is_shell` runs
 /// only for a foreground group that is not the child's, under a child that
 /// is not a shell.
@@ -2966,7 +3128,7 @@ pub(super) fn argv_is_interactive_shell(
 
 /// `/etc/shells`, bounded; empty when it cannot be read.
 #[cfg(unix)]
-fn read_etc_shells() -> String {
+pub(super) fn read_etc_shells() -> String {
     use std::io::Read;
     const MAX_ETC_SHELLS_BYTES: u64 = 64 * 1024;
     let mut text = String::new();
