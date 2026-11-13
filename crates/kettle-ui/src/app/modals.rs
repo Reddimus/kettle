@@ -1709,8 +1709,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text);
-                let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
+                let action = palette_enter_action(q, *sel, &cmds, &self.ui_text);
                 ws.palette_input = None;
                 if let Some(a) = action {
                     self.handle_action(ws, a, event_loop);

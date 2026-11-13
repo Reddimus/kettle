@@ -154,6 +154,19 @@ pub(super) fn palette_view_entries(
     entries
 }
 
+/// The command Enter runs: the one ranked at `selected` among `entries`, which
+/// is the row the painter shows there. `None` past the last match.
+pub(super) fn palette_enter_action(
+    query: &str,
+    selected: usize,
+    entries: &[(kettle_config::palette::PaletteLabel, Action)],
+    tr: &kettle_i18n::Translator,
+) -> Option<Action> {
+    kettle_config::palette::rank_entries(query, entries, tr)
+        .get(selected)
+        .map(|&index| entries[index].1.clone())
+}
+
 pub(super) fn command_picker_list(
     query: &str,
     selected: usize,

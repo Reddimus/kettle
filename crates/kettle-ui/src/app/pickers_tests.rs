@@ -458,10 +458,13 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
             }
         }
     }
-    // Enter, the pointer and the painted list read the same view entries.
+    // Enter, the pointer and the painted list read the same view entries;
+    // `enter_in_the_shortcut_list_runs_the_selected_bound_row` checks the
+    // lookup Enter makes in them.
     let source = finding_body(include_str!("modals.rs"), "palette_key");
     assert!(source.contains("palette_view_entries("));
     assert!(source.contains("ws.palette_bound_only"));
+    assert!(source.contains("palette_enter_action(q, *sel, &cmds, &self.ui_text)"));
     let open = include_str!("pickers.rs")
         .split("pub(super) fn open_picker_list(")
         .nth(1)
@@ -478,4 +481,49 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
         .to_string();
     assert!(arm.contains("ws.palette_bound_only = matches!(action, Action::ShowKeybinds);"));
     assert!(arm.contains("ws.palette_input = Some("));
+}
+
+/// Enter in the keyboard-shortcut list runs the row painted at the selection,
+/// for every selection and query: a command with a shortcut, the label and
+/// hint the list shows there. Past the last row it runs nothing.
+#[test]
+fn enter_in_the_shortcut_list_runs_the_selected_bound_row() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
+        let entries = super::palette_view_entries(None, &tr, &[], &bindings, true);
+        let full = super::palette_view_entries(None, &tr, &[], &bindings, false);
+        for query in ["", "tab", "split", "font", "pane"] {
+            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true);
+            let matched = kettle_config::palette::rank_entries(query, &entries, &tr).len();
+            assert!(matched > 1, "{query:?} needs several rows");
+            for (selected, row) in list.rows.iter().enumerate() {
+                let action = super::palette_enter_action(query, selected, &entries, &tr)
+                    .unwrap_or_else(|| panic!("{query:?} row {selected}"));
+                let hint = kettle_config::keybinds::ui_hint_label(&bindings, &action)
+                    .unwrap_or_default();
+                assert!(!hint.is_empty(), "{query:?} row {selected}: {action:?}");
+                assert_eq!(row.hint, hint, "{query:?} row {selected}");
+                let label = entries
+                    .iter()
+                    .find(|(_, candidate)| *candidate == action)
+                    .map(|(label, _)| label.shown(&tr));
+                assert_eq!(label, Some(row.label.as_str()), "{query:?} row {selected}");
+            }
+            assert_eq!(list.rows.len(), matched, "{query:?}");
+            assert_eq!(
+                super::palette_enter_action(query, matched, &entries, &tr),
+                None
+            );
+        }
+        // The full palette at the same selections runs commands without a
+        // shortcut too; the list above never did.
+        let unbound = (0..full.len())
+            .filter_map(|selected| super::palette_enter_action("", selected, &full, &tr))
+            .find(|action| {
+                kettle_config::keybinds::ui_hint_label(&bindings, action)
+                    .is_none_or(|hint| hint.is_empty())
+            });
+        assert!(unbound.is_some());
+        assert_eq!(super::palette_enter_action("qqzzxx", 0, &entries, &tr), None);
+    }
 }
