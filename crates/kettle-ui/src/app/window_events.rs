@@ -749,10 +749,9 @@ impl App {
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
-                    if settings_button_at(&bar, px, py) {
+                    if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native
                         // button; a middle press does nothing.
-                        ws.pressed_settings = bcode == 0;
                     } else if bcode == 0
                         && bar.new_tab_menu.2 > 0.0
                         && in_bar(bar.new_tab_menu, px, py)
@@ -1048,12 +1047,10 @@ impl App {
                         window.request_redraw();
                     }
                 }
-                if button == MouseButton::Left && ws.pressed_settings {
-                    ws.pressed_settings = false;
-                    let bar = self.tab_bar(ws);
-                    let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    ws.held_buttons.end_own(0);
-                    if let Some(action) = settings_release_action(true, &bar, x, y) {
+                if button == MouseButton::Left
+                    && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
+                {
+                    if let Some(action) = action {
                         self.handle_action(ws, action, event_loop);
                     }
                     if let Some(window) = &ws.window {

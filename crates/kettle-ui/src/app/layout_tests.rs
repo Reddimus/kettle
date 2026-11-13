@@ -621,3 +621,53 @@ fn the_font_size_chip_is_announced_politely() {
     assert_eq!(node.label(), Some(label));
     assert_eq!(node.live(), Some(accesskit::Live::Polite));
 }
+
+/// A font change the user asks for fills the size chip with the new size
+/// and grid, in the user's language, and has its live region announced;
+/// `resize-overlay = never` leaves the chip empty, as does a window with no
+/// renderer to size.
+#[test]
+fn a_font_size_change_fills_the_size_chip_unless_it_is_turned_off() {
+    use kettle_config::ResizeOverlayMode as Mode;
+    let now = std::time::Instant::now();
+    for (language, caption) in [
+        (kettle_i18n::Language::En, "Font size 15 · 74×22"),
+        (kettle_i18n::Language::Es, "Tamaño de fuente 15 · 74×22"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        for mode in [Mode::AfterFirst, Mode::Always] {
+            let mut ws = WindowState::new(1, Mux::new());
+            super::font_size_chip(&mut ws, (mode, &tr), Some((15.0, (74, 22))), now);
+            assert_eq!(ws.resize_overlay, Some((74, 22, now)), "{mode:?}");
+            assert_eq!(ws.resize_overlay_label.as_deref(), Some(caption));
+            assert!(ws.accessibility_pending, "the live region waits");
+        }
+        let mut ws = WindowState::new(1, Mux::new());
+        super::font_size_chip(&mut ws, (Mode::Never, &tr), Some((15.0, (74, 22))), now);
+        assert_eq!((ws.resize_overlay, ws.resize_overlay_label), (None, None));
+        assert!(!ws.accessibility_pending);
+        let mut ws = WindowState::new(1, Mux::new());
+        super::font_size_chip(&mut ws, (Mode::Always, &tr), None, now);
+        assert_eq!((ws.resize_overlay, ws.resize_overlay_label), (None, None));
+    }
+}
+
+/// The accessibility tree rebuilds when the size chip's caption comes, goes
+/// or changes, though nothing else in the tree does.
+#[test]
+fn the_size_chip_caption_is_part_of_the_accessibility_key() {
+    use kettle_render::Overlay;
+    let key = |text: Option<&str>| {
+        super::overlay_live_region_key(&Overlay {
+            resize_overlay: Some((80, 24)),
+            resize_overlay_text: text.map(str::to_owned),
+            ..Overlay::default()
+        })
+    };
+    let none = key(None);
+    let fourteen = key(Some("Font size 14 · 80×24"));
+    let fifteen = key(Some("Font size 15 · 74×22"));
+    assert_ne!(none, fourteen);
+    assert_ne!(fourteen, fifteen);
+    assert_eq!(fourteen, key(Some("Font size 14 · 80×24")));
+}

@@ -2484,8 +2484,8 @@ impl App {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
-            if settings_button_at(&bar, px, py) {
-                ws.pressed_settings = bcode == 0;
+            if press_settings_gear(ws, &bar, (px, py), bcode) {
+                // Armed on a primary press; opens on release.
             } else if bcode == 0
                 && bar.new_tab_menu.2 > 0.0
                 && rect_contains(bar.new_tab_menu, px, py)
@@ -2610,12 +2610,10 @@ impl App {
                 window.request_redraw();
             }
         }
-        if bcode == 0 && ws.pressed_settings {
-            ws.pressed_settings = false;
-            let bar = self.tab_bar(ws);
-            let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-            ws.held_buttons.end_own(bcode);
-            if let Some(action) = settings_release_action(true, &bar, x, y) {
+        if bcode == 0
+            && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
+        {
+            if let Some(action) = action {
                 self.handle_action(ws, action, event_loop);
             }
             if let Some(window) = &ws.window {

@@ -1051,9 +1051,7 @@ impl App {
                 }
             }
         }
-        // The font size chip's live region comes and goes, and changes text,
-        // with no other change to the tree.
-        overlay.resize_overlay_text.hash(&mut hasher);
+        overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
@@ -1728,8 +1726,24 @@ pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 5
 /// The font size chip's live region.
 const ACCESSIBILITY_FONT_SIZE_ID: NodeId = NodeId((1 << 59) + 5);
 
+/// The live regions an `Overlay` brings to the tree on its own: the font
+/// size chip's comes and goes, and changes text, with no other change to the
+/// tree, so the tree must rebuild when it does.
+pub(super) fn overlay_live_region_key(overlay: &Overlay) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    overlay.resize_overlay_text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// A polite live region that says what the font size chip shows, so a
 /// screen reader hears the new size and grid as the chip appears.
+///
+/// Screen readers speak a live region when its content changes. A chip
+/// shown again with the same caption while this node is still in the tree
+/// (another step at the 5 or 72 size limit, say) leaves its label as it was,
+/// so it is not spoken again; the painted chip still shows. That is accepted:
+/// the size did not change. Not yet checked live with VoiceOver or Orca.
 pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
     let mut status = Node::new(Role::Status);
     status.set_label(label.to_owned());

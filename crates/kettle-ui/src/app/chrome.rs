@@ -1055,6 +1055,99 @@ pub(super) fn settings_gear_takes_press_over_settings(
     primary && on_gear && !editing_text && nav.is_some_and(|nav| !nav.capturing)
 }
 
+/// With Settings open, a press at the pointer arms the gear ahead of
+/// Settings' close-on-outside-press when
+/// `settings_gear_takes_press_over_settings` says so. Says whether it did.
+pub(super) fn arm_settings_gear_over_settings(
+    ws: &mut WindowState,
+    bar: &TabBar,
+    button: u8,
+) -> bool {
+    let on_gear = settings_button_at(bar, ws.cursor.x as f32, ws.cursor.y as f32);
+    if !settings_gear_takes_press_over_settings(
+        ws.settings_nav.as_ref(),
+        ws.settings_text_edit.is_some(),
+        button == 0,
+        on_gear,
+    ) {
+        return false;
+    }
+    ws.pressed_settings = true;
+    true
+}
+
+/// A tab-bar press at `(x, y)` with `button` (0 primary, 1 middle) on the
+/// Settings gear: the gear takes it, and a primary press arms it so its
+/// release can open Settings, like a native button. A middle press there
+/// does nothing. Says whether the press was on the gear; native and ctl
+/// presses both come here.
+pub(super) fn press_settings_gear(
+    ws: &mut WindowState,
+    bar: &TabBar,
+    (x, y): (f32, f32),
+    button: u8,
+) -> bool {
+    if !settings_button_at(bar, x, y) {
+        return false;
+    }
+    ws.pressed_settings = button == 0;
+    true
+}
+
+/// A primary release, native or ctl, after a press on the gear: `None` when
+/// the gear was not pressed, so the release goes on to the rest of the
+/// window. Otherwise the press ends, and the release runs Settings when it
+/// lands back on the gear (`bar` gives the strip under the pointer then).
+pub(super) fn release_settings_gear(
+    ws: &mut WindowState,
+    bar: impl FnOnce(&WindowState) -> TabBar,
+) -> Option<Option<Action>> {
+    if !ws.pressed_settings {
+        return None;
+    }
+    ws.pressed_settings = false;
+    let bar = bar(ws);
+    ws.held_buttons.end_own(0);
+    Some(settings_release_action(
+        true,
+        &bar,
+        ws.cursor.x as f32,
+        ws.cursor.y as f32,
+    ))
+}
+
+/// What in the tab bar is under the pointer. A change between two pointer
+/// moves calls for a redraw.
+pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool);
+
+pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
+    (
+        ws.hovered_close_idx,
+        ws.hovered_tab_idx,
+        ws.hovered_new_tab,
+        ws.hovered_new_tab_menu,
+        ws.hovered_settings,
+    )
+}
+
+/// Point the tab bar's hover at what lies under the pointer on `bar`: a
+/// tab, its `✕`, or one of the strip's buttons. Returns the strip button
+/// hovered, if any, and whether the hover changed.
+pub(super) fn hover_tab_bar(
+    ws: &mut WindowState,
+    bar: &TabBar,
+) -> (Option<NewTabHoverTarget>, bool) {
+    let before = tab_bar_hover(ws);
+    let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+    ws.hovered_tab_idx = bar.hovered_tab_idx;
+    ws.hovered_close_idx = hovered_close_button(&bar.segments, x, y);
+    let target = new_tab_hover_target(bar, x, y);
+    ws.hovered_new_tab = target == Some(NewTabHoverTarget::Plus);
+    ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
+    ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
+    (target, tab_bar_hover(ws) != before)
+}
+
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
     if settings_button_at(bar, x, y) {
         Some(NewTabHoverTarget::Settings)

@@ -1475,3 +1475,130 @@ fn the_settings_gear_takes_a_press_ahead_of_open_settings() {
     assert!(!takes(Some(&capturing), false, true, true), "capturing a key");
     assert!(!takes(None, false, true, true), "Settings closed");
 }
+
+/// The strip of a macOS title bar `width` pt wide at `scale` with one tab:
+/// its `▾ +` and Settings gear, as press, release and hover read them.
+fn macos_titlebar_strip(width: f32, scale: f32) -> kettle_render::TabBar {
+    let cfg = kettle_config::Config::default();
+    let lane = macos_titlebar_lane(width, scale);
+    let geometry =
+        super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = lane.3;
+    bar.band = lane;
+    bar.in_titlebar = true;
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.settings = geometry.settings_rect;
+    bar
+}
+
+fn centre_of(rect: kettle_render::Rect4) -> (f32, f32) {
+    (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5)
+}
+
+fn point_at(ws: &mut crate::window_state::WindowState, (x, y): (f32, f32)) {
+    ws.cursor = winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+}
+
+/// A primary press on the gear arms it and a release back on it opens
+/// Settings; this is the path native and ctl presses and releases share.
+/// A middle press is the gear's but arms nothing, a press elsewhere is not
+/// the gear's, a release off the gear opens nothing, and a release with no
+/// press goes on to the rest of the window.
+#[test]
+fn a_press_then_release_on_the_settings_gear_opens_settings() {
+    use super::chrome::{press_settings_gear, release_settings_gear};
+    for scale in [1.0, 2.0] {
+        let strip = || macos_titlebar_strip(1280.0, scale);
+        let bar = strip();
+        let gear = centre_of(bar.settings);
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), None);
+        assert!(press_settings_gear(&mut ws, &bar, gear, 1), "a middle press");
+        assert!(!ws.pressed_settings, "a middle press arms the gear");
+        assert!(!press_settings_gear(&mut ws, &bar, centre_of(bar.new_tab_menu), 0));
+        assert!(!ws.pressed_settings);
+        // Press, release on the gear: Settings, and the gesture is over.
+        ws.held_buttons.pressed(0, None, (0, 0));
+        assert!(press_settings_gear(&mut ws, &bar, gear, 0));
+        assert!(ws.pressed_settings);
+        point_at(&mut ws, gear);
+        assert_eq!(
+            release_settings_gear(&mut ws, |_| strip()),
+            Some(Some(Action::OpenSettings))
+        );
+        assert!(!ws.pressed_settings);
+        assert_eq!(ws.held_buttons.dragging(), None, "the gear's press still held");
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), None);
+        // Press, drag off, release: the release is the gear's, but it opens
+        // nothing.
+        assert!(press_settings_gear(&mut ws, &bar, gear, 0));
+        point_at(&mut ws, (bar.settings.0 - 2.0 * scale, gear.1));
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), Some(None));
+        assert!(!ws.pressed_settings);
+    }
+}
+
+/// With Settings open, a primary press on the gear arms it instead of
+/// closing Settings, so its release reopens Settings as Cmd+, does.
+#[test]
+fn with_settings_open_a_press_on_the_gear_arms_it() {
+    use super::chrome::{arm_settings_gear_over_settings, release_settings_gear};
+    let strip = || macos_titlebar_strip(1280.0, 2.0);
+    let bar = strip();
+    let gear = centre_of(bar.settings);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    point_at(&mut ws, gear);
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 0), "Settings closed");
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 1), "a middle press");
+    assert!(!ws.pressed_settings);
+    point_at(&mut ws, centre_of(bar.new_tab));
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 0), "off the gear");
+    assert!(!ws.pressed_settings);
+    point_at(&mut ws, gear);
+    assert!(arm_settings_gear_over_settings(&mut ws, &bar, 0));
+    assert!(ws.pressed_settings);
+    assert_eq!(
+        release_settings_gear(&mut ws, |_| strip()),
+        Some(Some(Action::OpenSettings))
+    );
+}
+
+/// The gear's hover is part of the strip's hover: moving onto or off the
+/// gear alone changes it, which redraws the strip, and the gear is a
+/// pointer target like `▾` and `+`.
+#[test]
+fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
+    use super::chrome::{NewTabHoverTarget, hover_tab_bar};
+    let bar = macos_titlebar_strip(1280.0, 1.0);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    let gear = centre_of(bar.settings);
+    point_at(&mut ws, gear);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+    assert!(ws.hovered_settings && !ws.hovered_new_tab_menu && !ws.hovered_new_tab);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), false),
+        "no move, no redraw"
+    );
+    // Off the gear into the gap before `▾`: only the gear's hover changes.
+    point_at(&mut ws, (bar.settings.0 + bar.settings.2 + 2.0, gear.1));
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true));
+    assert!(!ws.hovered_settings);
+    point_at(&mut ws, centre_of(bar.new_tab_menu));
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Menu), true)
+    );
+    point_at(&mut ws, gear);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+    assert!(ws.hovered_settings && !ws.hovered_new_tab_menu);
+}
