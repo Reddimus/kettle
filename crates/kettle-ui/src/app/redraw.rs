@@ -879,7 +879,9 @@ impl App {
         // chunks into one event-loop wake without losing output that races the
         // snapshot below. This must follow every early-return guard: entering
         // Presenting without attempting a frame would strand the pacer and
-        // schedule a near-zero recovery loop.
+        // schedule a near-zero recovery loop. A settled typed echo reopened its
+        // panes' latches when it armed; acknowledging an open latch leaves it
+        // open (see `plan_typed_echo_paint`).
         self.acknowledge_output_wakes(ws);
         // A settled echo paints in this frame, whatever requested it.
         ws.typed_echo.frame_sampled();

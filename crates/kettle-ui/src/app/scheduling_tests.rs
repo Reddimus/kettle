@@ -148,7 +148,7 @@ fn typed_echo_bypasses_the_output_coalescer() {
     // settle, and requests the redraw itself on `Now`.
     assert!(
         src.contains(
-            "if ws.typed_echo.plan_paint(now, new_echo, ECHO_SETTLE_ENABLED)\n                        == crate::typed_echo::EchoPaint::Now\n                        && let Some(w) = &ws.window\n                    {\n                        w.request_redraw();"
+            "if plan_typed_echo_paint(ws, now, new_echo, ECHO_SETTLE_ENABLED)\n                        == crate::typed_echo::EchoPaint::Now\n                        && let Some(w) = &ws.window\n                    {\n                        w.request_redraw();"
         ),
         "the Wakeup arm must paint unsettled echo immediately"
     );
@@ -537,7 +537,7 @@ fn armed_echo_window(key: std::time::Instant) -> WindowState {
     ws.typed_echo.key_sent(next, [typed_into(1, 12)]);
     let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 13, Some(next))]);
     assert_eq!(
-        ws.typed_echo.plan_paint(next, new_echo, true),
+        super::plan_typed_echo_paint(&mut ws, next, new_echo, true),
         EchoPaint::Settle
     );
     ws
@@ -554,13 +554,13 @@ fn echo_settle_paints_once_at_an_unextended_deadline() {
     let later = armed + Duration::from_millis(1);
     assert!(!ws.typed_echo.typed_wake(Some(armed), [(2, 3, Some(later))]));
     assert_eq!(
-        ws.typed_echo.plan_paint(later, false, true),
+        super::plan_typed_echo_paint(&mut ws, later, false, true),
         EchoPaint::Settle
     );
     assert_eq!(
         super::poll_echo_settle(&mut ws, later),
-        SettlePoll::Wait(crate::typed_echo::SETTLE_POLL_STEP),
-        "it polls in steps while it waits"
+        SettlePoll::Wait(armed + ECHO_SETTLE - later),
+        "it waits once, for the deadline"
     );
     assert!(ws.typed_echo.settle_pending());
     // Due: one request, then nothing more while it is queued.
@@ -635,7 +635,7 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     ws.typed_echo.key_sent(next, [typed_into(1, 19)]);
     let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
     assert_eq!(
-        ws.typed_echo.plan_paint(next, new_echo, true),
+        super::plan_typed_echo_paint(&mut ws, next, new_echo, true),
         EchoPaint::Settle
     );
 
@@ -647,7 +647,7 @@ fn echo_settle_redraw_that_returns_early_is_not_retried_or_stuck() {
     ws.typed_echo.key_sent(next, [typed_into(1, 19)]);
     let new_echo = ws.typed_echo.typed_wake(Some(next), [(1, 20, Some(next))]);
     assert_eq!(
-        ws.typed_echo.plan_paint(next, new_echo, true),
+        super::plan_typed_echo_paint(&mut ws, next, new_echo, true),
         EchoPaint::Now
     );
 }
@@ -662,6 +662,11 @@ fn echo_settle_is_wired_with_the_coalescer_guards() {
     // about_to_wait polls it, requests on Request, folds its wait, and holds
     // the blink handoff while it is pending.
     assert!(src.contains("let echo_settle = poll_echo_settle(ws, now);"));
+    // The typed Wakeup arm hands the settle each pane's latch and generation,
+    // so arming reopens the latch the echo's second write must wake through.
+    assert!(src.contains(
+        "pane.term.acknowledge_output_wake();\n            }\n        },\n        |id| panes.get(&id).map(|pane| pane.term.output_generation()),"
+    ));
     assert!(src.contains("|| coalesce_due\n            || echo_settle_due"));
     assert!(src.contains(
         "if let crate::typed_echo::SettlePoll::Wait(next) = echo_settle {"
@@ -792,7 +797,7 @@ fn the_keystroke_helper_arms_only_typed_text_into_a_quiet_pane() {
     };
     let wake = |ws: &mut WindowState, at, generation| {
         let new_echo = ws.typed_echo.typed_wake(Some(at), [(id, generation, Some(at))]);
-        ws.typed_echo.plan_paint(at, new_echo, true)
+        super::plan_typed_echo_paint(ws, at, new_echo, true)
     };
 
     // A typed key whose echo splits teaches the pane.
@@ -835,27 +840,32 @@ fn the_keystroke_helper_arms_only_typed_text_into_a_quiet_pane() {
     ws.mux.kill_children();
 }
 
-/// On a real window and pane, through the real keystroke, wake and poll
-/// helpers: a learned pane's settle paints at the echo's second publication,
-/// which raises no wake, and a one-write echo still waits for the deadline,
-/// in bounded steps.
+/// On a real window and pane, through the real keystroke, wake, plan and poll
+/// helpers: arming reopens the pane's output latch, so the echo's second
+/// publication raises a wake of its own and handling that wake requests the
+/// frame, with no polling; a one-write echo paints at the deadline after one
+/// wait; and a pane closed mid-settle falls back to the deadline.
 #[cfg(unix)]
 #[test]
-fn echo_settle_releases_a_real_panes_split_echo_at_its_second_publication() {
-    use crate::typed_echo::{
-        ECHO_SETTLE, EchoPaint, SETTLE_POLL_STEP, SETTLE_WAIT_FLOOR, SettlePoll,
-    };
+fn echo_settle_releases_a_real_panes_split_echo_at_the_wake_of_its_second_publication() {
+    use crate::typed_echo::{ECHO_SETTLE, EchoPaint, SettlePoll};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     let cfg = kettle_config::Config {
         shell_integration: false,
         login_shell: false,
         ..kettle_config::Config::default()
     };
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counter = wakes.clone();
     let mut mux = Mux::new();
     mux.new_tab_with_geometry(
         &cfg,
         kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
-        std::sync::Arc::new(|| {}),
+        Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }),
         &["/bin/cat".to_owned()],
         None,
     )
@@ -880,46 +890,70 @@ fn echo_settle_releases_a_real_panes_split_echo_at_its_second_publication() {
         }
         assert_eq!(generation(ws), before + 1, "one write, one publication");
     };
-    let type_key = |ws: &mut WindowState, bytes: &[u8], at| {
+    // The publication's wake, if its latch was open, follows its generation.
+    let woke_since = |before: usize| {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while wakes.load(Ordering::SeqCst) == before && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        wakes.load(Ordering::SeqCst) - before
+    };
+    // A presented frame: the window painted everything, and the redraw
+    // reopened the latch before its snapshot.
+    let frame = |ws: &mut WindowState| {
+        ws.typed_echo.redraw_started();
+        ws.mux.panes[&id].term.acknowledge_output_wake();
+        ws.typed_echo.frame_sampled();
         ws.seen_output_gen.insert(id, generation(ws));
+    };
+    let type_key = |ws: &mut WindowState, bytes: &[u8], at| {
         assert!(ws.mux.panes[&id].feed_input(bytes).is_queued());
         super::note_keystroke(ws, at, &[id]);
     };
     let ms = Duration::from_millis;
     let us = Duration::from_micros;
 
-    // The pane learned a split 50 ms ago.
+    // The pane learned a split 50 ms ago: two real writes for one key.
     let learned = Instant::now();
-    ws.typed_echo.key_sent(learned, [typed_into(id, 0)]);
-    assert!(ws.typed_echo.typed_wake(Some(learned), [(id, 1, Some(learned))]));
+    let base = generation(&ws);
+    ws.typed_echo.key_sent(learned, [typed_into(id, base)]);
+    publish(&ws);
+    assert!(ws.typed_echo.typed_wake(Some(learned), [(id, base + 1, Some(learned))]));
+    publish(&ws);
     let second = learned + ms(1);
     assert_eq!(
         ws.typed_echo
-            .observe(second, Some(learned), |_| Some((2, Some(second)))),
+            .observe(second, Some(learned), |_| Some((base + 2, Some(second)))),
         Some(id)
     );
+    frame(&mut ws);
 
     // A split echo: the first write wakes the window and arms the settle.
     let at = learned + ms(50);
     type_key(&mut ws, b"i", at);
+    let before = wakes.load(Ordering::SeqCst);
     publish(&ws);
+    assert_eq!(woke_since(before), 1, "the first write wakes the window");
     let new_echo = super::note_typed_echo_wake(&mut ws);
     assert!(new_echo);
     assert_eq!(
-        ws.typed_echo.plan_paint(at, new_echo, true),
+        super::plan_typed_echo_paint(&mut ws, at, new_echo, true),
         EchoPaint::Settle
     );
     assert_eq!(
-        super::poll_echo_settle(&mut ws, at + us(300)),
-        SettlePoll::Wait(SETTLE_POLL_STEP),
-        "one write so far"
+        super::poll_echo_settle(&mut ws, at),
+        SettlePoll::Wait(ECHO_SETTLE),
+        "one wait, for the deadline"
     );
-    // The second write: no wake, but the next poll reads the generation.
+    // The second write wakes the window again: the settle reopened the latch.
+    let before = wakes.load(Ordering::SeqCst);
     publish(&ws);
+    assert_eq!(woke_since(before), 1, "the second write raises its own wake");
+    assert!(!super::note_typed_echo_wake(&mut ws));
     assert_eq!(
-        super::poll_echo_settle(&mut ws, at + us(550)),
-        SettlePoll::Request,
-        "the second publication releases the settle before its deadline"
+        super::plan_typed_echo_paint(&mut ws, at + us(500), false, true),
+        EchoPaint::Now,
+        "handling the second write's wake releases the settle"
     );
     assert_eq!(ws.typed_echo.counts().settled_early, 1);
     assert_eq!(ws.typed_echo.counts().settled_echoes, 0);
@@ -927,29 +961,59 @@ fn echo_settle_releases_a_real_panes_split_echo_at_its_second_publication() {
         super::poll_echo_settle(&mut ws, at + ms(1)),
         SettlePoll::Idle
     );
-    ws.typed_echo.redraw_started();
-    ws.typed_echo.frame_sampled();
+    frame(&mut ws);
 
-    // A one-write echo waits for the deadline, polling in bounded steps.
+    // A one-write echo paints at the deadline, after one wait.
     let at = at + ms(50);
     type_key(&mut ws, b"j", at);
     publish(&ws);
     let new_echo = super::note_typed_echo_wake(&mut ws);
     assert_eq!(
-        ws.typed_echo.plan_paint(at, new_echo, true),
+        super::plan_typed_echo_paint(&mut ws, at, new_echo, true),
         EchoPaint::Settle
     );
-    let most = ECHO_SETTLE.as_nanos().div_ceil(SETTLE_POLL_STEP.as_nanos());
-    let (mut now, mut polls) = (at, 0);
-    while let SettlePoll::Wait(wait) = super::poll_echo_settle(&mut ws, now) {
-        assert!((SETTLE_WAIT_FLOOR..=SETTLE_POLL_STEP).contains(&wait), "{wait:?}");
-        now += wait;
-        polls += 1;
-        assert!(polls <= most, "{polls} polls: the settle spins");
-    }
-    assert_eq!(now, at + ECHO_SETTLE, "the deadline caps a one-write echo");
+    let SettlePoll::Wait(wait) = super::poll_echo_settle(&mut ws, at) else {
+        panic!("the armed settle must wait");
+    };
+    assert_eq!(wait, ECHO_SETTLE);
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, at + wait),
+        SettlePoll::Request,
+        "the deadline caps a one-write echo"
+    );
     assert_eq!(ws.typed_echo.counts().settled_echoes, 1);
     assert_eq!(ws.typed_echo.counts().settled_early, 1);
-    assert_eq!(super::poll_echo_settle(&mut ws, now), SettlePoll::Idle);
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, at + wait),
+        SettlePoll::Idle
+    );
+    frame(&mut ws);
+
+    // A pane closed mid-settle: a later wake cannot read it, so it never
+    // completes early, and the deadline paints.
+    let at = at + ms(50);
+    type_key(&mut ws, b"k", at);
+    publish(&ws);
+    let new_echo = super::note_typed_echo_wake(&mut ws);
+    assert_eq!(
+        super::plan_typed_echo_paint(&mut ws, at, new_echo, true),
+        EchoPaint::Settle
+    );
+    let closed = ws.mux.panes.remove(&id).expect("pane");
+    assert_eq!(
+        super::plan_typed_echo_paint(&mut ws, at + ms(1), false, true),
+        EchoPaint::Settle
+    );
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, at + ms(1)),
+        SettlePoll::Wait(ECHO_SETTLE - ms(1))
+    );
+    assert_eq!(
+        super::poll_echo_settle(&mut ws, at + ECHO_SETTLE),
+        SettlePoll::Request
+    );
+    assert_eq!(ws.typed_echo.counts().settled_echoes, 2);
+    assert_eq!(ws.typed_echo.counts().settled_early, 1);
+    ws.mux.panes.insert(id, closed);
     ws.mux.kill_children();
 }

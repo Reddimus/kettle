@@ -215,6 +215,47 @@ pub(super) fn note_typed_echo_wake(ws: &mut WindowState) -> bool {
     )
 }
 
+/// Ask the typed-echo settle how a typed output wake paints, with each
+/// pane's output latch and generation (`TypedEcho::plan_paint`).
+///
+/// The settle reopens the latch of each pane it waits for here, ahead of the
+/// frame, and that is safe for the output coalescer's latch rule:
+/// - The latch gates wakes, not output. Reopening it early can add a wake but
+///   never loses one: the pane is acknowledged before its generation is read,
+///   so a publication shows in that read or raises a fresh wake. And the
+///   app's `wake_pending` latch was cleared before this Wakeup fanned out, so
+///   that wake is queued even while this one is being handled.
+/// - It happens only inside the typing window, where the coalescer is already
+///   bypassed (`output_pacer.reset()`), and only for panes still short of the
+///   echo's second write: at most two extra wakes per pane and keystroke, not
+///   a flood's worth.
+/// - It never runs on a quiesced window: the quiesce branch returns first, so
+///   no disabled gate is acknowledged from here.
+/// - The redraw's own acknowledgement before its snapshot (`redraw`) finds an
+///   open latch and leaves it open, or a pending one and clears it, as it
+///   does for any wake that raced a frame. A wake raised in between and
+///   handled after that frame finds nothing unpainted and rearms
+///   (`output_wakeup_needs_paint`).
+pub(super) fn plan_typed_echo_paint(
+    ws: &mut WindowState,
+    now: std::time::Instant,
+    new_echo: bool,
+    settles: bool,
+) -> crate::typed_echo::EchoPaint {
+    let panes = &ws.mux.panes;
+    ws.typed_echo.plan_paint(
+        now,
+        new_echo,
+        settles,
+        |id| {
+            if let Some(pane) = panes.get(&id) {
+                pane.term.acknowledge_output_wake();
+            }
+        },
+        |id| panes.get(&id).map(|pane| pane.term.output_generation()),
+    )
+}
+
 pub(super) fn defer_output_racing_frame(ws: &mut WindowState) {
     // Publication during maintenance can be coalesced into an already-served
     // wake before redraw reopens the latch. Retain a paced retry even when no
@@ -864,7 +905,9 @@ impl App {
                 // Apply current visibility/recovery policy, but leave enabled
                 // latches closed until redraw is ready to snapshot a frame.
                 // This prevents one queued event from reopening the flood gate
-                // before the deferred paint budget expires.
+                // before the deferred paint budget expires. The one exception
+                // is a settled typed echo's panes, reopened early so the
+                // echo's second write wakes (`plan_typed_echo_paint`).
                 self.sync_output_wake_gate(ws);
                 // Wakeups fan out to every window; skip windows whose
                 // panes produced no output since their last paint (plain
@@ -926,7 +969,7 @@ impl App {
                     ws.output_pacer.reset();
                     observe_typed_echo(ws, now);
                     let new_echo = note_typed_echo_wake(ws);
-                    if ws.typed_echo.plan_paint(now, new_echo, ECHO_SETTLE_ENABLED)
+                    if plan_typed_echo_paint(ws, now, new_echo, ECHO_SETTLE_ENABLED)
                         == crate::typed_echo::EchoPaint::Now
                         && let Some(w) = &ws.window
                     {
