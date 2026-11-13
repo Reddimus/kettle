@@ -2835,7 +2835,8 @@ pub(super) enum LonePaneJob {
 /// read to screen readers.
 ///
 /// Accepted limitations: a script shows as its interpreter (`bash` for
-/// `./deploy.sh`), the text is not refreshed if the job exits while the
+/// `./deploy.sh`), a pipeline is named after its first command (`cat` for
+/// `cat f | less`), the text is not refreshed if the job exits while the
 /// question is open, and "closing stops it" is wrong for a program that
 /// ignores SIGHUP.
 pub(super) fn close_dialog_body(
