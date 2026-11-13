@@ -24,21 +24,39 @@ pub(super) struct ExitParts<'a> {
     pub(super) session_writer: &'a mut crate::session::SessionWriter,
 }
 
+/// How long a quit waits for the session write handed over just before it.
+pub(super) const EXIT_SESSION_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How long a quit waits for a running recording to write its tail.
+pub(super) const EXIT_RECORDING_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+/// How long a quit gives desktop notifications already admitted to leave.
+pub(super) const EXIT_NOTIFICATION_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 /// Release what must not outlive the process, the first time only, and say
 /// whether this call did it.
 ///
-/// Its cost is bounded by what it already was after `run_app`: deleting the
-/// private copies, joining the session writer (at most the one write in
-/// progress and the latest pending one) and `flush_notifications`, which the
-/// App bounds at 250 ms. The recorder is only handed its finish, as
-/// `close_window_now` does, so a stalled recording device cannot hold the
-/// quit up.
-pub(super) fn run_exit_teardown(parts: ExitParts<'_>, flush_notifications: impl FnOnce()) -> bool {
+/// Each wait has its own bound, so however stalled the disk is, a quit
+/// spends at most about 2.05 s waiting here: [`EXIT_RECORDING_WAIT`] for the
+/// recorder's tail, `session_wait` ([`EXIT_SESSION_WAIT`] from the App) for
+/// the session write, and [`EXIT_NOTIFICATION_WAIT`] for notifications,
+/// which the App's `flush_notifications` applies. Deleting the private
+/// copies is local work, the same as it was after `run_app`. A session
+/// write given up on leaves the previous file whole, since each write is an
+/// atomic replace.
+pub(super) fn run_exit_teardown(
+    parts: ExitParts<'_>,
+    session_wait: std::time::Duration,
+    flush_notifications: impl FnOnce(),
+) -> bool {
     if std::mem::replace(parts.done, true) {
         return false;
     }
+    // `exit()` follows a quit and takes the recorder's writer thread with
+    // it, so wait a little for the tail instead of only handing it over as
+    // `close_window_now` does. A device that does not answer is detached at
+    // the bound, and the recorder's own `Drop` then has nothing to wait for.
     if let Some(recorder) = parts.recorder {
-        recorder.begin_finish();
+        let _ = recorder.finish_with_timeout(EXIT_RECORDING_WAIT);
     }
     // Pasted screenshots are captured screen content, so they do not outlive
     // the session that produced them. Runs on the error path too — an exit
@@ -64,18 +82,25 @@ pub(super) fn run_exit_teardown(parts: ExitParts<'_>, flush_notifications: impl 
     parts.video_copies.close();
     // After the deletions, so they overlap the write `exiting` just handed
     // the writer.
-    parts.session_writer.finish();
+    let _ = parts.session_writer.finish_timed(session_wait);
     flush_notifications();
     true
 }
 
-/// The window `save_session_on_exit` saves through, from each window's
-/// sequence number and whether it has tabs: the first that has tabs and is
-/// not the quick terminal (`quick`). `None` saves nothing.
+/// The window `save_session_on_exit` saves through, or `None` to save
+/// nothing: nothing once the teardown has run (the writer is finished) or
+/// after a failed startup, and otherwise the first window, from each one's
+/// sequence number and whether it has tabs, that has tabs and is not the
+/// quick terminal (`quick`).
 pub(super) fn exit_save_window(
+    teardown_done: bool,
+    startup_failed: bool,
     windows: impl IntoIterator<Item = (u64, bool)>,
     quick: Option<u64>,
 ) -> Option<u64> {
+    if teardown_done || startup_failed {
+        return None;
+    }
     windows
         .into_iter()
         .find(|&(seq, has_tabs)| has_tabs && quick != Some(seq))
@@ -96,10 +121,9 @@ impl App {
     /// would replace the one the user means to restore. A startup that failed
     /// saves nothing.
     pub(super) fn save_session_on_exit(&mut self) {
-        if self.exit_teardown_done || self.startup_error.is_some() {
-            return;
-        }
         let Some(seq) = exit_save_window(
+            self.exit_teardown_done,
+            self.startup_error.is_some(),
             self.windows
                 .iter()
                 .map(|(seq, ws)| (*seq, !ws.mux.tabs.is_empty())),
@@ -149,11 +173,8 @@ impl App {
                 video_copies: &self.video_copies,
                 session_writer: &mut self.session_writer,
             },
-            || {
-                crate::notifications::flush_desktop_notifications(std::time::Duration::from_millis(
-                    250,
-                ))
-            },
+            EXIT_SESSION_WAIT,
+            || crate::notifications::flush_desktop_notifications(EXIT_NOTIFICATION_WAIT),
         );
     }
 }

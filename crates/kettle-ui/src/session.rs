@@ -708,20 +708,56 @@ impl SessionWriter {
     /// once that write is on disk.
     ///
     /// A write already in progress finishes first, then the latest pending
-    /// one, and nothing after it: a submit after this is never written. The
-    /// process may leave through `exit()` the moment this returns (AppKit
-    /// does after `terminate:`), which skips every destructor, so the join
-    /// cannot be left to `Drop`. Calling it again does nothing.
+    /// one, and nothing after it: a submit after this is never written.
+    /// Calling it again does nothing. This waits as long as the disk does;
+    /// a quit uses [`SessionWriter::finish_timed`] instead.
     pub(crate) fn finish(&mut self) {
-        let Some(worker) = self.worker.take() else {
+        let Some(worker) = self.close() else {
             return;
         };
-        let (lock, ready) = &*self.pending;
-        lock.lock().expect("session save lock").closing = true;
-        ready.notify_one();
         if worker.join().is_err() {
             log::warn!("session save worker panicked");
         }
+    }
+
+    /// [`SessionWriter::finish`], giving up after `timeout`. Returns whether
+    /// the last write finished in time.
+    ///
+    /// The process may leave through `exit()` the moment this returns (AppKit
+    /// does after `terminate:`), which skips every destructor, so the wait
+    /// cannot be left to `Drop`; and a hung network home or a stalled disk
+    /// must not hold a quit, a logout or a shutdown up. A write given up on is
+    /// left to its thread, which `exit()` ends. Each write is an atomic
+    /// replace, so that leaves the previous session file whole. The worker is
+    /// detached either way, so a later `finish` or `Drop` has nothing to wait
+    /// for.
+    pub(crate) fn finish_timed(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(worker) = self.close() else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        // Polled like the recorder's writer: `JoinHandle` has no timed join.
+        while !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                log::warn!("session save did not finish within {timeout:?}; not waiting for it");
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if worker.join().is_err() {
+            log::warn!("session save worker panicked");
+        }
+        true
+    }
+
+    /// Tell the worker to write what is pending and stop, and hand back its
+    /// thread, if it still has one.
+    fn close(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        let worker = self.worker.take()?;
+        let (lock, ready) = &*self.pending;
+        lock.lock().expect("session save lock").closing = true;
+        ready.notify_one();
+        Some(worker)
     }
 }
 
@@ -1302,9 +1338,63 @@ mod tests {
         assert_eq!(load_from_path(&path).map(|s| s.active), Some(7));
     }
 
+    /// The timed finish waits for a slow write like `finish` does, and
+    /// reports it written.
+    #[test]
+    fn finish_timed_waits_for_a_write_that_finishes_in_time() {
+        let dir = private_tempdir();
+        let path = dir.path().join("session.json");
+        let mut writer = slow_writer(path.clone());
+        writer.submit(
+            Session {
+                active: 4,
+                ..Session::default()
+            },
+            None,
+        );
+        assert!(writer.finish_timed(std::time::Duration::from_secs(10)));
+        assert_eq!(load_from_path(&path).map(|s| s.active), Some(4));
+        assert!(writer.finish_timed(std::time::Duration::ZERO));
+    }
+
+    /// A write that never returns (a hung network home, a stalled disk)
+    /// must not hold a quit up: the timed finish gives up at its bound, and
+    /// the `Drop` after it has nothing left to wait for.
+    #[test]
+    fn finish_timed_gives_up_on_a_write_that_never_finishes() {
+        use std::time::{Duration, Instant};
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut writer = SessionWriter::with_sink(move |_, _| {
+            started_tx.send(()).unwrap();
+            // Stands in for a write that never returns; the test lets it go
+            // at the end so the thread does not outlive it.
+            let _ = release_rx.recv();
+        })
+        .unwrap();
+        writer.submit(Session::default(), None);
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let bound = Duration::from_millis(200);
+        let start = Instant::now();
+        assert!(!writer.finish_timed(bound));
+        let waited = start.elapsed();
+        assert!(waited >= bound, "gave up early, after {waited:?}");
+        assert!(
+            waited < Duration::from_secs(2),
+            "the bound did not hold: {waited:?}"
+        );
+        let start = Instant::now();
+        drop(writer);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "Drop waited on the hung write"
+        );
+        drop(release_tx);
+    }
+
     const FINISH_EXIT_CHILD: &str = "KETTLE_SESSION_FINISH_EXIT_CHILD";
 
-    /// The quit path itself: submit, `finish`, then `std::process::exit`,
+    /// The quit path itself: submit, `finish_timed`, then `std::process::exit`,
     /// which runs no destructor. The snapshot must be on disk when the child
     /// is gone.
     #[test]
@@ -1318,7 +1408,7 @@ mod tests {
                 },
                 None,
             );
-            writer.finish();
+            assert!(writer.finish_timed(std::time::Duration::from_secs(10)));
             std::process::exit(0);
         }
         let dir = private_tempdir();

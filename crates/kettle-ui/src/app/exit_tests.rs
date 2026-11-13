@@ -85,6 +85,7 @@ fn the_exit_teardown_deletes_the_private_copies_and_waits_for_the_session_write(
     let mut flushed = 0;
     assert!(super::exit::run_exit_teardown(
         fixture.parts(&mut done),
+        std::time::Duration::from_secs(10),
         || flushed += 1
     ));
     for file in &fixture.files {
@@ -115,10 +116,11 @@ fn the_exit_teardown_runs_once_when_both_exit_paths_call_it() {
     let mut second = ExitFixture::new(root.path(), "second");
     let mut done = false;
     let mut flushed = 0;
-    assert!(super::exit::run_exit_teardown(first.parts(&mut done), || {
+    let wait = std::time::Duration::from_secs(10);
+    assert!(super::exit::run_exit_teardown(first.parts(&mut done), wait, || {
         flushed += 1
     }));
-    assert!(!super::exit::run_exit_teardown(second.parts(&mut done), || {
+    assert!(!super::exit::run_exit_teardown(second.parts(&mut done), wait, || {
         flushed += 1
     }));
     assert_eq!(flushed, 1, "notifications were flushed twice");
@@ -147,12 +149,17 @@ fn the_exit_teardown_runs_once_when_both_exit_paths_call_it() {
 #[test]
 fn the_quit_save_needs_a_window_with_tabs_that_is_not_the_quick_terminal() {
     use super::exit::exit_save_window;
-    assert_eq!(exit_save_window([], None), None);
-    assert_eq!(exit_save_window([(1, false), (2, false)], None), None);
-    assert_eq!(exit_save_window([(1, true)], Some(1)), None);
-    assert_eq!(exit_save_window([(1, true), (2, false)], Some(1)), None);
-    assert_eq!(exit_save_window([(1, false), (2, true)], None), Some(2));
-    assert_eq!(exit_save_window([(1, true), (2, true)], Some(1)), Some(2));
+    let pick = |windows: &[(u64, bool)], quick| exit_save_window(false, false, windows.iter().copied(), quick);
+    assert_eq!(pick(&[], None), None);
+    assert_eq!(pick(&[(1, false), (2, false)], None), None);
+    assert_eq!(pick(&[(1, true)], Some(1)), None);
+    assert_eq!(pick(&[(1, true), (2, false)], Some(1)), None);
+    assert_eq!(pick(&[(1, false), (2, true)], None), Some(2));
+    assert_eq!(pick(&[(1, true), (2, true)], Some(1)), Some(2));
+    // Once the teardown has run the writer is finished, and a failed startup
+    // has nothing worth restoring: neither saves, whatever the windows hold.
+    assert_eq!(exit_save_window(true, false, [(1, true)], None), None);
+    assert_eq!(exit_save_window(false, true, [(1, true)], None), None);
 }
 
 /// Drift guard. `exiting` cannot be reached without a live event loop and

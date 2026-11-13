@@ -413,7 +413,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   split, a tab title), and a save still being written could be lost. The
   same quit now also deletes the private copies of pasted screenshots and of
   files opened in the image viewer, document viewer or video player, which
-  were left behind.
+  were left behind. A slow disk or a hung network home holds a quit up for
+  at most about 2 seconds; a session write that has not finished by then
+  leaves the previous session file intact.
 
 - A link no longer draws its hover underline across text you have selected.
   While a selection is being dragged, the links it passes over show no

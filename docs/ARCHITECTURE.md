@@ -482,12 +482,15 @@ logout, shutdown) never returns from `run_app`: winit calls
 `ApplicationHandler::exiting` and AppKit then calls `exit()`, which runs no
 destructor. So `exiting` hands a running recording its tail, saves the session
 once more through `save_session` and its gates when a window other than the
-quick terminal still has tabs, and runs the exit teardown: it deletes pasted
-screenshots and the image, document and video viewer copies, finishes the
-recorder without waiting on it, joins the session writer
-(`SessionWriter::finish`) and flushes notifications for at most 250 ms. The
-same teardown runs after `run_app` returns; a flag makes the first call the
-only one.
+quick terminal still has tabs, and runs the exit teardown. It first waits at
+most 300 ms for the recorder to write its tail, then deletes pasted screenshots
+and the image, document and video viewer copies, then waits at most 1.5 s for
+the session write (`SessionWriter::finish_timed`) and flushes notifications for
+at most 250 ms, so a stalled disk or a hung network home cannot hold a quit,
+logout or shutdown for more than about 2 s. A session write given up on leaves
+the previous file whole, because each write is an atomic replace. The same
+teardown runs after `run_app` returns; a flag makes the first call the only
+one.
 
 The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
 fixtures and includes the tests split out of its original body, preserving their
