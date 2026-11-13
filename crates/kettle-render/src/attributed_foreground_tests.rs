@@ -686,3 +686,167 @@ fn selected_ansi_indexed_truecolour_link_and_decoration_ink_meets_aa() {
         }
     }
 }
+
+/// A focused selection keeps its hue; an unfocused window's selection is a
+/// neutral grey, in the row fill and in the per-cell fill a program-set
+/// background gets, so losing focus changes its colour as well as its
+/// strength, as macOS does.
+#[test]
+fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
+    use super::theme::PaneSelectionFills;
+    let cfg = Config::default();
+    let grey = |c: Rgb| c.r == c.g && c.g == c.b;
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        for alpha in [1.0, 0.86] {
+            let mut cache = MinimumContrastCache::default();
+            let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
+            let row = fills.row(false);
+            assert!(grey(row), "{name} at {alpha}: row fill {row:?}");
+            for program_bg in [theme.background, theme.palette[1], theme.palette[4], row] {
+                let cell = fills.cell(
+                    CellHighlight::InactiveSelection,
+                    &cfg,
+                    &theme,
+                    program_bg,
+                    &mut cache,
+                );
+                assert!(
+                    grey(cell),
+                    "{name} at {alpha}: cell fill {cell:?} on {program_bg:?}"
+                );
+            }
+        }
+    }
+}
+
+/// TokyoNight Night at the macOS and Windows default opacity of 86%, over a
+/// white page: the background shows as #3a3b44, against which the old fills
+/// measured 1.95:1 focused and 1.31:1 unfocused.
+#[test]
+fn selections_are_measured_against_a_see_through_background_as_shown() {
+    use super::theme::{PaneSelectionFills, selection_contrast_target};
+    let cfg = Config::default();
+    let theme = cfg.theme_by_name("TokyoNight Night");
+    let mut cache = MinimumContrastCache::default();
+    let fills = PaneSelectionFills::new(&theme, theme.background, 0.86, &mut cache);
+    let target = selection_contrast_target(theme.background, fills.row(true), 0.86);
+    assert_eq!(target, Rgb::new(58, 59, 68));
+    let focused = color::contrast_ratio(fills.row(true), target);
+    let unfocused = color::contrast_ratio(fills.row(false), target);
+    assert!(
+        focused >= 2.4,
+        "focused {:?} at {focused:.2}:1",
+        fills.row(true)
+    );
+    assert!(
+        unfocused >= 2.0,
+        "unfocused {:?} at {unfocused:.2}:1",
+        fills.row(false)
+    );
+    let (hue, saturation, _) = color::hsl(theme.selection_background);
+    let (fill_hue, fill_saturation, _) = color::hsl(fills.row(true));
+    assert!(hue_distance(hue, fill_hue) < 0.05);
+    assert!(fill_saturation >= saturation - 0.02);
+}
+
+/// Text on any selection fill stays at 4.5:1, see-through or not, and a dark
+/// theme's selected text stays light.
+#[test]
+fn selected_text_stays_readable_on_see_through_and_opaque_fills() {
+    use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
+    let cfg = Config::default();
+    for theme in [
+        cfg.theme_by_name("TokyoNight Night"),
+        cfg.theme_by_name("Kettle Day"),
+        Theme::default(),
+    ] {
+        for alpha in [1.0, 0.99, 0.86, 0.5] {
+            let mut cache = MinimumContrastCache::default();
+            let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
+            for (highlight, fill) in [
+                (CellHighlight::Selection, fills.row(true)),
+                (CellHighlight::InactiveSelection, fills.row(false)),
+            ] {
+                for ink in [theme.foreground, theme.palette[4], theme.palette[8]] {
+                    let drawn = resolved_highlight_foreground_cached(
+                        ink, fill, highlight, &cfg, &theme, &mut cache,
+                    );
+                    let ratio = color::contrast_ratio(drawn, fill);
+                    assert!(ratio >= 4.5, "{drawn:?} on {fill:?} at {alpha}: {ratio:.2}");
+                }
+            }
+            if theme.is_dark() {
+                let ink = resolved_highlight_foreground_cached(
+                    theme.foreground,
+                    fills.row(true),
+                    CellHighlight::Selection,
+                    &cfg,
+                    &theme,
+                    &mut cache,
+                );
+                assert!(
+                    color::relative_luminance(ink) > color::relative_luminance(fills.row(true)),
+                    "a dark theme's selected text stays light at {alpha}"
+                );
+            }
+        }
+    }
+}
+
+/// Where nothing shows behind the window, the selection is the one the theme
+/// gives against its own background: at full opacity, under macOS Reduce
+/// Transparency, over the starfield and on an opaque surface.
+#[test]
+fn an_opaque_window_keeps_the_theme_selection() {
+    use super::theme::{PaneSelectionFills, selection_backdrop_alpha};
+    let mut cfg = Config::default();
+    let theme = cfg.theme_by_name("TokyoNight Night");
+    let fills = |alpha: f64| {
+        PaneSelectionFills::new(
+            &theme,
+            theme.background,
+            alpha,
+            &mut MinimumContrastCache::default(),
+        )
+        .row(true)
+    };
+    assert_eq!(fills(1.0), Rgb::new(77, 100, 166));
+    cfg.background_opacity = 0.86;
+    let pre = wgpu::CompositeAlphaMode::PreMultiplied;
+    assert_eq!(
+        selection_backdrop_alpha(&cfg, pre, false, false),
+        0.86_f32 as f64
+    );
+    for alpha in [
+        selection_backdrop_alpha(&cfg, pre, false, true),
+        selection_backdrop_alpha(&cfg, wgpu::CompositeAlphaMode::Opaque, false, false),
+    ] {
+        assert_eq!(alpha, 1.0);
+        assert_eq!(fills(alpha), Rgb::new(77, 100, 166));
+    }
+    cfg.background_type = kettle_config::BackgroundType::Starfield;
+    assert_eq!(selection_backdrop_alpha(&cfg, pre, false, false), 1.0);
+    cfg.background_type = kettle_config::BackgroundType::Image;
+    assert_eq!(selection_backdrop_alpha(&cfg, pre, true, false), 1.0);
+    assert!(selection_backdrop_alpha(&cfg, pre, false, false) < 1.0);
+}
+
+/// A theme whose selection colour is nearly grey still tells a focused
+/// selection from an unfocused one by brightness.
+#[test]
+fn a_near_grey_selection_keeps_focused_and_unfocused_apart() {
+    use super::theme::PaneSelectionFills;
+    let theme = Theme::default();
+    assert_eq!(theme.selection_background, Rgb::new(0x58, 0x5b, 0x70));
+    for alpha in [1.0, 0.99] {
+        let fills = PaneSelectionFills::new(
+            &theme,
+            theme.background,
+            alpha,
+            &mut MinimumContrastCache::default(),
+        );
+        let ratio = color::contrast_ratio(fills.row(true), fills.row(false));
+        assert!(ratio >= 1.3, "at {alpha}: {ratio:.2}");
+    }
+}

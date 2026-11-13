@@ -3695,8 +3695,16 @@ non-current search match keeps it wherever it meets the fill's ratio (3:1, or
 separate from resolves a fill against that background, painted over the row
 quad, and its ink resolves against that fill. A selection over a status line
 therefore stays one colour, and a plain selection draws one quad per row.
-Contrast is computed from opaque colours; a translucent window's composite
-with the desktop is not known to the renderer. In a dimmed split, highlights
+The unfocused fill is the grey nearest the background that reaches 2:1.
+The desktop behind a translucent window is not known to the renderer, so
+`theme::selection_backdrop_alpha` decides whether one shows at all (not on an
+opaque surface, a covering wallpaper, or a window the OS draws opaque, which
+kettle-ui reports as `Overlay::window_opaque` from macOS Reduce Transparency).
+When one does, the row fills are measured against the background over white
+or black (`theme::selection_contrast_target`), whichever leaves the selection
+less contrast; the focused fill strengthens there only while its text keeps
+4.5:1 and its light or dark ink. Default cells are still recognised by the
+background colour as drawn. In a dimmed split, highlights
 resolve against backgrounds as the pane dimmer shows them, because highlight
 fills paint above the dimmer. A link underline on a highlight reuses the
 cell's resolved text ink. Per-frame colour caches include these decisions and

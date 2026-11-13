@@ -121,7 +121,7 @@ as displayed, including trailing spaces and block padding. Stream selections joi
 copy each row's column slice on its own line. Settings > Behavior exposes the
 copy controls and selection modifiers. Settings > Appearance changes cursor
 shape, blinking and the unfocused style immediately. An unfocused window uses
-a subdued selection and, by default, a steady hollow cursor; an application
+a neutral selection and, by default, a steady hollow cursor; an application
 that hides its cursor keeps it hidden.
 
 ## Pasting

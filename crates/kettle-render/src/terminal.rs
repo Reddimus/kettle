@@ -509,6 +509,7 @@ impl Renderer {
         let selection_fills = super::theme::PaneSelectionFills::new(
             theme,
             shown(default_bg),
+            self.selection_backdrop_alpha,
             &mut self.minimum_contrast_cache,
         );
         let selection_bg = selection_fills.row(window_focused);

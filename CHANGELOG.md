@@ -155,6 +155,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- When a window loses focus its selection turns a neutral grey, as a
+  selection in an inactive macOS window does, instead of a dimmer shade of
+  the same colour, so it changes colour as well as strength. With the
+  window's background see-through (the macOS and Windows default), selection
+  colours are now chosen against the background as it shows over the
+  desktop, not against the theme's solid colour: the unfocused grey stays at
+  least 2:1 from it, about 1.3:1 before, and on macOS and Windows the
+  focused colour is a little stronger than before (lighter on a dark theme,
+  darker on a light one), while selected text keeps at least 4.5:1. Linux,
+  at 99% opacity, changes by about 1%. An opaque window, and one under
+  macOS Reduce Transparency, keeps the focused colours it had.
+
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
   theme and other pickers now are too, and in all of them the highlighted row

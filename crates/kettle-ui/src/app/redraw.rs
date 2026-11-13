@@ -294,6 +294,10 @@ impl App {
         });
 
         let window_focused = ws.window_focused;
+        let window_opaque = ws
+            .native_material
+            .as_ref()
+            .is_some_and(|material| material.window_opaque());
         // Brighten the focused pane's scrollbar while the pointer is on the
         // gutter or the thumb is being dragged (overlay-scrollbar feel). The
         // scrolled-back case is decided per-pane in the renderer from the snapshot.
@@ -422,6 +426,7 @@ impl App {
                 media_scrubbing: ws.lane_drag.is_some_and(|drag| drag.scrub),
                 card_hover,
                 window_focused,
+                window_opaque,
                 scrollbar_active,
                 scrollbar_hovered_pane: ws.scrollbar_hover,
                 cursor_visible,
@@ -572,6 +577,7 @@ impl App {
             media_scrubbing: false,
             card_hover,
             window_focused,
+            window_opaque,
             scrollbar_active,
             scrollbar_hovered_pane: ws.scrollbar_hover,
             cursor_visible,

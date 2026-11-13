@@ -418,6 +418,9 @@ pub struct Renderer {
     /// palette across thousands of cells, while the lift itself performs a
     /// bisection with many nonlinear color conversions.
     minimum_contrast_cache: MinimumContrastCache,
+    /// How opaque this frame shows a pane's default background over the
+    /// desktop (`1.0` when nothing shows through), for selection contrast.
+    selection_backdrop_alpha: f64,
     chrome_colors: chrome::Colors,
     /// Per-pane, per-row content keys for the line-level shaping cache.
     /// `build_pane` hashes each grid row's style runs (text, fg, bold, italic).
@@ -1705,6 +1708,12 @@ impl Renderer {
         // it this frame if a solid block cursor is visible.
         self.pending_cursor_glyph = None;
         self.minimum_contrast_cache.clear();
+        self.selection_backdrop_alpha = theme::selection_backdrop_alpha(
+            cfg,
+            self.config.alpha_mode,
+            opaque_wallpaper_covers_surface,
+            overlay.window_opaque,
+        );
         // Inline image instances share one renderer/window budget. Allocate it
         // across panes before iterating so pane order cannot monopolize all
         // slots. Offscreen placements consume no quota.

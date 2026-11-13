@@ -7105,3 +7105,51 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
         "matched characters keep the row's width"
     );
 }
+
+/// An unfocused window paints its selection in a neutral grey, the hue a
+/// macOS selection takes in an inactive window, so the change of focus shows
+/// in the selection's colour and not only its strength.
+#[test]
+fn an_unfocused_window_paints_its_selection_grey() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("C09_GPU_SKIP: unfocused selection colour, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    let mut snap = snapshot_of(30, 4, b"\x1b[?25l");
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(1), Column(0)),
+        Point::new(Line(1), Column(20)),
+        false,
+    ));
+    let x = (cfg.padding_x + renderer.cell_w * 5.5) as u32;
+    let y = (cfg.padding_y + renderer.cell_h * 1.5) as u32;
+    let mut sample = |window_focused: bool| {
+        let overlay = Overlay {
+            window_focused,
+            cursor_visible: false,
+            ..Overlay::default()
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let p = frame.get_pixel(x, y);
+        Rgb::new(p[0], p[1], p[2])
+    };
+    let focused = sample(true);
+    let unfocused = sample(false);
+    assert!(
+        focused.r != focused.b,
+        "the focused selection keeps the theme's hue: {focused:?}"
+    );
+    assert!(
+        unfocused.r == unfocused.g && unfocused.g == unfocused.b,
+        "the unfocused selection is grey: {unfocused:?}"
+    );
+    assert_ne!(
+        unfocused,
+        color::resolve_query(257, &cfg.theme, &snap.colors).unwrap_or(cfg.theme.background),
+        "the unfocused selection is painted"
+    );
+}
