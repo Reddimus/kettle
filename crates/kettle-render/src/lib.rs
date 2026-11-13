@@ -338,6 +338,9 @@ mod dim_blend_tests;
 #[cfg(test)]
 mod context_menu_row_width_tests;
 
+#[cfg(test)]
+mod picker_scroll_thumb_tests;
+
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,

@@ -149,6 +149,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The command palette and the theme, layout and SSH pickers show eight full
+  rows starting right under the search field when the list is longer than
+  that, instead of six rows under an empty strip, and a thin scrollbar thumb
+  at the right edge shows where in the list you are. The panel ends at its
+  last row in a short window. The wheel and the arrow keys scroll as before;
+  the strips that scrolled when hovered are gone. Right-click menus are
+  unchanged.
 - The command palette ranks a command by the best way the typed text fits
   its name, and leaves out names the text only lies scattered through while
   a closer match exists. "font" now lists the font-size commands and no

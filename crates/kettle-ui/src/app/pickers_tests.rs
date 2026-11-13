@@ -163,11 +163,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
     )
     .unwrap();
     let row_h = kettle_render::menu::row_height(16.0);
-    let (inset, _) = kettle_render::menu::scroll_content(
-        menu.rows.len() as f32 * row_h,
-        menu.panel_h_clamped,
-        row_h,
-    );
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
     ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 0.5);
     ws.accessibility_pending = false;
@@ -377,6 +373,51 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 super::PickerPointer::Press
             ));
             assert_eq!(ws.palette_input.as_ref().unwrap().1, menu.highlight);
+        }
+    }
+}
+
+/// A long picker list fills its panel: the first row sits right under the
+/// query header, all eight rows are painted and hit, and paint, pointer and
+/// accessibility agree on every row. A short window still shows a row.
+#[test]
+fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let bindings = kettle_config::keybinds::defaults();
+    let profiles: Vec<String> = (0..20).map(|i| format!("profile-{i}")).collect();
+    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles);
+    assert!(list.rows.len() >= 150, "{} rows", list.rows.len());
+    let cell = (8.0, 16.0);
+    let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len()).unwrap();
+    let menu = picker_context_menu(list, (800.0, 600.0), cell, 0.0).unwrap();
+    let header_bottom = geometry.header.1 + geometry.header.3;
+    let painted = kettle_render::context_menu_row_rects(&menu, cell);
+    assert_eq!(painted.len(), 8, "eight full rows");
+    assert_eq!(painted[0].1.1, header_bottom, "no gap under the header");
+    let row_h = kettle_render::menu::row_height(cell.1);
+    assert_eq!(
+        painted.last().unwrap().1.1 + row_h,
+        menu.anchor.1 + menu.panel_h_clamped
+    );
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    for &(index, rect) in &painted {
+        assert_eq!(menu.visible_row_rect(index), Some(rect), "row {index}");
+        ws.cursor.x = f64::from(rect.0 + 10.0);
+        ws.cursor.y = f64::from(rect.1 + rect.3 * 0.5);
+        apply_picker_pointer(&mut ws, &menu, cell.1, PickerPointer::Press);
+        assert_eq!(ws.palette_input.as_ref().unwrap().1, index, "row {index}");
+    }
+    assert_eq!(menu.visible_row_rect(8), None);
+    // A window with room for one or two rows still paints and hits them.
+    for height in [120.0, 150.0] {
+        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[]);
+        let menu = picker_context_menu(list, (800.0, height), cell, 0.0).unwrap();
+        let painted = kettle_render::context_menu_row_rects(&menu, cell);
+        assert!(!painted.is_empty(), "height {height}");
+        assert_eq!(painted[0].1.1, menu.anchor.1);
+        for &(index, rect) in &painted {
+            assert_eq!(menu.visible_row_rect(index), Some(rect));
         }
     }
 }

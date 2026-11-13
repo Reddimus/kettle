@@ -172,7 +172,7 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
         natural_h
     };
     let (ax, ay) = menu.anchor;
-    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    let (inset, content_h) = menu_scroll_content(menu, natural_h, panel_h, row_h);
     let mut row_y = ay + inset;
     for row in menu
         .rows
@@ -294,8 +294,7 @@ impl ContextMenu {
         // is configured; the picker header retains the latter.
         let row_h = self.picker_header_height - menu::PICKER_HEADER_PAD + menu::ROW_PAD;
         let height = |row: &ContextMenuRow| if row.separator { menu::SEP_H } else { row_h };
-        let natural_h: f32 = self.rows.iter().map(height).sum();
-        let (inset, content_h) = menu::scroll_content(natural_h, self.panel_h_clamped, row_h);
+        let (inset, content_h) = menu::picker_scroll_content(self.panel_h_clamped);
         let offset: f32 = self.rows[self.scroll_offset..index]
             .iter()
             .map(height)
@@ -1480,6 +1479,16 @@ struct MenuPanel {
     row_h: f32,
 }
 
+/// A picker's rows fill its panel; a context menu keeps arrow strips at the
+/// edges it is cut at.
+fn menu_scroll_content(menu: &ContextMenu, natural_h: f32, panel_h: f32, row_h: f32) -> (f32, f32) {
+    if menu.picker_header_height > 0.0 {
+        menu::picker_scroll_content(panel_h)
+    } else {
+        menu::scroll_content(natural_h, panel_h, row_h)
+    }
+}
+
 fn menu_panel(menu: &ContextMenu, cw: f32, ch: f32) -> Option<MenuPanel> {
     let panel_w = context_menu_panel_width(menu, cw);
     let row_h = menu::row_height(ch);
@@ -1507,7 +1516,7 @@ fn menu_panel(menu: &ContextMenu, cw: f32, ch: f32) -> Option<MenuPanel> {
     {
         return None;
     }
-    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    let (inset, content_h) = menu_scroll_content(menu, natural_h, panel_h, row_h);
     Some(MenuPanel {
         ax,
         ay,
@@ -1642,8 +1651,9 @@ pub(crate) const MENU_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
     (6.0, 4.0, 0.05),
     (10.0, 6.0, 0.035),
 ];
-/// The most rounded surfaces one level paints: its shadow, panel and selection.
-pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 2;
+/// The most rounded surfaces one level paints: its shadow, panel, selection
+/// and a picker's scrollbar thumb.
+pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 3;
 /// Levels whose surfaces fit in one frame. Kettle's own menus nest a few
 /// levels deep at most; a deeper stack paints only its deepest levels' panels.
 pub(crate) const MENU_SURFACE_LEVELS: usize = 16;
@@ -1737,7 +1747,69 @@ pub(crate) fn menu_level_surfaces(
             });
         }
     }
+    if let Some((tx, ty, tw, th)) = picker_scroll_thumb(menu, (cw, ch), scale) {
+        out.push(RoundedSurface {
+            pos: [tx, ty],
+            size: [tw, th],
+            fill: rgba(picker_scroll_thumb_color(theme, colors), 1.0),
+            stroke: [0.0; 4],
+            params: [tw * 0.5, 0.0, 0.0, 0.0],
+        });
+    }
     out
+}
+
+/// The scrollbar thumb of a picker whose rows do not all fit: a pill in the
+/// gap between the selection's right inset and the panel border, so it
+/// never covers the selection, a label, a hint or a swatch strip. Its length
+/// is the visible share of the rows, at least one row, and its place follows
+/// the scroll offset.
+/// The track stops a corner radius short of the panel's rounded bottom.
+/// Decorative: pointer input does not hit it.
+pub(crate) fn picker_scroll_thumb(
+    menu: &ContextMenu,
+    cell: (f32, f32),
+    scale: f32,
+) -> Option<Rect4> {
+    if menu.picker_header_height <= 0.0 {
+        return None;
+    }
+    let panel = menu_panel(menu, cell.0, cell.1)?;
+    let total = menu.rows.len();
+    let visible = context_menu_row_rects(menu, cell).len();
+    if visible == 0 || visible >= total {
+        return None;
+    }
+    let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
+    // The panel border is one pixel at every scale.
+    let gap = inset_x - 1.0;
+    let width = (gap * 0.6).max(2.0).min(gap);
+    let x = panel.ax + panel.panel_w - inset_x + (gap - width) * 0.5;
+    let top = panel.ay + MENU_SELECTION_INSET.1 * scale;
+    let bottom = panel.ay + panel.panel_h - MENU_PANEL_RADIUS * scale;
+    let track = bottom - top;
+    if !(track > 0.0 && width > 0.0 && x.is_finite()) {
+        return None;
+    }
+    // At least one row tall, so a long list's thumb still reads as one.
+    let height = (track * visible as f32 / total as f32)
+        .max(panel.row_h.min(track))
+        .min(track);
+    let max_offset = total - visible;
+    let offset = menu.scroll_offset.min(max_offset) as f32 / max_offset as f32;
+    Some((x, top + (track - height) * offset, width, height))
+}
+
+/// The thumb's colour: the theme's foreground dimmed as muted text is, held
+/// at the 3:1 non-text minimum against the panel.
+pub(crate) fn picker_scroll_thumb_color(
+    theme: &kettle_config::Theme,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    colors.icon(
+        crate::dim_blend(theme.foreground, theme.background),
+        theme.background,
+    )
 }
 
 /// The fill and edge of a bar that asks for input.
@@ -1790,6 +1862,13 @@ pub mod menu {
     pub const SEP_H: f32 = 8.0;
     /// Height of each pointer target at the cut edges of a scrolling menu.
     pub const SCROLL_H: f32 = 18.0;
+
+    /// A picker's content inset and height: its rows fill the panel from the
+    /// header down. Pickers scroll with the selection and the wheel and show
+    /// a scrollbar thumb, so they keep no arrow strips at the cut edges.
+    pub fn picker_scroll_content(panel_h: f32) -> (f32, f32) {
+        (0.0, panel_h.max(0.0))
+    }
 
     /// Content inset and height shared by paint, pointer targets and navigation.
     pub fn scroll_content(natural_h: f32, panel_h: f32, row_h: f32) -> (f32, f32) {

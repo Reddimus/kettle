@@ -3648,12 +3648,16 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. The panel's
+with the highlighted row drawn as an inset rounded selection. A picker whose
+results overflow also gets a decorative scrollbar thumb, a rounded pill in the
+gap between the selection's right inset and the border, drawn after the
+selection; its rows fill the panel from the header down, since pickers scroll
+with the selection and the wheel and keep no arrow strips. The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
 `RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
-the picker's header divider and the scroll arrows stay flat quads. The scene
+the picker's header divider and a context menu's scroll arrows stay flat quads. The scene
 pass draws the levels root first, one layer each: the level's surfaces, its
 quads, its swatches, then its labels in a `TextRenderer` of its own
 (`menu_level_text`, ranges in `menu_level_draws`). A submenu therefore covers

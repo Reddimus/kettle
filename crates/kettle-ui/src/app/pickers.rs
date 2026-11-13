@@ -602,7 +602,10 @@ pub(super) fn picker_card_geometry(
     let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
     let y = top_chrome + top;
     let available = sh - bottom - y - header_h;
-    let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
+    // Whole rows only: with no arrow strips, a part row of slack at the
+    // bottom would be blank panel that neither paints nor takes a press.
+    let fit = ((available / row_h).floor() as usize).max(1);
+    let rows_h = row_count.min(PICKER_MAX_VISIBLE_ROWS).min(fit) as f32 * row_h;
     Some(PickerGeometry {
         header: (x, y, width, header_h),
         rows: (x, y + header_h, width, rows_h),
@@ -637,11 +640,7 @@ pub(super) fn picker_context_menu(
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
-    let (_, content_h) = kettle_render::menu::scroll_content(
-        row_height * list.rows.len() as f32,
-        height,
-        row_height,
-    );
+    let (_, content_h) = kettle_render::menu::picker_scroll_content(height);
     let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
     Some(ContextMenu {
         anchor: (x, y),
@@ -717,11 +716,7 @@ fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Opt
     let (px, py) = (cursor.0 as f32, cursor.1 as f32);
     let (x, y) = menu.anchor;
     let row_h = kettle_render::menu::row_height(cell_h);
-    let (inset, content_h) = kettle_render::menu::scroll_content(
-        menu.rows.len() as f32 * row_h,
-        menu.panel_h_clamped,
-        row_h,
-    );
+    let (inset, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     if px < x || px >= x + menu.panel_w_clamped || py < y + inset || py >= y + inset + content_h {
         return None;
     }
@@ -749,8 +744,7 @@ pub(super) fn apply_picker_pointer(
         return false;
     }
     let row_h = kettle_render::menu::row_height(cell_h);
-    let (inset, content_h) =
-        kettle_render::menu::scroll_content(menu.rows.len() as f32 * row_h, h, row_h);
+    let (inset, content_h) = kettle_render::menu::picker_scroll_content(h);
     let selected = if matches!(event, PickerPointer::Press)
         && let Some(row) = picker_result_row(menu, cell_h, (ws.cursor.x, ws.cursor.y))
     {
