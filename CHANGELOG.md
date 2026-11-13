@@ -392,6 +392,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Starting a recording into a directory could fail with "resource
+  temporarily unavailable" when a new pane opened at the same moment as
+  recording retention removed an old file. Kettle now takes the next file
+  name instead.
+
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
   the same wallpaper exception as the bar itself, and vertical tabs follow
