@@ -992,6 +992,31 @@ pub(crate) fn gc(c: Rgb) -> GColor {
 mod selection_contrast_tests {
     use super::*;
 
+    /// A focused fill too close to the background for a grey to sit 1.3:1
+    /// from it still gets a grey between the two, not the background itself.
+    #[test]
+    fn an_unfocused_grey_fits_between_a_faint_fill_and_its_background() {
+        let theme = kettle_config::Theme::default();
+        let luminance = color::relative_luminance;
+        for (active, background) in [
+            (Rgb::new(60, 63, 75), Rgb::new(52, 55, 65)),
+            (Rgb::new(215, 218, 228), Rgb::new(225, 225, 228)),
+        ] {
+            assert!(color::contrast_ratio(active, background) < 1.3);
+            let grey = neutral_selection(&theme, active, background, background);
+            assert!(grey.r == grey.g && grey.g == grey.b, "{grey:?}");
+            let (low, high) = if luminance(active) > luminance(background) {
+                (background, active)
+            } else {
+                (active, background)
+            };
+            assert!(
+                luminance(low) < luminance(grey) && luminance(grey) < luminance(high),
+                "{grey:?} is not between {active:?} and {background:?}"
+            );
+        }
+    }
+
     #[test]
     fn inactive_search_fills_contrast_with_each_cell_background() {
         let theme = kettle_config::Theme {
