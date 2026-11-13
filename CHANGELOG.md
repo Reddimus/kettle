@@ -172,7 +172,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   F11 and the green button still toggle the same full screen. Shell lists
   Split Left and Split Up beside Split Right and Split Down. Window starts
   with the system's Minimize (Command-M) and Zoom and ends with Bring All to
-  Front. English titles are in title case: SSH Launcher…, Quick-Select Hints
+  Front. Full screen, Minimize and Zoom work on a borderless window too, and
+  Minimize and Zoom are off while the window is full screen, as in other
+  apps. English titles are in title case: SSH Launcher…, Quick-Select Hints
   and Toggle Quick Terminal. A chord you bind yourself still wins over the
   menu's.
 - The key hint beside a picker's search field and its "No matching command"

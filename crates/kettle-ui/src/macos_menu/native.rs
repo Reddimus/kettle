@@ -3,12 +3,12 @@ use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
-use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, sel};
+use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability};
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 use winit::event_loop::EventLoopProxy;
 
-use super::{Command, Key, Menu, Mods, NativeAction, Row, Trigger};
+use super::{Key, Menu, Mods, Route, Row, Trigger};
 use crate::app::UserEvent;
 
 #[path = "equivalents.rs"]
@@ -20,8 +20,18 @@ struct State {
 }
 
 struct Invocation {
-    action: kettle_config::Action,
+    route: Route,
     proxy: EventLoopProxy<UserEvent>,
+}
+
+impl Invocation {
+    fn send(&self) {
+        let event = match &self.route {
+            Route::Action(action) => UserEvent::MenuCommand(action.clone()),
+            Route::Window(command) => UserEvent::MenuWindow(*command),
+        };
+        let _ = self.proxy.send_event(event);
+    }
 }
 
 thread_local! {
@@ -39,29 +49,32 @@ declare_class!(
     impl DeclaredClass for MenuTarget { type Ivars = Invocation; }
     // SAFETY: NSObject's protocol implementation is inherited unchanged.
     unsafe impl NSObjectProtocol for MenuTarget {}
-    // SAFETY: the selector has AppKit's void(id) action signature.
+    // SAFETY: every selector has AppKit's void(id) action signature. An item
+    // sends only its own action to its target, so each method sends that
+    // item's route; the native selectors are the ones `NativeAction::route`
+    // claims, and AppKit keeps recognising them on the item.
     unsafe impl MenuTarget {
         #[method(kettleMenuAction:)]
         fn activate(&self, _sender: &NSMenuItem) {
-            let invocation = self.ivars();
-            let _ = invocation.proxy.send_event(UserEvent::MenuCommand(invocation.action.clone()));
+            self.ivars().send();
+        }
+
+        #[method(toggleFullScreen:)]
+        fn toggle_full_screen(&self, _sender: &NSMenuItem) {
+            self.ivars().send();
+        }
+
+        #[method(performMiniaturize:)]
+        fn perform_miniaturize(&self, _sender: &NSMenuItem) {
+            self.ivars().send();
+        }
+
+        #[method(performZoom:)]
+        fn perform_zoom(&self, _sender: &NSMenuItem) {
+            self.ivars().send();
         }
     }
 );
-
-fn selector_for(action: NativeAction) -> Sel {
-    match action {
-        NativeAction::About => sel!(orderFrontStandardAboutPanel:),
-        NativeAction::Hide => sel!(hide:),
-        NativeAction::HideOthers => sel!(hideOtherApplications:),
-        NativeAction::ShowAll => sel!(unhideAllApplications:),
-        NativeAction::Quit => sel!(terminate:),
-        NativeAction::ToggleFullScreen => sel!(toggleFullScreen:),
-        NativeAction::Minimize => sel!(performMiniaturize:),
-        NativeAction::Zoom => sel!(performZoom:),
-        NativeAction::BringAllToFront => sel!(arrangeInFront:),
-    }
-}
 
 fn equivalent(trigger: Trigger) -> (String, NSEventModifierFlags) {
     use NSEventModifierFlags as F;
@@ -98,26 +111,55 @@ fn equivalent(trigger: Trigger) -> (String, NSEventModifierFlags) {
     (key, flags)
 }
 
+/// One menu item for `row`, which must be `Row::Item`. A routed item owns its
+/// target, so a rebuilt menu cannot retarget a selection in an old one that
+/// AppKit is still tracking.
 fn make_item(
     mtm: MainThreadMarker,
-    title: &str,
-    selector: Sel,
-    shortcut: Option<Trigger>,
-) -> Retained<NSMenuItem> {
+    proxy: &EventLoopProxy<UserEvent>,
+    row: &Row,
+) -> Option<Retained<NSMenuItem>> {
+    let Row::Item {
+        title,
+        command,
+        shortcut,
+        enabled,
+        ..
+    } = row
+    else {
+        return None;
+    };
     let (key, flags) = shortcut
         .map(equivalent)
         .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
-    // SAFETY: selector is either our void(id) target or a standard AppKit action.
+    // SAFETY: the selector is a standard AppKit action or one MenuTarget
+    // implements, and the item gets that target below.
     let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
             &NSString::from_str(title),
-            Some(selector),
+            Some(Sel::register(command.selector())),
             &NSString::from_str(&key),
         )
     };
     item.setKeyEquivalentModifierMask(flags);
-    item
+    // SAFETY: enabled comes from the focused window's model.
+    unsafe { item.setEnabled(*enabled) };
+    if let Some(route) = command.route() {
+        let target = mtm.alloc::<MenuTarget>().set_ivars(Invocation {
+            route,
+            proxy: proxy.clone(),
+        });
+        // SAFETY: newly allocated NSObject subclass with initialized ivars.
+        let target: Retained<MenuTarget> = unsafe { msg_send_id![super(target), init] };
+        let target_obj: &AnyObject = &target;
+        // SAFETY: representedObject retains the target for this item's lifetime.
+        unsafe {
+            item.setRepresentedObject(Some(target_obj));
+            item.setTarget(Some(target_obj));
+        }
+    }
+    Some(item)
 }
 
 pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
@@ -128,7 +170,16 @@ pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
+    // The menu AppKit performs key equivalents from: native items only, each
+    // built as its visible twin, Kettle target and enabled state included.
     let native = NSMenu::new(mtm);
+    // SAFETY: a newly created main-thread menu with explicit enabled state.
+    unsafe { native.setAutoenablesItems(false) };
+    for row in super::key_equivalent_rows(&model) {
+        if let Some(item) = make_item(mtm, proxy, row) {
+            native.addItem(&item);
+        }
+    }
     let bar = new_menu(mtm, &native);
     for menu in &model {
         let submenu = new_menu(mtm, &native);
@@ -192,39 +243,10 @@ fn append_rows(
                 // SAFETY: AppKit retains the live services menu.
                 unsafe { app.setServicesMenu(Some(&services)) };
             }
-            Row::Item {
-                title,
-                command,
-                shortcut,
-                enabled,
-                ..
-            } => {
-                let selector = match command {
-                    Command::Kettle(_) => sel!(kettleMenuAction:),
-                    Command::Native(action) => selector_for(*action),
-                };
-                let item = make_item(mtm, title, selector, *shortcut);
-                // SAFETY: enabled comes from the focused window's model.
-                unsafe { item.setEnabled(*enabled) };
-                if let Command::Kettle(action) = command {
-                    let target = mtm.alloc::<MenuTarget>().set_ivars(Invocation {
-                        action: action.clone(),
-                        proxy: proxy.clone(),
-                    });
-                    // SAFETY: newly allocated NSObject subclass with initialized ivars.
-                    let target: Retained<MenuTarget> = unsafe { msg_send_id![super(target), init] };
-                    let target_obj: &AnyObject = &target;
-                    // AppKit can retain an old menu while tracking it. The item owns its
-                    // invocation, so rebuilding profiles cannot retarget an old selection.
-                    // SAFETY: representedObject retains the target for this item's lifetime.
-                    unsafe {
-                        item.setRepresentedObject(Some(target_obj));
-                        item.setTarget(Some(target_obj));
-                    }
-                } else {
-                    native.addItem(&make_item(mtm, title, selector, *shortcut));
+            Row::Item { .. } => {
+                if let Some(item) = make_item(mtm, proxy, row) {
+                    submenu.addItem(&item);
                 }
-                submenu.addItem(&item);
             }
         }
     }

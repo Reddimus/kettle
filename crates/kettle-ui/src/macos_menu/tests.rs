@@ -453,8 +453,10 @@ fn menu_equivalents_leave_yielded_keys_on_the_original_pane_path() {
     assert!(route.contains(".servicesMenu()"));
     assert!(route.contains("services.performKeyEquivalent(event)"));
     assert!(!route.contains("super"));
-    assert!(native.contains("native.addItem(&make_item(mtm, title, selector, *shortcut))"));
-    assert!(native.contains("if let Command::Kettle(action) = command"));
+    // The key-equivalent menu holds `key_equivalent_rows`, which
+    // `native_window_items_route_through_kettle_in_both_menus` checks holds
+    // no Kettle command.
+    assert!(native.contains("for row in super::key_equivalent_rows(&model)"));
     assert!(native.contains("let submenu = new_menu(mtm, &native)"));
     assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
     let events = kettle_test_support::production_source(include_str!("../app/window_events.rs"));
@@ -523,9 +525,9 @@ fn shell_profiles_are_dynamic_and_native_dispatch_includes_submenus() {
 #[test]
 fn native_items_retain_the_command_they_were_built_with() {
     let native = kettle_test_support::production_source(include_str!("native.rs"));
-    assert!(native.contains("action: action.clone()"));
+    assert!(native.contains("if let Some(route) = command.route()"));
     assert!(native.contains("item.setRepresentedObject(Some(target_obj))"));
-    assert!(native.contains("invocation.action.clone()"));
+    assert!(native.contains("let event = match &self.route"));
     assert!(!native.contains("sender.tag()"));
 }
 
@@ -873,6 +875,150 @@ fn menu_bar_follows_macos_conventions() {
                         menu.title
                     );
                 }
+            }
+        }
+    }
+}
+
+/// AppKit's own full-screen, Minimize and Zoom bypass winit and so fail on a
+/// borderless window. Each item keeps the system's selector, so AppKit adds no
+/// second full-screen item, but a Kettle target answers it and sends the
+/// change through winit; the key-equivalent menu carries the same items, so
+/// Control-Command-F and Command-M take that path too.
+#[test]
+fn native_window_items_route_through_kettle_in_both_menus() {
+    use NativeAction as N;
+    let all = [
+        N::About,
+        N::Hide,
+        N::HideOthers,
+        N::ShowAll,
+        N::Quit,
+        N::ToggleFullScreen,
+        N::Minimize,
+        N::Zoom,
+        N::BringAllToFront,
+    ];
+    let routed = [
+        (
+            N::ToggleFullScreen,
+            "toggleFullScreen:",
+            Route::Action(Action::ToggleFullscreen),
+        ),
+        (
+            N::Minimize,
+            "performMiniaturize:",
+            Route::Window(WindowCommand::Minimize),
+        ),
+        (N::Zoom, "performZoom:", Route::Window(WindowCommand::Zoom)),
+    ];
+    for action in all {
+        let route = routed.iter().find(|(native, ..)| *native == action);
+        let command = Command::Native(action);
+        assert_eq!(
+            command.route(),
+            route.map(|(_, _, route)| route.clone()),
+            "{action:?}"
+        );
+        if let Some((_, selector, _)) = route {
+            assert_eq!(command.selector(), *selector);
+        }
+    }
+    assert_eq!(
+        Command::Kettle(Action::NewTab).route(),
+        Some(Route::Action(Action::NewTab))
+    );
+    // The target answers every selector the model routes to it.
+    let native = kettle_test_support::production_source(include_str!("native.rs"));
+    for selector in routed
+        .iter()
+        .map(|(_, selector, _)| *selector)
+        .chain(["kettleMenuAction:"])
+    {
+        assert!(
+            native.contains(&format!("#[method({selector})]")),
+            "{selector}"
+        );
+    }
+    assert!(native.contains("Some(Sel::register(command.selector()))"));
+    let output = kettle_test_support::production_source(include_str!("../app/output.rs"));
+    assert!(output.contains("crate::macos_menu::perform(command, window)"));
+
+    let natives = |model: &[Menu]| {
+        model
+            .iter()
+            .flat_map(|menu| &menu.rows)
+            .filter(|row| {
+                matches!(
+                    row,
+                    Row::Item {
+                        command: Command::Native(_),
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let state = |rows: &[&Row], wanted: NativeAction| {
+        rows.iter().find_map(|row| match row {
+            Row::Item {
+                command: Command::Native(action),
+                shortcut,
+                enabled,
+                ..
+            } if *action == wanted => Some((*shortcut, *enabled)),
+            _ => None,
+        })
+    };
+    let ctrl_cmd_f = Some(Trigger::new(Mods::SUPER | Mods::CTRL, Key::Char('f')));
+    let cmd_m = Some(Trigger::new(Mods::SUPER, Key::Char('m')));
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for (context, fullscreen, window_items) in [
+            (ready(), true, true),
+            (
+                Context {
+                    fullscreen: true,
+                    ..ready()
+                },
+                true,
+                false,
+            ),
+            (Context::default(), false, false),
+        ] {
+            let model = empty_menu_model(&tr, &Bindings::new(), context);
+            let keys = key_equivalent_rows(&model);
+            // The key-equivalent menu is exactly the native rows, each built
+            // from the same row as its visible twin.
+            assert_eq!(
+                keys.iter().map(|row| (*row).clone()).collect::<Vec<_>>(),
+                natives(&model)
+            );
+            assert!(keys.iter().all(|row| !matches!(
+                row,
+                Row::Item {
+                    command: Command::Kettle(_),
+                    ..
+                }
+            )));
+            assert_eq!(
+                state(&keys, N::ToggleFullScreen),
+                Some((ctrl_cmd_f, fullscreen)),
+                "{language:?} {context:?}"
+            );
+            assert_eq!(
+                state(&keys, N::Minimize),
+                Some((cmd_m, window_items)),
+                "{language:?} {context:?}"
+            );
+            assert_eq!(
+                state(&keys, N::Zoom),
+                Some((None, window_items)),
+                "{language:?} {context:?}"
+            );
+            for always in [N::Quit, N::Hide, N::BringAllToFront] {
+                assert_eq!(state(&keys, always).map(|(_, on)| on), Some(true));
             }
         }
     }

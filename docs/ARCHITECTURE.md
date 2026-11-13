@@ -302,7 +302,7 @@ Edit, View, Window and Help menus (the Window menu carries the tab commands: nex
 previous, rename, move left, right and to a new window; Help, registered with
 `setHelpMenu` so macOS adds its menu search field, holds Kettle Help and
 Keyboard Shortcuts; View's full-screen item and Window's Minimize, Zoom and
-Bring All to Front are AppKit's own selectors, so the system adds no second
+Bring All to Front carry AppKit's own selectors, so the system adds no second
 full-screen item, and its title follows the focused window's state), actions, separators,
 enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
@@ -317,7 +317,12 @@ Kettle equivalents are declined so the original event reaches winit's modal
 handlers, `resolve_keybind_action`, program-key yield rules and terminal writer,
 with its physical key, layout, repeat and release intact. Mouse menu choices
 send existing actions to the focused window through the event-loop proxy.
-Commands with no existing Kettle Action are omitted.
+Full screen, Minimize and Zoom go the same way, by mouse or key equivalent: a
+Kettle target answers `toggleFullScreen:`, `performMiniaturize:` and
+`performZoom:` and sends `ToggleFullscreen` or a winit minimize or zoom, since
+AppKit's own versions skip winit and do nothing on a borderless window.
+Minimize and Zoom are off in full screen. Other commands with no existing
+Kettle Action are omitted.
 The Linux desktop entry carries its
 Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from

@@ -324,6 +324,10 @@ pub enum UserEvent {
     DockCommand(crate::macos_dock::DockCommand),
     #[cfg(target_os = "macos")]
     MenuCommand(kettle_config::Action),
+    /// A native Window menu item Kettle performs through winit, so it works
+    /// on a borderless window (see `macos_menu::NativeAction::route`).
+    #[cfg(target_os = "macos")]
+    MenuWindow(crate::macos_menu::WindowCommand),
     #[cfg(target_os = "macos")]
     DockReopen,
     #[cfg(target_os = "macos")]
