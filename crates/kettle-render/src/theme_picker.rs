@@ -80,8 +80,9 @@ impl ThemePickerFooter {
 }
 
 /// Columns the sample card's lines and the status lines need at least, in
-/// `tr`'s words: every sample line and the readout whole, the mode and the
-/// contrast button whole, and each theme name at least four columns.
+/// `tr`'s words: every sample line and the readout whole, the contrast button
+/// whole, the mode at least [`FOLLOW_MIN_COLS`] columns, and each theme name
+/// at least four columns.
 pub fn theme_footer_min_columns(footer: &ThemePickerFooter, tr: &Translator) -> (usize, usize) {
     // The widest readout any theme gives, so the card does not come and go
     // as the selection moves.
@@ -106,7 +107,8 @@ pub fn theme_footer_min_columns(footer: &ThemePickerFooter, tr: &Translator) -> 
         .map(|value| columns(&contrast_button_text(value, tr)))
         .max()
         .unwrap_or(0);
-    let mode = columns(theme_follow_label(footer.follow, tr)) + 3 + button + 1;
+    let follow = columns(theme_follow_label(footer.follow, tr)).min(FOLLOW_MIN_COLS);
+    let mode = follow + 3 + button + 1;
     let slots = slot_texts(footer, tr);
     let themes = slots
         .iter()
@@ -233,6 +235,10 @@ const PAD_X: f32 = 16.0;
 /// edited side's mark, and the columns between the two themes.
 const SLOT_MARK_COLS: usize = 2;
 const SLOT_GAP_COLS: usize = 3;
+/// The mode label is cut to fit beside the contrast button, to no fewer
+/// columns than this. "Contraste: Desactivado" beside "Seguir el sistema"
+/// is wider than the narrowest picker (360 px at 1x, and every picker at 2x).
+pub(crate) const FOLLOW_MIN_COLS: usize = 12;
 
 fn line_pitch(cell_h: f32) -> f32 {
     cell_h + LINE_GAP
@@ -361,7 +367,7 @@ pub fn contrast_button_text(minimum_contrast: f32, tr: &Translator) -> String {
     let value = if minimum_contrast.is_finite() && minimum_contrast > 1.0 {
         format!("{}:1", minimum_contrast_token(minimum_contrast))
     } else {
-        tr.text(Text::PickerThemeContrastOff).to_string()
+        tr.text(Text::SettingsValueOff).to_string()
     };
     format!("{} {value}", tr.text(Text::PickerThemeContrast))
 }

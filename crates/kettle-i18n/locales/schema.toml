@@ -1659,7 +1659,7 @@ args = [{ name = "name", type = "str" }]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Update policy: tell the user about an update."
 
 [messages.settings_value_off]
-context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-off toggle or a disabled choice."
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-off toggle or a disabled choice. Also the theme picker's Contrast button value when minimum-contrast is off (crates/kettle-render/src/theme_picker.rs), so the button and the Settings row agree."
 
 [messages.settings_value_on]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-on toggle."
@@ -2814,9 +2814,6 @@ context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line in
 
 [messages.picker_theme_contrast]
 context = "crates/kettle-render/src/theme_picker.rs: Theme picker button label before the minimum-contrast value (Off, 3:1, 4.5:1, 7:1); a click steps it. Keep short."
-
-[messages.picker_theme_contrast_off]
-context = "crates/kettle-render/src/theme_picker.rs: Theme picker minimum-contrast button value when the setting is off. One short word."
 
 [messages.picker_theme_text_contrast]
 context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout: the contrast of the theme's text colour on its background. ratio is a WCAG ratio such as 11.4:1."

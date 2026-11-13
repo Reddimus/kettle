@@ -264,11 +264,13 @@ dot and an underline on the side a pick saves to (a click on a side chooses
 it; a screen reader offers both as radio buttons in one group); a fixed theme
 shows only **Theme:**. The **Contrast:** button on it (a button to a screen
 reader too) steps `minimum-contrast` through Off, 3:1, 4.5:1 and 7:1 and
-saves it at once, like the Settings row. It is
-not part of the preview: Esc puts back the theme only, not the contrast. The
-footer gives way so the list keeps at least four rows: on a short window the
-card is left out first, then one status line. A window too narrow for them
-leaves them out rather than cutting them. The list shows up to 14 rows, and a
+saves it at once, like the Settings row. It is not part of the preview: Esc
+puts back the theme only, not the contrast. The footer gives way so the list
+keeps at least four rows: on a short window the card is left out first, then
+one status line. A window too narrow for them leaves them out rather than
+cutting them, except that a long mode label (such as Spanish "Seguir el
+sistema" beside "Contraste: Desactivado") is shortened with "…" to make room
+for the button on a narrow picker. The list shows up to 14 rows, and a
 screen reader reads the card and status as one line.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),

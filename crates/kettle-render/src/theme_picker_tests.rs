@@ -158,11 +158,22 @@ fn the_status_line_names_the_schedule_and_both_sides() {
 /// At the picker's narrowest, in Spanish and at 2x, every footer line the
 /// picker shows fits its bounds: long theme names end in an ellipsis before
 /// any label is lost, the contrast button keeps its words, and the edited
-/// side's underline stays under its own label. A picker too narrow for the
-/// card or the status line leaves it out rather than cutting it.
+/// side's underline stays under its own label. Beside the widest button,
+/// Spanish "Contraste: Desactivado", the mode label is cut instead, to no
+/// fewer than `FOLLOW_MIN_COLS` columns. A picker too narrow for the card or
+/// the status line leaves it out rather than cutting it.
 #[test]
 fn the_footer_fits_the_narrowest_picker_by_shortening_names() {
+    // Off reads as the Settings row's Off, in every language.
     for tr in [&EN, &ES] {
+        let off = tr.text(kettle_i18n::Text::SettingsValueOff);
+        assert!(crate::contrast_button_text(0.0, tr).ends_with(off));
+    }
+    assert_eq!(
+        crate::contrast_button_text(0.0, &ES),
+        "Contraste: Desactivado"
+    );
+    for (tr, minimum) in [(&EN, 4.5), (&ES, 4.5), (&EN, 0.0), (&ES, 0.0)] {
         for (cw, ch) in [(8.4, 17.0), (16.8, 34.0)] {
             for width in [360.0, 500.0, 720.0] {
                 let mut f = footer(
@@ -172,11 +183,11 @@ fn the_footer_fits_the_narrowest_picker_by_shortening_names() {
                 );
                 f.dark_theme = "Catppuccin Frappe Extra Long Night".into();
                 f.light_theme = "Solarized Osaka Light Variant".into();
-                f.minimum_contrast = 4.5;
+                f.minimum_contrast = minimum;
                 f.min_columns = crate::theme_footer_min_columns(&f, tr);
                 let (card, status) = f.fits(width, cw);
                 let what = format!(
-                    "{} {cw} {width}",
+                    "{} {minimum} {cw} {width}",
                     tr.text(kettle_i18n::Text::PickerThemeContrast)
                 );
                 // The picker's own sizes: 360px at 1x, 720px at 2x.
@@ -212,13 +223,25 @@ fn the_footer_fits_the_narrowest_picker_by_shortening_names() {
                 if width < 400.0 {
                     assert!(slots.contains('…'), "{what}: {slots}");
                 }
-                let button = crate::contrast_button_text(4.5, tr);
+                let button = crate::contrast_button_text(minimum, tr);
                 assert!(
                     all.iter().any(|line| line.trim() == button),
                     "{what}: {all:?}"
                 );
                 let mode = tr.text(kettle_i18n::Text::PickerThemeFollowSchedule);
-                assert!(all.iter().any(|line| line == mode), "{what}: {all:?}");
+                let shown = &layout.lines[layout.lines.len() - 3].text();
+                if shown != mode {
+                    let kept = shown.strip_suffix('…').expect("a cut mode ends in …");
+                    assert!(mode.starts_with(kept), "{what}: {shown}");
+                    assert!(
+                        columns(shown) >= crate::theme_picker::FOLLOW_MIN_COLS,
+                        "{what}: {shown}"
+                    );
+                }
+                // Only the widest button, Spanish "Desactivado", cuts it.
+                if minimum > 1.0 || tr.language() == Language::En {
+                    assert_eq!(shown, mode, "{what}");
+                }
                 let (ux, _, uw, _) = layout.slot_underline.expect("the edited side");
                 let start = slots.find(light).unwrap();
                 let left = layout.lines.last().unwrap().left;
