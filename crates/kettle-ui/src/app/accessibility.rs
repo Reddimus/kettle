@@ -2215,6 +2215,10 @@ fn push_picker_accessibility(
     let mut input = Node::new(Role::TextInput);
     if let Some(field) = field {
         input.set_bounds(bounds(field.rect));
+        // What the painted placeholder says; never the field's value.
+        if !field.placeholder.is_empty() {
+            input.set_placeholder(field.placeholder.clone());
+        }
     }
     input.set_label(label);
     input.set_value(query);

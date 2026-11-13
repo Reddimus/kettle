@@ -90,9 +90,12 @@ and the key that restores them.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
 below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
-`kettle --list-keybinds` for the full map. The macOS Shell, Edit, View and
-Window menus expose common actions and show their current Cmd shortcuts,
-including config overrides. See
+`kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
+the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
+command palette then lists only the commands that have a shortcut, with the
+shortcut beside each, and you can search it and press Enter to run one. The
+macOS Shell, Edit, View and Window menus expose common actions and show their
+current Cmd shortcuts, including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.
 
 ## Selecting text

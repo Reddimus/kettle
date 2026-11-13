@@ -1757,3 +1757,42 @@ fn accessibility_pane_lifetime_prunes_churn_and_moves_without_an_adapter() {
     assert!(ws.accessibility_output.borrow().is_empty());
     assert!(ws.accessibility_text_rows.borrow().is_empty());
 }
+
+/// A screen reader hears a picker's placeholder as the field's placeholder,
+/// not as its value: the keyboard-shortcut list says what it searches.
+#[test]
+fn picker_placeholder_is_the_inputs_placeholder_not_its_value() {
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let placeholder = es.text(kettle_i18n::Text::PickerPlaceholderShortcuts);
+    for (query, placeholder) in [("", placeholder), ("tab", placeholder), ("", "")] {
+        let overlay = kettle_render::Overlay {
+            palette_query: Some(query.into()),
+            text_field: Some(kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: placeholder.into(),
+                rect: (10.0, 10.0, 400.0, 30.0),
+                text: query.into(),
+                cursor_byte: query.len(),
+                selection: None,
+                prefix: String::new(),
+                hint: String::new(),
+                horizontal_scroll: 0,
+                accent_palette: 0,
+            }),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (640.0, 480.0), (8.0, 24.0), 1.0, &es);
+        let input = &projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+            .unwrap()
+            .1;
+        assert_eq!(input.value(), Some(query));
+        assert_eq!(
+            input.placeholder(),
+            (!placeholder.is_empty()).then_some(placeholder)
+        );
+    }
+}

@@ -133,6 +133,27 @@ pub(super) fn palette_entries(
     entries
 }
 
+/// The rows the open palette ranks: every entry, or with `bound_only` (the
+/// keyboard-shortcut list) only those that have a shortcut to show. The
+/// painter, key handling, pointer, accessibility and control paths all take
+/// their rows from here, so a selection index means the same row in each.
+pub(super) fn palette_view_entries(
+    notice: Option<&crate::update_notice::Notice>,
+    tr: &kettle_i18n::Translator,
+    profiles: &[String],
+    bindings: &Bindings,
+    bound_only: bool,
+) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
+    let mut entries = palette_entries(notice, tr, profiles);
+    if bound_only {
+        entries.retain(|(_, action)| {
+            kettle_config::keybinds::ui_hint_label(bindings, action)
+                .is_some_and(|hint| !hint.is_empty())
+        });
+    }
+    entries
+}
+
 pub(super) fn command_picker_list(
     query: &str,
     selected: usize,
@@ -140,8 +161,9 @@ pub(super) fn command_picker_list(
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
     profiles: &[String],
+    bound_only: bool,
 ) -> PickerList {
-    let commands = palette_entries(notice, tr, profiles);
+    let commands = palette_view_entries(notice, tr, profiles, bindings, bound_only);
     let ranked = kettle_config::palette::rank_matches(query, &commands, tr);
     let rows = ranked
         .into_iter()
@@ -690,6 +712,7 @@ pub(super) fn open_picker_list(
             tr,
             notice,
             &ws.palette_profiles,
+            ws.palette_bound_only,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(

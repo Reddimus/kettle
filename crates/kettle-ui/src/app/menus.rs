@@ -877,7 +877,7 @@ impl App {
 
     /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
-    /// palette / About) behind a separator. Pure over the shell list so the
+    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure over the shell list so the
     /// menu shape is unit-testable.
     pub(super) fn new_tab_menu_items(
         shells: &[kettle_core::term::ShellChoice],
@@ -927,11 +927,17 @@ impl App {
             action: Action::OpenSettings,
             enabled: true,
         });
-        items.push(ContextMenuItem::Item {
-            label: tr.text(T::MenuCommandPalette),
-            action: Action::CommandPalette,
-            enabled: true,
-        });
+        for (label, action) in [
+            (T::MenuCommandPalette, Action::CommandPalette),
+            (T::MenuKeyboardShortcuts, Action::ShowKeybinds),
+            (T::MenuHelp, Action::ShowHelp),
+        ] {
+            items.push(ContextMenuItem::Item {
+                label: tr.text(label),
+                action,
+                enabled: true,
+            });
+        }
         items.push(ContextMenuItem::Item {
             label: tr.text(T::MenuAbout),
             action: Action::About,

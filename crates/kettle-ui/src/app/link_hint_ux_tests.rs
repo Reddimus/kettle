@@ -106,7 +106,7 @@ fn hint_context_menu_and_palette_offer_the_action_with_the_live_shortcut() {
     ));
     let trigger = kettle_config::keybinds::parse_trigger("ctrl+shift+u").unwrap();
     let bindings = [(trigger, Action::HintMode)].into_iter().collect();
-    let picker = command_picker_list("Quick-select hints", 0, &bindings, &tr, None, &[]);
+    let picker = command_picker_list("Quick-select hints", 0, &bindings, &tr, None, &[], false);
     assert_eq!(picker.rows[0].label, "Quick-select hints");
     assert_eq!(
         picker.rows[0].hint,

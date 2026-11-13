@@ -35,6 +35,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteToggleZoom, ToggleZoom),
         (T::PaletteScaledZoom, ScaledZoom),
         (T::PaletteShowHelp, ShowHelp),
+        (T::PaletteShowKeybinds, ShowKeybinds),
         (T::PaletteSendNewline, SendNewline),
         (T::MenuOpenLayout, OpenLayoutPicker),
         (T::MenuSaveLayout, SaveLayout),
@@ -414,6 +415,7 @@ mod tests {
             ToggleZoom,
             ScaledZoom,
             ShowHelp,
+            ShowKeybinds,
             SendNewline,
             OpenLayoutPicker,
             SaveLayout,
@@ -579,6 +581,7 @@ mod tests {
                 | ToggleZoom
                 | ScaledZoom
                 | ShowHelp
+                | ShowKeybinds
                 | SendNewline
                 | SaveLayout
                 | LaunchProfile(_)

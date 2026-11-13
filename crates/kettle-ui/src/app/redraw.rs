@@ -144,6 +144,7 @@ impl App {
                     tr,
                     self.update_notice().as_ref(),
                     &ws.palette_profiles,
+                    ws.palette_bound_only,
                 )),
             ),
             None => (None, String::new(), None),

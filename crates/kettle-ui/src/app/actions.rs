@@ -1057,9 +1057,10 @@ impl App {
                 self.close_all_modals(ws);
                 ws.ssh_input = Some((Default::default(), 0));
             }
-            Action::CommandPalette => {
+            Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);
                 ws.palette_profiles = kettle_config::Config::list_profiles();
+                ws.palette_bound_only = matches!(action, Action::ShowKeybinds);
                 ws.palette_input = Some((Default::default(), 0));
             }
             // Open the in-app settings overlay (Ctrl+, / right-click

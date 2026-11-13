@@ -1108,6 +1108,9 @@ pub(crate) struct WindowState {
     pub(crate) palette_profiles: Vec<String>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
+    /// The open palette lists only commands with a keyboard shortcut
+    /// (`Action::ShowKeybinds`). Set on every open; read only while open.
+    pub(crate) palette_bound_only: bool,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
@@ -1691,6 +1694,7 @@ impl WindowState {
             ssh_input: None,
             palette_input: None,
             palette_profiles: Vec::new(),
+            palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,
             settings_restart_pending: false,

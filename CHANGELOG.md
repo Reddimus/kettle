@@ -8,6 +8,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- A searchable list of every keyboard shortcut. Choose Help > Keyboard
+  Shortcuts on macOS, Keyboard shortcuts in the new-tab ▾ menu, or "Show
+  keyboard shortcuts" in the command palette: the palette opens listing only
+  the commands that have a shortcut, each with its shortcut, and Enter runs
+  the selected one. Its empty field reads "Search keyboard shortcuts…". The
+  action is `show_keybinds` (alias `keyboard_shortcuts`) for a `keybind` line;
+  it has no default shortcut.
+
+- macOS has a Help menu, last in the menu bar, with Kettle Help (the README,
+  as the palette's help command opens) and Keyboard Shortcuts. As in other
+  Mac apps, its search field finds any menu command by name. The new-tab ▾
+  menu on every platform gains Keyboard shortcuts and Help rows.
+
 - The command palette's empty search field says "Type a command…" in grey
   until you type, in the UI language. In a window too narrow for it beside the
   key hint, it is left out rather than cut off.

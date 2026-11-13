@@ -75,6 +75,8 @@ fn the_new_tab_dropdown_follows_the_ui_language() {
             "SSH launcher",
             "Settings…",
             "Command palette",
+            "Keyboard shortcuts",
+            "Help",
             "About kettle"
         ]
     );
@@ -88,6 +90,8 @@ fn the_new_tab_dropdown_follows_the_ui_language() {
             "Lanzador SSH",
             "Configuración…",
             "Paleta de comandos",
+            "Atajos de teclado",
+            "Ayuda",
             "Acerca de kettle"
         ]
     );

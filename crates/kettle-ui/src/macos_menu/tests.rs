@@ -43,11 +43,11 @@ fn complete_structure_in_english_and_spanish() {
     let es = empty_menu_model(&Translator::new(Language::Es), &Bindings::new(), ready());
     assert_eq!(
         en.iter().map(|menu| menu.title).collect::<Vec<_>>(),
-        ["Kettle", "Shell", "Edit", "View", "Window"]
+        ["Kettle", "Shell", "Edit", "View", "Window", "Help"]
     );
     assert_eq!(
         es.iter().map(|menu| menu.title).collect::<Vec<_>>(),
-        ["Kettle", "Shell", "Editar", "Ver", "Ventana"]
+        ["Kettle", "Shell", "Editar", "Ver", "Ventana", "Ayuda"]
     );
     assert_eq!(
         titles(&en),
@@ -111,6 +111,7 @@ fn complete_structure_in_english_and_spanish() {
                 "Move Tab Right",
                 "Move Tab to New Window"
             ],
+            vec!["Kettle Help", "Keyboard Shortcuts"],
         ]
     );
     assert_eq!(
@@ -175,6 +176,7 @@ fn complete_structure_in_english_and_spanish() {
                 "Mover la pestaña a la derecha",
                 "Mover la pestaña a una ventana nueva"
             ],
+            vec!["Ayuda de Kettle", "Atajos de teclado"],
         ]
     );
     let commands = |menus: Vec<Menu>| {
@@ -199,7 +201,7 @@ fn complete_structure_in_english_and_spanish() {
     assert_eq!(commands(en.clone()), commands(es));
     assert_eq!(
         en.iter().map(|menu| menu.windows).collect::<Vec<_>>(),
-        [false, false, false, false, true]
+        [false, false, false, false, true, false]
     );
     assert_eq!(
         en.iter()
@@ -244,7 +246,52 @@ fn complete_structure_in_english_and_spanish() {
             Action::MoveTabLeft,
             Action::MoveTabRight,
             Action::MoveTabToNewWindow,
+            Action::ShowHelp,
+            Action::ShowKeybinds,
         ]
+    );
+}
+
+/// The last menu is AppKit's Help menu, flagged so macOS adds its menu search
+/// field: Kettle Help opens the README and Keyboard Shortcuts the searchable
+/// shortcut list, in both languages.
+#[test]
+fn help_menu_is_last_and_flagged_with_help_and_shortcuts() {
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let model = empty_menu_model(&tr, &Bindings::new(), ready());
+        let help = model.last().unwrap();
+        assert!(help.help, "{language:?}");
+        assert_eq!(model.iter().filter(|menu| menu.help).count(), 1);
+        assert_eq!(help.title, tr.text(T::MacosMenuHelp));
+        let items: Vec<_> = help
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Item {
+                    title,
+                    command: Command::Kettle(action),
+                    enabled,
+                    ..
+                } => Some((title.as_str(), action.clone(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                (tr.text(T::MacosMenuKettleHelp), Action::ShowHelp, true),
+                (
+                    tr.text(T::MacosMenuKeyboardShortcuts),
+                    Action::ShowKeybinds,
+                    true
+                ),
+            ]
+        );
+    }
+    assert_eq!(
+        Translator::new(Language::Es).text(T::MacosMenuHelp),
+        "Ayuda"
     );
 }
 
@@ -613,7 +660,7 @@ fn window_menu_offers_rename_and_moving_the_tab() {
     for language in [Language::En, Language::Es] {
         let tr = Translator::new(language);
         let model = empty_menu_model(&tr, &Bindings::new(), ready());
-        let window = model.last().unwrap();
+        let window = model.iter().find(|menu| menu.windows).unwrap();
         assert_eq!(window.title, tr.text(T::MacosMenuWindow));
         for (text, action) in [
             (T::MacosMenuRenameTab, Action::EditTabTitle),

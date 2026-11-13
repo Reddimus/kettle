@@ -1677,10 +1677,12 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(
+        let cmds = palette_view_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
             &ws.palette_profiles,
+            &self.cfg.keybinds,
+            ws.palette_bound_only,
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -3339,8 +3341,12 @@ pub(super) fn project_modal_editor(
 /// fits and paints this same translated string.
 pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator) -> String {
     if ws.palette_input.is_some() {
-        tr.text(kettle_i18n::Text::PickerPlaceholderCommand)
-            .to_string()
+        tr.text(if ws.palette_bound_only {
+            kettle_i18n::Text::PickerPlaceholderShortcuts
+        } else {
+            kettle_i18n::Text::PickerPlaceholderCommand
+        })
+        .to_string()
     } else {
         String::new()
     }

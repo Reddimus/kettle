@@ -143,6 +143,10 @@ pub(super) fn sync(proxy: &EventLoopProxy<UserEvent>, model: Vec<Menu>) {
             // SAFETY: AppKit retains this menu and fills it with open windows.
             unsafe { app.setWindowsMenu(Some(&submenu)) };
         }
+        if menu.help {
+            // SAFETY: AppKit retains this menu and adds its menu search field.
+            unsafe { app.setHelpMenu(Some(&submenu)) };
+        }
     }
     app.setMainMenu(Some(&bar));
     STATE.with(|state| *state.borrow_mut() = Some(State { model }));

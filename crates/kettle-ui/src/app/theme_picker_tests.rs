@@ -798,7 +798,15 @@ fn rows_other_than_themes_carry_no_swatches() {
     let layouts = ["dev".to_string()];
     let hosts = [("gpu".to_string(), "dev@gpu".to_string())];
     let lists = [
-        super::command_picker_list("", 0, &kettle_config::keybinds::defaults(), &EN, None, &[]),
+        super::command_picker_list(
+            "",
+            0,
+            &kettle_config::keybinds::defaults(),
+            &EN,
+            None,
+            &[],
+            false,
+        ),
         super::command_picker_list(
             "zzqqxxjj",
             0,
@@ -806,6 +814,7 @@ fn rows_other_than_themes_carry_no_swatches() {
             &EN,
             None,
             &[],
+            false,
         ),
         super::layout_picker_list("", 0, &layouts, &EN),
         super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),

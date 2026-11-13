@@ -214,14 +214,14 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
 fn picker_rows_and_empty_states_follow_the_ui_language() {
     let bindings = kettle_config::keybinds::defaults();
     assert_eq!(
-        command_picker_list("", 0, &bindings, &ES, None, &[],).rows[0].label,
+        command_picker_list("", 0, &bindings, &ES, None, &[], false,).rows[0].label,
         "Nueva pestaña"
     );
-    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, &[]);
+    let none = command_picker_list("zzzqqq", 0, &bindings, &ES, None, &[], false);
     assert_eq!(none.rows[0].label, "Ningún comando coincide");
     assert!(!none.rows[0].enabled);
     assert_eq!(
-        command_picker_list("zzzqqq", 0, &bindings, &EN, None, &[],).rows[0].label,
+        command_picker_list("zzzqqq", 0, &bindings, &EN, None, &[], false,).rows[0].label,
         "No matching command"
     );
 
@@ -264,6 +264,12 @@ fn palette_placeholder_is_translated_and_only_in_the_palette() {
         assert_eq!(
             picker_placeholder(&ws, &tr),
             tr.text(Text::PickerPlaceholderCommand)
+        );
+        // The keyboard-shortcut list says what it searches instead.
+        ws.palette_bound_only = true;
+        assert_eq!(
+            picker_placeholder(&ws, &tr),
+            tr.text(Text::PickerPlaceholderShortcuts)
         );
         ws.palette_input = None;
         ws.layout_picker_input = Some((Default::default(), 0));

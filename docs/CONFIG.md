@@ -931,7 +931,10 @@ use their stored destination. Quick-select hints is also available in the
 macOS Edit menu, the palette (with its current binding), and the terminal context
 menu when a link or path is visible. This adds no configuration keys.
 
-**Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
+**Modals + UI**: `command_palette` (`palette`), `show_keybinds`
+(`keyboard_shortcuts`; the palette listing only commands that have a shortcut,
+with each shortcut; also Help > Keyboard Shortcuts on macOS and the new-tab
+dropdown's Keyboard shortcuts row), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold
 spaces), git hashes and IP addresses on screen:
 type a label to open a URL or copy anything else, or hold Shift while typing it

@@ -51,6 +51,8 @@ pub(crate) struct Menu {
     title: &'static str,
     rows: Vec<Row>,
     windows: bool,
+    /// AppKit's Help menu, which gains the system's menu search field.
+    help: bool,
 }
 
 /// Facts from the focused window; no AppKit, window or terminal handles.
@@ -246,6 +248,7 @@ pub(crate) fn menu_model_with_profiles(
         title: tr.text(text),
         rows,
         windows,
+        help: false,
     };
     vec![
         menu(
@@ -352,6 +355,17 @@ pub(crate) fn menu_model_with_profiles(
             ],
             true,
         ),
+        Menu {
+            help: true,
+            ..menu(
+                T::MacosMenuHelp,
+                vec![
+                    item(T::MacosMenuKettleHelp, Action::ShowHelp),
+                    item(T::MacosMenuKeyboardShortcuts, Action::ShowKeybinds),
+                ],
+                false,
+            )
+        },
     ]
 }
 

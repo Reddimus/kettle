@@ -367,6 +367,10 @@ pub enum Action {
     /// so it works on Linux/macOS/Windows without spawning a
     /// per-platform helper.
     ShowHelp,
+    /// Open the command palette listing only the commands that have a
+    /// keyboard shortcut, each with its shortcut: a searchable, runnable
+    /// shortcut reference (macOS Help > Keyboard Shortcuts).
+    ShowKeybinds,
     /// Terminator parity
     /// (`terminatorlib/layoutlauncher.py`). Open the runtime
     /// layout picker — an overlay modal that lists saved
@@ -821,6 +825,8 @@ pub fn action_names() -> Vec<&'static str> {
         "scaled_zoom",
         "help",
         "show_help",
+        "show_keybinds",
+        "keyboard_shortcuts",
         "send_newline",
         "layout_launcher",
         "open_layout_picker",
@@ -1141,6 +1147,9 @@ impl Action {
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
+            "show_keybinds" | "show-keybinds" | "keyboard_shortcuts" | "keyboard-shortcuts" => {
+                ShowKeybinds
+            }
             "send_newline" | "send-newline" => SendNewline,
             "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
@@ -3287,6 +3296,21 @@ mod tests {
                 "alias {s:?} should parse to SendNewline"
             );
         }
+    }
+
+    /// The keyboard-shortcut list's documented names resolve to
+    /// `Action::ShowKeybinds`, and `--list-actions` names it.
+    #[test]
+    fn from_name_accepts_show_keybinds_aliases() {
+        for s in [
+            "show_keybinds",
+            "show-keybinds",
+            "keyboard_shortcuts",
+            "keyboard-shortcuts",
+        ] {
+            assert_eq!(Action::from_name(s), Some(Action::ShowKeybinds), "{s}");
+        }
+        assert!(action_names().contains(&"show_keybinds"));
     }
 
     /// Drift guard. Terminator's F1 `key_help`

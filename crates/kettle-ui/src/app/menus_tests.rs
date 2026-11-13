@@ -98,7 +98,8 @@ fn vim_menu_nav_intercepts_before_mnemonic_catchall() {
 }
 
 /// The `▾` menu is shells → separator → Windows
-/// Terminal's bottom section (Settings / Command palette / About).
+/// Terminal's bottom section (Settings / Command palette / Keyboard
+/// shortcuts / Help / About).
 #[test]
 fn new_tab_menu_items_has_wt_bottom_rows() {
     let shells = vec![
@@ -111,7 +112,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     );
     assert_eq!(
         items.len(),
-        11,
+        13,
         "shells, profile submenu, layouts, SSH and bottom rows"
     );
     assert!(matches!(
@@ -138,6 +139,22 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     assert!(matches!(
         items[10],
         ContextMenuItem::Item {
+            label: "Keyboard shortcuts",
+            action: Action::ShowKeybinds,
+            enabled: true
+        }
+    ));
+    assert!(matches!(
+        items[11],
+        ContextMenuItem::Item {
+            label: "Help",
+            action: Action::ShowHelp,
+            enabled: true
+        }
+    ));
+    assert!(matches!(
+        items[12],
+        ContextMenuItem::Item {
             label: "About kettle",
             action: Action::About,
             enabled: true
@@ -147,10 +164,10 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     // assignment must keep working with the new bottom rows.
     let mn = assign_mnemonics(&items, &[]);
     let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
-    assert_eq!(letters.len(), 9, "all dispatchable rows get mnemonics");
+    assert_eq!(letters.len(), 11, "all dispatchable rows get mnemonics");
     letters.sort_unstable();
     letters.dedup();
-    assert_eq!(letters.len(), 9, "mnemonics are distinct");
+    assert_eq!(letters.len(), 11, "mnemonics are distinct");
 }
 
 /// An `Info` row (About panel) is inert — not
@@ -649,6 +666,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
                 &kettle_i18n::Translator::new(kettle_i18n::Language::En),
                 None,
                 &[],
+                false,
             )),
             None,
             None,
