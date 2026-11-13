@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- After a session restore on macOS and Linux, a shell that runs `clear` at
+  startup no longer hides the restored output. The restored rows and the
+  "Restored" divider stay on screen with the prompt below them, whichever
+  order `clear` sends its sequences in. Only that first clear is affected;
+  later clears work as before. A startup program that clears and then draws
+  at fixed positions outside the alternate screen can draw over restored
+  rows; `restore-scrollback-lines = 0` turns restored output off. Windows is
+  unchanged.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu
