@@ -30,7 +30,7 @@ fn overlay() -> SettingsOverlay {
         title: "Appearance".into(),
         search_placeholder: "Search settings".into(),
         no_matches: "No settings match".into(),
-        hints: "Up/Down field    Left/Right change    Tab category    Esc close".into(),
+        hints: "Up/Down field · Left/Right change · Tab category · Esc close".into(),
         ..Default::default()
     }
 }

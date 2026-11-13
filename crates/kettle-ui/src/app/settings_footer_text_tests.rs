@@ -8,15 +8,15 @@ const ES: Translator = Translator::new(Language::Es);
 fn hints_name_the_keys_and_translate_only_their_actions() {
     assert_eq!(
         settings_hints(&EN, true),
-        "↑↓/jk field    ←→/hl change    g/G ends    Del reset    Tab category    Esc close"
+        "↑↓/jk field · ←→/hl change · g/G ends · Del reset · Tab category · Esc close"
     );
     assert_eq!(
         settings_hints(&EN, false),
-        "↑↓ field    ←→ change    Del reset    Tab category    Esc close"
+        "↑↓ field · ←→ change · Del reset · Tab category · Esc close"
     );
     assert_eq!(
         settings_hints(&ES, false),
-        "↑↓ campo    ←→ cambiar    Del restablecer    Tab categoría    Esc cerrar"
+        "↑↓ campo · ←→ cambiar · Del restablecer · Tab categoría · Esc cerrar"
     );
 }
 
@@ -545,6 +545,99 @@ fn pending_changes_are_never_hidden_by_an_appearance_hint() {
     )
     .unwrap();
     assert!(note.contains("Restart Kettle or open a new window to apply pending changes."));
+}
+
+/// On screen, each key stays beside what it does and the groups stand apart:
+/// the laid-out footer puts more space between one group and the next than
+/// between a key and its action, and wraps only between groups.
+#[test]
+fn the_laid_out_settings_footer_separates_key_groups() {
+    use kettle_i18n::Text;
+    use unicode_width::UnicodeWidthStr as _;
+    let cw = 8.0;
+    let mut wrapped = false;
+    for tr in [EN, ES] {
+        for vim_nav in [false, true] {
+            let mut groups = vec![
+                (
+                    if vim_nav { "↑↓/jk" } else { "↑↓" },
+                    Text::SettingsHintField,
+                ),
+                (
+                    if vim_nav { "←→/hl" } else { "←→" },
+                    Text::SettingsHintChange,
+                ),
+            ];
+            if vim_nav {
+                groups.push(("g/G", Text::SettingsHintEnds));
+            }
+            groups.extend([
+                ("Del", Text::SettingsHintReset),
+                ("Tab", Text::SettingsHintCategory),
+                ("Esc", Text::SettingsHintClose),
+            ]);
+            // The release-comparison window, then two narrower ones; the
+            // longer hint sets wrap in both.
+            for surface in [(1600.0, 1000.0), (800.0, 600.0), (560.0, 600.0)] {
+                let set = kettle_render::SettingsOverlay {
+                    hints: settings_hints(&tr, vim_nav),
+                    ..Default::default()
+                };
+                let layout = kettle_render::settings_layout(&set, (cw, 16.0), surface, cw);
+                let lines: Vec<&str> = layout.footer.iter().map(|(t, _)| t.as_str()).collect();
+                // Each group's line and its key, action and end columns.
+                let mut placed = Vec::new();
+                let mut from = (0, 0);
+                for (key, what) in &groups {
+                    let action = tr.text(*what);
+                    let group = format!("{key} {action}");
+                    let (line, at) = lines
+                        .iter()
+                        .enumerate()
+                        .skip(from.0)
+                        .find_map(|(i, line)| {
+                            let start = if i == from.0 { from.1 } else { 0 };
+                            line[start..].find(&group).map(|at| (i, start + at))
+                        })
+                        .unwrap_or_else(|| panic!("{group:?} is not whole in {lines:?}"));
+                    let text = lines[line];
+                    let key_end = text[..at + key.len()].width();
+                    let action_at = at + key.len() + text[at + key.len()..].find(action).unwrap();
+                    placed.push((
+                        line,
+                        text[..at].width(),
+                        key_end,
+                        text[..action_at].width(),
+                        text[..at + group.len()].width(),
+                    ));
+                    from = (line, at + group.len());
+                }
+                let mut pairs = 0;
+                for pair in placed.windows(2) {
+                    let (line, _, key_end, action_start, end) = pair[0];
+                    let (next_line, next_start, ..) = pair[1];
+                    let within = (action_start - key_end) as f32 * cw;
+                    if line == next_line {
+                        let between = (next_start - end) as f32 * cw;
+                        assert!(
+                            between > within,
+                            "{surface:?}: {between} px between groups, {within} px within, in {lines:?}"
+                        );
+                        pairs += 1;
+                    }
+                }
+                assert!(pairs > 0, "{lines:?}");
+                wrapped |= lines.len() > 1;
+                for line in &lines {
+                    assert!(
+                        !line.starts_with('·') && !line.trim_end().ends_with('·'),
+                        "{lines:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(wrapped, "no surface wrapped the footer");
 }
 
 /// Pseudo-locale layout check: the Settings key hints, the widest footer

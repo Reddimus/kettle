@@ -11,6 +11,8 @@ pub struct SettingsOverlay {
     pub rows: Vec<SettingsRow>,
     pub focused_row: usize,
     pub title: String,
+    /// Key hints as `key action` groups joined by ` · `. The footer wraps
+    /// between groups, never inside one.
     pub hints: String,
     pub footer_note: Option<String>,
     pub search_query: String,
@@ -167,6 +169,28 @@ fn wrapped_lines(text: &str, width: f32, cw: f32) -> Vec<String> {
     result
 }
 
+/// Wrap key hints between their ` · ` groups, so a key stays beside what it
+/// does and no line starts or ends with a separator. A group wider than the
+/// line is cut with an ellipsis.
+fn wrapped_hint_lines(text: &str, width: f32, cw: f32) -> Vec<String> {
+    let cols = (width / cw.max(1.0)).floor().max(1.0) as usize;
+    let mut result = Vec::new();
+    for source in text.lines() {
+        let mut line = String::new();
+        for group in source.split(" · ").map(str::trim).filter(|g| !g.is_empty()) {
+            if !line.is_empty() && display_width(&line) + 3 + display_width(group) > cols {
+                result.push(fit_single_line_label(&std::mem::take(&mut line), cols));
+            }
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(group);
+        }
+        result.push(fit_single_line_label(&line, cols));
+    }
+    result
+}
+
 /// Pixel layout shared by painting, pointer input, text editing, AX and ctl.
 /// Offscreen rows have no rectangle, and pinned controls never scroll with rows.
 pub fn settings_layout(
@@ -306,7 +330,7 @@ pub fn settings_layout(
     );
     let rows_top = title_y + title_rect.3 + if compact { 0.0 } else { 8.0 };
     let footer_gap = if compact { 2.0 } else { 12.0 };
-    let mut footer_lines = wrapped_lines(&set.hints, inner.2, text_cw);
+    let mut footer_lines = wrapped_hint_lines(&set.hints, inner.2, text_cw);
     if let Some(note) = &set.footer_note {
         footer_lines.extend(wrapped_lines(note, inner.2, text_cw));
     }

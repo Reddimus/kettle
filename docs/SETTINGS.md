@@ -60,7 +60,9 @@ default); it applies only to new terminals. Its Built-in box drawing toggle (on
 by default, `builtin-box-drawing`) applies at once. Opacity, background type, and blur apply at once
 when the window can already show them; only an opaque window turning translucent, or blur turned on in
 a window opened without it, needs a new window.
-The footer shows dependencies for the focused row and pending changes. Notes
+The footer lists the keys, each beside what it does, with a dot between one
+key and the next; a narrow window wraps the list between keys. Below it, the
+footer shows dependencies for the focused row and pending changes. Notes
 keep reserved space below scrolling fields when space permits. In short windows,
 the panel reduces spacing and hides the repeated category title to retain the
 focused option. At the shortest supported heights, Search and categories share
