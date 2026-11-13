@@ -390,6 +390,25 @@ impl NativeMaterial {
         }
     }
 
+    /// Whether the window system draws this window opaque whatever its
+    /// pixels' alpha, so no desktop shows behind it: on macOS under Reduce
+    /// Transparency, or when the window was opened without an alpha surface.
+    pub(crate) fn window_opaque(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            macos_material_policy(
+                false,
+                self.alpha_surface_required,
+                self.last_reduce_transparency.get().unwrap_or(false),
+            )
+            .window_opaque
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
     /// Whether this window asked for blur that the window system cannot
     /// give (GNOME and X11 on Linux, Windows without its backdrop).
     pub(crate) fn blur_unavailable(&self) -> bool {
