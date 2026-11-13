@@ -2524,8 +2524,10 @@ with these rules:
 
 A live A/B on macOS measured the fixed 3 ms settle, before early release. It
 ran on 2026-11-13 at 60 Hz, in oh-my-zsh with async zsh-autosuggestions, with
-keys paced 33 and 50 ms apart and 8 runs of 132 keys per build. It confirmed
-both effects:
+keys paced 33 and 50 ms apart. Each build ran 8 runs of 132 keys on
+suggestion-changing text and 8 on text that matches no history; the
+autosuggestions figures below are from the first set. It confirmed both
+effects:
 - Without the settle, about one intermediate frame reached the screen per
   split echo: 244 over 238 split echoes.
 - With it, 12 over 235 (0.05 per split, 95% fewer), and frames per echo fell
