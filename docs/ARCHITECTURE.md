@@ -2473,17 +2473,46 @@ shell.
 
 On macOS, a pane whose typed-text echo split within `ECHO_SETTLE` (3 ms) keeps
 its later typed-text echoes settled for `SPLIT_MEMORY` (5 s). Such an echo
-paints at its first wake plus `ECHO_SETTLE`, instead of at once. The pane's
-output latch stays closed from that wake until the frame acknowledges it, so
-the second write lands with no new wake and the settled frame paints both.
-Shells that write each echo once never arm the settle and pay nothing. The
-settle is a single phase (`Idle`, `Armed { deadline, key }`, `Queued`) with
-these rules:
-- The deadline is never extended.
+paints when its second write lands, or at its first wake plus `ECHO_SETTLE`,
+whichever comes first, instead of at once. The pane's output latch stays
+closed from the first wake until the frame acknowledges it, so the second
+write lands with no new wake and the settled frame paints both.
+
+Because that write raises no wake, the settle polls for it:
+- `note_keystroke` records each followed pane's output generation with the
+  key.
+- While the settle is armed, `about_to_wait` reads the echo's panes'
+  generations at least every `SETTLE_POLL_STEP` (250 µs).
+- Once every learned pane of the echo is two publications past the key, the
+  frame is requested (`settled_early`). A pane of a broadcast whose echoes do
+  not split is not waited for.
+- If both writes landed before the UI thread reached the first wake, the echo
+  paints at once without arming.
+- The probe never saw more than two writes for one key. A third would land
+  after the paint and count as an intermediate frame.
+
+An echo that arrives in one write still waits the full `ECHO_SETTLE`: until
+the deadline nothing tells it apart from the first half of a split. In the
+live A/B below, about three in four typed echoes in a learned pane were
+single writes, so early release shortens only the remaining quarter. Shells
+that write each echo once never arm the settle and pay nothing.
+
+A deadline scaled to the pane's recent split gaps (twice the largest in the
+last 5 s, between 1 and 3 ms) was considered and not adopted. On a replay of
+the headless probe (792 keys, runs concatenated per key gap, so the 5 s window
+spans runs), it shortened the deadline for 190 of 787 keys in learned panes,
+saving about 0.28 ms per single-write echo. It also let 7 of 187 split echoes
+outlast their deadline, against 4 with the fixed 3 ms.
+
+The settle is a single phase (`Idle`, `Armed { deadline, key }`, `Queued`)
+with these rules:
+- The deadline is never extended. A deadline that is due counts as the
+  deadline (`settled_echoes`), even if the echo has also completed.
 - `about_to_wait` polls it under the coalescer's guards. With nothing pending
   the poll returns before them. A hidden window or a pending frame recovery
   cancels it rather than waking for a redraw that would return early. A wait
-  is at least 100 µs, never zero.
+  is at least 100 µs, never zero, and at most 250 µs while armed, so one
+  settle costs at most about a dozen loop turns.
 - `Queued` ends when the next redraw callback begins, even one that returns
   early, so a failed redraw is not retried every turn.
 - A typed wake that finds it `Queued` requests the redraw again.
@@ -2492,10 +2521,23 @@ these rules:
   armed paint. A paste is not a keystroke: it never arms the settle, and its
   output takes the ordinary output path.
 
-That a split echo shows as two presented frames, and that the settle merges
-them into one, is inferred from the code paths above (winit's redraw dispatch
-and the FIFO surface). It has not yet been measured live; the
-`ui_geometry.typed_echo` counts exist to measure it.
+A live A/B on macOS measured the fixed 3 ms settle, before early release. It
+ran on 2026-11-13 at 60 Hz, in oh-my-zsh with async zsh-autosuggestions, with
+keys paced 33 and 50 ms apart and 8 runs of 132 keys per build. It confirmed
+both effects:
+- Without the settle, about one intermediate frame reached the screen per
+  split echo: 244 over 238 split echoes.
+- With it, 12 over 235 (0.05 per split, 95% fewer), and frames per echo fell
+  from 1.30 to 1.08. The residue is about one per run: the first split after
+  a cold start, which is not settled by design.
+- Plain zsh never split and never settled (0 settles in 1042 echoes).
+
+The A/B also found the cost. In the autosuggestions shell, 99% of echoes on
+suggestion-changing text were settled, each waiting the full 3 ms, single
+writes included. That failed the preregistered criterion of no cost for
+single-write echoes. Early release was added after the A/B. It, and how
+closely macOS honours sub-millisecond `WaitUntil` steps, have not been
+measured live.
 
 `ECHO_SETTLE` comes from a headless PTY probe of oh-my-zsh with
 zsh-autosuggestions: 97% of 192 split echoes spanned 3 ms or less. It stays
