@@ -349,14 +349,14 @@ pub(crate) fn tab_accent(
 }
 
 /// The opacity a translucent surface needs under chrome text. Behind a
-/// translucent window lies anything from black to white, and on a mid-tone
+/// translucent window lies anything from black to `white`, and on a mid-tone
 /// theme no ink clears `TEXT_CONTRAST` over that whole span. The surface keeps
 /// the window's opacity whenever some ink can; otherwise it takes the least
 /// opacity at which one can.
-pub(crate) fn text_surface_alpha(surface: Rgb, window_alpha: f64) -> f64 {
+pub(crate) fn text_surface_alpha(surface: Rgb, window_alpha: f64, white: [f64; 3]) -> f64 {
     let window_alpha = window_alpha.clamp(0.0, 1.0);
     let reachable = |alpha: f64| {
-        let backing = color::Backing::translucent(surface, alpha);
+        let backing = color::Backing::translucent(surface, alpha, white);
         [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
             .into_iter()
             .any(|ink| backing.weakest_contrast(ink) >= TEXT_CONTRAST)

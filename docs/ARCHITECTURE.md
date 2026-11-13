@@ -3712,8 +3712,11 @@ to manual copy, copy on selection and vi yank.
 Chrome text is different: Kettle chooses it, so it is held to its floors on
 screen. A surface left at alpha `a` shows the stored, premultiplied pixel plus
 `1 - a` of whatever is behind the window, which can be anything from black to
-white. `color::Backing` keeps a surface's two extremes, its composite over a
-black and over a white backdrop, and `Colors::on` floors an ink chosen against
+white. On macOS the window blur brightens white by a few levels, so
+`color::PLATFORM_WHITE` there is `MACOS_BLURRED_WHITE`, calibrated from the
+6.0.0 comparison's capture over a pure white bar; elsewhere it is plain white.
+`color::Backing` keeps a surface's two extremes, its composite over a
+black and over that white backdrop, and `Colors::on` floors an ink chosen against
 the surface's own colour against both, one 8-bit level wider each way for the
 GPU's and the window server's rounding. The ink stays on its side of the
 surface, so light text stays light. An opaque surface is unchanged, and an ink

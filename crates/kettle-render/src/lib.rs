@@ -907,8 +907,10 @@ impl Renderer {
             .unwrap_or(theme.background);
         // The active horizontal tab is the terminal's own surface: as
         // translucent as the window, unless its text needs it more opaque.
-        let active_tab_alpha = chrome::text_surface_alpha(default_bg, composed_bg_alpha(cfg));
-        let active_tab_backing = color::Backing::translucent(default_bg, active_tab_alpha);
+        let active_tab_alpha =
+            chrome::text_surface_alpha(default_bg, composed_bg_alpha(cfg), color::PLATFORM_WHITE);
+        let active_tab_backing =
+            color::Backing::translucent(default_bg, active_tab_alpha, color::PLATFORM_WHITE);
         let translucent_window = composed_bg_alpha(cfg) < 1.0;
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;

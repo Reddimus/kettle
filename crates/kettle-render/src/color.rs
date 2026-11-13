@@ -513,6 +513,25 @@ pub(crate) fn with_min_contrast_on_both(
 /// that pixel, not the ink, is the strongest a stem may show.
 pub(crate) const STEM_COVERAGE: f64 = 248.0 / 255.0;
 
+/// The brightest backdrop a translucent window can show, per channel, on the
+/// scale where white is 255: plain white.
+pub(crate) const PLAIN_WHITE: [f64; 3] = [255.0; 3];
+
+/// The same on macOS, where the window server's blur brightens what it
+/// samples. Calibrated from the 6.0.0 release comparison's capture of
+/// TokyoNight Night at 0.86 over a pure white bar (`ux/r14/mac/kettle/
+/// C02-over-backdrop.png`, x 2-60, y 720-811). Its most common and brightest
+/// pixel there, (61, 64, 74), is what a backdrop of (267.4, 282.1, 279.8)
+/// gives; [`PLAIN_WHITE`] gives (59, 60, 71). Rounded up.
+pub(crate) const MACOS_BLURRED_WHITE: [f64; 3] = [268.0, 283.0, 280.0];
+
+/// The white extreme of the backdrop on this platform.
+pub(crate) const PLATFORM_WHITE: [f64; 3] = if cfg!(target_os = "macos") {
+    MACOS_BLURRED_WHITE
+} else {
+    PLAIN_WHITE
+};
+
 /// What a surface can look like on screen. An opaque surface shows its own
 /// colour. A translucent one shows whatever lies behind the window through
 /// it, so it is described by its two extremes: the surface over a black
@@ -537,7 +556,8 @@ impl Backing {
         }
     }
 
-    /// `color` left at `alpha` in the window's surface. The scene is
+    /// `color` left at `alpha` in the window's surface, over backdrops from
+    /// black to `white` ([`PLATFORM_WHITE`] for the live window). The scene is
     /// premultiplied, and the window server adds `(1 - alpha)` of the
     /// backdrop to the stored, sRGB-encoded value. That value is
     /// `alpha * color` on a plain target and the encoding of `alpha` times
@@ -545,13 +565,13 @@ impl Backing {
     /// extremes take the first over black and the second over white, whatever
     /// the target. A macOS capture of TokyoNight Night at 0.86 over a white
     /// and a black bar measured within a few levels of these.
-    pub(crate) fn translucent(color: Rgb, alpha: f64) -> Self {
+    pub(crate) fn translucent(color: Rgb, alpha: f64, white: [f64; 3]) -> Self {
         let alpha = alpha.clamp(0.0, 1.0);
         if alpha >= 1.0 {
             return Self::opaque(color);
         }
-        let channel = |value: u8, white: bool| -> u8 {
-            let stored = if white {
+        let channel = |value: u8, backdrop: Option<f64>| -> u8 {
+            let stored = if backdrop.is_some() {
                 let light = alpha * srgb_to_linear(value);
                 255.0
                     * if light <= 0.0031308 {
@@ -562,21 +582,21 @@ impl Backing {
             } else {
                 alpha * f64::from(value)
             };
-            let backdrop = if white { 255.0 } else { 0.0 };
-            (stored + (1.0 - alpha) * backdrop)
+            (stored + (1.0 - alpha) * backdrop.unwrap_or(0.0))
                 .round()
                 .clamp(0.0, 255.0) as u8
         };
-        let at = |white| {
-            Rgb::new(
-                channel(color.r, white),
-                channel(color.g, white),
-                channel(color.b, white),
-            )
-        };
         Self {
-            over_black: at(false),
-            over_white: at(true),
+            over_black: Rgb::new(
+                channel(color.r, None),
+                channel(color.g, None),
+                channel(color.b, None),
+            ),
+            over_white: Rgb::new(
+                channel(color.r, Some(white[0])),
+                channel(color.g, Some(white[1])),
+                channel(color.b, Some(white[2])),
+            ),
             translucent: true,
         }
     }
