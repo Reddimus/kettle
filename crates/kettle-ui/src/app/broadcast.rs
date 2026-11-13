@@ -36,6 +36,7 @@ pub(super) fn broadcast_scope_after(
             focused_group.map(|group| toggle(BroadcastScope::Group(group.to_owned())))
         }
         Action::ToggleBroadcastWindow => Some(toggle(BroadcastScope::All)),
+        Action::ToggleBroadcastPanesInTab => Some(toggle(BroadcastScope::Tab)),
         _ => None,
     }
 }

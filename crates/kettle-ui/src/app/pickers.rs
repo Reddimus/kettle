@@ -103,15 +103,17 @@ pub(crate) fn profile_launch_entries(
         .collect()
 }
 
-/// Commands and the profiles captured when the palette opened, followed by
-/// release notes and Dismiss while an update notice is active.
+/// Commands, with the broadcast rows `broadcast-default` picks, and the
+/// profiles captured when the palette opened, followed by release notes and
+/// Dismiss while an update notice is active.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
     profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
-    let mut entries: Vec<_> = kettle_config::palette::commands()
+    let mut entries: Vec<_> = kettle_config::palette::commands_for(broadcast_default)
         .into_iter()
         .map(|(label, action)| (PaletteLabel::Text(label), action))
         .collect();
@@ -140,8 +142,9 @@ pub(super) fn command_picker_list(
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
     profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> PickerList {
-    let commands = palette_entries(notice, tr, profiles);
+    let commands = palette_entries(notice, tr, profiles, broadcast_default);
     let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
     let rows = ranked
         .iter()
@@ -695,6 +698,7 @@ pub(super) fn open_picker_list(
             tr,
             notice,
             &ws.palette_profiles,
+            cfg.broadcast_default,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(

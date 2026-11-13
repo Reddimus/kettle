@@ -1695,6 +1695,7 @@ impl App {
             self.update_notice().as_ref(),
             &self.ui_text,
             &ws.palette_profiles,
+            self.cfg.broadcast_default,
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;

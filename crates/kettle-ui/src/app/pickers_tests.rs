@@ -44,7 +44,7 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
-        &[],
+        &[], kettle_config::BroadcastDefault::default(),
     );
     let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
         .expect("a 320x160 surface fits a picker card");
@@ -301,7 +301,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        &[], kettle_config::BroadcastDefault::default(),
     );
     for row in &list.rows {
         assert_eq!(
@@ -332,7 +332,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        &[], kettle_config::BroadcastDefault::default(),
     );
     assert_eq!(empty.rows.len(), 1);
     assert!(!empty.rows[0].enabled);
@@ -349,7 +349,7 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 &kettle_config::keybinds::defaults(),
                 &EN_TEXT,
                 None,
-                &[],
+                &[], kettle_config::BroadcastDefault::default(),
             );
             let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
                 .expect("a restored 120px window must retain its picker");

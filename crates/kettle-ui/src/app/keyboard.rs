@@ -787,6 +787,7 @@ pub(super) fn toggles_once_per_press(action: &Action) -> bool {
             | Action::ToggleBroadcastGroup
             | Action::ToggleBroadcastOff
             | Action::ToggleBroadcastWindow
+            | Action::ToggleBroadcastPanesInTab
             | Action::ToggleCopyOnSelect
             | Action::ToggleCursorBlink
             | Action::ToggleMouseHide

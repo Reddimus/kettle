@@ -149,6 +149,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The command palette names the broadcast chord's row after the scope it
+  turns on, so with `broadcast-default = all` it reads "Broadcast input to
+  every pane in window" instead of claiming the tab. Each scope is listed
+  once in both languages. A new `broadcast_panes_in_tab` action always
+  broadcasts to the focused tab, whatever `broadcast-default` says; it has no
+  default chord. `broadcast-default = off` still keeps the chord from turning
+  broadcast on.
+
 - The profile menu is now called New Window with Profile (Nueva ventana con
   perfil), since each profile has always opened in a new window. In the
   macOS Shell menu it sits right below New Window.

@@ -504,6 +504,11 @@ pub enum Action {
     /// from the misnamed `ToggleBroadcastAll` which is
     /// actually per-tab.
     ToggleBroadcastWindow,
+    /// Toggle broadcast to every pane in the focused tab, whatever
+    /// `broadcast-default` says. `broadcast_tab` names `ToggleBroadcastAll`,
+    /// the chord's action, whose scope follows `broadcast-default`; this one
+    /// always targets the tab. No default binding.
+    ToggleBroadcastPanesInTab,
     ToggleQuickTerminal,
     ToggleFullscreen,
     /// Full terminal reset (RIS, `\e c`) of the focused pane's terminal.
@@ -896,6 +901,8 @@ pub fn action_names() -> Vec<&'static str> {
         "broadcast-window",
         "toggle_broadcast_window",
         "toggle-broadcast-window",
+        "broadcast_panes_in_tab",
+        "broadcast-panes-in-tab",
         "toggle_quick_terminal",
         "toggle_fullscreen",
         "full_screen",
@@ -1249,6 +1256,10 @@ impl Action {
             | "broadcast-window"
             | "toggle_broadcast_window"
             | "toggle-broadcast-window" => ToggleBroadcastWindow,
+            // Always the focused tab. Deliberately not `toggle_broadcast_tab`:
+            // every other scope pairs `broadcast_X` with `toggle_broadcast_X`
+            // for one action, and `broadcast_tab` is the chord's action.
+            "broadcast_panes_in_tab" | "broadcast-panes-in-tab" => ToggleBroadcastPanesInTab,
             // Terminator's `*_toggle` names toggle GROUPING (window.py:959,
             // :987), not broadcasting. Like Terminator, these generate the group
             // name rather than prompting for one.
@@ -2633,6 +2644,34 @@ mod tests {
         assert!(action.is_some(), "existing windows need a transfer action");
         assert_eq!(Action::from_name("move-tab-to-window"), action);
         assert!(action_names().contains(&"move_tab_to_window"));
+    }
+
+    /// The tab-scope toggle has a name of its own. `broadcast_tab` stays the
+    /// chord's action, whose scope follows `broadcast-default`, and the name a
+    /// user would guess from the `broadcast_X`/`toggle_broadcast_X` pairs is
+    /// not given a second meaning.
+    #[test]
+    fn the_tab_scope_toggle_cannot_be_mistaken_for_broadcast_tab() {
+        for name in ["broadcast_panes_in_tab", "broadcast-panes-in-tab"] {
+            assert_eq!(
+                Action::from_name(name),
+                Some(Action::ToggleBroadcastPanesInTab),
+                "{name}"
+            );
+            assert!(action_names().contains(&name), "{name}");
+        }
+        for name in ["broadcast_tab", "broadcast-tab"] {
+            assert_eq!(Action::from_name(name), Some(Action::ToggleBroadcastAll));
+        }
+        for name in ["toggle_broadcast_tab", "toggle-broadcast-tab"] {
+            assert_eq!(Action::from_name(name), None, "{name}");
+        }
+        // No default binding: the chord stays `ToggleBroadcastAll`'s.
+        assert!(
+            !defaults()
+                .values()
+                .any(|action| *action == Action::ToggleBroadcastPanesInTab)
+        );
     }
 
     #[test]

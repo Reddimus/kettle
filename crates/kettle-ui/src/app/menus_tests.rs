@@ -648,7 +648,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
                 &kettle_config::keybinds::defaults(),
                 &kettle_i18n::Translator::new(kettle_i18n::Language::En),
                 None,
-                &[],
+                &[], kettle_config::BroadcastDefault::default(),
             )),
             None,
             None,

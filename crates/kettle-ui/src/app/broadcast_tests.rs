@@ -87,6 +87,16 @@ fn the_other_broadcast_actions_ignore_broadcast_default() {
                     BroadcastScope::Group("fleet".into())
                 })
             );
+            // The tab toggle ignores `broadcast-default`, which the chord's
+            // action does not.
+            assert_eq!(
+                after(Action::ToggleBroadcastPanesInTab, None),
+                Some(if current == BroadcastScope::Tab {
+                    BroadcastScope::Off
+                } else {
+                    BroadcastScope::Tab
+                })
+            );
             // No group on the focused pane: nothing to toggle.
             assert_eq!(after(Action::ToggleBroadcastGroup, None), None);
             assert_eq!(after(Action::NewTab, None), None);
@@ -232,5 +242,61 @@ fn group_cleanup_goes_through_the_helper_and_is_free_when_unchanged() {
             body.contains("self.set_window_broadcast_scope(seq, BroadcastScope::Off)"),
             "{owner} must reset other windows through the helper"
         );
+    }
+}
+
+/// The palette the window paints and runs lists the broadcast rows
+/// `broadcast-default` picks: the chord's action carries the label of the
+/// scope it turns on, in both languages, and no scope is listed twice.
+#[test]
+fn the_palette_labels_the_chord_with_the_scope_it_turns_on() {
+    use kettle_i18n::{Language, Text, Translator};
+    for tr in [Translator::new(Language::En), Translator::new(Language::Es)] {
+        for (default, chord, tab) in [
+            (
+                BroadcastDefault::Group,
+                Some(Text::PaletteToggleBroadcastAll),
+                Action::ToggleBroadcastAll,
+            ),
+            (
+                BroadcastDefault::All,
+                Some(Text::PaletteToggleBroadcastWindow),
+                Action::ToggleBroadcastPanesInTab,
+            ),
+            (
+                BroadcastDefault::Off,
+                None,
+                Action::ToggleBroadcastPanesInTab,
+            ),
+        ] {
+            let entries = palette_entries(None, &tr, &[], default);
+            let label = |action: &Action| {
+                entries
+                    .iter()
+                    .find(|(_, a)| a == action)
+                    .map(|(label, _)| label.shown(&tr).to_owned())
+            };
+            assert_eq!(
+                label(&Action::ToggleBroadcastAll),
+                chord.map(|text| tr.text(text).to_owned()),
+                "{default:?}"
+            );
+            assert_eq!(
+                label(&tab),
+                Some(tr.text(Text::PaletteToggleBroadcastAll).to_owned()),
+                "{default:?}"
+            );
+            let shown: Vec<_> = entries.iter().map(|(label, _)| label.shown(&tr)).collect();
+            for text in [
+                Text::PaletteToggleBroadcastAll,
+                Text::PaletteToggleBroadcastWindow,
+            ] {
+                assert_eq!(
+                    shown.iter().filter(|s| **s == tr.text(text)).count(),
+                    1,
+                    "{default:?} {text:?}"
+                );
+            }
+        }
     }
 }
