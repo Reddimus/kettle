@@ -120,6 +120,7 @@ pub(crate) fn is_bidi_format_char(c: char) -> bool {
         '\u{202A}'..='\u{202E}'      // LRE RLE PDF LRO RLO
             | '\u{2066}'..='\u{2069}' // LRI RLI FSI PDI
             | '\u{200E}' | '\u{200F}' // LRM RLM
+            | '\u{061C}' // ALM
     )
 }
 

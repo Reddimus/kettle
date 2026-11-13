@@ -2865,16 +2865,20 @@ pub(super) fn close_dialog_body(
 
 /// The name a close question shows for a program: `argv[0]`'s base name, cut
 /// at the first space or `:` (programs that rewrite `argv[0]`, such as
-/// `postgres: user db host idle`, put private detail after it), with control,
-/// bidirectional and zero-width characters gone, at most 32 columns. `None`
-/// when nothing visible is left. `argv[0]` is untrusted: the program sets it.
+/// `postgres: user db host idle`, put private detail after it), with control
+/// and bidirectional characters ending it, invisible ones gone, at most 64
+/// characters and 32 columns. `None` when nothing visible is left. `argv[0]`
+/// is untrusted: the program sets it.
 #[cfg(any(unix, test))]
 pub(super) fn close_program_label(argv0: &str) -> Option<String> {
+    // Enough for any real program name; a base character can otherwise
+    // carry hundreds of combining marks in one column.
+    const MAX_NAME_CHARS: usize = 64;
     let name = argv0.strip_prefix('-').unwrap_or(argv0);
     let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let name: String = super::title::sanitize_title(name)
         .chars()
-        .filter(|c| !matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}'))
+        .filter(|&c| !is_invisible_in_a_name(c))
         .collect();
     let name = name
         .split(|c: char| c.is_whitespace() || c == ':')
@@ -2884,7 +2888,51 @@ pub(super) fn close_program_label(argv0: &str) -> Option<String> {
     if crate::text_editor::display_width(name) == 0 {
         return None;
     }
-    Some(super::menus::ellipsize_menu_label(name, 32))
+    let mut capped: String = name.chars().take(MAX_NAME_CHARS).collect();
+    if capped.len() < name.len() {
+        capped.push('…');
+    }
+    Some(super::menus::ellipsize_menu_label(&capped, 32))
+}
+
+/// Characters that draw nothing in a program name, so a program could use
+/// them to hide or pad what the question shows: every
+/// Default_Ignorable_Code_Point (DerivedCoreProperties.txt) and format
+/// character (General_Category Cf) as of Unicode 16.0, and U+2800 BRAILLE
+/// PATTERN BLANK, which has width but no ink. The Hangul fillers U+115F,
+/// U+1160, U+3164 and U+FFA0 are blank with width too, and are
+/// default-ignorable.
+#[cfg(any(unix, test))]
+fn is_invisible_in_a_name(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x034F
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x2800
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF0..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
 }
 
 /// The program a busy lone pane would stop, by name, or `None` for a shell

@@ -880,6 +880,51 @@ fn close_program_label_keeps_only_a_safe_program_name() {
     }
 }
 
+/// A program cannot hide or pad its name with characters that draw nothing:
+/// every default-ignorable and format character goes, as do the blanks that
+/// take width (the Hangul fillers and the blank Braille pattern). U+061C, the
+/// Arabic letter mark, ends the name as the other bidirectional marks do.
+#[test]
+fn close_program_label_drops_every_invisible_character() {
+    let cases: [(&str, Option<&str>); 14] = [
+        ("evil\u{061C}gpj", Some("evil")),
+        ("a\u{3164}b", Some("ab")),
+        ("a\u{115F}\u{1160}b", Some("ab")),
+        ("a\u{FFA0}b", Some("ab")),
+        ("a\u{2800}\u{2800}b", Some("ab")),
+        ("a\u{00AD}b", Some("ab")),
+        ("a\u{034F}b", Some("ab")),
+        ("a\u{180E}b", Some("ab")),
+        ("a\u{2064}b", Some("ab")),
+        ("a\u{FFF9}b", Some("ab")),
+        ("a\u{13430}b", Some("ab")),
+        ("a\u{E0041}\u{E0100}b", Some("ab")),
+        ("\u{3164}\u{FFA0}\u{2800}", None),
+        ("\u{061C}", None),
+    ];
+    for (argv0, expected) in cases {
+        assert_eq!(
+            super::close_program_label(argv0).as_deref(),
+            expected,
+            "{argv0:?}"
+        );
+    }
+}
+
+/// A name is cut to 64 characters before it is fitted to 32 columns, so one
+/// base character cannot carry hundreds of combining marks into the dialog.
+#[test]
+fn close_program_label_caps_combining_marks() {
+    let stacked = format!("e{}", "\u{0301}".repeat(500));
+    let label = super::close_program_label(&stacked).expect("the base character is visible");
+    assert!(label.starts_with('e'), "{label:?}");
+    assert!(label.ends_with('…'), "a cut name says so: {label:?}");
+    assert!(label.chars().count() <= 65, "{} characters", label.chars().count());
+    // A real name is untouched by the cap.
+    let name = "x".repeat(30);
+    assert_eq!(super::close_program_label(&name).as_deref(), Some(name.as_str()));
+}
+
 /// The question never names a shell (an interactive one at its prompt or
 /// running integration's command), and never an argument.
 #[test]
