@@ -192,6 +192,7 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_read"
                         | "osc52_denied_write"
                         | "mouse_override_hint"
+                        | "font_size_chip"
                 )
         })
         .cloned()

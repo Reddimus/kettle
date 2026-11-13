@@ -518,6 +518,10 @@ pub struct Overlay {
     /// transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
+    /// What the size chip says instead of the bare `cols×rows`: kettle-ui
+    /// puts the translated font size and grid here after a font-size change.
+    /// The chip is sized from this same text.
+    pub resize_overlay_text: Option<String>,
     pub update_toast: Option<UpdateToastOverlay>,
     /// Persistent notices use the same painter and geometry as update toasts.
     pub notices: Vec<UpdateToastOverlay>,
@@ -531,6 +535,17 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    /// The size chip's text while it shows: `resize_overlay_text`, or the
+    /// grid as `cols×rows`.
+    pub(crate) fn visible_resize_label(&self) -> Option<String> {
+        let (cols, rows) = self.visible_resize_overlay()?;
+        Some(
+            self.resize_overlay_text
+                .clone()
+                .unwrap_or_else(|| format!("{cols}×{rows}")),
+        )
+    }
+
     pub(crate) fn visible_resize_overlay(&self) -> Option<(u16, u16)> {
         if self.settings.is_some()
             || self.palette_query.is_some()
@@ -1364,6 +1379,12 @@ pub struct TabBar {
     /// The pointer is over the shell-dropdown hit target immediately left of
     /// `+`. Kept separate so each half has an unambiguous hover response.
     pub hovered_new_tab_menu: bool,
+    /// The Settings button that leads the `▾ +` pair in a macOS title bar,
+    /// drawn as a gear. Zero-area `(0,0,0,0)` everywhere else, and in a lane
+    /// too narrow to keep a tab beside it; the renderer then draws nothing.
+    pub settings: Rect4,
+    pub hovered_settings: bool,
+    pub pressed_settings: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1439,6 +1460,9 @@ impl TabBar {
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            settings: (0.0, 0.0, 0.0, 0.0),
+            hovered_settings: false,
+            pressed_settings: false,
             broadcast: false,
             hovered_close_idx: None,
             hovered_tab_idx: None,

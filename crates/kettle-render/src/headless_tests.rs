@@ -5607,6 +5607,209 @@ fn tab_strip_legibility_at(font_size: f32) {
     }
 }
 
+/// The macOS title bar's Settings gear is drawn from quads, not a font, so
+/// it reads the same on every host: at 1x and 2x, in Night and Day, focused
+/// and unfocused, its ink meets the 3:1 icon floor against the strip (and
+/// the hover fill), stays whole inside its button, and lifts on hover. A
+/// zero rect draws nothing.
+#[test]
+fn titlebar_settings_gear_is_legible_and_inside_its_button() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("settings gear check skipped: no GPU adapter");
+                return;
+            };
+            let theme = cfg.theme.clone();
+            let strip = resolve_chrome_bg(&cfg, &theme, None);
+            let side = 32.0 * scale;
+            let mut tabs = TabBar::hidden();
+            tabs.height = side;
+            tabs.in_titlebar = true;
+            tabs.band = (78.0 * scale, 0.0, w as f32 - 78.0 * scale, side);
+            let plus_x = w as f32 - 8.0 * scale - side;
+            tabs.new_tab = (plus_x, 0.0, side, side);
+            tabs.new_tab_menu = (plus_x - 4.0 * scale - side, 0.0, side, side);
+            let gear = (tabs.new_tab_menu.0 - 8.0 * scale - side, 0.0, side, side);
+            let snap = snapshot_of(20, 2, b"");
+            for (window_focused, hovered, present) in [
+                (true, false, true),
+                (false, false, true),
+                (true, true, true),
+                (true, false, false),
+            ] {
+                tabs.settings = if present { gear } else { (0.0, 0.0, 0.0, 0.0) };
+                tabs.hovered_settings = hovered && present;
+                let overlay = Overlay {
+                    window_focused,
+                    ..Overlay::default()
+                };
+                let mut terminal = pane(&snap, w, h);
+                terminal.rect = (0.0, side, w as f32, h as f32 - side);
+                terminal.terminal = terminal.rect;
+                let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+                let case = format!(
+                    "{theme_name} @{scale}x focused={window_focused} hovered={hovered} \
+                     present={present}"
+                );
+                if !present {
+                    assert_eq!(glyph_ink(&frame, gear, strip), None, "{case}: drew a gear");
+                    continue;
+                }
+                let mut colors = chrome::Colors::default();
+                let (background, ink) = if hovered {
+                    let fill = chrome::tab_detail(strip, theme.foreground, false);
+                    let accent = renderer.ui_accent(&cfg, &theme);
+                    (fill, colors.tab_text(accent, fill, window_focused))
+                } else {
+                    (
+                        strip,
+                        colors.tab_text(theme.foreground, strip, window_focused),
+                    )
+                };
+                let floor = if window_focused {
+                    chrome::TEXT_CONTRAST
+                } else {
+                    chrome::ICON_CONTRAST
+                };
+                // The hover fill is a rounded square: judge the ink on its
+                // flat middle.
+                let middle = (
+                    gear.0 + 6.0 * scale,
+                    gear.1 + 6.0 * scale,
+                    gear.2 - 12.0 * scale,
+                    gear.3 - 12.0 * scale,
+                );
+                assert_glyph_painted(&frame, middle, (background, ink), floor, &case);
+                let (x, y, iw, ih) =
+                    glyph_ink(&frame, middle, background).unwrap_or_else(|| panic!("{case}"));
+                assert!(
+                    iw >= 12.0 * scale && ih >= 12.0 * scale,
+                    "{case}: gear ink {iw}x{ih} is too small to read"
+                );
+                assert!(
+                    x >= gear.0 + 2.0
+                        && y >= gear.1 + 2.0
+                        && x + iw <= gear.0 + gear.2 - 2.0
+                        && y + ih <= gear.1 + gear.3 - 2.0,
+                    "{case}: gear ink {:?} reaches the edge of {gear:?}",
+                    (x, y, iw, ih)
+                );
+                if hovered {
+                    // The fill shows at the button's corner-free edge.
+                    let p = frame.get_pixel((gear.0 + gear.2 * 0.5) as u32, (gear.1 + 1.0) as u32);
+                    assert_ne!(
+                        Rgb::new(p[0], p[1], p[2]),
+                        strip,
+                        "{case}: no hover fill behind the gear"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The size chip is sized from the text it shows, so a font-size caption
+/// ("Font size 14 · 80×24") sits whole inside its outline instead of in a
+/// chip sized for the bare grid.
+#[test]
+fn resize_chip_fits_a_font_size_caption() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 200) else {
+        eprintln!("resize chip caption check skipped: no GPU adapter");
+        return;
+    };
+    let snap = snapshot_of(40, 8, b"");
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    // The chip's outline across its top edge: its left and right ends.
+    let outline = |frame: &image::RgbaImage| {
+        (0..frame.height())
+            .find_map(|y| {
+                let xs: Vec<u32> = (0..frame.width())
+                    .filter(|&x| {
+                        let p = frame.get_pixel(x, y);
+                        Rgb::new(p[0], p[1], p[2]) == accent
+                    })
+                    .collect();
+                (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+            })
+            .expect("the chip's outline")
+    };
+    for caption in ["Font size 14 · 80×24", "Tamaño de fuente 14 · 80×24"] {
+        let overlay = Overlay {
+            resize_overlay: Some((80, 24)),
+            resize_overlay_text: Some(caption.into()),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 200)], &overlay);
+        let (left, right) = outline(&frame);
+        let text = caption.chars().count() as f32 * renderer.cell_w;
+        assert!(
+            (right - left) as f32 >= text,
+            "{caption}: chip {left}..{right} is narrower than its {text} px text"
+        );
+        assert_eq!(renderer.resize_overlay_text, caption);
+    }
+}
+
+/// At a large font in a small window a caption wider than the window is
+/// drawn smaller, on one line, whole inside a chip inside the window.
+#[test]
+fn resize_chip_caption_fits_a_narrow_window_at_a_large_font() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 48.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 240, 1.0, false).unwrap()
+    else {
+        eprintln!("resize chip fit check skipped: no GPU adapter");
+        return;
+    };
+    let caption = "Tamaño de fuente 48 · 7×3";
+    let snap = snapshot_of(7, 3, b"");
+    let overlay = Overlay {
+        resize_overlay: Some((7, 3)),
+        resize_overlay_text: Some(caption.into()),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 240)], &overlay);
+    assert_eq!(
+        renderer.resize_overlay_buffer.layout_runs().count(),
+        1,
+        "the caption wrapped"
+    );
+    let width = renderer
+        .resize_overlay_buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        width + 56.0 <= 480.5,
+        "caption {width} px does not fit 480 px"
+    );
+    // The outline's left and right edges are both on screen.
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    let edges = (0..frame.height()).find_map(|y| {
+        let xs: Vec<u32> = (0..frame.width())
+            .filter(|&x| {
+                let p = frame.get_pixel(x, y);
+                Rgb::new(p[0], p[1], p[2]) == accent
+            })
+            .collect();
+        (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+    });
+    let (left, right) = edges.expect("the chip's outline");
+    assert!(
+        left >= 10 && right <= 470,
+        "chip {left}..{right} reaches the window edge"
+    );
+}
+
 /// A side bar draws its tabs' close glyph from the same enlarged buffer as a
 /// top bar, so it grew too. At the default font and a large one the `✕`
 /// must stay inside the chip that shows the button (its square less 5 px a

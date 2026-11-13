@@ -34,6 +34,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   group. The checkmark also follows a group scope that ends because its last
   pane closed.
 
+- On macOS, the title bar shows a Settings gear before the new-tab `▾ +`
+  buttons, so Settings is one click away in every window. Clicking it opens
+  Settings, as Cmd+, does; its tooltip names whichever key opens Settings,
+  and screen readers call it Settings (Configuración in Spanish). The gear
+  sits apart from `▾ +`, which do not move, and it hides only when the
+  window is too narrow to keep a tab beside it. A lone tab stays centred
+  on the window beside it, narrowing in a narrow window. Windows and Linux keep
+  Settings in their `▾` and `≡` menus.
+
+- Making the font larger or smaller, or resetting it, from the keyboard,
+  the menus or Ctrl+scroll shows the new size and the grid it leaves, such
+  as "Font size 14 · 80×24", in the middle of the window for a moment, the
+  way a window resize shows its size. Screen readers announce the same
+  text. `resize-overlay = never` turns it off along with the resize chip.
+
 - Vi mode can select whole lines and blocks from the keyboard, as Vim does:
   `V` starts a line selection and `Ctrl+v` a block (rectangular) selection
   at the vi cursor, beside `v` for characters. Pressing another of the three
@@ -269,6 +284,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The profile menu is now called New Window with Profile (Nueva ventana con
   perfil), since each profile has always opened in a new window. In the
   macOS Shell menu it sits right below New Window.
+
+- The size chip a window resize shows (`120×40`) is now as wide as its drawn
+  text, measured from the same text it paints, rather than from a count of
+  grid cells. That lets it fit the font size caption, and on any platform the
+  plain `cols×rows` chip may be a pixel wider or narrower than before.
 
 - When a window loses focus its selection turns a neutral grey, as a
   selection in an inactive macOS window does, instead of a dimmer shade of
@@ -520,6 +540,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On macOS, title-bar buttons no longer drag the window. AppKit moved the
+  window with any press in the title bar, so a press on the Settings gear,
+  `▾`, `+` or a tab's close button that was dragged off came back over the
+  button with the window, and a release there opened Settings. Dragging a
+  tab in a window with several tabs moved the window too, instead of
+  reordering the tab or tearing it off. Empty title-bar space and a lone
+  tab still move the window, and a double-click on empty space still zooms
 
 - A link no longer draws its hover underline across text you have selected.
   While a selection is being dragged, the links it passes over show no

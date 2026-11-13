@@ -162,6 +162,9 @@ pub(crate) fn activity_marker_quads(
 
 /// Anchor to the actual control while keeping tooltips outside the header.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    if bar.hovered_settings && !bar.pressed_settings && bar.settings.2 > 0.0 {
+        return (bar.settings.0, bar.band.1, bar.settings.2, bar.band.3);
+    }
     bar.window_controls
         .iter()
         .find(|b| b.hovered && !b.pressed)
@@ -354,6 +357,112 @@ pub(crate) fn horizontal_tab_quads(
     HorizontalTabQuads {
         chrome: band,
         surface,
+    }
+}
+
+/// Side of the Settings gear's ink box at 1x, in pixels.
+const GEAR_SIDE: f32 = 14.0;
+
+/// Coverage of a gear `side` pixels square, row by row, 0..=255. Drawn
+/// rather than shaped: U+2699 can fall back to a colour emoji and its weight
+/// depends on the installed fonts. A ring of eight square teeth around a
+/// hole; the ring is wide enough at 1x to hold fully covered pixels.
+pub(crate) fn gear_mask(side: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let s = side as f32;
+    let (outer, body, hole, half_tooth) = (0.48 * s, 0.32 * s, 0.19 * s, 0.105 * s);
+    let centre = s * 0.5;
+    let inside = |x: f32, y: f32| {
+        let (dx, dy) = (x - centre, y - centre);
+        let r = dx.hypot(dy);
+        if r < hole || r > outer {
+            return false;
+        }
+        if r <= body {
+            return true;
+        }
+        // Distance from the nearest tooth's centre line, at 0, 45, 90... deg.
+        let step = std::f32::consts::FRAC_PI_4;
+        let angle = dy.atan2(dx);
+        let off = angle - (angle / step).round() * step;
+        r * off.sin().abs() <= half_tooth
+    };
+    let mut mask = Vec::with_capacity((side * side) as usize);
+    for py in 0..side {
+        for px in 0..side {
+            let mut hits = 0;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                    hits += u32::from(inside(x, y));
+                }
+            }
+            mask.push((hits * 255 / (SAMPLES * SAMPLES)) as u8);
+        }
+    }
+    mask
+}
+
+/// A gear's coverage for one side length, kept between frames.
+#[derive(Default)]
+pub(crate) struct GearMask {
+    side: u32,
+    mask: Vec<u8>,
+}
+
+impl GearMask {
+    fn get(&mut self, side: u32) -> &[u8] {
+        if self.side != side || self.mask.is_empty() {
+            self.mask = gear_mask(side);
+            self.side = side;
+        }
+        &self.mask
+    }
+}
+
+/// The Settings gear in `ink`, centred in `button` and snapped to whole
+/// pixels, as one quad per run of equal coverage. Nothing for a zero rect.
+pub(crate) fn push_settings_gear(
+    quads: &mut Vec<QuadInstance>,
+    button: Rect4,
+    ink: Rgb,
+    scale: f32,
+    cache: &mut GearMask,
+) {
+    let (x, y, w, h) = button;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    // An even side keeps the centre on a pixel corner, so the four
+    // axis-aligned teeth cover whole pixels.
+    let side = ((GEAR_SIDE * scale.max(0.5)).min(w.min(h) - 4.0) * 0.5).floor() * 2.0;
+    if side < 8.0 {
+        return;
+    }
+    let left = (x + (w - side) * 0.5).round();
+    let top = (y + (h - side) * 0.5).round();
+    let n = side as u32;
+    for (row, line) in cache.get(n).chunks(n as usize).enumerate() {
+        let mut start = 0;
+        while start < line.len() {
+            let coverage = line[start];
+            let mut end = start + 1;
+            while end < line.len() && line[end] == coverage {
+                end += 1;
+            }
+            if coverage > 0 {
+                quads.push(rect(
+                    left + start as f32,
+                    top + row as f32,
+                    (end - start) as f32,
+                    1.0,
+                    ink,
+                    f32::from(coverage) / 255.0,
+                ));
+            }
+            start = end;
+        }
     }
 }
 
@@ -1468,6 +1577,53 @@ mod window_control_tests {
                 bar.window_controls[0].hovered = false;
                 assert_eq!(tooltip_anchor(&bar), bar.band);
             }
+        }
+    }
+
+    #[test]
+    fn settings_gear_mask_is_kept_per_side_length() {
+        let mut cache = GearMask::default();
+        assert_eq!(cache.get(16), gear_mask(16).as_slice());
+        let first = cache.mask.as_ptr();
+        cache.get(16);
+        assert_eq!(cache.mask.as_ptr(), first, "re-rasterized at the same side");
+        assert_eq!(cache.get(32).len(), 32 * 32);
+        assert_eq!(cache.side, 32);
+    }
+
+    #[test]
+    fn settings_gear_tooltip_hangs_under_the_gear_inside_the_window() {
+        for scale in [1.0, 2.0] {
+            let width = 640.0 * scale;
+            let mut bar = TabBar::hidden();
+            bar.band = (78.0 * scale, 0.0, width - 78.0 * scale, 32.0 * scale);
+            let gear = (width - 124.0 * scale, 0.0, 32.0 * scale, 32.0 * scale);
+            bar.settings = gear;
+            bar.hovered_settings = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (gear.0, 0.0, gear.2, bar.band.3));
+            for text in [80.0, 900.0] {
+                let bounds = tooltip_rect(
+                    anchor,
+                    (width, 400.0 * scale),
+                    (text * scale, 20.0 * scale),
+                    scale,
+                );
+                assert!(
+                    bounds.0 >= 0.0 && bounds.0 + bounds.2 <= width,
+                    "{bounds:?}"
+                );
+                assert_eq!(bounds.1, 36.0 * scale);
+                if text < 100.0 {
+                    // Ends under the gear, not at the window's far edge.
+                    assert!(bounds.0 + bounds.2 <= gear.0 + gear.2);
+                }
+            }
+            bar.pressed_settings = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_settings = false;
+            bar.settings = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(tooltip_anchor(&bar), bar.band);
         }
     }
 

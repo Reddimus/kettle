@@ -103,6 +103,8 @@ use labels::{
 };
 /// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
 pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
+/// Space around the size chip's text, in pixels.
+const RESIZE_CHIP_PAD: f32 = 14.0;
 /// Size of a tab's close `×` relative to its title.
 pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
@@ -641,6 +643,9 @@ pub struct Renderer {
     new_tab_arrow_buffer: TextBuffer,
     tab_tooltip_buffer: TextBuffer,
     tab_tooltip_text: String,
+    /// The Settings gear's coverage at its last side length, so a frame
+    /// reuses it instead of rasterizing the gear again.
+    settings_gear_mask: tab_strip::GearMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -1559,8 +1564,13 @@ impl Renderer {
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
                     ),
+                    (
+                        tabbar.settings,
+                        tabbar.hovered_settings,
+                        tabbar.pressed_settings,
+                    ),
                 ] {
-                    if hovered {
+                    if hovered && bounds.2 > 0.0 {
                         let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
@@ -1571,6 +1581,33 @@ impl Renderer {
                             None,
                         );
                     }
+                }
+                // The Settings gear is drawn, not shaped, in the `▾`'s ink:
+                // the accent while hovered, and never under 3:1 in an
+                // unfocused window.
+                if tabbar.settings.2 > 0.0 {
+                    let (ink, background) = if tabbar.hovered_settings {
+                        (
+                            accent,
+                            chrome::strip_hover(
+                                chrome_strip_bg,
+                                theme.foreground,
+                                tabbar.pressed_settings,
+                            ),
+                        )
+                    } else {
+                        (theme.foreground, chrome_strip_bg)
+                    };
+                    let ink = self
+                        .chrome_colors
+                        .tab_text(ink, background, overlay.window_focused);
+                    tab_strip::push_settings_gear(
+                        &mut quads,
+                        tabbar.settings,
+                        ink,
+                        self.scale,
+                        &mut self.settings_gear_mask,
+                    );
                 }
             }
             // Drag-in-progress ghost. While the user holds a
@@ -2776,15 +2813,15 @@ impl Renderer {
         // text ("120×40"). Drawn later in the menu pass so it sits above pane
         // content; the equality gate means a live resize only re-shapes when
         // the GRID size actually changed.
-        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
-            let label = format!("{rcols}×{rrows}");
+        if let Some(label) = overlay.visible_resize_label() {
             // Metrics/size stay OUTSIDE the text gate: a DPI change can re-show
             // the chip with an UNCHANGED label, and gating them would leave the
             // glyphs shaped at the old monitor's scale. Both calls early-out
             // when unchanged, like the other chrome buffers.
             self.resize_overlay_buffer.set_metrics(metrics);
-            self.resize_overlay_buffer
-                .set_size(Some(sw), Some(ch * 2.0));
+            // One line, never wrapped: a caption wider than the window at a
+            // large font is drawn smaller instead (below).
+            self.resize_overlay_buffer.set_size(None, Some(ch * 2.0));
             if self.resize_overlay_text != label {
                 self.resize_overlay_buffer.set_text(
                     &label,
@@ -2796,6 +2833,23 @@ impl Renderer {
             }
             self.resize_overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+            let width = self
+                .resize_overlay_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            // The chip's padding inside, and as much again to the window edge.
+            let room = (sw - 4.0 * RESIZE_CHIP_PAD).max(1.0);
+            if width > room {
+                let fit = room / width;
+                self.resize_overlay_buffer
+                    .set_metrics(glyphon::Metrics::new(
+                        metrics.font_size * fit,
+                        metrics.line_height * fit,
+                    ));
+                self.resize_overlay_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
@@ -3526,11 +3580,20 @@ impl Renderer {
         }
         // Ghostty parity: the transient resize chip, centered and drawn in the
         // menu pass (last) so it reads over any pane content.
-        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
-            let label_cells = format!("{rcols}×{rrows}").chars().count() as f32;
-            let pad = 14.0_f32;
-            let chip_w = label_cells * cw + pad * 2.0;
-            let chip_h = ch + pad;
+        if overlay.visible_resize_overlay().is_some() {
+            // Sized from the text shaped above, which may be a translated
+            // font-size caption rather than `cols×rows`.
+            let label_w = self
+                .resize_overlay_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max)
+                .max(cw);
+            let pad = RESIZE_CHIP_PAD;
+            let chip_w = (label_w.ceil() + pad * 2.0).min(sw);
+            // A caption drawn smaller to fit gets a chip as much shorter.
+            let fit = (self.resize_overlay_buffer.metrics().font_size / metrics.font_size).min(1.0);
+            let chip_h = ch * fit + pad;
             let cx = (sw - chip_w) / 2.0;
             let cy = (sh - chip_h) / 2.0;
             menu_q.push(rect(cx, cy, chip_w, chip_h, theme.palette[0], 0.92));

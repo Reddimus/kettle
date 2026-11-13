@@ -33,6 +33,48 @@ pub(super) fn should_zoom_font(ctrl: bool, notches: i32, disabled: bool) -> Opti
 #[allow(dead_code)] // doc-only reference + layout-helper test fixture; production uses cfg.tab_bar_width
 pub const VERTICAL_TAB_STRIP_W: f32 = 180.0;
 
+/// Whether a font-size change shows the size chip: always, unless the user
+/// turned the chip off. `after-first` only skips the window's first
+/// placement, which a font change never is.
+pub(super) fn font_size_chip_shown(mode: kettle_config::ResizeOverlayMode) -> bool {
+    mode != kettle_config::ResizeOverlayMode::Never
+}
+
+/// The size chip's text after a font-size change, such as "Font size 14 ·
+/// 80×24". The size is written as a person would: whole sizes without a
+/// decimal separator, others to one decimal place with the language's
+/// separator ("13.5", "13,5"). Settings shows the configured size rounded
+/// to whole pixels, so it has no separator to match.
+pub(super) fn font_size_chip_label(
+    tr: &kettle_i18n::Translator,
+    size: f32,
+    (cols, rows): (usize, usize),
+) -> String {
+    let size = (size * 10.0).round() / 10.0;
+    tr.font_size_chip(&tr.decimal(size), cols as u64, rows as u64)
+}
+
+/// After a font-size change the user asked for, the size chip names the new
+/// size and the grid it leaves, `sized` as `(size, (cols, rows))`, unless
+/// `resize-overlay = never` or there is no renderer to size. Screen readers
+/// hear the same text.
+pub(super) fn font_size_chip(
+    ws: &mut WindowState,
+    (mode, tr): (kettle_config::ResizeOverlayMode, &kettle_i18n::Translator),
+    sized: Option<(f32, (usize, usize))>,
+    now: std::time::Instant,
+) {
+    let Some((size, (cols, rows))) = sized else {
+        return;
+    };
+    if !font_size_chip_shown(mode) {
+        return;
+    }
+    ws.resize_overlay = Some((cols as u16, rows as u16, now));
+    ws.resize_overlay_label = Some(font_size_chip_label(tr, size, (cols, rows)));
+    ws.accessibility_pending = true;
+}
+
 /// The tab bar's band: where it draws and where a dragged tab docks. A bottom
 /// bar sits above the search bar and a bottom status bar. A side strip excludes
 /// search and status bands, so the docking target matches what is painted.
@@ -563,7 +605,23 @@ impl App {
         if show_chip {
             let (cols, rows) = self.grid_of(ws, self.area(ws));
             ws.resize_overlay = Some((cols as u16, rows as u16, std::time::Instant::now()));
+            ws.resize_overlay_label = None;
         }
+    }
+
+    /// After a font-size change the user asked for, from a key, a menu or
+    /// Ctrl+wheel; see `font_size_chip`. The renderer already measures
+    /// cells at the new size, so the grid is the one the panes are about to
+    /// take.
+    pub(super) fn show_font_size_chip(&mut self, ws: &mut WindowState) {
+        let size = ws.renderer.as_ref().map(|r| r.font_size());
+        let sized = size.map(|size| (size, self.grid_of(ws, self.area(ws))));
+        font_size_chip(
+            ws,
+            (self.cfg.resize_overlay, &self.ui_text),
+            sized,
+            std::time::Instant::now(),
+        );
     }
 
     pub(super) fn commit_window_resize(&mut self, ws: &mut WindowState, width: u32, height: u32) {

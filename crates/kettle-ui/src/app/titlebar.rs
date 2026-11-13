@@ -62,6 +62,7 @@ pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
         && ![
             bar.new_tab,
             bar.new_tab_menu,
+            bar.settings,
             bar.scroll_left,
             bar.scroll_right,
         ]
@@ -69,7 +70,115 @@ pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
         .any(|r| rect_contains(r, x, y))
 }
 
+/// Whether `(x, y)` is on something in the title-bar strip that a press acts
+/// on: the gear, `▾`, `+`, an overflow arrow, a tab's close button, or a tab
+/// when there are several. A lone tab stands for the window's title, so like
+/// empty strip space and the traffic lights' corner it moves the window.
+pub(super) fn titlebar_control_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    if !rect_contains(bar.band, x, y) || empty_titlebar_space(bar, x, y) {
+        return false;
+    }
+    bar.segments
+        .iter()
+        .find(|s| rect_contains(s.rect, x, y))
+        .is_none_or(|s| bar.segments.len() > 1 || rect_contains(s.close, x, y))
+}
+
+/// A pointer event as the title bar's hold on the window sees it. Points
+/// are in the window, in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum TitlebarPointer {
+    /// Pointer motion, with or without a press.
+    Move(f32, f32),
+    /// A primary press.
+    Press(f32, f32),
+    /// A primary release, or focus loss, after which a release may never come.
+    Release(f32, f32),
+    /// The pointer left the window.
+    Leave,
+}
+
+/// Whether the primary button is down, and whether AppKit may move the
+/// window, after a title-bar pointer event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TitlebarHold {
+    pub pressed: bool,
+    pub movable: bool,
+}
+
+/// The window's title-bar hold after `event`, from the hold before it.
+/// `on_control` says whether a point is on a title-bar control
+/// (`titlebar_control_at`).
+///
+/// With title-bar tabs, AppKit moves the window when a press anywhere in its
+/// title bar is dragged, and it decides so before Kettle sees the press. So
+/// the window is held still while the pointer is over a control, and stays
+/// held from a press there until the press ends: a press dragged off a
+/// control and released neither moves the window nor lands back on the
+/// control. A press elsewhere frees it, so empty space drags as before.
+pub(super) fn titlebar_hold_after(
+    hold: TitlebarHold,
+    event: TitlebarPointer,
+    on_control: impl FnOnce(f32, f32) -> bool,
+) -> TitlebarHold {
+    match event {
+        // A held press keeps the hold its start set, wherever it goes.
+        TitlebarPointer::Move(..) if hold.pressed => hold,
+        TitlebarPointer::Move(x, y) | TitlebarPointer::Release(x, y) => TitlebarHold {
+            pressed: false,
+            movable: !on_control(x, y),
+        },
+        TitlebarPointer::Press(x, y) => TitlebarHold {
+            pressed: true,
+            movable: !on_control(x, y),
+        },
+        TitlebarPointer::Leave => TitlebarHold {
+            pressed: false,
+            movable: true,
+        },
+    }
+}
+
 impl App {
+    /// Follow the pointer for the title bar's hold on the window; see
+    /// `titlebar_hold_after`. Only macOS title-bar tabs are held: only
+    /// AppKit drags the window on its own.
+    pub(super) fn track_titlebar_pointer(&self, ws: &mut WindowState, event: TitlebarPointer) {
+        let tabs = cfg!(target_os = "macos") && ws.macos_titlebar_tabs && !ws.linux_titlebar;
+        let hold = TitlebarHold {
+            pressed: ws.titlebar_pressed,
+            movable: !ws.titlebar_window_held,
+        };
+        let next = titlebar_hold_after(hold, event, |x, y| {
+            tabs && Self::macos_titlebar_band(ws).is_some_and(|band| y < band.height)
+                && titlebar_control_at(&self.tab_bar(ws), x, y)
+        });
+        ws.titlebar_pressed = next.pressed;
+        if ws.titlebar_window_held != next.movable {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(window) = &ws.window {
+            // Only a hold Kettle made is undone: a window that was already
+            // unmovable, as in simple fullscreen, stays as it was.
+            ws.titlebar_window_held = native::set_movable(window, next.movable) && !next.movable;
+            return;
+        }
+        ws.titlebar_window_held = false;
+    }
+
+    /// A pointer that enters the window brings no motion of its own until it
+    /// moves again. Read where it is, so a press that follows at once over a
+    /// title-bar control still finds the window held.
+    pub(super) fn track_titlebar_entry(&self, ws: &mut WindowState) {
+        #[cfg(target_os = "macos")]
+        if let Some((x, y)) = ws.window.as_deref().and_then(native::pointer_position) {
+            self.track_titlebar_pointer(ws, TitlebarPointer::Move(x, y));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = ws;
+    }
+
     /// Reconcile estimated startup chrome while the new window is still hidden.
     pub(super) fn correct_startup_titlebar_size(
         &self,
@@ -122,6 +231,10 @@ impl App {
                 && macos_titlebar_policy(&self.cfg) == MacosTitlebarPolicy::Tabs;
             native::set_tabs(window, tabs);
             ws.macos_titlebar_tabs = tabs;
+            if !tabs {
+                // A plain title bar has no controls to hold the window for.
+                self.track_titlebar_pointer(ws, TitlebarPointer::Leave);
+            }
         }
         #[cfg(target_os = "linux")]
         if let Some(window) = &ws.window {
@@ -178,6 +291,27 @@ impl App {
             },
             |band| band.height,
         )
+    }
+
+    /// Arm the title bar's Settings gear when Settings is open and the
+    /// press is on it; see `settings_gear_takes_press_over_settings`.
+    pub(super) fn press_settings_gear_over_settings(
+        &self,
+        ws: &mut WindowState,
+        bcode: u8,
+    ) -> bool {
+        // Only open Settings can take the press; skip laying out the strip.
+        if ws.settings_nav.is_none() {
+            return false;
+        }
+        let bar = self.tab_bar(ws);
+        if !arm_settings_gear_over_settings(ws, &bar, bcode) {
+            return false;
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
     }
 
     pub(super) fn press_titlebar_space(
@@ -315,6 +449,32 @@ mod native {
         )
     }
 
+    /// Make the window movable by the user or not. Returns whether this
+    /// changed it.
+    pub(super) fn set_movable(window: &Window, movable: bool) -> bool {
+        with_window(window, |native, _| {
+            // SAFETY: A read-only AppKit query on a live main-thread window.
+            if unsafe { native.isMovable() } == movable {
+                return false;
+            }
+            native.setMovable(movable);
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// Where the pointer is in the window's view, in physical pixels.
+    pub(super) fn pointer_position(window: &Window) -> Option<(f32, f32)> {
+        let scale = window.scale_factor();
+        with_window(window, |native, view| {
+            // SAFETY: A read-only AppKit query on a live main-thread window.
+            let location = unsafe { native.mouseLocationOutsideOfEventStream() };
+            // The view is flipped, as winit's pointer events assume.
+            let point = view.convertPoint_fromView(location, None);
+            ((point.x * scale) as f32, (point.y * scale) as f32)
+        })
+    }
+
     pub(super) fn double_click_interval() -> f64 {
         // SAFETY: This is a read-only AppKit query on the event loop's main thread.
         unsafe { objc2_app_kit::NSEvent::doubleClickInterval() }
@@ -445,6 +605,126 @@ mod tests {
                 assert!(narrow.hint.is_none());
             }
         }
+    }
+
+    fn titlebar_strip(tabs: usize) -> TabBar {
+        let mut bar = TabBar::hidden();
+        bar.height = 28.0;
+        bar.band = (78.0, 0.0, 722.0, 28.0);
+        bar.settings = (708.0, 0.0, 28.0, 28.0);
+        bar.new_tab_menu = (744.0, 0.0, 28.0, 28.0);
+        bar.new_tab = (772.0, 0.0, 28.0, 28.0);
+        for idx in 0..tabs {
+            let x = 240.0 + 200.0 * idx as f32;
+            bar.segments.push(kettle_render::TabSeg {
+                idx,
+                rect: (x, 0.0, 200.0, 28.0),
+                title_rect: (x + 10.0, 0.0, 160.0, 28.0),
+                // Only the hovered tab shows its close button.
+                close: if idx == 0 {
+                    (x + 172.0, 0.0, 28.0, 28.0)
+                } else {
+                    (x + 200.0, 0.0, 0.0, 0.0)
+                },
+                title: "shell".into(),
+                path: None,
+                hint: None,
+                active: idx == 0,
+                activity: RenderTabActivity::Normal,
+            });
+        }
+        bar
+    }
+
+    fn after(bar: &TabBar, hold: TitlebarHold, event: TitlebarPointer) -> TitlebarHold {
+        titlebar_hold_after(hold, event, |x, y| titlebar_control_at(bar, x, y))
+    }
+
+    const FREE: TitlebarHold = TitlebarHold {
+        pressed: false,
+        movable: true,
+    };
+
+    #[test]
+    fn titlebar_control_press_dragged_off_and_released_never_moves_the_window() {
+        let bar = titlebar_strip(1);
+        // The gear, the new-tab menu arrow, `+`, and the lone tab's close button.
+        for (x, y) in [(720.0, 14.0), (758.0, 14.0), (786.0, 14.0), (420.0, 14.0)] {
+            assert!(titlebar_control_at(&bar, x, y), "x={x}");
+            let hover = after(&bar, FREE, TitlebarPointer::Move(x, y));
+            assert!(!hover.movable, "hovering x={x} holds the window");
+            let press = after(&bar, hover, TitlebarPointer::Press(x, y));
+            assert_eq!(
+                press,
+                TitlebarHold {
+                    pressed: true,
+                    movable: false
+                }
+            );
+            // Dragged off the control, onto empty space or the terminal, and
+            // past the window's edge: still held.
+            let mut drag = press;
+            for (dx, dy) in [(150.0, 14.0), (x, 150.0), (x - 150.0, 14.0), (900.0, -40.0)] {
+                drag = after(&bar, drag, TitlebarPointer::Move(dx, dy));
+                assert_eq!(drag, press, "x={x} dragged to ({dx}, {dy})");
+            }
+            assert_eq!(after(&bar, drag, TitlebarPointer::Release(x, 150.0)), FREE);
+            // Released back over the control, it stays held for the next press.
+            assert_eq!(
+                after(&bar, drag, TitlebarPointer::Release(x, y)),
+                TitlebarHold {
+                    pressed: false,
+                    movable: false
+                }
+            );
+            assert_eq!(after(&bar, drag, TitlebarPointer::Leave), FREE);
+            assert_eq!(after(&bar, hover, TitlebarPointer::Leave), FREE);
+            // A press with no hover before it holds the window from then on.
+            assert!(!after(&bar, FREE, TitlebarPointer::Press(x, y)).movable);
+        }
+    }
+
+    #[test]
+    fn titlebar_empty_space_and_a_lone_tab_still_move_the_window() {
+        let bar = titlebar_strip(1);
+        let held = TitlebarHold {
+            pressed: false,
+            movable: false,
+        };
+        // Empty space left of the tab, between it and the gear, beside the
+        // gear, the traffic lights' corner, the lone tab's title, and the
+        // terminal below the strip.
+        for (x, y) in [
+            (100.0, 14.0),
+            (600.0, 14.0),
+            (740.0, 14.0),
+            (40.0, 14.0),
+            (300.0, 14.0),
+            (720.0, 40.0),
+        ] {
+            assert!(!titlebar_control_at(&bar, x, y), "x={x} y={y}");
+            assert_eq!(after(&bar, held, TitlebarPointer::Move(x, y)), FREE);
+            // A press here frees a window still held from an earlier hover.
+            let press = after(&bar, held, TitlebarPointer::Press(x, y));
+            assert!(press.pressed && press.movable, "x={x} y={y}");
+            // The window then follows the pointer over a control unheld.
+            assert_eq!(
+                after(&bar, press, TitlebarPointer::Move(720.0, 14.0)),
+                press
+            );
+        }
+    }
+
+    #[test]
+    fn titlebar_tabs_hold_the_window_once_there_are_several() {
+        let bar = titlebar_strip(2);
+        // Either tab's body and the hovered tab's close button: a press
+        // reorders or tears off the tab instead.
+        for x in [300.0, 420.0, 500.0, 620.0] {
+            assert!(titlebar_control_at(&bar, x, 14.0), "x={x}");
+            assert!(!after(&bar, FREE, TitlebarPointer::Press(x, 14.0)).movable);
+        }
+        assert!(!titlebar_control_at(&bar, 660.0, 14.0));
     }
 
     #[test]

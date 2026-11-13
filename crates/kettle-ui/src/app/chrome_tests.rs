@@ -1020,3 +1020,585 @@ fn tab_hints_follow_the_go_to_tab_bindings_on_every_platform() {
     custom.retain(|_, bound| *bound != Action::GotoTab(2));
     assert!(super::chrome::tab_goto_hint(&custom, 2).is_none());
 }
+
+/// A macOS title bar, `width` logical px wide at `scale`, with its lane
+/// starting after the traffic lights.
+fn macos_titlebar_lane(width: f32, scale: f32) -> kettle_render::Rect4 {
+    (78.0 * scale, 0.0, (width - 78.0) * scale, 32.0 * scale)
+}
+
+/// The macOS title bar gains a Settings gear that leads `▾ +` by a gap
+/// wider than theirs; `▾` and `+` stay exactly where a strip without it
+/// puts them, and no other strip gets one.
+#[test]
+fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
+    use super::chrome::{HorizontalTabGeometry, horizontal_tab_geometry};
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 2.0] {
+        // 400 pt stands in for the narrow window C03 asks about; the
+        // panel harness never sized one.
+        for width in [400.0, 640.0, 1280.0] {
+            let lane = macos_titlebar_lane(width, scale);
+            for tabs in [1, 3, 20] {
+                let HorizontalTabGeometry {
+                    arrow_rect,
+                    plus_rect,
+                    settings_rect,
+                    layout,
+                    ..
+                } = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
+                let (menu, plus, _) = super::horizontal_new_tab_controls(lane, scale, true);
+                assert_eq!((arrow_rect, plus_rect), (menu, plus), "▾ + moved");
+                let case = format!("{width}px @{scale}x, {tabs} tabs");
+                assert!(settings_rect.2 > 0.0, "{case}: no gear");
+                assert_eq!((settings_rect.2, settings_rect.3), (menu.2, menu.3), "{case}");
+                assert_eq!(settings_rect.1, menu.1, "{case}");
+                let gap = menu.0 - (settings_rect.0 + settings_rect.2);
+                assert!(gap >= 8.0 * scale - 0.01, "{case}: gap {gap}");
+                assert!(
+                    settings_rect.0 >= lane.0 && settings_rect.1 >= lane.1,
+                    "{case}: gear outside the band"
+                );
+                assert!(settings_rect.1 + settings_rect.3 <= lane.1 + lane.3 + 0.01);
+                // The tabs give the gear its room: none reaches under it.
+                for (i, x) in layout.xs.iter().enumerate() {
+                    let Some(x) = x else { continue };
+                    let w = if i + 1 == tabs {
+                        layout.last_width
+                    } else {
+                        layout.width
+                    };
+                    assert!(
+                        lane.0 + x + w <= settings_rect.0 + 0.01,
+                        "{case}: tab {i} ends at {} past the gear at {}",
+                        lane.0 + x + w,
+                        settings_rect.0
+                    );
+                }
+            }
+            // No gear on a plain strip or in a Kettle-drawn GNOME header.
+            for header in [(false, false), (true, true), (true, false)] {
+                let geometry = horizontal_tab_geometry(lane, scale, header, (2, 0), &cfg);
+                assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0), "{header:?}");
+            }
+        }
+    }
+}
+
+/// The gear costs the tabs its width and gap, never a tab: it shows only
+/// while the lane keeps `tab-min-width` beside every control, whatever the
+/// tab count, and `▾ +` never hide.
+#[test]
+fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
+    use super::chrome::horizontal_tab_geometry;
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 2.0] {
+        let probe = macos_titlebar_lane(1280.0, scale);
+        let (menu, plus, reserve) = super::horizontal_new_tab_controls(probe, scale, true);
+        let extra = menu.2 + 8.0 * scale;
+        let threshold = reserve + extra + cfg.tab_min_width;
+        for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
+            let lane = (probe.0, 0.0, lane_width, probe.3);
+            for tabs in [1, 20] {
+                let geometry = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
+                assert_eq!(geometry.settings_rect.2 > 0.0, shown, "{lane_width} @{scale}x");
+                let (menu, plus_now, _) = super::horizontal_new_tab_controls(lane, scale, true);
+                assert_eq!(geometry.arrow_rect, menu);
+                assert_eq!(geometry.plus_rect, plus_now);
+                assert!(plus_now.2 == plus.2 && menu.2 > 0.0);
+            }
+        }
+    }
+}
+
+/// A lone tab stays centred on the window with the gear in place. The gear
+/// takes its room from the right of the strip only, so in a window too
+/// narrow for the preferred tab beside it the tab narrows about the centre
+/// instead of sliding left of it. The sweep covers the 500-660 pt widths
+/// where that happens, at 1x and 2x and at both title-bar heights, and
+/// holds the tab at least as centred as the strip without a gear held it.
+#[test]
+fn macos_titlebar_settings_gear_keeps_a_lone_tab_centred() {
+    use super::chrome::horizontal_tab_geometry;
+    let cfg = kettle_config::Config::default();
+    let widths = (500..=660).map(|w| w as f32).chain([1280.0]);
+    for scale in [1.0_f32, 2.0] {
+        for height in [28.0_f32, 32.0] {
+            for width in widths.clone() {
+                let lane = (78.0 * scale, 0.0, (width - 78.0) * scale, height * scale);
+                let case = format!("{width}pt @{scale}x, {height}pt bar");
+                let centre_of_window = width * scale * 0.5;
+                let geometry = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+                assert!(geometry.settings_rect.2 > 0.0, "{case}: no gear");
+                let x = lane.0 + geometry.layout.xs[0].expect("the lone tab shows");
+                let w = geometry.layout.last_width;
+                assert_eq!(geometry.layout.width, w, "{case}");
+                let offset = (x + w * 0.5 - centre_of_window).abs();
+                assert!(offset < 0.01, "{case}: lone tab {offset} px off centre");
+                assert!(w >= cfg.tab_min_width, "{case}: tab {w} px wide");
+                assert!(x >= lane.0, "{case}: tab under the traffic lights");
+                assert!(
+                    x + w <= geometry.settings_rect.0 + 0.01,
+                    "{case}: tab ends at {} past the gear at {}",
+                    x + w,
+                    geometry.settings_rect.0
+                );
+                // The same strip without the gear, as the title bar laid it
+                // out before the gear: its reserve is `▾ +` alone.
+                let (_, _, reserve) = super::horizontal_new_tab_controls(lane, scale, true);
+                let before = super::titlebar_tab_layout(
+                    1,
+                    0,
+                    (lane.2 - reserve, reserve, lane.0),
+                    lane.3,
+                    cfg.tab_min_width,
+                    cfg.scroll_tabbar,
+                );
+                let before_x = lane.0 + before.xs[0].expect("the lone tab showed");
+                let before_offset = (before_x + before.last_width * 0.5 - centre_of_window).abs();
+                assert!(
+                    offset <= before_offset + 0.01,
+                    "{case}: {offset} px off centre, {before_offset} px without the gear"
+                );
+                // Where the tab already fitted, centred and at its full
+                // width, in the strip the gear leaves, it keeps that width.
+                if before_offset < 0.01 && before_x + before.last_width <= lane.0 + geometry.strip {
+                    assert_eq!(w, before.last_width, "{case}");
+                }
+            }
+        }
+    }
+}
+
+/// The narrowed lone tab stops at `tab-min-width`: a window too narrow for
+/// that about the centre keeps the tab at the minimum, clamped into the
+/// strip, and a strip narrower than the minimum keeps its own layout.
+#[test]
+fn a_lone_titlebar_tab_narrows_no_further_than_the_minimum() {
+    use super::chrome::{centre_lone_titlebar_tab, titlebar_tab_layout};
+    // Centred room 2 * min(160, 200 - 160) = 80, under a 120 minimum.
+    let space = (200.0, 120.0, 0.0);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!((layout.width, layout.last_width), (120.0, 120.0));
+    assert_eq!(layout.xs, vec![Some(80.0)], "clamped to end at the strip");
+    // Room for 200 about a centre at 150: narrowed to it, centred.
+    let space = (250.0, 50.0, 0.0);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!(layout.last_width, 200.0);
+    assert_eq!(layout.xs, vec![Some(50.0)]);
+    // Narrower than the minimum: untouched.
+    let space = (100.0, 50.0, 0.0);
+    let untouched = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
+    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    assert_eq!(
+        (layout.xs, layout.last_width, layout.arrow_left),
+        (untouched.xs, untouched.last_width, untouched.arrow_left)
+    );
+}
+
+/// Press, hover and release all use the gear's own rect: a press there is
+/// not empty title bar (no window drag, no double-click zoom), the pointer
+/// hovers it at every corner, and a release opens Settings only when it
+/// lands back on the gear.
+#[test]
+fn macos_titlebar_settings_gear_hit_tests_share_its_rect() {
+    use super::*;
+    use super::chrome::{horizontal_tab_geometry, settings_button_at, settings_release_action};
+    use super::titlebar::empty_titlebar_space;
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 2.0] {
+        let lane = macos_titlebar_lane(1280.0, scale);
+        let geometry = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = lane.3;
+        bar.band = lane;
+        bar.in_titlebar = true;
+        bar.new_tab = geometry.plus_rect;
+        bar.new_tab_menu = geometry.arrow_rect;
+        bar.settings = geometry.settings_rect;
+        let gear = bar.settings;
+        let (cx, cy) = (gear.0 + gear.2 * 0.5, gear.1 + gear.3 * 0.5);
+        assert!(!empty_titlebar_space(&bar, cx, cy), "a press on the gear drags");
+        // The gap before `▾` still drags the window.
+        assert!(empty_titlebar_space(&bar, gear.0 + gear.2 + 4.0 * scale, cy));
+        for dx in [0.01, gear.2 - 0.01] {
+            for dy in [0.01, gear.3 - 0.01] {
+                assert_eq!(
+                    new_tab_hover_target(&bar, gear.0 + dx, gear.1 + dy),
+                    Some(NewTabHoverTarget::Settings)
+                );
+            }
+        }
+        assert!(tab_bar_pointer_region_contains(&bar, cx, cy));
+        assert_eq!(
+            settings_release_action(true, &bar, cx, cy),
+            Some(Action::OpenSettings)
+        );
+        // Released off the gear, or never pressed on it: nothing.
+        let off = (gear.0 - 2.0 * scale, cy);
+        assert_eq!(settings_release_action(true, &bar, off.0, off.1), None);
+        assert_eq!(
+            settings_release_action(true, &bar, cx, gear.1 + gear.3 + scale),
+            None
+        );
+        assert_eq!(settings_release_action(false, &bar, cx, cy), None);
+        // Without a gear the same point is empty title bar again.
+        bar.settings = (0.0, 0.0, 0.0, 0.0);
+        assert!(!settings_button_at(&bar, cx, cy));
+        assert_eq!(settings_release_action(true, &bar, cx, cy), None);
+        assert!(empty_titlebar_space(&bar, cx, cy));
+    }
+}
+
+/// Screen readers find the gear as a "Settings" button, in both languages,
+/// at the rect that takes its clicks; ctl reports the same rect.
+#[test]
+fn macos_titlebar_settings_gear_is_a_named_button_for_accesskit_and_ctl() {
+    use super::*;
+    use super::chrome::horizontal_tab_geometry;
+    let cfg = kettle_config::Config::default();
+    let lane = macos_titlebar_lane(1280.0, 2.0);
+    let geometry = horizontal_tab_geometry(lane, 2.0, (false, true), (1, 0), &cfg);
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = lane.3;
+    bar.band = lane;
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.settings = geometry.settings_rect;
+    let gear = bar.settings;
+    let bounds = accesskit::Rect::new(
+        gear.0 as f64,
+        gear.1 as f64,
+        (gear.0 + gear.2) as f64,
+        (gear.1 + gear.3) as f64,
+    );
+    for (language, label) in [
+        (kettle_i18n::Language::En, "Settings"),
+        (kettle_i18n::Language::Es, "Configuración"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+        let buttons: Vec<_> = nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label))
+            .collect();
+        assert_eq!(buttons.len(), 1, "{label}");
+        let node = &buttons[0].1;
+        assert_eq!(node.role(), accesskit::Role::Button);
+        assert_eq!(node.bounds(), Some(bounds));
+        assert!(node.supports_action(accesskit::Action::Click));
+        let list = nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TabList)
+            .unwrap();
+        assert!(list.1.children().contains(&buttons[0].0));
+    }
+    let json = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
+    assert_eq!(
+        json["settings"],
+        serde_json::json!({"x":gear.0,"y":gear.1,"width":gear.2,"height":gear.3})
+    );
+    // No gear, no node.
+    bar.settings = (0.0, 0.0, 0.0, 0.0);
+    let tr = kettle_i18n::Translator::default();
+    let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+    assert!(!nodes.iter().any(|(_, node)| node.label() == Some("Settings")));
+}
+
+/// The gear's tooltip names Settings with whatever key opens it: a rebind
+/// shows the new key, and an unbound action shows no key at all.
+#[test]
+fn macos_titlebar_settings_tooltip_follows_the_open_settings_binding() {
+    use super::chrome::{NewTabHoverTarget, chrome_button_shortcut, new_tab_tooltip};
+    let defaults = kettle_config::keybinds::defaults();
+    let default_key = chrome_button_shortcut(&defaults, NewTabHoverTarget::Settings);
+    assert_eq!(
+        default_key,
+        kettle_config::keybinds::ui_hint_label(&defaults, &Action::OpenSettings)
+    );
+    assert!(default_key.is_some(), "Settings has a default shortcut");
+    assert_ne!(
+        default_key,
+        chrome_button_shortcut(&defaults, NewTabHoverTarget::Plus),
+        "the gear must not show the New Tab key"
+    );
+    let parsed =
+        kettle_config::Config::parse_text("keybind = ctrl+shift+f3=open_settings\n").keybinds;
+    let (trigger, action) = parsed
+        .iter()
+        .find(|(trigger, action)| {
+            **action == Action::OpenSettings && trigger.label().contains("F3")
+        })
+        .unwrap();
+    let mut custom = defaults.clone();
+    custom.retain(|_, bound| *bound != Action::OpenSettings);
+    custom.insert(*trigger, action.clone());
+    let key = chrome_button_shortcut(&custom, NewTabHoverTarget::Settings).unwrap();
+    assert!(key.contains("F3"), "{key}");
+    for (language, label) in [
+        (kettle_i18n::Language::En, "Settings"),
+        (kettle_i18n::Language::Es, "Configuración"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Settings), &tr, Some(&key)),
+            Some(format!("{label}  {key}"))
+        );
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Settings), &tr, None),
+            Some(label.into())
+        );
+    }
+    custom.retain(|_, bound| *bound != Action::OpenSettings);
+    assert_eq!(
+        chrome_button_shortcut(&custom, NewTabHoverTarget::Settings),
+        None
+    );
+}
+
+/// Leaving the window or losing focus drops the gear's hover and press, so
+/// it never stays lit and a later release elsewhere never opens Settings.
+/// The rest of the strip's buttons let go the same way.
+#[test]
+fn leaving_the_window_or_losing_focus_forgets_the_settings_gear() {
+    let lit = || {
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        ws.hovered_settings = true;
+        ws.pressed_settings = true;
+        ws.hovered_new_tab = true;
+        ws.pressed_new_tab = true;
+        ws.hovered_new_tab_menu = true;
+        ws.pressed_new_tab_menu = true;
+        ws.hovered_close_idx = Some(0);
+        ws.hovered_tab_idx = Some(0);
+        ws
+    };
+    let mut focus_lost = lit();
+    focus_lost.release_titlebar_buttons();
+    assert!(!focus_lost.hovered_settings && !focus_lost.pressed_settings);
+    assert!(!focus_lost.pressed_new_tab && !focus_lost.pressed_new_tab_menu);
+    let mut left = lit();
+    left.leave_tab_bar();
+    assert!(!left.hovered_settings && !left.pressed_settings);
+    assert!(!left.hovered_new_tab && !left.pressed_new_tab);
+    assert!(!left.hovered_new_tab_menu && !left.pressed_new_tab_menu);
+    assert_eq!((left.hovered_close_idx, left.hovered_tab_idx), (None, None));
+}
+
+/// A screen reader's click on the gear runs OpenSettings, the action
+/// Cmd+, runs; New tab keeps its own action and a tab is not a button.
+#[test]
+fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
+    use super::chrome::horizontal_tab_geometry;
+    use super::*;
+    let cfg = kettle_config::Config::default();
+    let lane = macos_titlebar_lane(1280.0, 2.0);
+    let geometry = horizontal_tab_geometry(lane, 2.0, (false, true), (1, 0), &cfg);
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = lane.3;
+    bar.band = lane;
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.settings = geometry.settings_rect;
+    let tr = kettle_i18n::Translator::default();
+    let nodes = tab_accessibility_projection(&bar, &[7], false, &tr);
+    let action_of = |label: &str| {
+        let (id, _) = nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .unwrap_or_else(|| panic!("no {label} node"));
+        tab_button_action(*id)
+    };
+    assert_eq!(action_of("Settings"), Some(Action::OpenSettings));
+    assert_eq!(action_of("New tab"), Some(Action::NewTab));
+    assert_eq!(tab_button_action(accessibility_tab_id(7, false)), None);
+}
+
+/// A tab torn off a macOS title bar is held by its pointer in the lone tab
+/// the new window paints: centred on that window, at least
+/// `tab-min-width` wide, and clear of the Settings gear. The torn window's
+/// grip once assumed `▾ +` alone, so in a narrow window it held the pointer
+/// in a full-width tab that ran under the gear.
+#[test]
+fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_lone_tab_beside_the_gear() {
+    use super::chrome::{titlebar_settings_control, titlebar_tear_off_grab_x};
+    let cfg = kettle_config::Config::default();
+    let buttons = crate::window_buttons::ButtonLayout {
+        left: Vec::new(),
+        right: Vec::new(),
+    };
+    for scale in [1.0_f32, 2.0] {
+        for width in (500..=660).step_by(4).map(|w| w as f32).chain([1280.0]) {
+            let band = macos_titlebar_lane(width, scale);
+            let case = format!("{width}pt @{scale}x");
+            let (menu, _, reserve) = super::horizontal_new_tab_controls(band, scale, true);
+            let (gear, _) =
+                titlebar_settings_control(menu, band.2, reserve, scale, cfg.tab_min_width);
+            assert!(gear.2 > 0.0, "{case}: no gear");
+            let in_tab = f64::from(32.0 * scale);
+            let grab = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, in_tab);
+            let x = (grab - in_tab) as f32;
+            // A tab centred on the window from `x` is this wide.
+            let centre = width * scale * 0.5;
+            let tab_w = 2.0 * (centre - x);
+            assert!(x >= band.0, "{case}: grip under the traffic lights at {x}");
+            assert!(tab_w >= cfg.tab_min_width, "{case}: tab {tab_w} px wide");
+            assert!(
+                x + tab_w <= gear.0 + 0.01,
+                "{case}: the held tab ends at {} under the gear at {}",
+                x + tab_w,
+                gear.0
+            );
+        }
+    }
+}
+
+/// With Settings open, a primary press on the gear goes to the gear, not
+/// to Settings' close-on-outside-press, so its release does what Cmd+,
+/// does. Settings keeps the press while it edits text or captures a key,
+/// and anywhere off the gear.
+#[test]
+fn the_settings_gear_takes_a_press_ahead_of_open_settings() {
+    use super::chrome::settings_gear_takes_press_over_settings as takes;
+    let open = crate::settings::SettingsNav::default();
+    assert!(takes(Some(&open), false, true, true));
+    assert!(!takes(Some(&open), false, true, false), "off the gear");
+    assert!(!takes(Some(&open), false, false, true), "a middle press");
+    assert!(!takes(Some(&open), true, true, true), "editing a field");
+    let capturing = crate::settings::SettingsNav {
+        capturing: true,
+        ..Default::default()
+    };
+    assert!(!takes(Some(&capturing), false, true, true), "capturing a key");
+    assert!(!takes(None, false, true, true), "Settings closed");
+}
+
+/// The strip of a macOS title bar `width` pt wide at `scale` with one tab:
+/// its `▾ +` and Settings gear, as press, release and hover read them.
+fn macos_titlebar_strip(width: f32, scale: f32) -> kettle_render::TabBar {
+    let cfg = kettle_config::Config::default();
+    let lane = macos_titlebar_lane(width, scale);
+    let geometry =
+        super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = lane.3;
+    bar.band = lane;
+    bar.in_titlebar = true;
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.settings = geometry.settings_rect;
+    bar
+}
+
+fn centre_of(rect: kettle_render::Rect4) -> (f32, f32) {
+    (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5)
+}
+
+fn point_at(ws: &mut crate::window_state::WindowState, (x, y): (f32, f32)) {
+    ws.cursor = winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+}
+
+/// A primary press on the gear arms it and a release back on it opens
+/// Settings; this is the path native and ctl presses and releases share.
+/// A middle press is the gear's but arms nothing, a press elsewhere is not
+/// the gear's, a release off the gear opens nothing, and a release with no
+/// press goes on to the rest of the window.
+#[test]
+fn a_press_then_release_on_the_settings_gear_opens_settings() {
+    use super::chrome::{press_settings_gear, release_settings_gear};
+    for scale in [1.0, 2.0] {
+        let strip = || macos_titlebar_strip(1280.0, scale);
+        let bar = strip();
+        let gear = centre_of(bar.settings);
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), None);
+        assert!(press_settings_gear(&mut ws, &bar, gear, 1), "a middle press");
+        assert!(!ws.pressed_settings, "a middle press arms the gear");
+        assert!(!press_settings_gear(&mut ws, &bar, centre_of(bar.new_tab_menu), 0));
+        assert!(!ws.pressed_settings);
+        // Press, release on the gear: Settings, and the gesture is over.
+        ws.held_buttons.pressed(0, None, (0, 0));
+        assert!(press_settings_gear(&mut ws, &bar, gear, 0));
+        assert!(ws.pressed_settings);
+        point_at(&mut ws, gear);
+        assert_eq!(
+            release_settings_gear(&mut ws, |_| strip()),
+            Some(Some(Action::OpenSettings))
+        );
+        assert!(!ws.pressed_settings);
+        assert_eq!(ws.held_buttons.dragging(), None, "the gear's press still held");
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), None);
+        // Press, drag off, release: the release is the gear's, but it opens
+        // nothing.
+        assert!(press_settings_gear(&mut ws, &bar, gear, 0));
+        point_at(&mut ws, (bar.settings.0 - 2.0 * scale, gear.1));
+        assert_eq!(release_settings_gear(&mut ws, |_| strip()), Some(None));
+        assert!(!ws.pressed_settings);
+    }
+}
+
+/// With Settings open, a primary press on the gear arms it instead of
+/// closing Settings, so its release reopens Settings as Cmd+, does.
+#[test]
+fn with_settings_open_a_press_on_the_gear_arms_it() {
+    use super::chrome::{arm_settings_gear_over_settings, release_settings_gear};
+    let strip = || macos_titlebar_strip(1280.0, 2.0);
+    let bar = strip();
+    let gear = centre_of(bar.settings);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    point_at(&mut ws, gear);
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 0), "Settings closed");
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 1), "a middle press");
+    assert!(!ws.pressed_settings);
+    point_at(&mut ws, centre_of(bar.new_tab));
+    assert!(!arm_settings_gear_over_settings(&mut ws, &bar, 0), "off the gear");
+    assert!(!ws.pressed_settings);
+    point_at(&mut ws, gear);
+    assert!(arm_settings_gear_over_settings(&mut ws, &bar, 0));
+    assert!(ws.pressed_settings);
+    assert_eq!(
+        release_settings_gear(&mut ws, |_| strip()),
+        Some(Some(Action::OpenSettings))
+    );
+}
+
+/// The gear's hover is part of the strip's hover: moving onto or off the
+/// gear alone changes it, which redraws the strip, and the gear is a
+/// pointer target like `▾` and `+`.
+#[test]
+fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
+    use super::chrome::{NewTabHoverTarget, hover_tab_bar};
+    let bar = macos_titlebar_strip(1280.0, 1.0);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    let gear = centre_of(bar.settings);
+    point_at(&mut ws, gear);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+    assert!(ws.hovered_settings && !ws.hovered_new_tab_menu && !ws.hovered_new_tab);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), false),
+        "no move, no redraw"
+    );
+    // Off the gear into the gap before `▾`: only the gear's hover changes.
+    point_at(&mut ws, (bar.settings.0 + bar.settings.2 + 2.0, gear.1));
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true));
+    assert!(!ws.hovered_settings);
+    point_at(&mut ws, centre_of(bar.new_tab_menu));
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Menu), true)
+    );
+    point_at(&mut ws, gear);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+    assert!(ws.hovered_settings && !ws.hovered_new_tab_menu);
+}

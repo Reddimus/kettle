@@ -60,6 +60,15 @@ def titlebar_geometry(geometry):
     for control in ("new_tab", "new_tab_menu"):
         rect = bar[control]
         assert rect["width"] >= 20 * scale and rect["height"] >= 20 * scale, control
+    # The Settings gear leads the pair, apart from it, when the lane has room.
+    gear = bar.get("settings") or {"width": 0}
+    if gear["width"]:
+        menu = bar["new_tab_menu"]
+        assert gear["width"] >= 20 * scale and gear["height"] >= 20 * scale, "settings"
+        assert gear["x"] >= band["x"], "settings gear overlaps traffic lights"
+        assert gear["x"] + gear["width"] + 8 * scale <= menu["x"] + 0.5, (
+            "settings gear must sit apart from the new-tab pair"
+        )
     for tab in bar["segments"]:
         rect = tab["rect"]
         if rect["x"] < -1000:  # parked overflow tab

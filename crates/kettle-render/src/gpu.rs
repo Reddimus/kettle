@@ -930,6 +930,7 @@ impl Renderer {
             new_tab_arrow_buffer,
             tab_tooltip_buffer,
             tab_tooltip_text: String::new(),
+            settings_gear_mask: Default::default(),
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,

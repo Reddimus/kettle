@@ -945,6 +945,11 @@ pub(crate) struct WindowState {
     pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
     pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
+    /// The primary button is down in this window, as title-bar tracking saw.
+    pub(crate) titlebar_pressed: bool,
+    /// Kettle made the window unmovable because the pointer is over, or
+    /// pressed, a title-bar control; see `titlebar_hold_after`.
+    pub(crate) titlebar_window_held: bool,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -1278,6 +1283,10 @@ pub(crate) struct WindowState {
     pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
+    /// The pointer is over, or pressed, the macOS title bar's Settings gear.
+    /// A press opens Settings on a release over the gear.
+    pub(crate) hovered_settings: bool,
+    pub(crate) pressed_settings: bool,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1425,6 +1434,10 @@ pub(crate) struct WindowState {
     /// while the transient size chip is visible; expires
     /// `RESIZE_OVERLAY_DURATION` after the last resize event.
     pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
+    /// What the chip says instead of the bare grid: the font size and grid
+    /// after a font-size change (`App::show_font_size_chip`). A window
+    /// resize and the chip's expiry clear it.
+    pub(crate) resize_overlay_label: Option<String>,
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
@@ -1493,6 +1506,29 @@ impl WindowState {
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
         self.preview_overlay = Some(overlay);
+    }
+
+    /// On focus loss, drop every title-bar button press and the window
+    /// controls' hover: their releases may never come here. The Settings
+    /// gear loses its hover too, so a release elsewhere never opens
+    /// Settings and the gear never stays lit.
+    pub(crate) fn release_titlebar_buttons(&mut self) {
+        self.pressed_window_control = None;
+        self.hovered_window_control = None;
+        self.pressed_new_tab = false;
+        self.pressed_new_tab_menu = false;
+        self.hovered_settings = false;
+        self.pressed_settings = false;
+    }
+
+    /// When the pointer leaves the window, nothing in the tab bar is under
+    /// it or pressed any more.
+    pub(crate) fn leave_tab_bar(&mut self) {
+        self.release_titlebar_buttons();
+        self.hovered_close_idx = None;
+        self.hovered_tab_idx = None;
+        self.hovered_new_tab = false;
+        self.hovered_new_tab_menu = false;
     }
 
     /// Point `cursor` back at the physical pointer before a native button or
@@ -1641,6 +1677,8 @@ impl WindowState {
             pressed_window_control: None,
             hovered_window_control: None,
             titlebar_click: None,
+            titlebar_pressed: false,
+            titlebar_window_held: false,
             native_material: None,
             accessibility: None,
             accessibility_key: None,
@@ -1744,6 +1782,8 @@ impl WindowState {
             pressed_new_tab_menu: false,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            hovered_settings: false,
+            pressed_settings: false,
             context_menu_a11y_label: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
@@ -1785,6 +1825,7 @@ impl WindowState {
             last_typed: None,
             typed_echo: crate::typed_echo::TypedEcho::default(),
             resize_overlay: None,
+            resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),

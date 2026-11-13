@@ -96,6 +96,11 @@ pub(super) fn edit_modal_text(
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        // The title bar's Settings gear is outside the Settings panel, but a
+        // press there arms the gear rather than closing Settings.
+        if self.press_settings_gear_over_settings(ws, button) {
+            return true;
+        }
         let Some((kind, inside)) = self.modal_press_target(ws) else {
             return false;
         };

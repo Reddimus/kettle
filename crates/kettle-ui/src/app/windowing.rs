@@ -769,17 +769,14 @@ impl App {
         let strip_w = f64::from(self.cfg.tab_bar_width).max(8.0);
         let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), bar_h as f32);
         let in_seg_x = if ws.macos_titlebar_tabs {
-            let controls = 2.0 * bar_h as f32;
-            let strip = (destination_band.2 - controls).max(0.0);
-            let layout = titlebar_tab_layout(
-                1,
-                0,
-                (strip, controls, destination_band.0),
-                bar_h as f32,
-                self.cfg.tab_min_width,
-                self.cfg.scroll_tabbar,
-            );
-            f64::from(destination_band.0 + layout.xs[0].unwrap_or(0.0)) + in_seg_x
+            titlebar_tear_off_grab_x(
+                &self.cfg,
+                destination_band,
+                (ws.linux_titlebar, ws.macos_titlebar_tabs),
+                src.scale_factor() as f32,
+                &self.linux_button_layout(ws),
+                in_seg_x,
+            )
         } else {
             in_seg_x
         };
