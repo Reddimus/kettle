@@ -1483,6 +1483,15 @@ impl App {
             return;
         }
 
+        if let Some(kind) = vi_visual_kind(key, ch, ws.mods) {
+            let cursor = term.vi_mode_cursor.point;
+            let visual = toggle_vi_visual(&mut term.selection, owner.visual, kind, cursor);
+            if let Some(state) = ws.vi_mode.as_mut() {
+                state.visual = visual;
+            }
+            return;
+        }
+
         match ch {
             'g' => {
                 use kettle_core::Dimensions as _;
@@ -1493,23 +1502,6 @@ impl App {
                 use kettle_core::Dimensions as _;
                 let point = kettle_core::Point::new(term.bottommost_line(), kettle_core::Column(0));
                 term.vi_goto_point(point);
-            }
-            'v' => {
-                if owner.visual {
-                    term.selection = None;
-                } else {
-                    let point = term.vi_mode_cursor.point;
-                    let mut selection = kettle_core::Selection::new(
-                        kettle_core::SelectionType::Simple,
-                        point,
-                        kettle_core::Side::Left,
-                    );
-                    selection.update(point, kettle_core::Side::Right);
-                    term.selection = Some(selection);
-                }
-                if let Some(state) = ws.vi_mode.as_mut() {
-                    state.visual = !owner.visual;
-                }
             }
             'y' => {
                 let yanked = if owner.visual {
@@ -3794,6 +3786,60 @@ pub(super) fn confirmation_button_action(
                 paste_as_one_line(text)
             };
             Some(action)
+        }
+    }
+}
+
+/// The selection a vi-mode visual key makes: `v` by character, `V` by line
+/// and Ctrl-v a block, as in Vim. `ch` is the key's accepted text, which is
+/// `'\0'` while Ctrl is held, so Ctrl-v is read from the key itself, in
+/// either case for Caps Lock. Ctrl+Shift+V, the Linux and Windows paste
+/// chord, is not a block key.
+pub(super) fn vi_visual_kind(
+    key: &Key,
+    ch: char,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<kettle_core::SelectionType> {
+    use kettle_core::SelectionType;
+    match ch {
+        'v' => return Some(SelectionType::Simple),
+        'V' => return Some(SelectionType::Lines),
+        _ => {}
+    }
+    let ctrl_v = mods.control_key()
+        && !mods.shift_key()
+        && !mods.alt_key()
+        && !mods.super_key()
+        && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("v") || c == "\u{16}");
+    ctrl_v.then_some(SelectionType::Block)
+}
+
+/// Start, switch or end vi mode's visual selection at the vi `cursor`, and
+/// return whether visual mode is on afterwards. The key for the kind already
+/// shown ends it; another kind's key turns the same selection into that kind,
+/// keeping both of its ends.
+pub(super) fn toggle_vi_visual(
+    selection: &mut Option<kettle_core::Selection>,
+    visual: bool,
+    kind: kettle_core::SelectionType,
+    cursor: kettle_core::Point,
+) -> bool {
+    match selection.as_mut() {
+        Some(current) if visual && current.ty == kind => {
+            *selection = None;
+            false
+        }
+        Some(current) if visual => {
+            current.ty = kind;
+            // Each kind puts the anchor sides on different edges.
+            current.include_all();
+            true
+        }
+        _ => {
+            let mut started = kettle_core::Selection::new(kind, cursor, kettle_core::Side::Left);
+            started.update(cursor, kettle_core::Side::Right);
+            *selection = Some(started);
+            true
         }
     }
 }

@@ -529,7 +529,7 @@ pub(crate) fn hsl(c: Rgb) -> (f64, f64, f64) {
     (hue, saturation, lightness)
 }
 
-fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> Rgb {
+pub(crate) fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> Rgb {
     let lightness = lightness.clamp(0.0, 1.0);
     let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation.clamp(0.0, 1.0);
     let hue = hue.rem_euclid(6.0);
