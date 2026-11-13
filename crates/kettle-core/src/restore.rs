@@ -733,4 +733,71 @@ mod tests {
         assert_eq!(term.history_size(), 2);
         assert!(!term.restore_clear_guard_armed());
     }
+
+    /// Spawn a restored pane whose child optionally prints `x`, waits for the
+    /// test to resize the pane to 10 columns, then clears.
+    #[cfg(unix)]
+    fn resize_before_the_startup_clear(print_first: bool) -> crate::Terminal {
+        let flag = std::env::temp_dir().join(format!(
+            "kettle-restore-resize-{}-{print_first}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&flag);
+        let script = format!(
+            "{}while [ ! -e '{}' ]; do sleep 0.01; done; printf '\\033[H\\033[2Jprompt$ '; read wait",
+            if print_first { "printf x; " } else { "" },
+            flag.display()
+        );
+        let mut terminal = spawn_seeded(&one_row_seed(), &script);
+        if print_first {
+            wait_for_row(&terminal, 2, 'x');
+        }
+        terminal.resize(10, 6, 8, 16).expect("resize");
+        std::fs::write(&flag, b"").expect("release the child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while terminal.term.lock().unwrap().grid().cursor.point.column != Column(8) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the prompt never arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&flag);
+        terminal
+    }
+
+    /// A resize before the shell prints anything moves the anchor with the
+    /// reflowed rows, so the clear still keeps them.
+    #[cfg(unix)]
+    #[test]
+    fn a_resize_before_any_output_reanchors_the_guard() {
+        let terminal = resize_before_the_startup_clear(false);
+        let term = terminal.term.lock().unwrap();
+        let rows: Vec<String> = (0..5)
+            .map(|row| {
+                (0..10)
+                    .map(|col| term.grid()[Point::new(Line(row), Column(col))].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["saved outp", "ut", "Restored d", "ivider", "prompt$"]
+        );
+        assert_eq!(term.history_size(), 0);
+    }
+
+    /// After output, a resize disarms the guard and the clear behaves as it
+    /// always did.
+    #[cfg(unix)]
+    #[test]
+    fn a_resize_after_output_disarms_the_guard() {
+        let terminal = resize_before_the_startup_clear(true);
+        let term = terminal.term.lock().unwrap();
+        assert_eq!(term.grid()[Point::new(Line(0), Column(0))].c, 'p');
+        assert!(term.history_size() >= 3);
+        assert!(!term.restore_clear_guard_armed());
+    }
 }
