@@ -773,6 +773,7 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         panel_w_clamped: 360.0,
         panel_h_clamped: 56.0,
         picker_header_height: 30.0,
+        status: None,
         a11y_label: None,
     };
     assert!(menu_row_selected(&menu, 0) && !menu_row_selected(&menu, 1));
