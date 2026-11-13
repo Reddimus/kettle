@@ -3147,16 +3147,10 @@ Services items, and verifies that enabled and disabled Kettle equivalents are
 declined. It uses a process-local Services fixture without installing a Quick
 Action; other platforms report this test as skipped. The harness-free executable
 also honors a test-name substring filter.
-Existing keyboard tests exercise program-ownership yielding and terminal
-encoding. These checks do not establish physical keyboard delivery or live
-Quick Action invocation; an unlocked macOS session is needed for mouse,
-keyboard, System Settings Services shortcuts and window list acceptance.
-
-menu while retaining Services and Windows registration. Existing keyboard tests
-exercise program-ownership yielding and terminal encoding. These checks do not
-establish live AppKit menu interaction; native CI must compile the AppKit layer,
-and an unlocked macOS session is needed for mouse, keyboard, Services and window
-list acceptance.
+Portable keyboard tests cover program-ownership yielding and terminal encoding.
+Use an unlocked macOS session to verify mouse interaction, physical keyboard
+delivery, System Settings Services shortcuts, live Quick Action invocation, and
+the Window menu's window list.
 
 ### Paste protection and compact context menus
 
