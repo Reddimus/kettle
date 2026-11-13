@@ -1496,12 +1496,27 @@ impl WindowState {
         self.preview_overlay = Some(overlay);
     }
 
-    /// Drop the Settings gear's hover and press when the pointer leaves the
-    /// window or the window loses focus, so a release elsewhere never opens
+    /// On focus loss, drop every title-bar button press and the window
+    /// controls' hover: their releases may never come here. The Settings
+    /// gear loses its hover too, so a release elsewhere never opens
     /// Settings and the gear never stays lit.
-    pub(crate) fn forget_settings_button(&mut self) {
+    pub(crate) fn release_titlebar_buttons(&mut self) {
+        self.pressed_window_control = None;
+        self.hovered_window_control = None;
+        self.pressed_new_tab = false;
+        self.pressed_new_tab_menu = false;
         self.hovered_settings = false;
         self.pressed_settings = false;
+    }
+
+    /// When the pointer leaves the window, nothing in the tab bar is under
+    /// it or pressed any more.
+    pub(crate) fn leave_tab_bar(&mut self) {
+        self.release_titlebar_buttons();
+        self.hovered_close_idx = None;
+        self.hovered_tab_idx = None;
+        self.hovered_new_tab = false;
+        self.hovered_new_tab_menu = false;
     }
 
     /// Point `cursor` back at the physical pointer before a native button or

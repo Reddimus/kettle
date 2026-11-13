@@ -1035,7 +1035,9 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
     use super::chrome::{HorizontalTabGeometry, horizontal_tab_geometry};
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
-        for width in [640.0, 1280.0] {
+        // 400 pt stands in for the narrow window C03 asks about; the
+        // panel harness never sized one.
+        for width in [400.0, 640.0, 1280.0] {
             let lane = macos_titlebar_lane(width, scale);
             for tabs in [1, 3, 20] {
                 let HorizontalTabGeometry {
@@ -1277,13 +1279,84 @@ fn macos_titlebar_settings_tooltip_follows_the_open_settings_binding() {
 
 /// Leaving the window or losing focus drops the gear's hover and press, so
 /// it never stays lit and a later release elsewhere never opens Settings.
+/// The rest of the strip's buttons let go the same way.
 #[test]
-fn leaving_the_window_forgets_the_settings_gear() {
-    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
-    ws.hovered_settings = true;
-    ws.pressed_settings = true;
-    ws.forget_settings_button();
-    assert!(!ws.hovered_settings && !ws.pressed_settings);
+fn leaving_the_window_or_losing_focus_forgets_the_settings_gear() {
+    let lit = || {
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        ws.hovered_settings = true;
+        ws.pressed_settings = true;
+        ws.hovered_new_tab = true;
+        ws.pressed_new_tab = true;
+        ws.hovered_new_tab_menu = true;
+        ws.pressed_new_tab_menu = true;
+        ws.hovered_close_idx = Some(0);
+        ws.hovered_tab_idx = Some(0);
+        ws
+    };
+    let mut focus_lost = lit();
+    focus_lost.release_titlebar_buttons();
+    assert!(!focus_lost.hovered_settings && !focus_lost.pressed_settings);
+    assert!(!focus_lost.pressed_new_tab && !focus_lost.pressed_new_tab_menu);
+    let mut left = lit();
+    left.leave_tab_bar();
+    assert!(!left.hovered_settings && !left.pressed_settings);
+    assert!(!left.hovered_new_tab && !left.pressed_new_tab);
+    assert!(!left.hovered_new_tab_menu && !left.pressed_new_tab_menu);
+    assert_eq!((left.hovered_close_idx, left.hovered_tab_idx), (None, None));
+}
+
+/// A screen reader's click on the gear runs OpenSettings, the action
+/// Cmd+, runs; New tab keeps its own action and a tab is not a button.
+#[test]
+fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
+    use super::chrome::horizontal_tab_geometry;
+    use super::*;
+    let cfg = kettle_config::Config::default();
+    let lane = macos_titlebar_lane(1280.0, 2.0);
+    let geometry = horizontal_tab_geometry(lane, 2.0, (false, true), (1, 0), &cfg);
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = lane.3;
+    bar.band = lane;
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.settings = geometry.settings_rect;
+    let tr = kettle_i18n::Translator::default();
+    let nodes = tab_accessibility_projection(&bar, &[7], false, &tr);
+    let action_of = |label: &str| {
+        let (id, _) = nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .unwrap_or_else(|| panic!("no {label} node"));
+        tab_button_action(*id)
+    };
+    assert_eq!(action_of("Settings"), Some(Action::OpenSettings));
+    assert_eq!(action_of("New tab"), Some(Action::NewTab));
+    assert_eq!(tab_button_action(accessibility_tab_id(7, false)), None);
+}
+
+/// A tab torn off a macOS title bar lands where a lone tab is painted, which
+/// ends before the gear: drag-out and the painted strip share one geometry.
+#[test]
+fn torn_off_tab_lands_where_the_titlebar_paints_a_lone_tab_beside_the_gear() {
+    use super::chrome::{horizontal_tab_geometry, tear_off_destination_tab};
+    let cfg = kettle_config::Config::default();
+    let buttons = crate::window_buttons::ButtonLayout::default();
+    for scale in [1.0, 2.0] {
+        for width in [400.0, 1280.0] {
+            let band = macos_titlebar_lane(width, scale);
+            let painted = horizontal_tab_geometry(band, scale, (false, true), (1, 0), &cfg);
+            let destination = tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons);
+            let x = band.0 + painted.layout.xs[0].expect("the lone tab shows");
+            assert_eq!(
+                destination,
+                (x, band.1, painted.layout.last_width, band.3),
+                "{width}px @{scale}x"
+            );
+            assert!(painted.settings_rect.2 > 0.0, "{width}px @{scale}x: no gear");
+            assert!(destination.0 + destination.2 <= painted.settings_rect.0);
+        }
+    }
 }
 
 /// With Settings open, a primary press on the gear goes to the gear, not

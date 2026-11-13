@@ -1329,10 +1329,8 @@ impl App {
                     .find(|b| window_control_accessibility_id(b.action) == request.target_node)
                 {
                     self.activate_window_control(ws, control.action, event_loop);
-                } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
-                    self.handle_action(ws, Action::NewTab, event_loop);
-                } else if request.target_node == ACCESSIBILITY_TAB_SETTINGS_ID {
-                    self.handle_action(ws, Action::OpenSettings, event_loop);
+                } else if let Some(action) = tab_button_action(request.target_node) {
+                    self.handle_action(ws, action, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -3320,6 +3318,19 @@ const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
 /// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
 const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
+
+/// The action a screen reader's click on one of the strip's own buttons
+/// runs: New tab opens a tab, and the macOS title bar's gear opens Settings
+/// as Cmd+, does.
+pub(super) fn tab_button_action(node: NodeId) -> Option<Action> {
+    if node == ACCESSIBILITY_TAB_NEW_ID {
+        Some(Action::NewTab)
+    } else if node == ACCESSIBILITY_TAB_SETTINGS_ID {
+        Some(Action::OpenSettings)
+    } else {
+        None
+    }
+}
 
 pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
     NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))

@@ -270,15 +270,7 @@ impl App {
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = None;
-                ws.hovered_close_idx = None;
-                ws.hovered_tab_idx = None;
-                ws.pressed_new_tab = false;
-                ws.pressed_new_tab_menu = false;
-                ws.hovered_new_tab = false;
-                ws.hovered_new_tab_menu = false;
-                ws.forget_settings_button();
-                ws.hovered_window_control = None;
-                ws.pressed_window_control = None;
+                ws.leave_tab_bar();
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -1414,12 +1406,8 @@ impl App {
                     }
                 }
                 if !f {
-                    ws.pressed_window_control = None;
-                    ws.hovered_window_control = None;
+                    ws.release_titlebar_buttons();
                     ws.titlebar_click = None;
-                    ws.pressed_new_tab = false;
-                    ws.pressed_new_tab_menu = false;
-                    ws.forget_settings_button();
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
                     // Retire the blink layer so the next frame paints the steady
