@@ -188,17 +188,34 @@ fn broadcast_default_picks_the_scope_the_group_chord_turns_on() {
     );
     assert_eq!(toggled(BroadcastScope::Tab, never), BroadcastScope::Off);
 
-    // The dispatch must be running that expression, not a re-implementation.
+    // The dispatch must be running that expression, not a re-implementation:
+    // the arm hands the action to `apply_broadcast_action`, which reads
+    // `broadcast-default` and asks `broadcast_scope_after`.
     let src = production_source();
     let arm = src
-        .split("Action::ToggleBroadcastAll => {")
+        .split("Action::ToggleBroadcastAll\n            | Action::ToggleBroadcastOff")
         .nth(1)
         .expect("the broadcast toggle arm is present");
     assert!(
-        arm.contains("broadcast_scope_for_default(self.cfg.broadcast_default)")
-            && arm.contains("if ws.mux.broadcast == on"),
-        "the toggle arm must read `broadcast-default` and compare against \
-             the current scope"
+        arm[..arm.find("=>").unwrap() + 60].contains("self.apply_broadcast_action(ws, &action)"),
+        "the toggle arm must run the shared broadcast transition"
+    );
+    let apply = src
+        .split("fn apply_broadcast_action(")
+        .nth(1)
+        .expect("apply_broadcast_action");
+    assert!(apply.contains("self.cfg.broadcast_default"));
+    let after = src
+        .split("fn broadcast_scope_after(")
+        .nth(1)
+        .expect("broadcast_scope_after");
+    assert!(
+        after.contains("if *current == on")
+            && after.contains(
+                "Action::ToggleBroadcastAll => Some(toggle(broadcast_scope_for_default(default)))"
+            ),
+        "the toggle must read `broadcast-default` and compare against the \
+         current scope"
     );
 }
 

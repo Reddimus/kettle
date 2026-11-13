@@ -57,6 +57,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/accessibility.rs"),
         include_str!("app/actions.rs"),
         include_str!("app/automation.rs"),
+        include_str!("app/broadcast.rs"),
         include_str!("app/chrome.rs"),
         include_str!("app/clipboard.rs"),
         include_str!("app/completion.rs"),
@@ -125,6 +126,7 @@ fn production_source() -> String {
 }
 
 mod actions;
+mod broadcast;
 mod clipboard;
 mod completion;
 mod ctl_snapshot;
