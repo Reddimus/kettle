@@ -5183,6 +5183,7 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
     };
     let field = TextFieldOverlay {
         picker_header: false,
+        placeholder: String::new(),
         text: "Rename".into(),
         cursor_byte: 3,
         selection: Some((0, 3)),
@@ -5273,6 +5274,80 @@ fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
             );
         }
     }
+}
+
+/// An unfocused window paints no Cmd+N hints: they are for the keyboard in
+/// a focused one. Their lane stays reserved, so the title does not move when
+/// focus comes and goes.
+#[test]
+fn an_unfocused_window_hides_tab_hints_without_moving_titles() {
+    let _serialized = gpu_test_guard();
+    let cfg = Config {
+        background_opacity: 1.0,
+        ..gpu_test_config()
+    };
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    else {
+        eprintln!("tab hint visibility skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let snap = snapshot_of(20, 2, b"");
+    let mut tabs = TabBar::hidden();
+    tabs.height = (renderer.cell_h + 12.0).max(28.0).round();
+    tabs.band = (0.0, 0.0, 480.0, tabs.height);
+    tabs.new_tab = (440.0, 0.0, tabs.height, tabs.height);
+    tabs.new_tab_menu = (400.0, 0.0, tabs.height, tabs.height);
+    for idx in 0..2 {
+        let rect = (8.0 + idx as f32 * 190.0, 0.0, 190.0, tabs.height);
+        let hint = format!("Alt+{}", idx + 1);
+        let content = horizontal_tab_content_layout(
+            rect,
+            true,
+            true,
+            0.0,
+            "shell",
+            Some(&hint),
+            renderer.cell_w,
+        );
+        tabs.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: content.title,
+            hint: content.hint.map(|lane| (lane, hint)),
+            close: content.close,
+            title: "shell".into(),
+            path: None,
+            active: idx == 0,
+            activity: TabActivity::Normal,
+        });
+    }
+    // The lanes less the tab's accent bar along the top and a margin below.
+    let inner = |(x, y, w, h): (f32, f32, f32, f32)| (x, y + 6.0, w, h - 12.0);
+    let (hint, _) = tabs.segments[0]
+        .hint
+        .clone()
+        .expect("a 190 px tab has room for its hint");
+    let (hint, title) = (inner(hint), inner(tabs.segments[0].title_rect));
+    let mut boxes = Vec::new();
+    for window_focused in [true, false] {
+        let mut terminal = pane(&snap, 480, 160);
+        terminal.rect = (0.0, tabs.height, 480.0, 160.0 - tabs.height);
+        terminal.terminal = terminal.rect;
+        let overlay = Overlay {
+            window_focused,
+            ..Overlay::default()
+        };
+        let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+        let hint_ink = glyph_ink(&frame, hint, theme.background);
+        assert_eq!(
+            hint_ink.is_some(),
+            window_focused,
+            "focused={window_focused}: hint ink {hint_ink:?}"
+        );
+        boxes.push(glyph_ink(&frame, title, theme.background).expect("the title is painted"));
+    }
+    assert_eq!(boxes[0], boxes[1], "the title moved when focus changed");
 }
 
 /// The pixel box the ink in `rect` spans against `background`. Ink is any
@@ -5496,8 +5571,9 @@ fn tab_strip_legibility_at(font_size: f32) {
             (tabs.segments[1].title_rect, tabs.segments[1].close);
         let fg = theme.foreground;
         // The renderer's roles: inactive titles and resting close glyphs are
-        // secondary text, the strip's controls primary, and an unfocused
-        // window dims both toward the 3:1 floor.
+        // secondary text, the strip's controls primary. An unfocused window
+        // dims its glyphs toward the 3:1 floor, but its titles only to the
+        // text floor, since they still name the tabs.
         let mut colors = chrome::Colors::default();
         let secondary_floor = chrome::SECONDARY_TEXT_CONTRAST
             .min(color::contrast_ratio(fg, strip))
@@ -5537,14 +5613,16 @@ fn tab_strip_legibility_at(font_size: f32) {
                 );
                 continue;
             }
-            let (secondary, control, floors) = if window_focused {
+            let (title, secondary, control, floors) = if window_focused {
                 (
+                    colors.secondary(fg, strip),
                     colors.secondary(fg, strip),
                     colors.text(fg, strip),
                     (secondary_floor, chrome::TEXT_CONTRAST),
                 )
             } else {
                 (
+                    colors.tab_title(fg, strip, color::Backing::opaque(strip), false, false),
                     colors.tab_text(rest_close, strip, false),
                     colors.tab_text(fg, strip, false),
                     (chrome::ICON_CONTRAST, chrome::ICON_CONTRAST),
@@ -5553,8 +5631,12 @@ fn tab_strip_legibility_at(font_size: f32) {
             assert_glyph_painted(
                 &frame,
                 inactive_title,
-                (strip, secondary),
-                floors.0,
+                (strip, title),
+                if window_focused {
+                    floors.0
+                } else {
+                    chrome::TEXT_CONTRAST
+                },
                 &format!("{case}: inactive title"),
             );
             // Smallest ink side, with a pixel to spare for rasterizer edges.
@@ -5604,6 +5686,209 @@ fn tab_strip_legibility_at(font_size: f32) {
             }
         }
     }
+}
+
+/// The macOS title bar's Settings gear is drawn from quads, not a font, so
+/// it reads the same on every host: at 1x and 2x, in Night and Day, focused
+/// and unfocused, its ink meets the 3:1 icon floor against the strip (and
+/// the hover fill), stays whole inside its button, and lifts on hover. A
+/// zero rect draws nothing.
+#[test]
+fn titlebar_settings_gear_is_legible_and_inside_its_button() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("settings gear check skipped: no GPU adapter");
+                return;
+            };
+            let theme = cfg.theme.clone();
+            let strip = resolve_chrome_bg(&cfg, &theme, None);
+            let side = 32.0 * scale;
+            let mut tabs = TabBar::hidden();
+            tabs.height = side;
+            tabs.in_titlebar = true;
+            tabs.band = (78.0 * scale, 0.0, w as f32 - 78.0 * scale, side);
+            let plus_x = w as f32 - 8.0 * scale - side;
+            tabs.new_tab = (plus_x, 0.0, side, side);
+            tabs.new_tab_menu = (plus_x - 4.0 * scale - side, 0.0, side, side);
+            let gear = (tabs.new_tab_menu.0 - 8.0 * scale - side, 0.0, side, side);
+            let snap = snapshot_of(20, 2, b"");
+            for (window_focused, hovered, present) in [
+                (true, false, true),
+                (false, false, true),
+                (true, true, true),
+                (true, false, false),
+            ] {
+                tabs.settings = if present { gear } else { (0.0, 0.0, 0.0, 0.0) };
+                tabs.hovered_settings = hovered && present;
+                let overlay = Overlay {
+                    window_focused,
+                    ..Overlay::default()
+                };
+                let mut terminal = pane(&snap, w, h);
+                terminal.rect = (0.0, side, w as f32, h as f32 - side);
+                terminal.terminal = terminal.rect;
+                let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+                let case = format!(
+                    "{theme_name} @{scale}x focused={window_focused} hovered={hovered} \
+                     present={present}"
+                );
+                if !present {
+                    assert_eq!(glyph_ink(&frame, gear, strip), None, "{case}: drew a gear");
+                    continue;
+                }
+                let mut colors = chrome::Colors::default();
+                let (background, ink) = if hovered {
+                    let fill = chrome::tab_detail(strip, theme.foreground, false);
+                    let accent = renderer.ui_accent(&cfg, &theme);
+                    (fill, colors.tab_text(accent, fill, window_focused))
+                } else {
+                    (
+                        strip,
+                        colors.tab_text(theme.foreground, strip, window_focused),
+                    )
+                };
+                let floor = if window_focused {
+                    chrome::TEXT_CONTRAST
+                } else {
+                    chrome::ICON_CONTRAST
+                };
+                // The hover fill is a rounded square: judge the ink on its
+                // flat middle.
+                let middle = (
+                    gear.0 + 6.0 * scale,
+                    gear.1 + 6.0 * scale,
+                    gear.2 - 12.0 * scale,
+                    gear.3 - 12.0 * scale,
+                );
+                assert_glyph_painted(&frame, middle, (background, ink), floor, &case);
+                let (x, y, iw, ih) =
+                    glyph_ink(&frame, middle, background).unwrap_or_else(|| panic!("{case}"));
+                assert!(
+                    iw >= 12.0 * scale && ih >= 12.0 * scale,
+                    "{case}: gear ink {iw}x{ih} is too small to read"
+                );
+                assert!(
+                    x >= gear.0 + 2.0
+                        && y >= gear.1 + 2.0
+                        && x + iw <= gear.0 + gear.2 - 2.0
+                        && y + ih <= gear.1 + gear.3 - 2.0,
+                    "{case}: gear ink {:?} reaches the edge of {gear:?}",
+                    (x, y, iw, ih)
+                );
+                if hovered {
+                    // The fill shows at the button's corner-free edge.
+                    let p = frame.get_pixel((gear.0 + gear.2 * 0.5) as u32, (gear.1 + 1.0) as u32);
+                    assert_ne!(
+                        Rgb::new(p[0], p[1], p[2]),
+                        strip,
+                        "{case}: no hover fill behind the gear"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The size chip is sized from the text it shows, so a font-size caption
+/// ("Font size 14 · 80×24") sits whole inside its outline instead of in a
+/// chip sized for the bare grid.
+#[test]
+fn resize_chip_fits_a_font_size_caption() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(640, 200) else {
+        eprintln!("resize chip caption check skipped: no GPU adapter");
+        return;
+    };
+    let snap = snapshot_of(40, 8, b"");
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    // The chip's outline across its top edge: its left and right ends.
+    let outline = |frame: &image::RgbaImage| {
+        (0..frame.height())
+            .find_map(|y| {
+                let xs: Vec<u32> = (0..frame.width())
+                    .filter(|&x| {
+                        let p = frame.get_pixel(x, y);
+                        Rgb::new(p[0], p[1], p[2]) == accent
+                    })
+                    .collect();
+                (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+            })
+            .expect("the chip's outline")
+    };
+    for caption in ["Font size 14 · 80×24", "Tamaño de fuente 14 · 80×24"] {
+        let overlay = Overlay {
+            resize_overlay: Some((80, 24)),
+            resize_overlay_text: Some(caption.into()),
+            ..focused(false)
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 200)], &overlay);
+        let (left, right) = outline(&frame);
+        let text = caption.chars().count() as f32 * renderer.cell_w;
+        assert!(
+            (right - left) as f32 >= text,
+            "{caption}: chip {left}..{right} is narrower than its {text} px text"
+        );
+        assert_eq!(renderer.resize_overlay_text, caption);
+    }
+}
+
+/// At a large font in a small window a caption wider than the window is
+/// drawn smaller, on one line, whole inside a chip inside the window.
+#[test]
+fn resize_chip_caption_fits_a_narrow_window_at_a_large_font() {
+    let _serialized = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.font_size = 48.0;
+    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 240, 1.0, false).unwrap()
+    else {
+        eprintln!("resize chip fit check skipped: no GPU adapter");
+        return;
+    };
+    let caption = "Tamaño de fuente 48 · 7×3";
+    let snap = snapshot_of(7, 3, b"");
+    let overlay = Overlay {
+        resize_overlay: Some((7, 3)),
+        resize_overlay_text: Some(caption.into()),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 240)], &overlay);
+    assert_eq!(
+        renderer.resize_overlay_buffer.layout_runs().count(),
+        1,
+        "the caption wrapped"
+    );
+    let width = renderer
+        .resize_overlay_buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    assert!(
+        width + 56.0 <= 480.5,
+        "caption {width} px does not fit 480 px"
+    );
+    // The outline's left and right edges are both on screen.
+    let accent = cfg.accent_color.unwrap_or(cfg.theme.palette[4]);
+    let edges = (0..frame.height()).find_map(|y| {
+        let xs: Vec<u32> = (0..frame.width())
+            .filter(|&x| {
+                let p = frame.get_pixel(x, y);
+                Rgb::new(p[0], p[1], p[2]) == accent
+            })
+            .collect();
+        (xs.len() > 20).then(|| (xs[0], *xs.last().unwrap()))
+    });
+    let (left, right) = edges.expect("the chip's outline");
+    assert!(
+        left >= 10 && right <= 470,
+        "chip {left}..{right} reaches the window edge"
+    );
 }
 
 /// A side bar draws its tabs' close glyph from the same enlarged buffer as a
@@ -6007,6 +6292,7 @@ fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     };
     let field = TextFieldOverlay {
         picker_header: true,
+        placeholder: String::new(),
         text: "dra".into(),
         cursor_byte: 3,
         selection: None,
@@ -7108,6 +7394,237 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
         widths(&renderer),
         "matched characters keep the row's width"
     );
+}
+
+/// A picker header's key hint reaches the frame in secondary text, the
+/// colour `text_field_slot_color` gives the hint slot, not muted grey.
+#[test]
+fn a_picker_header_paints_its_key_hint_as_secondary_text() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
+        eprintln!("PICKER_HEADER_GPU_SKIP: no GPU adapter on this host");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 440.0;
+    let field = TextFieldOverlay {
+        picker_header: true,
+        placeholder: String::new(),
+        text: String::new(),
+        cursor_byte: 0,
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (40.0, 40.0, width, 30.0),
+        prefix: "  > ".into(),
+        hint: "Esc".into(),
+        accent_palette: 5,
+    };
+    let cw = text_field_cell_width(&field, renderer.cell_w, renderer.cell_h);
+    let hint = text_field_rects(&field, cw)[2];
+    assert!(hint.2 > 0.0, "the hint has a slot");
+    let overlay = Overlay {
+        context_menu: Some(ContextMenu {
+            picker_header_height: 30.0,
+            ..menu_level((40.0, 70.0), &["New tab", "Close tab"], 0, (width, row_h))
+        }),
+        text_field: Some(field),
+        ..focused(false)
+    };
+    let snap = snapshot_of(20, 4, b"");
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 260)], &overlay);
+    let theme = &cfg.theme;
+    let mut colors = chrome::Colors::default();
+    let secondary = overlays::picker_header_secondary_color(theme, &mut colors);
+    let floor = chrome::SECONDARY_TEXT_CONTRAST
+        .min(color::contrast_ratio(theme.foreground, theme.background));
+    assert_glyph_painted(
+        &frame,
+        hint,
+        (theme.background, secondary),
+        floor,
+        "picker key hint",
+    );
+}
+
+/// An empty picker query paints its placeholder in the editor slot, in the
+/// secondary text colour; typing replaces it, and other fields paint none.
+#[test]
+fn an_empty_picker_query_paints_its_placeholder() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
+        eprintln!("PICKER_HEADER_GPU_SKIP: no GPU adapter on this host");
+        return;
+    };
+    cfg.theme = kettle_config::Theme::by_name("Builtin Dark");
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 440.0;
+    let picker = || ContextMenu {
+        picker_header_height: 30.0,
+        ..menu_level((40.0, 70.0), &["New tab", "Close tab"], 0, (width, row_h))
+    };
+    let field = |text: &str, placeholder: &str| TextFieldOverlay {
+        picker_header: true,
+        placeholder: placeholder.into(),
+        text: text.into(),
+        cursor_byte: text.len(),
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (40.0, 40.0, width, 30.0),
+        prefix: "  > ".into(),
+        hint: String::new(),
+        accent_palette: 5,
+    };
+    let snap = snapshot_of(20, 4, b"");
+    // The editor slot's pixels, right of where a caret or one typed glyph sits.
+    let slot = |overlay: &Overlay, renderer: &mut Renderer| {
+        let frame = capture(renderer, &cfg, &[pane(&snap, 640, 260)], overlay);
+        let field = overlay.text_field.as_ref().unwrap();
+        let cw = text_field_cell_width(field, renderer.cell_w, renderer.cell_h);
+        let (x, y, w, h) = text_field_rects(field, cw)[1];
+        let mut pixels = Vec::new();
+        for py in y as u32..(y + h) as u32 {
+            for px in (x + 4.0 * cw) as u32..(x + w) as u32 {
+                pixels.push(frame.get_pixel(px, py).0);
+            }
+        }
+        pixels
+    };
+    let with = |text: &str, placeholder: &str| Overlay {
+        context_menu: Some(picker()),
+        text_field: Some(field(text, placeholder)),
+        ..focused(false)
+    };
+    let changed = |a: &[[u8; 4]], b: &[[u8; 4]]| {
+        a.iter()
+            .zip(b)
+            .filter(|(p, q)| {
+                p.iter()
+                    .zip(q.iter())
+                    .map(|(x, y)| (*x as i32 - *y as i32).abs())
+                    .sum::<i32>()
+                    > 60
+            })
+            .count()
+    };
+    let none = slot(&with("", ""), &mut renderer);
+    let shown = slot(&with("", "Type a command…"), &mut renderer);
+    let typed = slot(&with("x", "Type a command…"), &mut renderer);
+    assert!(
+        changed(&shown, &none) > 40,
+        "placeholder not painted: {} changed pixels",
+        changed(&shown, &none)
+    );
+    assert_eq!(
+        changed(&typed, &none),
+        0,
+        "a typed query hides the placeholder"
+    );
+}
+
+/// An unfocused window paints its selection in a neutral grey, the hue a
+/// macOS selection takes in an inactive window, so the change of focus shows
+/// in the selection's colour and not only its strength.
+#[test]
+fn an_unfocused_window_paints_its_selection_grey() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("C09_GPU_SKIP: unfocused selection colour, no adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    let mut snap = snapshot_of(30, 4, b"\x1b[?25l");
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(1), Column(0)),
+        Point::new(Line(1), Column(20)),
+        false,
+    ));
+    let x = (cfg.padding_x + renderer.cell_w * 5.5) as u32;
+    let y = (cfg.padding_y + renderer.cell_h * 1.5) as u32;
+    let mut sample = |window_focused: bool| {
+        let overlay = Overlay {
+            window_focused,
+            cursor_visible: false,
+            ..Overlay::default()
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let p = frame.get_pixel(x, y);
+        Rgb::new(p[0], p[1], p[2])
+    };
+    let focused = sample(true);
+    let unfocused = sample(false);
+    assert!(
+        focused.r != focused.b,
+        "the focused selection keeps the theme's hue: {focused:?}"
+    );
+    assert!(
+        unfocused.r == unfocused.g && unfocused.g == unfocused.b,
+        "the unfocused selection is grey: {unfocused:?}"
+    );
+    assert_ne!(
+        unfocused,
+        color::resolve_query(257, &cfg.theme, &snap.colors).unwrap_or(cfg.theme.background),
+        "the unfocused selection is painted"
+    );
+}
+
+/// A see-through window paints the selection worked out against its
+/// background as the desktop shows it; a window the OS draws opaque (macOS
+/// Reduce Transparency) keeps the one worked out against the theme colour.
+#[test]
+fn a_see_through_window_paints_the_selection_measured_as_shown() {
+    use super::theme::PaneSelectionFills;
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    let mut cfg = gpu_test_config();
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 0.86;
+    let Some(mut renderer) =
+        Renderer::headless_for_tests_with(&cfg, 320, 120, 1.0, true).expect("renderer builds")
+    else {
+        eprintln!("C09_GPU_SKIP: see-through selection colour, no adapter");
+        return;
+    };
+    let mut snap = snapshot_of(30, 4, b"\x1b[?25l");
+    snap.selection = Some(SelectionRange::new(
+        Point::new(Line(1), Column(0)),
+        Point::new(Line(1), Column(20)),
+        false,
+    ));
+    let x = (cfg.padding_x + renderer.cell_w * 5.5) as u32;
+    let y = (cfg.padding_y + renderer.cell_h * 1.5) as u32;
+    let mut sample = |window_opaque: bool| {
+        let overlay = Overlay {
+            window_focused: true,
+            window_opaque,
+            cursor_visible: false,
+            ..Overlay::default()
+        };
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let p = frame.get_pixel(x, y);
+        Rgb::new(p[0], p[1], p[2])
+    };
+    let background =
+        color::resolve_query(257, &cfg.theme, &snap.colors).unwrap_or(cfg.theme.background);
+    let fill = |alpha: f64| {
+        PaneSelectionFills::new(
+            &cfg.theme,
+            background,
+            alpha,
+            &mut MinimumContrastCache::default(),
+        )
+        .row(true)
+    };
+    let (see_through, opaque) = (fill(composed_bg_alpha(&cfg)), fill(1.0));
+    assert_ne!(
+        see_through, opaque,
+        "the fixture must differ when see-through"
+    );
+    assert_eq!(sample(false), see_through);
+    assert_eq!(sample(true), opaque);
 }
 
 /// Background tabs' activity markers reach the frame as three shapes beside

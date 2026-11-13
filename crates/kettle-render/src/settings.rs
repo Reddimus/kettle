@@ -27,6 +27,49 @@ impl SettingsOverlay {
     }
 }
 
+/// The Settings panel's surfaces and strokes. The panel is opaque, so they are
+/// resolved against the theme's own background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SettingsColors {
+    /// The focused row and the active category.
+    pub(crate) selected: kettle_config::Rgb,
+    /// The panel's own outline and the sidebar divider, which only group
+    /// content and stay quiet.
+    pub(crate) border: kettle_config::Rgb,
+    /// The outlines of fields, choices, switches, the search field and the
+    /// category arrows, and an off switch's knob. They show where a control
+    /// is and which state it is in, so they keep `ICON_CONTRAST` against the
+    /// panel.
+    pub(crate) control: kettle_config::Rgb,
+    /// `control` on the selected row, where the outline also has to stand
+    /// out from the row's fill around it.
+    pub(crate) selected_control: kettle_config::Rgb,
+}
+
+pub(crate) fn settings_colors(
+    theme: &kettle_config::Theme,
+    accent: kettle_config::Rgb,
+    linear: bool,
+    colors: &mut super::chrome::Colors,
+) -> SettingsColors {
+    let selected = colors.surface(theme.background, accent, 0.18, linear);
+    let border = colors.surface(theme.background, theme.palette[8], 0.65, linear);
+    let control = colors.icon(border, theme.background);
+    let selected_control = super::color::with_min_contrast_on_both(
+        control,
+        theme.background,
+        selected,
+        super::chrome::ICON_CONTRAST,
+        false,
+    );
+    SettingsColors {
+        selected,
+        border,
+        control,
+        selected_control,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SettingsControl {
     Toggle(bool),

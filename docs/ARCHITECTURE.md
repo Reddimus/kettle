@@ -298,9 +298,22 @@ title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
-Edit, View and Window menus (the Window menu carries the tab commands: next,
-previous, rename, move left, right and to a new window), actions, separators,
-enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+Edit, View, Window and Help menus (the Window menu carries the tab commands: next,
+previous, rename, move left, right and to a new window; Help, registered with
+`setHelpMenu` so macOS adds its menu search field, holds Kettle Help and
+Keyboard Shortcuts; View's full-screen item and Window's Minimize, Zoom and
+Bring All to Front carry AppKit's own selectors, so the system adds no second
+full-screen item, and its title follows the focused window's state), actions, separators,
+enabled and checked state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding).
+The Shell menu's Broadcast Input submenu and the right-click menu's Broadcast
+Input category share one row table (`app::broadcast::broadcast_rows`): Off,
+Panes in This Tab, Panes in This Window and Panes in This Group, with the
+current scope checked. The rows run the existing toggles, so the checked row
+turns broadcast off, and the chord's action is the row for the scope it turns
+on, which puts its hint there. The Group row stays checked for any group
+target; when the focused pane is not in that group it runs
+`ToggleBroadcastOff`. The menu-bar snapshot holds a `Copy` `BroadcastKind`
+instead of the group's name. AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. AppKit's automatic window tabbing is
 turned off before the event loop launches AppKit
@@ -313,7 +326,12 @@ Kettle equivalents are declined so the original event reaches winit's modal
 handlers, `resolve_keybind_action`, program-key yield rules and terminal writer,
 with its physical key, layout, repeat and release intact. Mouse menu choices
 send existing actions to the focused window through the event-loop proxy.
-Commands with no existing Kettle Action are omitted.
+Full screen, Minimize and Zoom go the same way, by mouse or key equivalent: a
+Kettle target answers `toggleFullScreen:`, `performMiniaturize:` and
+`performZoom:` and sends `ToggleFullscreen` or a winit minimize or zoom, since
+AppKit's own versions skip winit and do nothing on a borderless window.
+Minimize and Zoom are off in full screen. Other commands with no existing
+Kettle Action are omitted.
 The Linux desktop entry carries its
 Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
@@ -453,6 +471,7 @@ using `use super::*;` to share the parent scope:
 | `keyboard`, `ime` | key encoding, bindings, program key ownership; composition and IME cursor geometry |
 | `pointer` | mouse reporting, wheel, selection, pane and split-divider dragging, cursor icons |
 | `actions` | action dispatch, pane/tab operations, scaled zoom and broadcast groups |
+| `broadcast` | the broadcast scope's one write path, its action transitions and the Broadcast Input menu rows |
 | `layout` | content bands, pane/grid geometry, resize and PTY pixel sizes |
 | `focus` | focus transitions, focus reports and completion cleanup |
 | `output` | PTY output and lifecycle drains, wake gates, output generations and per-window user events |
@@ -469,12 +488,28 @@ using `use super::*;` to share the parent scope:
 | `modals`, `pickers`, `hints`, `settings_text` | dialog ownership and input; picker projections; hint targets; translated settings notes |
 | `accessibility` | accessibility identifiers, projections, tree and actions |
 | `config_reload`, `sessions` | config watchers, reloads and themes; session save and restore |
+| `exit` | the once-only exit teardown, from `exiting` or after `run_app` |
 | `system_opener`, `update_toast` | bounded desktop launches; transient update notifications |
 
 Session saves pass their opt-in gate before snapshotting. One worker performs
 serialization, comparison and durable replacement with one replaceable pending
 snapshot; it holds no queue lock during filesystem work. Shutdown drains the
 latest snapshot after any write already in progress and waits for completion.
+
+A quit through AppKit's `terminate:` (Cmd+Q, the Dock's or app menu's Quit,
+logout, shutdown) never returns from `run_app`: winit calls
+`ApplicationHandler::exiting` and AppKit then calls `exit()`, which runs no
+destructor. So `exiting` hands a running recording its tail, saves the session
+once more through `save_session` and its gates when a window other than the
+quick terminal still has tabs, and runs the exit teardown. It first waits at
+most 300 ms for the recorder to write its tail, then deletes pasted screenshots
+and the image, document and video viewer copies, then waits at most 1.5 s for
+the session write (`SessionWriter::finish_timed`) and flushes notifications for
+at most 250 ms, so a stalled disk or a hung network home cannot hold a quit,
+logout or shutdown for more than about 2 s. A session write given up on leaves
+the previous file whole, because each write is an atomic replace. The same
+teardown runs after `run_app` returns; a flag makes the first call the only
+one.
 
 The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
 fixtures and includes the tests split out of its original body, preserving their
@@ -1769,9 +1804,13 @@ click: context menus, the command palette, theme/layout pickers, SSH, title
 editing and quick-select hints. The command palette and theme, layout and SSH
 pickers share one top-centred rounded card below the top chrome. Its query header
 and results use one geometry for paint, pointer input, control diagnostics,
-AccessKit bounds and the IME caret. Command labels accent the characters matched
-by the same fuzzy matcher used for ranking; English alias matches in Spanish
-have no accent unless the displayed label also matches. The whole card counts
+AccessKit bounds and the IME caret. The fuzzy matcher scores each label by its
+best alignment, and while any row matches strongly (each scattered piece of
+the query starts a word, or a query of four or more characters runs
+contiguously, as `screen` does in `fullscreen`) the palette leaves
+out rows the query only lies scattered through. Command labels accent the
+characters of the alignment that ranked the row; English alias matches in
+Spanish have no accent unless the displayed label also matches. The whole card counts
 as inside. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
@@ -1856,7 +1895,16 @@ side and its line at the button's height, so a glyph stays centred and
 unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
 square (growing with the band height), a 4 pt
-inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
+inter-button gap, a 4 pt leading gap and an 8 pt outside margin. In a macOS
+title bar `titlebar_settings_control` adds a Settings gear the size of `▾`, 8 pt
+before it, without moving `▾ +`; it shows only while the lane still keeps
+`tab-min-width` beside every control (never by tab count). The gear is drawn as
+alpha quads from `tab_strip::gear_mask`, not a font glyph, and opens Settings on
+a release over it. The gear takes its room from the right of the strip, so
+`centre_lone_titlebar_tab` narrows a lone tab evenly about the window centre,
+down to `tab-min-width`, rather than letting it slide off centre, and a
+torn-off tab is held in that same lone tab (`tear_off_destination_tab`, shared
+with the Wayland grip). Titlebar height
 is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
 clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
 band height. Tooltips use translated action names and the live keymap shortcut,
@@ -2436,6 +2484,156 @@ current and lose an invalidation. The commit-hook search regression exercises
 matcher tolerance with saved forward and reverse regex work before the real
 publication helper runs. The UI frame regression exercises the lost link-cache
 invalidation and the post-presentation retry under that interleaving.
+
+### Typed echo
+
+Output within `TYPING_ECHO_WINDOW` (150 ms) of a keystroke skips the output
+coalescer and requests a redraw at once. `request_redraw` is not paced to the
+display on macOS: winit dispatches the redraw in the same run-loop pass, and
+the Metal surface presents FIFO with up to three drawables. A shell that
+answers one key with two writes therefore gets two frames, and the first stays
+on screen for a whole refresh. zsh-autosuggestions in its default async mode does
+this on each key that changes the suggestion: the first write erases the old
+gray suggestion, the second, about a millisecond later, draws the new one.
+
+`crate::typed_echo` handles it in two parts. Each output publication is
+stamped in the pane's `OutputWakeGate`, waking or not
+(`Terminal::output_published_at`). The PTY reader stores the stamp before the
+`Release` increment of the output generation, so a reader that acquires a
+generation and then reads the stamp gets that publication's time or a later
+one's. The diagnostics then judge splits by publication time, not by when the
+UI thread sees a wake, which can be after a whole frame of rendering. A
+frame's generations are sampled under each pane's terminal lock during
+capture, because the staged cutoff above predates the capture.
+`ui_geometry.typed_echo` reports the counts.
+
+Both parts follow one keystroke at a time. `note_keystroke`, which every
+keystroke stamp goes through, records the panes the key reached. It keeps
+only those that took typed text (a printable character or a backspace,
+`typed_echo::is_typed_text`) and whose output the window had all painted. A
+paste of any length, and keys replayed in one block after a paste, are never
+typed text. An echo is the first wake that carries new output of one of those
+panes, so output from a sibling pane, and type-ahead into a pane that is still
+printing, are neither counted nor learned from. Enter, Tab, arrows and control
+keys are left out too: Enter prints a newline, runs the command and draws the
+prompt in separate writes in any shell, so learning from it would settle every
+shell.
+
+On macOS, a pane whose typed-text echo split within `ECHO_SETTLE` (3 ms) keeps
+its later typed-text echoes settled for `SPLIT_MEMORY` (5 s). Such an echo is
+held at its first wake instead of painting at once. It paints when the UI
+thread handles the wake its second write raises, or at its first wake plus
+`ECHO_SETTLE`, whichever comes first.
+
+The settle is event-driven:
+- `note_keystroke` records each followed pane's output generation with the
+  key: the key's baseline.
+- The first wake leaves the pane's output latch closed. Arming the settle
+  reopens it (`plan_typed_echo_paint`), acknowledging first and reading the
+  generation after, so the second write either shows in that read or raises
+  a fresh wake.
+- The typed Wakeup arm hands each wake to the armed settle. Once every
+  learned pane the key reached is two publications past its baseline, the
+  frame is requested (`settled_early`). That includes a pane of a broadcast
+  that had not published yet at the first wake, whose latch each wake
+  reopens until it completes. A pane whose echoes do not split is not waited
+  for.
+- If every write landed before the UI thread reached the first wake, the
+  echo paints at once without arming, and counts as neither kind of settle.
+- `about_to_wait` waits once, for the deadline. No step polls the
+  generations.
+- The probe never saw more than two writes for one key. A third would land
+  after the paint and count as an intermediate frame.
+
+Reopening the latch early keeps the output coalescer's latch rule. The latch
+gates wakes, not output, so opening it early can add a wake but never lose
+one. It is reopened only inside the typing window, where the coalescer is
+already bypassed, and only for panes still short of their second write: at
+most two extra wakes per pane and keystroke. The app's shared wake latch is
+cleared before each Wakeup fans out, so a publication during that Wakeup
+queues the next one. The redraw still acknowledges every pane before its
+snapshot; that leaves an open latch open and clears a pending one, as for
+any wake that races a frame.
+
+Counting publications cannot tell whose they are:
+- A key sent before the previous key's echo in that pane had published
+  shares its baseline. The previous echo's write would be counted as this
+  echo's first, and this echo's own first write as its second. zsh-autosuggestions does this in a burst, cancelling one
+  key's suggestion fetch when the next key arrives. `key_sent` marks such a
+  pane's baseline uncertain, and only the deadline releases its settle.
+- The settle can still reach two publications before the echo's second write.
+  The first write can be split across two PTY reads, each of which
+  publishes. The previous key's late write, its suggestion arriving after
+  this key went out to a pane that looked quiet, can land after this key's
+  baseline. An asynchronous prompt redraw, such as a theme's async git
+  status, can publish in between. Each releases the settle early, and the
+  echo's real second write then paints in a frame of its own, as without the
+  settle. Releasing at the number of publications seen when the pane's split
+  was learned was considered and not adopted: it cannot tell those
+  publications apart either.
+- A later keystroke whose echo joins the armed paint adds its learned panes
+  to the armed key's, and the paint then follows that keystroke. It waits for
+  every pane of both keys, so neither echo paints half-written.
+- A pane that closes mid-settle is never complete, and the deadline paints.
+
+An echo that arrives in one write still waits the full `ECHO_SETTLE`: until
+the deadline nothing tells it apart from the first half of a split. In the
+live A/B below, about three in four typed echoes in a learned pane were
+single writes, so early release shortens only the remaining quarter. Shells
+that write each echo once never arm the settle and pay nothing.
+
+A deadline scaled to the pane's recent split gaps (twice the largest in the
+last 5 s, between 1 and 3 ms) was considered and not adopted. On a replay of
+the headless probe (792 keys, runs concatenated per key gap, so the 5 s window
+spans runs), it shortened the deadline for 190 of 787 keys in learned panes,
+saving about 0.28 ms per single-write echo. It also let 7 of 187 split echoes
+outlast their deadline, against 4 with the fixed 3 ms.
+
+The settle is a single phase (`Idle`, `Armed { deadline, key }`, `Queued`)
+with these rules:
+- The deadline is never extended. A deadline that is due counts as the
+  deadline (`settled_echoes`), even if the echo has also completed, whether
+  `about_to_wait` or a wake finds it.
+- `about_to_wait` checks it under the coalescer's guards. With nothing
+  pending the check returns before them. A hidden window or a pending frame
+  recovery cancels it rather than waking for a redraw that would return
+  early. A settle that already requested its frame was counted when it
+  requested it. While armed it asks for one wake, at the deadline, never
+  sooner than 100 µs from now, so a timer that fires early cannot spin the
+  loop.
+- `Queued` ends when the next redraw callback begins, even one that returns
+  early, so a failed redraw is not retried every turn.
+- A typed wake that finds it `Queued` requests the redraw again.
+- Output after a later keystroke that would not settle on its own (Enter,
+  Tab, a key into another pane) paints at once instead of waiting for the
+  armed paint. A paste is not a keystroke: it never arms the settle, and its
+  output takes the ordinary output path.
+
+A live A/B on macOS measured the fixed 3 ms settle, before early release. It
+ran on 2026-11-13 at 60 Hz, in oh-my-zsh with async zsh-autosuggestions, with
+keys paced 33 and 50 ms apart. Each build ran 8 runs of 132 keys on
+suggestion-changing text and 8 on text that matches no history; the
+autosuggestions figures below are from the first set. It confirmed both
+effects:
+- Without the settle, about one intermediate frame reached the screen per
+  split echo: 244 over 238 split echoes.
+- With it, 12 over 235 (0.05 per split, 95% fewer), and frames per echo fell
+  from 1.30 to 1.08. The residue is about one per run: the first split after
+  a cold start, which is not settled by design.
+- Plain zsh never split and never settled (0 settles in 1042 echoes).
+
+The A/B also found the cost. In the autosuggestions shell, 99% of echoes on
+suggestion-changing text were settled, each waiting the full 3 ms, single
+writes included. That failed the preregistered criterion of no cost for
+single-write echoes. Early release was added after the A/B, first by polling
+and then event-driven as described above. Neither has been measured live, so
+how much sooner a split echo paints is not known.
+
+`ECHO_SETTLE` comes from a headless PTY probe of oh-my-zsh with
+zsh-autosuggestions: 97% of 192 split echoes spanned 3 ms or less. It stays
+below the 4 ms minimum output budget. Windows keeps the immediate path, since
+its timers are too coarse for the deadline. X11 and Wayland keep it too until
+it is measured there.
 
 ### Character protection
 
@@ -3645,12 +3843,16 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. The panel's
+with the highlighted row drawn as an inset rounded selection. A picker whose
+results overflow also gets a decorative scrollbar thumb, a rounded pill in the
+gap between the selection's right inset and the border, drawn after the
+selection; its rows fill the panel from the header down, since pickers scroll
+with the selection and the wheel and keep no arrow strips. The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
 `RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
-the picker's header divider and the scroll arrows stay flat quads. The scene
+the picker's header divider and a context menu's scroll arrows stay flat quads. The scene
 pass draws the levels root first, one layer each: the level's surfaces, its
 quads, its swatches, then its labels in a `TextRenderer` of its own
 (`menu_level_text`, ranges in `menu_level_draws`). A submenu therefore covers
@@ -3720,8 +3922,21 @@ non-current search match keeps it wherever it meets the fill's ratio (3:1, or
 separate from resolves a fill against that background, painted over the row
 quad, and its ink resolves against that fill. A selection over a status line
 therefore stays one colour, and a plain selection draws one quad per row.
-Contrast is computed from opaque colours; a translucent window's composite
-with the desktop is not known to the renderer. In a dimmed split, highlights
+The unfocused fill is the grey nearest the background that reaches 2:1, kept
+between the background and the focused fill and at least 1.3:1 from the
+focused fill (`SELECTION_FOCUS_SEPARATION`), so it gives up 2:1 where the
+focused fill stops short.
+The desktop behind a translucent window is not known to the renderer, so
+`theme::selection_backdrop_alpha` decides whether one shows at all (not on an
+opaque surface, a covering wallpaper, or a window the OS draws opaque, which
+kettle-ui reports as `Overlay::window_opaque` from macOS Reduce Transparency).
+When one does, the row fills are measured against the background over white
+or black (`theme::selection_contrast_target`), whichever leaves the selection
+less contrast, unless that composite passes the selection, when they are
+measured against the background itself; the focused fill strengthens away
+from it on its own side, only while its text keeps 4.5:1 and its light or
+dark ink. Default cells are still recognised by the
+background colour as drawn. In a dimmed split, highlights
 resolve against backgrounds as the pane dimmer shows them, because highlight
 fills paint above the dimmer. A link underline on a highlight reuses the
 cell's resolved text ink. Per-frame colour caches include these decisions and
@@ -3733,6 +3948,36 @@ their pane glyph directly. Only the focused blinking block uses the separate
 cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay
 in the terminal engine; Kettle's bounded copy helper applies the same policy
 to manual copy, copy on selection and vi yank.
+
+Chrome text is different: Kettle chooses it, so it is held to its floors on
+screen. A surface left at alpha `a` shows its stored pixel plus `1 - a` of
+whatever is behind the window, which can be anything from black to white. The
+stored pixel is `a` times the colour with straight alpha (how macOS is
+presented) or on a plain target, and the encoding of `a` times its linear light
+when premultiplied on an sRGB target; `color::Backing` takes the darker over
+black and the lighter over white, so it covers every path. macOS shows a
+translucent window a few levels brighter at both ends than that, so there the
+backdrop is lifted by `color::MACOS_BACKDROP_LIFT`, derived from one
+dark-appearance capture in the 6.0.0 comparison; elsewhere
+`PLATFORM_BACKDROP_LIFT` is zero. `Colors::on` floors an ink chosen against
+the surface's own colour against both extremes, one 8-bit level wider each way
+for the GPU's and the window server's rounding. The ink stays on its side of
+the surface, so light text stays light. An opaque surface is unchanged, and an
+ink that already clears both extremes does not move; Linux's default 0.99
+window is translucent, so inks resolved exactly to the floor there move by up
+to 7 levels. The active horizontal tab is the terminal surface at the window's
+opacity. Where no ink can clear the text floor over that span,
+`chrome::text_surface_alpha` makes it more opaque, by at most
+`MAX_TEXT_SURFACE_RAISE` (0.1) and only over a solid background; over an image,
+starfield or transparent background, and past the cap, the text is best effort.
+At the default 0.86 that raises three mid-tone themes, five on macOS. The search
+bar, which was 98% opaque, is drawn opaque over a translucent terminal in the
+colour it has over the theme's background, so its labels do not depend on the
+backdrop. An unfocused window does not paint the tabs' Cmd+N hints but keeps
+their lanes, so titles do not move. These labels are swept over every bundled
+theme at 0.86, 0.7, 0.43, 0.99 and opaque in `chrome_contrast_sweep_tests`.
+The tab accent bar, the jump-to-bottom pill's fill and terminal text, including
+`minimum-contrast`, are still resolved against the opaque colour.
 
 ### Cursor patch
 
@@ -4032,7 +4277,9 @@ non-regression claim.
   advances `deferred → queued → presenting → idle` only after a presented
   frame; a failed presentation returns to `deferred` without a busy deadline.
   The pane latch stays closed throughout a deferred interval and reopens only
-  when a real frame is about to snapshot generations. A queued wake that was
+  when a real frame is about to snapshot generations. The one exception is a
+  settled typed echo, inside the typing window where the pacer is bypassed:
+  it reopens its panes' latches when it arms (see [Typed echo](#typed-echo)). A queued wake that was
   already covered by a presented frame is acknowledged and then resampled,
   closing the race between the stale check and rearm. Visibility, recovery,
   reap, and renderer guards run before the pacer can enter `presenting`, so an
@@ -4299,7 +4546,8 @@ still clear the ring rather than guessing which history row survived.
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
 selection, and renders the captured native state. The UI's `ViState` stores
-only the owning pane and whether visual selection is active. This single-owner
+only the owning pane and whether visual selection is active; the visual kind
+(`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
 invalidation consistent with the grid.
 
@@ -4422,7 +4670,13 @@ Other additions:
   arguments as untrusted: validate fields against their specific character sets
   and a 512-byte limit, then reject controls again before direct spawning.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
-  per-tab / per-window / cross-tab named scopes).
+  per-tab / per-window / cross-tab named scopes). `App::set_broadcast_scope`
+  is the only writer of a window's scope: the actions and the stale-group
+  cleanup (`hoover_groups`, `hoover_mapped_groups`, run from redraw, close
+  and title edits) go through it, so a change always redraws the window and
+  resyncs the macOS menu's checkmark. It returns early when the scope is
+  unchanged, which keeps the per-frame cleanup free. A source scan
+  (`the_broadcast_scope_has_one_writer`) keeps it the only writer.
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
 - **vertical tab strips** and a **wgpu offscreen-scene screenshot path**.
 - **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
@@ -5033,7 +5287,9 @@ category strip side by side. Group headings are omitted when needed to retain
 a complete focused field. Picker geometry similarly reduces outer spacing to
 retain its header and one result. The renderer uses `visible_resize_overlay`
 for both size-chip text preparation and drawing, suppressing it under Settings
-or a picker card.
+or a picker card. After a font-size action kettle-ui sets
+`Overlay::resize_overlay_text` to the translated size and grid; the chip is
+sized from the shaped text, and the same string is a polite live region.
 
 ### Paste consent and context-menu nesting
 
@@ -5171,7 +5427,9 @@ do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
-remains visible. Hint actions and their legend share `hint_action`; OSC 8
+remains visible. A selection drag suspends hover in `link_under_native_pointer`,
+and `link_rects` clears the hover flag of a link group any of whose cells is
+selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are
@@ -5201,6 +5459,28 @@ the normal grid, scrollback, search, selection, accessibility, control geometry
 and IME paths. No chrome or terminal rectangle changes. A successful startup
 restore removes its sidecar; later session saves capture the current grid again.
 
+Off Windows, `kettle-core::term::seed_restored_content` then arms a one-shot
+restore clear guard in the vendored engine (`term/restore_clear_guard.rs`) at
+the cursor row below the divider. The anchor is a stable row identity
+(history origin plus history size plus screen line), which ED 3's history
+purge leaves unchanged, stamped with the grid geometry. The first ED 2 on the
+primary screen with the cursor at the home position consumes the guard: it
+erases from the anchor row down and puts the cursor there, so a startup
+`clear` in any of its byte orders keeps the restored rows in view. ED 3
+never touches the guard. Any other erase (ED 0/1, ED 2 away from home, ISO
+or DEC selective erase), a primary-screen scroll, the alternate screen, RIS,
+DECALN, DECCOLM and the first OSC 133 A prompt mark (applied in wire order
+through the synchronized-output marker queue) disarm it, after which the
+engine behaves as upstream. User input reaches it through an atomic flag:
+`Pane::record_user_input`, which every user-input writer calls, sets it
+without locking the terminal, and the engine reads it under the terminal
+lock when it next parses output, decides an ED 2 or resizes. Focus reports
+bypass that path and do not disarm. A resize before any output re-anchors
+to the reflowed cursor row; after output it disarms, and a geometry change
+that bypassed `Term::resize` fails the stamp check and falls back to the
+upstream clear. Windows stays unarmed because ConPTY's repaint behaviour has
+not been verified against the guard.
+
 System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
@@ -5227,7 +5507,8 @@ grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
 28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
 hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
 New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
-dimmed. Outer corners remain square.
+dimmed; tab titles keep 4.5:1 when dimmed, since they still name the tabs,
+and an unfocused window paints no shortcut hints. Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`

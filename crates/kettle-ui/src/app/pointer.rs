@@ -914,6 +914,7 @@ impl App {
             };
             r.set_font_size(new);
             ws.scaled_zoom_prev_font_size = None;
+            self.show_font_size_chip(ws);
             self.resize_all(ws);
             if let Some(w) = &ws.window {
                 w.request_redraw();
@@ -1752,15 +1753,7 @@ impl App {
         // `tabbar.hovered_close_idx`, which we pass through in
         // `tab_bar()`).
         let bar = self.tab_bar(ws);
-        let prior_hover = (
-            ws.hovered_close_idx,
-            ws.hovered_tab_idx,
-            ws.hovered_new_tab,
-            ws.hovered_new_tab_menu,
-        );
-        ws.hovered_tab_idx = bar.hovered_tab_idx;
-        ws.hovered_close_idx =
-            hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let control_hover = window_control_at(&bar, cursor_x, cursor_y);
         if control_hover != ws.hovered_window_control {
@@ -1770,23 +1763,11 @@ impl App {
             }
         }
 
-        let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
-        ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
-        ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
-        if prior_hover
-            != (
-                ws.hovered_close_idx,
-                ws.hovered_tab_idx,
-                ws.hovered_new_tab,
-                ws.hovered_new_tab_menu,
-            )
-            && let Some(window) = &ws.window
-        {
+        if hover_changed && let Some(window) = &ws.window {
             window.request_redraw();
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
-        let new_tab_hover_icon =
-            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
+        let new_tab_hover_icon = new_tab_hover.is_some().then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {

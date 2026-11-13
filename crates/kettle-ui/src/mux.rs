@@ -1009,6 +1009,12 @@ pub struct Pane {
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
     user_input_generation: AtomicU64,
+    /// Whether the last keyboard or paste input queued here was typed text:
+    /// one key's worth of printable characters or a backspace, not Enter, Tab,
+    /// a control chord, an escape sequence or a paste of any length. The
+    /// window reads it when it records a keystroke; only typed text is
+    /// followed by the typed-echo counts and settle (see `crate::typed_echo`).
+    last_input_typed_text: AtomicBool,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
     /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
@@ -1108,7 +1114,11 @@ impl Pane {
         move || user_rx.try_iter().map(|item| item.bytes.to_vec()).collect()
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    /// See `last_input_typed_text`.
+    pub(crate) fn last_input_was_typed_text(&self) -> bool {
+        self.last_input_typed_text.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn input_generation(&self) -> u64 {
         self.user_input_generation.load(Ordering::Relaxed)
     }
@@ -1225,6 +1235,33 @@ impl Pane {
     }
 
     pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        let typed_text = crate::typed_echo::is_typed_text(&bytes);
+        self.feed_user_input(bytes, typed_text)
+    }
+
+    /// Write a paste, or keys replayed in one block after one, as user input.
+    /// It is the same input as [`Self::feed_input`] except that it is never
+    /// typed text, however short: a paste is not one keystroke, so it never
+    /// teaches or arms the typed-echo settle (`crate::typed_echo`).
+    pub fn feed_paste(&self, bytes: &[u8]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        ) {
+            return result;
+        }
+        if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        self.feed_paste_shared(Arc::from(bytes))
+    }
+
+    /// [`Self::feed_paste`] for a payload shared between panes.
+    pub fn feed_paste_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
+        self.feed_user_input(bytes, false)
+    }
+
+    fn feed_user_input(&self, bytes: Arc<[u8]>, typed_text: bool) -> PaneInputResult {
         if let Some(result) = pane_input_policy(
             !self.held && self.pty_input.failed(),
             self.read_only || self.held,
@@ -1239,6 +1276,7 @@ impl Pane {
                     self.pty_input
                         .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
+                self.record_typed_text(result, typed_text);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1269,6 +1307,9 @@ impl Pane {
         let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
         let reporting_mode = self.input_reporting_mode();
         let nonempty = !joined.is_empty();
+        let typed_text = inputs
+            .iter()
+            .all(|input| crate::typed_echo::is_typed_text(input));
         let joined: Arc<[u8]> = Arc::from(joined);
         self.term
             .with_keyboard_input_admission(&boundaries, joined.clone(), |echo| {
@@ -1276,6 +1317,7 @@ impl Pane {
                     .pty_input
                     .enqueue_user_with_echo(reporting_mode, joined, echo);
                 self.record_user_input(result, nonempty);
+                self.record_typed_text(result, nonempty && typed_text);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1302,9 +1344,18 @@ impl Pane {
         })
     }
 
+    fn record_typed_text(&self, result: PaneInputResult, typed_text: bool) {
+        if result.is_queued() {
+            self.last_input_typed_text
+                .store(typed_text, Ordering::Relaxed);
+        }
+    }
+
     fn record_user_input(&self, result: PaneInputResult, nonempty: bool) {
         if result.is_queued() && nonempty {
             self.user_input_generation.fetch_add(1, Ordering::Relaxed);
+            // Lock-free: the reader thread applies it under the terminal lock.
+            self.term.note_restore_guard_user_input();
         }
     }
 
@@ -2590,6 +2641,7 @@ impl Mux {
                 rx,
                 pty_input,
                 user_input_generation: AtomicU64::new(0),
+                last_input_typed_text: AtomicBool::new(false),
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
@@ -4912,7 +4964,7 @@ impl Mux {
                     raw.get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, false)))
                 };
                 // Paste is user input — read-only panes drop it.
-                let result = p.feed_input_shared(bytes.clone());
+                let result = p.feed_paste_shared(bytes.clone());
                 delivery.record_for(id, receipt_pane, result);
             }
         }
@@ -4977,7 +5029,7 @@ impl Mux {
                 .or_insert_with(|| {
                     Arc::<[u8]>::from(crate::input::paste_payload(&text, bracketed))
                 });
-            let result = pane.feed_input_shared(bytes.clone());
+            let result = pane.feed_paste_shared(bytes.clone());
             delivery.record_for(id, receipt_pane, result);
         }
         delivery
@@ -6114,6 +6166,62 @@ mod node_tests {
         pane.read_only = true;
         assert_eq!(pane.feed_input(b"refused"), PaneInputResult::ReadOnly);
         assert_eq!(pane.input_generation(), after_keys);
+        mux.kill_children();
+    }
+
+    /// Only typed-text keys teach the typed-echo settle, on every keyboard
+    /// path; refused input leaves the last answer alone.
+    #[cfg(unix)]
+    #[test]
+    fn panes_remember_whether_their_last_input_was_typed_text() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let argv = vec!["/bin/cat".to_owned()];
+        mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+            &argv,
+            None,
+        )
+        .expect("PTY fixture");
+        let pane = mux.panes.values_mut().next().unwrap();
+        let (queue, _rx) = input_queue_fixture();
+        pane.pty_input = queue;
+        assert!(!pane.last_input_was_typed_text());
+        assert_eq!(pane.feed_input(b"g"), PaneInputResult::Queued);
+        assert!(pane.last_input_was_typed_text());
+        assert_eq!(pane.feed_input(b"\r"), PaneInputResult::Queued);
+        assert!(!pane.last_input_was_typed_text(), "Enter is not typed text");
+        assert_eq!(
+            pane.feed_key_inputs(&[b"a".to_vec(), b"\x7f".to_vec()]),
+            PaneInputResult::Queued
+        );
+        assert!(pane.last_input_was_typed_text());
+        assert_eq!(
+            pane.feed_key_inputs(&[b"a".to_vec(), b"\t".to_vec()]),
+            PaneInputResult::Queued
+        );
+        assert!(!pane.last_input_was_typed_text(), "a batch with Tab is not");
+        assert_eq!(pane.feed_input(b"a"), PaneInputResult::Queued);
+        assert_eq!(pane.feed_paste(b"ab"), PaneInputResult::Queued);
+        assert!(
+            !pane.last_input_was_typed_text(),
+            "a paste is never typed text, however short"
+        );
+        for _ in 6..PTY_INPUT_QUEUE_DEPTH {
+            assert_eq!(pane.feed_input(b"x"), PaneInputResult::Queued);
+        }
+        // A full queue refuses Enter inside the admission closure.
+        assert_eq!(pane.feed_input(b"\r"), PaneInputResult::Backpressured);
+        assert!(
+            pane.last_input_was_typed_text(),
+            "refused input changes nothing"
+        );
         mux.kill_children();
     }
 
@@ -11614,7 +11722,7 @@ mod grapheme_config_tests;
 mod restore_content_tests {
     use super::*;
     use crate::session_content::PaneContent;
-    use kettle_core::{Column, Line, Point};
+    use kettle_core::{Column, Dimensions, Line, Point};
 
     fn saved_session() -> Session {
         Session {
@@ -11688,6 +11796,115 @@ mod restore_content_tests {
         };
         let saved = mux.snapshot_content(&allowed, &mut budget);
         assert!(!saved[0][0].lines.is_empty());
+    }
+
+    /// A restored pane whose child switches its tty to raw mode, enables
+    /// focus reports, prints `ready`, reads three bytes, then clears the way
+    /// `tput clear` does and draws a prompt.
+    fn restored_pane_waiting_for_input() -> Mux {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let script = "stty -icanon -echo min 1; printf '\\033[?1004hready'; \
+                      dd bs=1 count=3 >/dev/null 2>&1; \
+                      printf '\\033[H\\033[2Jprompt$ '; read wait";
+        let session = Session {
+            tabs: vec![STab {
+                root: SNode::Leaf {
+                    cwd: None,
+                    cmd: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                    group: None,
+                },
+                focus: 0,
+                title_override: None,
+                zoomed: false,
+            }],
+            ..Session::default()
+        };
+        let content = vec![vec![PaneContent {
+            remote: false,
+            lines: vec![("old content".into(), false, vec![])],
+        }]];
+        let mut mux = Mux::new();
+        let outcome = mux.restore_geometry_with_content(
+            &session,
+            &cfg,
+            &[],
+            &|| Arc::new(|| {}),
+            &content,
+            "divider",
+        );
+        assert!(outcome.restored_any);
+        let pane = mux.panes.values().next().unwrap();
+        assert!(pane.term.restore_clear_guard_armed());
+        wait_for_first_char(pane, 2, 'r');
+        mux
+    }
+
+    fn wait_for_first_char(pane: &Pane, row: i32, expected: char) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pane.term.term.lock().unwrap().grid()[Point::new(Line(row), Column(0))].c != expected
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "row {row} never started with {expected:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The writer's bytes reach the child, which then clears. User input
+    /// disarms the guard, so the clear behaves as it always has: the prompt
+    /// lands on the top row and the restored rows go to history.
+    fn assert_user_input_disarms(write: impl FnOnce(&Pane) -> PaneInputResult) {
+        let mux = restored_pane_waiting_for_input();
+        let pane = mux.panes.values().next().unwrap();
+        assert_eq!(write(pane), PaneInputResult::Queued);
+        wait_for_first_char(pane, 0, 'p');
+        let term = pane.term.term.lock().unwrap();
+        assert_eq!(term.history_size(), 3);
+        assert!(!term.restore_clear_guard_armed());
+    }
+
+    #[test]
+    fn typed_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_input(b"abc"));
+    }
+
+    #[test]
+    fn shared_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_input_shared(Arc::from(&b"abc"[..])));
+    }
+
+    #[test]
+    fn key_batches_disarm_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_key_inputs(&[b"a".to_vec(), b"bc".to_vec()]));
+    }
+
+    #[test]
+    fn pointer_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_pointer_input(b"abc"));
+    }
+
+    #[test]
+    fn mouse_releases_disarm_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_mouse_release(b"abc"));
+    }
+
+    /// Focus reports are Kettle's, not the user's: the child's clear after
+    /// one still keeps the restored rows above the prompt.
+    #[test]
+    fn focus_reports_leave_the_restore_clear_guard_armed() {
+        let mux = restored_pane_waiting_for_input();
+        let pane = mux.panes.values().next().unwrap();
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
+        wait_for_first_char(pane, 2, 'p');
+        let term = pane.term.term.lock().unwrap();
+        assert_eq!(term.grid()[Point::new(Line(0), Column(0))].c, 'o');
+        assert_eq!(term.grid()[Point::new(Line(1), Column(0))].c, 'd');
+        assert_eq!(term.history_size(), 0);
     }
 
     #[test]

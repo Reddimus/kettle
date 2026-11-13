@@ -789,7 +789,10 @@ Tab, Shift+Tab, Left and Right move focus. Clicking outside leaves the question
 open. Short dialogs scroll with the wheel, Up/Down, Page Up/Page Down or Home/End.
 .PP
 The new-tab button's dropdown lists detected shells plus Settings, Command
-palette, and About rows; it is always visible.
+palette, Keyboard shortcuts, Help and About rows; it is always visible.
+Keyboard shortcuts opens the command palette listing only the commands that
+have a shortcut, each with its shortcut; type to search and Enter to run.
+Help opens the README in the web browser.
 Menu rows show right-aligned shortcut hints taken from the live
 keybind map.
 .PP
@@ -935,6 +938,12 @@ jump to middle of viewport
 .TP
 .B v
 toggle char-visual selection (anchor at cursor)
+.TP
+.B V
+toggle line-visual selection (whole lines)
+.TP
+.B ^V
+toggle block-visual selection (Ctrl+v; a rectangle of columns)
 .TP
 .B y
 yank visual selection to clipboard, exit vi-mode

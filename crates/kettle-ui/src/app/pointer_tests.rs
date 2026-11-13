@@ -1253,7 +1253,7 @@ fn command_palette_cancels_an_armed_titlebar_drag() {
         "modal pointer ownership must cancel an existing pane drag before release"
     );
     let palette = src
-        .split("Action::CommandPalette =>")
+        .split("Action::CommandPalette | Action::ShowKeybinds =>")
         .nth(1)
         .unwrap()
         .split("Action::")

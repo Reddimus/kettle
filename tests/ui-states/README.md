@@ -19,20 +19,27 @@ and only the repository's bundled JetBrains Mono and Fira Sans fonts.
 The artifact retains the environment, source/font hashes, all 80 fixture
 records, and the completed process cleanup receipt.
 
+The 24 `palette-empty`, `palette-query` and `theme-picker` captures were
+replaced by PR #855 from the Linux CI job in
+[run 43502436986](https://github.com/Reddimus/kettle/actions/runs/43502436986),
+artifact `ui-states-43502436986-1`, in the same environment: pickers fill their
+rows and show a scrollbar thumb, and the palette drops weak matches. The PR
+description shows each before and after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |
 | --- | --- |
 | `default` | Fixture text, prompt, and normal window |
 | `palette-empty` | Initial command rows and shortcut hints |
-| `palette-query` | Commands matching `split`, including fuzzy matches such as the English close-confirmation preference |
+| `palette-query` | Commands matching `split`: word-start and contiguous matches only, so scattered mid-word matches drop out while a stronger match exists |
 | `palette-nomatch` | Empty-result message with the query retained |
 | `settings` | Appearance controls and responsive navigation |
 | `search-matches` | Match highlight, count and search controls |
 | `search-nomatch` | Search query and no-match state |
 | `tabs` | Three tabs with one active tab |
 | `splits` | Three nonoverlapping panes and active-pane border |
-| `theme-picker` | Theme rows with their colour swatches, light/dark labels, and active selection (the narrow window drops the swatches) |
+| `theme-picker` | Theme rows filling the panel with their colour swatches, light/dark labels, a scrollbar thumb, and active selection (the narrow window drops the swatches) |
 
 CI regenerates these files through the private Wayland runner and compares
 each name against this directory. The existing thresholds remain 24 per

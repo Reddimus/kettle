@@ -112,12 +112,10 @@ fn pre_launch_spawn_sits_between_app_build_and_run_app() {
         run.find("startup_trace::Phase::AppBuilt").unwrap(),
         run.find("app.start_first_pane_before_launch()").unwrap(),
         run.find("event_loop.run_app(&mut app)").unwrap(),
-        run.find("app.pasted_images.cleanup();").unwrap(),
-        // Copies handed to the image viewer, the document viewer and the
-        // video player go on exit too.
-        run.find("app.viewer_copies").unwrap(),
-        run.find("app.document_copies.close();").unwrap(),
-        run.find("app.video_copies.close();\n        if let Err(error) = &result {")
+        // The once-only exit teardown (pasted screenshots, viewer, document
+        // and video copies, the session writer); what it deletes is tested
+        // in exit_tests.rs.
+        run.find("app.finish_exit();\n        if let Err(error) = &result {")
             .unwrap(),
         run.find("app.runtime_tracker.stop();").unwrap(),
     ];

@@ -326,16 +326,19 @@ fn builtin_theme_picker_localizes_labels_and_keeps_selection_identifiers() {
 }
 
 #[test]
-fn picker_scroll_strips_leave_the_selected_row_fully_visible() {
+fn picker_scrolling_leaves_the_selected_row_fully_visible() {
     let list = theme_picker_list("", 20, "Builtin Dark", &EN);
     let menu = super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0).unwrap();
-    let (_, content_h) = kettle_render::menu::scroll_content(
-        menu.rows.len() as f32 * 28.0,
-        menu.panel_h_clamped,
-        28.0,
-    );
+    // A picker's rows fill its panel: there are no arrow strips.
+    let (inset, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    assert_eq!((inset, content_h), (0.0, menu.panel_h_clamped));
     let visible = (content_h / 28.0).floor() as usize;
+    assert!(visible >= 1);
     assert!((menu.scroll_offset..menu.scroll_offset + visible).contains(&menu.highlight));
+    let selected = menu
+        .visible_row_rect(menu.highlight)
+        .expect("selected row painted");
+    assert!(selected.1 + selected.3 <= menu.anchor.1 + menu.panel_h_clamped);
 }
 
 #[test]
@@ -401,7 +404,7 @@ fn regression_picker_scroll_strips_have_pointer_and_wheel_routes() {
 }
 
 #[test]
-fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
+fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
@@ -434,6 +437,11 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
         assert!(ws.context_menu.is_none());
         let menu = project(&ws);
         assert_eq!(menu.scroll_offset, 0);
+        let last = (0..menu.rows.len())
+            .take_while(|&index| menu.visible_row_rect(index).is_some())
+            .last()
+            .expect("a visible row");
+        // The bottom edge is the last visible row, not an arrow strip.
         ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
         ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped - 0.25);
         assert!(apply_picker_pointer(
@@ -443,24 +451,22 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
             PickerPointer::Press
         ));
         let menu = project(&ws);
-        assert_eq!(menu.scroll_offset, 1, "picker {kind}: bottom click");
-        assert!(apply_picker_pointer(
-            &mut ws,
-            &menu,
-            cell.1,
-            PickerPointer::Hover
-        ));
-        let menu = project(&ws);
-        assert_eq!(menu.scroll_offset, 2, "picker {kind}: bottom hover");
-        ws.cursor.y = f64::from(menu.anchor.1 + 0.25);
-        assert!(apply_picker_pointer(
-            &mut ws,
-            &menu,
-            cell.1,
-            PickerPointer::Hover
-        ));
-        let menu = project(&ws);
-        assert_eq!(menu.scroll_offset, 1, "picker {kind}: top hover");
+        assert_eq!(menu.scroll_offset, 0, "picker {kind}: bottom click");
+        assert_eq!(menu.highlight, last, "picker {kind}: bottom row selected");
+        // Hovering the edges does not scroll.
+        for y in [
+            menu.anchor.1 + 0.25,
+            menu.anchor.1 + menu.panel_h_clamped - 0.25,
+        ] {
+            ws.cursor.y = f64::from(y);
+            assert!(!apply_picker_pointer(
+                &mut ws,
+                &menu,
+                cell.1,
+                PickerPointer::Hover
+            ));
+            assert_eq!(project(&ws).scroll_offset, 0, "picker {kind}: hover");
+        }
         assert!(apply_picker_pointer(
             &mut ws,
             &menu,
@@ -468,7 +474,7 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
             PickerPointer::Wheel(3)
         ));
         let menu = project(&ws);
-        assert_eq!(menu.scroll_offset, 4, "picker {kind}: wheel down");
+        assert_eq!(menu.scroll_offset, 3, "picker {kind}: wheel down");
         assert!(apply_picker_pointer(
             &mut ws,
             &menu,
@@ -477,17 +483,6 @@ fn picker_arrows_and_wheel_scroll_all_four_modal_projections() {
         ));
         let menu = project(&ws);
         assert_eq!(menu.scroll_offset, 0, "picker {kind}: wheel up clamps");
-        assert!(apply_picker_pointer(
-            &mut ws,
-            &menu,
-            cell.1,
-            PickerPointer::Press
-        ));
-        assert_eq!(
-            project(&ws).scroll_offset,
-            0,
-            "disabled top arrow consumes press"
-        );
         ws.cursor.x = f64::from(menu.anchor.0 - 1.0);
         assert!(!apply_picker_pointer(
             &mut ws,
@@ -590,11 +585,7 @@ fn picker_result_presses_select_the_visible_row() {
         assert_eq!(menu.anchor, (176.0, 78.0));
         assert_eq!(menu.picker_header_height, 30.0);
         let row_h = kettle_render::menu::row_height(16.0);
-        let (inset, _) = kettle_render::menu::scroll_content(
-            menu.rows.len() as f32 * row_h,
-            menu.panel_h_clamped,
-            row_h,
-        );
+        let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
         ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
         ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 1.5);
         assert!(
@@ -793,6 +784,7 @@ fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
             for width in [160.0, 320.0, 800.0] {
                 let field = kettle_render::TextFieldOverlay {
                     picker_header: true,
+                    placeholder: String::new(),
                     text: "Tokyo".into(),
                     cursor_byte: 5,
                     selection: None,
@@ -880,7 +872,16 @@ fn rows_other_than_themes_carry_no_swatches() {
     let layouts = ["dev".to_string()];
     let hosts = [("gpu".to_string(), "dev@gpu".to_string())];
     let lists = [
-        super::command_picker_list("", 0, &kettle_config::keybinds::defaults(), &EN, None, &[]),
+        super::command_picker_list(
+            "",
+            0,
+            &kettle_config::keybinds::defaults(),
+            &EN,
+            None,
+            &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
+        ),
         super::command_picker_list(
             "zzqqxxjj",
             0,
@@ -888,6 +889,8 @@ fn rows_other_than_themes_carry_no_swatches() {
             &EN,
             None,
             &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
         ),
         super::layout_picker_list("", 0, &layouts, &EN),
         super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),
@@ -1117,16 +1120,11 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
             let mut ws = WindowState::new(0, Mux::new());
             ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
             let list = open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
-            let rows = list.rows.len();
             let menu = picker_context_menu(list, surface, cell, top).unwrap();
             let footer = menu.picker_footer.as_ref().expect("a footer");
             assert!(footer.show_sample, "{scale}x: card");
             assert_eq!(footer.status_lines, 2, "{scale}x");
-            let (_, content_h) = kettle_render::menu::scroll_content(
-                rows as f32 * row_h,
-                menu.panel_h_clamped,
-                row_h,
-            );
+            let (_, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
             let painted = (content_h / row_h + 0.001).floor() as usize;
             assert!(painted >= 12, "{scale}x: {painted} rows");
             assert!(painted <= 14, "{scale}x: {painted} rows");
@@ -1145,19 +1143,23 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
             assert!(layout.contrast_button.is_some(), "{scale}x");
         }
         let palette = picker_context_menu(
-            command_picker_list("", 0, &kettle_config::keybinds::defaults(), &EN, None, &[]),
+            command_picker_list(
+                "",
+                0,
+                &kettle_config::keybinds::defaults(),
+                &EN,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            ),
             surface,
             cell,
             top,
         )
         .unwrap();
         assert!(palette.picker_footer.is_none());
-        let total = palette.rows.len();
-        let (_, content_h) = kettle_render::menu::scroll_content(
-            total as f32 * row_h,
-            palette.panel_h_clamped,
-            row_h,
-        );
+        let (_, content_h) = kettle_render::menu::picker_scroll_content(palette.panel_h_clamped);
         assert_eq!(
             (content_h / row_h + 0.001).floor() as usize,
             8,
@@ -1180,12 +1182,10 @@ fn a_short_window_drops_the_theme_sample_before_the_rows() {
         let mut ws = WindowState::new(0, Mux::new());
         ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
         let list = open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap();
-        let rows = list.rows.len();
         let Some(menu) = picker_context_menu(list, (1280.0, height as f32), cell, 32.0) else {
             continue;
         };
-        let (_, content_h) =
-            kettle_render::menu::scroll_content(rows as f32 * row_h, menu.panel_h_clamped, row_h);
+        let (_, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
         let painted = (content_h / row_h + 0.001).floor() as usize;
         let parts = menu.picker_footer.as_ref().map_or((false, 0), |footer| {
             (footer.show_sample, footer.status_lines)
@@ -1377,6 +1377,7 @@ fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
         for (cw, width) in [(8.4, 360.0), (16.8, 720.0), (8.4, 720.0)] {
             let field = kettle_render::TextFieldOverlay {
                 picker_header: true,
+                placeholder: String::new(),
                 text: "Tokyo".into(),
                 cursor_byte: 5,
                 selection: None,
@@ -1764,6 +1765,7 @@ fn a_narrow_theme_picker_header_drops_the_tab_hint_first() {
         for width in (160..=1200).step_by(8) {
             let field = kettle_render::TextFieldOverlay {
                 picker_header: true,
+                placeholder: String::new(),
                 text: "Tokyo".into(),
                 cursor_byte: 5,
                 selection: None,

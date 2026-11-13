@@ -96,6 +96,11 @@ pub(super) fn edit_modal_text(
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        // The title bar's Settings gear is outside the Settings panel, but a
+        // press there arms the gear rather than closing Settings.
+        if self.press_settings_gear_over_settings(ws, button) {
+            return true;
+        }
         let Some((kind, inside)) = self.modal_press_target(ws) else {
             return false;
         };
@@ -302,6 +307,7 @@ impl App {
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
             picker_header: picker,
+            placeholder: picker_placeholder(ws, &self.ui_text),
             text,
             cursor_byte,
             selection,
@@ -1487,6 +1493,15 @@ impl App {
             return;
         }
 
+        if let Some(kind) = vi_visual_kind(key, ch, ws.mods) {
+            let cursor = term.vi_mode_cursor.point;
+            let visual = toggle_vi_visual(&mut term.selection, owner.visual, kind, cursor);
+            if let Some(state) = ws.vi_mode.as_mut() {
+                state.visual = visual;
+            }
+            return;
+        }
+
         match ch {
             'g' => {
                 use kettle_core::Dimensions as _;
@@ -1497,23 +1512,6 @@ impl App {
                 use kettle_core::Dimensions as _;
                 let point = kettle_core::Point::new(term.bottommost_line(), kettle_core::Column(0));
                 term.vi_goto_point(point);
-            }
-            'v' => {
-                if owner.visual {
-                    term.selection = None;
-                } else {
-                    let point = term.vi_mode_cursor.point;
-                    let mut selection = kettle_core::Selection::new(
-                        kettle_core::SelectionType::Simple,
-                        point,
-                        kettle_core::Side::Left,
-                    );
-                    selection.update(point, kettle_core::Side::Right);
-                    term.selection = Some(selection);
-                }
-                if let Some(state) = ws.vi_mode.as_mut() {
-                    state.visual = !owner.visual;
-                }
             }
             'y' => {
                 let yanked = if owner.visual {
@@ -1695,10 +1693,13 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(
+        let cmds = palette_view_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
             &ws.palette_profiles,
+            self.cfg.broadcast_default,
+            &self.cfg.keybinds,
+            ws.palette_bound_only,
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -1725,8 +1726,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text);
-                let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
+                let action = palette_enter_action(q, *sel, &cmds, &self.ui_text);
                 ws.palette_input = None;
                 if let Some(a) = action {
                     self.handle_action(ws, a, event_loop);
@@ -3555,6 +3555,22 @@ pub(super) fn project_modal_editor(
     (text, cursor, selection)
 }
 
+/// What the open picker's empty query field says it is for: the command
+/// palette's placeholder, or nothing for the other pickers. The renderer
+/// fits and paints this same translated string.
+pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator) -> String {
+    if ws.palette_input.is_some() {
+        tr.text(if ws.palette_bound_only {
+            kettle_i18n::Text::PickerPlaceholderShortcuts
+        } else {
+            kettle_i18n::Text::PickerPlaceholderCommand
+        })
+        .to_string()
+    } else {
+        String::new()
+    }
+}
+
 pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
     if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
         return None;
@@ -3853,6 +3869,60 @@ pub(super) fn confirmation_button_action(
                 paste_as_one_line(text)
             };
             Some(action)
+        }
+    }
+}
+
+/// The selection a vi-mode visual key makes: `v` by character, `V` by line
+/// and Ctrl-v a block, as in Vim. `ch` is the key's accepted text, which is
+/// `'\0'` while Ctrl is held, so Ctrl-v is read from the key itself, in
+/// either case for Caps Lock. Ctrl+Shift+V, the Linux and Windows paste
+/// chord, is not a block key.
+pub(super) fn vi_visual_kind(
+    key: &Key,
+    ch: char,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<kettle_core::SelectionType> {
+    use kettle_core::SelectionType;
+    match ch {
+        'v' => return Some(SelectionType::Simple),
+        'V' => return Some(SelectionType::Lines),
+        _ => {}
+    }
+    let ctrl_v = mods.control_key()
+        && !mods.shift_key()
+        && !mods.alt_key()
+        && !mods.super_key()
+        && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("v") || c == "\u{16}");
+    ctrl_v.then_some(SelectionType::Block)
+}
+
+/// Start, switch or end vi mode's visual selection at the vi `cursor`, and
+/// return whether visual mode is on afterwards. The key for the kind already
+/// shown ends it; another kind's key turns the same selection into that kind,
+/// keeping both of its ends.
+pub(super) fn toggle_vi_visual(
+    selection: &mut Option<kettle_core::Selection>,
+    visual: bool,
+    kind: kettle_core::SelectionType,
+    cursor: kettle_core::Point,
+) -> bool {
+    match selection.as_mut() {
+        Some(current) if visual && current.ty == kind => {
+            *selection = None;
+            false
+        }
+        Some(current) if visual => {
+            current.ty = kind;
+            // Each kind puts the anchor sides on different edges.
+            current.include_all();
+            true
+        }
+        _ => {
+            let mut started = kettle_core::Selection::new(kind, cursor, kettle_core::Side::Left);
+            started.update(cursor, kettle_core::Side::Right);
+            *selection = Some(started);
+            true
         }
     }
 }

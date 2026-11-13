@@ -551,11 +551,14 @@ impl App {
         accessibility_input: AccessibilityInput,
     ) -> PaneInputResult {
         let mut result = PaneInputResult::Queued;
+        let mut reached = Vec::new();
         for (id, bytes) in targets {
             let Some(pane) = ws.mux.panes.get(id) else {
                 continue;
             };
-            let delivered = pane.feed_input(bytes);
+            // Keys replayed in one block after a paste are not one typed
+            // keystroke: they never teach or arm the typed-echo settle.
+            let delivered = pane.feed_paste(bytes);
             if delivered.is_queued() && !bytes.is_empty() {
                 for (_, release) in key_presses.iter().filter(|(pane, _)| pane == id) {
                     release.mark_accepted();
@@ -565,7 +568,7 @@ impl App {
                 }
             }
             if delivered.is_queued() && prepare_input {
-                ws.last_typed = Some(std::time::Instant::now());
+                reached.push(*id);
                 if scroll_to_bottom && let Ok(mut term) = pane.term.term.lock() {
                     term.scroll_display(Scroll::Bottom);
                 }
@@ -574,6 +577,9 @@ impl App {
                 Self::dismiss_media_paste_receipt_after_input(ws, *id, delivered);
             }
             result = result.merge(delivered);
+        }
+        if !reached.is_empty() {
+            note_keystroke(ws, std::time::Instant::now(), &reached);
         }
         result
     }
@@ -1637,7 +1643,7 @@ pub(super) fn paste_text_into_target(
     }
     let bracketed = *modes.get(&id)?;
     let bytes = input::paste_payload(text, bracketed);
-    Some(pane.feed_input(&bytes))
+    Some(pane.feed_paste(&bytes))
 }
 
 /// Deliver a confirmed non-broadcast path paste to the pane named when the
@@ -1668,7 +1674,7 @@ pub(super) fn paste_paths_into_target(
         .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
         .unwrap_or(false);
     let bytes = input::paste_payload(&text, bracketed);
-    let result = pane.feed_input(&bytes);
+    let result = pane.feed_paste(&bytes);
     Some(PaneInputDelivery {
         result,
         accepted: result.is_queued(),

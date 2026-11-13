@@ -130,14 +130,65 @@ pub(super) fn refresh_macos_modifiers(ws: &mut WindowState, policy: MacosOptionA
     );
 }
 
+/// Mark a keystroke queued at `input_time` in this window, when the window
+/// accepted it, for the `recipients` it reached. See [`note_keystroke`].
 pub(super) fn stamp_accepted_input(
-    last_typed: &mut Option<std::time::Instant>,
+    ws: &mut WindowState,
     delivery: PaneInputDelivery,
     input_time: std::time::Instant,
+    recipients: &[u64],
 ) {
     if delivery.accepted {
-        *last_typed = Some(input_time);
+        note_keystroke(ws, input_time, recipients);
     }
+}
+
+/// A keystroke was queued at `at` to `recipients`, panes of this window. It
+/// opens the typing window (`last_typed`), so its echo skips the output
+/// coalescer. The typed-echo diagnostics and settle follow it only into a
+/// recipient that took typed text (a paste never is) and whose output the
+/// window had all painted; any other pane's output, and output that was
+/// already streaming, is not this key's echo (see `crate::typed_echo`).
+pub(super) fn note_keystroke(ws: &mut WindowState, at: std::time::Instant, recipients: &[u64]) {
+    ws.last_typed = Some(at);
+    let seen = &ws.seen_output_gen;
+    let panes = &ws.mux.panes;
+    ws.typed_echo.key_sent(
+        at,
+        recipients.iter().filter_map(|id| {
+            let pane = panes.get(id)?;
+            let generation = pane.term.output_generation();
+            Some(crate::typed_echo::KeyTarget {
+                pane: *id,
+                typed_text: pane.last_input_was_typed_text(),
+                quiet: seen.get(id).copied().unwrap_or(0) == generation,
+                generation,
+            })
+        }),
+    );
+}
+
+/// Each pane's user-input generation, to tell afterwards which panes a
+/// delivery that does not name its recipients reached.
+pub(super) fn input_generations(mux: &Mux) -> Vec<(u64, u64)> {
+    mux.panes
+        .iter()
+        .map(|(id, pane)| (*id, pane.input_generation()))
+        .collect()
+}
+
+/// The panes whose user-input generation moved since `before`.
+pub(super) fn input_recipients(mux: &Mux, before: &[(u64, u64)]) -> Vec<u64> {
+    mux.panes
+        .iter()
+        .filter(|(id, pane)| {
+            before
+                .iter()
+                .find(|(seen, _)| seen == *id)
+                .is_none_or(|(_, generation)| *generation != pane.input_generation())
+        })
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// The modifiers physically held. On macOS, Option counts whether or not it
@@ -767,8 +818,8 @@ pub(super) fn modal_repeat_is_inert(
                     && (matches!(key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight))
                         || letter(key, &["h", "l"])))
         }
-        // `v` toggles visual mode; motions repeat.
-        ModalRepeat::ViMode => letter(key, &["v"]),
+        // `v`, `V` and Ctrl-v toggle visual mode; motions repeat.
+        ModalRepeat::ViMode => letter(key, &["v", "\u{16}"]),
         // Label letters only pick a target; nothing in hint mode moves.
         ModalRepeat::Hint => true,
     }
@@ -798,6 +849,7 @@ pub(super) fn toggles_once_per_press(action: &Action) -> bool {
             | Action::ToggleBroadcastGroup
             | Action::ToggleBroadcastOff
             | Action::ToggleBroadcastWindow
+            | Action::ToggleBroadcastPanesInTab
             | Action::ToggleCopyOnSelect
             | Action::ToggleCursorBlink
             | Action::ToggleMouseHide
@@ -1351,14 +1403,14 @@ impl App {
                 return PaneInputResult::Queued;
             };
             let result = pane.feed_input(bytes);
-            if result.is_queued() {
-                ws.last_typed = Some(input_time);
-            }
             if result.is_queued()
                 && self.cfg.scroll_on_keystroke
                 && let Ok(mut term) = pane.term.term.lock()
             {
                 term.scroll_display(Scroll::Bottom);
+            }
+            if result.is_queued() {
+                note_keystroke(ws, input_time, &[pane_id]);
             }
             Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
             result
@@ -1530,10 +1582,10 @@ impl App {
         ws.terminal_key_recipients
             .entry(event.physical_key)
             .or_default()
-            .extend(recipients);
+            .extend(recipients.iter().copied());
         Self::dismiss_media_paste_receipt_after_delivery(ws, delivery);
         if let Some(input_time) = input_time {
-            stamp_accepted_input(&mut ws.last_typed, delivery, input_time);
+            stamp_accepted_input(ws, delivery, input_time, &recipients);
         }
         if Mux::scope_crosses_windows(&scope) {
             for other in self.windows.values_mut() {
@@ -1580,7 +1632,7 @@ impl App {
                     (&event.logical_key, event.text.as_deref()),
                 );
                 if let Some(input_time) = input_time {
-                    stamp_accepted_input(&mut other.last_typed, foreign, input_time);
+                    stamp_accepted_input(other, foreign, input_time, &recipients);
                 }
                 delivery.result = delivery.result.merge(foreign.result);
                 delivery.accepted |= foreign.accepted;

@@ -44,7 +44,7 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
-        &[],
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
     let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
         .expect("a 320x160 surface fits a picker card");
@@ -163,11 +163,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
     )
     .unwrap();
     let row_h = kettle_render::menu::row_height(16.0);
-    let (inset, _) = kettle_render::menu::scroll_content(
-        menu.rows.len() as f32 * row_h,
-        menu.panel_h_clamped,
-        row_h,
-    );
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
     ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 0.5);
     ws.accessibility_pending = false;
@@ -301,12 +297,16 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
-    for row in &list.rows {
+    let entries = super::palette_entries(None, &es, &[], kettle_config::BroadcastDefault::default());
+    let ranked = kettle_config::palette::rank_matches("ct", &entries, &es);
+    assert_eq!(list.rows.len(), ranked.len());
+    for (row, entry) in list.rows.iter().zip(ranked) {
+        assert_eq!(row.label, entries[entry.index].0.shown(&es));
         assert_eq!(
             row.matched_chars,
-            kettle_config::palette::matched_char_positions("ct", &row.label).map(|positions| {
+            entry.matched_chars.map(|positions| {
                 positions
                     .into_iter()
                     .map(|index| index..index + 1)
@@ -332,7 +332,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[],
+        &[], false, kettle_config::BroadcastDefault::default(),
     );
     assert_eq!(empty.rows.len(), 1);
     assert!(!empty.rows[0].enabled);
@@ -349,7 +349,7 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 &kettle_config::keybinds::defaults(),
                 &EN_TEXT,
                 None,
-                &[],
+                &[], false, kettle_config::BroadcastDefault::default(),
             );
             let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
                 .expect("a restored 120px window must retain its picker");
@@ -377,9 +377,9 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
     }
 }
 
-/// A scrolling picker paints whole rows down to its bottom arrow strip: the
-/// arrow strips are counted into the list's height, so no blank part-row is
-/// left under the selection, and a long list paints all eight rows. The last
+/// A scrolling picker paints whole rows down to its bottom edge: it has no
+/// arrow strips, and its height is whole rows, so no blank part-row is left
+/// under the selection, and a long list paints all eight rows. The last
 /// painted row takes a click.
 #[test]
 fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
@@ -395,11 +395,8 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
                 )
                 .unwrap();
                 let row_h = kettle_render::menu::row_height(cell.1);
-                let (_, content_h) = kettle_render::menu::scroll_content(
-                    total as f32 * row_h,
-                    menu.panel_h_clamped,
-                    row_h,
-                );
+                let (_, content_h) =
+                    kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
                 let painted = (content_h / row_h).floor();
                 let what = format!("{surface:?} {cell:?} {total} rows");
                 assert!(
@@ -408,7 +405,7 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
                     content_h - painted * row_h
                 );
                 let room = surface.1 - menu.anchor.1 - 16.0;
-                if room >= 8.0 * row_h + 36.0 {
+                if room >= 8.0 * row_h {
                     assert!(painted as usize >= total.min(8), "{what}: {painted} painted");
                 }
                 let last = menu.scroll_offset + painted as usize - 1;
@@ -426,5 +423,152 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
                 assert_eq!(ws.layout_picker_input.as_ref().unwrap().1, last, "{what}");
             }
         }
+    }
+}
+
+/// A long picker list fills its panel: the first row sits right under the
+/// query header, all eight rows are painted and hit, and paint, pointer and
+/// accessibility agree on every row. A short window still shows a row.
+#[test]
+fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let bindings = kettle_config::keybinds::defaults();
+    let profiles: Vec<String> = (0..20).map(|i| format!("profile-{i}")).collect();
+    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles, false, kettle_config::BroadcastDefault::default());
+    assert!(list.rows.len() >= 150, "{} rows", list.rows.len());
+    let cell = (8.0, 16.0);
+    let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len()).unwrap();
+    let menu = picker_context_menu(list, (800.0, 600.0), cell, 0.0).unwrap();
+    let header_bottom = geometry.header.1 + geometry.header.3;
+    let painted = kettle_render::context_menu_row_rects(&menu, cell);
+    assert_eq!(painted.len(), 8, "eight full rows");
+    assert_eq!(painted[0].1.1, header_bottom, "no gap under the header");
+    let row_h = kettle_render::menu::row_height(cell.1);
+    assert_eq!(
+        painted.last().unwrap().1.1 + row_h,
+        menu.anchor.1 + menu.panel_h_clamped
+    );
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    for &(index, rect) in &painted {
+        assert_eq!(menu.visible_row_rect(index), Some(rect), "row {index}");
+        ws.cursor.x = f64::from(rect.0 + 10.0);
+        ws.cursor.y = f64::from(rect.1 + rect.3 * 0.5);
+        apply_picker_pointer(&mut ws, &menu, cell.1, PickerPointer::Press);
+        assert_eq!(ws.palette_input.as_ref().unwrap().1, index, "row {index}");
+    }
+    assert_eq!(menu.visible_row_rect(8), None);
+    // A window with room for one or two rows still paints and hits them.
+    for height in [120.0, 150.0] {
+        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
+        let menu = picker_context_menu(list, (800.0, height), cell, 0.0).unwrap();
+        let painted = kettle_render::context_menu_row_rects(&menu, cell);
+        assert!(!painted.is_empty(), "height {height}");
+        assert_eq!(painted[0].1.1, menu.anchor.1);
+        for &(index, rect) in &painted {
+            assert_eq!(menu.visible_row_rect(index), Some(rect));
+        }
+    }
+}
+
+/// The keyboard-shortcut list is the palette with only bound commands: every
+/// row shows its shortcut, it holds exactly the palette commands that have
+/// one, and the row a selection index paints is the one Enter runs, because
+/// the painter and the key handler rank the same view entries.
+#[test]
+fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
+        let list = command_picker_list("", 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+        let bound = kettle_config::palette::commands_for(kettle_config::BroadcastDefault::default())
+            .into_iter()
+            .filter(|(_, action)| {
+                kettle_config::keybinds::ui_hint_label(&bindings, action)
+                    .is_some_and(|hint| !hint.is_empty())
+            })
+            .count();
+        assert!(bound >= 10, "{bound} bound commands");
+        assert_eq!(list.rows.len(), bound);
+        assert!(list.rows.iter().all(|row| row.enabled && !row.hint.is_empty()));
+        let full = command_picker_list("", 0, &bindings, &tr, None, &[], false, kettle_config::BroadcastDefault::default());
+        assert!(full.rows.len() > list.rows.len());
+        assert!(full.rows.iter().any(|row| row.hint.is_empty()));
+        for query in ["", "tab", "split", "font"] {
+            let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
+            let ranked = kettle_config::palette::rank_entries(query, &entries, &tr);
+            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+            assert_eq!(list.rows.len(), ranked.len().max(1), "{query:?}");
+            for (row, index) in list.rows.iter().zip(&ranked) {
+                assert_eq!(row.label, entries[*index].0.shown(&tr), "{query:?}");
+            }
+        }
+    }
+    // Enter, the pointer and the painted list read the same view entries;
+    // `enter_in_the_shortcut_list_runs_the_selected_bound_row` checks the
+    // lookup Enter makes in them.
+    let source = finding_body(include_str!("modals.rs"), "palette_key");
+    assert!(source.contains("palette_view_entries("));
+    assert!(source.contains("ws.palette_bound_only"));
+    assert!(source.contains("palette_enter_action(q, *sel, &cmds, &self.ui_text)"));
+    let open = include_str!("pickers.rs")
+        .split("pub(super) fn open_picker_list(")
+        .nth(1)
+        .unwrap();
+    assert!(open.split("fn ").next().unwrap().contains("ws.palette_bound_only"));
+    // Each open sets the mode: Keyboard Shortcuts on, the palette off.
+    let arm = production_source()
+        .split("Action::CommandPalette | Action::ShowKeybinds =>")
+        .nth(1)
+        .unwrap()
+        .split("\n            }")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(arm.contains("ws.palette_bound_only = matches!(action, Action::ShowKeybinds);"));
+    assert!(arm.contains("ws.palette_input = Some("));
+}
+
+/// Enter in the keyboard-shortcut list runs the row painted at the selection,
+/// for every selection and query: a command with a shortcut, the label and
+/// hint the list shows there. Past the last row it runs nothing.
+#[test]
+fn enter_in_the_shortcut_list_runs_the_selected_bound_row() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
+        let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
+        let full = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, false);
+        for query in ["", "tab", "split", "font", "pane"] {
+            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+            let matched = kettle_config::palette::rank_entries(query, &entries, &tr).len();
+            assert!(matched > 1, "{query:?} needs several rows");
+            for (selected, row) in list.rows.iter().enumerate() {
+                let action = super::palette_enter_action(query, selected, &entries, &tr)
+                    .unwrap_or_else(|| panic!("{query:?} row {selected}"));
+                let hint = kettle_config::keybinds::ui_hint_label(&bindings, &action)
+                    .unwrap_or_default();
+                assert!(!hint.is_empty(), "{query:?} row {selected}: {action:?}");
+                assert_eq!(row.hint, hint, "{query:?} row {selected}");
+                let label = entries
+                    .iter()
+                    .find(|(_, candidate)| *candidate == action)
+                    .map(|(label, _)| label.shown(&tr));
+                assert_eq!(label, Some(row.label.as_str()), "{query:?} row {selected}");
+            }
+            assert_eq!(list.rows.len(), matched, "{query:?}");
+            assert_eq!(
+                super::palette_enter_action(query, matched, &entries, &tr),
+                None
+            );
+        }
+        // The full palette at the same selections runs commands without a
+        // shortcut too; the list above never did.
+        let unbound = (0..full.len())
+            .filter_map(|selected| super::palette_enter_action("", selected, &full, &tr))
+            .find(|action| {
+                kettle_config::keybinds::ui_hint_label(&bindings, action)
+                    .is_none_or(|hint| hint.is_empty())
+            });
+        assert!(unbound.is_some());
+        assert_eq!(super::palette_enter_action("qqzzxx", 0, &entries, &tr), None);
     }
 }

@@ -182,6 +182,80 @@ fn window_has_new_output(ws: &WindowState) -> bool {
     })
 }
 
+/// Judge the typed-echo diagnostics' pending echo and frame against each
+/// pane's current output. Returns the pane whose echo this found split.
+pub(super) fn observe_typed_echo(ws: &mut WindowState, now: std::time::Instant) -> Option<u64> {
+    let panes = &ws.mux.panes;
+    ws.typed_echo.observe(now, ws.last_typed, |id| {
+        panes.get(&id).map(|pane| {
+            // Generation first: the PTY reader stamps a publication before it
+            // bumps the generation, so the stamp read after it is at least as
+            // new as that generation's publication.
+            let generation = pane.term.output_generation();
+            (generation, pane.term.output_published_at())
+        })
+    })
+}
+
+/// Record an output wake inside the typing window with the panes whose
+/// output this window has not painted. Returns whether it is the first wake
+/// of the last keystroke's echo: `typed_echo` keeps only the panes
+/// `note_keystroke` recorded for that keystroke (typed text into a pane with
+/// nothing unpainted), so a sibling's output or a stream is never its echo.
+pub(super) fn note_typed_echo_wake(ws: &mut WindowState) -> bool {
+    let seen = &ws.seen_output_gen;
+    let panes = &ws.mux.panes;
+    ws.typed_echo.typed_wake(
+        ws.last_typed,
+        panes.iter().filter_map(|(id, pane)| {
+            let generation = pane.term.output_generation();
+            (seen.get(id).copied().unwrap_or(0) != generation)
+                .then(|| (*id, generation, pane.term.output_published_at()))
+        }),
+    )
+}
+
+/// Ask the typed-echo settle how a typed output wake paints, with each
+/// pane's output latch and generation (`TypedEcho::plan_paint`).
+///
+/// The settle reopens the latch of each pane it waits for here, ahead of the
+/// frame, and that is safe for the output coalescer's latch rule:
+/// - The latch gates wakes, not output. Reopening it early can add a wake but
+///   never loses one: the pane is acknowledged before its generation is read,
+///   so a publication shows in that read or raises a fresh wake. And the
+///   app's `wake_pending` latch was cleared before this Wakeup fanned out, so
+///   that wake is queued even while this one is being handled.
+/// - It happens only inside the typing window, where the coalescer is already
+///   bypassed (`output_pacer.reset()`), and only for panes still short of the
+///   echo's second write: at most two extra wakes per pane and keystroke, not
+///   a flood's worth.
+/// - It never runs on a quiesced window: the quiesce branch returns first, so
+///   no disabled gate is acknowledged from here.
+/// - The redraw's own acknowledgement before its snapshot (`redraw`) finds an
+///   open latch and leaves it open, or a pending one and clears it, as it
+///   does for any wake that raced a frame. A wake raised in between and
+///   handled after that frame finds nothing unpainted and rearms
+///   (`output_wakeup_needs_paint`).
+pub(super) fn plan_typed_echo_paint(
+    ws: &mut WindowState,
+    now: std::time::Instant,
+    new_echo: bool,
+    settles: bool,
+) -> crate::typed_echo::EchoPaint {
+    let panes = &ws.mux.panes;
+    ws.typed_echo.plan_paint(
+        now,
+        new_echo,
+        settles,
+        |id| {
+            if let Some(pane) = panes.get(&id) {
+                pane.term.acknowledge_output_wake();
+            }
+        },
+        |id| panes.get(&id).map(|pane| pane.term.output_generation()),
+    )
+}
+
 pub(super) fn defer_output_racing_frame(ws: &mut WindowState) {
     // Publication during maintenance can be coalesced into an already-served
     // wake before redraw reopens the latch. Retain a paced retry even when no
@@ -831,7 +905,9 @@ impl App {
                 // Apply current visibility/recovery policy, but leave enabled
                 // latches closed until redraw is ready to snapshot a frame.
                 // This prevents one queued event from reopening the flood gate
-                // before the deferred paint budget expires.
+                // before the deferred paint budget expires. The one exception
+                // is a settled typed echo's panes, reopened early so the
+                // echo's second write wakes (`plan_typed_echo_paint`).
                 self.sync_output_wake_gate(ws);
                 // Wakeups fan out to every window; skip windows whose
                 // panes produced no output since their last paint (plain
@@ -867,6 +943,7 @@ impl App {
                     // one-shot repair deadline is armed.
                     // Output bursts must not bypass timeout backoff.
                     ws.output_pacer.reset();
+                    ws.typed_echo.quiesce();
                     return;
                 }
                 // Coalesce rapid PTY-output paints to ~one per
@@ -876,16 +953,26 @@ impl App {
                 // paints. Input/cursor paints don't come through here, so
                 // typing and the cursor stay immediate.
                 let now = std::time::Instant::now();
-                // Keystroke ECHO paints immediately. request_redraw is
-                // vsync-coalesced, so this can't outpace the display, and the
-                // coalescer's job (letting a NON-atomic output burst settle
-                // before the snapshot) doesn't apply to a few echoed cells.
-                // Routing echo through the WaitUntil deadline (~16ms timer
-                // granularity on Windows, frequently late) makes held-key
-                // repeat visibly stutter.
+                // Keystroke ECHO skips the coalescer: its job (letting a
+                // NON-atomic output burst settle before the snapshot) doesn't
+                // apply to a few echoed cells, and routing echo through the
+                // WaitUntil deadline (~16ms timer granularity on Windows,
+                // frequently late) makes held-key repeat visibly stutter.
+                // request_redraw merges repeated requests into one callback but
+                // is NOT paced to the display: on macOS winit dispatches it in
+                // the same run-loop pass and the surface presents FIFO with up
+                // to three drawables, so each echo wake can become its own
+                // frame. An echo the shell writes in two parts would show its
+                // first half for a refresh; the echo settle (`typed_echo`)
+                // holds such a pane's echoes for one short deadline instead.
                 if typed_recently(now, ws.last_typed, TYPING_ECHO_WINDOW) {
                     ws.output_pacer.reset();
-                    if let Some(w) = &ws.window {
+                    observe_typed_echo(ws, now);
+                    let new_echo = note_typed_echo_wake(ws);
+                    if plan_typed_echo_paint(ws, now, new_echo, ECHO_SETTLE_ENABLED)
+                        == crate::typed_echo::EchoPaint::Now
+                        && let Some(w) = &ws.window
+                    {
                         w.request_redraw();
                     }
                 } else if should_defer_output_paint(
@@ -954,6 +1041,12 @@ impl App {
             #[cfg(target_os = "macos")]
             UserEvent::MenuCommand(action) => {
                 self.handle_action(ws, action, _el);
+            }
+            #[cfg(target_os = "macos")]
+            UserEvent::MenuWindow(command) => {
+                if let Some(window) = &ws.window {
+                    crate::macos_menu::perform(command, window);
+                }
             }
             // Every Dock row maps onto an action kettle already has, so this
             // reuses the keybind path wholesale — including NewWindow's

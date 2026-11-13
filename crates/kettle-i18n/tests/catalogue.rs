@@ -16,6 +16,8 @@ fn every_static_message_has_clean_text_in_both_languages() {
         let cognate = [
             Text::MacosMenuApp,
             Text::MacosMenuShell,
+            // macOS's own Spanish Window menu says Zoom.
+            Text::MacosMenuZoomWindow,
             Text::SettingsGpuKindVirtual,
             Text::SettingsGpuKindSoftware,
             Text::MediaViewerKindVideo,
@@ -190,6 +192,7 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_read"
                         | "osc52_denied_write"
                         | "mouse_override_hint"
+                        | "font_size_chip"
                 )
         })
         .cloned()
@@ -234,6 +237,7 @@ fn no_spanish_message_is_left_in_english() {
     let cognates = [
         "macos_menu_app",
         "macos_menu_shell",
+        "macos_menu_zoom_window",
         "settings_gpu_kind_software",
         "settings_gpu_kind_virtual",
         "media_lane_video_time",

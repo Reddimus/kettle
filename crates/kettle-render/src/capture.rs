@@ -729,12 +729,13 @@ pub fn capture_png_with_annotation(
                 } else {
                     theme.background
                 };
-                let mut colors = chrome::Colors::default();
-                let fg = if row.enabled {
-                    colors.text(theme.foreground, background)
-                } else {
-                    colors.muted(theme.foreground, background)
-                };
+                let fg = crate::overlays::menu_row_text_color(
+                    &menu,
+                    row,
+                    theme,
+                    background,
+                    &mut chrome::Colors::default(),
+                );
                 menu_areas.push(TextArea {
                     buffer: &menu_text_buffers[i],
                     left: ax + 16.0,

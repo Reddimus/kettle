@@ -10,6 +10,9 @@ pub struct TextFieldOverlay {
     /// A contained picker header keeps the complete hint only when the query
     /// and a caret-sized gap fit beside it.
     pub picker_header: bool,
+    /// What a picker's empty query field says it is for, in the secondary
+    /// text colour. Paint only: it is never the field's value.
+    pub placeholder: String,
     pub text: String,
     pub cursor_byte: usize,
     pub selection: Option<(usize, usize)>,
@@ -54,6 +57,24 @@ pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) 
         super::fit_key_hint(&field.hint, budget)
     };
     (prefix, hint)
+}
+
+/// The placeholder a picker header paints in its empty editor slot: the
+/// whole string when it fits the slot less a two-column gap before the hint,
+/// otherwise nothing, since a cut-off "Type a c…" reads worse than an empty
+/// field. Hidden too while the field holds text (an IME preedit included)
+/// and outside picker headers. Paint measures and draws this same string.
+pub fn text_field_placeholder(field: &TextFieldOverlay, cw: f32) -> String {
+    if !field.picker_header || !field.text.is_empty() || field.placeholder.is_empty() || cw <= 0.0 {
+        return String::new();
+    }
+    let editor = text_field_rects(field, cw)[1];
+    let columns = ((editor.2 - 2.0) / cw).floor() - 2.0;
+    if columns >= super::display_width(&field.placeholder) as f32 {
+        field.placeholder.clone()
+    } else {
+        String::new()
+    }
 }
 
 pub fn text_field_rects(field: &TextFieldOverlay, cw: f32) -> [Rect4; 3] {
@@ -224,6 +245,7 @@ mod tests {
                 for horizontal_scroll in [0, 1, 20] {
                     let field = TextFieldOverlay {
                         picker_header: false,
+                        placeholder: String::new(),
                         text: text.into(),
                         cursor_byte: cursor,
                         selection: Some((0, text.len())),
@@ -300,6 +322,7 @@ mod tests {
             {
                 let field = TextFieldOverlay {
                     picker_header: false,
+                    placeholder: String::new(),
                     text: text.into(),
                     cursor_byte: cursor,
                     selection: Some((0, cursor)),
@@ -347,6 +370,7 @@ mod tests {
         for width in [120.0, 400.0, 875.0, 2000.0] {
             let field = TextFieldOverlay {
                 picker_header: false,
+                placeholder: String::new(),
                 text: "spilt".into(),
                 cursor_byte: 3,
                 selection: None,
@@ -407,6 +431,7 @@ mod tests {
             for width in [0.0, 1.0, 40.0, 300.0, 800.0] {
                 let field = TextFieldOverlay {
                     picker_header: false,
+                    placeholder: String::new(),
                     text: String::new(),
                     cursor_byte: 0,
                     selection: None,
@@ -429,6 +454,60 @@ mod tests {
 #[cfg(test)]
 mod picker_header_tests {
     use super::*;
+
+    /// The palette's placeholder, in either language, shows whole in the
+    /// editor slot with a two-column gap before the hint, or not at all; a
+    /// typed query, an IME preedit or a non-picker field shows none.
+    #[test]
+    fn picker_placeholder_fits_its_slot_and_never_reaches_the_hint() {
+        use kettle_i18n::{Language, Text, Translator};
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let placeholder = tr.text(Text::PickerPlaceholderCommand);
+            let hint = format!(
+                "(Enter {} · Tab/↑↓ {} · Esc {})",
+                tr.text(Text::PickerHintRun),
+                tr.text(Text::PickerHintSelect),
+                tr.text(Text::PickerHintCancel)
+            );
+            for cw in [7.0_f32, 8.0, 9.6, 16.0] {
+                for width in [120.0_f32, 200.0, 300.0, 360.0, 448.0, 560.0, 720.0, 1440.0] {
+                    let mut field = TextFieldOverlay {
+                        picker_header: true,
+                        placeholder: placeholder.into(),
+                        text: String::new(),
+                        cursor_byte: 0,
+                        selection: None,
+                        horizontal_scroll: 0,
+                        rect: (10.0, 10.0, width, 30.0),
+                        prefix: "  \u{2318} ".into(),
+                        hint: hint.clone(),
+                        accent_palette: 5,
+                    };
+                    let shown = text_field_placeholder(&field, cw);
+                    let [_, editor, hint_slot] = text_field_rects(&field, cw);
+                    let right = editor.0 + 2.0 + crate::display_width(&shown) as f32 * cw;
+                    assert!(
+                        right + 2.0 * cw <= hint_slot.0 + 0.001,
+                        "{language:?} {cw}/{width}: {shown:?} reaches the hint"
+                    );
+                    // Whole or not at all, never cut off.
+                    assert!(shown.is_empty() || shown == placeholder, "{shown:?}");
+                    let room = ((editor.2 - 2.0) / cw).floor() - 2.0;
+                    let fits = room >= crate::display_width(placeholder) as f32;
+                    assert_eq!(!shown.is_empty(), fits, "{language:?} {cw}/{width}");
+                    if width >= 1440.0 && cw <= 9.6 {
+                        assert_eq!(shown, placeholder, "{language:?} {cw}");
+                    }
+                    field.text = "x".into();
+                    assert_eq!(text_field_placeholder(&field, cw), "");
+                    field.text = String::new();
+                    field.picker_header = false;
+                    assert_eq!(text_field_placeholder(&field, cw), "");
+                }
+            }
+        }
+    }
     #[test]
     fn picker_hint_is_complete_or_absent_without_overlapping_query() {
         for hint in [
@@ -437,6 +516,7 @@ mod picker_header_tests {
         ] {
             let mut field = TextFieldOverlay {
                 picker_header: true,
+                placeholder: String::new(),
                 text: "año".into(),
                 cursor_byte: 4,
                 selection: None,
@@ -474,6 +554,7 @@ mod review_tests {
             buffer.set_wrap(glyphon::cosmic_text::Wrap::None);
             let field = TextFieldOverlay {
                 picker_header: false,
+                placeholder: String::new(),
                 text: "Rename".into(),
                 cursor_byte: 3,
                 selection: Some((0, 3)),

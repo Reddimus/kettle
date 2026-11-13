@@ -561,3 +561,122 @@ fn closing_scaled_zoom_owner_restores_baseline_with_another_tab_remaining() {
             < finish.find("self.resize_all(&mut ws)").unwrap()
     );
 }
+
+/// Making the font larger, smaller or resetting it shows the size chip with
+/// the new size and the grid it leaves, in the user's language, and reset
+/// shows the configured size. Whole sizes have no decimal point and others
+/// no float noise.
+#[test]
+fn font_size_changes_show_the_size_and_grid_on_the_chip() {
+    use super::{font_size_after, font_size_chip_label};
+    let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    for (action, size) in [
+        (Action::IncreaseFontSize, "14"),
+        (Action::ZoomInAll, "14"),
+        (Action::DecreaseFontSize, "12"),
+        (Action::ZoomOutAll, "12"),
+        (Action::ResetFontSize, "15"),
+        (Action::ZoomNormalAll, "15"),
+    ] {
+        let after = font_size_after(&action, 13.0, 15.0);
+        assert_eq!(
+            font_size_chip_label(&en, after, (80, 24)),
+            format!("Font size {size} · 80×24"),
+            "{action:?}"
+        );
+        assert_eq!(
+            font_size_chip_label(&es, after, (80, 24)),
+            format!("Tamaño de fuente {size} · 80×24"),
+            "{action:?}"
+        );
+    }
+    assert_eq!(
+        font_size_chip_label(&en, 13.5, (120, 40)),
+        "Font size 13.5 · 120×40"
+    );
+    assert_eq!(
+        font_size_chip_label(&en, 13.1_f32 + 1.0, (1, 1)),
+        "Font size 14.1 · 1×1"
+    );
+    // Spanish writes a fractional size with a decimal comma.
+    assert_eq!(
+        font_size_chip_label(&es, 13.5, (120, 40)),
+        "Tamaño de fuente 13,5 · 120×40"
+    );
+    assert_eq!(
+        font_size_chip_label(&es, 13.1_f32 + 1.0, (1, 1)),
+        "Tamaño de fuente 14,1 · 1×1"
+    );
+}
+
+/// `resize-overlay = never` keeps the chip off for font changes too; the
+/// other modes show it, `after-first` included, since a font change is
+/// never the window's first placement.
+#[test]
+fn only_resize_overlay_never_hides_the_font_size_chip() {
+    use kettle_config::ResizeOverlayMode as Mode;
+    assert!(!super::font_size_chip_shown(Mode::Never));
+    assert!(super::font_size_chip_shown(Mode::AfterFirst));
+    assert!(super::font_size_chip_shown(Mode::Always));
+}
+
+/// Screen readers hear the chip's own text from a polite live region.
+#[test]
+fn the_font_size_chip_is_announced_politely() {
+    let label = "Tamaño de fuente 14 · 80×24";
+    let (_, node) = super::font_size_chip_node(label);
+    assert_eq!(node.role(), accesskit::Role::Status);
+    assert_eq!(node.label(), Some(label));
+    assert_eq!(node.live(), Some(accesskit::Live::Polite));
+}
+
+/// A font change the user asks for fills the size chip with the new size
+/// and grid, in the user's language, and has its live region announced;
+/// `resize-overlay = never` leaves the chip empty, as does a window with no
+/// renderer to size.
+#[test]
+fn a_font_size_change_fills_the_size_chip_unless_it_is_turned_off() {
+    use kettle_config::ResizeOverlayMode as Mode;
+    let now = std::time::Instant::now();
+    for (language, caption) in [
+        (kettle_i18n::Language::En, "Font size 15 · 74×22"),
+        (kettle_i18n::Language::Es, "Tamaño de fuente 15 · 74×22"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        for mode in [Mode::AfterFirst, Mode::Always] {
+            let mut ws = WindowState::new(1, Mux::new());
+            super::font_size_chip(&mut ws, (mode, &tr), Some((15.0, (74, 22))), now);
+            assert_eq!(ws.resize_overlay, Some((74, 22, now)), "{mode:?}");
+            assert_eq!(ws.resize_overlay_label.as_deref(), Some(caption));
+            assert!(ws.accessibility_pending, "the live region waits");
+        }
+        let mut ws = WindowState::new(1, Mux::new());
+        super::font_size_chip(&mut ws, (Mode::Never, &tr), Some((15.0, (74, 22))), now);
+        assert_eq!((ws.resize_overlay, ws.resize_overlay_label), (None, None));
+        assert!(!ws.accessibility_pending);
+        let mut ws = WindowState::new(1, Mux::new());
+        super::font_size_chip(&mut ws, (Mode::Always, &tr), None, now);
+        assert_eq!((ws.resize_overlay, ws.resize_overlay_label), (None, None));
+    }
+}
+
+/// The accessibility tree rebuilds when the size chip's caption comes, goes
+/// or changes, though nothing else in the tree does.
+#[test]
+fn the_size_chip_caption_is_part_of_the_accessibility_key() {
+    use kettle_render::Overlay;
+    let key = |text: Option<&str>| {
+        super::overlay_live_region_key(&Overlay {
+            resize_overlay: Some((80, 24)),
+            resize_overlay_text: text.map(str::to_owned),
+            ..Overlay::default()
+        })
+    };
+    let none = key(None);
+    let fourteen = key(Some("Font size 14 · 80×24"));
+    let fifteen = key(Some("Font size 15 · 74×22"));
+    assert_ne!(none, fourteen);
+    assert_ne!(fourteen, fifteen);
+    assert_eq!(fourteen, key(Some("Font size 14 · 80×24")));
+}
