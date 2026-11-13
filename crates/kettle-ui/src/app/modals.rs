@@ -2615,6 +2615,10 @@ impl App {
         if !plan.restore_active {
             ws.theme_preview = None;
             self.set_runtime_theme_name(ws, name);
+        } else {
+            // Put the window's theme back now, not at the next window event:
+            // Enter can come from a control or remote command.
+            self.sync_theme_preview(ws);
         }
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time

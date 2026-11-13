@@ -1399,6 +1399,11 @@ fn a_pick_for_the_other_side_puts_the_window_back_on_its_theme() {
     assert!(keep.contains("ws.theme_preview = None;"));
     assert!(keep.contains("self.set_runtime_theme_name(ws, name);"));
     assert_eq!(commit.matches("ws.theme_preview = None;").count(), 1);
+    let back = commit
+        .split("} else {")
+        .nth(1)
+        .expect("the other side's branch");
+    assert!(back.contains("self.sync_theme_preview(ws);"));
     assert_eq!(commit.matches("set_runtime_theme").count(), 1);
 }
 
