@@ -44,9 +44,8 @@ printed something. Windows is unchanged: there a startup clear still pushes
 the restored rows into scrollback.
 
 One case can lose restored text. A startup program that clears and then
-draws at absolute screen positions without using the alternate screen, such
-as tmux configured not to use it, draws over restored rows that would
-otherwise have gone to scrollback. Set `restore-scrollback-lines = 0` to
+draws at absolute screen positions without using the alternate screen draws
+over restored rows that would otherwise have gone to scrollback. Set `restore-scrollback-lines = 0` to
 turn restored output off entirely.
 
 Remote/SSH/container output is **excluded by default**: server output may be
