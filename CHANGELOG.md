@@ -406,6 +406,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, quitting with ⌘Q, the Dock's or the app menu's Quit, or by
+  logging out or shutting down now saves the session on the way out, as
+  closing the last window already did. Before, the restored session could
+  miss whatever changed since the last background save (a directory, a
+  split, a tab title), and a save still being written could be lost. The
+  same quit now also deletes the private copies of pasted screenshots and of
+  files opened in the image viewer, document viewer or video player, which
+  were left behind.
+
 - A link no longer draws its hover underline across text you have selected.
   While a selection is being dragged, the links it passes over show no
   underline, "click to open" hint or hand cursor. Once the button is

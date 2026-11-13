@@ -638,7 +638,7 @@ impl SessionWriter {
     }
 
     #[cfg(test)]
-    fn with_sink(
+    pub(crate) fn with_sink(
         mut write: impl FnMut(Session, Option<String>) + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::with_content_sink(move |session, layout, _| write(session, layout))

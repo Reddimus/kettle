@@ -916,6 +916,7 @@ impl App {
             version_line: startup_version,
             torn_drag: None,
             last_session_sweep: None,
+            exit_teardown_done: false,
         };
         if let Some((path, diagnostics)) = config_diagnostics {
             app.set_config_notice(&path, &diagnostics);
@@ -934,32 +935,13 @@ impl App {
         };
         let result = result.and_then(|()| app.startup_error.take().map_or(Ok(()), Err));
         app.runtime_tracker.set_phase("exiting");
-        // Pasted screenshots are captured screen content, so they do not outlive
-        // the session that produced them. Runs on the error path too — an exit
-        // caused by a failure is exactly when leftovers would go unnoticed.
-        // PNGs still being encoded are stopped and kept first, so cleanup
-        // takes them too.
-        if let Some(encoder) = app.png_encoder.take() {
-            for encoded in encoder.close() {
-                let _ = app.pasted_images.keep_png(encoded);
-            }
-        }
-        app.pasted_images.cleanup();
-        // So are the copies handed to the image viewer, and the store closes
-        // so an open still on its way cannot leave a new one.
-        app.viewer_copies
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .close();
-        // And the copies handed to the document viewer and the video
-        // player; a copy on its way stops first.
-        app.document_copies.close();
-        app.video_copies.close();
+        // Usually already done from `exiting`; a launch that failed before
+        // the loop ran, or a platform that skips it, gets it here.
+        app.finish_exit();
         if let Err(error) = &result {
             app.runtime_tracker.record_exit(&error.to_string());
         }
         app.runtime_tracker.stop();
-        crate::notifications::flush_desktop_notifications(std::time::Duration::from_millis(250));
         result
     }
 
