@@ -5377,6 +5377,28 @@ the normal grid, scrollback, search, selection, accessibility, control geometry
 and IME paths. No chrome or terminal rectangle changes. A successful startup
 restore removes its sidecar; later session saves capture the current grid again.
 
+Off Windows, `kettle-core::term::seed_restored_content` then arms a one-shot
+restore clear guard in the vendored engine (`term/restore_clear_guard.rs`) at
+the cursor row below the divider. The anchor is a stable row identity
+(history origin plus history size plus screen line), which ED 3's history
+purge leaves unchanged, stamped with the grid geometry. The first ED 2 on the
+primary screen with the cursor at the home position consumes the guard: it
+erases from the anchor row down and puts the cursor there, so a startup
+`clear` in any of its byte orders keeps the restored rows in view. ED 3
+never touches the guard. Any other erase (ED 0/1, ED 2 away from home, ISO
+or DEC selective erase), a primary-screen scroll, the alternate screen, RIS,
+DECALN, DECCOLM and the first OSC 133 A prompt mark (applied in wire order
+through the synchronized-output marker queue) disarm it, after which the
+engine behaves as upstream. User input reaches it through an atomic flag:
+`Pane::record_user_input`, which every user-input writer calls, sets it
+without locking the terminal, and the engine reads it under the terminal
+lock when it next parses output, decides an ED 2 or resizes. Focus reports
+bypass that path and do not disarm. A resize before any output re-anchors
+to the reflowed cursor row; after output it disarms, and a geometry change
+that bypassed `Term::resize` fails the stamp check and falls back to the
+upstream clear. Windows stays unarmed because ConPTY's repaint behaviour has
+not been verified against the guard.
+
 System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,

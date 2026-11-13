@@ -40,6 +40,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   turns the current selection into that kind, and the same key again ends
   it. `y` copies whole lines or the selected columns of each row.
 
+- After a session restore on macOS and Linux, a shell that runs `clear` at
+  startup no longer hides the restored output. The restored rows and the
+  "Restored" divider stay on screen with the prompt below them, whichever
+  order `clear` sends its sequences in. Only that first clear is affected;
+  later clears work as before. A startup program that clears and then draws
+  at fixed positions outside the alternate screen can draw over restored
+  rows; `restore-scrollback-lines = 0` turns restored output off. Windows is
+  unchanged.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu
@@ -518,6 +527,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   released, a selected link keeps its hint and hand cursor, and its underline
   comes back when the selection is cleared. ⌘-click and Ctrl+click still open
   it.
+
+- Starting a recording into a directory could fail with "resource
+  temporarily unavailable" when a new pane opened at the same moment as
+  recording retention removed an old file. Kettle now takes the next file
+  name instead.
 
 - In an unfocused window, the active tab's bar was the same colour as a
   hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
