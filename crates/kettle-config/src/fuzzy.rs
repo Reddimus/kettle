@@ -48,7 +48,7 @@ pub fn align(pattern: &str, candidate: &str) -> Option<Alignment> {
 /// The best alignment in which every matched char starts a word (the first
 /// char, one after a separator, or a camelCase hump), continues the previous
 /// match, or matches whitespace typed in the pattern; or else, for a pattern
-/// of at least [`MIN_MIDWORD_RUN`] chars, the pattern as one contiguous run
+/// of at least four chars (`MIN_MIDWORD_RUN`), the pattern as one contiguous run
 /// anywhere, as `screen` lies in `fullscreen`. `None` when the pattern only
 /// lies scattered through the middles of words, as `font` does in `Focus
 /// next pane`, or is a shorter run inside one, as `scr` is in `fullscreen`.
