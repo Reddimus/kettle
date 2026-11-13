@@ -226,16 +226,19 @@ impl App {
         input_time: std::time::Instant,
     ) -> PaneInputResult {
         let receipt_pane = Self::media_paste_receipt_owners(ws);
+        let before = input_generations(&ws.mux);
         let local = ws
             .mux
             .broadcast_write_delivery(bytes, scroll_to_bottom, receipt_pane);
         Self::dismiss_media_paste_receipt_after_delivery(ws, local);
-        stamp_accepted_input(&mut ws.last_typed, local, input_time);
+        let reached = input_recipients(&ws.mux, &before);
+        stamp_accepted_input(ws, local, input_time, &reached);
         let mut result = local.result;
         if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
             let scope = ws.mux.broadcast.clone();
             for other in self.windows.values_mut() {
                 let receipt_pane = Self::media_paste_receipt_owners(other);
+                let before = input_generations(&other.mux);
                 let delivery = other.mux.broadcast_write_foreign_delivery(
                     &scope,
                     bytes,
@@ -249,7 +252,8 @@ impl App {
                     window.request_redraw();
                 }
                 Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
-                stamp_accepted_input(&mut other.last_typed, delivery, input_time);
+                let reached = input_recipients(&other.mux, &before);
+                stamp_accepted_input(other, delivery, input_time, &reached);
                 result = result.merge(delivery.result);
             }
         }

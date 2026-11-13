@@ -3029,6 +3029,9 @@ fn force_sync_update_flush(processor: &mut Processor, context: &mut SyncFlushCon
     context
         .image_pruner
         .prune_if_changed(context.term, context.images);
+    // Stamp before the Release increment: a reader that sees the new
+    // generation must also see its time.
+    context.output_wake.stamp_publication();
     context
         .out_gen
         .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -3052,6 +3055,9 @@ fn publish_output_if_ready(
     // that same tag. Sampling after cache checks could consume this increment
     // while keeping stale results. Search also checks saved haystack contents
     // before resuming work, even when this counter has not advanced yet.
+    // The publication's time is stamped first, so a reader that sees the new
+    // generation also sees its stamp (`Terminal::output_published_at`).
+    output_wake.stamp_publication();
     out_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
     output_wake.request();
     true
@@ -8776,6 +8782,15 @@ impl Terminal {
     /// Re-open this pane's output latch before the UI reads its generation.
     pub fn acknowledge_output_wake(&self) {
         self.output_wake.acknowledge();
+    }
+
+    /// When this pane last published output (see
+    /// [`Self::output_generation`]), whether or not that publication woke the
+    /// UI. Read it after the generation: the stamp is stored before the
+    /// generation moves, so it is at least as new as the publication of the
+    /// generation just read (possibly a later one's).
+    pub fn output_published_at(&self) -> Option<std::time::Instant> {
+        self.output_wake.last_publication()
     }
 
     /// Whether the program rang the bell since the last call. Bells are

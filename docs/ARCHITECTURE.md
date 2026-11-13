@@ -2450,6 +2450,156 @@ matcher tolerance with saved forward and reverse regex work before the real
 publication helper runs. The UI frame regression exercises the lost link-cache
 invalidation and the post-presentation retry under that interleaving.
 
+### Typed echo
+
+Output within `TYPING_ECHO_WINDOW` (150 ms) of a keystroke skips the output
+coalescer and requests a redraw at once. `request_redraw` is not paced to the
+display on macOS: winit dispatches the redraw in the same run-loop pass, and
+the Metal surface presents FIFO with up to three drawables. A shell that
+answers one key with two writes therefore gets two frames, and the first stays
+on screen for a whole refresh. zsh-autosuggestions in its default async mode does
+this on each key that changes the suggestion: the first write erases the old
+gray suggestion, the second, about a millisecond later, draws the new one.
+
+`crate::typed_echo` handles it in two parts. Each output publication is
+stamped in the pane's `OutputWakeGate`, waking or not
+(`Terminal::output_published_at`). The PTY reader stores the stamp before the
+`Release` increment of the output generation, so a reader that acquires a
+generation and then reads the stamp gets that publication's time or a later
+one's. The diagnostics then judge splits by publication time, not by when the
+UI thread sees a wake, which can be after a whole frame of rendering. A
+frame's generations are sampled under each pane's terminal lock during
+capture, because the staged cutoff above predates the capture.
+`ui_geometry.typed_echo` reports the counts.
+
+Both parts follow one keystroke at a time. `note_keystroke`, which every
+keystroke stamp goes through, records the panes the key reached. It keeps
+only those that took typed text (a printable character or a backspace,
+`typed_echo::is_typed_text`) and whose output the window had all painted. A
+paste of any length, and keys replayed in one block after a paste, are never
+typed text. An echo is the first wake that carries new output of one of those
+panes, so output from a sibling pane, and type-ahead into a pane that is still
+printing, are neither counted nor learned from. Enter, Tab, arrows and control
+keys are left out too: Enter prints a newline, runs the command and draws the
+prompt in separate writes in any shell, so learning from it would settle every
+shell.
+
+On macOS, a pane whose typed-text echo split within `ECHO_SETTLE` (3 ms) keeps
+its later typed-text echoes settled for `SPLIT_MEMORY` (5 s). Such an echo is
+held at its first wake instead of painting at once. It paints when the UI
+thread handles the wake its second write raises, or at its first wake plus
+`ECHO_SETTLE`, whichever comes first.
+
+The settle is event-driven:
+- `note_keystroke` records each followed pane's output generation with the
+  key: the key's baseline.
+- The first wake leaves the pane's output latch closed. Arming the settle
+  reopens it (`plan_typed_echo_paint`), acknowledging first and reading the
+  generation after, so the second write either shows in that read or raises
+  a fresh wake.
+- The typed Wakeup arm hands each wake to the armed settle. Once every
+  learned pane the key reached is two publications past its baseline, the
+  frame is requested (`settled_early`). That includes a pane of a broadcast
+  that had not published yet at the first wake, whose latch each wake
+  reopens until it completes. A pane whose echoes do not split is not waited
+  for.
+- If every write landed before the UI thread reached the first wake, the
+  echo paints at once without arming, and counts as neither kind of settle.
+- `about_to_wait` waits once, for the deadline. No step polls the
+  generations.
+- The probe never saw more than two writes for one key. A third would land
+  after the paint and count as an intermediate frame.
+
+Reopening the latch early keeps the output coalescer's latch rule. The latch
+gates wakes, not output, so opening it early can add a wake but never lose
+one. It is reopened only inside the typing window, where the coalescer is
+already bypassed, and only for panes still short of their second write: at
+most two extra wakes per pane and keystroke. The app's shared wake latch is
+cleared before each Wakeup fans out, so a publication during that Wakeup
+queues the next one. The redraw still acknowledges every pane before its
+snapshot; that leaves an open latch open and clears a pending one, as for
+any wake that races a frame.
+
+Counting publications cannot tell whose they are:
+- A key sent before the previous key's echo in that pane had published
+  shares its baseline. The previous echo's write would be counted as this
+  echo's first, and this echo's own first write as its second. zsh-autosuggestions does this in a burst, cancelling one
+  key's suggestion fetch when the next key arrives. `key_sent` marks such a
+  pane's baseline uncertain, and only the deadline releases its settle.
+- The settle can still reach two publications before the echo's second write.
+  The first write can be split across two PTY reads, each of which
+  publishes. The previous key's late write, its suggestion arriving after
+  this key went out to a pane that looked quiet, can land after this key's
+  baseline. An asynchronous prompt redraw, such as a theme's async git
+  status, can publish in between. Each releases the settle early, and the
+  echo's real second write then paints in a frame of its own, as without the
+  settle. Releasing at the number of publications seen when the pane's split
+  was learned was considered and not adopted: it cannot tell those
+  publications apart either.
+- A later keystroke whose echo joins the armed paint adds its learned panes
+  to the armed key's, and the paint then follows that keystroke. It waits for
+  every pane of both keys, so neither echo paints half-written.
+- A pane that closes mid-settle is never complete, and the deadline paints.
+
+An echo that arrives in one write still waits the full `ECHO_SETTLE`: until
+the deadline nothing tells it apart from the first half of a split. In the
+live A/B below, about three in four typed echoes in a learned pane were
+single writes, so early release shortens only the remaining quarter. Shells
+that write each echo once never arm the settle and pay nothing.
+
+A deadline scaled to the pane's recent split gaps (twice the largest in the
+last 5 s, between 1 and 3 ms) was considered and not adopted. On a replay of
+the headless probe (792 keys, runs concatenated per key gap, so the 5 s window
+spans runs), it shortened the deadline for 190 of 787 keys in learned panes,
+saving about 0.28 ms per single-write echo. It also let 7 of 187 split echoes
+outlast their deadline, against 4 with the fixed 3 ms.
+
+The settle is a single phase (`Idle`, `Armed { deadline, key }`, `Queued`)
+with these rules:
+- The deadline is never extended. A deadline that is due counts as the
+  deadline (`settled_echoes`), even if the echo has also completed, whether
+  `about_to_wait` or a wake finds it.
+- `about_to_wait` checks it under the coalescer's guards. With nothing
+  pending the check returns before them. A hidden window or a pending frame
+  recovery cancels it rather than waking for a redraw that would return
+  early. A settle that already requested its frame was counted when it
+  requested it. While armed it asks for one wake, at the deadline, never
+  sooner than 100 µs from now, so a timer that fires early cannot spin the
+  loop.
+- `Queued` ends when the next redraw callback begins, even one that returns
+  early, so a failed redraw is not retried every turn.
+- A typed wake that finds it `Queued` requests the redraw again.
+- Output after a later keystroke that would not settle on its own (Enter,
+  Tab, a key into another pane) paints at once instead of waiting for the
+  armed paint. A paste is not a keystroke: it never arms the settle, and its
+  output takes the ordinary output path.
+
+A live A/B on macOS measured the fixed 3 ms settle, before early release. It
+ran on 2026-11-13 at 60 Hz, in oh-my-zsh with async zsh-autosuggestions, with
+keys paced 33 and 50 ms apart. Each build ran 8 runs of 132 keys on
+suggestion-changing text and 8 on text that matches no history; the
+autosuggestions figures below are from the first set. It confirmed both
+effects:
+- Without the settle, about one intermediate frame reached the screen per
+  split echo: 244 over 238 split echoes.
+- With it, 12 over 235 (0.05 per split, 95% fewer), and frames per echo fell
+  from 1.30 to 1.08. The residue is about one per run: the first split after
+  a cold start, which is not settled by design.
+- Plain zsh never split and never settled (0 settles in 1042 echoes).
+
+The A/B also found the cost. In the autosuggestions shell, 99% of echoes on
+suggestion-changing text were settled, each waiting the full 3 ms, single
+writes included. That failed the preregistered criterion of no cost for
+single-write echoes. Early release was added after the A/B, first by polling
+and then event-driven as described above. Neither has been measured live, so
+how much sooner a split echo paints is not known.
+
+`ECHO_SETTLE` comes from a headless PTY probe of oh-my-zsh with
+zsh-autosuggestions: 97% of 192 split echoes spanned 3 ms or less. It stays
+below the 4 ms minimum output budget. Windows keeps the immediate path, since
+its timers are too coarse for the deadline. X11 and Wayland keep it too until
+it is measured there.
+
 ### Character protection
 
 A cell's protection bit is separate from its visual SGR attributes. DECSCA
@@ -4037,7 +4187,9 @@ non-regression claim.
   advances `deferred → queued → presenting → idle` only after a presented
   frame; a failed presentation returns to `deferred` without a busy deadline.
   The pane latch stays closed throughout a deferred interval and reopens only
-  when a real frame is about to snapshot generations. A queued wake that was
+  when a real frame is about to snapshot generations. The one exception is a
+  settled typed echo, inside the typing window where the pacer is bypassed:
+  it reopens its panes' latches when it arms (see [Typed echo](#typed-echo)). A queued wake that was
   already covered by a presented frame is acknowledged and then resampled,
   closing the race between the stale check and rearm. Visibility, recovery,
   reap, and renderer guards run before the pacer can enter `presenting`, so an
