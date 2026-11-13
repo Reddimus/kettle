@@ -1,0 +1,3433 @@
+[
+ {
+  "id": "c01-larger-default-text",
+  "category": "C01",
+  "title": "Default Linux text is 8% larger (13 px to 14 px font)",
+  "caption": "The same prompt measures 140 px wide in 5.9.0 and 151 px in 6.0.0, the 14/13 ratio of the font-size default change. The text inset from the window edge goes from 8 px to 12 px.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   0,
+   84,
+   200,
+   80
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     113,
+     144,
+     20
+    ],
+    "label": "140 px wide"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     10,
+     89,
+     155,
+     20
+    ],
+    "label": "151 px wide"
+   }
+  ],
+  "objective_basis": "Bounding box of 'fixture:~/project$' on (26,27,39): old x8-147 (140 px), y115-130; new x12-162 (151 px), y91-106. 151/140 = 1.079 vs 14/13 = 1.077. The 61-character fixture line is 475 px in old and 512 px in new (1.078). Row pitch 16.2 px old, 17.5 px new.",
+  "kind": "measured"
+ },
+ {
+  "id": "c01-larger-header-controls",
+  "category": "C01",
+  "title": "New-tab and menu glyphs grow from 7x7 and 5x4 px to 12 px",
+  "caption": "5.9.0 drew the new-tab + at 7x7 px and the options arrow at 5x4 px, at 5.5:1 against their fill. 6.0.0 draws the + at 12x12 px and the main-menu glyph at 12x13 px, at 11.3:1 against the header.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   1470,
+   32,
+   130,
+   70
+  ],
+  "scale": 4,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1559,
+     74,
+     32,
+     10
+    ],
+    "label": "menu 5x4, + 7x7"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1492,
+     47,
+     47,
+     16
+    ],
+    "label": "12 px glyphs"
+   }
+  ],
+  "objective_basis": "Old +: x1583-1589, y76-82 (7x7), (191,201,244) on (65,72,104), 5.48:1. Old arrow: x1561-1565, y77-80 (5x4), 5.53:1. New +: x1526-1537, y50-61 (12x12). New menu glyph: x1494-1505, y49-61 (12x13). Both (192,202,245) on (20,21,29), 11.26:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c01-merged-header",
+  "category": "C01",
+  "title": "Window chrome shrinks from 60 px to 46 px on a new window",
+  "caption": "5.9.0 drew a 34 px title bar holding only a close button above a separate 24 px tab strip, 60 px in all, plus a 1 px accent frame around the single pane. 6.0.0 draws one 46 px header with the tab, menu, new-tab and close controls and no single-pane frame, so the terminal starts 14 px higher.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   0,
+   28,
+   1600,
+   110
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     300,
+     32,
+     1296,
+     60
+    ],
+    "label": "60 px chrome"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     300,
+     32,
+     1296,
+     46
+    ],
+    "label": "46 px header"
+   }
+  ],
+  "objective_basis": "Vertical runs at x=300. Old: y32-65 title bar (48,48,48), y66 line (58,58,58), y67-90 tab strip (26,27,38), y91 accent line (187,154,247), terminal from y92. New: y32-77 header (20,21,29), terminal from y78. Old title bar has non-background pixels only at x1571-1594 (the close button). Old 1 px (187,154,247) frame at x=0, x=1599 and y=999; new is (26,27,39) to the edge.",
+  "kind": "measured"
+ },
+ {
+  "id": "c01-no-blank-first-row",
+  "category": "C01",
+  "title": "A new window's first prompt is on row 1, not row 2",
+  "caption": "In 5.9.0 the first tab of a newly launched window had an empty first row, with the prompt on row 2. In 6.0.0 the prompt is on row 1. The changelog lists this fix: a new window whose shell clears the screen no longer gains a blank line above the prompt when the window grows.",
+  "old": "C01-first-window.png",
+  "new": "C01-first-window.png",
+  "crop": [
+   0,
+   76,
+   420,
+   104
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     2,
+     99,
+     400,
+     14
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     300,
+     150,
+     240,
+     112
+    ],
+    "label": "blank first row"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     9,
+     88,
+     158,
+     21
+    ],
+    "label": "prompt on row 1"
+   }
+  ],
+  "objective_basis": "Old row pitch is 16.2 px with row 1 glyph tops at y100-102 (C02-focused). Old C01 prompt glyphs span y115-130 (row 2); y92-114 holds no text. The same row-2 prompt is in old C02-windowed, C03-tabs-1, C03-tabs-switched, C03-reordered-before and C03-background-activity (first prompt glyph top y117), each the first tab of a fresh launch per receipts.jsonl. New prompt glyph top is y91-93, row 1, in every C01-C03 capture.",
+  "kind": "visual"
+ },
+ {
+  "id": "c02-follows-system-light",
+  "category": "C02",
+  "title": "Kettle turns light with GNOME's light style; 5.9.0 stayed dark",
+  "caption": "With GNOME set to prefer light (white top bar), 5.9.0 kept its dark terminal: below the top bar its light and dark captures differ only in the cursor cell. 6.0.0 switches to the Kettle Day light theme, background (224,225,231).",
+  "old": "C02-system-light.png",
+  "new": "C02-system-light.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "highlight",
+    "xy": [
+     4,
+     4,
+     1592,
+     22
+    ],
+    "label": "GNOME set to light"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     300,
+     300,
+     1000,
+     500
+    ],
+    "label": "stays dark"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     300,
+     300,
+     1000,
+     500
+    ],
+    "label": "Kettle Day light"
+   }
+  ],
+  "objective_basis": "Receipts: 'system color-scheme prefer-light' then capture 3.6 s (old) and 3.7 s (new) later. GNOME top bar (250,250,251) in both light captures, (0,0,0) in both dark ones. Old: terminal bg (26,27,39) in both; below y32, light vs dark differ in 128 px, all in the cursor cell (x156-163, y749-764). New: bg (224,225,231), header (212,212,217), text (28,65,158) at 7.0:1; below y32, light vs dark differ in 1,548,800 px.",
+  "kind": "measured"
+ },
+ {
+  "id": "c02-fullscreen-no-stale-frame",
+  "category": "C02",
+  "title": "Fullscreen toggle no longer leaves a stale size chip on screen",
+  "caption": "The terminal-size chip lasts 750 ms in both builds. In 5.9.0 it was still on screen 3.3 s after F11, entering fullscreen (203x59) and again leaving it (203x54). 6.0.0 shows no chip in either capture. The changelog fixes GNOME Wayland windows that stopped repainting after a fullscreen change.",
+  "old": "C02-fullscreen.png",
+  "new": "C02-fullscreen.png",
+  "crop": [
+   600,
+   400,
+   400,
+   200
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     755,
+     477,
+     90,
+     46
+    ],
+    "label": "chip after 3.3 s"
+   },
+   {
+    "on": "new",
+    "shape": "circle",
+    "xy": [
+     755,
+     477,
+     90,
+     46
+    ],
+    "label": "no chip"
+   }
+  ],
+  "objective_basis": "RESIZE_OVERLAY_DURATION = 750 ms in crates/kettle-ui/src/app/layout.rs at e58e367b9 and a354c472d. Receipts, old: F11 at 1794540687.138, capture 690.411 (3.27 s); F11 692.496, capture 695.78 (3.28 s). New: 1794537164.155 to 168.114 (3.96 s); 170.445 to 173.893 (3.45 s). Old chip x763-836, y485-514 (C02-fullscreen) and y518-548 (C02-windowed). New: 0 non-background pixels in x600-999, y400-599 in both captures.",
+  "kind": "measured"
+ },
+ {
+  "id": "c02-unfocused-cursor",
+  "category": "C02",
+  "title": "An unfocused window keeps a hollow cursor at the prompt",
+  "caption": "5.9.0 drew no cursor once the window lost focus. 6.0.0 draws a steady hollow cursor outline in the unfocused window, so the typing position stays visible.",
+  "old": "C02-unfocused.png",
+  "new": "C02-unfocused.png",
+  "crop": [
+   0,
+   730,
+   260,
+   115
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     151,
+     746,
+     18,
+     22
+    ],
+    "label": "no cursor"
+   },
+   {
+    "on": "new",
+    "shape": "circle",
+    "xy": [
+     167,
+     787,
+     18,
+     22
+    ],
+    "label": "hollow cursor"
+   }
+  ],
+  "objective_basis": "Old C02-focused: 8x16 block (192,202,245) at x156-163, y749-764; old C02-unfocused: 0 non-background pixels in x150-189, y747-767. 5.9.0 source e58e367b9 crates/kettle-render/src/terminal.rs:830: 'Cursor: hidden with the window unfocused', so this is not blink phase. New C02-unfocused: 8x17 outline (192,202,245) at x172-179, y790-806.",
+  "kind": "visual"
+ },
+ {
+  "id": "c02-unfocused-tab-label-dims",
+  "category": "C02",
+  "title": "Focus loss now changes Kettle's header at 2.9:1, not 1.18:1",
+  "caption": "On focus loss 5.9.0 changed only its title bar shade, (48,48,48) to (36,36,36), a 1.18:1 step; the tab strip did not change. 6.0.0 dims the tab title by a 2.9:1 step, to 3.65:1 on the background, and turns off the active tab's accent edge.",
+  "old": "C02-unfocused.png",
+  "new": "C02-unfocused.png",
+  "crop": [
+   500,
+   28,
+   1100,
+   100
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     504,
+     36,
+     1092,
+     26
+    ],
+    "label": "only change 1.18:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     767,
+     45,
+     65,
+     18
+    ],
+    "label": "title to 3.65:1"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     518,
+     32,
+     518,
+     2
+    ],
+    "label": "accent edge off"
+   }
+  ],
+  "objective_basis": "Focused vs unfocused diff. Old: y32-65 bar 54,400 px changed, (48,48,48) to (36,36,36) = 1.18:1; tab strip y66-91 0 px changed. New: 1,524 px changed in x516-1583, y32-61. Title (192,202,245) 10.58:1 becomes (109,115,142) 3.65:1 on (26,27,39); the two title colours differ by 2.90:1. Accent edge x518-1035, y32-33 goes (187,154,247) to (52,54,65).",
+  "kind": "measured"
+ },
+ {
+  "id": "c03-activity-dot",
+  "category": "C03",
+  "title": "Activity marker sits beside the title at twice the contrast",
+  "caption": "5.9.0 marked background activity with a square at the tab's left edge, 206 px from the title, at 5.21:1 (blue) and 4.47:1 (orange). 6.0.0 draws a dot 4 px before the title at 10.6:1 and 9.09:1. The marker shrinks from 9x8 px to 6x6 px.",
+  "old": "C03-background-activity.png",
+  "new": "C03-background-activity.png",
+  "crop": [
+   500,
+   34,
+   360,
+   90
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     539,
+     78,
+     213,
+     10
+    ],
+    "label": "marker 206 px away"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     513,
+     51,
+     8,
+     8
+    ],
+    "label": "dot, 10.6:1"
+   }
+  ],
+  "objective_basis": "Old markers: x539-547, y79-86 (9x8), (125,207,255) on (65,72,104), 5.21:1; x1073-1080 (8x8), (224,175,104), 4.47:1. Titles start at x754 and x1263 (gaps 206 and 182 px). New dots: x514-519 and x908-913, y52-57 (6x6) on (20,21,29), 10.6:1 and 9.09:1; titles start at x524 and x918 (4 px gap).",
+  "kind": "measured"
+ },
+ {
+  "id": "c03-inactive-title-contrast",
+  "category": "C03",
+  "title": "Inactive tab titles go from 5.53:1 to 7.05:1 contrast",
+  "caption": "5.9.0 drew inactive tab titles on a raised (65,72,104) fill at 5.53:1. 6.0.0 draws them on the header background at 7.05:1, above the 7:1 AAA level.",
+  "old": "C03-tabs-3.png",
+  "new": "C03-tabs-3.png",
+  "crop": [
+   0,
+   30,
+   800,
+   80
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     218,
+     71,
+     81,
+     14
+    ],
+    "label": "5.53:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     122,
+     47,
+     62,
+     14
+    ],
+    "label": "7.05:1"
+   }
+  ],
+  "objective_basis": "Old inactive titles x220-296 and x754-829, y73-83: (192,202,245) on (65,72,104), 5.53:1. New inactive titles x124-181 and x518-575, y49-59: (152,160,194) on (20,21,29), 7.05:1. Active title 10.58:1 in both. New C03-background-activity inactive titles also 7.05:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c03-tab-close-button",
+  "category": "C03",
+  "title": "Inactive tab close x grows from 6x6 at 2.95:1 to 9x8 at 7.05:1",
+  "caption": "5.9.0 drew an inactive tab's close button as a dark 6x6 px x inside a 14x14 px box, at 2.95:1 against the box. 6.0.0 draws a 9x8 px x at 7.05:1 against the header, with no box.",
+  "old": "C03-tabs-3.png",
+  "new": "C03-tabs-3.png",
+  "crop": [
+   340,
+   36,
+   220,
+   80
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     514,
+     72,
+     14,
+     14
+    ],
+    "label": "6x6, 2.95:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     365,
+     49,
+     13,
+     12
+    ],
+    "label": "9x8, 7.05:1"
+   }
+  ],
+  "objective_basis": "Old: box (93,100,132) at x514-527, y72-85; glyph x518-523, y77-82 (6x6), (25,27,40), 2.95:1 against the box. Old active-tab x: 7x7, 3.01:1. New inactive x: x367-375, y51-58 (9x8), (152,160,194) on (20,21,29), 7.05:1; active-tab x 7.02:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c03-tab-shortcut-hints",
+  "category": "C03",
+  "title": "Tabs show their Alt+N go-to-tab shortcut on Linux",
+  "caption": "5.9.0 tabs showed only an index and title. 6.0.0 labels each tab with its go-to-tab key, Alt+1, Alt+2 and Alt+3, at 4.5:1 contrast.",
+  "old": "C03-tabs-3.png",
+  "new": "C03-tabs-3.png",
+  "crop": [
+   0,
+   30,
+   1600,
+   100
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     305,
+     48,
+     45,
+     14
+    ],
+    "label": "Alt+1 hint"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1093,
+     48,
+     45,
+     14
+    ],
+    "label": "Alt+3 hint"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     310,
+     70,
+     190,
+     18
+    ],
+    "label": "no shortcut"
+   }
+  ],
+  "objective_basis": "New: 'Alt+1', 'Alt+2', 'Alt+3' text, 41x10 px at x307, x701, x1095 (y50-59), (121,126,146) on (20,21,29), 4.51:1. Old: each tab holds only 'N: fixture' (77x11 px) and a close box, with no other text. The hints also show in new C03-background-activity, C03-reordered and C03-moved-to-window.",
+  "kind": "visual"
+ },
+ {
+  "id": "c04-focused-title-bold",
+  "category": "C04",
+  "title": "Focused pane title is bold, so focus no longer rests on colour alone",
+  "caption": "In 5.9.0 the focused pane's title had the same weight as the others and stood out only by its purple fill. In 6.0.0 it is bold: its ink coverage rose 51% (full-ink pixels 35 to 76), while the unfocused title, the control, rose 8% from the larger font.",
+  "old": "C04-split-right.png",
+  "new": "C04-split-right.png",
+  "crop": [
+   800,
+   72,
+   200,
+   64
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     813,
+     93,
+     124,
+     15
+    ],
+    "label": "Regular weight"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     814,
+     81,
+     124,
+     15
+    ],
+    "label": "Bold focused title"
+   }
+  ],
+  "objective_basis": "Coverage-weighted ink of 'fixture' (bg→fg): focused 110.0 (5.9.0) vs 165.7 (6.0.0), +51%; pixels at >90% ink 35 vs 76. Unfocused 'fixture': 159.6 vs 171.8, +8%. CHANGELOG: 'The focused pane's title is bold as well as highlighted'.",
+  "kind": "measured"
+ },
+ {
+  "id": "c04-no-stray-blank-row",
+  "category": "C04",
+  "title": "Prompts start on row 1, and zoom/restore no longer adds a blank row",
+  "caption": "5.9.0 left a blank row above the first prompt (24 px below the bar above it, against 8 px in a freshly split pane), and zooming then restoring a pane added another (bottom-right prompt y=575 to 591). 6.0.0 keeps every prompt on row 1, 14 px below its pane title, through split, zoom and restore.",
+  "old": "C04-restored.png",
+  "new": "C04-restored.png",
+  "crop": [
+   0,
+   70,
+   1000,
+   580
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     4,
+     116,
+     160,
+     36
+    ],
+    "label": "Blank row above prompt"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     804,
+     572,
+     160,
+     36
+    ],
+    "label": "Pushed down by zoom"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     8,
+     108,
+     168,
+     22
+    ],
+    "label": "Prompt on row 1"
+   }
+  ],
+  "objective_basis": "Prompt text tops. 5.9.0 unsplit frames (C05-menus-menu, C06-settings, C07-theme-ui): tab bar ends y=91, prompt y=115 (24 px gap, one blank row). Split frames: left (original) pane prompt y=137 vs fresh top-right pane y=121 under titles ending y=113; bottom-right y=575 in C04-split-down and y=591 in C04-restored. 6.0.0: unsplit prompt y=90-91 under a header ending y=78; split panes all at y=114 under titles ending y=100; bottom-right y=575 in both C04-split-down and C04-restored. CHANGELOG: a new window 'no longer gains a blank line above the prompt when the window grows'.",
+  "kind": "measured"
+ },
+ {
+  "id": "c04-zoom-indicator",
+  "category": "C04",
+  "title": "A zoomed pane says it is zoomed, how many panes hide, and how to restore",
+  "caption": "After the same Ctrl+Shift+X zoom of a 3-pane tab, 5.9.0 showed the pane with no title strip and no sign that 2 panes were hidden. 6.0.0 keeps a title strip that reads \"Zoomed · 2 panes hidden · Ctrl+Shift+X restores\".",
+  "old": "C04-zoomed.png",
+  "new": "C04-zoomed.png",
+  "crop": [
+   0,
+   60,
+   760,
+   80
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     4,
+     80,
+     572,
+     20
+    ],
+    "label": "Zoom state, restore key"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     0,
+     92,
+     600,
+     22
+    ],
+    "label": "No zoom indicator"
+   }
+  ],
+  "objective_basis": "Receipts: both runs pressed ctrl+shift+x after split_right and split_down (action=zoom). 6.0.0 frame: accent strip y=79-100 with the text '⤢ Zoomed · 2 panes hidden · Ctrl+Shift+X restores  fixture  187x49'. 5.9.0 frame: the pane starts under the tab bar at y=92; the only title on screen is the tab's '1: fixture'.",
+  "kind": "visual"
+ },
+ {
+  "id": "c05-match-highlight",
+  "category": "C05",
+  "title": "Palette highlights the characters that match the query",
+  "caption": "With 'split' typed, 5.9.0 drew every result in plain text. 6.0.0 draws the matched characters, such as 'Split' and 'splits', in the accent colour, at 7.39:1 on unselected rows.",
+  "old": "C05-palette-split.png",
+  "new": "C05-palette-split.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     455,
+     220,
+     44,
+     15
+    ],
+    "label": "Matches highlighted"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     619,
+     803,
+     42,
+     15
+    ],
+    "label": "No match marking"
+   }
+  ],
+  "objective_basis": "New list: 445 pixels in accent (187,154,247); 'Split' in row 2 has 38 full-accent pixels while 'up' stays (192,202,245). Old list: 'Split' and 'up' are both (192,202,245); the 26 accent pixels in the old list are the selection bar and scroll arrow, none in label text. (187,154,247) on (26,27,38) = 7.39:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c05-menu-button-size",
+  "category": "C05",
+  "title": "Header menu button grows from a 5x4 px caret to a 12x13 px icon",
+  "caption": "5.9.0 drew the header's options menu button as a 5x4 px caret at 5.53:1, and the new-tab + at 7x7 px. 6.0.0 draws the same button as a 12x13 px three-bar \"Main menu\" icon and the + at 12x12 px, both at 11.26:1.",
+  "old": "C04-split-right.png",
+  "new": "C04-split-right.png",
+  "crop": [
+   1440,
+   30,
+   160,
+   95
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     1556,
+     72,
+     14,
+     13
+    ],
+    "label": "5x4 px caret"
+   },
+   {
+    "on": "new",
+    "shape": "circle",
+    "xy": [
+     1490,
+     45,
+     20,
+     20
+    ],
+    "label": "12x13 px icon"
+   }
+  ],
+  "objective_basis": "Ink boxes on the default TokyoNight Night theme (C04-split-right, no menu open): old ▾ 5x4 px, (192,202,245) on (65,72,104) = 5.53:1; old + 7x7 px. New ≡ 12x13 px and + 12x12 px, (192,202,245) on (20,21,29) = 11.26:1. CHANGELOG: the new-tab options button is drawn as the window's primary menu (≡, 'Main menu'), drawn larger inside the same click target.",
+  "kind": "measured"
+ },
+ {
+  "id": "c05-palette-card",
+  "category": "C05",
+  "title": "Palette query sits directly above its results in one card",
+  "caption": "In 5.9.0 the palette query was typed into the bottom status bar, 217 px below and 571 px left of the first result. In 6.0.0 the query and results share one 720x267 card near the top, with the first result 47 px under the query. The query text contrast rose from 5.53:1 to 10.59:1.",
+  "old": "C05-palette-empty.png",
+  "new": "C05-palette-empty.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     0,
+     975,
+     1600,
+     25
+    ],
+    "label": "Query at bottom"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     589,
+     740,
+     422,
+     226
+    ],
+    "label": "Results far above"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     440,
+     152,
+     720,
+     267
+    ],
+    "label": "Query atop results"
+   }
+  ],
+  "objective_basis": "Old: query text box x=34-79, y=983-993 on the (65,72,104) status bar; result list 560-1039 x 740-974, first row centre y=771, labels from x=605. New: card border 440-1159 x 152-418; query text y=164-174, first row centre y=216, labels from x=456. Query 'qqzzxx' (C05-palette-nomatch): (192,202,245) on (65,72,104) = 5.53:1 vs on (26,27,38) = 10.59:1. The no-match message also moves next to the query (C05-palette-nomatch).",
+  "kind": "measured"
+ },
+ {
+  "id": "c05-shortcut-contrast",
+  "category": "C05",
+  "title": "Palette shortcut hints rise from 4.54:1 to 7.03:1 contrast",
+  "caption": "In 5.9.0, shortcut hints on unselected palette rows, such as Ctrl+PageDown, were drawn at 4.54:1. 6.0.0 draws them at 7.03:1. On the selected row they rise from 4.53:1 to 4.94:1.",
+  "old": "C05-palette-empty.png",
+  "new": "C05-palette-empty.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     892,
+     905,
+     104,
+     18
+    ],
+    "label": "4.54:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1033,
+     355,
+     112,
+     18
+    ],
+    "label": "7.03:1"
+   }
+  ],
+  "objective_basis": "'Ctrl+PageDown' on (26,27,38): old (126,131,151) = 4.54:1, new (156,165,201) = 7.03:1. Selected-row 'Ctrl+Shift+T' on (88,73,119): old (195,193,215) = 4.53:1, new (192,202,245) = 4.94:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c06-blur-unavailable-note",
+  "category": "C06",
+  "title": "Settings says window blur is unavailable in this session",
+  "caption": "On this GNOME session, which cannot blur windows, 5.9.0 showed 'Window blur: On' with no caveat. 6.0.0 adds 'Not available in this session; opacity still applies.' under the switch.",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     493,
+     514,
+     300,
+     18
+    ],
+    "label": "On, no caveat"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     577,
+     397,
+     700,
+     42
+    ],
+    "label": "Says unavailable here"
+   }
+  ],
+  "objective_basis": "New text at y=422-435: 'Not available in this session; opacity still applies.' at 4.54:1. The old row has only 'Window blur' and 'On'. Both runs used the same GNOME 50 headless session.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-categories-sidebar",
+  "category": "C06",
+  "title": "Settings categories: 8 tabs become an 11-entry sidebar",
+  "caption": "5.9.0 had 8 category tabs in one row. 6.0.0 lists 11 categories in a sidebar, adding Text / Rendering, Sessions and Quick terminal.",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     497,
+     402,
+     590,
+     22
+    ],
+    "label": "8 categories"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     322,
+     192,
+     231,
+     320
+    ],
+    "label": "11 categories"
+   }
+  ],
+  "objective_basis": "Old tabs: Appearance, Background, Behavior, Search, Tabs, Graphics, Agents, Keybinds (8). New sidebar: the same 8 plus Text / Rendering, Sessions and Quick terminal (11). Category labels are 10.59:1 in both.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-descriptions",
+  "category": "C06",
+  "title": "Every setting has a one-line description (11 of 11, was 0 of 9)",
+  "caption": "5.9.0 listed bare labels such as 'Font size' and 'Window padding'. 6.0.0 puts a one-line description under each of the 11 visible settings, for example 'Set the terminal font size in logical pixels.'",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     577,
+     265,
+     445,
+     21
+    ],
+    "label": "Description per setting"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     493,
+     468,
+     614,
+     20
+    ],
+    "label": "Label only"
+   }
+  ],
+  "objective_basis": "Description lines counted on the Appearance page: old 0 of 9 rows, new 11 of 11 rows. Description text (126,131,151) on (26,27,38) = 4.54:1.",
+  "kind": "visual"
+ },
+ {
+  "id": "c06-font-size-unit",
+  "category": "C06",
+  "title": "Font size is shown in px, its real unit, not pt",
+  "caption": "5.9.0's Settings showed the font size as '13 pt', though `font-size` is measured in logical pixels. 6.0.0 shows '14 px' and describes it as 'Set the terminal font size in logical pixels.'",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     734,
+     469,
+     46,
+     18
+    ],
+    "label": "Says 13 pt"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1213,
+     291,
+     65,
+     25
+    ],
+    "label": "Says 14 px"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     580,
+     316,
+     382,
+     18
+    ],
+    "label": "Logical pixels"
+   }
+  ],
+  "objective_basis": "Old value text '13 pt'; new value text '14 px' plus the description 'Set the terminal font size in logical pixels.' CHANGELOG: 'Settings and --check-config label font sizes in logical px.' The 13 to 14 change is the new Linux default and is not part of this claim.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-reset-hint",
+  "category": "C06",
+  "title": "Settings footer adds a 'Del reset' hint",
+  "caption": "5.9.0's footer listed field, change, ends, category and close, with no reset key. 6.0.0's footer adds 'Del reset': Delete or Backspace returns the highlighted setting to its default.",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     859,
+     864,
+     80,
+     18
+    ],
+    "label": "Del reset hint"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     500,
+     669,
+     536,
+     18
+    ],
+    "label": "No reset hint"
+   }
+  ],
+  "objective_basis": "Old footer: '↑↓/jk field  ↔/hl change  g/G ends  Tab category  Esc close'. New footer: '↑↓/jk field ↔/hl change g/G ends Del reset Tab category Esc close'. Both at 4.54:1. CHANGELOG: 'Delete or Backspace resets the highlighted setting to its default, and the footer says so.'",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-search-field",
+  "category": "C06",
+  "title": "Settings gains a search field",
+  "caption": "5.9.0's Settings had no search input. 6.0.0 puts a 'Search settings' field at the top of its sidebar, which the CHANGELOG says finds settings by name, description or config key.",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     322,
+     150,
+     231,
+     30
+    ],
+    "label": "Search settings field"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     497,
+     378,
+     600,
+     46
+    ],
+    "label": "No search"
+   }
+  ],
+  "objective_basis": "New: bordered field x=322-552, y=150-179 with placeholder 'Search settings' at 4.54:1. Old: the panel header holds only the title 'Settings — Appearance' and a row of category tabs; no input field anywhere in the panel.",
+  "kind": "visual"
+ },
+ {
+  "id": "c06-unfocused-cursor-row",
+  "category": "C06",
+  "title": "Settings offers an Unfocused cursor choice",
+  "caption": "5.9.0's Appearance list had Cursor shape and Cursor blink but no setting for the cursor in unfocused panes or windows. 6.0.0 adds 'Unfocused cursor: ‹ Hollow ›', described as 'Show an outline, hide, or keep the active cursor shape.'",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     577,
+     548,
+     700,
+     42
+    ],
+    "label": "Unfocused cursor setting"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     493,
+     557,
+     614,
+     42
+    ],
+    "label": "Not offered"
+   }
+  ],
+  "objective_basis": "Row present in the new Appearance list at y=550-590. Absent from the old list of 9 rows (Theme to Show pane titlebars).",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c06-value-controls",
+  "category": "C06",
+  "title": "Settings values are drawn as controls: ‹ choice › arrows and switches",
+  "caption": "5.9.0 printed every value as plain text in one column ('On', 'Block'), with no control glyphs. 6.0.0 draws choices between ‹ › arrows, numbers in boxed fields and on/off settings as knob switches.",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1115,
+     189,
+     163,
+     25
+    ],
+    "label": "Choice arrows"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1213,
+     394,
+     65,
+     24
+    ],
+    "label": "Knob switch"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     733,
+     447,
+     48,
+     196
+    ],
+    "label": "Plain text values"
+   }
+  ],
+  "objective_basis": "New Appearance page: 4 choice controls with ‹ › glyphs, 3 knob switches (accent pill (187,154,247), dark knob, 'On' label (26,27,38) at 7.39:1) and 4 boxed value fields. Old: 9 values as unboxed text at x=738-775 with no control glyphs.",
+  "kind": "visual"
+ },
+ {
+  "id": "c07-follow-system",
+  "category": "C07",
+  "title": "Settings adds an Appearance row that follows system light/dark mode",
+  "caption": "5.9.0's Settings offered only one fixed Theme. 6.0.0 adds 'Appearance: ‹ Follow system ›' above Theme, described as 'Follow the system, use light or dark, or keep a fixed theme.'",
+  "old": "C06-settings.png",
+  "new": "C06-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     577,
+     187,
+     700,
+     50
+    ],
+    "label": "Follow system appearance"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     493,
+     445,
+     614,
+     21
+    ],
+    "label": "Fixed theme only"
+   }
+  ],
+  "objective_basis": "New first Appearance row reads 'Appearance  ‹ Follow system ›' with its description. Old first row is 'Theme  TokyoNight Night'; none of its 9 rows is an appearance or light/dark choice.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c07-header-controls-contrast",
+  "category": "C07",
+  "title": "After a theme switch, header controls stay at 10.48:1, not 3.4:1",
+  "caption": "After applying Ayu Mirage, 5.9.0 drew the menu caret and + on a flat grey chip at 3.40:1 and 3.37:1, below 4.5:1. 6.0.0 draws its menu icon and + on the theme's header colour at 10.48:1.",
+  "old": "C07-theme-applied.png",
+  "new": "C07-theme-applied.png",
+  "crop": [
+   1440,
+   30,
+   160,
+   95
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1553,
+     69,
+     45,
+     20
+    ],
+    "label": "3.37:1 on grey"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1490,
+     45,
+     51,
+     20
+    ],
+    "label": "10.48:1"
+   }
+  ],
+  "objective_basis": "Old: chip bg (104,104,104); + (204,201,193) 7x7 px = 3.37:1; ▾ (204,202,194) 4x4 px = 3.40:1. New: header bg (24,27,36); ≡ 12x13 px and + 12x12 px in (204,202,194) = 10.48:1. C07-theme-preview gives the same values. The new × is GNOME's window close and the old tab × is hidden for a single tab in 6.0.0, so × is not compared.",
+  "kind": "measured"
+ },
+ {
+  "id": "c07-tag-contrast",
+  "category": "C07",
+  "title": "Theme picker 'dark' tags rise from 4.54:1 to about 7:1",
+  "caption": "5.9.0 drew the light/dark tag beside each theme at 4.54:1. 6.0.0 draws it at 7.03:1 on TokyoNight Night and 7.05:1 while previewing Ayu Mirage.",
+  "old": "C07-theme-preview.png",
+  "new": "C07-theme-preview.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     911,
+     763,
+     36,
+     15
+    ],
+    "label": "4.54:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1108,
+     208,
+     38,
+     15
+    ],
+    "label": "7.05:1"
+   }
+  ],
+  "objective_basis": "First-row 'dark' tag, Ayu Mirage preview, bg (31,36,48): old (137,139,141) = 4.54:1, new (175,175,170) = 7.05:1. C07-theme-ui (TokyoNight Night, bg (26,27,38)): old (126,131,151) = 4.54:1, new (156,165,201) = 7.03:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c07-theme-swatches",
+  "category": "C07",
+  "title": "Theme picker rows show an 8-colour strip of each theme",
+  "caption": "5.9.0's theme picker gave each theme only its name and a 'dark' tag. 6.0.0 adds 8 swatches per row (background, text and six accents), so themes can be compared before previewing.",
+  "old": "C07-theme-ui.png",
+  "new": "C07-theme-ui.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     977,
+     207,
+     103,
+     164
+    ],
+    "label": "Colour strip per theme"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     895,
+     760,
+     52,
+     165
+    ],
+    "label": "Name and tag only"
+   }
+  ],
+  "objective_basis": "New: every one of the 6 rows has a 97x8 px strip at x=980-1076. TokyoNight Night row (y=359-366): (26,27,38), (192,202,245), (247,118,142), (158,206,106), (224,175,104), (122,162,247), (187,154,247), (125,207,255), that theme's palette. Old rows: only text pixels.",
+  "kind": "measured"
+ },
+ {
+  "id": "c08-arabic-bidi",
+  "category": "C08 Text rendering",
+  "title": "Right-to-left text shows in bidi order with joined Arabic",
+  "caption": "The fixture line holds Hebrew \"shalom olam\", Arabic \"marhaban bil-alam\" and a mixed \"abc + Hebrew + 123\" run. 5.9.0 drew it all in logical order, left to right, with every Arabic letter in its unjoined form. 6.0.0 shows it in Unicode bidi display order: the right-to-left run reads from the right, the Arabic letters join, and 123 sits left of the Hebrew run as the bidi algorithm places it.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   356,
+   470,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     44,
+     375,
+     194,
+     17
+    ],
+    "label": "Logical order, unjoined"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     50,
+     371,
+     210,
+     17
+    ],
+    "label": "Bidi order, joined"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     369,
+     371,
+     57,
+     17
+    ],
+    "label": "123 before Hebrew"
+   }
+  ],
+  "objective_basis": "Fixture: 'RTL: <Hebrew> <Arabic>  (bidi: abc <Hebrew alef-bet-gimel> 123)'. 5.9.0: Hebrew at x=45-117 then Arabic at x=132-236, each word's final letter on its right (final mem at the right end of both Hebrew words), Arabic letters separated by gaps; tail reads 'abc', alef-bet-gimel (alef leftmost, x=335-356), '123' (x=368-391). 6.0.0: Arabic first at x=52-162 with connected letters, Hebrew at x=180-258 with final mem on the left of each word, tail reads 'abc', '123' (x=371-390), then the Hebrew with alef rightmost (x=398-424). That matches UBA rules W/N1/L2 for an LTR paragraph.",
+  "kind": "visual"
+ },
+ {
+  "id": "c08-box-drawing",
+  "category": "C08 Text rendering",
+  "title": "Box-drawing lines are single 1 px strokes with no soft edge",
+  "caption": "5.9.0 drew box-drawing characters from the font: horizontal lines were a full pixel plus a half-bright one, and vertical lines 2 px wide. 6.0.0 draws them itself as single 1 px lines, so the two boxes hold 2 colours instead of 68.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   226,
+   140,
+   96
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     8,
+     249,
+     55,
+     43
+    ],
+    "label": "Soft 2 px strokes"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     13,
+     235,
+     56,
+     41
+    ],
+    "label": "Single 1 px strokes"
+   }
+  ],
+  "objective_basis": "Top line of the first box: 5.9.0 column x=20 is (191,201,244) at y=253 plus (89,94,117) at y=254. 6.0.0 column x=25 is one pixel (192,202,245) at y=238 with background above and below. Left vertical: 5.9.0 is (187,196,239)+(174,183,222) at x=11-12; 6.0.0 is one pixel at x=15. The single-line and double-line box groups hold 68 distinct colours in 5.9.0 (x=8-125, y=248-292) and 2 in 6.0.0 (x=12-140, y=234-278). C08-torture-large shows the same.",
+  "kind": "measured"
+ },
+ {
+  "id": "c08-default-emoji-color",
+  "category": "C08 Text rendering",
+  "title": "Default and VS16 emoji draw in colour instead of outlines",
+  "caption": "The same emoji line was printed in both runs. In 5.9.0, the grinning face, red heart, smiling face, watch and teapot came out as single-colour outline glyphs. In 6.0.0 all five draw as colour emoji.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   290,
+   380,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     63,
+     308,
+     13,
+     15
+    ],
+    "label": "Outline glyph"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     297,
+     308,
+     68,
+     15
+    ],
+    "label": "Outline glyphs"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     246,
+     299,
+     96,
+     19
+    ],
+    "label": "Colour emoji"
+   }
+  ],
+  "objective_basis": "Fixture bytes are identical (panel/fixture/torture.sh). In 5.9.0 the grinning face (x=64-74) and the heart, smiling face, watch and teapot (x=297-364, y=309-322) use only the text colour #c0caf5 and its antialiasing. In 6.0.0 the same characters (grinning face x=71-88; heart to teapot x=247-340, y=300-317) are full-colour bitmaps: a red heart, a yellow face, a brown watch and a red teapot.",
+  "kind": "visual"
+ },
+ {
+  "id": "c08-emoji-clusters",
+  "category": "C08 Text rendering",
+  "title": "Skin-tone, ZWJ and flag emoji draw as one glyph each",
+  "caption": "5.9.0 split the skin-toned thumbs-up into a thumb and a skin swatch, the woman technologist into a woman and a computer, and the family into three faces, and it drew the Japanese and Spanish flags as boxed letters J P E S. 6.0.0 draws each as a single glyph and shows both flags; its family glyph is grey rather than three colour faces. The rainbow flag was already one glyph in 5.9.0.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   0,
+   290,
+   380,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     84,
+     308,
+     128,
+     15
+    ],
+    "label": "Split into parts"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     249,
+     308,
+     48,
+     15
+    ],
+    "label": "Flags as letters"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     95,
+     299,
+     146,
+     19
+    ],
+    "label": "One glyph each"
+   }
+  ],
+  "objective_basis": "Glyphs drawn for the five sequences thumbs-up+skin tone, woman+ZWJ+laptop, man+ZWJ+woman+ZWJ+girl, JP flag and ES flag: 5.9.0 draws 2+2+3 glyphs (x=86-210) plus four boxed regional-indicator letters (x=250-297). 6.0.0 draws one glyph per sequence (x=97-239), with the Japanese flag at x=196-214 and the Spanish flag at x=222-239. The 6.0.0 family glyph is the emoji font's grey design, not three colour faces.",
+  "kind": "visual"
+ },
+ {
+  "id": "c08-overline",
+  "category": "C08 Text rendering",
+  "title": "SGR 53 overline is now drawn",
+  "caption": "The fixture prints \"Over\" with SGR 53 (overline). 5.9.0 drew the word with no line above it. 6.0.0 draws a 1 px line above the word.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   560,
+   96,
+   200,
+   72
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     599,
+     129,
+     35,
+     17
+    ],
+    "label": "No overline"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     647,
+     104,
+     40,
+     19
+    ],
+    "label": "Overline drawn"
+   }
+  ],
+  "objective_basis": "6.0.0: row y=107 has 34 bright pixels across x=650-683 above \"Over\", with 3 empty rows between it and the glyphs (y=111-120). 5.9.0: rows y=124-133 above \"Over\" (x=598-633) have 0 bright pixels; the glyphs start at y=134.",
+  "kind": "measured"
+ },
+ {
+  "id": "c08-shades-braille",
+  "category": "C08 Text rendering",
+  "title": "Shade blocks are flat tones and braille dots are separate",
+  "caption": "In 5.9.0 the light, medium and dark shade blocks were the font's dither patterns, and the braille dots ran together into short dashes. 6.0.0 fills each shade cell with one flat colour and draws each braille dot as a separate square.",
+  "old": "C08-torture.png",
+  "new": "C08-torture.png",
+  "crop": [
+   228,
+   222,
+   100,
+   80
+  ],
+  "scale": 4,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     242,
+     244,
+     24,
+     18
+    ],
+    "label": "Dithered shades"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     300,
+     226,
+     281,
+     247
+    ],
+    "label": "Dots merged"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     263,
+     229,
+     48,
+     31
+    ],
+    "label": "Flat tones, dots"
+   }
+  ],
+  "objective_basis": "Luminance standard deviation inside the three shade cells: 5.9.0 27.3, 10.3 and 16.8, with 53, 36 and 40 distinct colours. 6.0.0 0.0 in each, one colour per cell (luminance 111, 150 and 179). Zoomed 6x, the 5.9.0 braille (x=266-285, y=249-272) are horizontal dashes about 6x2 px, while the 6.0.0 braille (x=290-310, y=230-259) are separate 2x2 px dots on a regular grid.",
+  "kind": "measured"
+ },
+ {
+  "id": "c09-link-hover-pill",
+  "category": "C09 Cursor and selection",
+  "title": "A hovered link shows its destination and how to open it",
+  "caption": "The Alt-drag ends with the pointer on a URL in both runs. 5.9.0 shows nothing. 6.0.0 underlines only the hovered URL and shows a status line reading \"https://example.org/docs/page19 | Ctrl+click to open\".",
+  "old": "C09-block-selected.png",
+  "new": "C09-block-selected.png",
+  "crop": [
+   0,
+   396,
+   600,
+   604
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     272,
+     406,
+     261,
+     17
+    ],
+    "label": "Hovered URL underlined"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     300,
+     930,
+     220,
+     980
+    ],
+    "label": "Destination and gesture"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     300,
+     930,
+     220,
+     980
+    ],
+    "label": "No status line"
+   }
+  ],
+  "objective_basis": "The block selection ends at x=483 on row page20 in 5.9.0 (URL span x=250-492) and at x=481 on row page19 in 6.0.0 (URL span x=272-532), so the drag ends on a URL in both. 6.0.0: underline at y=421 spans x=272-532 on row page19 only; pill text spans x=7-441, y=984-998. 5.9.0: only background in x=4-450, y=980-998. The same pill shows in 6.0.0 C09-shift-extended (page17) and C09-drag-selected. This overlaps C12: 5.9.0 C12-link-hover is also blank there.",
+  "kind": "visual"
+ },
+ {
+  "id": "c09-selection-contrast",
+  "category": "C09 Cursor and selection",
+  "title": "Selection fill contrast rises from 1.40:1 to 3.00:1",
+  "caption": "With the same triple-click line selection, the 5.9.0 fill (#283457) measured 1.40:1 against the terminal background. The 6.0.0 fill (#4d64a6) measures 3.00:1. Word, drag, block and Shift-extended selections use the same fills.",
+  "old": "C09-line-selected.png",
+  "new": "C09-line-selected.png",
+  "crop": [
+   0,
+   494,
+   600,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     8,
+     505,
+     588,
+     17
+    ],
+    "label": "Fill 1.40:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     12,
+     510,
+     584,
+     17
+    ],
+    "label": "Fill 3.00:1"
+   }
+  ],
+  "objective_basis": "Fill pixels against the background (26,27,39), WCAG ratio: 5.9.0 (40,52,87) = 1.40:1 across x=8-1590, y=505-521; 6.0.0 (77,100,166) = 3.00:1 across x=12-1582, y=510-526. The same fill colours are in C09-word-selected (444 / 482 px), C09-drag-selected, C09-block-selected and C09-shift-extended.",
+  "kind": "measured"
+ },
+ {
+  "id": "c09-unfocused-selection",
+  "category": "C09 Cursor and selection",
+  "title": "Unfocused-window selection rises from 1.40:1 to 2.02:1",
+  "caption": "With another window in front, the 5.9.0 selection kept its focused fill at 1.40:1 against the background. 6.0.0 switches to a separate unfocused fill at 2.02:1, between the 1.40:1 of 5.9.0 and its own 3.00:1 focused fill.",
+  "old": "C09-unfocused-selection-and-cursor.png",
+  "new": "C09-unfocused-selection-and-cursor.png",
+  "crop": [
+   0,
+   204,
+   340,
+   160
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     8,
+     213,
+     328,
+     114
+    ],
+    "label": "Unfocused fill 1.40:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     12,
+     212,
+     324,
+     123
+    ],
+    "label": "Unfocused fill 2.02:1"
+   }
+  ],
+  "objective_basis": "Unfocused selection fill: 5.9.0 (40,52,87) at 1.40:1, the same colour as its focused fill; 6.0.0 (60,75,122) at 2.02:1, distinct from its focused (77,100,166) at 3.00:1. Both receipts log backdrop mode \"front\" before the capture, and the 5.9.0 header is in GNOME's backdrop colours (48 to 36 grey), so the window was unfocused in both. The 6.0.0 hollow cursor is left out: 5.9.0 shows no cursor in this frame or C02-unfocused, but its focused C08-torture frame also shows none at the prompt, so absence cannot be attributed.",
+  "kind": "measured"
+ },
+ {
+  "id": "c10-match-contrast",
+  "category": "C10 Search in scrollback",
+  "title": "Other search matches rise from 1.40:1 to 3.00:1 contrast",
+  "caption": "5.9.0 filled the non-current matches with #283457, 1.40:1 against the background. 6.0.0 fills them with #4d64a6, 3.00:1. The current match keeps the same amber fill in both.",
+  "old": "C10-find-matches.png",
+  "new": "C10-find-matches.png",
+  "crop": [
+   0,
+   86,
+   320,
+   60
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     219,
+     99,
+     40,
+     16
+    ],
+    "label": "Match 1.40:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     247,
+     90,
+     42,
+     15
+    ],
+    "label": "Match 3.00:1"
+   }
+  ],
+  "objective_basis": "Non-current match fill against background (26,27,39): 5.9.0 (40,52,87) = 1.40:1; 6.0.0 (77,100,166) = 3.00:1. Current match fill (224,175,104) in both. Same query, same fixture, 122 matches.",
+  "kind": "measured"
+ },
+ {
+  "id": "c10-match-counter",
+  "category": "C10 Search in scrollback",
+  "title": "Search shows the current match and total: 27/122",
+  "caption": "5.9.0's search bar showed no match count. 6.0.0 shows \"27/122\" next to the query, and \"28/122\" after Enter.",
+  "old": "C10-find-matches.png",
+  "new": "C10-find-matches.png",
+  "crop": [
+   0,
+   930,
+   1000,
+   70
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "box",
+    "xy": [
+     568,
+     978,
+     56,
+     17
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     660,
+     942,
+     624,
+     978
+    ],
+    "label": "Match 27 of 122"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     660,
+     942,
+     624,
+     978
+    ],
+    "label": "No match count"
+   }
+  ],
+  "objective_basis": "6.0.0 text \"27/122\" at x=572-620, y=979-992 in C10-find-matches and \"28/122\" in C10-find-next. 5.9.0 has no count in the bar in either frame: the query field spans x=70-880 and the controls read Prev, Next, Wrap, Case, Enter: Next, Close. The figures are self-consistent: the current match is the first \"error\" on line 13, which is number 27 if lines start at 0 with two matches each, and lines 0-60 give 122.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c10-regex-toggle",
+  "category": "C10 Search in scrollback",
+  "title": "Search bar gains a Regex toggle beside Case",
+  "caption": "The 5.9.0 search bar offered Prev, Next, Wrap and Case. 6.0.0 adds a \"Regex: On\" toggle beside Case.",
+  "old": "C10-find-empty.png",
+  "new": "C10-find-empty.png",
+  "crop": [
+   700,
+   930,
+   900,
+   70
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1120,
+     978,
+     84,
+     17
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1060,
+     942,
+     1118,
+     978
+    ],
+    "label": "Regex toggle"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     1060,
+     942,
+     1130,
+     978
+    ],
+    "label": "Case, then Enter"
+   }
+  ],
+  "objective_basis": "6.0.0 label \"Regex: On\" at x=1126-1199, y=981-993, between \"Case: Smart\" and \"Enter: Next\". The 5.9.0 bar reads \"Prev, Next, Wrap: On, Case: Smart, Enter: Next, Type to search, Close\", with no Regex control; Case is followed directly by Enter: Next.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c11-jump-to-bottom",
+  "category": "C11 Scrollback",
+  "title": "Scrolled-up pane shows a \"360 lines\" button back to the bottom",
+  "caption": "After the same single wheel scroll, 5.9.0 showed nothing about the offset. 6.0.0 shows a button reading \"360 lines\" with a down arrow, and the offset is exactly 360 rows: the last visible line is 99641 and the live bottom is line 100000 plus the prompt.",
+  "old": "C11-scrolled-up.png",
+  "new": "C11-scrolled-up.png",
+  "crop": [
+   1300,
+   880,
+   300,
+   120
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "box",
+    "xy": [
+     1482,
+     970,
+     104,
+     24
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1330,
+     900,
+     1476,
+     968
+    ],
+    "label": "360 lines button"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     1330,
+     900,
+     1476,
+     968
+    ],
+    "label": "No button"
+   }
+  ],
+  "objective_basis": "6.0.0 pill at x=1482-1585, y=970-993 reading \"(down arrow) 360 lines\". 5.9.0 has only background there. Both runs: one wheel event at [0.5,0.5] (receipt), last visible line 99641; C11-bottom ends at 100000 plus the prompt in both, so the offset is 359 lines + 1 prompt row = 360.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c11-scrollback-depth",
+  "category": "C11 Scrollback",
+  "title": "Scrollback keeps about five times more history at this width",
+  "caption": "After the same 360-row scroll, the 5.9.0 scrollbar thumb rose 162 px of its 884 px travel and the 6.0.0 thumb 32 px of 897. In this 1600 px window that puts 5.9.0's history near 2,000 lines and 6.0.0's near 10,000, which fits the CHANGELOG's larger default scrollback-bytes.",
+  "old": "C11-scrolled-up.png",
+  "new": "C11-scrolled-up.png",
+  "crop": [
+   1300,
+   780,
+   300,
+   220
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1591,
+     814,
+     7,
+     24
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     1360,
+     800,
+     1584,
+     826
+    ],
+    "label": "162 px above bottom"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1360,
+     900,
+     1584,
+     955
+    ],
+    "label": "32 px above bottom"
+   }
+  ],
+  "objective_basis": "At the live bottom (C11-bottom) the thumb is y=976-998 in both. Scrolled up: 5.9.0 thumb y=814-837 on track y=92-998 (884 px travel): 162 px = 18.3 %, so 360/0.183 = about 1,960 scrollable lines. 6.0.0 thumb y=944-967 on track y=78-998 (897 px travel): 32 px = 3.6 %, about 10,100 lines. The line counts are estimates from thumb position at this window width (byte caps depend on width); the 162 vs 32 px is measured.",
+  "kind": "measured"
+ },
+ {
+  "id": "c12-hints-help",
+  "category": "C12 Links/hints",
+  "title": "Hint mode shows a help line with its keys",
+  "caption": "In hint mode, 5.9.0 showed only the labels. 6.0.0 adds a bottom line that reads 'Label: copy text / open URL · Shift+label: copy text · Esc to cancel'.",
+  "old": "C12-hints.png",
+  "new": "C12-hints.png",
+  "crop": [
+   0,
+   900,
+   800,
+   100
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     660,
+     925,
+     585,
+     988
+    ],
+    "label": "No help shown"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     660,
+     925,
+     585,
+     988
+    ],
+    "label": "Hint help line"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     4,
+     981,
+     576,
+     18
+    ]
+   }
+  ],
+  "objective_basis": "6.0.0 has text pixels at x7-576, y984-998 reading 'Label: copy text / open URL · Shift+label: copy text · Esc to cancel'. In 5.9.0, no pixel in x2-1582, y975-998 differs from the background by more than 60 (y999 is the window border).",
+  "kind": "visual"
+ },
+ {
+  "id": "c12-hints-labels",
+  "category": "C12 Links/hints",
+  "title": "Hint labels no longer hide URL text, and 25 of 41 take one key",
+  "caption": "5.9.0 drew all 41 quick-select labels as two letters over the start of each target, hiding 'ht' on 40 URLs and '~/' on the prompt (82 characters). 6.0.0 puts 40 of 41 labels in blank cells, after the URL on rows 1-16 or in the space before it on rows 17-40. 25 labels are one key, so selecting all 41 targets takes 57 keystrokes instead of 82.",
+  "old": "C12-hints.png",
+  "new": "C12-hints.png",
+  "crop": [
+   0,
+   80,
+   620,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     248,
+     98,
+     18,
+     652
+    ],
+    "label": "Labels hide 'ht'"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     525,
+     90,
+     25,
+     280
+    ],
+    "label": "2 keys, blank cells"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     262,
+     369,
+     12,
+     422
+    ],
+    "label": "1 key, blank cells"
+   }
+  ],
+  "objective_basis": "Read at 4x zoom: 5.9.0 labels aa..st cover x250-265 on all 40 URL rows ('ht' hidden) and 'sy' covers '~/' on the prompt, so 41 two-letter labels give 82 keystrokes. In 6.0.0, rows 1-16 carry mu..ma after the URL end (x524-549); rows 17-40 carry one letter (n,b,v,c,x,z,p,o,i,u,y,t,r,e,w,q,l,k,j,h,g,f,d,s) in the space cell before 'https' (x264-271); the prompt label 'a' covers '~'. So 16x2 + 25x1 = 57 keystrokes, and 1 text character is covered instead of 82.",
+  "kind": "measured"
+ },
+ {
+  "id": "c12-link-hover",
+  "category": "C12 Links/hints",
+  "title": "Hovering a link now shows its URL and how to open it",
+  "caption": "With the pointer over a link, 6.0.0 prints its destination and 'Ctrl+click to open' on the bottom line, where 5.9.0 shows nothing. 5.9.0 marked the hovered link only by turning its underline from blue to cyan, 1.47:1 against the other 39 underlines. 6.0.0 underlines only the hovered link.",
+  "old": "C12-link-hover.png",
+  "new": "C12-link-hover.png",
+  "crop": [
+   0,
+   440,
+   620,
+   560
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     248,
+     505,
+     246,
+     18
+    ],
+    "label": "Hover: colour only"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     270,
+     510,
+     266,
+     20
+    ],
+    "label": "Only underline: hovered"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     4,
+     983,
+     440,
+     14
+    ],
+    "label": "URL and gesture"
+   }
+  ],
+  "objective_basis": "Row scan over x250-530: in 5.9.0, 39 links are underlined in (122,162,247) and the hovered one (page26, y520-521) in (125,207,255), 1.47:1 against the others. In 6.0.0 one underline row exists, y526 under page25, (187,154,247), 7.38:1 on the (26,27,39) background. Text pixels at x7-441, y984-998 read 'https://example.org/docs/page25 | Ctrl+click to open' in 6.0.0. In 5.9.0, no pixel in x2-1582, y975-998 is more than 60 off the background (y999 is the window border). Both receipts log the same mouse move to (0.25, 0.5).",
+  "kind": "visual"
+ },
+ {
+  "id": "c13-activity-dot",
+  "category": "C13 Shell integration",
+  "title": "Background-tab activity dot sits by the title, 339 px to 5 px",
+  "caption": "While a command ran in background tab 1, 5.9.0 drew its activity mark at the tab's left edge, 339 px from the title text. 6.0.0 draws the dot 5 px before the title, and its contrast with the surrounding tab colour rises from 5.21:1 to 10.60:1.",
+  "old": "C13-long-command-background.png",
+  "new": "C13-long-command-background.png",
+  "crop": [
+   0,
+   32,
+   820,
+   88
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     3,
+     75,
+     15,
+     15
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     19,
+     76,
+     331,
+     14
+    ],
+    "label": "339 px to title"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     40,
+     70,
+     116,
+     57
+    ],
+    "label": "5 px to title"
+   }
+  ],
+  "objective_basis": "5.9.0: the mark (125,207,255) spans x6-14, y79-86 and the title '1: fixture' starts at x354, a 339 px gap. Its contrast on the tab fill (65,72,104) is 5.21:1. 6.0.0: the dot spans x120-124, y52-57 and the title 'fixture' starts at x130, a 5 px gap. Its contrast on the strip (20,21,29) is 10.60:1. Same colour in both builds; WCAG relative-luminance ratios.",
+  "kind": "measured"
+ },
+ {
+  "id": "c13-exit-status-ticks",
+  "category": "C13 Shell integration",
+  "title": "Finished commands leave a red or green exit tick at the right edge",
+  "caption": "After true, false and ls, 5.9.0 drew nothing at the right edge. 6.0.0 drew a red tick for false (exit 1) and a green tick for ls, each just above its prompt row. The first command, true, got no tick.",
+  "old": "C13-marks.png",
+  "new": "C13-marks.png",
+  "crop": [
+   1440,
+   84,
+   160,
+   60
+  ],
+  "scale": 5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1588,
+     94,
+     10,
+     36
+    ],
+    "label": "No ticks"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1452,
+     90,
+     1588,
+     104.5
+    ],
+    "label": "false: red"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     1452,
+     124,
+     1588,
+     122.5
+    ],
+    "label": "ls: green"
+   }
+  ],
+  "objective_basis": "6.0.0 has 24 px of (247,118,142) at x1592-1597, y103-106 and 12 px of (158,206,106) at x1592-1597, y122-123. In 5.9.0 the only non-background pixels in x1570-1599, y91-999 are the window border at x1599. The pairing: in C13-new-tab-cwd a row-0 'pwd' puts its tick at y86-87, so a tick sits about 3 px above the top of its command's row (row pitch about 17.5 px from y90). That places the red tick on row 1 (false) and the green on row 2 (ls), with none on row 0 (true). It also matches the only non-zero exit. The ticks are unchanged in C13-jump-prev-prompt.",
+  "kind": "measured"
+ },
+ {
+  "id": "c14-da1-osc52",
+  "category": "C14 Clipboard and paste safety",
+  "title": "Device-attributes reply now advertises OSC 52 (ESC[?6;4;52c)",
+  "caption": "Asked for primary device attributes, 5.9.0 answered ESC[?6;4c in this session, which omits OSC 52 clipboard support. 6.0.0 answers ESC[?6;4;52c, so programs that probe DA1 are told OSC 52 copy is available.",
+  "old": "C14-control-char-paste.png",
+  "new": "C14-control-char-paste.png",
+  "crop": [
+   0,
+   138,
+   620,
+   80
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     361,
+     147,
+     53,
+     18
+    ],
+    "label": "No 52"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     393,
+     160,
+     82,
+     18
+    ],
+    "label": "52 = OSC 52"
+   }
+  ],
+  "objective_basis": "The on-screen keylog line reads b'\\x1b[?0u\\x1b[?6;4c' in 5.9.0 and b'\\x1b[?0u\\x1b[?6;4;52c' in 6.0.0. The same replies appear in each build's C17-keylog.txt, a separate launch, and in 5.9.0's C14-paste-bytes.txt. In both builds kettle-core/src/event.rs sends PRIMARY_DA_REPLY (…;52c) only when osc52_copy_allowed is set, and that flag requires a clipboard backend under the same default Osc52::Copy policy.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c14-multiline-paste",
+  "category": "C14 Clipboard and paste safety",
+  "title": "Ctrl+Shift+V pastes on GNOME Wayland; 5.9.0 inserted nothing",
+  "caption": "In the same GNOME 50 session, 5.9.0 inserted nothing for Ctrl+Shift+V. 6.0.0 places both clipboard lines at the prompt as one highlighted, unexecuted block. In the next capture the Ctrl+C leaves '^C' and a fresh prompt, with no 'first-pasted-line' output.",
+  "old": "C14-multiline-paste.png",
+  "new": "C14-multiline-paste.png",
+  "crop": [
+   0,
+   78,
+   700,
+   80
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     150,
+     113,
+     30,
+     22
+    ],
+    "label": "Nothing pasted"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     170,
+     91,
+     188,
+     16
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     10,
+     108,
+     197,
+     16
+    ],
+    "label": "Pasted, not run"
+   }
+  ],
+  "objective_basis": "Both receipts log the same steps: clipboard pid recorded, key ctrl+shift+v, action paste, capture ok. 5.9.0: the prompt row holds only the cursor. 6.0.0: 'echo first-pasted-line' and 'echo second-pasted-line' sit in a selection-coloured block at x172-356, y90-124 with no output. C14-control-char-paste (6.0.0) then shows '^C' and a new prompt with no echo output. 5.9.0 answered DA1 with ESC[?6;4c in both of its launches (C14 and C17). In both builds that reply is chosen when osc52_copy_is_available(policy, clipboard.is_some()) is false, and the policy and its default (Copy) are identical. So 5.9.0 had no clipboard backend in this session. The 6.0.0 CHANGELOG lists 'Copy and paste of text work in Wayland sessions without XWayland, including GNOME'.",
+  "kind": "visual"
+ },
+ {
+  "id": "c14-paste-confirm",
+  "category": "C14 Clipboard and paste safety",
+  "title": "A paste holding ESC[201~ now stops at a Confirm paste dialog",
+  "caption": "In 5.9.0, a two-line paste holding ESC[201~ did nothing, because it could not read the clipboard in this session. 6.0.0 holds the paste in a Confirm paste dialog that counts '2 lines · 1 escape sequence · 0 other control characters' and shows the ESC as a visible glyph. Cancel has focus, ahead of Paste without controls, Paste as one line and a red Paste.",
+  "old": "C14-control-char-paste.png",
+  "new": "C14-control-char-paste.png",
+  "crop": [
+   0,
+   78,
+   1100,
+   660
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     182,
+     200,
+     18
+    ],
+    "label": "No dialog, no text"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     578,
+     362,
+     392,
+     98
+    ],
+    "label": "Counts and preview"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     640,
+     600,
+     790,
+     530
+    ],
+    "label": "Cancel has focus"
+   }
+  ],
+  "objective_basis": "6.0.0 dialog (x560-1040, y310-722) reads 'Confirm paste', 'This paste may send commands to the terminal.', '2 lines · 1 escape sequence · 0 other control characters', and 'Preview: printf 'x'␛[201~; echo injected', with ESC drawn as a glyph. Cancel has a focus ring; Paste without controls and Paste as one line are filled (187,154,247); Paste is filled (247,118,142). The 5.9.0 frame shows nothing after 'Press keys; Ctrl+D ends.'. No paste-confirm dialog string exists in e58e367b9 kettle-ui/kettle-i18n. Its kettle-config/src/lib.rs accepts 'clipboard-paste-protection' as a no-op ('Retired in 5.1: pastes no longer ask first'). So the old frame shows a paste that never arrived, not an unguarded one. No byte-level claim is made: 6.0.0's C14-paste-bytes.txt is empty because the dialog was still open when Ctrl+D was sent.",
+  "kind": "visual"
+ },
+ {
+  "id": "c15-bell-dot",
+  "category": "C15 Bell/notifications/toasts",
+  "title": "Background-tab bell dot sits by the title, 314 px to 4 px",
+  "caption": "When background tab 2 rang the bell, 5.9.0 drew the orange mark at the tab's left edge, 314 px from the title text. 6.0.0 draws the dot 4 px before the title, and its contrast with the surrounding tab colour rises from 4.47:1 to 9.09:1.",
+  "old": "C15-bell-background-tab.png",
+  "new": "C15-bell-background-tab.png",
+  "crop": [
+   380,
+   32,
+   860,
+   88
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     801,
+     73,
+     19,
+     19
+    ]
+   },
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     819,
+     76,
+     306,
+     14
+    ],
+    "label": "314 px to title"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     430,
+     70,
+     511,
+     57
+    ],
+    "label": "4 px to title"
+   }
+  ],
+  "objective_basis": "5.9.0: the mark (224,175,104) spans x806-814, y79-86 and the title '2: fixture' starts at x1129, a 314 px gap. Its contrast on the tab fill (65,72,104) is 4.47:1. 6.0.0: the dot spans x514-519, y52-57 and the title starts at x524, a 4 px gap. Its contrast on (20,21,29) is 9.09:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c16-hint-contrast",
+  "category": "C16",
+  "title": "Menu shortcut hints: contrast up from 4.54:1 to 7.03:1",
+  "caption": "In 5.9.0 the menu's shortcut hints were drawn in (126,131,151), 4.54:1 against the menu background. In 6.0.0 hints on enabled rows use (156,165,201), 7.03:1. Row labels are 10.59:1 in both builds.",
+  "old": "C16-context-menu-empty.png",
+  "new": "C16-context-menu-empty.png",
+  "crop": [
+   790,
+   595,
+   320,
+   190
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     948,
+     623,
+     96,
+     46
+    ],
+    "label": "hints 4.54:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     990,
+     700,
+     104,
+     44
+    ],
+    "label": "hints 7.03:1"
+   }
+  ],
+  "objective_basis": "Most frequent glyph colour against the menu fill (26,27,38). 5.9.0 'Ctrl+Shift+I' and 'Ctrl+Shift+Q' (x950-1041, y625-666): (126,131,151), 4.54:1. 6.0.0 'Ctrl+Shift+H' and 'Ctrl+Shift+F' (x993-1091, y702-741): (156,165,201), 7.03:1. Labels (192,202,245): 10.59:1 in both. The hint on the disabled Copy row in 6.0.0 stays (126,131,151).",
+  "kind": "measured"
+ },
+ {
+  "id": "c16-menu-new-actions",
+  "category": "C16",
+  "title": "Right-click menu adds Select All, Quick-select hints, Find, Clear Scrollback",
+  "caption": "On a link with nothing selected, 5.9.0's menu had Paste as its only clipboard row, followed by split and pane commands. 6.0.0 adds Select All, Quick-select hints, Find… and Clear Scrollback, and shows a greyed-out Copy above Paste. Before, Find and Clear Scrollback were only in the command palette and key bindings.",
+  "old": "C16-context-menu-link.png",
+  "new": "C16-context-menu-link.png",
+  "crop": [
+   250,
+   240,
+   480,
+   760
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     262,
+     333,
+     400,
+     333
+    ],
+    "label": "only Paste"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     410,
+     646,
+     290,
+     110
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     262,
+     700,
+     402,
+     700
+    ],
+    "label": "4 new rows"
+   }
+  ],
+  "objective_basis": "Row text present vs absent. 5.9.0 link menu rows: Open Link, Copy Link Address, Paste, then splits. 6.0.0 rows: Open Link, Copy Link Address, Copy, Paste, Select All, Quick-select hints, Find…, Clear Scrollback, then 7 submenus. C16-menu-ax.json (empty-area menu) has none of Select All, Quick-select hints, Find… or Clear Scrollback in 5.9.0 and all four in 6.0.0. Copy itself is not new: the 5.9.0 menu shows it when text is selected (C16-tui-override-menu-on-selection). In 6.0.0 a disabled Copy has state ['showing'] only, with no enabled or sensitive state and no click action. The Shift-menu over vim has no Quick-select row.",
+  "kind": "visual"
+ },
+ {
+  "id": "c16-menu-rows",
+  "category": "C16",
+  "title": "Right-click menu: 22 rows and 678 px tall down to 13 rows and 392 px",
+  "caption": "5.9.0's right-click menu listed 22 rows and stood 678 px tall. To fit on screen it was shifted up until its top sat 295 px above the click. 6.0.0's menu has 13 rows and is 392 px tall, so it opens beside the click: its top is 9 px above it, moved up only to clear the screen edge.",
+  "old": "C16-context-menu-empty.png",
+  "new": "C16-context-menu-empty.png",
+  "crop": [
+   560,
+   290,
+   600,
+   710
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "arrow",
+    "xy": [
+     640,
+     700,
+     796,
+     614
+    ],
+    "label": "click point"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     580,
+     430,
+     796,
+     430
+    ],
+    "label": "22 rows, 678 px"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     580,
+     820,
+     796,
+     820
+    ],
+    "label": "13 rows, 392 px"
+   }
+  ],
+  "objective_basis": "Right-click at harness point (0.5,0.6) = (800,613) in both runs. Menu borders measured from pixel colour (55,61,88): 5.9.0 x800-1057, y318-995 (258x678); 6.0.0 x800-1108, y604-995 (309x392). C16-menu-ax.json (this menu): 22 menu items in 5.9.0, 13 in 6.0.0. The text-area click at (32,468) shows the same: 5.9.0 y318-995; 6.0.0 y468-858 (391 px, top at the click).",
+  "kind": "measured"
+ },
+ {
+  "id": "c16-middle-paste",
+  "category": "C16",
+  "title": "Middle-click after a double-click selection pastes on this GNOME session",
+  "caption": "After a double-click on 'alpha' and a middle-click, the 5.9.0 prompt stayed empty. With the same steps, 6.0.0 put 'alpha' at the prompt. 6.0.0 adds a native Wayland clipboard; 5.9.0 had no working clipboard in this session.",
+  "old": "C16-middle-paste.png",
+  "new": "C16-middle-paste.png",
+  "crop": [
+   0,
+   495,
+   600,
+   330
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "highlight",
+    "xy": [
+     8,
+     505,
+     46,
+     22
+    ],
+    "label": "selected word"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     152,
+     747,
+     16,
+     20
+    ],
+    "label": "nothing pasted"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     168,
+     788,
+     62,
+     22
+    ],
+    "label": "alpha pasted"
+   }
+  ],
+  "objective_basis": "Prompt text after identical receipts (dclick at (0.02,0.5), middle at (0.5,0.5)). 5.9.0 shows only the cursor block at x156-163; 6.0.0 shows 'alpha' at x172-221. The 6.0.0 CHANGELOG says copy and paste of text work in Wayland sessions without XWayland. In a354c472d, paste_primary falls back to the clipboard when PRIMARY is empty. In e58e367b9, OSC 52 is advertised only when clipboard.is_some(), and the 5.9.0 C17 DA1 reply lacks 52, which confirms there was no clipboard.",
+  "kind": "visual"
+ },
+ {
+  "id": "c16-selection-fill",
+  "category": "C16",
+  "title": "Selection fill contrast up from 1.40:1 to 3.00:1 against the background",
+  "caption": "In 5.9.0, a Shift-drag selection over vim was filled with (40,52,87), 1.40:1 against the terminal background. In 6.0.0 the fill is (77,100,166), 3.00:1, and the selected text is white. The double-click selection in C16-middle-paste changes the same way.",
+  "old": "C16-tui-override-drag.png",
+  "new": "C16-tui-override-drag.png",
+  "crop": [
+   0,
+   290,
+   520,
+   64
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     31,
+     310,
+     453,
+     17
+    ],
+    "label": "fill 1.40:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     29,
+     317,
+     453,
+     18
+    ],
+    "label": "fill 3.00:1"
+   }
+  ],
+  "objective_basis": "Exact-colour fill boxes: 5.9.0 (40,52,87) at x31-483, y310-326; 6.0.0 (77,100,166) at x29-481, y317-334. Background (26,27,39). WCAG ratios 1.40:1 and 3.00:1; 3:1 is the minimum for non-text elements. Text on the fill drops from (192,202,245) at 7.57:1 to (255,255,255) at 5.69:1 (see regressions). C16-middle-paste uses the same two fills. The CHANGELOG entry on strengthening selection colours below 3:1 may also be claimed under C09, so check for a duplicate.",
+  "kind": "measured"
+ },
+ {
+  "id": "c16-vim-shift-hint",
+  "category": "C16",
+  "title": "Shift+right-click menu over vim starts with a 'Hold Shift' explanation",
+  "caption": "Over vim with its mouse mode on, Shift+right-click opens Kettle's menu in both builds. 5.9.0's menu starts with Paste. 6.0.0's starts with 'Hold Shift to select text or open the menu while a program uses the mouse', which says how the menu was reached.",
+  "old": "C16-tui-override-menu.png",
+  "new": "C16-tui-override-menu.png",
+  "crop": [
+   100,
+   250,
+   460,
+   720
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     170,
+     279,
+     184,
+     136
+    ]
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     470,
+     345,
+     360,
+     345
+    ],
+    "label": "Hold Shift header"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     480,
+     290,
+     420,
+     290
+    ],
+    "label": "starts with Paste"
+   }
+  ],
+  "objective_basis": "Text present vs absent. 6.0.0: five wrapped lines at y283-411 inside the menu (x160-358), drawn in (126,131,151), 4.54:1. 5.9.0: the first row is Paste (y282-292). The same header appears in C16-tui-override-menu-on-selection, and the 6.0.0 CHANGELOG describes it.",
+  "kind": "visual"
+ },
+ {
+  "id": "c17-da1-osc52",
+  "category": "C17",
+  "title": "Device-attributes reply now includes 52 (OSC 52 clipboard)",
+  "caption": "5.9.0 answered the primary device-attributes query with ESC[?6;4c. 6.0.0 answers ESC[?6;4;52c, which tells programs that OSC 52 clipboard copy is available. Every other line of the 20-key log is byte-identical.",
+  "old": "C17-keylog.png",
+  "new": "C17-keylog.png",
+  "crop": [
+   0,
+   95,
+   500,
+   90
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     388,
+     132,
+     24,
+     16
+    ],
+    "label": "no 52"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     434,
+     108,
+     23,
+     13
+    ],
+    "label": "52 = OSC 52"
+   }
+  ],
+  "objective_basis": "C17-keylog.txt line 1: 5.9.0 b'\\x1b[?0u\\x1b[?6;4c'; 6.0.0 b'\\x1b[?0u\\x1b[?6;4;52c'. A diff of the two 22-line files differs only on line 1. On screen: 5.9.0 '4c' at x390-404, y133-146; 6.0.0 ';52' at x434-456, y105-122. In e58e367b9, osc52_copy_is_available is policy.can_copy() && clipboard_available.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c19-cwd-restored",
+  "category": "C19",
+  "title": "Relaunched shell reopens in the previous directory (~/project/src)",
+  "caption": "Before the restart, both builds' prompt was in ~/project/src. After relaunch, 5.9.0's shell started in ~/project. 6.0.0's starts in ~/project/src, where the session was left.",
+  "old": "C19-after-restart-history.png",
+  "new": "C19-after-restart-history.png",
+  "crop": [
+   0,
+   80,
+   360,
+   150
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     113,
+     145,
+     19
+    ],
+    "label": "~/project"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     10,
+     180,
+     188,
+     14
+    ],
+    "label": "~/project/src"
+   }
+  ],
+  "objective_basis": "Prompt text. C19-before-restart ends at 'fixture:~/project/src$' in both runs. After relaunch and Shift+Page Up, 5.9.0 shows 'fixture:~/project$' (x8-147, y115-130). 6.0.0's live prompt is 'fixture:~/project/src$' (x12-195, y178-193). The receipts log the same type, alt+F4, relaunch and shift+Prior steps in both runs.",
+  "kind": "visual"
+ },
+ {
+  "id": "c19-restored-output",
+  "category": "C19",
+  "title": "Relaunch restores the previous output above a dated 'Restored' divider",
+  "caption": "After a close and relaunch with the same config, 5.9.0 opened a fresh prompt, and Shift+Page Up showed no earlier output. 6.0.0 brings back the earlier command and its output, dimmed, then a 'Restored · <date time>' divider and a new prompt.",
+  "old": "C19-after-restart.png",
+  "new": "C19-after-restart.png",
+  "crop": [
+   0,
+   80,
+   760,
+   130
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     113,
+     160,
+     20
+    ],
+    "label": "fresh prompt only"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     700,
+     118,
+     590,
+     118
+    ],
+    "label": "earlier output"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     420,
+     170,
+     270,
+     170
+    ],
+    "label": "dated divider"
+   }
+  ],
+  "objective_basis": "Text present vs absent: 'restore-marker alpha' and 'restore-marker beta' (block x12-582, y91-158) appear in 6.0.0. They are absent from 5.9.0's C19-after-restart and C19-after-restart-history (after shift+Prior). Divider 'Restored · 2026-11-12 18:53:53' at x13-263, y164-177 is (192,202,245), 10.58:1. Restored text is drawn at (109,115,142), 3.65:1. The 6.0.0 CHANGELOG says session restore brings back output and that Linux restore-session now defaults to auto.",
+  "kind": "visual"
+ },
+ {
+  "id": "c20-atspi-tab-strip",
+  "category": "C20",
+  "title": "Tab, buttons and scrollback appear in the AT-SPI tree",
+  "caption": "In 5.9.0 the Kettle frame's AT-SPI tree held only the terminal. 6.0.0 adds a 'Tabs' page tab list with a selected, clickable 'fixture' tab, the buttons 'New tab', 'Main menu' and 'Close window', and a 'Scrollback' scroll bar, so a screen reader can reach them.",
+  "old": "C20-window.png",
+  "new": "C20-window.png",
+  "crop": [
+   0,
+   28,
+   1600,
+   100
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     2,
+     34,
+     1596,
+     57
+    ],
+    "label": "not in AT-SPI tree"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     514,
+     34,
+     526,
+     42
+    ],
+    "label": "page tab 'fixture'"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1488,
+     42,
+     102,
+     26
+    ],
+    "label": "3 named buttons"
+   }
+  ],
+  "objective_basis": "C20-ax-tree.json. 5.9.0: frame 'Kettle terminal' has one child, terminal 'fixture'. 6.0.0: frame children are page tab list 'Tabs' {page tab 'fixture' [focusable, selected; action click], button 'New tab', button 'Main menu', button 'Close window' (each with action click)} and terminal 'fixture' {label, scroll bar 'Scrollback'}. Measured 6.0.0 tab x514-1039, y32-77.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c20-orca-word-echo",
+  "category": "C20",
+  "title": "Orca echoes typed words, not ' e' fragments",
+  "caption": "While 'echo orca-check one two three' was typed, 5.9.0 passed each space to AT-SPI joined to the next letter, so Orca's typing echo was ' e', ' o', ' o', ' t', ' t'. 6.0.0 sends each space as its own insert, and Orca echoed 'echo', 'orca-', 'orca-check', 'one' and 'two'.",
+  "old": "C20-orca-after.png",
+  "new": "C20-orca-after.png",
+  "crop": [
+   0,
+   84,
+   520,
+   100
+  ],
+  "scale": 2,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     440,
+     160,
+     388,
+     132
+    ],
+    "label": "spoke ' e' ' o' ' t'"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     470,
+     150,
+     420,
+     110
+    ],
+    "label": "spoke whole words"
+   }
+  ],
+  "objective_basis": "C20-orca-speech.txt typing-echo utterances: 5.9.0 ' e', ' o', ' o', ' t', ' t'. 6.0.0 'echo ', 'orca-', 'orca-check ', 'one ', 'two '. C20-atspi-events.txt text-changed:insert: 5.9.0 sends ' e', ' o', ' o', ' t', ' t' (the space merged with the next letter; its prompt insert '\\nfixture:~/project$' has no trailing space). 6.0.0 sends ' ' as 4 separate inserts. The CHANGELOG entry on typed-space fragments names the same ' e' symptom.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c20-window-controls-size-contrast",
+  "category": "C20",
+  "title": "New-tab and close icons grow to 12-14 px at 11.3:1 contrast",
+  "caption": "The New tab '+' grew from 7x7 px at 5.4:1 contrast in 5.9.0 to 12x12 px at 11.3:1 in 6.0.0. The window close 'X' grew from 8x8 px at 9.6:1 to 14x14 px at 11.3:1.",
+  "old": "C20-window.png",
+  "new": "C20-window.png",
+  "crop": [
+   1440,
+   28,
+   160,
+   90
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1582,
+     75,
+     9,
+     9
+    ],
+    "label": "7 px, 5.4:1"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     1578,
+     44,
+     10,
+     10
+    ],
+    "label": "8 px, 9.6:1"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     1525,
+     47,
+     61,
+     16
+    ],
+    "label": "12-14 px, 11.3:1"
+   }
+  ],
+  "objective_basis": "Glyph boxes and WCAG contrast from pixels. 5.9.0: '+' x1583-1589 y76-82 (7x7), peak #bfc9f4 on #414868 = 5.4:1; header close 'X' x1579-1586 y45-52 (8x8), #ffffff on #454545 = 9.59:1. 6.0.0: '+' x1526-1537 y50-61 (12x12), close x1570-1583 y48-61 (14x14), both #c0caf5 on #14151d = 11.26:1. The 5.9.0 tab-strip arrow (5x4 px) was dropped from the comparison: it is unverified that it is the counterpart of 6.0.0's Main menu button.",
+  "kind": "measured"
+ },
+ {
+  "id": "c21-bidi-rtl-order",
+  "category": "C21",
+  "title": "Hebrew and Arabic display right to left",
+  "caption": "5.9.0 drew right-to-left text in stored order from left to right, so the first letter of the Hebrew phrase (shin) and the first Arabic word of line 5 sat at the left end. 6.0.0 draws Unicode bidi display order, so both start at the right end and read correctly.",
+  "old": "C21-bidi.png",
+  "new": "C21-bidi.png",
+  "crop": [
+   0,
+   88,
+   400,
+   124
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "both",
+    "shape": "box",
+    "xy": [
+     105,
+     92,
+     97,
+     22
+    ],
+    "label": "Hebrew phrase"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     166,
+     26,
+     16
+    ],
+    "label": "1st Arabic word: left"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     262,
+     156,
+     33,
+     18
+    ],
+    "label": "1st Arabic word: right"
+   }
+  ],
+  "objective_basis": "The fixture stores 'שלום עולם' as SHIN LAMED VAV FINAL-MEM / AYIN VAV LAMED FINAL-MEM. Per-cell glyph tiles (columns 13-21): 5.9.0 left to right = shin, lamed, vav, final mem, space, ayin, vav, lamed, final mem (stored order, so it reads backwards from the right). 6.0.0 = final mem, lamed, vav, ayin, space, final mem, vav, lamed, shin (correct display order). Line 5 'سطر عربي ...': the first word's ink is at x8-29 (left end) in 5.9.0 and at x264-293 (right end, before the period) in 6.0.0.",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-context-menu-edit-actions",
+  "category": "C21",
+  "title": "Context menu adds Copiar, Seleccionar todo and Buscar",
+  "caption": "With nothing selected, 5.9.0's Spanish context menu had 22 rows and no Copiar, Seleccionar todo or Buscar entry. 6.0.0 lists Copiar (disabled), Pegar, Seleccionar todo, Selección rápida, Buscar and Borrar el historial first and moves pane, tab and window actions into 7 submenus: 13 rows, 390 px tall instead of 679 px.",
+  "old": "C21-es-context-menu.png",
+  "new": "C21-es-context-menu.png",
+  "crop": [
+   0,
+   300,
+   520,
+   700
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     33,
+     317,
+     327,
+     677
+    ],
+    "label": "22 rows, no Buscar"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     38,
+     474,
+     398,
+     168
+    ],
+    "label": "Copiar, Buscar added"
+   }
+  ],
+  "objective_basis": "Rows read from the frames. 5.9.0: 22 rows (Pegar … Preferencias); the menu spans x32-360, y316-995 and ends 5 px above the window's bottom edge; none of the rows is Copiar, Seleccionar todo or Buscar. 6.0.0: 13 rows; the menu spans x32-441, y468-858; Copiar is drawn dimmed (#7e8397); Dividir, Panel, Pestaña, Ventana, Título, Grupo and Apariencia carry submenu arrows.",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-palette-query-beside-results",
+  "category": "C21",
+  "title": "Palette query field moves from 507 px to 54 px from results",
+  "caption": "In 5.9.0 the command palette's query caret sat in a full-width bar at the window's bottom-left corner, 507 px from the start of the first result. In 6.0.0 the query is the top row of the results card, 54 px from the first result.",
+  "old": "C21-es-palette.png",
+  "new": "C21-es-palette.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     4,
+     975,
+     64,
+     23
+    ],
+    "label": "query caret"
+   },
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     478,
+     758,
+     645,
+     28
+    ],
+    "label": "first result"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     444,
+     152,
+     712,
+     76
+    ],
+    "label": "query 54 px away"
+   }
+  ],
+  "objective_basis": "Caret to the first result's text start (selected row, label at ~x490 in 5.9.0 and ~x456 in 6.0.0). 5.9.0: caret x~33, y976-998, in a bar at y975-999 spanning the full window width; the results card spans y740-965; first-row center y771; distance √(459²+216²) ≈ 507 px. 6.0.0: caret x476, y154-177, inside the card (x440-1158); first row y204-227; distance √(20²+50²) ≈ 54 px.",
+  "kind": "measured"
+ },
+ {
+  "id": "c21-settings-help-and-search",
+  "category": "C21",
+  "title": "Spanish Settings adds a search field and per-row help",
+  "caption": "5.9.0's Spanish Settings showed a label and a value per row under 8 category tabs. 6.0.0 adds a 'Buscar configuración' search field, 11 categories, and a Spanish sentence under each of the 11 Apariencia rows saying what it does.",
+  "old": "C21-es-settings.png",
+  "new": "C21-es-settings.png",
+  "crop": [
+   300,
+   130,
+   1000,
+   770
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     410,
+     442,
+     780,
+     202
+    ],
+    "label": "no descriptions"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     320,
+     148,
+     234,
+     34
+    ],
+    "label": "settings search"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     580,
+     214,
+     670,
+     18
+    ],
+    "label": "per-row Spanish help"
+   }
+  ],
+  "objective_basis": "Frame text. 5.9.0: 9 rows with a label and a value only, 8 tabs (Apariencia … Atajos), no search field. 6.0.0: a 'Buscar configuración' field at x320-554 y148-182, 11 categories (adding Texto / Renderizado, Sesiones and Terminal rápida), and 11 rows, each with a description line, such as 'Seguir la apariencia del sistema, usar clara u oscura, o mantener un tema fijo.'",
+  "kind": "visual"
+ },
+ {
+  "id": "c21-shortcut-hint-contrast",
+  "category": "C21",
+  "title": "Menu shortcut hints rise from 4.54:1 to 7.03:1 contrast",
+  "caption": "Shortcut hints in the context menu were #7e8397 at 4.54:1 on the #1a1b26 menu in 5.9.0. In 6.0.0 they are #9ca5c9 at 7.03:1 on the same background; the command palette's hints changed the same way.",
+  "old": "C21-es-context-menu.png",
+  "new": "C21-es-context-menu.png",
+  "crop": [
+   0,
+   320,
+   460,
+   300
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "highlight",
+    "xy": [
+     248,
+     359,
+     98,
+     20
+    ],
+    "label": "4.54:1"
+   },
+   {
+    "on": "new",
+    "shape": "highlight",
+    "xy": [
+     322,
+     561,
+     106,
+     20
+    ],
+    "label": "7.03:1"
+   }
+  ],
+  "objective_basis": "Dominant text pixel versus the menu background (26,27,38). 5.9.0 'Ctrl+Shift+A' = (126,131,151), 4.54:1. 6.0.0 'Ctrl+Shift+H' = (156,165,201), 7.03:1. C21-es-palette 'Ctrl+PageDown' gives the same 4.54 to 7.03. Row labels are unchanged at (192,202,245), 10.59:1.",
+  "kind": "measured"
+ },
+ {
+  "id": "c23-sgr53-overline",
+  "category": "C23",
+  "title": "SGR 53 overline is drawn",
+  "caption": "In the escape suite's SGR line, 'over' (SGR 53) had no line above it in 5.9.0. 6.0.0 draws a 1 px overline across it, so all seven styles on the line render as named.",
+  "old": "C23-escape-suite.png",
+  "new": "C23-escape-suite.png",
+  "crop": [
+   0,
+   82,
+   460,
+   60
+  ],
+  "scale": 3,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "circle",
+    "xy": [
+     362,
+     93,
+     40,
+     22
+    ],
+    "label": "no overline"
+   },
+   {
+    "on": "new",
+    "shape": "circle",
+    "xy": [
+     394,
+     85,
+     42,
+     22
+    ],
+    "label": "overline drawn"
+   }
+  ],
+  "objective_basis": "Pixel rows. 5.9.0: no lit pixel at x366-400, y92-103, above the 'over' glyphs at y104-111. The lit row at y91 is the tab strip's full-width border, 1600 px long. 6.0.0: 34 lit pixels (#c0caf5) at y90 spanning x398-431, above the glyphs at y96-103.",
+  "kind": "visual"
+ },
+ {
+  "id": "c23-ucs-detect-completes",
+  "category": "C23",
+  "title": "ucs-detect finishes with 0 errors instead of timing out",
+  "caption": "On 5.9.0, ucs-detect stopped with 'Timeout Exceeded (3.0s)', left a late ';111R' cursor report on the prompt and wrote no results file. On 6.0.0 it finished in 16 s and wrote results with 0 errors in all 93 result groups.",
+  "old": "C23-ucs-detect.png",
+  "new": "C23-ucs-detect.png",
+  "crop": [
+   0,
+   880,
+   1100,
+   110
+  ],
+  "scale": 1.5,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     6,
+     942,
+     184,
+     18
+    ],
+    "label": "timeout"
+   },
+   {
+    "on": "old",
+    "shape": "arrow",
+    "xy": [
+     300,
+     968,
+     198,
+     968
+    ],
+    "label": "late ';111R'"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     548,
+     928,
+     500,
+     20
+    ],
+    "label": "run completed"
+   }
+  ],
+  "objective_basis": "receipts.jsonl C23 T1: wait_file ok=false in 5.9.0 after the harness waited 902 s; ok=true in 6.0.0 after 17.7 s. C23-ucs.yaml is absent for 5.9.0. In 6.0.0 the file shows TERM_PROGRAM_VERSION 6.0.0, xtversion kettle(6.0.0), seconds_elapsed 16.0, and n_errors 0 in all 93 groups (unicode_wide 506/506, narrow 5595/5595, emoji_zwj 1445/1445, VS16 426/426, VS15 158/158, every language 100%). The 5.9.0 frame is full of uncovered-font boxes, which matches the CHANGELOG fix: such screens no longer freeze the window, and cursor-position reports are answered promptly. The 6.0.0 run had the higher load average (8.14 against 0.28 in the C23-top frames), so a busier machine does not explain the 5.9.0 failure.",
+  "kind": "text-receipt"
+ },
+ {
+  "id": "c24-config-error-notice",
+  "category": "C24",
+  "title": "Bad config shows a notice with file, line and range",
+  "caption": "With an out-of-range font-size and an unknown key in the config, 5.9.0 showed nothing in the window. 6.0.0 shows 'Config settings ignored' naming term.cfg:4 (expects 5 to 72) and term.cfg:5 (unknown setting), with Open Config and Dismiss buttons, and the notice was still there 8.4 s later.",
+  "old": "C24-bad-config.png",
+  "new": "C24-bad-config.png",
+  "crop": [
+   380,
+   64,
+   820,
+   150
+  ],
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     420,
+     96,
+     758,
+     74
+    ],
+    "label": "no notice"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     420,
+     78,
+     758,
+     93
+    ],
+    "label": "file:line, key, range"
+   }
+  ],
+  "objective_basis": "6.0.0 frame text: 'Config settings ignored:', 'term.cfg:4 font-size: expects a number from 5 to 72', 'term.cfg:5 not-a-key: unknown setting', and the buttons 'Open Config' and 'Dismiss' (notice x420-1179, y78-171). In 5.9.0 the same region is terminal background. C24-bad-config-late was captured 8.39 s later (receipts). It is pixel-identical to the early frame in 6.0.0 (diff bbox None); in 5.9.0 only the clock differs.",
+  "kind": "visual"
+ },
+ {
+  "id": "c24-exit-code-banner",
+  "category": "C24",
+  "title": "A failed shell keeps its pane and shows exit code 3",
+  "caption": "After 'exit 3', 5.9.0 closed the window, leaving only the desktop and no exit code. 6.0.0 keeps the pane and its output and shows 'Process exited with code 3' with Restart (Enter) and Close (Esc). After 'exit 0' both builds close the window.",
+  "old": "C24-shell-exit-status-3.png",
+  "new": "C24-shell-exit-status-3.png",
+  "crop": null,
+  "scale": 1,
+  "marks": [
+   {
+    "on": "old",
+    "shape": "box",
+    "xy": [
+     8,
+     40,
+     1584,
+     952
+    ],
+    "label": "window gone, no code"
+   },
+   {
+    "on": "new",
+    "shape": "arrow",
+    "xy": [
+     480,
+     870,
+     232,
+     946
+    ],
+    "label": "exit code 3 banner"
+   },
+   {
+    "on": "new",
+    "shape": "box",
+    "xy": [
+     10,
+     89,
+     214,
+     33
+    ],
+    "label": "output kept"
+   }
+  ],
+  "objective_basis": "Both builds were captured about 4 s after typing (receipts C24 T1b). The 5.9.0 frame shows desktop background (2,60,136) over the whole window area. The 6.0.0 frame shows 'fixture:~/project$ exit 3' and 'exit' at y91-120, and a bottom banner (y~910-1000) with 'Process exited with code 3', 'Restart (Enter)' and 'Close (Esc)'. In C24-shell-exited (exit 0), both builds closed the window. CHANGELOG: 'Failed commands keep their pane and final output with an exit-code banner.'",
+  "kind": "visual"
+ }
+]
