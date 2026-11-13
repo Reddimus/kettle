@@ -96,10 +96,14 @@ pub fn theme_footer_min_columns(footer: &ThemePickerFooter, tr: &Translator) -> 
     // The readout, the square and its number, and room for the mark.
     let readout = columns(&readout_text(&widest, tr)) + 3 + 2 + 3;
     let palette = (16.0 * 1.75 + 2.0) as usize;
-    let mode = columns(theme_follow_label(footer.follow, tr))
-        + 3
-        + columns(&contrast_button_text(footer.minimum_contrast, tr))
-        + 1;
+    // The widest the button gets, so stepping it never drops the line.
+    let button = MINIMUM_CONTRAST_STEPS
+        .into_iter()
+        .chain([footer.minimum_contrast])
+        .map(|value| columns(&contrast_button_text(value, tr)))
+        .max()
+        .unwrap_or(0);
+    let mode = columns(theme_follow_label(footer.follow, tr)) + 3 + button + 1;
     let slots = slot_texts(footer, tr);
     let themes = slots
         .iter()

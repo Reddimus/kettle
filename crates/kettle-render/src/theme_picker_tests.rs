@@ -237,6 +237,32 @@ fn the_footer_fits_the_narrowest_picker_by_shortening_names() {
     }
 }
 
+/// The status line's width does not change as the contrast button steps, so
+/// a press on the button never drops the line it sits on.
+#[test]
+fn the_status_line_keeps_its_width_as_the_contrast_steps() {
+    for tr in [&EN, &ES] {
+        for follow in [
+            ThemeFollow::System,
+            ThemeFollow::Schedule,
+            ThemeFollow::Fixed,
+        ] {
+            let widths: Vec<usize> = crate::MINIMUM_CONTRAST_STEPS
+                .into_iter()
+                .map(|minimum| {
+                    let mut f = footer("TokyoNight Night", follow, None);
+                    f.minimum_contrast = minimum;
+                    crate::theme_footer_min_columns(&f, tr).1
+                })
+                .collect();
+            assert!(
+                widths.iter().all(|&w| w == widths[0]),
+                "{follow:?}: {widths:?}"
+            );
+        }
+    }
+}
+
 /// The footer's text is the painter's own colours and reads at 4.5:1 on its
 /// surface, and its underline, mark and edges at 3:1, in every bundled
 /// theme as both the panel and the sample.
