@@ -3376,7 +3376,14 @@ pub(super) fn tab_accessibility_projection(
         };
         let id = accessibility_tab_id(anchor, false);
         let mut tab = Node::new(Role::Tab);
-        tab.set_label(seg.title.clone());
+        // The marker a background tab shows is read after its name, as a
+        // label: every platform reads labels, not every one descriptions.
+        tab.set_label(match seg.activity {
+            RenderTabActivity::Normal => seg.title.clone(),
+            RenderTabActivity::Output => tr.a11y_tab_new_output(&seg.title),
+            RenderTabActivity::Bell => tr.a11y_tab_bell(&seg.title),
+            RenderTabActivity::Silent => tr.a11y_tab_output_stopped(&seg.title),
+        });
         tab.set_selected(seg.active);
         tab.add_action(AccessibilityAction::Click);
         tab.add_action(AccessibilityAction::Focus);

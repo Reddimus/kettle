@@ -5475,7 +5475,7 @@ fn tab_strip_legibility_at(font_size: f32) {
                 rect,
                 true,
                 true,
-                false,
+                0.0,
                 "shell",
                 None,
                 renderer.cell_w,
@@ -7307,4 +7307,124 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
         widths(&renderer),
         "matched characters keep the row's width"
     );
+}
+
+/// Background tabs' activity markers reach the frame as three shapes beside
+/// their titles, at 1x and 2x and in a dark and a light theme: a filled
+/// disc for output, a ring once it stopped and a triangle for the bell.
+#[test]
+fn background_tab_markers_have_distinct_shapes() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        let (width, height) = (480.0 * scale, 120.0 * scale);
+        let mut cfg = gpu_test_config();
+        cfg.close_button_on_tab = false;
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, width as u32, height as u32, scale, false)
+                .unwrap()
+        else {
+            eprintln!("TAB_MARKER_GPU_SKIP: no adapter");
+            return;
+        };
+        let snap = snapshot_of(20, 2, b"\x1b[?25l");
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            cfg.theme = kettle_config::Theme::by_name(name);
+            let strip = resolve_chrome_bg(&cfg, &cfg.theme, None);
+            let mut tabs = TabBar::hidden();
+            tabs.height = 28.0 * scale;
+            tabs.band = (0.0, 0.0, width, tabs.height);
+            let kinds = [
+                TabActivity::Normal,
+                TabActivity::Output,
+                TabActivity::Silent,
+                TabActivity::Bell,
+            ];
+            for (idx, activity) in kinds.into_iter().enumerate() {
+                let rect = (idx as f32 * 112.0 * scale, 0.0, 112.0 * scale, tabs.height);
+                let lane = if activity == TabActivity::Normal {
+                    0.0
+                } else {
+                    activity_lane(scale)
+                };
+                let content = horizontal_tab_content_layout(
+                    rect,
+                    false,
+                    false,
+                    lane,
+                    "fixture",
+                    None,
+                    renderer.overlay_text_cell_width(),
+                );
+                tabs.segments.push(TabSeg {
+                    idx,
+                    rect,
+                    title_rect: content.title,
+                    hint: None,
+                    close: content.close,
+                    title: "fixture".into(),
+                    path: None,
+                    active: idx == 0,
+                    activity,
+                });
+            }
+            let mut terminal = pane(&snap, width as u32, height as u32);
+            terminal.rect = (0.0, tabs.height, width, height - tabs.height);
+            terminal.terminal = terminal.rect;
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
+            let painted = |x: f32, y: f32| {
+                let p = frame.get_pixel(x as u32, y as u32);
+                [p[0], p[1], p[2]]
+                    .iter()
+                    .zip([strip.r, strip.g, strip.b])
+                    .any(|(&a, b)| a.abs_diff(b) > 24)
+            };
+            for (bi, seg) in tabs.segments.iter().enumerate().skip(1) {
+                let (label_left, _) = tab_strip::tab_label_origin(
+                    seg.title_rect,
+                    &renderer.tab_texts[bi],
+                    (renderer.overlay_text_cell_width(), 1.0),
+                );
+                let case = format!("{name} at {scale}x, {:?}", seg.activity);
+                let (x, y, w, h) =
+                    tab_strip::activity_marker_rect(seg.rect, seg.title_rect, label_left, scale)
+                        .unwrap_or_else(|| panic!("{case}: no room for a marker"));
+                let rows: Vec<usize> = (0..h as usize)
+                    .map(|row| {
+                        (0..w as usize)
+                            .filter(|&col| painted(x + col as f32, y + row as f32))
+                            .count()
+                    })
+                    .collect();
+                let centre = painted(x + w * 0.5, y + h * 0.5);
+                match seg.activity {
+                    TabActivity::Output => {
+                        assert!(centre, "{case}: a filled disc: {rows:?}");
+                        assert!(rows[0] < rows[h as usize / 2], "{case}: rounded: {rows:?}");
+                    }
+                    TabActivity::Silent => {
+                        assert!(!centre, "{case}: a ring's centre is the tab: {rows:?}");
+                        assert!(rows[0] > 0, "{case}: a ring has a rim: {rows:?}");
+                    }
+                    TabActivity::Bell => {
+                        let (top, bottom) = (rows[0], rows[h as usize - 1]);
+                        assert!(
+                            top > 0 && bottom >= 3 * top,
+                            "{case}: a triangle widens downward: {rows:?}"
+                        );
+                    }
+                    TabActivity::Normal => unreachable!(),
+                }
+                // Nothing is painted between the marker and the title.
+                for col in (x + w) as u32..(label_left - 1.0).floor() as u32 {
+                    for row in y as u32..(y + h) as u32 {
+                        assert!(
+                            !painted(col as f32, row as f32),
+                            "{case}: ink at {col},{row} in the gap before {label_left}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("TAB_MARKER_GPU_PASS");
 }
