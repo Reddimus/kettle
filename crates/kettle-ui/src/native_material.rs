@@ -636,13 +636,9 @@ fn linux_blur_policy(is_wayland: bool, kwin_blur_advertised: bool) -> bool {
 fn linux_is_wayland(window: &Window) -> bool {
     use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
-    let Ok(handle) = window.window_handle() else {
-        return false;
-    };
-    if !matches!(handle.as_raw(), RawWindowHandle::Wayland(_)) {
-        return false;
-    }
-    true
+    window
+        .window_handle()
+        .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
 }
 
 #[cfg(target_os = "linux")]
