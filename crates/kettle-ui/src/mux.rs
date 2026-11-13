@@ -2038,10 +2038,12 @@ pub enum TabActivity {
     /// since the user last saw it.
     Normal,
     /// Output arrived since the user last looked at this tab. Drawn
-    /// as a cyan dot — the standard "something happened" cue.
+    /// as a filled cyan disc on a top or bottom tab bar (a cyan dot on
+    /// vertical tabs until 6.1) — the standard "something happened" cue.
     Output,
     /// A `TermEvent::Bell` fired since the user last looked. Drawn as
-    /// a yellow dot, overrides `Output` because a bell is a stronger
+    /// a yellow triangle on a top or bottom tab bar (a yellow dot on
+    /// vertical tabs until 6.1), overrides `Output` because a bell is a stronger
     /// signal (the focused program explicitly asked for attention).
     Bell,
     /// Tab had unseen output but no further bytes for ≥ the
@@ -2049,8 +2051,9 @@ pub enum TabActivity {
     /// Watcher" affordance — useful for tail-following long jobs
     /// (`tail -f`, build watchers, network monitors) where the
     /// *absence* of recent output is the signal the user wants.
-    /// Drawn as a dim chrome-gray dot to read as a state distinct
-    /// from `Output` (cyan) and `Bell` (yellow).
+    /// Drawn on a top or bottom tab bar as a dim chrome-gray ring to
+    /// read as a state distinct from `Output` (a cyan disc) and `Bell`
+    /// (a yellow triangle); vertical tabs keep a gray dot until 6.1.
     Silent,
 }
 
