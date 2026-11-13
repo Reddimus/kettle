@@ -163,6 +163,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The size chip a window resize shows (`120×40`) is now as wide as its drawn
+  text, measured from the same text it paints, rather than from a count of
+  grid cells. That lets it fit the font size caption, and on any platform the
+  plain `cols×rows` chip may be a pixel wider or narrower than before.
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
   theme and other pickers now are too, and in all of them the highlighted row
