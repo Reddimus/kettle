@@ -8778,6 +8778,14 @@ impl Terminal {
         self.output_wake.acknowledge();
     }
 
+    /// When this pane last published output (see
+    /// [`Self::output_generation`]), whether or not that publication woke the
+    /// UI. Read it after the generation: a reader that has just seen a newer
+    /// generation may still get the previous publication's time.
+    pub fn output_published_at(&self) -> Option<std::time::Instant> {
+        self.output_wake.last_publication()
+    }
+
     /// Whether the program rang the bell since the last call. Bells are
     /// latched rather than queued, so any number of them is one bell here.
     pub fn take_bell(&self) -> bool {

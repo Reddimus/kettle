@@ -1,6 +1,6 @@
 //! Bridges `alacritty_terminal` events to the UI thread.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use alacritty_terminal::event::{Event as TermEvent, EventListener};
@@ -37,19 +37,53 @@ const OUTPUT_WAKE_DIRTY: u8 = 1 << 2;
 pub struct OutputWakeGate {
     state: AtomicU8,
     waker: Waker,
+    /// When the latest publication happened, in nanoseconds after
+    /// [`publication_epoch`] plus one; zero means never. Coalesced and
+    /// quiesced publications are stamped too, so the UI can tell how far apart
+    /// the writes of one burst were even when only the first woke it.
+    published_ns: AtomicU64,
+}
+
+/// Origin for [`OutputWakeGate`] publication stamps: an `Instant` is not
+/// atomic, so the gate stores an offset from this process-wide point.
+fn publication_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
 }
 
 impl OutputWakeGate {
     pub fn new(waker: Waker) -> Self {
+        // Fix the epoch before any stamp so a stamp never precedes it.
+        publication_epoch();
         Self {
             state: AtomicU8::new(OUTPUT_WAKE_ENABLED),
             waker,
+            published_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// When output was last published, whether or not that publication woke
+    /// the UI. A reader that has just seen a newer output generation can still
+    /// read the previous stamp: the PTY reader bumps the generation, then calls
+    /// [`Self::request`], which stores this stamp.
+    pub fn last_publication(&self) -> Option<std::time::Instant> {
+        match self.published_ns.load(Ordering::Acquire) {
+            0 => None,
+            stamp => publication_epoch()
+                .checked_add(std::time::Duration::from_nanos(stamp.saturating_sub(1))),
         }
     }
 
     /// Publish output damage. Returns `true` only when the caller owns a newly
     /// queued wake; duplicate output while that wake is pending is coalesced.
     pub fn request(&self) -> bool {
+        let since_epoch = publication_epoch().elapsed().as_nanos();
+        self.published_ns.store(
+            u64::try_from(since_epoch)
+                .unwrap_or(u64::MAX - 1)
+                .saturating_add(1),
+            Ordering::Release,
+        );
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             let (next, should_wake) = if current & OUTPUT_WAKE_ENABLED != 0 {
@@ -983,6 +1017,38 @@ mod tests {
         gate.acknowledge();
         gate.request();
         assert_eq!(woke.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn output_wake_gate_stamps_every_publication() {
+        let gate = OutputWakeGate::new(Arc::new(|| {}));
+        assert_eq!(gate.last_publication(), None);
+
+        let before = std::time::Instant::now();
+        assert!(gate.request());
+        let first = gate
+            .last_publication()
+            .expect("a waking publication is stamped");
+        assert!(first >= before && first <= std::time::Instant::now());
+
+        // A second write while the wake is pending is coalesced into that wake,
+        // but its time is what tells the UI the burst was split.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!gate.request());
+        let coalesced = gate.last_publication().expect("stamped");
+        assert!(
+            coalesced >= first + std::time::Duration::from_millis(2),
+            "a coalesced publication must still be stamped"
+        );
+
+        gate.set_enabled(false);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!gate.request());
+        assert!(
+            gate.last_publication().expect("stamped")
+                >= coalesced + std::time::Duration::from_millis(2),
+            "a quiesced publication must still be stamped"
+        );
     }
 
     #[test]
