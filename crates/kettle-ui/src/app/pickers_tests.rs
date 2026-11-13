@@ -303,10 +303,14 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         None,
         &[],
     );
-    for row in &list.rows {
+    let entries = super::palette_entries(None, &es, &[]);
+    let ranked = kettle_config::palette::rank_matches("ct", &entries, &es);
+    assert_eq!(list.rows.len(), ranked.len());
+    for (row, entry) in list.rows.iter().zip(ranked) {
+        assert_eq!(row.label, entries[entry.index].0.shown(&es));
         assert_eq!(
             row.matched_chars,
-            kettle_config::palette::matched_char_positions("ct", &row.label).map(|positions| {
+            entry.matched_chars.map(|positions| {
                 positions
                     .into_iter()
                     .map(|index| index..index + 1)

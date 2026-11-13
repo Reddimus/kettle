@@ -1769,9 +1769,12 @@ click: context menus, the command palette, theme/layout pickers, SSH, title
 editing and quick-select hints. The command palette and theme, layout and SSH
 pickers share one top-centred rounded card below the top chrome. Its query header
 and results use one geometry for paint, pointer input, control diagnostics,
-AccessKit bounds and the IME caret. Command labels accent the characters matched
-by the same fuzzy matcher used for ranking; English alias matches in Spanish
-have no accent unless the displayed label also matches. The whole card counts
+AccessKit bounds and the IME caret. The fuzzy matcher scores each label by its
+best alignment, and while any row matches strongly (each scattered piece of
+the query starts a word, or the query runs contiguously) the palette leaves
+out rows the query only lies scattered through. Command labels accent the
+characters of the alignment that ranked the row; English alias matches in
+Spanish have no accent unless the displayed label also matches. The whole card counts
 as inside. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs

@@ -206,10 +206,14 @@ impl PaletteLabel {
     }
 }
 
-/// Matched scalar positions in the displayed label. An English alias may rank
-/// a translated entry even when its displayed label has no matching positions.
-pub fn matched_char_positions(query: &str, label: &str) -> Option<Vec<usize>> {
-    fuzzy::matched_char_positions(query, label)
+/// One row [`rank_matches`] keeps: its index and the positions of the
+/// matched chars in its displayed label, from the alignment that ranked it.
+/// `None` when only the English alias of a translated label matched, so a
+/// highlight never lands on chars of the wrong label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RankedEntry {
+    pub index: usize,
+    pub matched_chars: Option<Vec<usize>>,
 }
 
 /// [`rank`] over rows that may carry run-time labels.
@@ -218,22 +222,69 @@ pub fn rank_entries(
     entries: &[(PaletteLabel, Action)],
     tr: &Translator,
 ) -> Vec<usize> {
+    rank_matches(query, entries, tr)
+        .into_iter()
+        .map(|entry| entry.index)
+        .collect()
+}
+
+/// [`rank_entries`] with each kept row's matched chars.
+///
+/// A row matches strongly when the query starts a word at each scattered
+/// piece or runs contiguously (see [`fuzzy::align_strong`]). While any row
+/// matches strongly, rows the query only lies scattered through are left out,
+/// so `font` lists the font-size commands and not `Focus next pane`; with no
+/// strong match every subsequence match is listed.
+pub fn rank_matches(
+    query: &str,
+    entries: &[(PaletteLabel, Action)],
+    tr: &Translator,
+) -> Vec<RankedEntry> {
     let english = Translator::new(Language::En);
     let alias = tr.language() != Language::En;
-    let mut scored: Vec<(usize, i32)> = entries
+    // The best score over the shown label and its English alias, with the
+    // shown label's positions.
+    let best = |shown: Option<fuzzy::Alignment>, alias: Option<fuzzy::Alignment>| {
+        let score = shown
+            .as_ref()
+            .map(|a| a.score)
+            .max(alias.as_ref().map(|a| a.score))?;
+        Some((score, shown.map(|a| a.positions)))
+    };
+    let matches: Vec<_> = entries
         .iter()
         .enumerate()
-        .filter_map(|(i, (label, _))| {
-            let shown = fuzzy::score(query, label.shown(tr));
-            let english = alias
-                .then(|| fuzzy::score(query, label.english(&english)))
-                .flatten();
-            shown.max(english).map(|s| (i, s))
+        .filter_map(|(index, (label, _))| {
+            let shown = label.shown(tr);
+            let alias = alias.then(|| label.english(&english));
+            let any = best(
+                fuzzy::align(query, shown),
+                alias.and_then(|alias| fuzzy::align(query, alias)),
+            )?;
+            let strong = best(
+                fuzzy::align_strong(query, shown),
+                alias.and_then(|alias| fuzzy::align_strong(query, alias)),
+            );
+            Some((index, strong, any))
+        })
+        .collect();
+    let strong_only = matches.iter().any(|(_, strong, _)| strong.is_some());
+    let mut scored: Vec<(usize, i32, Option<Vec<usize>>)> = matches
+        .into_iter()
+        .filter_map(|(index, strong, any)| {
+            let (score, positions) = if strong_only { strong? } else { any };
+            Some((index, score, positions))
         })
         .collect();
     // Sort by score desc, then original index asc (stable tie-break).
     scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    scored.into_iter().map(|(i, _)| i).collect()
+    scored
+        .into_iter()
+        .map(|(index, _, matched_chars)| RankedEntry {
+            index,
+            matched_chars,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -243,7 +294,8 @@ mod tests {
     #[test]
     fn matched_positions_follow_fuzzy_unicode_and_spanish_labels() {
         for (query, label, expected) in [
-            ("spt", "Split tab", Some(vec![0, 1, 4])),
+            // The `t` that starts `tab`, not the one ending `Split`.
+            ("spt", "Split tab", Some(vec![0, 1, 6])),
             ("AÑO", "Mi año", Some(vec![3, 4, 5])),
             ("ct", "Cerrar pestaña", Some(vec![0, 10])),
             ("İ", "İstanbul", Some(vec![0])),
@@ -251,9 +303,9 @@ mod tests {
             ("", "Cambiar tema", Some(vec![])),
             ("xyz", "Cambiar tema", None),
         ] {
-            assert_eq!(matched_char_positions(query, label), expected);
+            assert_eq!(fuzzy::matched_char_positions(query, label), expected);
             assert_eq!(
-                matched_char_positions(query, label).is_some(),
+                fuzzy::matched_char_positions(query, label).is_some(),
                 fuzzy::score(query, label).is_some()
             );
         }
@@ -742,6 +794,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn top(query: &str, tr: &Translator) -> Vec<Action> {
+        let cmds = commands();
+        rank(query, &cmds, tr)
+            .into_iter()
+            .map(|i| cmds[i].1.clone())
+            .collect()
+    }
+
+    /// Weak matches drop out while a strong one exists: `font` runs a font
+    /// command, not `Focus next pane`, which it lies scattered through. With
+    /// no strong match, every match stays.
+    #[test]
+    fn weak_matches_drop_out_when_a_strong_one_exists() {
+        let font = top("font", &EN);
+        assert!(
+            matches!(font[0], Action::ResetFontSize | Action::IncreaseFontSize),
+            "{font:?}"
+        );
+        assert!(!font.contains(&Action::FocusNext), "{font:?}");
+        let split = top("split", &EN);
+        for action in [
+            Action::SplitRight,
+            Action::SplitDown,
+            Action::SplitAuto,
+            Action::SplitLeft,
+            Action::SplitUp,
+            Action::EqualizeSplits,
+        ] {
+            assert!(split.contains(&action), "{action:?} in {split:?}");
+        }
+        assert!(!split.contains(&Action::ToggleBroadcastAll), "{split:?}");
+        assert!(
+            !split.contains(&Action::SetAskBeforeClosingBusyOrMultiple),
+            "{split:?}"
+        );
+        let tab = top("tab", &EN);
+        assert!(tab.contains(&Action::NextTab) && tab.contains(&Action::DuplicateTab));
+        // Whitespace typed in the query does not make the match weak.
+        assert_eq!(top("sp ri", &EN)[0], Action::SplitRight);
+        // A contiguous run inside a word is strong.
+        assert!(top("screen", &EN).contains(&Action::ToggleFullscreen));
+        // A single letter still lists every row with a word starting with it.
+        let t = top("t", &EN);
+        let cmds = commands();
+        for (label, action) in &cmds {
+            let words_start_t = EN
+                .text(*label)
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word.starts_with(['t', 'T']));
+            if words_start_t {
+                assert!(t.contains(action), "{action:?} for \"t\"");
+            }
+        }
+        // With no strong match anywhere, every subsequence match stays listed.
+        let query = "fcnp";
+        assert!(
+            cmds.iter()
+                .all(|(label, _)| fuzzy::align_strong(query, EN.text(*label)).is_none())
+        );
+        let weak = cmds
+            .iter()
+            .filter(|(label, _)| fuzzy::score(query, EN.text(*label)).is_some())
+            .count();
+        assert!(weak > 0);
+        assert_eq!(rank(query, &cmds, &EN).len(), weak);
+    }
+
+    /// Highlights come from the alignment that ranked the row: `theme` marks
+    /// the word in `Next theme`, and a Spanish row found only through its
+    /// English alias marks nothing rather than chars of its own label.
+    #[test]
+    fn highlights_follow_the_ranking_alignment() {
+        let cmds = commands();
+        let entries: Vec<_> = cmds
+            .iter()
+            .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+            .collect();
+        let ranked = rank_matches("theme", &entries, &EN);
+        let next = ranked
+            .iter()
+            .find(|entry| cmds[entry.index].1 == Action::NextTheme)
+            .expect("Next theme");
+        assert_eq!(next.matched_chars, Some((5..10).collect()));
+        let ranked = rank_matches("fullscreen", &entries, &ES);
+        assert_eq!(cmds[ranked[0].index].1, Action::ToggleFullscreen);
+        assert_eq!(ranked[0].matched_chars, None);
+        // A Spanish query on a Spanish label marks that label.
+        let ranked = rank_matches("pantalla", &entries, &ES);
+        assert_eq!(cmds[ranked[0].index].1, Action::ToggleFullscreen);
+        let label: Vec<char> = ES.text(cmds[ranked[0].index].0).chars().collect();
+        let marked: String = ranked[0]
+            .matched_chars
+            .as_ref()
+            .expect("shown label matched")
+            .iter()
+            .map(|&i| label[i])
+            .collect();
+        assert_eq!(marked.to_lowercase(), "pantalla");
     }
 
     /// `rank` is `rank_entries` over catalogue labels: same order for every

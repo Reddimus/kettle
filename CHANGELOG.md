@@ -149,6 +149,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The command palette ranks a command by the best way the typed text fits
+  its name, and leaves out names the text only lies scattered through while
+  a closer match exists. "font" now lists the font-size commands and no
+  longer puts "Focus next pane" first, "split" no longer lists the broadcast
+  and close-confirmation rows, and "theme" marks the word in "Next theme"
+  instead of the "t" of "Next". The SSH launcher and theme picker rank by the
+  same better fit. A text that only fits scattered still lists everything it
+  fits.
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
   theme and other pickers now are too, and in all of them the highlighted row

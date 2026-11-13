@@ -142,19 +142,15 @@ pub(super) fn command_picker_list(
     profiles: &[String],
 ) -> PickerList {
     let commands = palette_entries(notice, tr, profiles);
-    let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
+    let ranked = kettle_config::palette::rank_matches(query, &commands, tr);
     let rows = ranked
-        .iter()
-        .map(|&index| {
-            let (label, action) = &commands[index];
+        .into_iter()
+        .map(|entry| {
+            let (label, action) = &commands[entry.index];
             ContextMenuRow {
                 toggle: None,
                 swatches: None,
-                matched_chars: kettle_config::palette::matched_char_positions(
-                    query,
-                    label.shown(tr),
-                )
-                .map(|positions| {
+                matched_chars: entry.matched_chars.map(|positions| {
                     positions
                         .into_iter()
                         .map(|index| index..index + 1)
