@@ -1543,8 +1543,13 @@ impl Renderer {
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
                     ),
+                    (
+                        tabbar.settings,
+                        tabbar.hovered_settings,
+                        tabbar.pressed_settings,
+                    ),
                 ] {
-                    if hovered {
+                    if hovered && bounds.2 > 0.0 {
                         let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
@@ -1555,6 +1560,27 @@ impl Renderer {
                             None,
                         );
                     }
+                }
+                // The Settings gear is drawn, not shaped, in the `▾`'s ink:
+                // the accent while hovered, and never under 3:1 in an
+                // unfocused window.
+                if tabbar.settings.2 > 0.0 {
+                    let (ink, background) = if tabbar.hovered_settings {
+                        (
+                            accent,
+                            chrome::tab_detail(
+                                chrome_strip_bg,
+                                theme.foreground,
+                                tabbar.pressed_settings,
+                            ),
+                        )
+                    } else {
+                        (theme.foreground, chrome_strip_bg)
+                    };
+                    let ink = self
+                        .chrome_colors
+                        .tab_text(ink, background, overlay.window_focused);
+                    tab_strip::push_settings_gear(&mut quads, tabbar.settings, ink, self.scale);
                 }
             }
             // Drag-in-progress ghost. While the user holds a

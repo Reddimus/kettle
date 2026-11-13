@@ -1359,6 +1359,12 @@ pub struct TabBar {
     /// The pointer is over the shell-dropdown hit target immediately left of
     /// `+`. Kept separate so each half has an unambiguous hover response.
     pub hovered_new_tab_menu: bool,
+    /// The Settings button that leads the `▾ +` pair in a macOS title bar,
+    /// drawn as a gear. Zero-area `(0,0,0,0)` everywhere else, and in a lane
+    /// too narrow to keep a tab beside it; the renderer then draws nothing.
+    pub settings: Rect4,
+    pub hovered_settings: bool,
+    pub pressed_settings: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1434,6 +1440,9 @@ impl TabBar {
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            settings: (0.0, 0.0, 0.0, 0.0),
+            hovered_settings: false,
+            pressed_settings: false,
             broadcast: false,
             hovered_close_idx: None,
             hovered_tab_idx: None,
