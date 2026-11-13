@@ -2809,9 +2809,13 @@ fn context_menu_item_node(
 
 /// Mark a menu row that opens a submenu. The popup and expanded states say so
 /// to UIA, but the locked AccessKit adapters for AT-SPI and macOS pass neither
-/// on, which left Orca and VoiceOver reading the row as a plain command. The
-/// row is therefore also described as a submenu, in the UI's language, in
-/// place of the ▸ it is painted with.
+/// on, so there the row would be a plain menu item. The row is therefore also
+/// described as a submenu, in the UI's language, in place of the ▸ it is
+/// painted with. On macOS the description becomes AXHelp, which VoiceOver
+/// speaks as a delayed hint while hints are on. On Windows the description is
+/// the UIA full description, so it repeats what the ExpandCollapse pattern
+/// already says; that duplication is accepted to keep one marking for every
+/// platform.
 fn mark_context_submenu_row(node: &mut Node, expanded: bool, tr: &kettle_i18n::Translator) {
     node.set_has_popup(accesskit::HasPopup::Menu);
     node.set_expanded(expanded);
