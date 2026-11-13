@@ -120,8 +120,9 @@ impl OutputWakeGate {
         }
     }
 
-    /// Re-open the per-pane latch after the UI proves a queued wake stale or
-    /// immediately before it snapshots a real frame. Output racing after this
+    /// Re-open the per-pane latch after the UI proves a queued wake stale,
+    /// immediately before it snapshots a real frame, or when it holds a typed
+    /// echo back to wait for the echo's next write. Output racing after this
     /// acknowledgement owns a fresh wake.
     pub fn acknowledge(&self) {
         let mut current = self.state.load(Ordering::Acquire);
