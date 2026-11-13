@@ -34,7 +34,9 @@ pub use text_field::{
 mod settings;
 mod tab_strip;
 mod terminal;
-pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_text_scale};
+pub use tab_strip::{
+    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+};
 mod theme;
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
@@ -4205,21 +4207,28 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
-                if !cfg.tab_bar_pos.is_vertical() && tx - s.rect.0 >= 20.0 {
-                    let dot = match s.activity {
+                if !cfg.tab_bar_pos.is_vertical()
+                    && let Some(marker) = tab_strip::activity_marker_rect(
+                        s.rect,
+                        s.title_rect,
+                        centered_left,
+                        self.scale,
+                    )
+                {
+                    let ink = match s.activity {
                         TabActivity::Bell => Some(theme.palette[3]),
                         TabActivity::Output => Some(theme.palette[6]),
                         TabActivity::Silent => Some(theme.palette[8]),
                         TabActivity::Normal => None,
                     };
-                    if let Some(color) = dot {
-                        tab_strip::rounded_fill(
+                    if let Some(ink) = ink {
+                        tab_strip::activity_marker_quads(
                             &mut quads,
-                            (centered_left - 10.0, ty_px + th * 0.5 - 3.0, 6.0, 6.0),
-                            3.0,
-                            (true, true),
-                            (color, 1.0),
-                            None,
+                            s.activity,
+                            marker,
+                            self.scale,
+                            ink,
+                            tab_background,
                         );
                     }
                 }

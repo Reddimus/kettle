@@ -1229,7 +1229,7 @@ pub fn format_media_size(bytes: u64) -> String {
 }
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
-/// draws a small cyan dot, `Bell` draws a yellow dot. Terminator-
+/// draws a filled cyan disc, `Bell` a yellow triangle. Terminator-
 /// parity affordance ("you've got new output in an inactive tab").
 /// Renderer-side enum so the UI doesn't need to leak its
 /// `kettle_ui::mux::TabActivity` type across crate boundaries.
@@ -1243,8 +1243,9 @@ pub enum TabActivity {
     /// at least `tab-silence-threshold-ms`. Terminator's "Silence
     /// Watcher" affordance — useful for tail-following long jobs
     /// (`tail -f`, build watchers) where the *absence* of output is
-    /// the signal the user wants. Drawn as a dim chrome-gray dot,
-    /// distinct from `Output` (cyan) and `Bell` (yellow).
+    /// the signal the user wants. Drawn as a dim chrome-gray ring,
+    /// distinct from `Output` (a cyan disc) and `Bell` (a yellow
+    /// triangle) by shape as well as colour.
     Silent,
 }
 

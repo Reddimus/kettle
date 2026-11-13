@@ -35,12 +35,23 @@ pub struct HorizontalTabContent {
     pub hint: Option<Rect4>,
 }
 
-/// Hidden controls reserve no hint or close space; title and activity take priority.
+/// Room an activity marker takes before a tab's title: an
+/// `ACTIVITY_MARKER`-sized box and a gap, in device pixels at `scale`.
+pub fn activity_lane(scale: f32) -> f32 {
+    (12.0 * scale).round()
+}
+
+/// Side of the square box an activity marker is drawn in, at 1x.
+const ACTIVITY_MARKER: f32 = 8.0;
+
+/// Hidden controls reserve no hint or close space; title and activity take
+/// priority. `activity_lane` is [`activity_lane`] for a tab with a marker
+/// and `0.0` for one without.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
     show_controls: bool,
     close_enabled: bool,
-    activity: bool,
+    activity_lane: f32,
     label: &str,
     hint: Option<&str>,
     cell_width: f32,
@@ -63,7 +74,7 @@ pub fn horizontal_tab_content_layout(
         x + w - 8.0
     })
     .max(x);
-    let left = (x + 8.0 + if activity { 12.0 } else { 0.0 }).min(right);
+    let left = (x + 8.0 + activity_lane.max(0.0)).min(right);
     let cw = cell_width.max(1.0);
     let hint = hint.filter(|_| show_controls).and_then(|hint| {
         let width = display_width(hint) as f32 * cw;
@@ -80,6 +91,72 @@ pub fn horizontal_tab_content_layout(
         title: (left, y, right - left, h),
         close,
         hint,
+    }
+}
+
+/// Where a background tab's activity marker draws: a box of
+/// `ACTIVITY_MARKER * scale` device pixels whose right edge leaves the lane's
+/// gap before the title text at `label_left`, centred on the title line.
+/// `None` when the box would not lie wholly inside the tab, so the painter
+/// never needs to work the condition out again from title geometry.
+pub(crate) fn activity_marker_rect(
+    segment: Rect4,
+    title: Rect4,
+    label_left: f32,
+    scale: f32,
+) -> Option<Rect4> {
+    let size = (ACTIVITY_MARKER * scale).round().max(1.0);
+    let x = (label_left - activity_lane(scale)).round();
+    let y = (title.1 + title.3 * 0.5 - size * 0.5).round();
+    let inside = x >= segment.0 - 0.5 && x + size <= segment.0 + segment.2 + 0.5;
+    inside.then_some((x, y, size, size))
+}
+
+/// A background tab's activity marker, told apart by shape as well as
+/// colour: a filled disc for new output, a ring once the output stopped and
+/// a triangle pointing up when the bell rang. The ring's hole is filled with
+/// `tab_bg`, the flat full-height fill behind the marker, so it is exact.
+pub(crate) fn activity_marker_quads(
+    quads: &mut Vec<QuadInstance>,
+    kind: crate::TabActivity,
+    marker: Rect4,
+    scale: f32,
+    ink: Rgb,
+    tab_bg: Rgb,
+) {
+    use crate::TabActivity;
+    let (x, y, w, h) = marker;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    match kind {
+        TabActivity::Normal => {}
+        TabActivity::Output => {
+            rounded_fill(quads, marker, w * 0.5, (true, true), (ink, 1.0), None);
+        }
+        TabActivity::Silent => {
+            rounded_fill(quads, marker, w * 0.5, (true, true), (ink, 1.0), None);
+            let stroke = (2.0 * scale).round().max(1.0);
+            let hole = (x + stroke, y + stroke, w - stroke * 2.0, h - stroke * 2.0);
+            rounded_fill(quads, hole, hole.2 * 0.5, (true, true), (tab_bg, 1.0), None);
+        }
+        TabActivity::Bell => {
+            // One quad per device-pixel row, widening downward. Whole-pixel
+            // insets on both sides keep every row centred on the box.
+            let rows = h.round().max(1.0) as usize;
+            for i in 0..rows {
+                let raw = w * (i + 1) as f32 / rows as f32;
+                let inset = ((w - raw) * 0.5).floor().max(0.0);
+                quads.push(rect(
+                    x + inset,
+                    y + i as f32,
+                    w - inset * 2.0,
+                    1.0,
+                    ink,
+                    1.0,
+                ));
+            }
+        }
     }
 }
 
@@ -357,7 +434,7 @@ mod tests {
                     (0.0, 0.0, 320.0, 28.0),
                     visible,
                     true,
-                    false,
+                    0.0,
                     "shell",
                     Some("Cmd+1"),
                     8.0,
@@ -389,7 +466,7 @@ mod tests {
                             (10.0, 20.0, width, 28.0),
                             active || hovered,
                             enabled,
-                            false,
+                            0.0,
                             "shell",
                             Some("Cmd+1"),
                             8.0,
@@ -417,29 +494,214 @@ mod tests {
 
     #[test]
     fn horizontal_content_prioritizes_title_and_activity_over_hint() {
-        for width in [80.0, 160.0, 320.0] {
-            let full = horizontal_tab_content_layout(
-                (0.0, 0.0, width, 28.0),
+        // The marker lane scales with the display: 12 px at 1x, 24 at 2x.
+        for (scale, lane) in [(1.0_f32, 12.0_f32), (1.5, 18.0), (2.0, 24.0)] {
+            for width in [80.0, 160.0, 320.0] {
+                let (width, height) = (width * scale, 28.0 * scale);
+                let full = horizontal_tab_content_layout(
+                    (0.0, 0.0, width, height),
+                    true,
+                    true,
+                    0.0,
+                    "shell",
+                    None,
+                    8.0 * scale,
+                );
+                let dot = horizontal_tab_content_layout(
+                    (0.0, 0.0, width, height),
+                    true,
+                    true,
+                    activity_lane(scale),
+                    "a very long title that needs an ellipsis",
+                    Some("Cmd+1"),
+                    8.0 * scale,
+                );
+                assert_eq!(dot.title.0, full.title.0 + lane, "scale {scale}");
+                assert!(dot.hint.is_none());
+                assert_eq!(dot.close, full.close);
+            }
+        }
+    }
+
+    /// The marker box sits in the lane before the title at every scale, for
+    /// a plain strip's tab and for a lone titlebar tab whose title lane is
+    /// centred on the window. A paint condition worked out again from title
+    /// geometry once hid every marker at 2x.
+    #[test]
+    fn activity_marker_rect_paints_beside_the_title_at_every_scale() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let cell = (8.0 * scale, 16.0 * scale);
+            let size = (8.0 * scale).round();
+            let height = 28.0 * scale;
+            // (segment, centre of a lone titlebar tab's title lane)
+            let cases = [
+                ((0.0, 0.0, 160.0 * scale, height), None),
+                ((78.0 * scale, 0.0, 240.0 * scale, height), None),
+                (
+                    (78.0 * scale, 0.0, 320.0 * scale, height),
+                    Some(300.0 * scale),
+                ),
+                ((90.0 * scale, 32.0 * scale, 120.0 * scale, height), None),
+            ];
+            for (segment, centre) in cases {
+                for label in ["shell", "a very long title that fills its whole lane"] {
+                    let mut content = horizontal_tab_content_layout(
+                        segment,
+                        true,
+                        true,
+                        activity_lane(scale),
+                        label,
+                        Some("Cmd+1"),
+                        cell.0,
+                    );
+                    if let Some(centre) = centre {
+                        // The lone-tab centring `centered_title_lane` does.
+                        let lane = content.title;
+                        let half = (centre - lane.0).min(lane.0 + lane.2 - centre).max(0.0);
+                        assert!(half > 0.0, "the centre lies in the lane");
+                        content.title = (centre - half, lane.1, half * 2.0, lane.3);
+                    }
+                    let (label_left, _) = tab_label_origin(content.title, label, cell);
+                    let marker = activity_marker_rect(segment, content.title, label_left, scale)
+                        .unwrap_or_else(|| {
+                            panic!("no marker at {scale}x for {label:?} in {segment:?}")
+                        });
+                    let case = format!("{scale}x, {label:?}, {segment:?}: {marker:?}");
+                    assert_eq!((marker.2, marker.3), (size, size), "{case}");
+                    assert!(marker.0 >= segment.0 - 0.5, "{case}");
+                    assert!(marker.0 + marker.2 <= segment.0 + segment.2 + 0.5, "{case}");
+                    assert!(
+                        marker.0 + marker.2 <= label_left - 4.0 * scale + 0.5,
+                        "{case}: touches the title at {label_left}"
+                    );
+                    assert!(marker.1 >= segment.1 && marker.1 + marker.3 <= segment.1 + segment.3);
+                }
+            }
+            // A tab too narrow for the lane draws no marker outside itself.
+            let narrow = (40.0, 0.0, 12.0 * scale - 1.0, height);
+            let content = horizontal_tab_content_layout(
+                narrow,
                 true,
                 true,
-                false,
+                activity_lane(scale),
                 "shell",
                 None,
-                8.0,
+                cell.0,
             );
-            let dot = horizontal_tab_content_layout(
-                (0.0, 0.0, width, 28.0),
-                true,
-                true,
-                true,
-                "a very long title that needs an ellipsis",
-                Some("Cmd+1"),
-                8.0,
+            let (label_left, _) = tab_label_origin(content.title, "shell", cell);
+            assert_eq!(
+                activity_marker_rect(narrow, content.title, label_left, scale),
+                None,
+                "{scale}x"
             );
-            assert_eq!(dot.title.0, full.title.0 + 12.0);
-            assert!(dot.hint.is_none());
-            assert_eq!(dot.close, full.close);
         }
+    }
+
+    /// Which device pixels of `marker` are painted `ink`.
+    fn marker_grid(kind: TabActivity, scale: f32, ink: Rgb, tab_bg: Rgb) -> Vec<Vec<bool>> {
+        let marker = activity_marker_rect(
+            (0.0, 0.0, 200.0 * scale, 28.0 * scale),
+            (
+                8.0 * scale + activity_lane(scale),
+                0.0,
+                100.0 * scale,
+                28.0 * scale,
+            ),
+            40.0 * scale,
+            scale,
+        )
+        .expect("room for a marker");
+        let mut quads = vec![rect(0.0, 0.0, 200.0 * scale, 28.0 * scale, tab_bg, 1.0)];
+        activity_marker_quads(&mut quads, kind, marker, scale, ink, tab_bg);
+        let ink = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
+        (0..marker.3 as usize)
+            .map(|row| {
+                (0..marker.2 as usize)
+                    .map(|col| {
+                        sample(
+                            &quads,
+                            marker.0 + col as f32 + 0.5,
+                            marker.1 + row as f32 + 0.5,
+                        ) == Some(ink)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// (left, top, width, height) of the painted pixels.
+    fn painted_bounds(grid: &[Vec<bool>]) -> (usize, usize, usize, usize) {
+        let rows: Vec<usize> = (0..grid.len())
+            .filter(|&r| grid[r].contains(&true))
+            .collect();
+        let cols: Vec<usize> = (0..grid[0].len())
+            .filter(|&c| grid.iter().any(|row| row[c]))
+            .collect();
+        let (top, bottom) = (rows[0], *rows.last().unwrap());
+        let (left, right) = (cols[0], *cols.last().unwrap());
+        (left, top, right - left + 1, bottom - top + 1)
+    }
+
+    /// Output, Silent and Bell differ by shape, so a reader who cannot tell
+    /// the theme's cyan, grey and yellow apart still can tell them apart.
+    #[test]
+    fn activity_markers_differ_by_shape_not_only_colour() {
+        let (ink, tab_bg) = (Rgb::new(0xe0, 0xaf, 0x68), Rgb::new(0x14, 0x15, 0x1d));
+        let mut bounds_1x = Vec::new();
+        for scale in [1.0_f32, 2.0] {
+            let grids: Vec<_> = [TabActivity::Output, TabActivity::Silent, TabActivity::Bell]
+                .into_iter()
+                .map(|kind| marker_grid(kind, scale, ink, tab_bg))
+                .collect();
+            let [output, silent, bell] = [&grids[0], &grids[1], &grids[2]];
+            let side = output.len();
+            assert_eq!(side, (8.0 * scale).round() as usize);
+            let c = side / 2;
+            assert!(output[c][c], "{scale}x: Output's centre is filled");
+            assert!(!silent[c][c], "{scale}x: Silent's centre is the tab");
+            assert!(silent[0][c] && silent[c][0], "{scale}x: Silent has a rim");
+            let width = |row: &Vec<bool>| row.iter().filter(|&&p| p).count();
+            assert!(width(&bell[0]) > 0);
+            assert!(
+                width(&bell[side - 1]) >= 3 * width(&bell[0]),
+                "{scale}x: Bell widens downward: {bell:?}"
+            );
+            assert_ne!(output, silent);
+            assert_ne!(output, bell);
+            assert_ne!(silent, bell);
+            let none = marker_grid(TabActivity::Normal, scale, ink, tab_bg);
+            assert!(none.iter().flatten().all(|&p| !p), "Normal draws nothing");
+            let bounds: Vec<_> = grids.iter().map(|g| painted_bounds(g)).collect();
+            if scale == 1.0 {
+                bounds_1x = bounds;
+            } else {
+                for (two, one) in bounds.iter().zip(&bounds_1x) {
+                    assert_eq!(
+                        (two.2, two.3),
+                        (one.2 * 2, one.3 * 2),
+                        "the 2x marker is twice the 1x one"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The horizontal painter places and draws markers through the tested
+    /// functions, not a threshold of its own.
+    #[test]
+    fn horizontal_tab_markers_paint_through_the_marker_rect() {
+        let source = crate::production_source();
+        let block = source
+            .split_once("let (centered_left, label_top) = tab_strip::tab_label_origin(")
+            .expect("horizontal text pass")
+            .1
+            .split_once("let close_fg = if hovered {")
+            .expect("close glyph colours follow the marker")
+            .0;
+        assert!(block.contains("tab_strip::activity_marker_rect("));
+        assert!(block.contains("tab_strip::activity_marker_quads("));
+        assert!(!block.contains(">= 20.0"));
+        assert!(!block.contains("centered_left - 10.0"));
     }
 
     #[test]
@@ -449,7 +711,7 @@ mod tests {
                 (0.0, 0.0, width, 28.0),
                 true,
                 true,
-                true,
+                activity_lane(1.0),
                 "shell",
                 Some("Cmd+1"),
                 8.0,
@@ -473,7 +735,7 @@ mod tests {
                     (0.0, 0.0, width, 28.0),
                     true,
                     true,
-                    false,
+                    0.0,
                     label,
                     Some("Cmd+1"),
                     8.0,
@@ -495,7 +757,7 @@ mod tests {
             (0.0, 0.0, 124.0, 28.0),
             true,
             true,
-            false,
+            0.0,
             "shell",
             Some("Cmd+1"),
             8.0,
@@ -505,7 +767,7 @@ mod tests {
             (0.0, 0.0, 123.5, 28.0),
             true,
             true,
-            false,
+            0.0,
             "shell",
             Some("Cmd+1"),
             8.0,
@@ -712,7 +974,7 @@ mod tests {
                 (0.0, 0.0, 320.0, 32.0),
                 true,
                 true,
-                true,
+                activity_lane(1.0),
                 "shell",
                 Some(&hint),
                 text_advance,
@@ -818,7 +1080,7 @@ mod tests {
                     let cell = (8.0 * scale, line);
                     let segment = (8.0 * scale + h, y, 120.0 * scale, h);
                     let content = horizontal_tab_content_layout(
-                        segment, true, true, false, "fixture", None, cell.0,
+                        segment, true, true, 0.0, "fixture", None, cell.0,
                     );
                     let (_, title_top) = tab_label_origin(content.title, "fixture", cell);
                     for button in [(8.0 * scale, y, h, h), (1450.0 * scale, y, h * 0.5, h)] {
