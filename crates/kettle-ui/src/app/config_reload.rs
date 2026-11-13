@@ -564,19 +564,25 @@ impl App {
 }
 
 /// Choose the configured side, independently of a temporary picker preview's lightness.
+/// A schedule picks the side the window wears whatever the mode says, so a
+/// pick saves to the side `active_dark` (the schedule's) names.
 pub(super) fn theme_pick_key(cfg: &Config, active_dark: Option<bool>) -> &'static str {
     use kettle_config::ThemeMode;
+    let by_side = |dark: Option<bool>| {
+        if dark.unwrap_or(true) {
+            "dark-theme"
+        } else {
+            "light-theme"
+        }
+    };
+    if cfg.theme_schedule.is_some() {
+        return by_side(active_dark);
+    }
     match cfg.theme_mode {
         ThemeMode::Explicit => "theme",
         ThemeMode::Light => "light-theme",
         ThemeMode::Dark => "dark-theme",
-        ThemeMode::Auto => {
-            if active_dark.unwrap_or(true) {
-                "dark-theme"
-            } else {
-                "light-theme"
-            }
-        }
+        ThemeMode::Auto => by_side(active_dark),
     }
 }
 

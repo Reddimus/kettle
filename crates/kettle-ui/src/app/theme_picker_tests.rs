@@ -721,6 +721,67 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
     assert!(store.contains("self.persist_pref(key_str, &new_val)"));
 }
 
+/// A schedule picks the side the window wears whatever `theme-mode` says,
+/// so a pick saves to that side's key in every mode: a fixed theme or a
+/// forced side under a schedule would otherwise write a key the schedule
+/// overrides, and the pick would be lost. The status line then checks the
+/// worn side, marks it, and Enter keeps the pick.
+#[test]
+fn a_scheduled_pick_saves_to_the_side_the_schedule_wears_in_every_mode() {
+    use kettle_config::ThemeMode;
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config::default();
+    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    assert!(cfg.theme_schedule.is_some());
+    for mode in [
+        ThemeMode::Explicit,
+        ThemeMode::Light,
+        ThemeMode::Dark,
+        ThemeMode::Auto,
+    ] {
+        cfg.theme_mode = mode;
+        for (dark, key, slot) in [
+            (false, "light-theme", ThemeSlot::Light),
+            (true, "dark-theme", ThemeSlot::Dark),
+        ] {
+            assert_eq!(super::theme_pick_key(&cfg, Some(dark)), key, "{mode:?}");
+            let picker = state("", 0, "TokyoNight Night");
+            let save = super::theme_picker_save_key(Some(&picker), key);
+            assert_eq!(save, key, "{mode:?}");
+            assert_eq!(
+                super::theme_commit_plan(&picker, &cfg, Some(dark)),
+                super::ThemeCommitPlan {
+                    key,
+                    restore_active: false
+                },
+                "{mode:?}"
+            );
+            assert_eq!(
+                super::theme_picker_enter_hint(save, key),
+                kettle_i18n::Text::PickerHintKeep
+            );
+            let footer = super::theme_picker_footer(&picker, &cfg, save, &EN);
+            assert_eq!(footer.editing, Some(slot), "{mode:?}");
+            let slots = kettle_render::theme_footer_slots(&footer, &EN);
+            assert_eq!(slots.len(), 2);
+            for (side, _, checked) in slots {
+                assert_eq!(checked, side == slot, "{mode:?} {side:?}");
+            }
+            // The other side, chosen on the status line, saves its own key
+            // and puts the window back on the side the schedule wears.
+            let mut other = picker.clone();
+            other.slot = Some(match slot {
+                ThemeSlot::Dark => ThemeSlot::Light,
+                ThemeSlot::Light => ThemeSlot::Dark,
+            });
+            let plan = super::theme_commit_plan(&other, &cfg, Some(dark));
+            assert_ne!(plan.key, key, "{mode:?}");
+            assert_ne!(plan.key, "theme", "{mode:?}");
+            assert!(plan.restore_active, "{mode:?}");
+        }
+    }
+}
+
 #[test]
 fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
     for tr in [&EN, &ES] {
