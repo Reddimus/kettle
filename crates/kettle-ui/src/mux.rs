@@ -1305,6 +1305,8 @@ impl Pane {
     fn record_user_input(&self, result: PaneInputResult, nonempty: bool) {
         if result.is_queued() && nonempty {
             self.user_input_generation.fetch_add(1, Ordering::Relaxed);
+            // Lock-free: the reader thread applies it under the terminal lock.
+            self.term.note_restore_guard_user_input();
         }
     }
 
@@ -11614,7 +11616,7 @@ mod grapheme_config_tests;
 mod restore_content_tests {
     use super::*;
     use crate::session_content::PaneContent;
-    use kettle_core::{Column, Line, Point};
+    use kettle_core::{Column, Dimensions, Line, Point};
 
     fn saved_session() -> Session {
         Session {
@@ -11688,6 +11690,115 @@ mod restore_content_tests {
         };
         let saved = mux.snapshot_content(&allowed, &mut budget);
         assert!(!saved[0][0].lines.is_empty());
+    }
+
+    /// A restored pane whose child switches its tty to raw mode, enables
+    /// focus reports, prints `ready`, reads three bytes, then clears the way
+    /// `tput clear` does and draws a prompt.
+    fn restored_pane_waiting_for_input() -> Mux {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let script = "stty -icanon -echo min 1; printf '\\033[?1004hready'; \
+                      dd bs=1 count=3 >/dev/null 2>&1; \
+                      printf '\\033[H\\033[2Jprompt$ '; read wait";
+        let session = Session {
+            tabs: vec![STab {
+                root: SNode::Leaf {
+                    cwd: None,
+                    cmd: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                    group: None,
+                },
+                focus: 0,
+                title_override: None,
+                zoomed: false,
+            }],
+            ..Session::default()
+        };
+        let content = vec![vec![PaneContent {
+            remote: false,
+            lines: vec![("old content".into(), false, vec![])],
+        }]];
+        let mut mux = Mux::new();
+        let outcome = mux.restore_geometry_with_content(
+            &session,
+            &cfg,
+            &[],
+            &|| Arc::new(|| {}),
+            &content,
+            "divider",
+        );
+        assert!(outcome.restored_any);
+        let pane = mux.panes.values().next().unwrap();
+        assert!(pane.term.restore_clear_guard_armed());
+        wait_for_first_char(pane, 2, 'r');
+        mux
+    }
+
+    fn wait_for_first_char(pane: &Pane, row: i32, expected: char) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pane.term.term.lock().unwrap().grid()[Point::new(Line(row), Column(0))].c != expected
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "row {row} never started with {expected:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The writer's bytes reach the child, which then clears. User input
+    /// disarms the guard, so the clear behaves as it always has: the prompt
+    /// lands on the top row and the restored rows go to history.
+    fn assert_user_input_disarms(write: impl FnOnce(&Pane) -> PaneInputResult) {
+        let mux = restored_pane_waiting_for_input();
+        let pane = mux.panes.values().next().unwrap();
+        assert_eq!(write(pane), PaneInputResult::Queued);
+        wait_for_first_char(pane, 0, 'p');
+        let term = pane.term.term.lock().unwrap();
+        assert_eq!(term.history_size(), 3);
+        assert!(!term.restore_clear_guard_armed());
+    }
+
+    #[test]
+    fn typed_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_input(b"abc"));
+    }
+
+    #[test]
+    fn shared_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_input_shared(Arc::from(&b"abc"[..])));
+    }
+
+    #[test]
+    fn key_batches_disarm_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_key_inputs(&[b"a".to_vec(), b"bc".to_vec()]));
+    }
+
+    #[test]
+    fn pointer_input_disarms_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_pointer_input(b"abc"));
+    }
+
+    #[test]
+    fn mouse_releases_disarm_the_restore_clear_guard() {
+        assert_user_input_disarms(|pane| pane.feed_mouse_release(b"abc"));
+    }
+
+    /// Focus reports are Kettle's, not the user's: the child's clear after
+    /// one still keeps the restored rows above the prompt.
+    #[test]
+    fn focus_reports_leave_the_restore_clear_guard_armed() {
+        let mux = restored_pane_waiting_for_input();
+        let pane = mux.panes.values().next().unwrap();
+        assert_eq!(pane.feed_focus_report(true), PaneInputResult::Queued);
+        wait_for_first_char(pane, 2, 'p');
+        let term = pane.term.term.lock().unwrap();
+        assert_eq!(term.grid()[Point::new(Line(0), Column(0))].c, 'o');
+        assert_eq!(term.grid()[Point::new(Line(1), Column(0))].c, 'd');
+        assert_eq!(term.history_size(), 0);
     }
 
     #[test]
