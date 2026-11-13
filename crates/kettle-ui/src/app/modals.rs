@@ -3629,7 +3629,9 @@ pub(super) fn confirmation_button_action(
 
 /// The selection a vi-mode visual key makes: `v` by character, `V` by line
 /// and Ctrl-v a block, as in Vim. `ch` is the key's accepted text, which is
-/// `'\0'` while Ctrl is held, so Ctrl-v is read from the key itself.
+/// `'\0'` while Ctrl is held, so Ctrl-v is read from the key itself, in
+/// either case for Caps Lock. Ctrl+Shift+V, the Linux and Windows paste
+/// chord, is not a block key.
 pub(super) fn vi_visual_kind(
     key: &Key,
     ch: char,
@@ -3642,6 +3644,7 @@ pub(super) fn vi_visual_kind(
         _ => {}
     }
     let ctrl_v = mods.control_key()
+        && !mods.shift_key()
         && !mods.alt_key()
         && !mods.super_key()
         && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("v") || c == "\u{16}");

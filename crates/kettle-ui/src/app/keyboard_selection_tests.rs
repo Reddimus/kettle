@@ -99,6 +99,22 @@ fn vi_visual_keys_select_by_character_line_and_block() {
         &key("V"),
         false
     ));
+    // Caps Lock reports Ctrl-v's key in upper case.
+    assert_eq!(
+        kind(&key("V"), '\0', ModifiersState::CONTROL),
+        name(SelectionType::Block)
+    );
+    // Ctrl+Shift+V is the Linux and Windows paste chord, not a block key.
+    for ctrl_shift_v in [key("V"), key("v")] {
+        assert_eq!(
+            kind(
+                &ctrl_shift_v,
+                '\0',
+                ModifiersState::CONTROL | ModifiersState::SHIFT
+            ),
+            None
+        );
+    }
     for mods in [
         ModifiersState::CONTROL | ModifiersState::ALT,
         ModifiersState::CONTROL | ModifiersState::SUPER,
