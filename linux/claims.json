@@ -258,7 +258,7 @@
     "label": "no chip"
    }
   ],
-  "objective_basis": "RESIZE_OVERLAY_DURATION = 750 ms in crates/kettle-ui/src/app/layout.rs at e58e367b9 and a354c472d. Receipts, old: F11 at 1794540687.138, capture 690.411 (3.27 s); F11 692.496, capture 695.78 (3.28 s). New: 1794537164.155 to 168.114 (3.96 s); 170.445 to 173.893 (3.45 s). Old chip x763-836, y485-514 (C02-fullscreen) and y518-548 (C02-windowed). New: 0 non-background pixels in x600-999, y400-599 in both captures.",
+  "objective_basis": "RESIZE_OVERLAY_DURATION = 750 ms in crates/kettle-ui/src/app/layout.rs at e58e367b9 and a8dd0f66a. Receipts, old: F11 at 1794540687.138, capture 690.411 (3.27 s); F11 692.496, capture 695.78 (3.28 s). New: 1794550301.995 to 305.992 (4.00 s); 307.606 to 312.111 (4.51 s). Old chip x763-836, y485-514 (C02-fullscreen) and y518-548 (C02-windowed). New: 0 non-background pixels in x600-999, y400-599 in both captures.",
   "kind": "measured"
  },
  {
@@ -667,7 +667,7 @@
   "id": "c05-match-highlight",
   "category": "C05",
   "title": "Palette highlights the characters that match the query",
-  "caption": "With 'split' typed, 5.9.0 drew every result in plain text. 6.0.0 draws the matched characters, such as 'Split' and 'splits', in the accent colour, at 7.39:1 on unselected rows.",
+  "caption": "With 'split' typed, 5.9.0 drew every result in plain text. 6.0.0 draws the matched characters, such as 'Split' and 'splits', in the accent colour, at 7.39:1 on unselected rows and 4.51:1 on the selected row.",
   "old": "C05-palette-split.png",
   "new": "C05-palette-split.png",
   "crop": null,
@@ -696,7 +696,7 @@
     "label": "No match marking"
    }
   ],
-  "objective_basis": "New list: 445 pixels in accent (187,154,247); 'Split' in row 2 has 38 full-accent pixels while 'up' stays (192,202,245). Old list: 'Split' and 'up' are both (192,202,245); the 26 accent pixels in the old list are the selection bar and scroll arrow, none in label text. (187,154,247) on (26,27,38) = 7.39:1.",
+  "objective_basis": "New list: 445 pixels in accent (187,154,247); 'Split' in row 2 has 38 full-accent pixels while 'up' stays (192,202,245). Old list: 'Split' and 'up' are both (192,202,245); the 26 accent pixels in the old list are the selection bar and scroll arrow, none in label text. (187,154,247) on (26,27,38) = 7.39:1. Selected row: 'Split' in (207,184,249) on the selection fill (88,73,119) = 4.51:1.",
   "kind": "measured"
  },
  {
@@ -1017,9 +1017,9 @@
     "on": "new",
     "shape": "highlight",
     "xy": [
-     859,
+     908,
      864,
-     80,
+     84,
      18
     ],
     "label": "Del reset hint"
@@ -1036,7 +1036,7 @@
     "label": "No reset hint"
    }
   ],
-  "objective_basis": "Old footer: '↑↓/jk field  ↔/hl change  g/G ends  Tab category  Esc close'. New footer: '↑↓/jk field ↔/hl change g/G ends Del reset Tab category Esc close'. Both at 4.54:1. CHANGELOG: 'Delete or Backspace resets the highlighted setting to its default, and the footer says so.'",
+  "objective_basis": "Old footer: '↑↓/jk field  ↔/hl change  g/G ends  Tab category  Esc close'. New footer: '↑↓/jk field · ↔/hl change · g/G ends · Del reset · Tab category · Esc close'. Both at 4.54:1. CHANGELOG: 'Delete or Backspace resets the highlighted setting to its default, and the footer says so.'",
   "kind": "text-receipt"
  },
  {
@@ -2642,7 +2642,7 @@
     "label": "alpha pasted"
    }
   ],
-  "objective_basis": "Prompt text after identical receipts (dclick at (0.02,0.5), middle at (0.5,0.5)). 5.9.0 shows only the cursor block at x156-163; 6.0.0 shows 'alpha' at x172-221. The 6.0.0 CHANGELOG says copy and paste of text work in Wayland sessions without XWayland. In a354c472d, paste_primary falls back to the clipboard when PRIMARY is empty. In e58e367b9, OSC 52 is advertised only when clipboard.is_some(), and the 5.9.0 C17 DA1 reply lacks 52, which confirms there was no clipboard.",
+  "objective_basis": "Prompt text after identical receipts (dclick at (0.02,0.5), middle at (0.5,0.5)). 5.9.0 shows only the cursor block at x156-163; 6.0.0 shows 'alpha' at x172-221. The 6.0.0 CHANGELOG says copy and paste of text work in Wayland sessions without XWayland. In a8dd0f66a, paste_primary falls back to the clipboard when PRIMARY is empty. In e58e367b9, OSC 52 is advertised only when clipboard.is_some(), and the 5.9.0 C17 DA1 reply lacks 52, which confirms there was no clipboard.",
   "kind": "visual"
  },
  {
@@ -2868,7 +2868,7 @@
     "label": "dated divider"
    }
   ],
-  "objective_basis": "Text present vs absent: 'restore-marker alpha' and 'restore-marker beta' (block x12-582, y91-158) appear in 6.0.0. They are absent from 5.9.0's C19-after-restart and C19-after-restart-history (after shift+Prior). Divider 'Restored · 2026-11-12 18:53:53' at x13-263, y164-177 is (192,202,245), 10.58:1. Restored text is drawn at (109,115,142), 3.65:1. The 6.0.0 CHANGELOG says session restore brings back output and that Linux restore-session now defaults to auto.",
+  "objective_basis": "Text present vs absent: 'restore-marker alpha' and 'restore-marker beta' (block x12-582, y91-158) appear in 6.0.0. They are absent from 5.9.0's C19-after-restart and C19-after-restart-history (after shift+Prior). Divider 'Restored · 2026-11-12 22:31:59' at x13-263, y164-177 is (192,202,245), 10.58:1. Restored text is drawn at (109,115,142), 3.65:1. The 6.0.0 CHANGELOG says session restore brings back output and that Linux restore-session now defaults to auto.",
   "kind": "visual"
  },
  {
