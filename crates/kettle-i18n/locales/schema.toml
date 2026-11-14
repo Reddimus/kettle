@@ -1139,6 +1139,17 @@ context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the command p
 [messages.picker_placeholder_shortcuts]
 context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the empty search field of the keyboard-shortcuts list (the command palette showing only commands with a shortcut). Replaced by the query once anything is typed; left out in a window too narrow for all of it."
 
+[messages.picker_ssh_config_source]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: hint beside an SSH launcher row imported from the user's OpenSSH config. path is the fixed display path ~/.ssh/config (~\\.ssh\\config on Windows), verbatim; never the expanded home folder. Lowercase."
+args = [{ name = "path", type = "str" }]
+
+[messages.picker_ssh_connect_typed]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: SSH launcher row that connects to exactly what the user typed, shown below the matching hosts. target is the typed text, verbatim. Keep the straight quotes around it."
+args = [{ name = "target", type = "str" }]
+
+[messages.picker_ssh_invalid_target]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: disabled SSH launcher row when the typed target cannot be passed to ssh: it starts with a hyphen or contains a space. Keep the hyphen."
+
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
 
