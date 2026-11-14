@@ -1042,6 +1042,12 @@ impl App {
             UserEvent::MenuCommand(action) => {
                 self.handle_action(ws, action, _el);
             }
+            #[cfg(target_os = "macos")]
+            UserEvent::MenuWindow(command) => {
+                if let Some(window) = &ws.window {
+                    crate::macos_menu::perform(command, window);
+                }
+            }
             // Every Dock row maps onto an action kettle already has, so this
             // reuses the keybind path wholesale — including NewWindow's
             // fall-back to a new tab when a window cannot be created.

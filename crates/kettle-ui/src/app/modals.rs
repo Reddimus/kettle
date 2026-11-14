@@ -96,6 +96,11 @@ pub(super) fn edit_modal_text(
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        // The title bar's Settings gear is outside the Settings panel, but a
+        // press there arms the gear rather than closing Settings.
+        if self.press_settings_gear_over_settings(ws, button) {
+            return true;
+        }
         let Some((kind, inside)) = self.modal_press_target(ws) else {
             return false;
         };
@@ -308,6 +313,7 @@ impl App {
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
             picker_header: picker,
+            placeholder: picker_placeholder(ws, &self.ui_text),
             text,
             cursor_byte,
             selection,
@@ -1683,10 +1689,13 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(
+        let cmds = palette_view_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
             &ws.palette_profiles,
+            self.cfg.broadcast_default,
+            &self.cfg.keybinds,
+            ws.palette_bound_only,
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -1713,8 +1722,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank_entries(q, &cmds, &self.ui_text);
-                let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
+                let action = palette_enter_action(q, *sel, &cmds, &self.ui_text);
                 ws.palette_input = None;
                 if let Some(a) = action {
                     self.handle_action(ws, a, event_loop);
@@ -3485,6 +3493,22 @@ pub(super) fn project_modal_editor(
         selection = None;
     }
     (text, cursor, selection)
+}
+
+/// What the open picker's empty query field says it is for: the command
+/// palette's placeholder, or nothing for the other pickers. The renderer
+/// fits and paints this same translated string.
+pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator) -> String {
+    if ws.palette_input.is_some() {
+        tr.text(if ws.palette_bound_only {
+            kettle_i18n::Text::PickerPlaceholderShortcuts
+        } else {
+            kettle_i18n::Text::PickerPlaceholderCommand
+        })
+        .to_string()
+    } else {
+        String::new()
+    }
 }
 
 pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {

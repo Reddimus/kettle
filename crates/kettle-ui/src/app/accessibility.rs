@@ -187,6 +187,11 @@ impl App {
                 children.push(persistent_notice_id(pane, 0));
                 nodes.extend(persistent_notice_nodes(pane, &toast));
             }
+            if let Some(label) = overlay.resize_overlay_text.as_deref() {
+                let (id, node) = font_size_chip_node(label);
+                children.push(id);
+                nodes.push((id, node));
+            }
         }
         ws.accessibility_text_rows
             .borrow_mut()
@@ -1046,6 +1051,7 @@ impl App {
                 }
             }
         }
+        overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
@@ -1321,8 +1327,8 @@ impl App {
                     .find(|b| window_control_accessibility_id(b.action) == request.target_node)
                 {
                     self.activate_window_control(ws, control.action, event_loop);
-                } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
-                    self.handle_action(ws, Action::NewTab, event_loop);
+                } else if let Some(action) = tab_button_action(request.target_node) {
+                    self.handle_action(ws, action, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -1717,6 +1723,33 @@ const ACCESSIBILITY_UPDATE_STATUS_ID: NodeId = NodeId((1 << 59) + 2);
 pub(super) const ACCESSIBILITY_UPDATE_DETAILS_ID: NodeId = NodeId((1 << 59) + 3);
 pub(super) const ACCESSIBILITY_UPDATE_DISMISS_ID: NodeId = NodeId((1 << 59) + 4);
 pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+/// The font size chip's live region.
+const ACCESSIBILITY_FONT_SIZE_ID: NodeId = NodeId((1 << 59) + 5);
+
+/// The live regions an `Overlay` brings to the tree on its own: the font
+/// size chip's comes and goes, and changes text, with no other change to the
+/// tree, so the tree must rebuild when it does.
+pub(super) fn overlay_live_region_key(overlay: &Overlay) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    overlay.resize_overlay_text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A polite live region that says what the font size chip shows, so a
+/// screen reader hears the new size and grid as the chip appears.
+///
+/// Screen readers speak a live region when its content changes. A chip
+/// shown again with the same caption while this node is still in the tree
+/// (another step at the 5 or 72 size limit, say) leaves its label as it was,
+/// so it is not spoken again; the painted chip still shows. That is accepted:
+/// the size did not change. Not yet checked live with VoiceOver or Orca.
+pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
+    let mut status = Node::new(Role::Status);
+    status.set_label(label.to_owned());
+    status.set_live(accesskit::Live::Polite);
+    (ACCESSIBILITY_FONT_SIZE_ID, status)
+}
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
 /// stays below this bit; never by its nonce.
@@ -2215,6 +2248,10 @@ fn push_picker_accessibility(
     let mut input = Node::new(Role::TextInput);
     if let Some(field) = field {
         input.set_bounds(bounds(field.rect));
+        // What the painted placeholder says; never the field's value.
+        if !field.placeholder.is_empty() {
+            input.set_placeholder(field.placeholder.clone());
+        }
     }
     input.set_label(label);
     input.set_value(query);
@@ -3297,6 +3334,21 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+/// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
+const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
+
+/// The action a screen reader's click on one of the strip's own buttons
+/// runs: New tab opens a tab, and the macOS title bar's gear opens Settings
+/// as Cmd+, does.
+pub(super) fn tab_button_action(node: NodeId) -> Option<Action> {
+    if node == ACCESSIBILITY_TAB_NEW_ID {
+        Some(Action::NewTab)
+    } else if node == ACCESSIBILITY_TAB_SETTINGS_ID {
+        Some(Action::OpenSettings)
+    } else {
+        None
+    }
+}
 
 pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
     NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))
@@ -3370,6 +3422,11 @@ pub(super) fn tab_accessibility_projection(
             } else {
                 kettle_i18n::Text::A11yMainMenu
             }),
+        ),
+        (
+            ACCESSIBILITY_TAB_SETTINGS_ID,
+            bar.settings,
+            tr.text(kettle_i18n::Text::SettingsA11yTitle),
         ),
     ] {
         if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {

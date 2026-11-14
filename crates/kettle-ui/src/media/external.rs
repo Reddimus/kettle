@@ -295,6 +295,12 @@ impl PrivateCopies {
         Self::of(PastedImages::new(kind))
     }
 
+    /// Copies kept in `store`, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn in_store(store: PastedImages) -> Self {
+        Self::of(store)
+    }
+
     fn of(store: PastedImages) -> Self {
         Self {
             store: Mutex::new(store),

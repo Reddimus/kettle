@@ -26,6 +26,28 @@ images, hyperlinks and control sequences are not restored. Programs themselves
 start again using the existing layout restore behavior. Saved output is never
 sent as shell input.
 
+A shell that clears the screen at startup, for example with `clear` in
+`.bashrc` or `.zshrc`, no longer hides the restored rows on macOS and Linux.
+Kettle treats the first full-screen clear (`ESC[2J`) sent from the top-left
+corner as clearing only the rows below the divider, so the restored rows stay
+on screen with the prompt under them. This covers `tput clear` and the
+system `clear` on both platforms, whichever order it sends the clear-screen
+and clear-scrollback sequences in. The clear-scrollback part (`ESC[3J`) still
+removes restored rows that had already scrolled above the screen.
+
+This applies once, before anything else happens in the pane. A clear
+afterwards works as usual, and so does the first one if the shell has
+already drawn a prompt (with shell integration), printed enough to scroll,
+switched to the alternate screen, reset the terminal, or received a key
+press, paste or mouse report, or if the pane was resized after the shell had
+printed something. Windows is unchanged: there a startup clear still pushes
+the restored rows into scrollback.
+
+One case can lose restored text. A startup program that clears and then
+draws at absolute screen positions without using the alternate screen draws
+over restored rows that would otherwise have gone to scrollback. Set `restore-scrollback-lines = 0` to
+turn restored output off entirely.
+
 Remote/SSH/container output is **excluded by default**: server output may be
 sensitive and should not silently be copied onto local disk. Enable
 `restore-scrollback-remote = true` to include panes Kettle detects as remote.

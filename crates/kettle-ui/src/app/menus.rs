@@ -324,7 +324,7 @@ impl App {
             .unwrap_or(false);
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
-        vec![
+        let mut items = vec![
             ContextMenuItem::Item {
                 label: tr.text(T::MenuCopy),
                 action: Action::Copy,
@@ -462,7 +462,15 @@ impl App {
                 action: Action::UngroupTab,
                 enabled: has_group,
             },
-        ]
+        ];
+        // The Broadcast Input rows, as radio rows; `grouped_terminal_menu`
+        // gathers them into their own submenu.
+        let (broadcast, pane_group) = BroadcastKind::of_window(ws);
+        items.extend(
+            broadcast_rows(self.cfg.broadcast_default, broadcast, pane_group)
+                .map(|row| broadcast_menu_item(&row, &tr)),
+        );
+        items
     }
 
     /// Terminator parity, `custom_commands.py`: append every
@@ -877,7 +885,7 @@ impl App {
 
     /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
-    /// palette / About) behind a separator. Pure over the shell list so the
+    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure over the shell list so the
     /// menu shape is unit-testable.
     pub(super) fn new_tab_menu_items(
         shells: &[kettle_core::term::ShellChoice],
@@ -899,7 +907,7 @@ impl App {
             .collect();
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Submenu {
-            label: tr.text(T::MenuNewTabProfile).to_string(),
+            label: tr.text(T::MenuNewWindowProfile).to_string(),
             items: profile_launch_entries(profiles, tr)
                 .into_iter()
                 .map(|(label, action)| ContextMenuItem::DynamicItem {
@@ -927,11 +935,17 @@ impl App {
             action: Action::OpenSettings,
             enabled: true,
         });
-        items.push(ContextMenuItem::Item {
-            label: tr.text(T::MenuCommandPalette),
-            action: Action::CommandPalette,
-            enabled: true,
-        });
+        for (label, action) in [
+            (T::MenuCommandPalette, Action::CommandPalette),
+            (T::MenuKeyboardShortcuts, Action::ShowKeybinds),
+            (T::MenuHelp, Action::ShowHelp),
+        ] {
+            items.push(ContextMenuItem::Item {
+                label: tr.text(label),
+                action,
+                enabled: true,
+            });
+        }
         items.push(ContextMenuItem::Item {
             label: tr.text(T::MenuAbout),
             action: Action::About,
@@ -2977,7 +2991,7 @@ pub(super) fn grouped_terminal_menu(
 ) -> Vec<ContextMenuItem> {
     use kettle_i18n::Text as T;
     let mut primary = Vec::new();
-    let mut groups: [Vec<ContextMenuItem>; 8] = std::array::from_fn(|_| Vec::new());
+    let mut groups: [Vec<ContextMenuItem>; 9] = std::array::from_fn(|_| Vec::new());
     for item in items {
         let group = match &item {
             ContextMenuItem::Separator => continue,
@@ -3007,12 +3021,17 @@ pub(super) fn grouped_terminal_menu(
                         Some(4)
                     }
                     Action::CreateGroup | Action::GroupTab | Action::UngroupTab => Some(5),
-                    Action::OpenThemePicker | Action::OpenSettings => Some(6),
-                    _ => Some(7),
+                    Action::ToggleBroadcastOff
+                    | Action::ToggleBroadcastAll
+                    | Action::ToggleBroadcastPanesInTab
+                    | Action::ToggleBroadcastWindow
+                    | Action::ToggleBroadcastGroup => Some(6),
+                    Action::OpenThemePicker | Action::OpenSettings => Some(7),
+                    _ => Some(8),
                 }
             }
-            ContextMenuItem::Submenu { .. } => Some(6),
-            _ => Some(7),
+            ContextMenuItem::Submenu { .. } => Some(7),
+            _ => Some(8),
         };
         if let Some(group) = group {
             groups[group].push(item);
@@ -3064,6 +3083,7 @@ pub(super) fn grouped_terminal_menu(
         T::MenuCategoryWindow,
         T::MenuCategoryTitle,
         T::MenuCategoryGroup,
+        T::MenuBroadcastInput,
         T::MenuCategoryAppearance,
         T::MenuCategoryCommands,
     ]
@@ -3419,6 +3439,26 @@ pub(super) fn read_only_menu_item(
         tr.text(kettle_i18n::Text::MenuReadOnly),
         Action::TogglePaneReadOnly,
     )
+}
+
+/// A Broadcast Input row as a radio row. The right-click menu hides an
+/// unavailable row (`filter_disabled`), as it does every other: the Group row
+/// goes only while it is unchecked and the focused pane has no group, so the
+/// checked row always stays, and the Group category beside it offers Set
+/// Group…. The macOS menu bar greys the row instead, as native menus do.
+pub(super) fn broadcast_menu_item(
+    row: &BroadcastRow,
+    tr: &kettle_i18n::Translator,
+) -> ContextMenuItem {
+    let mut item = toggle_menu_item(
+        kettle_render::MenuToggle::Radio(row.checked),
+        tr.text(row.kind.text()),
+        row.action.clone(),
+    );
+    if let ContextMenuItem::DynamicItem { enabled, .. } = &mut item {
+        *enabled = row.enabled;
+    }
+    item
 }
 
 /// A check box or radio row. The state travels as data for screen readers,

@@ -740,6 +740,56 @@ pub(crate) fn starts_right_to_left(text: &str) -> bool {
 /// Opacity of a focused search button's accent fill.
 pub(crate) const SEARCH_FOCUSED_FILL_ALPHA: f32 = 0.92;
 
+/// The search bar's own layer: the theme's grey at 0.98 over the terminal.
+/// Over a translucent terminal it is painted opaque instead, in the colour it
+/// has over the theme's own background, so the labels resolved against that
+/// colour read the same whatever is behind the window.
+pub(crate) fn search_bar_layer(
+    theme: &kettle_config::Theme,
+    translucent: bool,
+    linear: bool,
+    colors: &mut super::chrome::Colors,
+) -> (kettle_config::Rgb, f64) {
+    if translucent {
+        (
+            colors.surface(theme.background, theme.palette[8], 0.98, linear),
+            1.0,
+        )
+    } else {
+        (theme.palette[8], 0.98)
+    }
+}
+
+/// What a search-bar segment's text sits on: the bar, and over it the editor
+/// well or a button's fill and any hover or press `tint`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_segment_fill(
+    theme: &kettle_config::Theme,
+    accent: kettle_config::Rgb,
+    control: Option<SearchControl>,
+    focused: SearchControl,
+    tint: Option<(kettle_config::Rgb, f32)>,
+    linear: bool,
+    colors: &mut super::chrome::Colors,
+) -> kettle_config::Rgb {
+    let bar = colors.surface(theme.background, theme.palette[8], 0.98, linear);
+    match control {
+        Some(SearchControl::Editor) => colors.surface(bar, theme.background, 0.72, linear),
+        Some(control) => {
+            let (fill, alpha) = if focused == control {
+                (accent, SEARCH_FOCUSED_FILL_ALPHA)
+            } else {
+                (theme.background, 0.28)
+            };
+            let fill = colors.surface(bar, fill, f64::from(alpha), linear);
+            tint.map_or(fill, |(tint, alpha)| {
+                colors.surface(fill, tint, f64::from(alpha), linear)
+            })
+        }
+        None => bar,
+    }
+}
+
 /// The label color for the focused search button.
 ///
 /// The button sits on the accent, which the theme foreground was never chosen

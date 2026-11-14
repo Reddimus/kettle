@@ -103,15 +103,17 @@ pub(crate) fn profile_launch_entries(
         .collect()
 }
 
-/// Commands and the profiles captured when the palette opened, followed by
-/// release notes and Dismiss while an update notice is active.
+/// Commands, with the broadcast rows `broadcast-default` picks, and the
+/// profiles captured when the palette opened, followed by release notes and
+/// Dismiss while an update notice is active.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
     profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
     use kettle_config::palette::PaletteLabel;
-    let mut entries: Vec<_> = kettle_config::palette::commands()
+    let mut entries: Vec<_> = kettle_config::palette::commands_for(broadcast_default)
         .into_iter()
         .map(|(label, action)| (PaletteLabel::Text(label), action))
         .collect();
@@ -133,6 +135,42 @@ pub(super) fn palette_entries(
     entries
 }
 
+/// The rows the open palette ranks: every entry, or with `bound_only` (the
+/// keyboard-shortcut list) only those that have a shortcut to show. The
+/// painter, key handling, pointer, accessibility and control paths all take
+/// their rows from here, so a selection index means the same row in each.
+pub(super) fn palette_view_entries(
+    notice: Option<&crate::update_notice::Notice>,
+    tr: &kettle_i18n::Translator,
+    profiles: &[String],
+    broadcast_default: kettle_config::BroadcastDefault,
+    bindings: &Bindings,
+    bound_only: bool,
+) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
+    let mut entries = palette_entries(notice, tr, profiles, broadcast_default);
+    if bound_only {
+        entries.retain(|(_, action)| {
+            kettle_config::keybinds::ui_hint_label(bindings, action)
+                .is_some_and(|hint| !hint.is_empty())
+        });
+    }
+    entries
+}
+
+/// The command Enter runs: the one ranked at `selected` among `entries`, which
+/// is the row the painter shows there. `None` past the last match.
+pub(super) fn palette_enter_action(
+    query: &str,
+    selected: usize,
+    entries: &[(kettle_config::palette::PaletteLabel, Action)],
+    tr: &kettle_i18n::Translator,
+) -> Option<Action> {
+    kettle_config::palette::rank_entries(query, entries, tr)
+        .get(selected)
+        .map(|&index| entries[index].1.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn command_picker_list(
     query: &str,
     selected: usize,
@@ -140,21 +178,26 @@ pub(super) fn command_picker_list(
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
     profiles: &[String],
+    bound_only: bool,
+    broadcast_default: kettle_config::BroadcastDefault,
 ) -> PickerList {
-    let commands = palette_entries(notice, tr, profiles);
-    let ranked = kettle_config::palette::rank_entries(query, &commands, tr);
+    let commands = palette_view_entries(
+        notice,
+        tr,
+        profiles,
+        broadcast_default,
+        bindings,
+        bound_only,
+    );
+    let ranked = kettle_config::palette::rank_matches(query, &commands, tr);
     let rows = ranked
-        .iter()
-        .map(|&index| {
-            let (label, action) = &commands[index];
+        .into_iter()
+        .map(|entry| {
+            let (label, action) = &commands[entry.index];
             ContextMenuRow {
                 toggle: None,
                 swatches: None,
-                matched_chars: kettle_config::palette::matched_char_positions(
-                    query,
-                    label.shown(tr),
-                )
-                .map(|positions| {
+                matched_chars: entry.matched_chars.map(|positions| {
                     positions
                         .into_iter()
                         .map(|index| index..index + 1)
@@ -606,7 +649,10 @@ pub(super) fn picker_card_geometry(
     let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
     let y = top_chrome + top;
     let available = sh - bottom - y - header_h;
-    let rows_h = (row_count.min(PICKER_MAX_VISIBLE_ROWS) as f32 * row_h).min(available);
+    // Whole rows only: with no arrow strips, a part row of slack at the
+    // bottom would be blank panel that neither paints nor takes a press.
+    let fit = ((available / row_h).floor() as usize).max(1);
+    let rows_h = row_count.min(PICKER_MAX_VISIBLE_ROWS).min(fit) as f32 * row_h;
     Some(PickerGeometry {
         header: (x, y, width, header_h),
         rows: (x, y + header_h, width, rows_h),
@@ -641,11 +687,7 @@ pub(super) fn picker_context_menu(
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
-    let (_, content_h) = kettle_render::menu::scroll_content(
-        row_height * list.rows.len() as f32,
-        height,
-        row_height,
-    );
+    let (_, content_h) = kettle_render::menu::picker_scroll_content(height);
     let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
     Some(ContextMenu {
         anchor: (x, y),
@@ -695,6 +737,8 @@ pub(super) fn open_picker_list(
             tr,
             notice,
             &ws.palette_profiles,
+            ws.palette_bound_only,
+            cfg.broadcast_default,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list(
@@ -721,11 +765,7 @@ fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Opt
     let (px, py) = (cursor.0 as f32, cursor.1 as f32);
     let (x, y) = menu.anchor;
     let row_h = kettle_render::menu::row_height(cell_h);
-    let (inset, content_h) = kettle_render::menu::scroll_content(
-        menu.rows.len() as f32 * row_h,
-        menu.panel_h_clamped,
-        row_h,
-    );
+    let (inset, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     if px < x || px >= x + menu.panel_w_clamped || py < y + inset || py >= y + inset + content_h {
         return None;
     }
@@ -753,18 +793,16 @@ pub(super) fn apply_picker_pointer(
         return false;
     }
     let row_h = kettle_render::menu::row_height(cell_h);
-    let (inset, content_h) =
-        kettle_render::menu::scroll_content(menu.rows.len() as f32 * row_h, h, row_h);
+    let (_, content_h) = kettle_render::menu::picker_scroll_content(h);
     let selected = if matches!(event, PickerPointer::Press)
         && let Some(row) = picker_result_row(menu, cell_h, (ws.cursor.x, ws.cursor.y))
     {
         row
     } else {
-        let delta = match event {
-            PickerPointer::Wheel(delta) => delta,
-            _ if inset > 0.0 && py < y + inset => -1,
-            _ if inset > 0.0 && py >= y + inset + content_h => 1,
-            _ => return false,
+        // Pickers have no arrow strips at their cut edges; only the wheel
+        // scrolls them.
+        let PickerPointer::Wheel(delta) = event else {
+            return false;
         };
         let visible = ((content_h / row_h).floor() as usize)
             .max(1)

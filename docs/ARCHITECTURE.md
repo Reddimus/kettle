@@ -298,9 +298,22 @@ title editors, the search bar, the completion card, the paste receipts, the
 update toast, the screen-reader names, Kettle's desktop notifications, the
 macOS Dock menu and the macOS menu bar are on it. The menu bar is Kettle's own
 (`macos_menu`): a pure, portable model defines the translated Kettle, Shell,
-Edit, View and Window menus (the Window menu carries the tab commands: next,
-previous, rename, move left, right and to a new window), actions, separators,
-enabled state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding). AppKit installation replaces winit's startup menu on `resumed`
+Edit, View, Window and Help menus (the Window menu carries the tab commands: next,
+previous, rename, move left, right and to a new window; Help, registered with
+`setHelpMenu` so macOS adds its menu search field, holds Kettle Help and
+Keyboard Shortcuts; View's full-screen item and Window's Minimize, Zoom and
+Bring All to Front carry AppKit's own selectors, so the system adds no second
+full-screen item, and its title follows the focused window's state), actions, separators,
+enabled and checked state and live Cmd shortcut hints (the hint-mode entry also displays its Ctrl binding).
+The Shell menu's Broadcast Input submenu and the right-click menu's Broadcast
+Input category share one row table (`app::broadcast::broadcast_rows`): Off,
+Panes in This Tab, Panes in This Window and Panes in This Group, with the
+current scope checked. The rows run the existing toggles, so the checked row
+turns broadcast off, and the chord's action is the row for the scope it turns
+on, which puts its hint there. The Group row stays checked for any group
+target; when the focused pane is not in that group it runs
+`ToggleBroadcastOff`. The menu-bar snapshot holds a `Copy` `BroadcastKind`
+instead of the group's name. AppKit installation replaces winit's startup menu on `resumed`
 and reconciles it after focused-window dispatch and config reload, registering
 Services and the Windows menu each time. AppKit's automatic window tabbing is
 turned off before the event loop launches AppKit
@@ -313,7 +326,12 @@ Kettle equivalents are declined so the original event reaches winit's modal
 handlers, `resolve_keybind_action`, program-key yield rules and terminal writer,
 with its physical key, layout, repeat and release intact. Mouse menu choices
 send existing actions to the focused window through the event-loop proxy.
-Commands with no existing Kettle Action are omitted.
+Full screen, Minimize and Zoom go the same way, by mouse or key equivalent: a
+Kettle target answers `toggleFullScreen:`, `performMiniaturize:` and
+`performZoom:` and sends `ToggleFullscreen` or a winit minimize or zoom, since
+AppKit's own versions skip winit and do nothing on a borderless window.
+Minimize and Zoom are off in full screen. Other commands with no existing
+Kettle Action are omitted.
 The Linux desktop entry carries its
 Spanish beside its English; the CLI never takes a translator. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
@@ -453,6 +471,7 @@ using `use super::*;` to share the parent scope:
 | `keyboard`, `ime` | key encoding, bindings, program key ownership; composition and IME cursor geometry |
 | `pointer` | mouse reporting, wheel, selection, pane and split-divider dragging, cursor icons |
 | `actions` | action dispatch, pane/tab operations, scaled zoom and broadcast groups |
+| `broadcast` | the broadcast scope's one write path, its action transitions and the Broadcast Input menu rows |
 | `layout` | content bands, pane/grid geometry, resize and PTY pixel sizes |
 | `focus` | focus transitions, focus reports and completion cleanup |
 | `output` | PTY output and lifecycle drains, wake gates, output generations and per-window user events |
@@ -469,12 +488,28 @@ using `use super::*;` to share the parent scope:
 | `modals`, `pickers`, `hints`, `settings_text` | dialog ownership and input; picker projections; hint targets; translated settings notes |
 | `accessibility` | accessibility identifiers, projections, tree and actions |
 | `config_reload`, `sessions` | config watchers, reloads and themes; session save and restore |
+| `exit` | the once-only exit teardown, from `exiting` or after `run_app` |
 | `system_opener`, `update_toast` | bounded desktop launches; transient update notifications |
 
 Session saves pass their opt-in gate before snapshotting. One worker performs
 serialization, comparison and durable replacement with one replaceable pending
 snapshot; it holds no queue lock during filesystem work. Shutdown drains the
 latest snapshot after any write already in progress and waits for completion.
+
+A quit through AppKit's `terminate:` (Cmd+Q, the Dock's or app menu's Quit,
+logout, shutdown) never returns from `run_app`: winit calls
+`ApplicationHandler::exiting` and AppKit then calls `exit()`, which runs no
+destructor. So `exiting` hands a running recording its tail, saves the session
+once more through `save_session` and its gates when a window other than the
+quick terminal still has tabs, and runs the exit teardown. It first waits at
+most 300 ms for the recorder to write its tail, then deletes pasted screenshots
+and the image, document and video viewer copies, then waits at most 1.5 s for
+the session write (`SessionWriter::finish_timed`) and flushes notifications for
+at most 250 ms, so a stalled disk or a hung network home cannot hold a quit,
+logout or shutdown for more than about 2 s. A session write given up on leaves
+the previous file whole, because each write is an atomic replace. The same
+teardown runs after `run_app` returns; a flag makes the first call the only
+one.
 
 The `*_tests.rs` files sit next to their subsystems. `tests.rs` keeps shared
 fixtures and includes the tests split out of its original body, preserving their
@@ -1769,9 +1804,13 @@ click: context menus, the command palette, theme/layout pickers, SSH, title
 editing and quick-select hints. The command palette and theme, layout and SSH
 pickers share one top-centred rounded card below the top chrome. Its query header
 and results use one geometry for paint, pointer input, control diagnostics,
-AccessKit bounds and the IME caret. Command labels accent the characters matched
-by the same fuzzy matcher used for ranking; English alias matches in Spanish
-have no accent unless the displayed label also matches. The whole card counts
+AccessKit bounds and the IME caret. The fuzzy matcher scores each label by its
+best alignment, and while any row matches strongly (each scattered piece of
+the query starts a word, or a query of four or more characters runs
+contiguously, as `screen` does in `fullscreen`) the palette leaves
+out rows the query only lies scattered through. Command labels accent the
+characters of the alignment that ranked the row; English alias matches in
+Spanish have no accent unless the displayed label also matches. The whole card counts
 as inside. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
@@ -1856,7 +1895,16 @@ side and its line at the button's height, so a glyph stays centred and
 unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
 square (growing with the band height), a 4 pt
-inter-button gap, a 4 pt leading gap and an 8 pt outside margin. Titlebar height
+inter-button gap, a 4 pt leading gap and an 8 pt outside margin. In a macOS
+title bar `titlebar_settings_control` adds a Settings gear the size of `▾`, 8 pt
+before it, without moving `▾ +`; it shows only while the lane still keeps
+`tab-min-width` beside every control (never by tab count). The gear is drawn as
+alpha quads from `tab_strip::gear_mask`, not a font glyph, and opens Settings on
+a release over it. The gear takes its room from the right of the strip, so
+`centre_lone_titlebar_tab` narrows a lone tab evenly about the window centre,
+down to `tab-min-width`, rather than letting it slide off centre, and a
+torn-off tab is held in that same lone tab (`tear_off_destination_tab`, shared
+with the Wayland grip). Titlebar height
 is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
 clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
 band height. Tooltips use translated action names and the live keymap shortcut,
@@ -3795,12 +3843,16 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. The panel's
+with the highlighted row drawn as an inset rounded selection. A picker whose
+results overflow also gets a decorative scrollbar thumb, a rounded pill in the
+gap between the selection's right inset and the border, drawn after the
+selection; its rows fill the panel from the header down, since pickers scroll
+with the selection and the wheel and keep no arrow strips. The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
 `RoundedSurface` instances from `overlays::menu_level_surfaces`; separators,
-the picker's header divider and the scroll arrows stay flat quads. The scene
+the picker's header divider and a context menu's scroll arrows stay flat quads. The scene
 pass draws the levels root first, one layer each: the level's surfaces, its
 quads, its swatches, then its labels in a `TextRenderer` of its own
 (`menu_level_text`, ranges in `menu_level_draws`). A submenu therefore covers
@@ -3871,6 +3923,36 @@ their pane glyph directly. Only the focused blinking block uses the separate
 cursor-glyph renderer. Live cursor defaults and clipboard padding policy stay
 in the terminal engine; Kettle's bounded copy helper applies the same policy
 to manual copy, copy on selection and vi yank.
+
+Chrome text is different: Kettle chooses it, so it is held to its floors on
+screen. A surface left at alpha `a` shows its stored pixel plus `1 - a` of
+whatever is behind the window, which can be anything from black to white. The
+stored pixel is `a` times the colour with straight alpha (how macOS is
+presented) or on a plain target, and the encoding of `a` times its linear light
+when premultiplied on an sRGB target; `color::Backing` takes the darker over
+black and the lighter over white, so it covers every path. macOS shows a
+translucent window a few levels brighter at both ends than that, so there the
+backdrop is lifted by `color::MACOS_BACKDROP_LIFT`, derived from one
+dark-appearance capture in the 6.0.0 comparison; elsewhere
+`PLATFORM_BACKDROP_LIFT` is zero. `Colors::on` floors an ink chosen against
+the surface's own colour against both extremes, one 8-bit level wider each way
+for the GPU's and the window server's rounding. The ink stays on its side of
+the surface, so light text stays light. An opaque surface is unchanged, and an
+ink that already clears both extremes does not move; Linux's default 0.99
+window is translucent, so inks resolved exactly to the floor there move by up
+to 7 levels. The active horizontal tab is the terminal surface at the window's
+opacity. Where no ink can clear the text floor over that span,
+`chrome::text_surface_alpha` makes it more opaque, by at most
+`MAX_TEXT_SURFACE_RAISE` (0.1) and only over a solid background; over an image,
+starfield or transparent background, and past the cap, the text is best effort.
+At the default 0.86 that raises three mid-tone themes, five on macOS. The search
+bar, which was 98% opaque, is drawn opaque over a translucent terminal in the
+colour it has over the theme's background, so its labels do not depend on the
+backdrop. An unfocused window does not paint the tabs' Cmd+N hints but keeps
+their lanes, so titles do not move. These labels are swept over every bundled
+theme at 0.86, 0.7, 0.43, 0.99 and opaque in `chrome_contrast_sweep_tests`.
+The tab accent bar, the jump-to-bottom pill's fill and terminal text, including
+`minimum-contrast`, are still resolved against the opaque colour.
 
 ### Cursor patch
 
@@ -4563,7 +4645,13 @@ Other additions:
   arguments as untrusted: validate fields against their specific character sets
   and a 512-byte limit, then reject controls again before direct spawning.
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
-  per-tab / per-window / cross-tab named scopes).
+  per-tab / per-window / cross-tab named scopes). `App::set_broadcast_scope`
+  is the only writer of a window's scope: the actions and the stale-group
+  cleanup (`hoover_groups`, `hoover_mapped_groups`, run from redraw, close
+  and title edits) go through it, so a change always redraws the window and
+  resyncs the macOS menu's checkmark. It returns early when the scope is
+  unchanged, which keeps the per-frame cleanup free. A source scan
+  (`the_broadcast_scope_has_one_writer`) keeps it the only writer.
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
 - **vertical tab strips** and a **wgpu offscreen-scene screenshot path**.
 - **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
@@ -5174,7 +5262,9 @@ category strip side by side. Group headings are omitted when needed to retain
 a complete focused field. Picker geometry similarly reduces outer spacing to
 retain its header and one result. The renderer uses `visible_resize_overlay`
 for both size-chip text preparation and drawing, suppressing it under Settings
-or a picker card.
+or a picker card. After a font-size action kettle-ui sets
+`Overlay::resize_overlay_text` to the translated size and grid; the chip is
+sized from the shaped text, and the same string is a polite live region.
 
 ### Paste consent and context-menu nesting
 
@@ -5344,6 +5434,28 @@ the normal grid, scrollback, search, selection, accessibility, control geometry
 and IME paths. No chrome or terminal rectangle changes. A successful startup
 restore removes its sidecar; later session saves capture the current grid again.
 
+Off Windows, `kettle-core::term::seed_restored_content` then arms a one-shot
+restore clear guard in the vendored engine (`term/restore_clear_guard.rs`) at
+the cursor row below the divider. The anchor is a stable row identity
+(history origin plus history size plus screen line), which ED 3's history
+purge leaves unchanged, stamped with the grid geometry. The first ED 2 on the
+primary screen with the cursor at the home position consumes the guard: it
+erases from the anchor row down and puts the cursor there, so a startup
+`clear` in any of its byte orders keeps the restored rows in view. ED 3
+never touches the guard. Any other erase (ED 0/1, ED 2 away from home, ISO
+or DEC selective erase), a primary-screen scroll, the alternate screen, RIS,
+DECALN, DECCOLM and the first OSC 133 A prompt mark (applied in wire order
+through the synchronized-output marker queue) disarm it, after which the
+engine behaves as upstream. User input reaches it through an atomic flag:
+`Pane::record_user_input`, which every user-input writer calls, sets it
+without locking the terminal, and the engine reads it under the terminal
+lock when it next parses output, decides an ED 2 or resizes. Focus reports
+bypass that path and do not disarm. A resize before any output re-anchors
+to the reflowed cursor row; after output it disarms, and a geometry change
+that bypassed `Term::resize` fails the stamp check and falls back to the
+upstream clear. Windows stays unarmed because ConPTY's repaint behaviour has
+not been verified against the guard.
+
 System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
@@ -5370,7 +5482,8 @@ grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
 28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
 hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
 New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
-dimmed. Outer corners remain square.
+dimmed; tab titles keep 4.5:1 when dimmed, since they still name the tabs,
+and an unfocused window paints no shortcut hints. Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`

@@ -741,6 +741,7 @@ fn accessibility_reactivation_invalidates_published_tree() {
 fn modal_text_inputs_expose_their_text_and_selection() {
     let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
         picker_header: false,
+        placeholder: String::new(),
         text: text.into(),
         cursor_byte,
         selection,
@@ -989,6 +990,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: "/tmp/image.png".into(),
             cursor_byte: 4,
             selection: Some((4, 14)),
@@ -1172,6 +1174,7 @@ fn accessible_editor_characters_follow_graphemes() {
         palette_query: Some(text.into()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: text.into(),
             cursor_byte: 3,
             selection: Some((3, 14)),
@@ -1251,6 +1254,7 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         layout_picker_query: Some(String::new()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: true,
+            placeholder: String::new(),
             rect: header,
             text: String::new(),
             cursor_byte: 0,
@@ -1316,7 +1320,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
     let overlay = kettle_render::Overlay {
         settings: Some(settings),
         text_field: Some(kettle_render::TextFieldOverlay {
-            picker_header: false, text: "font".into(), cursor_byte: 4,
+            picker_header: false, text: "font".into(), cursor_byte: 4, placeholder: String::new(),
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
             horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
     };
@@ -1762,6 +1766,46 @@ fn accessibility_pane_lifetime_prunes_churn_and_moves_without_an_adapter() {
     assert!(ws.accessibility_output.borrow().is_empty());
     assert!(ws.accessibility_text_rows.borrow().is_empty());
 }
+
+/// A screen reader hears a picker's placeholder as the field's placeholder,
+/// not as its value: the keyboard-shortcut list says what it searches.
+#[test]
+fn picker_placeholder_is_the_inputs_placeholder_not_its_value() {
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let placeholder = es.text(kettle_i18n::Text::PickerPlaceholderShortcuts);
+    for (query, placeholder) in [("", placeholder), ("tab", placeholder), ("", "")] {
+        let overlay = kettle_render::Overlay {
+            palette_query: Some(query.into()),
+            text_field: Some(kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: placeholder.into(),
+                rect: (10.0, 10.0, 400.0, 30.0),
+                text: query.into(),
+                cursor_byte: query.len(),
+                selection: None,
+                prefix: String::new(),
+                hint: String::new(),
+                horizontal_scroll: 0,
+                accent_palette: 0,
+            }),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (640.0, 480.0), (8.0, 24.0), 1.0, &es);
+        let input = &projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+            .unwrap()
+            .1;
+        assert_eq!(input.value(), Some(query));
+        assert_eq!(
+            input.placeholder(),
+            (!placeholder.is_empty()).then_some(placeholder)
+        );
+    }
+}
+
 
 /// A background tab's activity marker is read after its name, in the
 /// window's language, so a screen reader hears what a sighted user sees.

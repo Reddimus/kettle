@@ -608,6 +608,9 @@ impl App {
         let resize_chip_active = resize_chip_live && !render_hidden;
         if !resize_chip_live && ws.resize_overlay.is_some() {
             ws.resize_overlay = None;
+            if ws.resize_overlay_label.take().is_some() {
+                ws.accessibility_pending = true;
+            }
             if !render_hidden && let Some(w) = &ws.window {
                 w.request_redraw();
             }

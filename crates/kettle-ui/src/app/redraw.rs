@@ -148,6 +148,8 @@ impl App {
                     tr,
                     self.update_notice().as_ref(),
                     &ws.palette_profiles,
+                    ws.palette_bound_only,
+                    self.cfg.broadcast_default,
                 )),
             ),
             None => (None, String::new(), None),
@@ -439,6 +441,7 @@ impl App {
                 scrollbar_hovered_pane: ws.scrollbar_hover,
                 cursor_visible,
                 resize_overlay,
+                resize_overlay_text: resize_overlay.and(ws.resize_overlay_label.clone()),
                 update_toast: self.update_toast_projection(ws),
                 notices: self
                     .persistent_notices(ws)
@@ -590,6 +593,7 @@ impl App {
             scrollbar_hovered_pane: ws.scrollbar_hover,
             cursor_visible,
             resize_overlay,
+            resize_overlay_text: resize_overlay.and(ws.resize_overlay_label.clone()),
             update_toast: None,
             notices: self
                 .persistent_notices(ws)

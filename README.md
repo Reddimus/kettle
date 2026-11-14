@@ -89,10 +89,14 @@ A zoomed pane keeps its titlebar, which shows how many panes the zoom hides
 and the key that restores them.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
-below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`. Run
-`kettle --list-keybinds` for the full map. The macOS Shell, Edit, View and
-Window menus expose common actions and show their current Cmd shortcuts,
-including config overrides. See
+below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`; the gear before `▾ +` in the title
+bar opens Settings too. Run
+`kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
+the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
+command palette then lists only the commands that have a shortcut, with the
+shortcut beside each, and you can search it and press Enter to run one. The
+macOS Shell, Edit, View and Window menus expose common actions and show their
+current Cmd shortcuts, including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.
 
 ## Selecting text
@@ -258,7 +262,7 @@ explicitly.
 Open the new-tab **▾** menu beside **+** (set `tab-bar = always` to keep it
 visible with one tab), or the macOS **Shell** menu:
 
-- **New Tab with Profile** lists the same profiles as `kettle --list-profiles`.
+- **New Window with Profile** lists the same profiles as `kettle --list-profiles`.
   Each choice opens a separate Kettle process/window with that profile, since
   profiles include application-wide settings. The empty **Create Profile…**
   action creates and opens the profiles directory; add a `NAME.config` file
@@ -274,7 +278,11 @@ visible with one tab), or the macOS **Shell** menu:
 The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
 profile, and **Broadcast input…** actions for all panes in the tab, a group or the
 window. Broadcast sends input to multiple panes; choose **Stop broadcasting
-input** when finished. Profiles and
+input** when finished. The macOS **Shell** menu and the right-click menu have a
+**Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
+Window** and **Panes in This Group**, with the current one checked; choosing the
+checked row stops broadcasting. The broadcast chord (`Ctrl+Cmd+B` on macOS,
+`Ctrl+Shift+G` on Windows, `Super+G` elsewhere) shows on the row it turns on. Profiles and
 layouts can also be selected with `--profile NAME` and `--layout NAME`.
 See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.md).
 

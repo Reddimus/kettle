@@ -31,6 +31,7 @@ pub mod color;
 mod grapheme;
 mod horizontal;
 mod rectangles;
+mod restore_clear_guard;
 pub mod search;
 
 #[cfg(test)]
@@ -41,6 +42,8 @@ mod ascii_run_tests;
 mod grapheme_width_tests;
 #[cfg(test)]
 mod rectangle_tests;
+#[cfg(test)]
+mod restore_clear_guard_tests;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ProtectionMode {
@@ -464,6 +467,9 @@ pub struct Term<T> {
     /// Bounded, ordered terminal mutations consumed by graphics integrations.
     graphics_events: GraphicsEventJournal,
     row_events: GraphicsEventJournal,
+
+    /// Kettle-only one-shot guard for rows seeded by a session restore.
+    restore_clear_guard: Option<restore_clear_guard::RestoreClearGuard>,
 }
 
 /// Maximum number of unconsumed graphics events retained by a terminal.
@@ -814,6 +820,7 @@ impl<T> Term<T> {
             mode,
             graphics_events: GraphicsEventJournal::new(),
             row_events: GraphicsEventJournal::new(),
+            restore_clear_guard: None,
         }
     }
 
@@ -1253,6 +1260,7 @@ impl<T> Term<T> {
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
+        self.resize_restore_clear_guard();
     }
 
     /// Hard resets invalidate unfinished controls in independent input streams.
@@ -1289,6 +1297,7 @@ impl<T> Term<T> {
 
     fn swap_alt_with_clear(&mut self, clear_on_entry: bool, save_restore_cursor: bool) {
         self.stop_grapheme();
+        self.drop_restore_clear_guard("alternate screen");
         if !self.mode.contains(TermMode::ALT_SCREEN) {
             // Set alt screen cursor to the current primary screen cursor.
             self.inactive_grid.cursor = self.grid.cursor.clone();
@@ -1486,6 +1495,7 @@ impl<T> Term<T> {
     #[inline]
     fn scroll_down_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling down relative: origin={origin}, lines={lines}");
+        self.drop_restore_clear_guard("scroll");
 
         lines = cmp::min(
             lines,
@@ -1542,6 +1552,7 @@ impl<T> Term<T> {
     #[inline]
     fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
+        self.drop_restore_clear_guard("scroll");
 
         lines = cmp::min(
             lines,
@@ -1605,6 +1616,7 @@ impl<T> Term<T> {
     where
         T: EventListener,
     {
+        self.drop_restore_clear_guard("column mode");
         // Setting 132 column font makes no sense, but run the other side effects.
         // Clear scrolling region.
         self.mode.remove(TermMode::LEFT_RIGHT_MARGIN);
@@ -1908,6 +1920,9 @@ impl<T> Term<T> {
     }
 
     fn clear_protected_screen(&mut self, mode: ansi::ClearMode, selective: bool) {
+        if !matches!(mode, ansi::ClearMode::Saved) {
+            self.drop_restore_clear_guard("protected erase");
+        }
         let point = self.grid.cursor.point;
         let columns = Column(self.columns());
         let bottom = Line(self.screen_lines() as i32 - 1);
@@ -2626,6 +2641,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn decaln(&mut self) {
         self.stop_grapheme();
+        self.drop_restore_clear_guard("screen alignment");
         trace!("Decalnning");
 
         // DECALN also resets the margins and homes the cursor (DEC STD 070,
@@ -3616,6 +3632,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         match mode {
             ansi::ClearMode::Above => {
+                self.drop_restore_clear_guard("erase above");
                 let cursor = self.grid.cursor.point;
 
                 // If clearing more than one line.
@@ -3632,6 +3649,7 @@ impl<T: EventListener> Handler for Term<T> {
                 self.selection = self.selection.take().filter(|s| !s.intersects_range(range));
             }
             ansi::ClearMode::Below => {
+                self.drop_restore_clear_guard("erase below");
                 let cursor = self.grid.cursor.point;
                 self.erase_cells(cursor.line, cursor.column, Column(self.columns()));
 
@@ -3645,6 +3663,8 @@ impl<T: EventListener> Handler for Term<T> {
             ansi::ClearMode::All => {
                 if self.mode.contains(TermMode::ALT_SCREEN) {
                     self.grid.reset_region(..);
+                } else if self.consume_restore_clear_guard() {
+                    // Kettle: the restored rows stay; see `restore_clear_guard`.
                 } else {
                     let old_offset = self.grid.display_offset();
 
@@ -3699,6 +3719,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.drop_restore_clear_guard("reset");
         self.input_reset_generation = self.input_reset_generation.wrapping_add(1);
         self.colors.set_reverse_video(false);
         self.protection_mode = ProtectionMode::Off;

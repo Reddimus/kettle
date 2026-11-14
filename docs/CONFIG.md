@@ -129,7 +129,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `focus` | `click`\|`sloppy`\|`system` | `click` | Focus-follows-mouse policy. `click` (default) — focus on click. `sloppy` — focus on cursor movement; pane under the cursor becomes focused without clicking. `system` — kettle treats this as `click` (winit doesn't expose the OS-level focus policy, so the OS-managed mode falls back to explicit-click behavior) |
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS title template: `{title}` uses the pane title, cwd basename, or `kettle`; `{cwd}` abbreviates home; `{tab}` is 1-based. `{{`/`}}` escape braces. Native titlebars omit Private Use/Nerd Font glyphs; tabs and pane titles retain them |
-| `tab-format` (`tab-title-format`) | string | `{title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). Horizontal tabs show a close button on the active or hovered tab and, on macOS, a Cmd+1 through Cmd+9 hint when space permits |
+| `tab-format` (`tab-title-format`) | string | `{title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). Horizontal tabs show a close button on the active or hovered tab and, on macOS, a Cmd+1 through Cmd+9 hint when space permits and the window is focused |
 | `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane overlay scrollbar. `auto` shows it whenever the pane has scrollback history — dim at rest, brighter while scrolled back or while the pointer hovers/drags it; `always` also draws the empty gutter with no history. Click or drag the thumb to scroll |
 | `scrollbar-width` | float 2–40 logical px | `6` | Visible overlay-thumb width. Kettle scales it for display DPI and keeps a separate invisible hit strip of at least 12 logical px. Dragging preserves the pointer's position inside the thumb |
 | `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
@@ -169,7 +169,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | Show a thin strip at the configured edge with `HH:MM:SS` in local time, the theme, and the focused pane title. Disabled by default. Aliases: `none` / `false` = off, `on` / `true` = bottom |
 | `trigger` | regex \[`:: cmd args`\] | — | Repeatable. Triggers run only while the window is unfocused: a match against any of its panes' output then requests attention. `^` and `$` anchor to each row of output. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
-| `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing. `after-first` skips the initial window placement; `never` disables it |
+| `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing, and the new font size with the grid (`Font size 14 · 80×24`) after making the font larger, smaller or resetting it. `after-first` skips the initial window placement; `never` disables both |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `auto` (or `explicit` when `theme` is set without a mode) | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference (XDG Settings portal on Linux, native appearance on macOS/Windows); no preference or unavailable detection selects dark. If `theme-schedule` is set, the schedule owns the switch instead |
 | `light-theme` / `dark-theme` | string | `Kettle Day` / `TokyoNight Night` | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`). Kettle Day is TokyoNight Day with darker text: foreground 7:1 and ANSI colours 1–7 and 9–15 at least 4.5:1 against its background. `TokyoNight Day` itself keeps upstream's colours |
 | `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries in local time (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
@@ -751,11 +751,26 @@ scrollback only; keep the visible screen unlike `reset`).
 **Broadcast**: `broadcast_all` (type to every pane in the window),
 `broadcast_off`, `broadcast_group` (type to every pane in the focused pane's
 named group — **in every window**, since a group is a set you declared and
-`group_all` already spans them; typing and pasting both follow it). The default
+`group_all` already spans them; typing and pasting both follow it),
+`broadcast_panes_in_tab` (type to every pane in the focused tab, whatever
+`broadcast-default` says; no default chord). The default
 `Ctrl+Cmd+B` (macOS), `Ctrl+Shift+G` (Windows), or `Super+G` (elsewhere) chord
 is `broadcast_tab`, which **toggles** —
 pressing it again turns broadcast off, so you never have to reach for a second
-chord to stop. Which scope it turns *on* is `broadcast-default`.
+chord to stop. Which scope it turns *on* is `broadcast-default`, and the
+command palette names the chord's row after that scope. Under
+`broadcast-default = off` the chord can only turn broadcast off.
+
+The macOS **Shell** menu and the right-click menu offer the same scopes in a
+**Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
+Window** and **Panes in This Group**. The current scope is checked, and
+choosing the checked row turns broadcast off. The chord's hint shows on the
+row it turns on: the tab under `group`, the window under `all`, and no row
+under `off`. **Panes in This Group** stays checked while any group is the
+target; when the focused pane is in another group or none, choosing it turns
+broadcast off, and choosing it again broadcasts to the focused pane's group.
+It is unavailable while the focused pane has no group: greyed in the menu bar,
+hidden in the right-click menu.
 
 A second Kettle process is its own broadcast domain. Use one process with
 several windows when a group needs to span those windows.
@@ -943,7 +958,10 @@ use their stored destination. Quick-select hints is also available in the
 macOS Edit menu, the palette (with its current binding), and the terminal context
 menu when a link or path is visible. This adds no configuration keys.
 
-**Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
+**Modals + UI**: `command_palette` (`palette`), `show_keybinds`
+(`keyboard_shortcuts`; the palette listing only commands that have a shortcut,
+with each shortcut; also Help > Keyboard Shortcuts on macOS and the new-tab
+dropdown's Keyboard shortcuts row), `hint_mode` (`hints` /
 `quick_select`; labels the URLs, paths (a quoted or backticked path may hold
 spaces), git hashes and IP addresses on screen:
 type a label to open a URL or copy anything else, or hold Shift while typing it

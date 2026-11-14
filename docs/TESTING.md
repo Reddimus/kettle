@@ -3140,6 +3140,16 @@ menu while retaining Services and Windows registration.
 loop is built, and `move_tab_rows_agree_with_the_wrapping_mux_at_every_position`
 pins Move Tab Left / Right as enabled wherever `Mux::nudge_active_tab` moves the
 tab, the first and last tab included, since the move wraps.
+`help_menu_is_last_and_flagged_with_help_and_shortcuts` checks that Help is the
+last menu, flagged for `setHelpMenu`, and holds Kettle Help and Keyboard
+Shortcuts in English and Spanish. `menu_bar_follows_macos_conventions` checks
+one full-screen item, on Control-Command-F unless the keymap owns it and titled
+for the focused window's state; all four splits; the native Minimize, Zoom and
+Bring All to Front; and English title case.
+`native_window_items_route_through_kettle_in_both_menus` checks that full
+screen, Minimize and Zoom keep AppKit's selectors but route through Kettle and
+winit, in the visible menu and the key-equivalent menu alike, with Minimize and
+Zoom off in full screen.
 `cargo test -p kettle-ui --test macos_menu_native` runs the production menu subclass
 on the process main thread on macOS. It dispatches synthetic AppKit key events
 to native commands and a nested, registered Services menu, checks disabled
@@ -3151,6 +3161,26 @@ Existing keyboard tests exercise program-ownership yielding and terminal
 encoding. These checks do not establish physical keyboard delivery or live
 Quick Action invocation; an unlocked macOS session is needed for mouse,
 keyboard, System Settings Services shortcuts and window list acceptance.
+
+The command palette's ranking runs on every platform with
+`cargo test -p kettle-config --lib -- fuzzy palette`:
+`score_rates_the_best_alignment_not_the_first`,
+`strong_alignments_start_words_and_run_contiguously` and
+`long_inputs_fall_back_to_the_first_match` pin the best-alignment scorer and
+its bounded fallback, `weak_matches_drop_out_when_a_strong_one_exists` the
+weak-match cutoff, and `highlights_follow_the_ranking_alignment` the marked
+characters. For picker geometry, `kettle-ui`'s
+`overflowing_picker_rows_start_at_the_header_and_fill_the_panel` and
+`picker_rows_and_wheel_scroll_all_four_modal_projections` hold painted rows,
+hit testing and accessibility to one layout, and `kettle-render`'s
+`picker_scroll_thumb_stays_in_the_right_gap_and_tracks_the_offset` and
+`picker_scroll_thumb_is_drawn_last_at_three_to_one` pin the scrollbar thumb.
+`bound_only_palette_lists_every_bound_command_with_its_shortcut` and
+`enter_in_the_shortcut_list_runs_the_selected_bound_row` cover the Keyboard
+Shortcuts list. `picker_key_hint_slot_is_secondary_text` pins the header key
+hint's colour without a GPU; `a_picker_header_paints_its_key_hint_as_secondary_text`
+and `an_empty_picker_query_paints_its_placeholder` check the frame and print
+`PICKER_HEADER_GPU_SKIP` when no GPU adapter exists.
 
 menu while retaining Services and Windows registration. Existing keyboard tests
 exercise program-ownership yielding and terminal encoding. These checks do not
