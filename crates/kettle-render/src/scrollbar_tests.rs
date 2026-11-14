@@ -397,3 +397,112 @@ fn opaque_only_inside_the_padding_of_an_opaque_window() {
     // The default window on this platform is translucent.
     assert!(!opaque(&Config::default(), 1.0));
 }
+
+/// A pane narrower than the bar, or a short one, keeps the channel, the
+/// thumb, the hit strip and the command ticks inside it at 1x and 2x, so
+/// nothing spills into the pane beside it, and the ticks stay on the bar.
+#[test]
+fn narrow_and_short_panes_keep_the_bar_inside() {
+    let mark = kettle_core::term::CommandMark {
+        row: 50,
+        exit_code: 1,
+    };
+    for mode in [
+        ScrollbarMode::Auto,
+        ScrollbarMode::Always,
+        ScrollbarMode::Never,
+    ] {
+        for width in [6.0, 40.0] {
+            let cfg = config(mode, width);
+            for scale in [1.0_f32, 2.0] {
+                for (w, h) in [
+                    (3.0, 920.0),
+                    (8.0, 920.0),
+                    (12.0, 920.0),
+                    (30.0, 920.0),
+                    (90.0, 920.0),
+                    (800.0, 12.0),
+                    (800.0, 0.5),
+                    (5.0, 5.0),
+                ] {
+                    let terminal = (40.0 * scale, 30.0 * scale, w * scale, h * scale);
+                    let (x, y, w, h) = terminal;
+                    let inside = |(rx, ry, rw, rh): (f32, f32, f32, f32)| {
+                        rx >= x
+                            && ry >= y
+                            && rw >= 0.0
+                            && rh >= 0.0
+                            && rx + rw <= x + w + 1e-3
+                            && ry + rh <= y + h + 1e-3
+                    };
+                    for (off, interacting) in [(0, false), (0, true), (SCROLLED_BACK, false)] {
+                        let bar = pane_scrollbar_geometry(
+                            terminal,
+                            scale,
+                            &cfg,
+                            ROWS,
+                            HISTORY,
+                            off,
+                            interacting,
+                        );
+                        let context =
+                            format!("{mode:?} width {width} scale {scale} pane {w}x{h} off {off}");
+                        assert!(inside(bar.track_rect), "{context}: {:?}", bar.track_rect);
+                        assert!(inside(bar.hit_rect), "{context}: {:?}", bar.hit_rect);
+                        assert!(
+                            (bar.hit_rect.0 + bar.hit_rect.2 - (x + w)).abs() < 1e-3,
+                            "{context}: the strip reaches the edge"
+                        );
+                        if let Some(thumb) = bar.thumb_rect {
+                            assert!(inside(thumb), "{context}: thumb {thumb:?}");
+                            assert_eq!((thumb.0, thumb.2), (bar.track_rect.0, bar.track_rect.2));
+                        }
+                        let column = (bar.track_rect.0, bar.track_rect.2);
+                        let [tx, _, tw, _] = kettle_core::scrollbar::command_tick_rect(
+                            terminal, column, scale, 0, 100, mark,
+                        )
+                        .expect("a tick");
+                        assert_eq!((tx, tw), column, "{context}: the tick lies on the bar");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A pane with no width or height, or no scale, draws no bar and holds no
+/// pointer strip.
+#[test]
+fn an_empty_pane_draws_no_bar() {
+    for mode in [ScrollbarMode::Auto, ScrollbarMode::Always] {
+        let cfg = config(mode, 6.0);
+        for (w, h, scale) in [
+            (0.0, 920.0, 1.0),
+            (-5.0, 920.0, 2.0),
+            (800.0, 0.0, 1.0),
+            (800.0, -1.0, 2.0),
+            (800.0, 920.0, 0.0),
+            (f32::NAN, 920.0, 1.0),
+        ] {
+            let bar = pane_scrollbar_geometry(
+                (40.0, 30.0, w, h),
+                scale,
+                &cfg,
+                ROWS,
+                HISTORY,
+                SCROLLED_BACK,
+                true,
+            );
+            let context = format!("{mode:?} {w}x{h} scale {scale}");
+            assert!(!bar.channel, "{context}");
+            assert_eq!(bar.thumb_rect, None, "{context}");
+            assert_eq!(
+                (bar.track_rect.2, bar.track_rect.3),
+                (0.0, 0.0),
+                "{context}"
+            );
+            assert_eq!((bar.hit_rect.2, bar.hit_rect.3), (0.0, 0.0), "{context}");
+            assert!(bar.track_rect.0 >= 40.0, "{context}");
+        }
+    }
+}

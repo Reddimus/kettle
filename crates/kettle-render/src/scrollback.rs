@@ -139,10 +139,20 @@ pub struct PaneScrollbar {
 }
 
 /// The pointer's strip along a terminal's right edge.
+/// In a pane narrower than the strip, it is the whole pane.
 pub fn scrollbar_hit_rect(terminal: Rect4, scale: f32, configured: f32) -> Rect4 {
     let (x, y, w, h) = terminal;
-    let width = scrollbar_hit_width(configured, scale);
+    if !pane_has_room(terminal, scale) {
+        return (x, y, 0.0, 0.0);
+    }
+    let width = scrollbar_hit_width(configured, scale).min(w);
     (x + w - width, y, width, h)
+}
+
+/// Whether a terminal rect can hold a scrollbar at all: finite, with a
+/// width, a height and a scale.
+fn pane_has_room((x, y, w, h): Rect4, scale: f32) -> bool {
+    [x, y, w, h, scale].into_iter().all(f32::is_finite) && w > 0.0 && h > 0.0 && scale > 0.0
 }
 
 /// A pane's scrollbar. `terminal` is the pane's terminal rect, `rows`,
@@ -155,6 +165,10 @@ pub fn scrollbar_hit_rect(terminal: Rect4, scale: f32, configured: f32) -> Rect4
 /// one width while there is history, so hovering never makes it jump, and
 /// with none draws the empty channel at the configured width, which hovering
 /// leaves alone: there is nothing to grab.
+///
+/// Every rect stays inside `terminal`. In a pane narrower than the bar and
+/// its edge, the bar narrows and the edge goes first, so nothing spills into
+/// the pane beside it; a pane with no width or height draws no bar.
 pub fn pane_scrollbar_geometry(
     terminal: Rect4,
     scale: f32,
@@ -168,11 +182,13 @@ pub fn pane_scrollbar_geometry(
     let (x, y, w, h) = terminal;
     let mode = cfg.scrollbar;
     let scrollable = hist > 0;
-    let shown = match mode {
-        ScrollbarMode::Never => false,
-        ScrollbarMode::Auto => scrollable,
-        ScrollbarMode::Always => true,
-    };
+    let room = pane_has_room(terminal, scale);
+    let shown = room
+        && match mode {
+            ScrollbarMode::Never => false,
+            ScrollbarMode::Auto => scrollable,
+            ScrollbarMode::Always => true,
+        };
     let active = scrollable && (off > 0 || interacting);
     let wide = match mode {
         // No bar: command ticks keep the resting column.
@@ -180,9 +196,17 @@ pub fn pane_scrollbar_geometry(
         ScrollbarMode::Auto => active,
         ScrollbarMode::Always => scrollable,
     };
-    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, scale, wide);
+    let bar_w = if room {
+        scrollbar_draw_width(cfg.scrollbar_width, scale, wide).min(w)
+    } else {
+        0.0
+    };
     let edge = 2.0 * scale;
-    let bx = x + w - bar_w - edge;
+    let bx = if room {
+        (x + w - bar_w - edge).max(x)
+    } else {
+        x
+    };
     let thumb_rect = if shown {
         kettle_core::scrollbar::thumb_with_min(
             rows,
@@ -196,7 +220,7 @@ pub fn pane_scrollbar_geometry(
         None
     };
     PaneScrollbar {
-        track_rect: (bx, y, bar_w, h),
+        track_rect: (bx, y, bar_w, if room { h } else { 0.0 }),
         channel: shown,
         thumb_rect,
         state: if active {
