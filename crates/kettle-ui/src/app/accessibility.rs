@@ -291,10 +291,7 @@ impl App {
                 }
                 if Some(pane_id) == focused && !alt && !state.text.is_empty() {
                     let id = accessibility_output_id(pane_id, state.serial);
-                    let mut announcement = Node::new(Role::Label);
-                    // A label's text is its value on AT-SPI; macOS reads the label.
-                    announcement.set_label(state.text.clone());
-                    announcement.set_value(state.text.clone());
+                    let mut announcement = static_text_node(state.text.clone());
                     announcement.set_live(accesskit::Live::Polite);
                     announcement.set_bounds(accesskit::Rect::new(
                         f64::from(text_rect.0),
@@ -756,6 +753,13 @@ impl App {
             children.extend(projected.iter().map(|(id, _)| *id));
             nodes.extend(projected);
         }
+        // A program's notification: a polite status, announced on every
+        // platform through AccessKit, with its Show and Dismiss buttons.
+        if let Some(view) = self.notification_toast_projection(ws) {
+            let projected = notification_toast_nodes(&view, &self.ui_text);
+            children.extend(projected.iter().map(|(id, _)| *id));
+            nodes.extend(projected);
+        }
         let surface = ws
             .window
             .as_ref()
@@ -814,6 +818,9 @@ impl App {
             .or(self
                 .update_toast_focus
                 .filter(|_| overlay.update_toast.is_some()))
+            .or(ws
+                .notification_toast_focus
+                .filter(|target| nodes.iter().any(|(id, _)| id == target)))
             .unwrap_or_else(|| {
                 if ws.search.open {
                     accessibility_search_control_id(ws.search.focused_control)
@@ -1064,6 +1071,18 @@ impl App {
                 }
             }
         }
+        if let Some(view) = self.notification_toast_projection(ws) {
+            view.label.hash(&mut hasher);
+            view.description.hash(&mut hasher);
+            view.show.hash(&mut hasher);
+            let geometry = view.overlay.control_geometry();
+            for rect in [geometry.rect, geometry.details, geometry.close] {
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        ws.notification_toast_focus.hash(&mut hasher);
         overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
@@ -1445,6 +1464,10 @@ impl App {
             }
             return;
         }
+        if self.notification_toast_action(ws, &request) {
+            return;
+        }
+        ws.notification_toast_focus = None;
         if matches!(
             request.target_node,
             ACCESSIBILITY_UPDATE_DETAILS_ID | ACCESSIBILITY_UPDATE_DISMISS_ID
@@ -1776,6 +1799,18 @@ pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
     status.set_label(label.to_owned());
     status.set_live(accesskit::Live::Polite);
     (ACCESSIBILITY_FONT_SIZE_ID, status)
+}
+
+/// A line of static text that every screen reader reads as `text`. AccessKit
+/// names a `Role::Label` from its value on AT-SPI and UI Automation, and macOS
+/// shows its label as the text's value, so it carries both: with the label
+/// alone, Orca and Narrator hear an empty name.
+pub(super) fn static_text_node(text: impl Into<String>) -> Node {
+    let text = text.into();
+    let mut node = Node::new(Role::Label);
+    node.set_label(text.clone());
+    node.set_value(text);
+    node
 }
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
@@ -2371,8 +2406,7 @@ fn push_picker_accessibility(
         && let Some(footer) = menu.picker_footer.as_ref()
     {
         let footer_id = accessibility_modal_id(kind, PICKER_FOOTER_A11Y_INDEX);
-        let mut text = Node::new(Role::Label);
-        text.set_label(kettle_render::theme_footer_description(footer, tr));
+        let mut text = static_text_node(kettle_render::theme_footer_description(footer, tr));
         let (x, y, w, h) = menu.rows_rect();
         text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
         projection.nodes.push((footer_id, text));
@@ -2787,8 +2821,7 @@ pub(super) fn modal_accessibility_projection(
             list.set_children(children.clone());
         } else if settings.rows.is_empty() {
             let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
-            let mut empty = Node::new(Role::Label);
-            empty.set_label(tr.text(kettle_i18n::Text::SettingsNoMatches));
+            let mut empty = static_text_node(tr.text(kettle_i18n::Text::SettingsNoMatches));
             empty.set_bounds(bounds(layout.empty_rect));
             projection.nodes.push((id, empty));
             list.set_children([id]);

@@ -1789,7 +1789,10 @@ shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
 Prefix and hint text have separate clipped slots of at most 30% of the field
 each outside pickers. Picker headers keep the complete right-aligned key hint
-only when it fits beside the query; otherwise they drop it. Other fields drop
+only when it fits beside the query; otherwise they drop it. An empty query's
+placeholder (`text_field_placeholder`) comes first: the hint is also dropped
+while only that lets the placeholder fit whole, and the placeholder is left
+out, never cut, when it does not fit alone. Other fields drop
 hint segments before truncating the final segment with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
@@ -3917,7 +3920,11 @@ fills in `ThemePickerFooter` from the config and decides, with
 `theme_footer_height` and the footer's own minimum columns, whether the card
 and how many status lines fit; kettle-render owns the words, layout and
 colours, so painting, the button's hit test and the footer's AccessKit text
-all come from `theme_footer_layout` and `theme_footer_description`. Each side
+all come from `theme_footer_layout` and `theme_footer_description`. That text
+is a `Role::Label` built by `static_text_node`, which sets it as both label and
+value: the locked adapters name a label from its value on AT-SPI and UI
+Automation and show its label as the value on macOS, so a label alone reads
+as an empty name to Orca and Narrator. Each side
 on the status line is a `slot_chips` target in that layout, and the same rect
 is its AccessKit radio button's bounds (`theme_footer_slots` gives its words);
 the two radios sit in one radio group, and the layout's `contrast_button` rect
@@ -4232,6 +4239,32 @@ non-regression claim.
   configured CIE L* step (`bell-flash-intensity`, scaled by the ramp) into a
   linear-light alpha via `perceptual_wash_alpha` so every theme moves by the
   same visible amount.
+- **The focused-bell mark** — a bell in the focused pane of the active tab
+  sets `Pane::focused_bell` (for `bell = visual` or `both`), which marks the
+  active tab (`classify_tab_activity`), the pane's titlebar and, with no
+  strip, the native title. `record_bell_answer` clears it when the pane
+  accepts a key, IME commit or paste, a pointer press in the pane clears it,
+  and `App::sync_focused_bell`, run on every drain and window dispatch,
+  clears it on any pane focus has left and repaints when the marked pane
+  changes. OS window focus never clears it. The flash is held back by
+  `motion_allowed` (`bell_flashes`); the mark is not.
+- **Program notifications are routed before they reach the desktop.** OSC
+  9/777 and `kettle.notify` go to `App::notify_from_program`. Their text is
+  sanitized there (`notification_router::sanitize_text`: controls and bidi
+  formatting characters removed, whitespace collapsed, capped at grapheme
+  boundaries), as is the source tab title. `notification_router::Router`
+  applies a per-source 2 s cooldown, which folds a burst into its newest
+  message with a count and delivers it when the cooldown ends
+  (`take_due`, woken by `next_due`), and 5 s identical-message suppression,
+  both before `route` picks a toast (some Kettle window has focus) or the
+  desktop (none has). A toast joins the window's `notification_toast::ToastQueue`
+  (one visible, three waiting; repeats and overflow are counted on toasts,
+  never by evicting the visible one), is painted through the update toast's
+  painter as one of the overlay's notices, and keeps its time in the update
+  toast's `ToastClock`. A desktop delivery is remembered in
+  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  failures with, so a refused or failed one is queued as a toast in its own
+  window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
   command-completion, and internal diagnostic toast enters a 64-message
   `try_send` queue. The worker preserves order while calling the OS backend.
@@ -4245,7 +4278,12 @@ non-regression claim.
   notification delivery. Linux retains one D-Bus sender connection across
   notifications: GNOME removes an app's notifications when that sender exits.
   Each call has a one-second reply timeout; a failed connection is replaced
-  on the next message. macOS and Windows keep their native backends.
+  on the next message. Linux asks the server's capabilities once per
+  connection and escapes `&`, `<` and `>` in bodies when it renders body
+  markup. A tracked (program) notification the backend refuses, errors on or
+  panics in is reported back to the UI by id only, over a bounded channel
+  that wakes the event loop (`UserEvent::DesktopNotificationFailed`). macOS
+  and Windows keep their native backends.
 - **Monitor-DPI transitions are one layout transaction per window.** winit
   delivers Windows `WM_DPICHANGED` as `ScaleFactorChanged` before the
   `SetWindowPos`-driven physical `Resized`. The renderer adopts the new glyph
@@ -4588,6 +4626,15 @@ marks untouched while the alternate screen is active. A resize may rebase the
 latest active prompt when it is provably a single row: widening is safe, while
 narrowing is safe only if the cursor remains on the same row. Other reflows
 still clear the ring rather than guessing which history row survived.
+
+Completed-command marks use the same ids. Each entry of their 2048-command
+ring holds the prompt row, the exit code and the output rows `output..end`:
+the cursor's row at OSC 133 C and at D, or the row below it when the cursor is
+past the first column. A scroll moves that span only when every row in it
+moves by the same amount, which checking the span's ends and the screen and
+region edges inside it proves; any other scroll empties the span and keeps the
+tick. Reflow, reset and a journal overflow clear the ring. Select Command
+Output converts the span back to grid lines under the term lock.
 
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
@@ -5076,6 +5123,42 @@ restore and `false` always opens fresh; legacy boolean spellings still work.
 The session is saved only in restore mode, so a fresh window never clobbers a
 saved layout. Privacy rules and crash recovery prompts do not change.
 
+Only one process restores and writes the default session. Any launch with
+arguments runs as its own process, and the activation lock cannot tell which
+one owns the session: an `-e` or `--profile` process that starts first holds
+it, and a bare launch it refuses then runs beside it with no lock. So the
+owner holds `session.owner.lock` beside `session.json` from startup until it
+exits (`DefaultSessionClaim`). Profile, `--new-process`, `-e`, `-d`,
+quick-terminal and `--layout` launches never take it. A launch whose restore
+mode is off takes it only once restore mode is on, so it cannot hold the
+session it will not restore, and it creates no file meanwhile; it removes a
+leftover output file only under a lock held for that and released. A launch
+that finds it held is a secondary for life: no restore, no write, no cleanup
+of either file, no sweep wake, and no takeover when the owner exits. Another
+build's primary (#575) is the exception, as before: a newer build waits for it
+to exit, then takes the lock. `default_session_restoring` (restore mode, then
+ownership) gates the load and every save, and the content cleanup asks the
+same claim, so they cannot disagree. An explicit `--restore` the launch cannot
+honour opens fresh with a translated notification.
+
+A `--config FILE` launch's default session is that file's own
+(`launch_session_path`, chosen once at startup and given to the claim, the
+writer and the load): `session-<digest>.json` beside `session.json`, the
+digest being 32 hex digits of SHA-256 over the file's canonical path, with
+the same `.content`, `.json.lock` and `.owner.lock` siblings and rules. A
+`--config` that names the default config file keeps `session.json`.
+
+Saving has three triggers. Gestures save at the end of dispatch: tab, split
+and window changes, and every key-bound action except scrolling. A sweep
+catches what no gesture announces (a `cd`, a divider, a window move, output)
+at most every `SESSION_SWEEP` (2 s), on event-loop turns that run anyway. Any
+window event except a redraw, and any user event, marks the session touched;
+after every window's turn, a touched session whose sweep is not yet due asks
+for one wake at the end of the interval (`SessionSweep`). The wake carries no
+event and asks for nothing more, and an idle Kettle gets no events, so a
+change before going quiet is written within 2 s and idle stays idle. Quitting
+saves once more through the same gates and waits at most 1.5 s for the write.
+
 Save Layout reuses the title editor's single-line field and all of its layout,
 IME, hit-test, control-geometry and accessibility projections. It captures the
 same multi-window snapshot as automatic saving, excluding the quick terminal,
@@ -5099,27 +5182,33 @@ sequenceDiagram
     autonumber
     participant Shell as Shell (PTY)
     participant Core as kettle-core
-    participant Mux as kettle-ui::Mux
-    participant FS as session.json (atomic)
-    participant App as App (next launch)
+    participant App as App (event loop)
+    participant W as Session writer thread
+    participant FS as session.json + session.content
+    participant Next as App (next launch)
 
-    Note over Shell,Mux: Per-keystroke / per-cd
-    Shell->>Core: OSC 7 (file://host/path/cwd)
-    Core->>Mux: Pane::cwd = path
-    Mux->>Mux: mark_dirty()
+    Note over App,W: Gestures save at once
+    App->>App: tab / split / window change, key-bound action
+    App->>W: SaveJob (content key unchanged → Keep, else Write)
 
-    Note over Mux,FS: Debounced autosave
-    Mux->>Mux: structural change (new tab / split / close)
-    Mux->>FS: private staged sibling + file sync
-    FS->>FS: atomic replace → session.json<br/>parent-directory sync
+    Note over Shell,App: Changes no gesture announces
+    Shell->>Core: output, OSC 7 cwd
+    Core->>App: Wakeup user event → session touched
+    App->>App: sweep due (2 s since the last)? sweep on this turn
+    App->>App: otherwise ask for one wake at last sweep + 2 s
+    App->>W: SaveJob from the sweep<br/>(streaming output at most every 30 s)
 
-    Note over App,FS: Next launch follows the resolved restore policy
-    App->>App: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
-    App->>FS: read session.json
-    FS-->>App: windows → tab trees + per-pane cwds
-    App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)
-    Mux->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
-    Note over Core,App: Pane reappears in same<br/>tab/split/cwd as last exit
+    Note over W,FS: One lock across both files
+    W->>FS: session.json.lock, then session.json if its bytes changed
+    W->>FS: session.content if its bytes changed<br/>(staged, synced, renamed, directory synced)
+    W-->>App: SessionResave on a stale file or a failed save
+
+    Note over Next,FS: Next launch, if it holds session.owner.lock
+    Next->>Next: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
+    Next->>FS: read session.json, then session.content if its digest matches
+    FS-->>Next: windows → tab trees + per-pane cwds
+    Next->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
+    Note over Core,Next: Pane reappears in same<br/>tab/split/cwd as last exit
 ```
 
 Four notable invariants preserved by this flow:
@@ -5497,9 +5586,43 @@ are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
 sidecar next to the session layout through `kettle-state` private durable writes.
 The digest prevents applying an old sidecar to a changed layout; it is not an
 authentication mechanism. Content remains untrusted and is validated again on
-load. The existing coalescing session writer serializes layout, content and
+load. One coalescing writer thread serializes layout, content and
 output-disable cleanup; an interrupted pair safely loses content rather than
 applying it to another layout.
+
+A save builds a `ContentKey` before it walks any grid, without a grid lock:
+the layout hash, `restore-scrollback-lines` and `-remote`, the window order,
+and per pane its id, output and geometry generations, whether it counts as
+remote, and where its last remote session ended. The generations are sampled
+first, so output racing a snapshot changes the next key rather than hiding in
+this one. `ContentThrottle` then decides: the exit save, a stale file, the
+first save and a changed binding (layout hash or either setting) write; an
+unchanged key keeps the file (`ContentJob::Keep`, no grid walk); a sweep that
+sees the previous sweep's key writes, because the output went quiet; a save 30
+seconds after the last write writes; anything else is put off and asks for the
+sweep's wake. Gestures follow the same rules except the quiet one, so they
+cannot bypass the interval. The writer's single pending slot folds jobs: a
+newer session wins, and a `Keep` never replaces a `Write` or `Remove` still
+waiting. The writer holds the content file it last wrote open, with its size,
+time and a digest of its bytes; a `Write` of the same bytes to the same file is
+skipped, and a `Keep` that finds the file deleted or replaced reports it.
+
+Both files are written under one hold of `session.json.lock`, so another
+writer cannot pair its layout with this content in between. A lock timeout or a
+failed `session.json` write changes neither file; a failed content write
+removes the old content only when `session.json` was just replaced. A stale
+file or a failed save sets a flag the next save reads, taking a fresh snapshot,
+and wakes the UI thread (`UserEvent::SessionResave`), at most three failures
+in a row.
+
+With `restore-scrollback-remote = false`, a remote pane saves no rows. When a
+pane stops counting as remote (or restore replays output saved as remote), it
+records the document row just past the bottom of its primary screen
+(`kettle_core::restore::primary_end_row`, numbered from
+`Grid::history_origin`). Rows before it stay out of the saved output while any
+of them remains in the grid, and rows after it save as local
+(`snapshot_from`). Rows leave only from the grid's old end: eviction, a
+scrollback clear, or a reset.
 
 Restore consumes content in window, tab and DFS leaf order. Each terminal
 parses validated content and a localized divider before its PTY reader or child

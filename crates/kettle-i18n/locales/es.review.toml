@@ -53,6 +53,9 @@ notify_profile_launch_failed = "accepted"
 notify_profiles_failed_body = "accepted"
 notify_profiles_failed = "accepted"
 notify_layout_failed_body = "accepted"
+notify_session_not_restored = "draft"
+notify_session_not_restored_owned_body = "draft"
+notify_session_not_restored_separate_body = "draft"
 notify_layout_failed = "accepted"
 edit_layout_name = "accepted"
 edit_ssh_host_name = "accepted"
@@ -474,6 +477,9 @@ menu_help = "accepted"
 menu_copy = "accepted"
 menu_copy_link = "accepted"
 menu_find = "accepted"
+menu_prev_prompt = "draft"
+menu_next_prompt = "draft"
+menu_select_command_output = "draft"
 menu_group_tab = "accepted"
 menu_new_tab = "accepted"
 menu_new_window = "accepted"
@@ -673,6 +679,7 @@ palette_hint_mode = "accepted"
 palette_increase_font_size = "accepted"
 palette_jump_next_prompt = "accepted"
 palette_jump_prev_prompt = "accepted"
+palette_select_command_output = "draft"
 palette_move_pane_down = "accepted"
 palette_move_pane_left = "accepted"
 palette_move_pane_right = "accepted"
@@ -1028,6 +1035,15 @@ mouse_override_hint = "accepted"
 font_size_chip = "accepted"
 menu_a11y_submenu = "accepted"
 
+notification_toast_sourced = "draft"
+notification_toast_repeats = "draft"
+notification_toast_show = "draft"
+notification_toast_show_a11y = "draft"
+notification_toast_a11y = "draft"
+notification_toast_a11y_unsourced = "draft"
+notification_toast_more = "draft"
+notification_toast_a11y_repeats = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1185,4 +1201,10 @@ keys = [
     "update_a11y_restart",
     "mouse_override_hint",
     "font_size_chip",
+    "notification_toast_show",
+    "notification_toast_show_a11y",
+    "notification_toast_a11y",
+    "notification_toast_a11y_unsourced",
+    "notification_toast_more",
+    "notification_toast_a11y_repeats",
 ]

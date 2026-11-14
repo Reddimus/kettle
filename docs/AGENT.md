@@ -736,7 +736,16 @@ server also leaves a `<pid>.alias.json` pointer where the OS puts the registry
 for this user (`/run/user/<uid>` or the account's home on Unix, the Local
 AppData known folder on Windows), and clients read that location too, so one
 started with a stripped environment still finds its Kettle. The pointer only
-names the real entry, which is read and checked in its own registry. Discovery
+names the real entry, which is read and checked in its own registry. A server
+removes its pointer when it shuts down, but one that crashed, was killed, or
+quit with ⌘Q on macOS (which runs no shutdown code) leaves it behind, so each
+starting server also removes, on a background thread and under the pointers'
+lock, up to 256 pointers per location whose server is gone. A pointer records
+its server's start time: it goes when that pid is not running or now belongs
+to a process that started at another time, and it stays while that process
+runs, wherever it points. A pointer from an earlier release has no start time
+and goes when the registry or entry it names no longer exists, or that entry's
+own start time shows its server gone. Discovery
 ignores links, unsafe permissions, mismatched pids, and non-v1 records. A discovery reads at most 1,024 registry entries from a
 walk of at most 8,192 directory entries, since each server's socket sits beside
 its entry; presence walks inspect at most 1,024 entries. A server unlinks its
@@ -948,7 +957,9 @@ cursor at all (vim's command line, fzf and less hide it).
 
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
 `agent_attached`, `protocol_notification` (`{title, body}` from a pane's OSC 9
-or OSC 777 notification), `tab_moved` (`{from_window, to_window, tab}` — a tab
+or OSC 777 notification, with control and bidi formatting characters removed
+and whitespace runs collapsed; sent whether Kettle shows it as a toast or a
+desktop notification), `tab_moved` (`{from_window, to_window, tab}` — a tab
 was torn off / moved to another window), `ping` (idle keepalive), and `lag`
 (when a slow subscriber's queue overflowed).
 

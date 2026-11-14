@@ -194,22 +194,21 @@ impl ReceiptWriter {
     }
 }
 
-pub(crate) struct Toast {
-    pub claim: Claim,
-    pub window: u64,
-    pub acknowledged: bool,
+/// A transient toast's lifetime: `LIFETIME` of time it was presented,
+/// visible and not paused (hovered or under assistive focus). Time in the
+/// background, behind a dialog or under the pointer does not count. Shared
+/// by the update toast and the notification toast.
+pub(crate) struct ToastClock {
     elapsed: Duration,
     last_tick: Instant,
     counting: bool,
+    /// A frame showing the toast reached the screen.
     pub presented: bool,
 }
 
-impl Toast {
-    pub fn new(claim: Claim, window: u64, now: Instant) -> Self {
+impl ToastClock {
+    pub fn new(now: Instant) -> Self {
         Self {
-            claim,
-            window,
-            acknowledged: false,
             elapsed: Duration::ZERO,
             last_tick: now,
             counting: false,
@@ -253,6 +252,40 @@ impl Toast {
                     .max(Duration::from_millis(1))
             }
         })
+    }
+}
+
+pub(crate) struct Toast {
+    pub claim: Claim,
+    pub window: u64,
+    pub acknowledged: bool,
+    pub clock: ToastClock,
+}
+
+impl Toast {
+    pub fn new(claim: Claim, window: u64, now: Instant) -> Self {
+        Self {
+            claim,
+            window,
+            acknowledged: false,
+            clock: ToastClock::new(now),
+        }
+    }
+
+    pub fn tick(&mut self, now: Instant, visible: bool, paused: bool) {
+        self.clock.tick(now, visible, paused);
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.clock.remaining()
+    }
+
+    pub fn opacity(&self, motion: bool) -> f32 {
+        self.clock.opacity(motion)
+    }
+
+    pub fn wake_after(&self, motion: bool) -> Option<Duration> {
+        self.clock.wake_after(motion)
     }
 }
 
@@ -397,6 +430,21 @@ mod tests {
         assert!(ledger.finish(&second, true));
     }
 
+    /// Under reduced motion a toast stays fully opaque until it goes and
+    /// asks for no fade frames; with motion it fades over its last 150 ms.
+    #[test]
+    fn reduced_motion_keeps_a_toast_opaque_until_it_goes() {
+        let now = Instant::now();
+        let mut clock = ToastClock::new(now);
+        clock.presented = true;
+        clock.tick(now, true, false);
+        clock.tick(now + LIFETIME - Duration::from_millis(50), true, false);
+        assert!(clock.opacity(true) < 0.5);
+        assert_eq!(clock.opacity(false), 1.0);
+        assert_eq!(clock.wake_after(true), Some(Duration::from_millis(16)));
+        assert_eq!(clock.wake_after(false), Some(Duration::from_millis(50)));
+    }
+
     #[test]
     fn background_time_and_hover_do_not_expire_the_toast() {
         let now = Instant::now();
@@ -406,7 +454,7 @@ mod tests {
         let mut toast = Toast::new(claim, 1, now);
         toast.tick(now + Duration::from_secs(100), true, false);
         assert_eq!(toast.remaining(), LIFETIME);
-        toast.presented = true;
+        toast.clock.presented = true;
         toast.tick(now + Duration::from_secs(100), true, false);
         toast.tick(now + Duration::from_secs(102), false, false);
         assert_eq!(toast.remaining(), Duration::from_secs(5));

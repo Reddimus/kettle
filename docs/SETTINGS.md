@@ -115,7 +115,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Scrollbar | `scrollbar` | Hidden · Automatic · Always |
 | Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
-| Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention |
+| Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention. Visual also marks the active tab while a bell in the pane you are looking at is unanswered |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
 | Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |

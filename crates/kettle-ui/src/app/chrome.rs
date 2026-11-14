@@ -56,6 +56,12 @@ impl App {
                     .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
                     .is_some()
             })
+            || self.notification_toast_projection(ws).is_some_and(|view| {
+                view.overlay
+                    .geometry
+                    .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                    .is_some()
+            })
     }
 
     pub(super) fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
@@ -248,8 +254,10 @@ impl App {
                     .copied()
                     .flatten()
                     .map_or(PARKED_TAB, |x| x0 + x);
-                // Per-tab activity dot. Active tabs short-circuit to
-                // Normal (the focused-tab accent already signals "you are here").
+                // Per-tab activity marker. Active tabs short-circuit to
+                // Normal (the focused-tab accent already signals "you are
+                // here") unless the bell rang in the focused pane and the user
+                // has not answered it.
                 let activity = ws
                     .mux
                     .tabs
@@ -258,6 +266,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,
@@ -308,11 +317,7 @@ impl App {
                     rect,
                     show_controls,
                     self.cfg.close_button_on_tab,
-                    if activity == RenderTabActivity::Normal {
-                        0.0
-                    } else {
-                        kettle_render::activity_lane(scale)
-                    },
+                    kettle_render::activity_lane(activity, scale),
                     &full_label,
                     hint.as_deref(),
                     cell_w,
@@ -476,6 +481,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,

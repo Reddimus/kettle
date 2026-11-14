@@ -330,3 +330,30 @@ fn bottom_persistent_notices_end_at_the_pane_bottom_with_the_same_layout() {
         }
     }
 }
+
+/// Text wrapped at `update_toast_columns` in up to six rows has a toast at
+/// every scale and width the toast takes, and seven rows do not fit: the
+/// helper names the stacked layout's real wrap width.
+#[test]
+fn text_fitted_to_the_toast_columns_always_has_a_toast() {
+    use super::{toast_text_rows, update_toast_columns};
+    for scale in [1.0_f32, 1.5, 2.0] {
+        for width in [360.0_f32, 520.0, 800.0, 1600.0] {
+            let surface = (width * scale, 900.0 * scale);
+            let cell = (8.0 * scale, 16.0 * scale);
+            let columns = update_toast_columns(surface.0, scale, cell.0);
+            assert!(columns > 0, "{scale}x {width}");
+            let line = "w".repeat(columns);
+            for rows in 1..=6 {
+                let text = vec![line.as_str(); rows].join("\n");
+                assert_eq!(toast_text_rows(&text, columns), Some(rows));
+                assert!(
+                    update_toast_geometry(surface, 0.0, scale, cell, 4, &text).is_some(),
+                    "{scale}x {width}: {rows} rows"
+                );
+            }
+            let seven = [line.as_str(); 7].join("\n");
+            assert!(update_toast_geometry(surface, 0.0, scale, cell, 4, &seven).is_none());
+        }
+    }
+}

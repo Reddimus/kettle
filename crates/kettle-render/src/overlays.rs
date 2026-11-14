@@ -775,6 +775,18 @@ pub fn update_toast_geometry(
     })
 }
 
+/// Text columns of [`update_toast_geometry`]'s widest, stacked layout on a
+/// surface `surface_width` wide: a caller that fits text to a number of rows
+/// wraps it at this many columns. Text of up to six rows there has a toast.
+pub fn update_toast_columns(surface_width: f32, scale: f32, cell_width: f32) -> usize {
+    let max_width = (surface_width - 32.0 * scale).min(480.0 * scale);
+    let text_width = max_width - 32.0 * scale;
+    if !text_width.is_finite() || cell_width <= 0.0 {
+        return 0;
+    }
+    ((text_width / cell_width).floor().max(0.0) as usize).saturating_sub(1)
+}
+
 /// Number of lines painted by the shared notice/toast word wrapper.
 pub fn toast_text_rows(text: &str, columns: usize) -> Option<usize> {
     toast_wrapped_text(text, columns).map(|(_, rows)| rows)
@@ -1274,7 +1286,7 @@ pub fn format_media_size(bytes: u64) -> String {
 }
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
-/// draws a filled cyan disc, `Bell` a yellow triangle on a top or bottom
+/// draws a filled cyan disc, `Bell` a drawn yellow bell on a top or bottom
 /// tab bar; vertical tabs keep a square dot in each colour until 6.1.
 /// Terminator-parity affordance ("you've got new output in an inactive tab").
 /// Renderer-side enum so the UI doesn't need to leak its
@@ -1291,7 +1303,7 @@ pub enum TabActivity {
     /// (`tail -f`, build watchers) where the *absence* of output is
     /// the signal the user wants. Drawn on a top or bottom tab bar as a
     /// dim chrome-gray ring, distinct from `Output` (a cyan disc) and
-    /// `Bell` (a yellow triangle) by shape as well as colour; vertical
+    /// `Bell` (a yellow bell) by shape as well as colour; vertical
     /// tabs keep a gray dot until 6.1.
     Silent,
 }

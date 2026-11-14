@@ -226,21 +226,55 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
 /// unavailable token on either side means "cannot tell", which stays with the
 /// historical bare-pid answer: never prune a record that may still be live.
 pub fn owner_alive(pid: u32, start_token: Option<u64>) -> bool {
-    owner_alive_with(pid, start_token, crate::process::inspect)
+    owner_state(pid, start_token) != OwnerState::Gone
 }
 
+/// What the OS says about the process instance a record names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerState {
+    /// Not running, exited, or the pid now belongs to another instance.
+    Gone,
+    /// Running, and the OS reports the start token the record holds.
+    Same,
+    /// Running under that pid, but the record holds no token or the OS will
+    /// not describe the process, so it may or may not be the writer.
+    Unknown,
+}
+
+/// [`owner_alive`], keeping "proved the same instance" apart from "cannot
+/// tell", for callers that need more evidence before they act on the latter.
+pub(crate) fn owner_state(pid: u32, start_token: Option<u64>) -> OwnerState {
+    owner_state_with(pid, start_token, crate::process::inspect)
+}
+
+#[cfg(test)]
 fn owner_alive_with(
     pid: u32,
     start_token: Option<u64>,
     inspect: impl FnOnce(u32) -> Result<crate::process::ProcessSnapshot, crate::process::InspectError>,
 ) -> bool {
+    owner_state_with(pid, start_token, inspect) != OwnerState::Gone
+}
+
+fn owner_state_with(
+    pid: u32,
+    start_token: Option<u64>,
+    inspect: impl FnOnce(u32) -> Result<crate::process::ProcessSnapshot, crate::process::InspectError>,
+) -> OwnerState {
     if !pid_alive(pid) {
-        return false;
+        return OwnerState::Gone;
     }
     let Ok(snapshot) = inspect(pid) else {
-        return true;
+        return OwnerState::Unknown;
     };
-    !snapshot.exited && start_token.is_none_or(|recorded| recorded == snapshot.identity.start())
+    if snapshot.exited {
+        return OwnerState::Gone;
+    }
+    match start_token {
+        Some(recorded) if recorded == snapshot.identity.start() => OwnerState::Same,
+        Some(_) => OwnerState::Gone,
+        None => OwnerState::Unknown,
+    }
 }
 
 /// RAII claim: the entry file lives as long as the guard. Dropped on window
@@ -739,6 +773,22 @@ mod tests {
             }),
             "unavailable inspection retains the conservative pid fallback"
         );
+    }
+
+    /// Only a matching token proves the same instance; a missing token or a
+    /// process the OS will not describe is "cannot tell", never "gone".
+    #[test]
+    fn owner_state_separates_proof_from_cannot_tell() {
+        let snapshot = crate::process::current().unwrap();
+        let (pid, token) = (snapshot.identity.pid(), snapshot.identity.start());
+        let state = |recorded, inspected| owner_state_with(pid, recorded, |_| inspected);
+        assert_eq!(state(Some(token), Ok(snapshot)), OwnerState::Same);
+        assert_eq!(state(Some(token ^ 1), Ok(snapshot)), OwnerState::Gone);
+        assert_eq!(state(None, Ok(snapshot)), OwnerState::Unknown);
+        let refused = Err(crate::process::InspectError::Unavailable);
+        assert_eq!(state(Some(token), refused), OwnerState::Unknown);
+        assert_eq!(owner_state(pid, Some(token)), OwnerState::Same);
+        assert_eq!(owner_state(u32::MAX - 1, Some(token)), OwnerState::Gone);
     }
 
     #[cfg(target_os = "linux")]

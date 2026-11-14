@@ -344,6 +344,12 @@ in the config. The default
 .B restore-session = auto
 follows the macOS keep-windows setting, restores the previous session on Linux,
 and opens fresh on Windows.
+One Kettle process owns the saved session. While another one has it open, and
+with
+.BR \-\-profile ", " \-\-new\-process ", " \-e " or " \-d ,
+this flag opens a fresh window and a notification says why. With
+.BI \-\-config \ FILE
+it restores that file's own session.
 .TP
 .BI \-\-agent\-server \ MODE
 Enable kettle's agent control server for this launch, overriding the
@@ -1146,10 +1152,21 @@ Set
 .B ssh-config-hosts = false
 to stop kettle reading it.
 .TP
-.I ~/.local/share/kettle/sessions/
+.I ~/.config/kettle/session.json
 Session JSON (atomic write-then-rename) capturing every window:
-tabs, splits, working directories + window geometry. Saved in restore mode
-and replayed on the next launch when restoration is enabled. The default
+tabs, splits, working directories + window geometry, with recent output in
+.I session.content
+beside it (under
+.B $XDG_CONFIG_HOME
+when set). Saved in restore mode, within 2 seconds of a change, and
+replayed on the next launch when restoration is enabled. Only the Kettle
+process holding
+.I session.owner.lock
+beside it restores and saves the session. A
+.BI \-\-config \ FILE
+launch has a session of that file's own,
+.IR session\-<digest>.json ,
+named by a digest of the file's path. The default
 .B restore-session = auto
 restores on Linux, follows the keep-windows setting on macOS and opens fresh
 on Windows. Use

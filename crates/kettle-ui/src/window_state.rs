@@ -1198,6 +1198,12 @@ pub(crate) struct WindowState {
     pub(crate) card_focus: Option<u64>,
     /// A tab focused by assistive technology, until ordinary input resumes.
     pub(crate) tab_focus: Option<accesskit::NodeId>,
+    /// Program notifications shown in this window: one on screen, a few
+    /// waiting (see `crate::notification_toast`).
+    pub(crate) notification_toasts: crate::notification_toast::ToastQueue,
+    /// The notification toast control assistive technology focused; only
+    /// then do Enter, Space, Tab and Escape belong to the toast.
+    pub(crate) notification_toast_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1312,6 +1318,9 @@ pub(crate) struct WindowState {
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
     pub(crate) context_menu_a11y_label: Option<String>,
+    /// The pane and stable row id the terminal menu was opened over, for its
+    /// Select Command Output row. Taken by the menu's next action.
+    pub(crate) context_menu_output_row: Option<(u64, u64)>,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1338,6 +1347,9 @@ pub(crate) struct WindowState {
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
     pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
+    /// The pane whose unanswered focused bell the last repaint was asked to
+    /// mark (`Mux::focused_bell_pane`), so a change repaints once.
+    pub(crate) focused_bell_drawn: Option<u64>,
     /// Coalesce output-driven repaints. `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
@@ -1778,6 +1790,8 @@ impl WindowState {
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
             tab_focus: None,
+            notification_toasts: Default::default(),
+            notification_toast_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,
@@ -1809,6 +1823,7 @@ impl WindowState {
             hovered_settings: false,
             pressed_settings: false,
             context_menu_a11y_label: None,
+            context_menu_output_row: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,
@@ -1821,6 +1836,7 @@ impl WindowState {
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
             bell_flashes: std::collections::HashMap::new(),
+            focused_bell_drawn: None,
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,

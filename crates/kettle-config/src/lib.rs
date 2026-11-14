@@ -213,11 +213,13 @@ pub enum CursorUnfocusedStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BellMode {
     Off,
-    /// Brief flash of the pane that rang.
+    /// Brief flash of the pane that rang (held back by `reduce-motion`), and
+    /// a bell mark on the active tab for a bell in the focused pane until
+    /// the user answers it.
     Visual,
     /// Request window attention (taskbar/dock urgency) when unfocused.
     Attention,
-    /// Both visual flash and window attention.
+    /// Both the visual cues and window attention.
     Both,
 }
 
@@ -1240,9 +1242,10 @@ impl LinkUnderline {
     }
 }
 
-/// Whether Kettle avoids motion it would start on its own (`reduce-motion`).
-/// Today that is a video's preview looping while the pointer rests on its
-/// lane; a preview the user starts plays either way.
+/// Whether Kettle avoids motion it would start on its own (`reduce-motion`):
+/// a video's preview looping while the pointer rests on its lane, the
+/// visual-bell flash and the notification toast's fade. A preview the user
+/// starts plays either way, and the bell mark on the tab shows either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
     /// Follow macOS Reduce Motion or the Linux Settings portal. If the

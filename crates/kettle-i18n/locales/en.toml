@@ -272,6 +272,9 @@ menu_help = "Help"
 menu_copy = "Copy"
 menu_copy_link = "Copy Link Address"
 menu_find = "Find…"
+menu_prev_prompt = "Previous Prompt"
+menu_next_prompt = "Next Prompt"
+menu_select_command_output = "Select Command Output"
 menu_group_tab = "Group This Tab…"
 menu_new_tab = "New Tab"
 menu_new_window = "New Window"
@@ -473,6 +476,7 @@ palette_hint_mode = "Quick-select hints"
 palette_increase_font_size = "Increase font size"
 palette_jump_next_prompt = "Jump to next prompt"
 palette_jump_prev_prompt = "Jump to previous prompt"
+palette_select_command_output = "Select output of last command"
 palette_move_pane_down = "Move pane down"
 palette_move_pane_left = "Move pane left"
 palette_move_pane_right = "Move pane right"
@@ -984,6 +988,12 @@ notify_layout_failed = "Layout not saved"
 
 notify_layout_failed_body = "Use a name of 1–128 letters, digits, dots, underscores or hyphens. Check that the layouts directory is writable."
 
+notify_session_not_restored = "Session not restored"
+
+notify_session_not_restored_owned_body = "Another Kettle process already has the saved session open, so this window opens without it."
+
+notify_session_not_restored_separate_body = "Windows opened with --profile, --new-process, -e or -d never restore the saved session."
+
 notify_profiles_failed = "Profiles directory not opened"
 
 notify_profiles_failed_body = "Check that the config directory is available and writable, and that your file manager can open folders."
@@ -1032,6 +1042,13 @@ a11y_window_close = "Close window"
 
 
 scrollback_a11y_position = "Scrollback"
+
+notification_toast_sourced = "{source}: {message}"
+notification_toast_repeats = "×{count}"
+notification_toast_show = "Show"
+notification_toast_show_a11y = "Show {source}"
+notification_toast_a11y = "Notification from {source}: {message}"
+notification_toast_a11y_unsourced = "Notification: {message}"
 
 [completion_matches]
 one = "{count} match"
@@ -1092,3 +1109,11 @@ other = "{count} new lines of output"
 [picker_theme_colours_lifted]
 one = "{count} color lifted"
 other = "{count} colors lifted"
+
+[notification_toast_more]
+one = "{count} more notification"
+other = "{count} more notifications"
+
+[notification_toast_a11y_repeats]
+one = "Sent once"
+other = "Sent {count} times"

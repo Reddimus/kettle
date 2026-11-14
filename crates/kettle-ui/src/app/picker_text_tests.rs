@@ -347,6 +347,64 @@ fn palette_placeholder_is_translated_and_only_in_the_palette() {
     );
 }
 
+/// The keyboard-shortcut list opens saying what it searches, whole, in both
+/// languages, in the header of a standard window's picker card: the 1285 px
+/// window of the Spanish review, where it once drew nothing, and a 1024 px
+/// one. It stays two columns clear of any hint (where both do not fit, the
+/// hint gives way while the field is empty), and a typed query has the whole
+/// hint. The header is built from the same pieces as the UI's.
+#[test]
+fn the_shortcut_list_shows_its_placeholder_in_a_standard_window() {
+    use super::{Mux, WindowState, picker_card_geometry, picker_placeholder};
+    use unicode_width::UnicodeWidthStr as _;
+    let palette = [
+        ("Enter", Text::PickerHintRun),
+        ("Tab/↑↓", Text::PickerHintSelect),
+        ("Esc", Text::PickerHintCancel),
+    ];
+    let cell = (8.4, 17.5);
+    for tr in [EN, ES] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.palette_input = Some((Default::default(), 0));
+        ws.palette_bound_only = true;
+        let placeholder = picker_placeholder(&ws, &tr);
+        assert_eq!(placeholder, tr.text(Text::PickerPlaceholderShortcuts));
+        for surface in [(1285.0, 841.0), (1024.0, 768.0)] {
+            let header = picker_card_geometry(surface, cell, 46.0, 1).unwrap().header;
+            let field = |text: &str| kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: placeholder.clone(),
+                text: text.into(),
+                cursor_byte: text.len(),
+                selection: None,
+                horizontal_scroll: 0,
+                rect: header,
+                prefix: "  \u{2318} ".into(),
+                hint: picker_hint(&tr, &palette),
+                accent_palette: 5,
+            };
+            let empty = field("");
+            let cw = kettle_render::text_field_cell_width(&empty, cell.0, cell.1);
+            assert_eq!(
+                kettle_render::text_field_placeholder(&empty, cw),
+                placeholder,
+                "{:?} {surface:?}",
+                tr.language()
+            );
+            let [_, editor, hint] = kettle_render::text_field_rects(&empty, cw);
+            let right = editor.0 + 2.0 + placeholder.width() as f32 * cw;
+            assert!(right + 2.0 * cw <= hint.0 + 0.001, "{surface:?}");
+            let typed = field("zoom");
+            assert_eq!(
+                kettle_render::text_field_labels(&typed, cw).1.trim_end(),
+                picker_hint(&tr, &palette),
+                "{surface:?}"
+            );
+            assert_eq!(kettle_render::text_field_placeholder(&typed, cw), "");
+        }
+    }
+}
+
 /// Screen readers hear an imported row's source as its description, the same
 /// text the row paints, and never hear a disabled placeholder as selected.
 #[test]
