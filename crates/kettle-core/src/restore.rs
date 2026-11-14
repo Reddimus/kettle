@@ -13,12 +13,38 @@ pub const MAX_RESTORE_LINE_BYTES: usize = 16 * 1024;
 /// Boundaries prevent a new terminal's mode from changing saved cell widths.
 pub type RestoreRow = (String, bool, Vec<(usize, bool)>);
 
+/// The document row (see `Grid::history_origin`) of the oldest row the primary
+/// grid still holds. Rows only ever leave from this end: scrolled out of
+/// bounded history, cleared with the scrollback (`CSI 3 J`) or reset (`RIS`).
+pub fn primary_first_row<T: EventListener>(term: &Term<T>) -> u64 {
+    term.primary_grid().history_origin()
+}
+
+/// The document row just past the bottom of the primary screen: every row the
+/// primary grid holds now comes before it, and every row added later comes at
+/// or after it.
+pub fn primary_end_row<T: EventListener>(term: &Term<T>) -> u64 {
+    let grid = term.primary_grid();
+    grid.history_origin() + grid.history_size() as u64 + grid.screen_lines() as u64
+}
+
 /// Generate SGR from cell state, never from raw output. OSC, DCS, links, cursor
 /// movement and device requests cannot cross this boundary. Budget includes JSON
 /// string escaping so the persistence envelope can enforce a total file cap.
 pub fn snapshot<T: EventListener>(
     term: &Term<T>,
     limit: usize,
+    budget: &mut usize,
+) -> Vec<RestoreRow> {
+    snapshot_from(term, limit, 0, budget)
+}
+
+/// [`snapshot`], leaving out every row before document row `first` (see
+/// [`primary_end_row`]): rows a remote session wrote before it ended.
+pub fn snapshot_from<T: EventListener>(
+    term: &Term<T>,
+    limit: usize,
+    first: u64,
     budget: &mut usize,
 ) -> Vec<RestoreRow> {
     if limit == 0 || *budget < 16 {
@@ -34,7 +60,14 @@ pub fn snapshot<T: EventListener>(
     {
         end -= 1;
     }
-    let start = (end - limit.min(MAX_RESTORE_LINES) as i32).max(-(grid.history_size() as i32));
+    // Document row `first` sits at line `first - origin - history`.
+    let first_line = i64::try_from(first.saturating_sub(grid.history_origin()))
+        .unwrap_or(i64::MAX)
+        .saturating_sub(grid.history_size() as i64)
+        .min(i64::from(i32::MAX)) as i32;
+    let start = (end - limit.min(MAX_RESTORE_LINES) as i32)
+        .max(-(grid.history_size() as i32))
+        .max(first_line);
     let mut rows = Vec::new();
     for row in (start..end).rev() {
         let mut line = String::new();
@@ -287,6 +320,81 @@ mod tests {
             &TermSize::new(40, 4),
             EventProxy::new(tx, waker),
         )
+    }
+
+    fn texts(rows: &[RestoreRow]) -> Vec<String> {
+        rows.iter().map(|row| row.0.clone()).collect()
+    }
+
+    /// Rows a remote session wrote stay out of a snapshot taken from its end
+    /// row, whatever happened since, and the grid gives them up only from its
+    /// old end: a scrollback clear that leaves them on screen keeps them, and
+    /// a reset or eviction does not.
+    #[test]
+    fn rows_before_a_remote_boundary_stay_out_until_they_leave_the_grid() {
+        let mut budget = usize::MAX;
+        let mut term = terminal();
+        let mut parser = Processor::new();
+        parser.advance(&mut term, b"REMOTE-1\r\nREMOTE-2\r\n");
+        let end = primary_end_row(&term);
+        assert_eq!(primary_first_row(&term), 0);
+        assert_eq!(end, 4, "one past the bottom of a 4-row screen");
+        parser.advance(
+            &mut term,
+            b"local-1\r\nlocal-2\r\nlocal-3\r\nlocal-4\r\nlocal-5\r\n",
+        );
+        let all = texts(&snapshot(&term, 100, &mut budget));
+        assert!(all.iter().any(|row| row.contains("REMOTE-1")), "{all:?}");
+        let local = texts(&snapshot_from(&term, 100, end, &mut budget));
+        assert!(local.iter().all(|row| !row.contains("REMOTE")), "{local:?}");
+        // Rows that were on screen when it ended may hold its output too:
+        // they stay out, and the rows after them save.
+        assert!(
+            local
+                .iter()
+                .all(|row| !row.contains("local-1") && !row.contains("local-2"))
+        );
+        assert!(local.iter().any(|row| row.contains("local-5")), "{local:?}");
+        assert!(
+            primary_first_row(&term) < end,
+            "the remote rows are still there"
+        );
+
+        // A scrollback clear with the remote rows still on screen keeps them.
+        let mut term = terminal();
+        parser.advance(&mut term, b"REMOTE-1\r\n");
+        let end = primary_end_row(&term);
+        parser.advance(&mut term, b"local\r\n\x1b[3J");
+        assert!(primary_first_row(&term) < end);
+        let rows = texts(&snapshot_from(&term, 100, end, &mut budget));
+        assert!(rows.iter().all(|row| !row.contains("REMOTE")), "{rows:?}");
+
+        // A reset takes every row the grid held.
+        parser.advance(&mut term, b"\x1bc");
+        assert!(primary_first_row(&term) >= end);
+
+        // So does eviction from bounded history.
+        let (tx, _) = crossbeam_channel::unbounded();
+        let waker: Waker = Arc::new(|| {});
+        let mut small = Term::new(
+            Config {
+                scrolling_history: 2,
+                ..Config::default()
+            },
+            &TermSize::new(40, 4),
+            EventProxy::new(tx, waker),
+        );
+        parser.advance(&mut small, b"REMOTE\r\n");
+        let end = primary_end_row(&small);
+        for _ in 0..8 {
+            parser.advance(&mut small, b"local\r\n");
+        }
+        assert!(primary_first_row(&small) >= end);
+        assert!(
+            texts(&snapshot_from(&small, 100, end, &mut budget))
+                .iter()
+                .any(|row| row.contains("local"))
+        );
     }
 
     #[test]

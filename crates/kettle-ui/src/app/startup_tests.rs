@@ -106,7 +106,7 @@ fn pre_launch_spawn_sits_between_app_build_and_run_app() {
     let order = [
         run.find("EventLoop::<UserEvent>::with_user_event().build()")
             .unwrap(),
-        run.find("let plan = startup_plan(&startup, &initial_cfg, another_build_running);")
+        run.find("let plan = startup_plan(&startup, &initial_cfg, session_elsewhere);")
             .unwrap(),
         run.find("let mut app = App {").unwrap(),
         run.find("startup_trace::Phase::AppBuilt").unwrap(),

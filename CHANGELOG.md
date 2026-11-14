@@ -653,6 +653,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A crash, `kill -9`, power loss or a logout that hangs no longer loses the
+  last changes to a saved session. Kettle saved every tab, split and window
+  change at once, and every 2 seconds while busy, but the last `cd`, window
+  move or output before Kettle went quiet reached disk only when something
+  else happened; on macOS that was often not until you quit. It is now
+  written within 2 seconds, and an idle Kettle still writes nothing and does
+  not wake up. The saved output (`session.content`, up to 8 MiB) is no longer
+  rewritten when nothing in it changed, and while output keeps arriving it is
+  replaced at most every 30 seconds instead of every 2, and within about 4
+  seconds after it stops. SESSION-RESTORE.md states the tested bounds.
+
+- `kettle -e` and `kettle -d` launches, profile windows, `--new-process`
+  launches, and a second Kettle process no longer reopen a copy of the saved
+  session or replace it with their own windows. One process owns the
+  session, the first started in restore mode without those options; the
+  others open fresh, and `kettle --restore` there says why in a
+  notification. `restore-scrollback-lines = 0` in a profile no longer
+  deletes the main process's saved output.
+
+- `kettle --config FILE` restores and saves a session of that file's own
+  instead of sharing `session.json` with every other launch: two config
+  files no longer overwrite each other's windows. Its files sit beside
+  `session.json`, named by a digest of the config file's path. Its saved
+  session used to be `session.json`, so the first `--config` launch after
+  updating opens fresh; a `--config` naming the default config file keeps
+  `session.json`.
+
+- `session.json` and `session.content` are written under one lock, so another
+  process can no longer pair its layout with this one's output. A save that
+  timed out on the lock deleted `session.content`; it now changes neither file
+  and is tried again at the next sweep.
+
+- With `restore-scrollback-remote = false`, output from an `ssh` session that
+  has ended was saved as local output once the pane counted as local again.
+  It now stays out of the saved output until it has left the scrollback, and
+  output after it is saved as usual.
+
 - Screen readers on Linux and Windows heard nothing for the theme picker's
   footer: its contrast readout, with the least readable palette colour's
   number and a warning below 3:1, the theme mode and both sides' themes.
