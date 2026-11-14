@@ -753,6 +753,13 @@ impl App {
             children.extend(projected.iter().map(|(id, _)| *id));
             nodes.extend(projected);
         }
+        // A program's notification: a polite status, announced on every
+        // platform through AccessKit, with its Show and Dismiss buttons.
+        if let Some(view) = self.notification_toast_projection(ws) {
+            let projected = notification_toast_nodes(&view, &self.ui_text);
+            children.extend(projected.iter().map(|(id, _)| *id));
+            nodes.extend(projected);
+        }
         let surface = ws
             .window
             .as_ref()
@@ -811,6 +818,9 @@ impl App {
             .or(self
                 .update_toast_focus
                 .filter(|_| overlay.update_toast.is_some()))
+            .or(ws
+                .notification_toast_focus
+                .filter(|target| nodes.iter().any(|(id, _)| id == target)))
             .unwrap_or_else(|| {
                 if ws.search.open {
                     accessibility_search_control_id(ws.search.focused_control)
@@ -1061,6 +1071,18 @@ impl App {
                 }
             }
         }
+        if let Some(view) = self.notification_toast_projection(ws) {
+            view.label.hash(&mut hasher);
+            view.description.hash(&mut hasher);
+            view.show.hash(&mut hasher);
+            let geometry = view.overlay.control_geometry();
+            for rect in [geometry.rect, geometry.details, geometry.close] {
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        ws.notification_toast_focus.hash(&mut hasher);
         overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
@@ -1442,6 +1464,10 @@ impl App {
             }
             return;
         }
+        if self.notification_toast_action(ws, &request) {
+            return;
+        }
+        ws.notification_toast_focus = None;
         if matches!(
             request.target_node,
             ACCESSIBILITY_UPDATE_DETAILS_ID | ACCESSIBILITY_UPDATE_DISMISS_ID

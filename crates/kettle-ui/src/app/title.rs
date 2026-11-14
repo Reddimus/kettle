@@ -117,6 +117,23 @@ fn is_private_use_char(c: char) -> bool {
 // with the SSH target validator in kettle-config.
 pub(crate) use kettle_config::ssh_config::is_bidi_format_char;
 
+/// The native-title mark for an unanswered bell in the focused pane. macOS
+/// title fonts carry the bell emoji. Linux window-manager and Windows title
+/// fonts may not, so there it is ASCII, like the recording mark.
+pub(super) fn bell_title_mark(macos: bool) -> &'static str {
+    if macos { "\u{1F514} " } else { "[!] " }
+}
+
+/// `title` with `mark` in front while `marked`: the focused pane's bell is
+/// unanswered and no tab strip shows it.
+pub(super) fn bell_window_title(title: String, marked: bool, mark: &str) -> String {
+    if marked {
+        format!("{mark}{title}")
+    } else {
+        title
+    }
+}
+
 /// Render the OS window title from the user's `window-title-format`
 /// template with the active pane's title / cwd / 1-based tab index. While
 /// the pane title is still the initial placeholder ("kettle") and the cwd
@@ -781,6 +798,13 @@ impl App {
         } else {
             want
         };
+        // A bell the user has not answered, for a window with no tab strip
+        // to mark it on.
+        let want = bell_window_title(
+            want,
+            ws.mux.focused_bell_pane().is_some() && self.tab_bar_h(ws) <= 0.0,
+            bell_title_mark(cfg!(target_os = "macos")),
+        );
         let want = sanitize_native_window_title(&want);
         if self.gpu_software_fallback {
             format!(

@@ -89,6 +89,8 @@ impl App {
 
     pub(super) fn toast_visible(&self, ws: &WindowState) -> bool {
         self.persistent_notices(ws).is_empty()
+            // A program's notification goes first; the update waits.
+            && ws.notification_toasts.is_empty()
             && ws.window_focused
             && ws.window_shown
             && !ws.window_occluded
@@ -188,7 +190,7 @@ impl App {
 
     pub(super) fn update_toast_presented(&mut self, window: u64) {
         if let Some(toast) = self.update_toast.as_mut().filter(|t| t.window == window) {
-            toast.presented = true;
+            toast.clock.presented = true;
             if !toast.acknowledged {
                 toast.acknowledged = true;
                 self.update_toast_handled = Some(toast.claim.notice.clone());
@@ -203,13 +205,13 @@ impl App {
         let Some(toast) = self.update_toast.take() else {
             return false;
         };
-        if toast.presented
+        if toast.clock.presented
             && !toast.acknowledged
             && let Some(writer) = &self.update_toast_receipts
         {
             writer.note(toast.claim.clone());
         }
-        if !toast.presented {
+        if !toast.clock.presented {
             finish(toast.claim.clone(), false);
         }
         self.update_toast_handled = Some(toast.claim.notice);
@@ -248,7 +250,7 @@ impl App {
                             .as_secs(),
                     ));
             let changed = Some(toast.claim.notice.clone()) != notice;
-            if expired || changed || (!toast.presented && !visible) {
+            if expired || changed || (!toast.clock.presented && !visible) {
                 let toast = self.update_toast.take().expect("toast is present");
                 self.update_toast_focus = None;
                 if !toast.acknowledged {

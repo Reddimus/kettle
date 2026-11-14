@@ -19,6 +19,14 @@ pub(crate) fn bell_flash_ramp(elapsed: std::time::Duration) -> f32 {
     let remaining = 1.0 - t.max(0.0);
     remaining * remaining
 }
+/// Whether a bell flashes the pane that rang: `bell` asks for a visual cue
+/// and motion is allowed. The flash is motion Kettle starts on its own, so
+/// `reduce-motion` holds it back; the focused-bell mark on the tab is drawn
+/// either way.
+pub(crate) fn bell_flashes(bell: kettle_config::BellMode, motion_allowed: bool) -> bool {
+    bell.visual() && motion_allowed
+}
+
 const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(super) fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {
@@ -90,6 +98,22 @@ impl App {
                 input_rejection_text(result, tr).unwrap_or(message),
             );
             self.last_input_rejection_notice = Some((result, now));
+        }
+    }
+
+    /// Answer the focused bell of any pane focus has left, and repaint the
+    /// tab strip, the window title and the accessibility tree when the
+    /// marked pane changed. Runs after every window dispatch and drain, so
+    /// whichever route moved focus or answered the bell, the mark follows.
+    pub(super) fn sync_focused_bell(&mut self, ws: &mut WindowState) {
+        ws.mux.settle_focused_bells();
+        let marked = ws.mux.focused_bell_pane();
+        if marked != ws.focused_bell_drawn {
+            ws.focused_bell_drawn = marked;
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
         }
     }
 
