@@ -8132,8 +8132,8 @@ impl Terminal {
             .unwrap_or_default()
     }
 
-    /// Stable row ids `start..end` of one completed command's output (see
-    /// [`CommandMark::output`]): the newest command whose output holds row
+    /// Stable row ids `start..end` of one completed command's output (the
+    /// rows from its OSC 133 C to its D): the newest command whose output holds row
     /// `at`, or with `None`, the newest command. `None` when that command
     /// printed nothing, its rows are gone, or the alternate screen is up.
     /// Locks as [`Self::command_marks`] does.
