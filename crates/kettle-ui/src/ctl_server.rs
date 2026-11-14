@@ -946,7 +946,7 @@ impl CtlServer {
         }
         // Where the OS puts the registry, independent of this environment, so
         // a client started with a stripped environment still finds us.
-        let server = Self::start_in(
+        let server = match Self::start_in(
             policy,
             pid,
             version,
@@ -954,7 +954,13 @@ impl CtlServer {
             wake,
             discovery::registry_dir(),
             discovery::canonical_registry_dir(),
-        )?;
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                log::warn!("agent-server: {error}");
+                return None;
+            }
+        };
         // Servers that crashed, were killed or quit without running their
         // shutdown left their aliases where the OS puts the registry.
         // Clear a bounded batch off the startup path; this server's own
@@ -974,7 +980,8 @@ impl CtlServer {
     }
 
     /// [`CtlServer::start`] with the registry and the OS's registry directory
-    /// given, and without the prune of other servers' aliases.
+    /// given, and without the prune of other servers' aliases. A failure
+    /// says which step failed, for the caller to log.
     fn start_in(
         policy: CtlPolicy,
         pid: u32,
@@ -983,9 +990,9 @@ impl CtlServer {
         wake: Arc<dyn Fn() + Send + Sync>,
         registry_dir: PathBuf,
         canonical_dir: Option<PathBuf>,
-    ) -> Option<CtlServer> {
+    ) -> Result<CtlServer, String> {
         if !policy.runs_server() {
-            return None;
+            return Err("the policy runs no control server".into());
         }
         // Held until the entry is written, so no other process removes this
         // socket between its bind and its registration.
@@ -993,15 +1000,11 @@ impl CtlServer {
         let endpoint = discovery::default_endpoint(&registry_dir, pid);
         let listener = match CtlListener::bind(&endpoint) {
             Ok(l) => l,
-            Err(e) => {
-                log::warn!("agent-server: cannot bind control endpoint {endpoint}: {e}");
-                return None;
-            }
+            Err(e) => return Err(format!("cannot bind control endpoint {endpoint}: {e}")),
         };
         let entry = RegistryEntry::registering("gui", pid, endpoint.clone(), version, started_unix);
         if let Err(e) = registration.register(&entry) {
-            log::warn!("agent-server: cannot write discovery entry: {e}");
-            return None;
+            return Err(format!("cannot write discovery entry: {e}"));
         }
         drop(registration);
         let alias_dir = canonical_dir
@@ -1038,12 +1041,11 @@ impl CtlServer {
             Ok(accept) => accept,
             Err(error) => {
                 published.withdraw();
-                log::warn!("agent-server: cannot spawn accept thread: {error}");
-                return None;
+                return Err(format!("cannot spawn accept thread: {error}"));
             }
         };
 
-        Some(CtlServer {
+        Ok(CtlServer {
             policy,
             rx,
             conns: HashMap::new(),
@@ -1197,15 +1199,52 @@ impl Drop for CtlServer {
     }
 }
 
-/// A server started as this process in a registry under `root`, aliased from
-/// a stand-in for the OS's registry directory there, and the files a client
-/// would find it by: its entry, its alias and, on Unix, its socket. Each is
-/// checked to exist.
+/// A server started in a registry under `root`, aliased from a stand-in for
+/// the OS's registry directory there, and the files a client would find it
+/// by: its entry, its alias and, on Unix, its socket. Each is checked to
+/// exist.
+///
+/// It runs under a pid of its own that no process has. On Windows a server's
+/// endpoint is the pipe `kettle-ctl-<pid>`, named by the pid alone, created
+/// as that name's first instance and held by the accept thread until the
+/// process ends, shutdown or not. One process can therefore start one
+/// server under its own pid, ever, and a test binary starts many. Nothing
+/// the server publishes or withdraws depends on which pid it is.
 #[cfg(test)]
 pub(crate) fn start_private_for_tests(root: &std::path::Path) -> (CtlServer, Vec<PathBuf>) {
+    start_private_as(root, stand_in_pid())
+}
+
+/// A pid for a test server: different at every call, above every real pid,
+/// and apart from the ones another test process on this machine hands out,
+/// since Windows pipe names are machine-wide.
+#[cfg(test)]
+fn stand_in_pid() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let next = NEXT.fetch_add(1, Ordering::Relaxed);
+    assert!(next < 512, "too many test servers for one process");
+    0x8000_0000 | ((std::process::id() & 0x003f_ffff) << 9) | next
+}
+
+/// [`start_private_for_tests`] under this process's own pid, as a running
+/// Kettle's server is: the real pipe name on Windows. For the reason given
+/// there, only one test in this binary may call it, and a second call
+/// panics on every platform rather than only where it cannot bind.
+#[cfg(test)]
+pub(crate) fn start_private_as_this_process(root: &std::path::Path) -> (CtlServer, Vec<PathBuf>) {
+    static USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    assert!(
+        !USED.swap(true, Ordering::AcqRel),
+        "a second server under this process's own pid cannot bind on Windows; \
+         use start_private_for_tests"
+    );
+    start_private_as(root, std::process::id())
+}
+
+#[cfg(test)]
+fn start_private_as(root: &std::path::Path, pid: u32) -> (CtlServer, Vec<PathBuf>) {
     let registry = root.join("registry");
     let canonical = root.join("os-ctl");
-    let pid = std::process::id();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
     let server = CtlServer::start_in(
         CtlPolicy::new(kettle_config::AgentServer::ReadOnly, false),
@@ -1216,7 +1255,7 @@ pub(crate) fn start_private_for_tests(root: &std::path::Path) -> (CtlServer, Vec
         registry.clone(),
         Some(canonical.clone()),
     )
-    .expect("start a server in a private registry");
+    .unwrap_or_else(|error| panic!("start a server in a private registry: {error}"));
     let mut files = vec![
         registry.join(format!("{pid}.json")),
         canonical.join(format!("{pid}.alias.json")),
@@ -3068,14 +3107,39 @@ mod tests {
         drop(listener);
     }
 
+    /// Each test server needs a pid of its own, or on Windows the second one
+    /// in this process cannot bind: its pipe is named by the pid alone and
+    /// the first server's accept thread holds that name until the process
+    /// ends. None may be a pid a process could have.
+    #[test]
+    fn test_servers_run_under_pids_of_their_own() {
+        let pids = [super::stand_in_pid(), super::stand_in_pid()];
+        assert_ne!(pids[0], pids[1]);
+        for pid in pids {
+            assert!(pid > i32::MAX as u32, "{pid} could be a process");
+            assert_ne!(pid, std::process::id());
+        }
+        // Two servers at once, and a third after one has shut down.
+        let root = kettle_test_support::private_tempdir("kettle-ctl-several-");
+        let (mut first, _) = super::start_private_for_tests(&root.join("first"));
+        let (_second, second_files) = super::start_private_for_tests(&root.join("second"));
+        first.shutdown();
+        let (_third, _) = super::start_private_for_tests(&root.join("third"));
+        for file in &second_files {
+            assert!(file.exists(), "{} went with another server", file.display());
+        }
+    }
+
     /// A quit through AppKit's `terminate:` ends in `exit()`, which runs no
     /// destructor, so the App shuts the server down itself: everything a
     /// client finds a server by goes while the server still exists. A second
-    /// shutdown and the drop remove nothing more.
+    /// shutdown and the drop remove nothing more. This server runs under the
+    /// process's own pid, as Kettle's does, so on Windows it is the real
+    /// pipe name; it is the one server in this binary that may.
     #[test]
     fn shutting_down_withdraws_the_entry_the_socket_and_the_alias() {
         let root = kettle_test_support::private_tempdir("kettle-ctl-shutdown-");
-        let (mut server, files) = super::start_private_for_tests(root.path());
+        let (mut server, files) = super::start_private_as_this_process(root.path());
         server.shutdown();
         for file in &files {
             assert!(!file.exists(), "{} outlived the shutdown", file.display());
