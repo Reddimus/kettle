@@ -55,15 +55,16 @@ pub(super) enum SshRow {
     Configured(usize),
     /// `ws.ssh_imported[i]`, a `Host` alias from `~/.ssh/config`.
     Imported(usize),
-    /// Connect to the trimmed query itself. Shown when it is a valid target
-    /// and no host row is exactly it, so a fuzzy match never takes over a
-    /// target typed in full.
+    /// Connect to the trimmed query itself. Shown, first and selected, when
+    /// the query is a valid target that no host row's name or alias equals
+    /// (ignoring ASCII case), so Enter never connects a typed `prod` to a
+    /// fuzzy match such as `prod-db`.
     ConnectTyped,
     /// Disabled and never selected: no hosts and nothing typed, or a typed
     /// target ssh must not receive.
     Placeholder,
     /// Reserved for the Save row, which writes the config and comes later.
-    /// It will sit after `ConnectTyped`.
+    /// It will sit last, after the host rows.
     #[expect(dead_code, reason = "the Save row that constructs it has not landed")]
     SaveTyped,
 }
@@ -91,11 +92,13 @@ impl SshRow {
     }
 }
 
-/// The launcher's rows for `query`, in display order: configured hosts, then
-/// imported aliases (each ranked, an exact match first overall), then one of
-/// `ConnectTyped` or the invalid-target `Placeholder` when no host row is
-/// exactly the query. An imported alias equal to a configured name or target,
-/// ignoring ASCII case, is not shown twice.
+/// The launcher's rows for `query`, in display order. A host row whose name or
+/// alias equals the trimmed query (ignoring ASCII case) comes first. Otherwise
+/// a valid typed target comes first as `ConnectTyped`, so it is what Enter
+/// connects to, and an invalid one is the `Placeholder`. The fuzzy matches
+/// follow: configured hosts, then imported aliases, each ranked. An imported
+/// alias equal to a configured name or target, ignoring ASCII case, is not
+/// shown twice.
 pub(super) fn ssh_rows(
     query: &str,
     hosts: &[(String, String)],
@@ -134,11 +137,14 @@ pub(super) fn ssh_rows(
         rows.insert(0, row);
         return rows;
     }
-    rows.push(if kettle_config::ssh_config::is_valid_ssh_target(query) {
-        SshRow::ConnectTyped
-    } else {
-        SshRow::Placeholder
-    });
+    rows.insert(
+        0,
+        if kettle_config::ssh_config::is_valid_ssh_target(query) {
+            SshRow::ConnectTyped
+        } else {
+            SshRow::Placeholder
+        },
+    );
     rows
 }
 
@@ -158,8 +164,8 @@ pub(super) fn ssh_clamp_selection(rows: &[SshRow], selected: usize) -> usize {
 
 /// The selection after one arrow (or Ctrl+J/K/N/P) step. Disabled rows are
 /// skipped. Down wraps from the last row to the first. Up from the first row
-/// wraps only onto a host row, never onto an action row such as Connect, so
-/// an Up press cannot turn Enter into something other than a host.
+/// wraps only onto a host row: the Save row that will sit last must take a
+/// deliberate Down, never one Up press.
 pub(super) fn ssh_step_selection(rows: &[SshRow], selected: usize, down: bool) -> usize {
     let current = ssh_clamp_selection(rows, selected);
     let selectable: Vec<usize> = (0..rows.len())
@@ -235,7 +241,8 @@ pub(super) fn take_ssh_enter_target(
     }
 }
 
-/// The text Tab completes to: the selected host row's name or alias.
+/// The text Tab completes to: the selected host row's name or alias, or, on
+/// the Connect row, the best fuzzy match below it.
 pub(super) fn ssh_completion(
     query: &str,
     selected: usize,
@@ -244,6 +251,10 @@ pub(super) fn ssh_completion(
 ) -> Option<String> {
     let rows = ssh_rows(query, hosts, imported);
     let row = *rows.get(ssh_clamp_selection(&rows, selected))?;
+    let row = match row {
+        SshRow::ConnectTyped => *rows.get(1)?,
+        row => row,
+    };
     row.host_label(hosts, imported).map(str::to_string)
 }
 

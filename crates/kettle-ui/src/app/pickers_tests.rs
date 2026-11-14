@@ -111,20 +111,22 @@ fn layout_and_ssh_pickers_keep_ranked_candidates_on_separate_rows() {
             .iter()
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>(),
-        ["gpu", "gpu-prod", "staging-prod", "Connect to \"gp\""]
+        ["Connect to \"gp\"", "gpu", "gpu-prod", "staging-prod"]
     );
     assert_eq!(ssh.selected, 1);
     let connect = |target: &str| Some(super::SshEnter::Connect(target.to_string()));
-    assert_eq!(ssh_row_action("gp", 1, &hosts, &[]), connect("dev@gpu"));
+    assert_eq!(ssh_row_action("gp", 1, &hosts, &[]), connect("dev@gpu-short"));
+    assert_eq!(ssh_row_action("gp", 2, &hosts, &[]), connect("dev@gpu"));
     assert_eq!(
         ssh_row_action("someone@example.test", 0, &hosts, &[]),
         connect("someone@example.test"),
         "an unmatched query must retain direct user-at-host launches"
     );
     assert_eq!(ssh_row_action("", 0, &[], &[]), None);
+    assert_eq!(ssh_row_action("gp", 0, &hosts, &[]), connect("gp"));
     assert_eq!(
         ssh_row_action("gp", usize::MAX, &hosts, &[]),
-        connect("gp"),
+        connect("dev@staging"),
         "dispatch must clamp to the same last visible row after a host-list reload"
     );
 }
@@ -603,36 +605,70 @@ fn ssh_rows_list_configured_hosts_then_imported_aliases_once_each() {
     assert_eq!(ssh_rows("", &[], &[]), [super::SshRow::Placeholder]);
 }
 
+/// A valid typed target that no row's name or alias equals (ignoring ASCII
+/// case) is the first row, selected, so Enter connects to exactly what was
+/// typed. Fuzzy matches follow it and take a deliberate Down.
 #[test]
-fn ssh_typed_targets_are_never_redirected_by_fuzzy_matches() {
+fn ssh_enter_connects_the_typed_target_unless_a_row_is_exactly_it() {
     use super::SshEnter::Connect;
-    use super::SshRow::{Configured, ConnectTyped, Imported};
-    // `web3` fuzzy-matches the imported `web03`. Enter on the first row
-    // connects there; one step down is the typed target itself.
+    use super::SshRow::{ConnectTyped, Imported};
     let imported = vec!["web03".to_string()];
     let rows = ssh_rows("web3", &[], &imported);
-    assert_eq!(rows, [Imported(0), ConnectTyped]);
-    assert_eq!(
-        ssh_row_action("web3", 0, &[], &imported),
-        Some(Connect("web03".into()))
-    );
-    let down = super::ssh_step_selection(&rows, 0, true);
-    assert_eq!(down, 1);
-    let Some(Connect(target)) = ssh_row_action("web3", down, &[], &imported) else {
-        panic!("the Connect row must connect");
+    assert_eq!(rows, [ConnectTyped, Imported(0)]);
+    let Some(Connect(target)) = ssh_row_action("web3", 0, &[], &imported) else {
+        panic!("Enter on the first row must connect");
     };
     assert_eq!(
         crate::mux::ssh_tab_argv(&target).unwrap(),
         ["ssh", "-t", "--", "web3"]
     );
-    let list = ssh_picker_list("web3", down, &[], &imported, &kettle_i18n::Translator::default());
-    assert_eq!(list.rows[1].label, "Connect to \"web3\"");
-    assert!(list.rows[1].enabled);
+    let mut ws = ssh_launcher_with("web3");
+    ws.ssh_imported = imported.clone();
+    assert_eq!(
+        super::take_ssh_enter_target(&mut ws, &[]).as_deref(),
+        Some("web3"),
+        "Enter with no navigation connects to the typed target"
+    );
+    let down = super::ssh_step_selection(&rows, 0, true);
+    assert_eq!(down, 1);
+    assert_eq!(
+        ssh_row_action("web3", down, &[], &imported),
+        Some(Connect("web03".into())),
+        "Down then Enter connects to the fuzzy match"
+    );
+    let list = ssh_picker_list("web3", 0, &[], &imported, &kettle_i18n::Translator::default());
+    assert_eq!(list.rows[0].label, "Connect to \"web3\"");
+    assert!(list.rows[0].enabled);
+    assert_eq!(list.selected, 0);
+    // A prefix of an imported alias is not that alias.
+    let imported = vec!["prod-db".to_string()];
+    assert_eq!(
+        ssh_row_action("prod", 0, &[], &imported),
+        Some(Connect("prod".into()))
+    );
+    // Tab on the Connect row still completes to the best match below it.
+    assert_eq!(
+        super::ssh_completion("prod", 0, &[], &imported).as_deref(),
+        Some("prod-db")
+    );
+}
 
-    // An exact name wins over an earlier prefix match, and needs no Connect row.
+/// A host row whose name or alias equals the trimmed query, ignoring ASCII
+/// case, is row 0 and there is no Connect row: Enter connects to that host.
+#[test]
+fn ssh_an_exact_name_or_alias_is_row_zero_with_no_connect_row() {
+    use super::SshEnter::Connect;
+    use super::SshRow::{Configured, Imported};
+    let imported = vec!["prod-db".to_string(), "prod".to_string()];
+    assert_eq!(ssh_rows("prod", &[], &imported), [Imported(1), Imported(0)]);
+    assert_eq!(ssh_rows("PROD ", &[], &imported), [Imported(1), Imported(0)]);
+    assert_eq!(
+        ssh_row_action("prod", 0, &[], &imported),
+        Some(Connect("prod".into()))
+    );
+    // An exact name wins over an earlier prefix match.
     let hosts = ssh_fixture_hosts(&[("db-old", "me@old"), ("db", "me@db")]);
     assert_eq!(ssh_rows("db", &hosts, &[]), [Configured(1), Configured(0)]);
-    assert_eq!(ssh_rows("DB ", &hosts, &[]), [Configured(1), Configured(0)]);
     assert_eq!(
         ssh_row_action("db", 0, &hosts, &[]),
         Some(Connect("me@db".into()))
@@ -673,41 +709,33 @@ fn ssh_enter_on_an_invalid_typed_target_spawns_nothing_and_stays_open() {
 }
 
 /// Arrows skip the disabled placeholder. Down wraps from the last row to the
-/// first. Up from the first row wraps only onto a host row: when the last row
-/// is an action row (Connect now, Save later), Up stays put.
+/// first. Up from the first row wraps onto the last row, which is a host.
 #[test]
-fn ssh_arrows_skip_the_placeholder_and_up_never_wraps_onto_an_action_row() {
+fn ssh_arrows_skip_the_placeholder_and_up_wraps_only_onto_a_host_row() {
     use super::ssh_step_selection as step;
     let hosts = ssh_fixture_hosts(&[("h-1", "me@h1"), ("h-2", "me@h2")]);
-    // Hosts and a Connect row.
+    // The Connect row, then hosts.
     let rows = ssh_rows("h", &hosts, &[]);
-    assert_eq!(rows.last(), Some(&super::SshRow::ConnectTyped));
-    assert_eq!(step(&rows, 0, false), 0, "Up from the first row stays");
+    assert_eq!(rows.first(), Some(&super::SshRow::ConnectTyped));
     assert_eq!(step(&rows, 0, true), 1);
     assert_eq!(step(&rows, 1, true), 2);
-    assert_eq!(step(&rows, 2, true), 0, "Down wraps to the first host");
+    assert_eq!(step(&rows, 2, true), 0, "Down wraps to the Connect row");
     assert_eq!(step(&rows, 2, false), 1);
+    assert_eq!(step(&rows, 0, false), 2, "Up wraps onto the last host");
     // Hosts only: Up wraps among them, as before.
     let rows = ssh_rows("", &hosts, &[]);
     assert_eq!(step(&rows, 0, false), 1);
-    // Hosts and the invalid-target placeholder, which is never selected.
-    let rows = ssh_rows("-", &hosts, &[]);
-    assert_eq!(rows.last(), Some(&super::SshRow::Placeholder));
-    assert_eq!(step(&rows, 1, true), 0);
-    assert_eq!(step(&rows, 0, false), 1);
-    assert_eq!(super::ssh_clamp_selection(&rows, 2), 1);
-    let list = ssh_picker_list("-", 9, &hosts, &[], &kettle_i18n::Translator::default());
-    assert_eq!(list.selected, 1);
     // A list with only the placeholder has nothing to move to.
     let rows = ssh_rows("", &[], &[]);
     assert_eq!((step(&rows, 0, true), step(&rows, 0, false)), (0, 0));
+    let rows = ssh_rows("-", &[], &[]);
+    assert_eq!((step(&rows, 0, true), step(&rows, 0, false)), (0, 0));
 }
 
-/// The wheel selects the row it exposes. It may reach the Connect row (Enter
-/// there connects to the typed text, which is not destructive), but it never
-/// selects the disabled placeholder.
+/// The wheel selects the row it exposes, here the last host below the
+/// Connect row.
 #[test]
-fn ssh_wheel_reaches_the_connect_row_but_never_the_placeholder() {
+fn ssh_wheel_reaches_the_last_host_row() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
@@ -717,27 +745,53 @@ fn ssh_wheel_reaches_the_connect_row_but_never_the_placeholder() {
     };
     let tr = kettle_i18n::Translator::default();
     let (surface, cell) = ((320.0, 160.0), (8.0, 16.0));
-    for (query, last_selectable, connect) in [("host", 40, true), ("-", 39, false)] {
-        let mut ws = ssh_launcher_with(query);
-        let menu = |ws: &WindowState| {
-            picker_context_menu(open_picker_list(ws, &cfg, "dark-theme", &tr, None).unwrap(), surface, cell, 0.0)
-                .unwrap()
-        };
-        let first = menu(&ws);
-        assert_eq!(first.rows.len(), 41, "{query}");
-        ws.cursor.x = f64::from(first.anchor.0 + first.panel_w_clamped * 0.5);
-        ws.cursor.y = f64::from(first.anchor.1 + first.panel_h_clamped * 0.5);
-        assert!(apply_picker_pointer(&mut ws, &first, cell.1, PickerPointer::Wheel(100)));
-        let selected = ws.ssh_input.as_ref().unwrap().1;
-        assert_eq!(selected, last_selectable, "{query}");
-        assert!(menu(&ws).rows[selected].enabled);
-        let action = ssh_row_action(query, selected, &cfg.ssh_hosts, &[]);
-        if connect {
-            assert_eq!(action, Some(super::SshEnter::Connect(query.into())));
-        } else {
-            assert_eq!(action, Some(super::SshEnter::Connect("me@host-39".into())));
-        }
-    }
+    let mut ws = ssh_launcher_with("host");
+    let first = picker_context_menu(
+        open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
+        surface,
+        cell,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(first.rows.len(), 41);
+    ws.cursor.x = f64::from(first.anchor.0 + first.panel_w_clamped * 0.5);
+    ws.cursor.y = f64::from(first.anchor.1 + first.panel_h_clamped * 0.5);
+    assert!(apply_picker_pointer(&mut ws, &first, cell.1, PickerPointer::Wheel(100)));
+    let selected = ws.ssh_input.as_ref().unwrap().1;
+    assert_eq!(selected, 40);
+    assert_eq!(
+        ssh_row_action("host", selected, &cfg.ssh_hosts, &[]),
+        Some(super::SshEnter::Connect("me@host-39".into()))
+    );
+}
+
+/// Whatever the picker, the wheel never selects a disabled row: it takes the
+/// nearest enabled row above it in view.
+#[test]
+fn picker_wheel_never_selects_a_disabled_row() {
+    use super::{PickerList, PickerPointer, apply_picker_pointer, picker_context_menu};
+    let row = |label: String, enabled: bool| ContextMenuRow {
+        toggle: None,
+        swatches: None,
+        matched_chars: None,
+        label,
+        separator: false,
+        enabled,
+        hint: String::new(),
+    };
+    let mut rows: Vec<ContextMenuRow> = (0..40).map(|i| row(format!("row-{i}"), true)).collect();
+    rows.push(row("disabled".into(), false));
+    let list = PickerList {
+        rows,
+        selected: 0,
+        footer: None,
+    };
+    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0).unwrap();
+    let mut ws = ssh_launcher_with("");
+    ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+    ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
+    assert!(apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Wheel(100)));
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 39);
 }
 
 #[test]
@@ -756,13 +810,17 @@ fn ssh_pointer_press_on_the_connect_row_matches_enter() {
         0.0,
     )
     .unwrap();
-    assert_eq!(menu.rows[2].label, "Connect to \"a\"");
+    assert_eq!(menu.rows[0].label, "Connect to \"a\"");
     let row_h = kettle_render::menu::row_height(16.0);
     let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
-    ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 2.5);
+    // Press the first host row, then the Connect row above it.
+    ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 1.5);
     assert!(apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Press));
-    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 2);
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 1);
+    ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 0.5);
+    assert!(apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Press));
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 0);
     // A press activates through the same Enter as the keyboard.
     assert_eq!(
         super::take_ssh_enter_target(&mut ws, &cfg.ssh_hosts).as_deref(),
