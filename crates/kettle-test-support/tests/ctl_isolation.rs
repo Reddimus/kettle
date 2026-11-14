@@ -26,10 +26,43 @@ fn function_starts(code: &str) -> Vec<usize> {
     starts
 }
 
+/// The index of the `)` that closes the `(` at `open`, or the end of `code`.
+fn closing_parenthesis(code: &str, open: usize) -> usize {
+    let mut depth = 0usize;
+    for (offset, byte) in code.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    code.len()
+}
+
+/// Where each `Command::new` that may start `kettle` begins in `code`, the
+/// output of `code_only`: every one whose program is not a lone string
+/// literal, which `code_only` has blanked to spaces.
+fn launches(code: &str) -> Vec<usize> {
+    code.match_indices("Command::new(")
+        .filter(|(at, call)| {
+            let open = at + call.len() - 1;
+            !code[open + 1..closing_parenthesis(code, open)]
+                .trim()
+                .is_empty()
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
 /// Why `raw`, a test file, starts a `kettle` that is not isolated, if it
-/// does: every `Command::new` with a program that is not a string literal
-/// must be followed, in its own function and after any `env_clear`, by
-/// `isolate_ctl_registry`.
+/// does. Each launch must be followed by its own `isolate_ctl_registry`,
+/// after any `env_clear`, before the next launch and before its function
+/// ends: one isolated launch does not cover another in the same function.
 fn unisolated(raw: &str) -> Option<String> {
     let reaches = ["\"mcp\"", "\"ctl\"", "\"show\"", "\"agent-setup\""];
     if !raw.contains("CARGO_BIN_EXE_kettle\"") || !reaches.iter().any(|arg| raw.contains(arg)) {
@@ -37,17 +70,20 @@ fn unisolated(raw: &str) -> Option<String> {
     }
     let code = kettle_test_support::code_only(raw);
     let starts = function_starts(&code);
-    for (at, call) in code.match_indices("Command::new(") {
-        if raw[at + call.len()..].starts_with('"') {
-            continue;
-        }
-        let end = starts.iter().copied().find(|&start| start > at).unwrap();
-        let body = &code[at..end];
-        let line = raw[..at].lines().count() + 1;
-        let Some(isolated) = body.rfind("isolate_ctl_registry(") else {
+    let launches = launches(&code);
+    for (index, &at) in launches.iter().enumerate() {
+        let function_end = starts.iter().copied().find(|&start| start > at).unwrap();
+        let end = launches
+            .get(index + 1)
+            .copied()
+            .filter(|&next| next < function_end)
+            .unwrap_or(function_end);
+        let own = &code[at..end];
+        let line = code[..at].matches('\n').count() + 1;
+        let Some(isolated) = own.rfind("isolate_ctl_registry(") else {
             return Some(format!("line {line} starts a kettle that is not isolated"));
         };
-        if body
+        if own
             .rfind("env_clear()")
             .is_some_and(|clear| clear > isolated)
         {
@@ -96,18 +132,46 @@ fn tests_isolate_every_kettle_that_reaches_the_control_registry() {
 /// The guard itself: what it must refuse and what it must let through.
 #[test]
 fn the_isolation_guard_refuses_a_bare_kettle() {
-    let bare = "fn t() {\n    let mut c = Command::new(env!(\"CARGO_BIN_EXE_kettle\"));\n    c.arg(\"mcp\");\n}\n";
-    assert!(unisolated(bare).is_some());
-    let other_fn = "fn t() {\n    let c = Command::new(env!(\"CARGO_BIN_EXE_kettle\")).arg(\"mcp\");\n}\nfn u(c: &mut Command) {\n    isolate_ctl_registry(c, r);\n}\n";
+    const KETTLE: &str = "Command::new(env!(\"CARGO_BIN_EXE_kettle\"))";
+    const ISOLATE: &str = "isolate_ctl_registry(&mut c, r);";
+    let bare = format!("fn t() {{\n    let mut c = {KETTLE};\n    c.arg(\"mcp\");\n}}\n");
+    assert_eq!(
+        unisolated(&bare).as_deref(),
+        Some("line 2 starts a kettle that is not isolated")
+    );
+    let other_fn = format!(
+        "fn t() {{\n    let c = {KETTLE}.arg(\"mcp\");\n}}\nfn u(c: &mut Command) {{\n    isolate_ctl_registry(c, r);\n}}\n"
+    );
     assert!(
-        unisolated(other_fn).is_some(),
+        unisolated(&other_fn).is_some(),
         "isolation in another function"
     );
-    let cleared = "fn t() {\n    let mut c = Command::new(env!(\"CARGO_BIN_EXE_kettle\"));\n    isolate_ctl_registry(&mut c, r);\n    c.env_clear().arg(\"ctl\");\n}\n";
-    assert!(unisolated(cleared).is_some(), "env_clear after isolating");
-    let isolated = "fn t() {\n    let mut c = Command::new(env!(\"CARGO_BIN_EXE_kettle\"));\n    c.env_clear().arg(\"ctl\");\n    isolate_ctl_registry(&mut c, r);\n    let sh = Command::new(\"/bin/sh\");\n}\n";
-    assert_eq!(unisolated(isolated), None);
-    let unrelated =
-        "fn t() {\n    Command::new(env!(\"CARGO_BIN_EXE_kettle\")).args([\"exec\"]);\n}\n";
-    assert_eq!(unisolated(unrelated), None, "exec reaches no registry");
+    let cleared = format!(
+        "fn t() {{\n    let mut c = {KETTLE};\n    {ISOLATE}\n    c.env_clear().arg(\"ctl\");\n}}\n"
+    );
+    assert!(unisolated(&cleared).is_some(), "env_clear after isolating");
+    let isolated = format!(
+        "fn t() {{\n    let ps = Command::new(\"ps\");\n    let mut c = {KETTLE};\n    c.env_clear().arg(\"ctl\");\n    {ISOLATE}\n    let sh = Command::new(\"/bin/sh\");\n}}\n"
+    );
+    assert_eq!(unisolated(&isolated), None);
+    let unrelated = format!("fn t() {{\n    {KETTLE}.args([\"exec\"]);\n}}\n");
+    assert_eq!(unisolated(&unrelated), None, "exec reaches no registry");
+    // Each launch needs its own isolation, whichever of two has one.
+    let first = format!("    let mut c = {KETTLE};\n    c.arg(\"mcp\");\n");
+    let second = format!("    let mut c = {KETTLE};\n    c.arg(\"ctl\");\n");
+    let two = |after_first: &str, after_second: &str| {
+        format!("fn t() {{\n{first}{after_first}{second}{after_second}}}\n")
+    };
+    let isolate = format!("    {ISOLATE}\n");
+    assert_eq!(
+        unisolated(&two("", &isolate)).as_deref(),
+        Some("line 2 starts a kettle that is not isolated"),
+        "only the second of two launches is isolated"
+    );
+    assert_eq!(
+        unisolated(&two(&isolate, "")).as_deref(),
+        Some("line 5 starts a kettle that is not isolated"),
+        "only the first of two launches is isolated"
+    );
+    assert_eq!(unisolated(&two(&isolate, &isolate)), None);
 }

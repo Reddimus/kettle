@@ -580,7 +580,8 @@ smokes, and every build reads it, since smokes drive release builds.
   account's, and with it Kettle's presence claims. Call it after any
   `env_clear`. `tests_isolate_every_kettle_that_reaches_the_control_registry`
   refuses a test file that runs `kettle mcp`, `ctl`, `show` or `agent-setup`
-  and starts a `kettle` it does not isolate.
+  and starts a `kettle` without isolating that launch; each launch in a
+  function needs its own call.
 - The `kettle` crate's unit tests run in the developer's environment, so the
   crate looks for a running Kettle only through `ctl_discovery`, which finds
   none under `cfg(test)`. `only_this_module_looks_for_a_running_kettle`
