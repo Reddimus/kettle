@@ -36,7 +36,7 @@ pollster = "1.0.1"
 raw-window-handle = "0.6.2"
 # GPOS mark anchors, to tell which marks the shaping font placed itself. The
 # version harfrust and skrifa already resolve for cosmic-text.
-read-fonts = { version = "0.37.0", default-features = false, features = ["std"] }
+read-fonts = { version = "0.46.0", default-features = false, features = ["std"] }
 unicode-bidi.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
