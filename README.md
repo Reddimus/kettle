@@ -190,7 +190,7 @@ costs the paste those two seconds and no more.
 
 - A copied link or remote file (`https:`, `sftp:`, a `file:` URI on another
   host) is not a file list: its text is pasted instead. A damaged or oversize
-  list pastes nothing, and a notification says so.
+  list pastes nothing; a notification says so unless `paste-files` is off.
 - A copied PNG is untrusted. It is decoded with limits set before any pixel is
   allocated (16,384 pixels a side, 256 MiB) and then re-encoded, so the
   temporary file is always a PNG Kettle wrote, with none of the source's

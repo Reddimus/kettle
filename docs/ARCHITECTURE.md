@@ -579,7 +579,8 @@ type names:
 | a file list of local files | `paste-files = on` | their quoted paths |
 | a file list of local files | `paste-files = off` | nothing |
 | a file list that is not all local files | either | the offer's text, if any |
-| a malformed or oversize file list | either | nothing, and a notice |
+| a malformed or oversize file list | `paste-files = on` | nothing, and a notice |
+| a malformed or oversize file list | `paste-files = off` | nothing, and no notice |
 | a text type | | the text, through paste protection |
 | `image/png` and no text type | `paste-images = on` | the path of a re-encoded PNG |
 
@@ -601,10 +602,25 @@ list that also names a local file pastes nothing.
 | file list | 1 MiB, 32 local files, 16 KiB a URI | shell quoting; a name that cannot be typed exactly pastes nothing |
 | PNG | 64 MiB, on Wayland and X11 | decode limits below |
 
-Every read of one paste shares one absolute two-second deadline, runs on the
-clipboard worker, and reads the selection pipe with a receive timeout, so a
-source that stalls costs the window thread that deadline and no more. A result
-that arrives late is dropped.
+Where and for how long a paste reads depends on the backend:
+
+- **Wayland.** Every read of one paste runs on the clipboard worker under one
+  absolute two-second deadline. The worker waits on the selection pipe with
+  `poll` for no longer than the time left, then reads; it sets no receive
+  timeout, which some systems refuse once the writer has closed with data
+  still to read. A source that stalls costs the window thread that one
+  deadline and no more, and a result that arrives late is dropped.
+- **X11.** arboard is asked on the window thread, one format after another:
+  the file list, the text, then the image. Each read has its own two-second
+  deadline, and a text or image read that times out ends the paste, so a
+  stalling owner can hold the window for two of them, four seconds. A
+  file-list read that fails is treated as no list and the
+  paste goes on to the text, because on X11 a failure does not show a list
+  exists: xclip answers every request with its own type, and an owner may
+  leave a request it cannot serve unanswered.
+- **macOS and Windows.** arboard reads the system pasteboard synchronously on
+  the window thread, in the same order. There is no pipe and no deadline of
+  Kettle's to enforce; the text cap is checked once the read returns.
 
 A PNG from another program is untrusted. The window thread reads only the size
 its header declares, for `reserve_png_from`, which refuses a side over 16,384
@@ -616,7 +632,10 @@ so every file in `kettle-paste-*` is a PNG Kettle encoded, with no ancillary
 chunk from the source. The room reserved for a waiting source is at least its
 own size, so the store's 256 MiB budget bounds the sources in the queue. The
 X11 route decodes in the vendored arboard under the same limits. An image that
-cannot be read, decoded or stored pastes nothing and shows one notice. Preview
+cannot be read, decoded or stored pastes nothing and shows one notice, on
+every backend: over the read cap or the decode limits, undecodable, or
+offered and never sent (the timeout notice). A clipboard with no image at all
+pastes nothing quietly. Preview
 image copies keep their arboard worker. Native Wayland selections require
 focus, and no data-control extension is required.
 
