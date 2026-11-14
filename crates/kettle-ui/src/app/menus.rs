@@ -463,6 +463,11 @@ impl App {
                 enabled: has_group,
             },
         ];
+        // Previous and Next Prompt; `grouped_terminal_menu` puts them after
+        // Find.
+        if let Some(pane) = ws.mux.focused() {
+            items.extend(pane_prompt_menu_rows(&pane.term, &tr));
+        }
         // The Broadcast Input rows, as radio rows; `grouped_terminal_menu`
         // gathers them into their own submenu.
         let (broadcast, pane_group) = BroadcastKind::of_window(ws);
@@ -853,34 +858,7 @@ impl App {
     /// row maps to `Action::NewTabShell(N)` (the Ctrl+Shift+N family).
     /// Everything else gets no hint. Empty string = none.
     pub(super) fn menu_item_hints(&self, items: &[ContextMenuItem]) -> Vec<String> {
-        let mut shell_ordinal: u8 = 0;
-        items
-            .iter()
-            .map(|it| match it {
-                ContextMenuItem::Item { action, .. }
-                | ContextMenuItem::DynamicItem { action, .. } => {
-                    kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, action)
-                        .unwrap_or_default()
-                }
-                // The submenu sign sits in the hint column, right-aligned
-                // like a native menu's.
-                ContextMenuItem::Submenu { .. } => SUBMENU_SIGN.to_string(),
-                ContextMenuItem::NewTabShell { .. } => {
-                    let h = if shell_ordinal < 9 {
-                        kettle_config::keybinds::ui_hint_label(
-                            &self.cfg.keybinds,
-                            &Action::NewTabShell(shell_ordinal),
-                        )
-                        .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    shell_ordinal = shell_ordinal.saturating_add(1);
-                    h
-                }
-                _ => String::new(),
-            })
-            .collect()
+        menu_item_hints(&self.cfg.keybinds, items)
     }
 
     /// The new-tab `▾` dropdown's rows — the detected
@@ -3006,6 +2984,8 @@ pub(super) fn grouped_terminal_menu(
                     | Action::SelectAll
                     | Action::HintMode
                     | Action::StartSearch
+                    | Action::JumpPrevPrompt
+                    | Action::JumpNextPrompt
                     | Action::ClearHistory => None,
                     Action::SplitAuto
                     | Action::SplitRight
@@ -3055,16 +3035,24 @@ pub(super) fn grouped_terminal_menu(
             action: Action::SelectAll,
             ..
         } => 3,
-        // Find and Clear Scrollback close the block, after the hints and
-        // any media or preview rows, which keep their old order.
+        // Find, the prompt jumps and Clear Scrollback close the block, after
+        // the hints and any media or preview rows, which keep their old order.
         ContextMenuItem::Item {
             action: Action::StartSearch,
             ..
         } => 5,
         ContextMenuItem::Item {
-            action: Action::ClearHistory,
+            action: Action::JumpPrevPrompt,
             ..
         } => 6,
+        ContextMenuItem::Item {
+            action: Action::JumpNextPrompt,
+            ..
+        } => 7,
+        ContextMenuItem::Item {
+            action: Action::ClearHistory,
+            ..
+        } => 8,
         _ => 4,
     });
     // A divider between the rows about the link under the pointer and the
@@ -3440,6 +3428,75 @@ pub(super) fn read_only_menu_item(
         tr.text(kettle_i18n::Text::MenuReadOnly),
         Action::TogglePaneReadOnly,
     )
+}
+
+/// Per-row shortcut hints for a menu, from the live keybind map `bindings`
+/// (see [`App::menu_item_hints`]).
+pub(super) fn menu_item_hints(
+    bindings: &kettle_config::keybinds::Bindings,
+    items: &[ContextMenuItem],
+) -> Vec<String> {
+    let mut shell_ordinal: u8 = 0;
+    items
+        .iter()
+        .map(|it| match it {
+            ContextMenuItem::Item { action, .. } | ContextMenuItem::DynamicItem { action, .. } => {
+                kettle_config::keybinds::ui_hint_label(bindings, action).unwrap_or_default()
+            }
+            // The submenu sign sits in the hint column, right-aligned
+            // like a native menu's.
+            ContextMenuItem::Submenu { .. } => SUBMENU_SIGN.to_string(),
+            ContextMenuItem::NewTabShell { .. } => {
+                let h = if shell_ordinal < 9 {
+                    kettle_config::keybinds::ui_hint_label(
+                        bindings,
+                        &Action::NewTabShell(shell_ordinal),
+                    )
+                    .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                shell_ordinal = shell_ordinal.saturating_add(1);
+                h
+            }
+            _ => String::new(),
+        })
+        .collect()
+}
+
+/// Previous Prompt and Next Prompt, offered only once the pane has a
+/// retained OSC 133 prompt mark (`has_prompt`), each enabled when a jump
+/// that way would move the view, as the keyboard decides.
+pub(super) fn prompt_menu_rows(
+    has_prompt: bool,
+    claims: &kettle_core::KeyboardClaims,
+    tr: &kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    if !has_prompt {
+        return Vec::new();
+    }
+    vec![
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuPrevPrompt),
+            action: Action::JumpPrevPrompt,
+            enabled: claims.prompt_above,
+        },
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuNextPrompt),
+            action: Action::JumpNextPrompt,
+            enabled: claims.prompt_below,
+        },
+    ]
+}
+
+/// [`prompt_menu_rows`] for the pane `term`. Each read takes the term lock
+/// and lets it go, so no caller may hold it.
+pub(super) fn pane_prompt_menu_rows(
+    term: &kettle_core::Terminal,
+    tr: &kettle_i18n::Translator,
+) -> Vec<ContextMenuItem> {
+    prompt_menu_rows(!term.prompt_marks().is_empty(), &term.keyboard_claims(), tr)
 }
 
 /// A Broadcast Input row as a radio row. The right-click menu hides an

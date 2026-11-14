@@ -482,6 +482,12 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 [messages.menu_find]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row that opens search in the pane's history."
 
+[messages.menu_prev_prompt]
+context = "crates/kettle-ui/src/app/menus.rs prompt_menu_rows: right-click menu row that scrolls the view to the shell prompt above it, using the prompt marks shell integration leaves. Same wording as the palette_jump_prev_prompt entry."
+
+[messages.menu_next_prompt]
+context = "crates/kettle-ui/src/app/menus.rs prompt_menu_rows: right-click menu row that scrolls the view to the shell prompt below it, using the prompt marks shell integration leaves. Same wording as the palette_jump_next_prompt entry."
+
 [messages.menu_reset_terminal]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 

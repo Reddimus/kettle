@@ -11,6 +11,11 @@ between commands:
 
 (Rebind with `keybind = ctrl+up=prev_prompt` / `next_prompt`.)
 
+The right-click menu offers the same jumps as **Previous Prompt** and **Next
+Prompt**, after **Find…**, once the pane has a prompt mark. Each row shows
+only while a jump that way would move the view, with its current chord beside
+it.
+
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 

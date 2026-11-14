@@ -274,6 +274,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   backspaces sent to a pane with nothing left unpainted, and only that pane's
   output: Enter, Tab, arrows, control keys, pastes, other panes' output and
   type-ahead while a pane prints are left out. Counts only, never text.
+- The right-click menu has **Previous Prompt** and **Next Prompt** rows after
+  **Find…** once shell integration has marked a prompt in the pane. Each
+  shows when a jump that way would move the view, with the chord it is bound
+  to beside it (Ctrl+Up and Ctrl+Down by default, also Cmd+Up and Cmd+Down
+  on macOS), and no chord once it is unbound.
 
 ### Changed
 

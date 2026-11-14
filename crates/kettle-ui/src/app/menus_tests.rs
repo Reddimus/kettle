@@ -1393,6 +1393,10 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             Action::ToggleBroadcastGroup,
             Action::OpenSettings,
             Action::OpenThemePicker,
+            Action::StartSearch,
+            Action::JumpPrevPrompt,
+            Action::JumpNextPrompt,
+            Action::ClearHistory,
         ]
         .into_iter()
         .map(|action| ContextMenuItem::Item {
@@ -1445,7 +1449,9 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             count_rows_fitting(&grouped, 0, 592.0, 28.0, 8.0),
             grouped.len()
         );
-        for item in grouped.iter().skip(6) {
+        // Find, the prompt jumps and Clear Scrollback end the top block.
+        assert!(matches!(grouped[9], ContextMenuItem::Separator));
+        for item in grouped.iter().skip(10) {
             assert!(matches!(item, ContextMenuItem::Submenu { .. }));
         }
     }
@@ -1590,12 +1596,14 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
     let tr = Translator::new(Language::En);
     let items: Vec<_> = [
         Action::ClearHistory,
+        Action::JumpNextPrompt,
         Action::SplitAuto,
         Action::Reset,
         Action::StartSearch,
         Action::HintMode,
         Action::SelectAll,
         Action::Paste,
+        Action::JumpPrevPrompt,
         Action::Copy,
     ]
     .into_iter()
@@ -1622,6 +1630,8 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
             Action::SelectAll,
             Action::HintMode,
             Action::StartSearch,
+            Action::JumpPrevPrompt,
+            Action::JumpNextPrompt,
             Action::ClearHistory,
         ]
     );
@@ -1883,4 +1893,174 @@ fn confirm_close_radio_labels_do_not_single_out_the_titlebar() {
             );
         }
     }
+}
+
+/// The prompt-jump rows' claims: a jump up would move the view, one down
+/// would not, as with every retained prompt above a view at the bottom.
+fn prompt_above_only() -> kettle_core::KeyboardClaims {
+    kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: false,
+        ..kettle_core::KeyboardClaims::default()
+    }
+}
+
+fn menu_rows(items: &[ContextMenuItem]) -> Vec<(&str, Action, bool)> {
+    items
+        .iter()
+        .map(|item| match item {
+            ContextMenuItem::Item {
+                label,
+                action,
+                enabled,
+            } => (*label, action.clone(), *enabled),
+            _ => panic!("unexpected row kind"),
+        })
+        .collect()
+}
+
+/// Previous Prompt and Next Prompt are offered once the pane holds a
+/// retained prompt mark, and each is enabled when a jump that way would
+/// move the view: with a prompt above only, Previous is enabled, Next is
+/// not, and the menu then shows Previous alone.
+#[test]
+fn prompt_rows_need_a_prompt_mark_and_follow_the_jump_claims() {
+    let both = kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: true,
+        ..kettle_core::KeyboardClaims::default()
+    };
+    assert!(super::prompt_menu_rows(false, &both, &EN_TEXT).is_empty());
+    assert_eq!(
+        menu_rows(&super::prompt_menu_rows(true, &both, &EN_TEXT)),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, true),
+        ]
+    );
+    let rows = super::prompt_menu_rows(true, &prompt_above_only(), &EN_TEXT);
+    assert_eq!(
+        menu_rows(&rows),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, false),
+        ]
+    );
+    assert_eq!(
+        menu_rows(&filter_disabled(rows)),
+        [("Previous Prompt", Action::JumpPrevPrompt, true)]
+    );
+}
+
+/// The hint column shows the chord bound to each jump, a rebound chord once
+/// the user rebinds it, and nothing once it is unbound.
+#[test]
+fn prompt_row_hints_follow_rebinds_and_vanish_when_unbound() {
+    use kettle_config::keybinds::parse_trigger;
+    let chord = |text: &str| {
+        parse_trigger(text)
+            .unwrap()
+            .ui_label(cfg!(target_os = "macos"))
+    };
+    let both = kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: true,
+        ..kettle_core::KeyboardClaims::default()
+    };
+    let rows = super::prompt_menu_rows(true, &both, &EN_TEXT);
+    let hints = |config: &str| {
+        super::menu_item_hints(&kettle_config::Config::parse_text(config).keybinds, &rows)
+    };
+    let defaults = hints("");
+    // Ctrl+Up everywhere; macOS also binds Cmd+Up and may show either.
+    assert!(
+        [chord("ctrl+up"), chord("super+up")].contains(&defaults[0]),
+        "{defaults:?}"
+    );
+    assert!(
+        [chord("ctrl+down"), chord("super+down")].contains(&defaults[1]),
+        "{defaults:?}"
+    );
+    let freed = "keybind = ctrl+up=unbind\nkeybind = super+up=unbind\n";
+    assert_eq!(
+        hints(&format!("{freed}keybind = alt+shift+p=prev_prompt")),
+        [chord("alt+shift+p"), defaults[1].clone()]
+    );
+    assert_eq!(hints(freed), [String::new(), defaults[1].clone()]);
+}
+
+/// Under `language = es` the rows read as the palette's Spanish does.
+#[test]
+fn prompt_rows_are_spanish_under_language_es() {
+    let cfg = kettle_config::Config::parse_text("language = es");
+    let tr = kettle_i18n::Translator::new(cfg.language.resolve(|| None));
+    let rows = super::prompt_menu_rows(true, &prompt_above_only(), &tr);
+    let labels: Vec<_> = menu_rows(&rows).into_iter().map(|row| row.0).collect();
+    assert_eq!(
+        labels,
+        [
+            "Indicador anterior de la shell",
+            "Indicador siguiente de la shell"
+        ]
+    );
+}
+
+/// A window whose one pane runs `/bin/sh -c SCRIPT` in a real PTY, once
+/// `ready` accepts its terminal. The script sleeps after printing so its
+/// screen stays put; dropping the window ends it.
+#[cfg(unix)]
+fn shell_window(
+    script: &str,
+    ready: impl Fn(&kettle_core::Terminal) -> bool,
+) -> (WindowState, u64) {
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let mut mux = Mux::new();
+    mux.new_tab_with_geometry(
+        &cfg,
+        kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+        std::sync::Arc::new(|| {}),
+        &["/bin/sh".into(), "-c".into(), script.into()],
+        None,
+    )
+    .expect("PTY fixture");
+    let pane = mux.active_focus().unwrap();
+    let ws = WindowState::new(1, mux);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready(&ws.mux.panes[&pane].term) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PTY fixture timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    (ws, pane)
+}
+
+/// A real pane offers the rows only once its output carried a prompt mark,
+/// and with that prompt scrolled up into history, Previous alone is enabled.
+#[cfg(unix)]
+#[test]
+fn a_pane_offers_prompt_rows_only_once_it_has_a_prompt_mark() {
+    let lines: String = (0..40).map(|n| format!("line{n}\\n")).collect();
+    let (plain, pane) = shell_window(&format!("printf '{lines}'; sleep 10"), |term| {
+        term.keyboard_claims().history_size > 10
+    });
+    assert!(super::pane_prompt_menu_rows(&plain.mux.panes[&pane].term, &EN_TEXT).is_empty());
+
+    let script = format!("printf '\\033]133;A\\007$ \\n{lines}'; sleep 10");
+    let (marked, pane) = shell_window(&script, |term| {
+        term.keyboard_claims().history_size > 10 && !term.prompt_marks().is_empty()
+    });
+    let term = &marked.mux.panes[&pane].term;
+    assert_eq!(
+        menu_rows(&super::pane_prompt_menu_rows(term, &EN_TEXT)),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, false),
+        ]
+    );
 }
