@@ -1013,7 +1013,11 @@ impl App {
             }
             Action::OpenSsh => {
                 self.close_all_modals(ws);
-                ws.ssh_input = Some((Default::default(), 0));
+                open_ssh_launcher(
+                    ws,
+                    &self.cfg,
+                    kettle_config::ssh_config::user_ssh_config_path,
+                );
             }
             Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);

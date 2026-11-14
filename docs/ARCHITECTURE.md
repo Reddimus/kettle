@@ -30,7 +30,7 @@ graph TD
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     cfg --> i18n
     cfg --> ctl
-    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
+    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · ssh_config Host aliases · fuzzy matcher<br/>command palette · atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
@@ -1798,6 +1798,23 @@ the exact same projection, including preedit, rather than estimating text widths
 Native and control pointer routes both place the caret and extend drag selections
 from those shaped stops. A pointer press ends composition before mapping into
 committed text.
+
+The SSH launcher's rows come from one model, `SshRow` in
+`kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
+(ignoring ASCII case) comes first; otherwise a valid typed target comes first as
+a Connect row, and an invalid one shows only a refusal row with the fuzzy
+matches hidden. The fuzzy matches follow: configured `ssh-host` entries, then
+the `Host` aliases of `~/.ssh/config`. Painting, keys, Tab, Enter, the pointer and AccessKit all read
+that list, and `ssh_picker_hint` is the one key-hint builder. `kettle-config`'s
+`ssh_config` module owns the parser, the path (`HOME`, or `USERPROFILE` on
+Windows) and the reader, which opens the file through
+`kettle_state::open_trusted_file_read_following_leaf` like the main config and
+reads at most 256 KiB. The launcher reads it only on open and only with
+`ssh-config-hosts` on, into window state that the next open replaces; the list
+is never persisted or logged. A connected alias does reach the pane's argv,
+and so the session file and titles, as a typed target does. Every launcher
+spawn is `ssh -t -- <target>` from `mux::ssh_tab_argv`, which refuses a target
+that `is_valid_ssh_target` rejects.
 
 Transient popups share one outside-press dispatch and consume the dismissing
 click: context menus, the command palette, theme/layout pickers, SSH, title

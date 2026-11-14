@@ -273,7 +273,10 @@ visible with one tab), or the macOS **Shell** menu:
   launches the selected arrangement in a separate process. Saving an existing
   name replaces that layout. Layouts live in the default config directory's
   `layouts/`. Quick-terminal windows are excluded.
-- **SSH launcher** opens configured SSH hosts or accepts a typed target.
+- **SSH launcher** lists configured hosts and the Host aliases in
+  `~/.ssh/config`, or connects to a typed target. See
+  [SSH launcher](docs/CONFIG.md#ssh-launcher) for what it reads and the
+  `ssh-config-hosts = false` opt-out.
 
 The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
 profile, and **Broadcast input…** actions for all panes in the tab, a group or the

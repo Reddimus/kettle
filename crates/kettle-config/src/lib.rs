@@ -23,6 +23,7 @@ pub mod fuzzy;
 pub mod keybinds;
 pub mod palette;
 pub mod parse;
+pub mod ssh_config;
 pub mod template;
 pub mod theme;
 mod theme_filter;
@@ -2214,8 +2215,13 @@ pub struct Config {
     pub keybinds_declared: HashSet<keybinds::Trigger>,
     /// Shell override; `None` uses `$SHELL` / platform default.
     pub shell: Option<String>,
-    /// Named SSH targets: `ssh-host = name=user@host` (repeatable).
+    /// Named SSH targets: `ssh-host = name=user@host` (repeatable). Every
+    /// entry passes `ssh_config::is_valid_ssh_host_name` and
+    /// `ssh_config::is_valid_ssh_target`; the parser drops the rest.
     pub ssh_hosts: Vec<(String, String)>,
+    /// `ssh-config-hosts`: the SSH launcher also lists the literal `Host`
+    /// aliases in `~/.ssh/config`, read each time it opens. On by default.
+    pub ssh_config_hosts: bool,
     /// iTerm2-parity triggers. Each entry is a regex
     /// pattern matched against PTY output; when it fires while the
     /// pane is unfocused, the action runs. Repeatable via
@@ -3505,6 +3511,7 @@ impl Default for Config {
             keybinds_declared: HashSet::new(),
             shell: None,
             ssh_hosts: Vec::new(),
+            ssh_config_hosts: true,
             triggers: Vec::new(),
             menu_items: Vec::new(),
         }
@@ -4086,6 +4093,8 @@ impl Config {
         "smart_copy",
         "split-to-group",
         "split_to_group",
+        "ssh-config-hosts",
+        "ssh_config_hosts",
         "sticky",
         "title-at-bottom",
         "title-hide-sizetext",
@@ -4659,12 +4668,14 @@ impl Config {
                     .split(',')
                     .filter(|t| !t.trim().is_empty())
                     .all(|tok| FontFeature::parse(tok).is_some()),
-                // `ssh-host = name=user@host` — requires the `=`
-                // separator; without it the entry is silently dropped
-                // (no `name` to bind via the Ctrl+Shift+S launcher).
-                "ssh-host" => v
-                    .split_once('=')
-                    .is_some_and(|(n, t)| !n.trim().is_empty() && !t.trim().is_empty()),
+                // `ssh-host = name=user@host`: the apply arm keeps only a
+                // valid name and target, so flag exactly what it drops (no
+                // `=`, an empty half, a target that starts with `-` or holds
+                // whitespace, a name with control or bidi characters).
+                "ssh-host" => v.split_once('=').is_some_and(|(n, t)| {
+                    ssh_config::is_valid_ssh_host_name(n.trim())
+                        && ssh_config::is_valid_ssh_target(t.trim())
+                }),
                 // `palette = N=#hex`: both halves must parse, AND N
                 // must fit the implementation's 0..=15 range.
                 // Indices 16..=255 are documented as belonging to the xterm
@@ -6237,15 +6248,23 @@ impl Config {
                     };
                 }
                 "ssh-host" => {
-                    // Drop entries with an empty name or target so they never
-                    // surface as an empty launcher row or a connection to "".
+                    // Drop entries the launcher must not offer: an empty or
+                    // unprintable name, or a target that is empty, starts with
+                    // `-` (ssh would read it as an option) or holds whitespace.
                     // `--check-config` flags them too (detect_malformed_values),
                     // so the diagnostic and the runtime list agree.
                     if let Some((name, target)) = e.value.split_once('=') {
                         let (n, t) = (name.trim(), target.trim());
-                        if !n.is_empty() && !t.is_empty() {
+                        if ssh_config::is_valid_ssh_host_name(n)
+                            && ssh_config::is_valid_ssh_target(t)
+                        {
                             cfg.ssh_hosts.push((n.to_string(), t.to_string()));
                         }
+                    }
+                }
+                "ssh-config-hosts" | "ssh_config_hosts" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.ssh_config_hosts = b;
                     }
                 }
                 "trigger" => {
@@ -7584,6 +7603,47 @@ cell-height = 1.2\n";
             c.ssh_hosts
         );
         assert_eq!(c.ssh_hosts[0].0, "good");
+    }
+
+    /// A target that starts with `-` would reach ssh as an option, and one
+    /// with whitespace or a bidi override cannot be a hostname. The parser
+    /// drops them and `--check-config` flags the same lines; a name with an
+    /// interior space is a label and keeps working.
+    #[test]
+    fn ssh_host_drops_option_like_and_unprintable_entries_and_flags_them() {
+        let text = "ssh-host = bad=-oProxyCommand=x\n\
+                    ssh-host = sp=me@h -p 22\n\
+                    ssh-host = ctl=me@\u{202E}x\n\
+                    ssh-host = bidi\u{2066}name=me@box\n\
+                    ssh-host = my box=me@box\n";
+        let c = Config::parse_text(text);
+        assert_eq!(
+            c.ssh_hosts,
+            [("my box".to_string(), "me@box".to_string())],
+            "only the valid entry may reach the launcher"
+        );
+        let bad = Config::detect_malformed_values(text);
+        assert_eq!(bad.len(), 4, "{bad:?}");
+        for name in ["bad=", "sp=", "ctl=", "bidi"] {
+            assert!(
+                bad.iter().any(|line| line.contains(name)),
+                "{name} must be flagged: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_config_hosts_defaults_on_and_parses() {
+        assert!(Config::default().ssh_config_hosts, "the import defaults on");
+        assert!(!Config::parse_text("ssh-config-hosts = false\n").ssh_config_hosts);
+        assert!(!Config::parse_text("ssh_config_hosts = off\n").ssh_config_hosts);
+        assert!(Config::parse_text("ssh-config-hosts = true\n").ssh_config_hosts);
+        assert!(Config::BOOL_KEYS.contains(&"ssh-config-hosts"));
+        let bad = Config::detect_malformed_values("ssh-config-hosts = maybe\n");
+        assert_eq!(bad, ["ssh-config-hosts = \"maybe\""]);
+        assert!(Config::detect_malformed_values("ssh-config-hosts = no\n").is_empty());
+        let (_, unknown) = Config::parse_collect("ssh-config-hosts = false\n");
+        assert!(unknown.is_empty(), "{unknown:?}");
     }
 
     #[test]

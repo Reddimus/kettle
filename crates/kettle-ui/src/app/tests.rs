@@ -70,12 +70,12 @@ use super::{
     output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
     pane_snapshot_keys_match, parse_remote_command_batch, picker_context_menu,
     picker_overlay_context_menu, picker_scroll_offset, production_source, rank_layouts,
-    rank_ssh_hosts, sanitize_native_window_title, sanitize_title, selected_ssh_target,
-    selection_kind, session_sweep_due, should_notify_input_rejection, should_poll_remote_window,
+    rank_ssh_hosts, sanitize_native_window_title, sanitize_title, selection_kind,
+    session_sweep_due, should_notify_input_rejection, should_poll_remote_window,
     should_restore_session, should_reveal_after_renderer_init,
-    should_reveal_before_first_surface_frame, ssh_picker_list, stage_applied_remote_probe,
-    stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
-    startup_inner_size_px, typeahead_match,
+    should_reveal_before_first_surface_frame, ssh_picker_list, ssh_row_action, ssh_rows,
+    stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
+    stamp_accepted_input, startup_inner_size_px, typeahead_match,
 };
 use crate::mux::{BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin};
 use crate::window_state::WindowState;

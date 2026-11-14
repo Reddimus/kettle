@@ -839,6 +839,19 @@ impl Drop for PtyInputQueue {
     }
 }
 
+/// The SSH launcher's argv for `target`: `ssh -t -- <target>`, or `None` when
+/// the target fails `is_valid_ssh_target`. The `--` ends ssh's options, so even
+/// a target that slipped past validation could not be read as one (`-oX`).
+/// Pure, so the exact argv is tested.
+pub(crate) fn ssh_tab_argv(target: &str) -> Option<Vec<String>> {
+    kettle_config::ssh_config::is_valid_ssh_target(target).then(|| {
+        ["ssh", "-t", "--", target]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells get the placeholder "kettle", and the
 /// cwd-basename fallback fills in for them once OSC 7 arrives. SSH panes have
@@ -3152,7 +3165,9 @@ impl Mux {
         waker: Waker,
         target: &str,
     ) -> Result<()> {
-        let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
+        // The error names no target: the launcher logs it, and a target can
+        // be private.
+        let argv = ssh_tab_argv(target).ok_or_else(|| anyhow::anyhow!("invalid ssh target"))?;
         // `spawn_pane` sees argv[0] == "ssh" and seeds the pane title to
         // `ssh <target>` so the tab is distinguishable from a regular
         // shell tab while the connection is establishing. The OSC 2
@@ -9002,6 +9017,110 @@ mod node_tests {
                 initial_pane_title(&argv),
                 "ssh alice@server",
                 "title must name the destination"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_tab_argv_ends_options_before_the_target_and_refuses_invalid_ones() {
+        assert_eq!(
+            ssh_tab_argv("box").unwrap(),
+            ["ssh", "-t", "--", "box"],
+            "the target must follow `--` so ssh never reads it as an option"
+        );
+        assert_eq!(
+            ssh_tab_argv("me@box.example").unwrap(),
+            ["ssh", "-t", "--", "me@box.example"]
+        );
+        for invalid in [
+            "-oProxyCommand=x",
+            "-oX",
+            "a b",
+            "",
+            "x\u{7}",
+            "me@\u{202E}x",
+        ] {
+            assert_eq!(ssh_tab_argv(invalid), None, "{invalid:?}");
+        }
+        // The title still shows the destination, not the `--`.
+        assert_eq!(
+            initial_pane_title(&ssh_tab_argv("me@box").unwrap()),
+            "ssh me@box"
+        );
+        let mut mux = Mux::new();
+        let error = mux
+            .new_ssh_tab_geometry(
+                &kettle_config::Config::default(),
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                std::sync::Arc::new(|| {}),
+                "-oProxyCommand=touch-secret",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("secret"),
+            "the error must not echo the target: {error}"
+        );
+        assert!(mux.tabs.is_empty(), "an invalid target must not spawn");
+    }
+
+    /// Configuration-only probe of the installed OpenSSH, on every runner
+    /// that has one (Windows CI is the one that matters: Win32-OpenSSH).
+    /// `-G` prints the resolved configuration and exits without connecting,
+    /// and `-F none` reads no config file, so the user's own `~/.ssh/config`
+    /// is never read. The launcher's argv tail (`-- <target>`) must make ssh
+    /// treat the target as the host: `box` resolves as `hostname box`, and a
+    /// target shaped like options is never applied as one. The output is
+    /// checked line by line and never printed. Without ssh it is skipped.
+    #[test]
+    fn installed_ssh_reads_the_launcher_target_after_double_dash_as_the_host() {
+        // `trailing` gives an option-shaped target a host to apply to, had
+        // ssh parsed it as an option, so the probe can tell the two apart.
+        let probe = |target: &str, trailing: &[&str]| {
+            // The launcher's own argv shape, with validation bypassed on
+            // purpose: this asks what ssh itself does with an option-shaped
+            // word in the target's place.
+            let mut argv = ssh_tab_argv("placeholder").unwrap();
+            *argv.last_mut().unwrap() = target.to_string();
+            assert_eq!(argv[..2], ["ssh", "-t"]);
+            std::process::Command::new(&argv[0])
+                .args(["-F", "none", "-G"])
+                .args(&argv[2..])
+                .args(trailing)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+        };
+        let resolved = match probe("box", &[]) {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipped: no ssh on PATH");
+                return;
+            }
+            Err(error) => panic!("ssh -G could not run: {:?}", error.kind()),
+        };
+        let lines = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        assert!(resolved.status.success(), "ssh -F none -G -- box failed");
+        assert!(
+            lines(&resolved).iter().any(|line| line == "hostname box"),
+            "ssh -G -- box did not resolve hostname box"
+        );
+        // After `--`, `-oProxyCommand=…` is a (bad) host name, never an
+        // option, and `-bogus` is never `-b ogus`. ssh may reject either as
+        // a host name; it must not apply them.
+        for (target, applied) in [
+            ("-oProxyCommand=kettle-probe", "proxycommand kettle-probe"),
+            ("-bogus", "bindaddress ogus"),
+        ] {
+            let output = probe(target, &["probe-host"]).expect("ssh ran above");
+            assert!(
+                !lines(&output).iter().any(|line| line == applied),
+                "ssh applied {target:?} as an option"
             );
         }
     }

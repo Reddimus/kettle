@@ -26,34 +26,255 @@ pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
         .collect()
 }
 
-/// Indices into configured SSH hosts, best match first, with config order breaking ties.
-pub(super) fn rank_ssh_hosts(query: &str, hosts: &[(String, String)]) -> Vec<usize> {
+/// Indices of `labels` that fuzzy-match `query`: a label equal to the trimmed
+/// query (ignoring ASCII case) first, then by score, then in input order.
+fn rank_ssh_labels<'a>(query: &str, labels: impl Iterator<Item = &'a str>) -> Vec<usize> {
     let query = query.trim();
-    let mut ranked: Vec<(usize, i32)> = hosts
-        .iter()
+    let mut ranked: Vec<(usize, bool, i32)> = labels
         .enumerate()
-        .filter_map(|(index, (name, _))| {
-            kettle_config::fuzzy::score(query, name).map(|score| (index, score))
+        .filter_map(|(index, label)| {
+            let exact = !query.is_empty() && label.eq_ignore_ascii_case(query);
+            kettle_config::fuzzy::score(query, label).map(|score| (index, exact, score))
         })
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    ranked.into_iter().map(|(index, _)| index).collect()
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+    ranked.into_iter().map(|(index, _, _)| index).collect()
 }
 
-pub(super) fn selected_ssh_target(
+/// Indices into configured SSH hosts: an exact name first, then best match,
+/// with config order breaking ties.
+pub(super) fn rank_ssh_hosts(query: &str, hosts: &[(String, String)]) -> Vec<usize> {
+    rank_ssh_labels(query, hosts.iter().map(|(name, _)| name.as_str()))
+}
+
+/// One SSH launcher row. Painting, keys, Tab, Enter, the pointer and
+/// accessibility all read this one list, from [`ssh_rows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SshRow {
+    /// `cfg.ssh_hosts[i]`.
+    Configured(usize),
+    /// `ws.ssh_imported[i]`, a `Host` alias from `~/.ssh/config`.
+    Imported(usize),
+    /// Connect to the trimmed query itself. Shown, first and selected, when
+    /// the query is a valid target that no host row's name or alias equals
+    /// (ignoring ASCII case), so Enter never connects a typed `prod` to a
+    /// fuzzy match such as `prod-db`.
+    ConnectTyped,
+    /// Disabled and never selected: no hosts and nothing typed, or a typed
+    /// target ssh must not receive.
+    Placeholder,
+    /// Reserved for the Save row, which writes the config and comes later.
+    /// It will sit last, after the host rows.
+    #[expect(dead_code, reason = "the Save row that constructs it has not landed")]
+    SaveTyped,
+}
+
+impl SshRow {
+    fn selectable(self) -> bool {
+        !matches!(self, Self::Placeholder)
+    }
+
+    fn is_host(self) -> bool {
+        matches!(self, Self::Configured(_) | Self::Imported(_))
+    }
+
+    /// The host name or alias a host row shows; `None` for other rows.
+    fn host_label<'a>(
+        self,
+        hosts: &'a [(String, String)],
+        imported: &'a [String],
+    ) -> Option<&'a str> {
+        match self {
+            Self::Configured(index) => hosts.get(index).map(|(name, _)| name.as_str()),
+            Self::Imported(index) => imported.get(index).map(String::as_str),
+            Self::ConnectTyped | Self::Placeholder | Self::SaveTyped => None,
+        }
+    }
+}
+
+/// The launcher's rows for `query`, in display order. A host row whose name or
+/// alias equals the trimmed query (ignoring ASCII case) comes first. Otherwise
+/// a valid typed target comes first as `ConnectTyped`, so it is what Enter
+/// connects to. The fuzzy matches follow: configured hosts, then imported
+/// aliases, each ranked. A query that is not a valid target shows only the
+/// `Placeholder` refusal, or the one host it names exactly. An imported
+/// alias equal to a configured name or target, ignoring ASCII case, is not
+/// shown twice.
+pub(super) fn ssh_rows(
+    query: &str,
+    hosts: &[(String, String)],
+    imported: &[String],
+) -> Vec<SshRow> {
+    let query = query.trim();
+    let shown: Vec<usize> = (0..imported.len())
+        .filter(|&index| {
+            let alias = &imported[index];
+            !hosts.iter().any(|(name, target)| {
+                name.eq_ignore_ascii_case(alias) || target.eq_ignore_ascii_case(alias)
+            })
+        })
+        .collect();
+    let mut rows: Vec<SshRow> = rank_ssh_hosts(query, hosts)
+        .into_iter()
+        .map(SshRow::Configured)
+        .collect();
+    rows.extend(
+        rank_ssh_labels(query, shown.iter().map(|&index| imported[index].as_str()))
+            .into_iter()
+            .map(|rank| SshRow::Imported(shown[rank])),
+    );
+    let exact = |row: &SshRow| {
+        row.host_label(hosts, imported)
+            .is_some_and(|label| label.eq_ignore_ascii_case(query))
+    };
+    if query.is_empty() {
+        if rows.is_empty() {
+            rows.push(SshRow::Placeholder);
+        }
+        return rows;
+    }
+    let exact = rows.iter().position(exact);
+    if !kettle_config::ssh_config::is_valid_ssh_target(query) {
+        // No fuzzy match is offered for text ssh must not receive, so Enter
+        // cannot reach one. A configured name with a space can still be
+        // typed in full: it is the only row then.
+        return vec![exact.map_or(SshRow::Placeholder, |position| rows[position])];
+    }
+    if let Some(position) = exact {
+        let row = rows.remove(position);
+        rows.insert(0, row);
+        return rows;
+    }
+    rows.insert(0, SshRow::ConnectTyped);
+    rows
+}
+
+/// `selected` moved onto a selectable row: itself, else the nearest one above,
+/// else below. A list with no selectable row keeps 0.
+pub(super) fn ssh_clamp_selection(rows: &[SshRow], selected: usize) -> usize {
+    let Some(last) = rows.len().checked_sub(1) else {
+        return 0;
+    };
+    let selected = selected.min(last);
+    (0..=selected)
+        .rev()
+        .chain(selected + 1..rows.len())
+        .find(|&index| rows[index].selectable())
+        .unwrap_or(selected)
+}
+
+/// The selection after one arrow (or Ctrl+J/K/N/P) step. Disabled rows are
+/// skipped. Down wraps from the last row to the first. Up from the first row
+/// wraps only onto a host row: the Save row that will sit last must take a
+/// deliberate Down, never one Up press.
+pub(super) fn ssh_step_selection(rows: &[SshRow], selected: usize, down: bool) -> usize {
+    let current = ssh_clamp_selection(rows, selected);
+    let selectable: Vec<usize> = (0..rows.len())
+        .filter(|&index| rows[index].selectable())
+        .collect();
+    let (Some(&first), Some(&last)) = (selectable.first(), selectable.last()) else {
+        return current;
+    };
+    let position = selectable.iter().position(|&index| index == current);
+    match (down, position) {
+        (true, Some(position)) => selectable.get(position + 1).copied().unwrap_or(first),
+        (false, Some(position)) if position > 0 => selectable[position - 1],
+        (false, _) if rows[last].is_host() => last,
+        (true, None) => first,
+        (false, _) => current,
+    }
+}
+
+/// What Enter (or a click, which is a synthetic Enter) does on the launcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SshEnter {
+    /// Spawn `ssh -t -- <target>`.
+    Connect(String),
+    /// The typed target is not one ssh may receive; nothing is spawned and
+    /// the launcher stays open on the row that says why.
+    Invalid,
+}
+
+/// The action for the selected row; `None` when nothing is typed and there is
+/// no host to connect to.
+pub(super) fn ssh_row_action(
     query: &str,
     selected: usize,
     hosts: &[(String, String)],
-) -> Option<String> {
-    let ranked = rank_ssh_hosts(query, hosts);
-    let selected = selected.min(ranked.len().saturating_sub(1));
-    ranked
-        .get(selected)
-        .map(|&index| hosts[index].1.clone())
-        .or_else(|| {
-            let query = query.trim();
-            (!query.is_empty()).then(|| query.to_string())
+    imported: &[String],
+) -> Option<SshEnter> {
+    let rows = ssh_rows(query, hosts, imported);
+    let row = *rows.get(ssh_clamp_selection(&rows, selected))?;
+    let connect = |target: &str| {
+        Some(if kettle_config::ssh_config::is_valid_ssh_target(target) {
+            SshEnter::Connect(target.to_string())
+        } else {
+            SshEnter::Invalid
         })
+    };
+    match row {
+        SshRow::Configured(index) => connect(&hosts.get(index)?.1),
+        SshRow::Imported(index) => connect(imported.get(index)?),
+        SshRow::ConnectTyped => connect(query.trim()),
+        SshRow::Placeholder => (!query.trim().is_empty()).then_some(SshEnter::Invalid),
+        SshRow::SaveTyped => None,
+    }
+}
+
+/// Resolve Enter on the open launcher. A connection closes it and returns the
+/// target to spawn; an invalid typed target leaves it open; an empty launcher
+/// closes as it always has.
+pub(super) fn take_ssh_enter_target(
+    ws: &mut WindowState,
+    hosts: &[(String, String)],
+) -> Option<String> {
+    let (query, selected) = ws.ssh_input.as_ref()?;
+    match ssh_row_action(query, *selected, hosts, &ws.ssh_imported) {
+        Some(SshEnter::Connect(target)) => {
+            ws.ssh_input = None;
+            Some(target)
+        }
+        Some(SshEnter::Invalid) => None,
+        None => {
+            ws.ssh_input = None;
+            None
+        }
+    }
+}
+
+/// The text Tab completes to: the selected host row's name or alias, or, on
+/// the Connect row, the best fuzzy match below it.
+pub(super) fn ssh_completion(
+    query: &str,
+    selected: usize,
+    hosts: &[(String, String)],
+    imported: &[String],
+) -> Option<String> {
+    let rows = ssh_rows(query, hosts, imported);
+    let row = *rows.get(ssh_clamp_selection(&rows, selected))?;
+    let row = match row {
+        SshRow::ConnectTyped => *rows.get(1)?,
+        row => row,
+    };
+    row.host_label(hosts, imported).map(str::to_string)
+}
+
+/// Open the SSH launcher. With `ssh-config-hosts` on, the aliases in the file
+/// `ssh_config` names are read now, so the list is fresh on every open; with
+/// it off, no path is looked up and no file is touched.
+pub(super) fn open_ssh_launcher(
+    ws: &mut WindowState,
+    cfg: &Config,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+) {
+    ws.ssh_imported = if cfg.ssh_config_hosts {
+        ssh_config()
+            .map(|path| kettle_config::ssh_config::user_ssh_host_aliases(&path).aliases)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    ws.ssh_input = Some((Default::default(), 0));
 }
 
 pub(super) struct PickerList {
@@ -726,48 +947,86 @@ pub(super) fn ssh_picker_list(
     query: &str,
     selected: usize,
     hosts: &[(String, String)],
+    imported: &[String],
     tr: &kettle_i18n::Translator,
 ) -> PickerList {
-    let ranked = rank_ssh_hosts(query, hosts);
-    let rows = ranked
+    let rows = ssh_rows(query, hosts, imported);
+    let selected = ssh_clamp_selection(&rows, selected);
+    let row = |label: String, hint: String, enabled: bool| ContextMenuRow {
+        toggle: None,
+        swatches: None,
+        matched_chars: None,
+        label,
+        separator: false,
+        enabled,
+        hint,
+    };
+    let rows = rows
         .iter()
-        .map(|&index| ContextMenuRow {
-            toggle: None,
-            swatches: None,
-            matched_chars: None,
-            label: hosts[index].0.clone(),
-            separator: false,
-            enabled: true,
-            hint: String::new(),
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        PickerList {
-            rows: vec![ContextMenuRow {
-                toggle: None,
-                swatches: None,
-                matched_chars: None,
-                label: tr
-                    .text(if hosts.is_empty() {
-                        kettle_i18n::Text::PickerNoConfiguredHosts
-                    } else {
-                        kettle_i18n::Text::PickerNoMatchingHost
-                    })
+        .map(|entry| match *entry {
+            SshRow::Configured(index) => row(hosts[index].0.clone(), String::new(), true),
+            SshRow::Imported(index) => row(
+                imported[index].clone(),
+                tr.picker_ssh_config_source(kettle_config::ssh_config::SSH_CONFIG_DISPLAY_PATH),
+                true,
+            ),
+            SshRow::ConnectTyped => row(
+                tr.picker_ssh_connect_typed(query.trim()),
+                String::new(),
+                true,
+            ),
+            SshRow::Placeholder if query.trim().is_empty() => row(
+                tr.text(kettle_i18n::Text::PickerNoConfiguredHosts)
                     .to_string(),
-                separator: false,
-                enabled: false,
-                hint: tr.text(kettle_i18n::Text::PickerTypedTarget).to_string(),
-            }],
-            selected: 0,
-            footer: None,
-        }
-    } else {
-        PickerList {
-            selected: selected.min(rows.len() - 1),
-            rows,
-            footer: None,
-        }
+                tr.text(kettle_i18n::Text::PickerTypedTarget).to_string(),
+                false,
+            ),
+            SshRow::Placeholder => row(
+                tr.text(kettle_i18n::Text::PickerSshInvalidTarget)
+                    .to_string(),
+                String::new(),
+                false,
+            ),
+            SshRow::SaveTyped => row(String::new(), String::new(), false),
+        })
+        .collect();
+    PickerList {
+        rows,
+        selected,
+        footer: None,
     }
+}
+
+/// The open SSH launcher's rows. The overlay painter, pointer hit-testing and
+/// accessibility all call this one builder.
+pub(super) fn ssh_picker_list_for(
+    ws: &WindowState,
+    cfg: &Config,
+    tr: &kettle_i18n::Translator,
+) -> Option<PickerList> {
+    let (query, selected) = ws.ssh_input.as_ref()?;
+    Some(ssh_picker_list(
+        query,
+        *selected,
+        &cfg.ssh_hosts,
+        &ws.ssh_imported,
+        tr,
+    ))
+}
+
+/// The SSH launcher's key hint, shared by the overlay and the text-field
+/// projection so the painted and announced hints cannot drift.
+pub(super) fn ssh_picker_hint(tr: &kettle_i18n::Translator) -> String {
+    use kettle_i18n::Text as T;
+    picker_hint(
+        tr,
+        &[
+            ("Enter", T::PickerHintConnect),
+            ("Tab", T::PickerHintComplete),
+            ("↑↓", T::PickerHintSelect),
+            ("Esc", T::PickerHintCancel),
+        ],
+    )
 }
 
 /// Keep the selected picker row inside the visible suffix. Picker rows have no
@@ -1081,9 +1340,7 @@ pub(super) fn open_picker_list(
             tr,
         ))
     } else {
-        ws.ssh_input
-            .as_ref()
-            .map(|(query, selected)| ssh_picker_list(query, *selected, &cfg.ssh_hosts, tr))
+        ssh_picker_list_for(ws, cfg, tr)
     }
 }
 
@@ -1174,11 +1431,21 @@ pub(super) fn apply_picker_pointer(
             .saturating_add_signed(delta)
             .min(max_offset);
         // The picker viewport follows selection. Crossing the cut edge selects
-        // the newly exposed row and keeps keyboard/preview routing in sync.
+        // the newly exposed row and keeps keyboard/preview routing in sync. A
+        // disabled row (a placeholder) is never selected: the nearest enabled
+        // row above it in view is.
         if offset == menu.scroll_offset {
             menu.highlight
         } else {
-            offset + visible - 1
+            let exposed = offset + visible - 1;
+            (offset..=exposed)
+                .rev()
+                .find(|&index| {
+                    menu.rows
+                        .get(index)
+                        .is_some_and(|row| row.enabled && !row.separator)
+                })
+                .unwrap_or(menu.highlight)
         }
     };
     let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {

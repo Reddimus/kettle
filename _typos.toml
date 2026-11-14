@@ -67,7 +67,9 @@ limt = "limt"
 themeing = "themeing"
 yse = "yse"
 Cpy = "Cpy"
-# Spanish examples in translator notes and desktop-entry keywords.
+# Spanish examples in translator notes, desktop-entry keywords and tests of
+# Spanish UI text.
+caracteres = "caracteres"
 comando = "comando"
 comandos = "comandos"
 divisiones = "divisiones"

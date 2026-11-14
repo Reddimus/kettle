@@ -8,6 +8,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- The SSH launcher (Ctrl+Shift+S) also lists the `Host` aliases in
+  `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows), marked "from
+  ~/.ssh/config", after the configured `ssh-host` entries. The file is read
+  each time the launcher opens and never written. Only literal aliases are
+  kept: patterns, `Match` blocks and aliases with `@` or non-ASCII text are
+  skipped, and `Include` is not followed. At most 256 KiB and 256 aliases are
+  read, and a file anyone else can change is skipped. The aliases are not
+  saved anywhere; one you connect to is, like a typed target, part of the
+  tab's saved command and its title. Set `ssh-config-hosts = false` to turn
+  this off. When a row's name or alias equals the typed text (ignoring case),
+  that host is the first row. Otherwise a **Connect to "…"** row comes first
+  and is selected, with the fuzzy matches below it, so typing `prod` connects
+  to `prod` even when `~/.ssh/config` has `prod-db`.
+
 - Settings › Appearance has a Minimum contrast row after Theme, for
   `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
   config, such as 2.5, shows as it is until you step it.
@@ -242,6 +256,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   type-ahead while a pane prints are left out. Counts only, never text.
 
 ### Changed
+
+- `ssh-host` entries whose target starts with `-` or contains whitespace,
+  control or bidi characters, or whose name is longer than 128 bytes or holds
+  control or bidi characters, are now ignored, and `--check-config` reports
+  them. None of those targets could connect, but some of those names worked
+  before and are now dropped: a name containing a tab, another control
+  character or a bidi mark, and a name over 128 bytes. In the SSH launcher, a
+  typed target that starts with `-` or contains whitespace or control
+  characters shows only a row saying why it cannot be used; the hosts it would
+  fuzzy-match are hidden, and Enter leaves the launcher open instead of
+  starting `ssh`. The "No configured host matches" row is gone: the Connect row
+  takes its place.
 
 - The macOS menu bar reads like a Mac app's. View has one Enter Full Screen
   item, on Control-Command-F, that reads Exit Full Screen while the window
@@ -547,6 +573,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   appear once a tab is split, and while broadcast input is on.
 
 ### Security
+
+- The SSH launcher passes its target to `ssh` after `--`, as
+  `ssh -t -- <target>`, so a target can never be read as an ssh option such
+  as `-oProxyCommand=…`. Sessions saved earlier replay their stored command
+  unchanged.
 
 - A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
   even where bracketed paste is on, as such text was made to escape it. Kettle

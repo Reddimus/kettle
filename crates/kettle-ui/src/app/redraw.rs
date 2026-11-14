@@ -114,18 +114,10 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
         let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
-            Some((query, selected)) => (
+            Some((query, _)) => (
                 Some(with_preedit(query)),
-                picker_hint(
-                    tr,
-                    &[
-                        ("Enter", T::PickerHintConnect),
-                        ("Tab", T::PickerHintComplete),
-                        ("↑↓", T::PickerHintSelect),
-                        ("Esc", T::PickerHintCancel),
-                    ],
-                ),
-                Some(ssh_picker_list(query, *selected, &self.cfg.ssh_hosts, tr)),
+                ssh_picker_hint(tr),
+                ssh_picker_list_for(ws, &self.cfg, tr),
             ),
             None => (None, String::new(), None),
         };
