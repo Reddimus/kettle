@@ -1048,8 +1048,10 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
     use kettle_config::{Config, TabBarPos};
     let buttons = crate::window_buttons::ButtonLayout::default();
     for scale in [1.0, 1.5, 2.0] {
+        // A narrow window's lone tab starts past the header's leading `+`
+        // (8 + 28 + 4 points); a wide one stays centred as before.
         for (width, minimum, expected_x) in [
-            (400.0, 80.0, 0.0),
+            (400.0, 80.0, 40.0),
             (1000.0, 80.0, 168.14286),
             (1000.0, 700.0, 81.0),
         ] {

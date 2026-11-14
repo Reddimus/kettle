@@ -420,18 +420,50 @@ impl App {
     }
 }
 
+/// The GNOME header's new-tab `+` and main menu `≡` in its tab lane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LinuxHeaderControls {
+    pub(super) menu: Rect,
+    pub(super) plus: Rect,
+    /// Room the tabs leave before them, for `+`.
+    pub(super) lead: f32,
+    /// Room the tabs leave after them, for `≡`.
+    pub(super) trail: f32,
+}
+
+/// Lay out the GNOME header's `+` and `≡` in `band`, the header less its
+/// window buttons: 28-point buttons centred on the header's height, `+`
+/// leading the lane, as GNOME Terminal and Ghostty place it, and `≡` ending
+/// it. Each keeps 8 points from the lane's edge and 4 from the tabs. In a
+/// lane too narrow for both, `≡` gives way first, as it did when it sat
+/// beside `+`; whatever is left is clipped to the lane.
 pub(super) fn linux_header_tab_controls(
     band: Rect,
     scale: f32,
     dropdown: bool,
-) -> (Rect, Rect, f32) {
-    let height = (28.0 * scale).min(band.3);
-    let lane = (band.0, band.1 + (band.3 - height) * 0.5, band.2, height);
-    let (menu, plus, reserve) = horizontal_new_tab_controls(lane, scale, dropdown);
+) -> LinuxHeaderControls {
+    let side = (28.0 * scale).min(band.3).max(0.0);
+    let y = band.1 + (band.3 - side) * 0.5;
+    let (edge, gap) = (8.0 * scale, 4.0 * scale);
+    let end = band.0 + band.2;
     let clip = |r: Rect| {
-        let left = r.0.clamp(band.0, band.0 + band.2);
-        let right = (r.0 + r.2).clamp(left, band.0 + band.2);
+        let left = r.0.clamp(band.0, end);
+        let right = (r.0 + r.2).clamp(left, end);
         (left, r.1, right - left, r.3)
     };
-    (clip(menu), clip(plus), reserve.min(band.2))
+    let plus = clip((band.0 + edge, y, side, side));
+    let lead = (edge + side + gap).min(band.2);
+    let menu = (end - edge - side, y, side, side);
+    let menu = if dropdown && menu.0 >= plus.0 + plus.2 + gap {
+        menu
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 };
+    LinuxHeaderControls {
+        menu,
+        plus,
+        lead,
+        trail: trail.min(band.2 - lead),
+    }
 }

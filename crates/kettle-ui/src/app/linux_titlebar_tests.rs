@@ -93,13 +93,19 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 &Default::default(),
             );
             let controls_start = width - 3.0 * height;
-            let (arrow, plus, reserve) =
-                linux_header_tab_controls((0.0, 0.0, controls_start, height), scale, true);
-            let strip = controls_start - reserve;
+            let LinuxHeaderControls {
+                menu: arrow,
+                plus,
+                lead,
+                trail,
+            } = linux_header_tab_controls((0.0, 0.0, controls_start, height), scale, true);
+            let strip = controls_start - lead - trail;
             let layout =
-                titlebar_tab_layout(count, 0, (strip, reserve, 0.0), height, 80.0 * scale, true);
-            assert_eq!(plus.0 + plus.2, controls_start - 8.0 * scale);
-            assert_eq!(arrow.0 + arrow.2 + 4.0 * scale, plus.0);
+                titlebar_tab_layout(count, 0, (strip, trail, lead), height, 80.0 * scale, true);
+            // `+` leads the header and `≡` ends it, before the window buttons.
+            assert_eq!(plus.0, 8.0 * scale);
+            assert_eq!(arrow.0 + arrow.2, controls_start - 8.0 * scale);
+            assert_eq!(lead, plus.0 + plus.2 + 4.0 * scale);
             assert_eq!(plus.2, 28.0 * scale);
             let mut bar = TabBar::hidden();
             bar.height = height;
@@ -117,7 +123,8 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                     layout.width
                 };
                 assert!(*x + w <= strip + 0.01);
-                let rect = (*x, 0.0, w, height);
+                let rect = (lead + *x, 0.0, w, height);
+                assert!(rect.0 >= plus.0 + plus.2);
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     count > 1,
@@ -130,7 +137,7 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 if count == 1 {
                     content.title = centered_title_lane(content.title, width * 0.5);
                     assert!((content.title.0 + content.title.2 * 0.5 - width * 0.5).abs() < 0.01);
-                    assert!(content.title.0 + content.title.2 <= strip);
+                    assert!(content.title.0 + content.title.2 <= lead + strip);
                 }
                 bar.segments.push(TabSeg {
                     idx,
@@ -152,8 +159,10 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 true
             ));
             assert!(!empty_titlebar_space(&bar, plus.0 + 1.0, height * 0.5));
+            assert!(!empty_titlebar_space(&bar, arrow.0 + 1.0, height * 0.5));
             if count == 1 {
-                assert!(empty_titlebar_space(&bar, 10.0 * scale, height * 0.5));
+                let between = (plus.0 + plus.2 + bar.segments[0].rect.0) * 0.5;
+                assert!(empty_titlebar_space(&bar, between, height * 0.5));
             }
         }
         // Even a tiny surface keeps the three window targets disjoint.
@@ -347,16 +356,27 @@ fn linux_header_new_controls_clear_buttons_at_every_width_and_scale() {
                     band.3,
                 );
                 for dropdown in [false, true] {
-                    let (menu, plus, reserve) = linux_header_tab_controls(lane, scale, dropdown);
-                    assert!(reserve >= 0.0 && reserve <= lane.2);
-                    for target in [menu, plus] {
+                    let LinuxHeaderControls {
+                        menu,
+                        plus,
+                        lead,
+                        trail,
+                    } = linux_header_tab_controls(lane, scale, dropdown);
+                    assert!(lead >= 0.0 && trail >= 0.0 && lead + trail <= lane.2 + 0.01);
+                    // An absent `≡` is the usual zero rect.
+                    for target in [menu, plus].into_iter().filter(|r| r.2 > 0.0) {
                         assert!(target.0 >= lane.0 - 0.01);
                         assert!(target.0 + target.2 <= lane.0 + lane.2 + 0.01);
                         assert!(target.2 >= 0.0 && target.2 <= 28.0 * scale + 0.01);
                     }
+                    // `+` leads and `≡` ends the lane, never overlapping.
                     if menu.2 > 0.0 && plus.2 > 0.0 {
-                        assert!(menu.0 + menu.2 <= plus.0);
+                        assert!(plus.0 + plus.2 + 4.0 * scale <= menu.0 + 0.01);
                     }
+                    assert_eq!(
+                        menu.2 > 0.0,
+                        dropdown && lane.2 >= 2.0 * (36.0 * scale) + 4.0 * scale
+                    );
                 }
             }
         }
@@ -475,7 +495,7 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
         } else {
             geometry.layout.width
         };
-        let rect = (lane.0 + x.unwrap(), 0.0, w, height);
+        let rect = (lane.0 + geometry.lead + x.unwrap(), 0.0, w, height);
         let content = kettle_render::horizontal_tab_content_layout(
             rect,
             tabs > 1,
@@ -666,4 +686,80 @@ fn lone_header_title_presses_like_empty_header_space() {
     ));
     let ctl: String = include_str!("ctl.rs").split_whitespace().collect();
     assert!(ctl.contains("ifws.linux_titlebar&&linux_title_space(&bar,px,py){returntrue;}"));
+}
+
+/// `+` leads the GNOME header, after any window buttons GNOME's layout puts
+/// on the left, and `≡` ends the lane before those on the right, at 1x and
+/// 2x. The pointer, AccessKit and ctl all find `+` in the rect the painter
+/// is given, and the tabs start past it.
+#[test]
+fn gnome_header_plus_leads_and_agrees_everywhere() {
+    let tr = kettle_i18n::Translator::default();
+    for scale in [1.0, 2.0] {
+        for layout in [
+            ":minimize,maximize,close",
+            "close,minimize:maximize",
+            "close:",
+        ] {
+            for tabs in [1, 2, 3] {
+                let bar = gnome_header_bar(1000.0, scale, layout, tabs);
+                let case = format!("{scale}x {layout:?} {tabs} tabs");
+                let plus = bar.new_tab;
+                let menu = bar.new_tab_menu;
+                assert_eq!((plus.2, plus.3), (28.0 * scale, 28.0 * scale), "{case}");
+                let left = bar
+                    .window_controls
+                    .iter()
+                    .filter(|b| b.rect.0 < bar.band.2 * 0.5)
+                    .map(|b| b.rect.0 + b.rect.2)
+                    .fold(0.0_f32, f32::max);
+                let right = bar
+                    .window_controls
+                    .iter()
+                    .filter(|b| b.rect.0 >= bar.band.2 * 0.5)
+                    .map(|b| b.rect.0)
+                    .fold(bar.band.2, f32::min);
+                assert!(
+                    plus.0 > left && plus.0 <= left + 18.0 * scale,
+                    "{case}: {plus:?}"
+                );
+                assert!(menu.0 > plus.0 + plus.2, "{case}: ≡ {menu:?} not after +");
+                assert!(menu.0 + menu.2 < right, "{case}: ≡ {menu:?} under a button");
+                for tab in &bar.segments {
+                    assert!(tab.rect.0 >= plus.0 + plus.2, "{case}: a tab before +");
+                    assert!(tab.rect.0 + tab.rect.2 <= menu.0, "{case}: a tab past ≡");
+                }
+                let (px, py) = centre(plus);
+                assert_eq!(
+                    new_tab_hover_target(&bar, px, py),
+                    Some(NewTabHoverTarget::Plus),
+                    "{case}"
+                );
+                assert!(tab_bar_pointer_region_contains(&bar, px, py));
+                assert_eq!(linux_header_press(&bar, (px, py), 0, false), None);
+                let nodes = tab_accessibility_projection(&bar, &[1, 2, 3], false, &tr);
+                let node = nodes
+                    .iter()
+                    .find(|(_, n)| n.label() == Some(tr.text(kettle_i18n::Text::PaletteNewTab)))
+                    .expect("the new-tab button");
+                assert_eq!(
+                    node.1.bounds().unwrap(),
+                    accesskit::Rect::new(
+                        plus.0 as f64,
+                        plus.1 as f64,
+                        (plus.0 + plus.2) as f64,
+                        (plus.1 + plus.3) as f64
+                    ),
+                    "{case}"
+                );
+                let json = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
+                assert_eq!(
+                    json["new_tab"],
+                    super::ctl_snapshot::rect_json(plus),
+                    "{case}"
+                );
+                assert_eq!(json["lone_title"], tabs == 1, "{case}");
+            }
+        }
+    }
 }

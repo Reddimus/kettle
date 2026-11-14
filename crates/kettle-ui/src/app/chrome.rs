@@ -222,6 +222,7 @@ impl App {
             arrow_rect,
             plus_rect,
             settings_rect,
+            lead,
             strip,
             layout,
         } = horizontal_tab_geometry(
@@ -231,6 +232,8 @@ impl App {
             (n, active),
             &self.cfg,
         );
+        // Tab positions count from past the GNOME header's leading `+`.
+        let x0 = x0 + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -1487,6 +1490,10 @@ pub(super) struct HorizontalTabGeometry {
     pub plus_rect: Rect,
     /// The macOS title bar's Settings gear, zero elsewhere.
     pub settings_rect: Rect,
+    /// How far into the lane the tabs start: past the GNOME header's
+    /// leading `+`, and zero on every other strip. `layout` positions count
+    /// from there.
+    pub lead: f32,
     pub strip: f32,
     pub layout: TabStripLayout,
 }
@@ -1501,10 +1508,13 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, mut button_w) = if linux {
-        linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
+    let (arrow_rect, plus_rect, lead, mut button_w) = if linux {
+        let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (controls.menu, controls.plus, controls.lead, controls.trail)
     } else {
-        horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
+        let (menu, plus, reserve) =
+            horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (menu, plus, 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
     // keep Settings in their `≡` / `▾` menus.
@@ -1515,9 +1525,9 @@ pub(super) fn horizontal_tab_geometry(
         settings_rect = rect;
         button_w += extra;
     }
-    let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+    let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
-        let space = (strip, button_w, lane.0);
+        let space = (strip, button_w, lane.0 + lead);
         let mut layout = titlebar_tab_layout(
             n,
             active,
@@ -1548,6 +1558,7 @@ pub(super) fn horizontal_tab_geometry(
         arrow_rect,
         plus_rect,
         settings_rect,
+        lead,
         strip,
         layout,
     }
@@ -1573,7 +1584,7 @@ pub(super) fn tear_off_destination_tab(
     let lane = horizontal_tab_lane(band, reservations);
     let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
     (
-        lane.0 + geometry.layout.xs[0].unwrap_or(0.0),
+        lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
         geometry.layout.last_width,
         band.3,
@@ -1582,7 +1593,7 @@ pub(super) fn tear_off_destination_tab(
 
 /// How far along a torn window's title bar its pointer holds it: `in_tab`
 /// into the lone tab the destination paints, which leaves room for the
-/// macOS Settings gear and the Linux header's window buttons.
+/// macOS Settings gear and the Linux header's leading `+` and window buttons.
 pub(super) fn titlebar_tear_off_grab_x(
     cfg: &Config,
     band: Rect,
