@@ -335,6 +335,27 @@ mod tests {
             vec![("Bad Title".to_string(), "line1\nline2".to_string())]
         );
 
+        // So are the bidi overrides that reorder text on screen, and
+        // whitespace runs collapse: one space, or in the body one newline.
+        let mut e = Extractor::new();
+        let chunks = e.feed(
+            "\x1b]777;notify;a\u{202E}b \u{2066}\tc;one \u{200F}\n\n  two   three\x07".as_bytes(),
+        );
+        assert_eq!(
+            notification_chunks(&chunks),
+            vec![("a b c".to_string(), "one\ntwo three".to_string())]
+        );
+        let mut e = Extractor::new();
+        let chunks = e.feed("\x1b]9;\u{202D}  Build\u{061C} \u{200E}done \x7f\x07".as_bytes());
+        assert_eq!(
+            notification_chunks(&chunks),
+            vec![("Build done".to_string(), String::new())]
+        );
+        // A field of nothing but overrides is no notification text.
+        let mut e = Extractor::new();
+        let chunks = e.feed("\x1b]9;\u{202E}\u{2069}\x07".as_bytes());
+        assert!(notification_chunks(&chunks).is_empty());
+
         // Unknown OSC 777 commands are not ours; preserve them byte-for-byte.
         let mut e = Extractor::new();
         let chunks = e.feed(b"\x1b]777;unknown;payload\x07");
