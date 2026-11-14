@@ -661,6 +661,7 @@ pub struct Renderer {
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
+    tab_bell_mask: tab_strip::BellMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -4449,6 +4450,7 @@ impl Renderer {
                         s.rect,
                         s.title_rect,
                         centered_left,
+                        s.activity,
                         self.scale,
                     )
                     && let Some(ink) = chrome::activity_ink(theme, s.activity)
@@ -4461,8 +4463,8 @@ impl Renderer {
                         s.activity,
                         marker,
                         self.scale,
-                        ink,
-                        tab_background,
+                        (ink, tab_background),
+                        &mut self.tab_bell_mask,
                     );
                 }
                 // `✕` close glyph — separate text area so we can color

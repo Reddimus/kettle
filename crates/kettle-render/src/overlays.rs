@@ -1274,7 +1274,7 @@ pub fn format_media_size(bytes: u64) -> String {
 }
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
-/// draws a filled cyan disc, `Bell` a yellow triangle on a top or bottom
+/// draws a filled cyan disc, `Bell` a drawn yellow bell on a top or bottom
 /// tab bar; vertical tabs keep a square dot in each colour until 6.1.
 /// Terminator-parity affordance ("you've got new output in an inactive tab").
 /// Renderer-side enum so the UI doesn't need to leak its
@@ -1291,7 +1291,7 @@ pub enum TabActivity {
     /// (`tail -f`, build watchers) where the *absence* of output is
     /// the signal the user wants. Drawn on a top or bottom tab bar as a
     /// dim chrome-gray ring, distinct from `Output` (a cyan disc) and
-    /// `Bell` (a yellow triangle) by shape as well as colour; vertical
+    /// `Bell` (a yellow bell) by shape as well as colour; vertical
     /// tabs keep a gray dot until 6.1.
     Silent,
 }

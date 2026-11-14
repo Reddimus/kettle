@@ -35,18 +35,38 @@ pub struct HorizontalTabContent {
     pub hint: Option<Rect4>,
 }
 
-/// Room an activity marker takes before a tab's title: an
-/// `ACTIVITY_MARKER`-sized box and a gap, in device pixels at `scale`.
-pub fn activity_lane(scale: f32) -> f32 {
-    (12.0 * scale).round()
+/// Room a `kind` marker takes before a tab's title: its box and a gap, in
+/// device pixels at `scale`; nothing for a tab without one. The bell's box
+/// is wider than the disc's and the ring's, so its lane is too.
+pub fn activity_lane(kind: crate::TabActivity, scale: f32) -> f32 {
+    use crate::TabActivity;
+    match kind {
+        TabActivity::Normal => 0.0,
+        TabActivity::Bell => (15.0 * scale).round(),
+        TabActivity::Output | TabActivity::Silent => (12.0 * scale).round(),
+    }
 }
 
-/// Side of the square box an activity marker is drawn in, at 1x.
+/// Side of the square box the disc and the ring are drawn in, at 1x.
 const ACTIVITY_MARKER: f32 = 8.0;
 
+/// Side of the bell's box at 1x, about the tab title's cap height: an 8 px
+/// box is too small for a bell to read as one.
+const BELL_MARKER: f32 = 11.0;
+
+/// Side of a `kind` marker's box in device pixels at `scale`.
+fn marker_side(kind: crate::TabActivity, scale: f32) -> f32 {
+    let side = if kind == crate::TabActivity::Bell {
+        BELL_MARKER
+    } else {
+        ACTIVITY_MARKER
+    };
+    (side * scale).round().max(1.0)
+}
+
 /// Hidden controls reserve no hint or close space; title and activity take
-/// priority. `activity_lane` is [`activity_lane`] for a tab with a marker
-/// and `0.0` for one without.
+/// priority. `activity_lane` is [`activity_lane`] for the tab's marker, which
+/// is `0.0` for a tab without one.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
     show_controls: bool,
@@ -94,35 +114,153 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
-/// Where a background tab's activity marker draws: a box of
-/// `ACTIVITY_MARKER * scale` device pixels whose right edge leaves the lane's
-/// gap before the title text at `label_left`, centred on the title line.
-/// `None` when the box would not lie wholly inside the tab, so the painter
-/// never needs to work the condition out again from title geometry.
+/// Where a tab's `kind` activity marker draws: a box of [`marker_side`]
+/// device pixels whose right edge leaves the lane's gap before the title text
+/// at `label_left`, centred on the title line. `None` when the box would not
+/// lie wholly inside the tab, so the painter never needs to work the
+/// condition out again from title geometry.
 pub(crate) fn activity_marker_rect(
     segment: Rect4,
     title: Rect4,
     label_left: f32,
+    kind: crate::TabActivity,
     scale: f32,
 ) -> Option<Rect4> {
-    let size = (ACTIVITY_MARKER * scale).round().max(1.0);
-    let x = (label_left - activity_lane(scale)).round();
+    let size = marker_side(kind, scale);
+    let x = (label_left - activity_lane(kind, scale)).round();
     let y = (title.1 + title.3 * 0.5 - size * 0.5).round();
     let inside = x >= segment.0 - 0.5 && x + size <= segment.0 + segment.2 + 0.5;
     inside.then_some((x, y, size, size))
 }
 
-/// A background tab's activity marker, told apart by shape as well as
-/// colour: a filled disc for new output, a ring once the output stopped and
-/// a triangle pointing up when the bell rang. The ring's hole is filled with
-/// `tab_bg`, the flat full-height fill behind the marker, so it is exact.
+/// Coverage of a bell `side` pixels square, row by row, 0..=255: a round
+/// dome whose sides flare out to a lip wider than the dome, one empty row,
+/// and a clapper centred under the lip. Drawn rather than shaped, for the
+/// gear's reasons. The dome is supersampled 4x4; the lip, the gap and the
+/// clapper are whole device rows and the clapper whole columns, so at 1x
+/// (11 px) the gap stays empty and the clapper solid instead of blurring
+/// into the lip below the marker's contrast floor.
+pub(crate) fn bell_mask(side: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let s = side as f32;
+    let unit = s / BELL_MARKER;
+    let clapper_h = ((1.5 * unit).round() as u32).max(1);
+    let gap = (unit.floor() as u32).max(1);
+    let lip_h = (unit.round() as u32).max(1);
+    let body_h = side.saturating_sub(clapper_h + gap + lip_h);
+    // The clapper keeps the box's parity, so it is centred on whole pixels.
+    let mut clapper_w = ((2.0 * unit).round() as u32).clamp(1, side);
+    if (side - clapper_w) % 2 == 1 {
+        clapper_w += 1;
+    }
+    let clapper_left = (side - clapper_w) / 2;
+    let centre = s * 0.5;
+    // From 2x the clapper's foot is round; below that it stays whole pixels.
+    let clapper_radius = clapper_w as f32 * 0.5;
+    let foot = (side >= 20).then_some(s - clapper_radius);
+    let in_clapper = |x: f32, y: f32| {
+        (x - centre).abs() <= clapper_radius
+            && foot.is_none_or(|foot| y <= foot || (x - centre).hypot(y - foot) <= clapper_radius)
+    };
+    let (dome, flare, body) = (0.3 * s, 0.45 * s, body_h as f32);
+    let half_width = |y: f32| {
+        if y <= dome {
+            (dome * dome - (dome - y) * (dome - y)).max(0.0).sqrt()
+        } else {
+            let t = ((y - dome) / (body - dome).max(1e-3)).clamp(0.0, 1.0);
+            dome + (flare - dome) * t * t
+        }
+    };
+    let coverage = |px: u32, py: u32, inside: &dyn Fn(f32, f32) -> bool| {
+        let mut hits = 0;
+        for sy in 0..SAMPLES {
+            for sx in 0..SAMPLES {
+                let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                hits += u32::from(inside(x, y));
+            }
+        }
+        (hits * 255 / (SAMPLES * SAMPLES)) as u8
+    };
+    let mut mask = Vec::with_capacity((side * side) as usize);
+    for py in 0..side {
+        for px in 0..side {
+            mask.push(if py < body_h {
+                coverage(px, py, &|x, y| (x - centre).abs() <= half_width(y))
+            } else if py < body_h + lip_h {
+                255
+            } else if py < body_h + lip_h + gap
+                || !(clapper_left..clapper_left + clapper_w).contains(&px)
+            {
+                0
+            } else {
+                coverage(px, py, &in_clapper)
+            });
+        }
+    }
+    mask
+}
+
+/// A bell's coverage for one side length, kept between frames.
+#[derive(Default)]
+pub(crate) struct BellMask {
+    side: u32,
+    mask: Vec<u8>,
+}
+
+impl BellMask {
+    fn get(&mut self, side: u32) -> &[u8] {
+        if self.side != side || self.mask.is_empty() {
+            self.mask = bell_mask(side);
+            self.side = side;
+        }
+        &self.mask
+    }
+}
+
+/// `mask`, `side` pixels square, in `ink` with its top-left at `(left,
+/// top)`, as one quad per run of equal coverage.
+fn push_coverage(
+    quads: &mut Vec<QuadInstance>,
+    (left, top): (f32, f32),
+    side: u32,
+    mask: &[u8],
+    ink: Rgb,
+) {
+    for (row, line) in mask.chunks(side.max(1) as usize).enumerate() {
+        let mut start = 0;
+        while start < line.len() {
+            let coverage = line[start];
+            let mut end = start + 1;
+            while end < line.len() && line[end] == coverage {
+                end += 1;
+            }
+            if coverage > 0 {
+                quads.push(rect(
+                    left + start as f32,
+                    top + row as f32,
+                    (end - start) as f32,
+                    1.0,
+                    ink,
+                    f32::from(coverage) / 255.0,
+                ));
+            }
+            start = end;
+        }
+    }
+}
+
+/// A tab's activity marker, told apart by shape as well as colour: a filled
+/// disc for new output, a ring once the output stopped and a bell when the
+/// bell rang. The ring's hole is filled with `tab_bg`, the flat full-height
+/// fill behind the marker, so it is exact.
 pub(crate) fn activity_marker_quads(
     quads: &mut Vec<QuadInstance>,
     kind: crate::TabActivity,
     marker: Rect4,
     scale: f32,
-    ink: Rgb,
-    tab_bg: Rgb,
+    (ink, tab_bg): (Rgb, Rgb),
+    bell: &mut BellMask,
 ) {
     use crate::TabActivity;
     let (x, y, w, h) = marker;
@@ -141,21 +279,8 @@ pub(crate) fn activity_marker_quads(
             rounded_fill(quads, hole, hole.2 * 0.5, (true, true), (tab_bg, 1.0), None);
         }
         TabActivity::Bell => {
-            // One quad per device-pixel row, widening downward. Whole-pixel
-            // insets on both sides keep every row centred on the box.
-            let rows = h.round().max(1.0) as usize;
-            for i in 0..rows {
-                let raw = w * (i + 1) as f32 / rows as f32;
-                let inset = ((w - raw) * 0.5).floor().max(0.0);
-                quads.push(rect(
-                    x + inset,
-                    y + i as f32,
-                    w - inset * 2.0,
-                    1.0,
-                    ink,
-                    1.0,
-                ));
-            }
+            let side = w.min(h).round().max(1.0) as u32;
+            push_coverage(quads, (x.round(), y.round()), side, bell.get(side), ink);
         }
     }
 }
@@ -519,27 +644,7 @@ pub(crate) fn push_settings_gear(
     let left = (x + (w - side) * 0.5).round();
     let top = (y + (h - side) * 0.5).round();
     let n = side as u32;
-    for (row, line) in cache.get(n).chunks(n as usize).enumerate() {
-        let mut start = 0;
-        while start < line.len() {
-            let coverage = line[start];
-            let mut end = start + 1;
-            while end < line.len() && line[end] == coverage {
-                end += 1;
-            }
-            if coverage > 0 {
-                quads.push(rect(
-                    left + start as f32,
-                    top + row as f32,
-                    (end - start) as f32,
-                    1.0,
-                    ink,
-                    f32::from(coverage) / 255.0,
-                ));
-            }
-            start = end;
-        }
-    }
+    push_coverage(quads, (left, top), n, cache.get(n), ink);
 }
 
 /// Side of the GNOME header's main-menu icon at 1x, as GNOME's symbolic
@@ -734,8 +839,16 @@ mod tests {
 
     #[test]
     fn horizontal_content_prioritizes_title_and_activity_over_hint() {
-        // The marker lane scales with the display: 12 px at 1x, 24 at 2x.
-        for (scale, lane) in [(1.0_f32, 12.0_f32), (1.5, 18.0), (2.0, 24.0)] {
+        // The marker lane scales with the display: 12 px at 1x, 24 at 2x for
+        // the disc and the ring, 15 and 30 for the wider bell.
+        assert_eq!(activity_lane(TabActivity::Normal, 2.0), 0.0);
+        for (scale, lane, bell) in [
+            (1.0_f32, 12.0_f32, 15.0_f32),
+            (1.5, 18.0, 23.0),
+            (2.0, 24.0, 30.0),
+        ] {
+            assert_eq!(activity_lane(TabActivity::Silent, scale), lane);
+            assert_eq!(activity_lane(TabActivity::Bell, scale), bell);
             for width in [80.0, 160.0, 320.0] {
                 let (width, height) = (width * scale, 28.0 * scale);
                 let full = horizontal_tab_content_layout(
@@ -751,7 +864,7 @@ mod tests {
                     (0.0, 0.0, width, height),
                     true,
                     true,
-                    activity_lane(scale),
+                    activity_lane(TabActivity::Output, scale),
                     "a very long title that needs an ellipsis",
                     Some("Cmd+1"),
                     8.0 * scale,
@@ -769,9 +882,16 @@ mod tests {
     /// geometry once hid every marker at 2x.
     #[test]
     fn activity_marker_rect_paints_beside_the_title_at_every_scale() {
-        for scale in [1.0_f32, 1.5, 2.0] {
+        for (kind, scale) in [TabActivity::Output, TabActivity::Bell]
+            .into_iter()
+            .flat_map(|kind| [1.0_f32, 1.5, 2.0].map(|scale| (kind, scale)))
+        {
             let cell = (8.0 * scale, 16.0 * scale);
-            let size = (8.0 * scale).round();
+            let size = marker_side(kind, scale);
+            assert_eq!(
+                size,
+                (if kind == TabActivity::Bell { 11.0 } else { 8.0 } * scale).round()
+            );
             let height = 28.0 * scale;
             // (segment, centre of a lone titlebar tab's title lane)
             let cases = [
@@ -789,7 +909,7 @@ mod tests {
                         segment,
                         true,
                         true,
-                        activity_lane(scale),
+                        activity_lane(kind, scale),
                         label,
                         Some("Cmd+1"),
                         cell.0,
@@ -802,11 +922,12 @@ mod tests {
                         content.title = (centre - half, lane.1, half * 2.0, lane.3);
                     }
                     let (label_left, _) = tab_label_origin(content.title, label, cell);
-                    let marker = activity_marker_rect(segment, content.title, label_left, scale)
-                        .unwrap_or_else(|| {
-                            panic!("no marker at {scale}x for {label:?} in {segment:?}")
-                        });
-                    let case = format!("{scale}x, {label:?}, {segment:?}: {marker:?}");
+                    let marker =
+                        activity_marker_rect(segment, content.title, label_left, kind, scale)
+                            .unwrap_or_else(|| {
+                                panic!("no {kind:?} at {scale}x for {label:?} in {segment:?}")
+                            });
+                    let case = format!("{kind:?} {scale}x, {label:?}, {segment:?}: {marker:?}");
                     assert_eq!((marker.2, marker.3), (size, size), "{case}");
                     assert!(marker.0 >= segment.0 - 0.5, "{case}");
                     assert!(marker.0 + marker.2 <= segment.0 + segment.2 + 0.5, "{case}");
@@ -818,21 +939,21 @@ mod tests {
                 }
             }
             // A tab too narrow for the lane draws no marker outside itself.
-            let narrow = (40.0, 0.0, 12.0 * scale - 1.0, height);
+            let narrow = (40.0, 0.0, activity_lane(kind, scale) - 1.0, height);
             let content = horizontal_tab_content_layout(
                 narrow,
                 true,
                 true,
-                activity_lane(scale),
+                activity_lane(kind, scale),
                 "shell",
                 None,
                 cell.0,
             );
             let (label_left, _) = tab_label_origin(content.title, "shell", cell);
             assert_eq!(
-                activity_marker_rect(narrow, content.title, label_left, scale),
+                activity_marker_rect(narrow, content.title, label_left, kind, scale),
                 None,
-                "{scale}x"
+                "{kind:?} {scale}x"
             );
         }
     }
@@ -842,17 +963,25 @@ mod tests {
         let marker = activity_marker_rect(
             (0.0, 0.0, 200.0 * scale, 28.0 * scale),
             (
-                8.0 * scale + activity_lane(scale),
+                8.0 * scale + activity_lane(kind, scale),
                 0.0,
                 100.0 * scale,
                 28.0 * scale,
             ),
             40.0 * scale,
+            kind,
             scale,
         )
         .expect("room for a marker");
         let mut quads = vec![rect(0.0, 0.0, 200.0 * scale, 28.0 * scale, tab_bg, 1.0)];
-        activity_marker_quads(&mut quads, kind, marker, scale, ink, tab_bg);
+        activity_marker_quads(
+            &mut quads,
+            kind,
+            marker,
+            scale,
+            (ink, tab_bg),
+            &mut BellMask::default(),
+        );
         let ink = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
         (0..marker.3 as usize)
             .map(|row| {
@@ -900,11 +1029,23 @@ mod tests {
             assert!(output[c][c], "{scale}x: Output's centre is filled");
             assert!(!silent[c][c], "{scale}x: Silent's centre is the tab");
             assert!(silent[0][c] && silent[c][0], "{scale}x: Silent has a rim");
+            // The bell's box is its own size; its lip spans it and an empty
+            // row parts the clapper from the lip.
+            let bell_side = bell.len();
+            assert_eq!(bell_side, (11.0 * scale).round() as usize);
             let width = |row: &Vec<bool>| row.iter().filter(|&&p| p).count();
-            assert!(width(&bell[0]) > 0);
+            let widths: Vec<usize> = bell.iter().map(width).collect();
+            // `max_by_key` keeps the last of equals: the lip's bottom row.
+            let lip = (0..bell_side).max_by_key(|&r| widths[r]).unwrap();
+            assert_eq!(widths[lip], bell_side, "{scale}x: the lip spans the box");
+            assert_eq!(
+                widths[lip + 1],
+                0,
+                "{scale}x: a gap under the lip: {bell:?}"
+            );
             assert!(
-                width(&bell[side - 1]) >= 3 * width(&bell[0]),
-                "{scale}x: Bell widens downward: {bell:?}"
+                widths[lip + 1..].iter().any(|&w| w > 0),
+                "{scale}x: a clapper: {bell:?}"
             );
             assert_ne!(output, silent);
             assert_ne!(output, bell);
@@ -915,15 +1056,99 @@ mod tests {
             if scale == 1.0 {
                 bounds_1x = bounds;
             } else {
-                for (two, one) in bounds.iter().zip(&bounds_1x) {
+                // The disc and the ring: the bell's antialiased dome has
+                // whole pixels of its own at each size.
+                for (two, one) in bounds.iter().zip(&bounds_1x).take(2) {
                     assert_eq!(
                         (two.2, two.3),
                         (one.2 * 2, one.3 * 2),
                         "the 2x marker is twice the 1x one"
                     );
                 }
+                assert_eq!(bounds[2].2, bounds_1x[2].2 * 2, "the bell's lip doubles");
             }
         }
+    }
+
+    /// The bell at the sizes it is drawn at (1x, between 1x and 2x, and
+    /// 2x): a round dome, its widest row (the lip) low in the box and wider
+    /// than anything above it, an empty gap, then a clapper centred under
+    /// the lip, all mirror-symmetric. At 1x the lip, the gap and the clapper
+    /// are whole pixels, so antialiasing cannot blur the clapper into the
+    /// lip. The triangle it replaces fails the dome test, and a filled box
+    /// the gap test.
+    #[test]
+    fn the_bell_mask_has_a_dome_a_lip_a_gap_and_a_clapper_at_every_size() {
+        for side in [11_u32, 15, 16, 17, 22] {
+            let n = side as usize;
+            let mask = bell_mask(side);
+            assert_eq!(mask.len(), n * n);
+            let rows: Vec<&[u8]> = mask.chunks(n).collect();
+            let widths: Vec<f32> = rows
+                .iter()
+                .map(|row| row.iter().map(|&c| f32::from(c) / 255.0).sum())
+                .collect();
+            // The last of the widest rows, so a two-row lip counts once.
+            let lip = (0..n)
+                .max_by(|&a, &b| widths[a].total_cmp(&widths[b]))
+                .unwrap();
+            let lip_width = widths[lip];
+            let case = format!("{side} px: {widths:?}");
+            assert!(
+                widths[n / 4] >= 0.45 * lip_width,
+                "{case}: a round dome is wide a quarter of the way down"
+            );
+            assert!(
+                (lip as f32 + 0.5) / side as f32 >= 2.0 / 3.0,
+                "{case}: the lip is in the lower third"
+            );
+            let first_lip = (0..=lip)
+                .rev()
+                .take_while(|&r| widths[r] == lip_width)
+                .last();
+            assert!(
+                widths[..first_lip.unwrap()].iter().all(|&w| w < lip_width),
+                "{case}: the lip is wider than the dome"
+            );
+            let gap: Vec<usize> = (lip + 1..n).take_while(|&r| widths[r] == 0.0).collect();
+            assert!(!gap.is_empty(), "{case}: an empty row under the lip");
+            let clapper: Vec<usize> = (lip + 1 + gap.len()..n).collect();
+            assert!(!clapper.is_empty(), "{case}: a clapper under the gap");
+            for &r in &clapper {
+                let cols: Vec<usize> = (0..n).filter(|&c| rows[r][c] > 0).collect();
+                assert!(!cols.is_empty(), "{case}: clapper row {r} is painted");
+                let (left, right) = (cols[0], *cols.last().unwrap());
+                assert_eq!(left, n - 1 - right, "{case}: the clapper is centred");
+                assert!(widths[r] <= 0.5 * lip_width, "{case}: a clapper, not a lip");
+            }
+            for (r, row) in rows.iter().enumerate() {
+                let half = |cells: &[u8]| cells.iter().map(|&c| u32::from(c)).sum::<u32>();
+                let (left, right) = (half(&row[..n / 2]), half(&row[n - n / 2..]));
+                assert!(
+                    left.abs_diff(right) <= 255,
+                    "{case}: row {r} is symmetric within a pixel"
+                );
+            }
+            if side == 11 {
+                assert!(rows[lip].iter().all(|&c| c == 255), "1x: a solid lip");
+                for &r in gap.iter().chain(&clapper) {
+                    assert!(
+                        rows[r].iter().all(|&c| c == 0 || c == 255),
+                        "1x: row {r} is whole pixels: {:?}",
+                        rows[r]
+                    );
+                }
+                assert_eq!(gap.len(), 1, "1x: one full gap row");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bell_mask_is_kept_per_side_length() {
+        let mut cache = BellMask::default();
+        assert_eq!(cache.get(11), bell_mask(11).as_slice());
+        assert_eq!(cache.get(22), bell_mask(22).as_slice());
+        assert_eq!(cache.get(11).len(), 121);
     }
 
     /// The horizontal painter places and draws markers through the tested
@@ -958,7 +1183,7 @@ mod tests {
                 (0.0, 0.0, width, 28.0),
                 true,
                 true,
-                activity_lane(1.0),
+                activity_lane(TabActivity::Bell, 1.0),
                 "shell",
                 Some("Cmd+1"),
                 8.0,
@@ -1221,7 +1446,7 @@ mod tests {
                 (0.0, 0.0, 320.0, 32.0),
                 true,
                 true,
-                activity_lane(1.0),
+                activity_lane(TabActivity::Bell, 1.0),
                 "shell",
                 Some(&hint),
                 text_advance,

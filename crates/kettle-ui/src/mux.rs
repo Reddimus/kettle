@@ -2089,7 +2089,7 @@ pub enum TabActivity {
     Output,
     /// A `TermEvent::Bell` fired since the user last looked, or, on the
     /// active tab, in its focused pane since the user last answered it. Drawn as
-    /// a yellow triangle on a top or bottom tab bar (a yellow dot on
+    /// a yellow bell on a top or bottom tab bar (a yellow dot on
     /// vertical tabs until 6.1), overrides `Output` because a bell is a stronger
     /// signal (the focused program explicitly asked for attention).
     Bell,
@@ -2100,7 +2100,7 @@ pub enum TabActivity {
     /// *absence* of recent output is the signal the user wants.
     /// Drawn on a top or bottom tab bar as a dim chrome-gray ring to
     /// read as a state distinct from `Output` (a cyan disc) and `Bell`
-    /// (a yellow triangle); vertical tabs keep a gray dot until 6.1.
+    /// (a yellow bell); vertical tabs keep a gray dot until 6.1.
     Silent,
 }
 

@@ -2665,7 +2665,7 @@ context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of 
 args = [{ name = "title", type = "str" }]
 
 [messages.a11y_tab_bell]
-context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows the terminal bell rang (a triangle). The argument is the tab title."
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a tab whose activity marker shows the terminal bell rang (a drawn bell): a background tab, or the active tab while the bell that rang in its focused pane is unanswered. The argument is the tab title."
 args = [{ name = "title", type = "str" }]
 
 [messages.a11y_tab_output_stopped]

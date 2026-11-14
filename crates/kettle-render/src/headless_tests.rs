@@ -7796,11 +7796,14 @@ fn a_see_through_window_paints_the_selection_measured_as_shown() {
     assert_eq!(sample(true), opaque);
 }
 
-/// Background tabs' activity markers reach the frame as three shapes beside
-/// their titles, at 1x and 2x and in a dark and a light theme: a filled
-/// disc for output, a ring once it stopped and a triangle for the bell.
+/// Background tabs and the active tab paint their activity markers beside
+/// their titles, at 1x and 2x and in a dark and a light theme: a filled disc
+/// for output, a ring once it stopped and a bell when the bell rang, on a
+/// background tab and on the active one (a bell in its focused pane). The
+/// bell's lip, the empty row under it, its clapper and its dome are sampled
+/// where the mask is solid or empty, not at antialiased edges.
 #[test]
-fn background_tab_markers_have_distinct_shapes() {
+fn tab_markers_have_distinct_shapes_on_background_and_active_tabs() {
     let _serialized = gpu_test_guard();
     for scale in [1.0_f32, 2.0] {
         let (width, height) = (480.0 * scale, 120.0 * scale);
@@ -7820,24 +7823,20 @@ fn background_tab_markers_have_distinct_shapes() {
             let mut tabs = TabBar::hidden();
             tabs.height = 28.0 * scale;
             tabs.band = (0.0, 0.0, width, tabs.height);
+            // The first tab is the active one.
             let kinds = [
-                TabActivity::Normal,
+                TabActivity::Bell,
                 TabActivity::Output,
                 TabActivity::Silent,
                 TabActivity::Bell,
             ];
             for (idx, activity) in kinds.into_iter().enumerate() {
                 let rect = (idx as f32 * 112.0 * scale, 0.0, 112.0 * scale, tabs.height);
-                let lane = if activity == TabActivity::Normal {
-                    0.0
-                } else {
-                    activity_lane(scale)
-                };
                 let content = horizontal_tab_content_layout(
                     rect,
                     false,
                     false,
-                    lane,
+                    activity_lane(activity, scale),
                     "fixture",
                     None,
                     renderer.overlay_text_cell_width(),
@@ -7858,23 +7857,42 @@ fn background_tab_markers_have_distinct_shapes() {
             terminal.rect = (0.0, tabs.height, width, height - tabs.height);
             terminal.terminal = terminal.rect;
             let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
-            let painted = |x: f32, y: f32| {
-                let p = frame.get_pixel(x as u32, y as u32);
-                [p[0], p[1], p[2]]
-                    .iter()
-                    .zip([strip.r, strip.g, strip.b])
-                    .any(|(&a, b)| a.abs_diff(b) > 24)
-            };
-            for (bi, seg) in tabs.segments.iter().enumerate().skip(1) {
+            for (bi, seg) in tabs.segments.iter().enumerate() {
+                // The active tab is the terminal's own surface.
+                let bg = if seg.active {
+                    cfg.theme.background
+                } else {
+                    strip
+                };
+                let painted = |x: f32, y: f32| {
+                    let p = frame.get_pixel(x as u32, y as u32);
+                    [p[0], p[1], p[2]]
+                        .iter()
+                        .zip([bg.r, bg.g, bg.b])
+                        .any(|(&a, b)| a.abs_diff(b) > 24)
+                };
                 let (label_left, _) = tab_strip::tab_label_origin(
                     seg.title_rect,
                     &renderer.tab_texts[bi],
                     (renderer.overlay_text_cell_width(), 1.0),
                 );
-                let case = format!("{name} at {scale}x, {:?}", seg.activity);
-                let (x, y, w, h) =
-                    tab_strip::activity_marker_rect(seg.rect, seg.title_rect, label_left, scale)
-                        .unwrap_or_else(|| panic!("{case}: no room for a marker"));
+                let case = format!(
+                    "{name} at {scale}x, {:?} on {} tab",
+                    seg.activity,
+                    if seg.active {
+                        "the active"
+                    } else {
+                        "a background"
+                    }
+                );
+                let (x, y, w, h) = tab_strip::activity_marker_rect(
+                    seg.rect,
+                    seg.title_rect,
+                    label_left,
+                    seg.activity,
+                    scale,
+                )
+                .unwrap_or_else(|| panic!("{case}: no room for a marker"));
                 let rows: Vec<usize> = (0..h as usize)
                     .map(|row| {
                         (0..w as usize)
@@ -7893,11 +7911,23 @@ fn background_tab_markers_have_distinct_shapes() {
                         assert!(rows[0] > 0, "{case}: a ring has a rim: {rows:?}");
                     }
                     TabActivity::Bell => {
-                        let (top, bottom) = (rows[0], rows[h as usize - 1]);
-                        assert!(
-                            top > 0 && bottom >= 3 * top,
-                            "{case}: a triangle widens downward: {rows:?}"
-                        );
+                        let n = w as usize;
+                        assert_eq!(n, (11.0 * scale).round() as usize, "{case}");
+                        let mask = tab_strip::bell_mask(n as u32);
+                        let solid =
+                            |row: usize| mask[row * n..(row + 1) * n].iter().all(|&c| c == 255);
+                        let lip = (0..n).rev().find(|&row| solid(row)).expect("a solid lip");
+                        let at = |col: usize, row: usize| painted(x + col as f32, y + row as f32);
+                        let mid = n / 2;
+                        assert!(at(mid, lip), "{case}: the lip: {rows:?}");
+                        assert!(!at(mid, lip + 1), "{case}: the gap under the lip: {rows:?}");
+                        assert!(at(mid, n - 1), "{case}: the clapper: {rows:?}");
+                        let quarter = n / 4;
+                        let shoulder = (0..mid)
+                            .find(|&col| mask[quarter * n + col] == 255)
+                            .expect("a solid shoulder");
+                        assert!(at(shoulder, quarter), "{case}: the dome: {rows:?}");
+                        assert!(!at(0, quarter), "{case}: outside the dome: {rows:?}");
                     }
                     TabActivity::Normal => unreachable!(),
                 }

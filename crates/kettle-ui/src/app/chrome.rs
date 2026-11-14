@@ -311,11 +311,7 @@ impl App {
                     rect,
                     show_controls,
                     self.cfg.close_button_on_tab,
-                    if activity == RenderTabActivity::Normal {
-                        0.0
-                    } else {
-                        kettle_render::activity_lane(scale)
-                    },
+                    kettle_render::activity_lane(activity, scale),
                     &full_label,
                     hint.as_deref(),
                     cell_w,

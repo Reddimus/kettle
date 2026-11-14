@@ -1085,7 +1085,9 @@ mod tab_chrome_tests {
     /// Every activity marker reaches 3:1 on the tab behind it, hovered or
     /// not and in a focused or unfocused window, and a focused window's
     /// marker keeps the theme colour's hue and saturation. TokyoNight Night's Silent grey
-    /// was 2.04:1 on its strip, Catppuccin Latte's bell yellow 2.04:1.
+    /// was 2.04:1 on its strip, Catppuccin Latte's bell yellow 2.04:1. The
+    /// active tab, which shows the bell for its focused pane, is the
+    /// terminal's own background.
     #[test]
     fn tab_activity_markers_keep_3_to_1_and_their_hue() {
         use crate::TabActivity;
@@ -1102,6 +1104,7 @@ mod tab_chrome_tests {
             for (surface, bg) in [
                 ("strip", strip),
                 ("hovered tab", strip_hover(strip, theme.foreground, false)),
+                ("active tab", theme.background),
             ] {
                 for kind in [TabActivity::Output, TabActivity::Silent, TabActivity::Bell] {
                     let raw = activity_ink(&theme, kind).expect("a marked state has ink");
