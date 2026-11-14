@@ -292,120 +292,157 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn read_paste_clipboard(&mut self, target: ClipboardType) -> Option<String> {
         let result = self
             .clipboard
             .as_mut()
             .map(|clipboard| get_clipboard_text_bounded(clipboard, target, LOCAL_PASTE_MAX + 1))
             .unwrap_or(Err(arboard::Error::ContentNotAvailable));
+        self.checked_paste_text(result)
+    }
+
+    /// The text a paste read, or `None` after telling the user why it was
+    /// refused. An empty clipboard is empty text.
+    fn checked_paste_text(&self, result: Result<String, arboard::Error>) -> Option<String> {
         match clipboard_paste_result(result) {
             Ok(text) => Some(text),
             Err(reason) => {
-                log::warn!(
-                    "terminal input rejected: {}",
-                    kettle_i18n::Translator::default().text(reason)
-                );
-                fire_notify(
-                    self.ui_text
-                        .text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
-                    self.ui_text.text(reason),
-                );
+                self.notify_paste_refused(reason);
                 None
             }
         }
     }
 
     pub(super) fn paste_clipboard(&mut self, ws: &mut WindowState) {
-        // A copied file arrives as CF_HDROP or `text/uri-list`, not text. Paste
-        // its quoted path and translate it for WSL. A text clipboard falls
-        // through to the normal paste path below.
-        if self.cfg.paste_files.enabled()
-            && let Some(paths) = self.clipboard_file_paste_paths()
-        {
-            let video = self.cfg.paste_video_preview.then(|| {
-                crate::video_preview::VideoPasteRequest::from_user_paths(
-                    &paths,
-                    crate::video_preview::VideoPasteSource::Clipboard,
-                )
-            });
-            self.paste_paths(ws, paths, false, video.flatten());
-            return;
-        }
-        // Bitmap paste: a screenshot puts raw pixels on the clipboard with no
-        // file and no text behind it, so neither the file branch nor the text
-        // path can see it. Materialize it as a PNG and paste the path, reusing
-        // the same shell-quoting / WSL-translation pipeline. Ordered after the
-        // file branch so a genuine copied file always wins.
-        if self.cfg.paste_images.enabled() && self.paste_clipboard_image(ws) {
-            return;
-        }
-        if let Some(text) = self.read_paste_clipboard(ClipboardType::Clipboard) {
-            self.paste_text(ws, text);
+        // One order on every platform (`crate::clipboard`): a copied file
+        // (CF_HDROP, `text/uri-list`) pastes its quoted path, translated for
+        // WSL; then text; then a bitmap. Text wins over a bitmap because a
+        // source that offers both, such as spreadsheet cells, means the text.
+        use crate::clipboard::{PasteContent, PasteRefusal, PasteWant};
+        let want = PasteWant {
+            files: self.cfg.paste_files.enabled(),
+            images: self.cfg.paste_images.enabled(),
+        };
+        let content = match self.clipboard.as_mut() {
+            Some(clipboard) => clipboard.paste_content(want, LOCAL_PASTE_MAX + 1),
+            None => PasteContent::Text(Err(arboard::Error::ContentNotAvailable)),
+        };
+        match content {
+            PasteContent::Files(paths) => {
+                let video = self.cfg.paste_video_preview.then(|| {
+                    crate::video_preview::VideoPasteRequest::from_user_paths(
+                        &paths,
+                        crate::video_preview::VideoPasteSource::Clipboard,
+                    )
+                });
+                self.paste_paths(ws, paths, false, video.flatten());
+            }
+            PasteContent::Text(text) => {
+                if let Some(text) = self.checked_paste_text(text) {
+                    self.paste_text(ws, text);
+                }
+            }
+            // A screenshot puts pixels on the clipboard with no file and no
+            // text behind it. Materialize it as a PNG and paste the path,
+            // through the same shell quoting and WSL translation.
+            PasteContent::Image(image) => self.paste_clipboard_image(ws, image),
+            PasteContent::FilesOff => {
+                log::debug!("paste: copied files ignored, paste-files is off");
+            }
+            PasteContent::Refused(refusal) => self.notify_paste_refused(match refusal {
+                PasteRefusal::Files => kettle_i18n::Text::NotifyBodyClipboardFilesUnreadable,
+                PasteRefusal::Image => kettle_i18n::Text::NotifyBodyClipboardImageUnreadable,
+            }),
         }
     }
 
-    /// Paste the clipboard's bitmap as the path of a temporary PNG. False
-    /// when the clipboard holds no image, or it cannot be stored, so the
-    /// paste falls through to text rather than silently doing nothing — the
-    /// failure mode this whole path exists to remove.
+    /// Tell the user a paste brought nothing, and why. The reason is a fixed
+    /// message: nothing from the clipboard is logged or shown.
+    fn notify_paste_refused(&self, reason: kettle_i18n::Text) {
+        log::warn!(
+            "terminal input rejected: {}",
+            kettle_i18n::Translator::default().text(reason)
+        );
+        fire_notify(
+            self.ui_text
+                .text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
+            self.ui_text.text(reason),
+        );
+    }
+
+    /// Paste the clipboard's bitmap as the path of a temporary PNG. The
+    /// clipboard held no text, so a bitmap that cannot be stored pastes
+    /// nothing and says so.
     ///
     /// A large screenshot takes long enough to encode to stall the window,
     /// so the PNG is made on the encoder thread and the paste waits in
-    /// [`App::queued_pastes`], with any made after it.
-    pub(super) fn paste_clipboard_image(&mut self, ws: &mut WindowState) -> bool {
-        let Some(image) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
-            return false;
-        };
-        // Read now: by the time the PNG is ready the clipboard may have changed.
-        let Some(fallback) = self.read_paste_clipboard(ClipboardType::Clipboard) else {
-            return true;
-        };
-        if !self.paste_queue_admits(fallback.len()) {
+    /// [`App::queued_pastes`], with any made after it. A PNG another program
+    /// supplied is decoded there too, under limits: the window thread reads
+    /// only the size its header declares.
+    pub(super) fn paste_clipboard_image(
+        &mut self,
+        ws: &mut WindowState,
+        image: crate::clipboard::PasteImage,
+    ) {
+        use crate::clipboard::PasteImage;
+        use crate::paste_image::PngSource;
+        if !self.paste_queue_admits(0) {
             self.report_input_result(PaneInputResult::Oversize);
-            return true;
+            return;
         }
-        let png = match self.pasted_images.reserve_png(
-            image.width,
-            image.height,
-            image.bytes.len(),
-            self.cfg.paste_image_preview,
-        ) {
+        let preview = self.cfg.paste_image_preview;
+        let (reserved, pixels) = match image {
+            PasteImage::Rgba(image) => (
+                self.pasted_images.reserve_png(
+                    image.width,
+                    image.height,
+                    image.bytes.len(),
+                    preview,
+                ),
+                PngSource::Rgba(image.bytes.into_owned()),
+            ),
+            PasteImage::Png(png) => (
+                self.pasted_images.reserve_png_from(&png, preview),
+                PngSource::Png(png),
+            ),
+        };
+        let png = match reserved {
             Ok(png) => png,
             Err(error) => {
                 log::warn!("clipboard image paste failed: {error}");
-                return false;
+                self.notify_paste_refused(kettle_i18n::Text::NotifyBodyClipboardImageUnreadable);
+                return;
             }
         };
         let id = self.png_jobs;
         self.png_jobs = self.png_jobs.wrapping_add(1);
-        let rgba = image.bytes.into_owned();
         let submitted = match self.png_encoder() {
-            Some(encoder) => encoder.submit(id, png, rgba),
-            None => Err((png, rgba)),
+            Some(encoder) => encoder.submit(id, png, pixels),
+            None => Err((png, pixels)),
         };
-        if let Err((png, rgba)) = submitted {
+        if let Err((png, pixels)) = submitted {
             // No encoder thread: encode here, as a paste always did once.
-            let encoded = png.encode(&rgba, &|| false);
-            return match self.pasted_images.keep_png(encoded) {
-                Ok(path) => {
-                    self.paste_paths(ws, vec![path], false, None);
-                    true
-                }
+            let encoded = png.encode_source(&pixels, &|| false);
+            match self.pasted_images.keep_png(encoded) {
+                Ok(path) => self.paste_paths(ws, vec![path], false, None),
                 Err(error) => {
                     log::warn!("clipboard image paste failed: {error}");
-                    false
+                    self.notify_paste_refused(
+                        kettle_i18n::Text::NotifyBodyClipboardImageUnreadable,
+                    );
                 }
-            };
+            }
+            return;
         }
         self.queue_paste(
             ws,
             QueuedPasteContent::Image {
                 id,
-                fallback,
+                fallback: String::new(),
                 path: None,
             },
         );
-        true
     }
 
     /// The clipboard-image encoder, started on first use.
@@ -718,7 +755,13 @@ impl App {
                 ..
             } => {
                 log::warn!("clipboard image paste failed: {error}");
-                self.paste_text_to(&mut ws, target, &fallback);
+                if fallback.is_empty() {
+                    self.notify_paste_refused(
+                        kettle_i18n::Text::NotifyBodyClipboardImageUnreadable,
+                    );
+                } else {
+                    self.paste_text_to(&mut ws, target, &fallback);
+                }
             }
             QueuedPasteContent::Image { path: None, .. } => {}
             QueuedPasteContent::Text(text) => self.paste_text_to(&mut ws, target, &text),
@@ -1497,8 +1540,9 @@ pub(super) struct QueuedPaste {
 }
 
 pub(super) enum QueuedPasteContent {
-    /// The PNG of encoder job `id`, once it is kept or has failed, and the
-    /// clipboard's text to paste instead if it failed.
+    /// The PNG of encoder job `id`, once it is kept or has failed, and text
+    /// to paste instead if it failed. A clipboard image has none: text wins
+    /// before an image is tried, so its failure is said, not replaced.
     Image {
         id: u64,
         fallback: String,

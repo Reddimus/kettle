@@ -180,6 +180,81 @@ const COPY_CHUNK: usize = 1024 * 1024;
 /// likelier than a genuine capture.
 const MAX_DIMENSION: usize = 16_384;
 
+/// Most encoded PNG bytes read from another program's clipboard offer. The
+/// decoded bitmap has its own bounds: [`MAX_DIMENSION`] a side and the
+/// store's byte budget as RGBA.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+pub(crate) const PNG_SOURCE_MAX: usize = 64 * 1024 * 1024;
+
+/// Most bytes the PNG decoder may allocate for one clipboard image.
+const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// What a pasted PNG is encoded from.
+pub(crate) enum PngSource {
+    /// Decoded RGBA8 pixels.
+    Rgba(Vec<u8>),
+    /// A PNG another program supplied: untrusted, decoded under limits, and
+    /// never kept as it came.
+    Png(Vec<u8>),
+}
+
+impl From<Vec<u8>> for PngSource {
+    fn from(rgba: Vec<u8>) -> Self {
+        Self::Rgba(rgba)
+    }
+}
+
+/// The width and height a PNG declares, read from its header alone: no
+/// decoder runs and nothing is allocated.
+pub(crate) fn png_dimensions(png: &[u8]) -> Option<(usize, usize)> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    let rest = png.strip_prefix(SIGNATURE)?;
+    let side = |at: usize| {
+        let bytes = rest.get(at..at + 4)?.try_into().ok()?;
+        usize::try_from(u32::from_be_bytes(bytes)).ok()
+    };
+    Some((side(0)?, side(4)?))
+}
+
+/// Decode `png`, which must be `width`×`height`, to RGBA8.
+///
+/// The bytes are untrusted. The decoder gets its limits before it reads the
+/// header: [`MAX_DIMENSION`] a side and [`MAX_DECODE_BYTES`] of allocation,
+/// which the decoded buffer is charged against before it exists. A header
+/// that asks for more is refused without allocating it.
+fn decode_png(png: &[u8], width: usize, height: usize) -> io::Result<Vec<u8>> {
+    use image::ImageDecoder as _;
+    let refuse = |error: image::ImageError| match error {
+        image::ImageError::Limits(_) => io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            "clipboard PNG exceeds the decode limits",
+        ),
+        // The error's text can quote the file, so only its kind is kept.
+        _ => io::Error::new(
+            io::ErrorKind::InvalidData,
+            "clipboard PNG could not be decoded",
+        ),
+    };
+    let side = u32::try_from(MAX_DIMENSION).unwrap_or(u32::MAX);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(side);
+    limits.max_image_height = Some(side);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    let mut reader = image::ImageReader::with_format(io::Cursor::new(png), image::ImageFormat::Png);
+    reader.limits(limits.clone());
+    let decoder = reader.into_decoder().map_err(refuse)?;
+    let (decoded_width, decoded_height) = decoder.dimensions();
+    if (decoded_width as usize, decoded_height as usize) != (width, height) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "clipboard image changed size after it was checked",
+        ));
+    }
+    limits.reserve(decoder.total_bytes()).map_err(refuse)?;
+    let image = image::DynamicImage::from_decoder(decoder).map_err(refuse)?;
+    Ok(image.into_rgba8().into_raw())
+}
+
 /// The receipt is UI chrome, not a second copy of the screenshot. Keep its
 /// decoded allocation small enough to remain cheap even on a large display.
 const PREVIEW_MAX_WIDTH: u32 = 256;
@@ -428,6 +503,24 @@ impl PngReservation {
             preview,
         }
     }
+
+    /// Encode `source` as [`PngReservation::encode`] does, decoding it
+    /// first when it is another program's PNG. A PNG that cannot be decoded
+    /// within the limits, or is not the size reserved for, fails like an
+    /// encode and leaves no file.
+    pub(crate) fn encode_source(self, source: &PngSource, stop: &dyn Fn() -> bool) -> EncodedPng {
+        match source {
+            PngSource::Rgba(rgba) => self.encode(rgba, stop),
+            PngSource::Png(png) => match decode_png(png, self.width, self.height) {
+                Ok(rgba) => self.encode(&rgba, stop),
+                Err(error) => EncodedPng {
+                    reservation: self.reservation,
+                    png: Err(error),
+                    preview: None,
+                },
+            },
+        }
+    }
 }
 
 fn encode_png_into(
@@ -508,7 +601,7 @@ impl<W: io::Write> io::Write for StopWriter<'_, W> {
 /// [`PngReservation`], so the store's file and byte bounds also bound the
 /// queue and the bitmaps waiting in it.
 pub(crate) struct PngEncoder {
-    jobs: Option<crossbeam_channel::Sender<(u64, PngReservation, Vec<u8>)>>,
+    jobs: Option<crossbeam_channel::Sender<(u64, PngReservation, PngSource)>>,
     done: crossbeam_channel::Receiver<(u64, EncodedPng)>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -517,7 +610,7 @@ pub(crate) struct PngEncoder {
 impl PngEncoder {
     /// Start the worker. `wake` runs, on the worker, after each PNG.
     pub(crate) fn new(wake: Box<dyn Fn() + Send>) -> io::Result<Self> {
-        let (jobs, queued) = crossbeam_channel::unbounded::<(u64, PngReservation, Vec<u8>)>();
+        let (jobs, queued) = crossbeam_channel::unbounded::<(u64, PngReservation, PngSource)>();
         let (finished, done) = crossbeam_channel::unbounded();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopping = std::sync::Arc::clone(&stop);
@@ -525,9 +618,9 @@ impl PngEncoder {
             .name("kettle-paste-png".into())
             .spawn(move || {
                 let stopped = || stopping.load(std::sync::atomic::Ordering::Acquire);
-                for (id, png, rgba) in queued {
-                    let encoded = png.encode(&rgba, &stopped);
-                    drop(rgba);
+                for (id, png, source) in queued {
+                    let encoded = png.encode_source(&source, &stopped);
+                    drop(source);
                     if finished.send((id, encoded)).is_err() {
                         break;
                     }
@@ -542,20 +635,21 @@ impl PngEncoder {
         })
     }
 
-    /// Queue `rgba` for `png`, under `id`. Gives both back when the worker
+    /// Queue `source` for `png`, under `id`. Gives both back when the worker
     /// is gone.
     #[allow(clippy::result_large_err)]
     pub(crate) fn submit(
         &self,
         id: u64,
         png: PngReservation,
-        rgba: Vec<u8>,
-    ) -> Result<(), (PngReservation, Vec<u8>)> {
+        source: impl Into<PngSource>,
+    ) -> Result<(), (PngReservation, PngSource)> {
+        let source = source.into();
         let Some(jobs) = self.jobs.as_ref() else {
-            return Err((png, rgba));
+            return Err((png, source));
         };
-        jobs.send((id, png, rgba))
-            .map_err(|crossbeam_channel::SendError((_, png, rgba))| (png, rgba))
+        jobs.send((id, png, source))
+            .map_err(|crossbeam_channel::SendError((_, png, source))| (png, source))
     }
 
     /// The next finished PNG, if one is ready.
@@ -659,6 +753,39 @@ impl PastedImages {
         len: usize,
         with_preview: bool,
     ) -> io::Result<PngReservation> {
+        self.reserve_png_holding(width, height, len, 0, with_preview)
+    }
+
+    /// [`PastedImages::reserve_png`] for a PNG another program supplied,
+    /// from the size its header declares. Nothing is decoded here. The room
+    /// set aside is at least the source's own size, so the store's byte
+    /// budget also bounds the sources waiting to be decoded.
+    pub(crate) fn reserve_png_from(
+        &mut self,
+        png: &[u8],
+        with_preview: bool,
+    ) -> io::Result<PngReservation> {
+        let (width, height) = png_dimensions(png).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "clipboard image is not a PNG")
+        })?;
+        let len = width
+            .checked_mul(height)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "clipboard image size overflows")
+            })?;
+        let held = u64::try_from(png.len()).unwrap_or(u64::MAX);
+        self.reserve_png_holding(width, height, len, held, with_preview)
+    }
+
+    fn reserve_png_holding(
+        &mut self,
+        width: usize,
+        height: usize,
+        len: usize,
+        held: u64,
+        with_preview: bool,
+    ) -> io::Result<PngReservation> {
         if width == 0 || height == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -700,11 +827,12 @@ impl PastedImages {
         // filtered rows, deflated no larger than stored, plus framing. A
         // bitmap near the store's size may still fit once deflated, so it
         // gets whatever room there is.
-        let bound = u64::try_from(expected + height)
+        let bound = (u64::try_from(expected + height)
             .unwrap_or(u64::MAX)
             .saturating_mul(9)
             / 8
-            + 4096;
+            + 4096)
+            .max(held);
         let next = self.begin(bound, "png")?;
         let size = bound.min(next.remaining);
         let reservation = self.reserve(next, size)?;
@@ -3982,3 +4110,6 @@ mod tests {
         images.cleanup();
     }
 }
+
+#[cfg(test)]
+mod source_tests;

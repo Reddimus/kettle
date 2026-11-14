@@ -1,11 +1,13 @@
-//! CLIPBOARD text on Wayland through the native bridge's data device.
+//! CLIPBOARD on Wayland through the native bridge's data device.
+use std::path::PathBuf;
 use std::time::Instant;
 
 use super::worker::{TextProvider, TextWorker};
+use super::{PasteContent, PasteWant};
 
 /// The worker that serializes reads and writes off the UI thread. The
-/// selection itself lives with the bridge (`crate::wayland::selection`), which
-/// owns the one data device the compositor reports the selection to.
+/// selection itself lives with the bridge (`crate::wayland::selection`),
+/// which owns the one data device the compositor reports the selection to.
 pub(super) fn clipboard() -> Option<TextWorker> {
     match TextWorker::start(|| Ok(Native)) {
         Ok(worker) => Some(worker),
@@ -40,7 +42,7 @@ impl TextProvider for Native {
                 // The kind maps to arboard's error; the message says which step
                 // failed (no bridge, no offer, cap or deadline) for diagnosis.
                 log::debug!("Wayland clipboard read failed: {error}");
-                map_error(error)
+                crate::wayland::selection_error(&error)
             })
     }
 
@@ -55,17 +57,15 @@ impl TextProvider for Native {
         }
         crate::wayland::selection().store(text).map_err(|error| {
             log::debug!("Wayland clipboard write failed: {error}");
-            map_error(error)
+            crate::wayland::selection_error(&error)
         })
     }
-}
 
-fn map_error(error: std::io::Error) -> arboard::Error {
-    match error.kind() {
-        std::io::ErrorKind::TimedOut => arboard::Error::Timeout,
-        std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::OutOfMemory => {
-            arboard::Error::LimitExceeded
-        }
-        _ => arboard::Error::ContentNotAvailable,
+    fn paste(&mut self, want: PasteWant, text_max: usize, deadline: Instant) -> PasteContent {
+        crate::wayland::selection().paste(want, text_max, deadline)
+    }
+
+    fn files(&mut self, deadline: Instant) -> Option<Vec<PathBuf>> {
+        crate::wayland::selection().files(deadline)
     }
 }

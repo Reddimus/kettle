@@ -2,6 +2,11 @@ use super::*;
 use std::time::{Duration, Instant};
 use worker::{TextProvider, TextWorker};
 
+const ALL: PasteWant = PasteWant {
+    files: true,
+    images: true,
+};
+
 #[test]
 fn backend_choice_uses_the_actual_display() {
     use winit::raw_window_handle::*;
@@ -33,6 +38,12 @@ fn backend_choice_uses_the_actual_display() {
 struct Provider {
     selections: [String; 2],
     thread: Option<std::thread::ThreadId>,
+    /// What a format-at-a-time clipboard holds besides text.
+    files: Vec<PathBuf>,
+    pixels: Option<Vec<u8>>,
+    text_error: Option<fn() -> arboard::Error>,
+    /// The formats a paste asked for, in order.
+    asked: Vec<&'static str>,
 }
 impl TextProvider for Provider {
     fn load(&mut self, primary: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
@@ -83,17 +94,18 @@ fn native_text_without_arboard_keeps_channels_order_caps_and_media_fallback() {
         ));
     }
     assert_eq!(clipboard.get_text().unwrap(), "next");
+    // A provider of text alone gives a paste its text and names no files.
     assert!(matches!(
-        clipboard.get_selection_bounded(false, 100, Instant::now()),
-        Err(arboard::Error::Timeout)
-    ));
-    assert!(matches!(
-        clipboard.get_image(),
-        Err(arboard::Error::ContentNotAvailable)
+        clipboard.paste_content(ALL, 100),
+        PasteContent::Text(Ok(text)) if text == "next"
     ));
     assert!(matches!(
         clipboard.file_list(),
         Err(arboard::Error::ContentNotAvailable)
+    ));
+    assert!(matches!(
+        clipboard.get_selection_bounded(false, 100, Instant::now()),
+        Err(arboard::Error::Timeout)
     ));
 }
 
@@ -255,6 +267,10 @@ impl SelectionFallback for Provider {
         max: usize,
         deadline: Instant,
     ) -> Result<String, arboard::Error> {
+        self.asked.push("text");
+        if let Some(error) = self.text_error {
+            return Err(error());
+        }
         let text = &self.selections[usize::from(primary)];
         if Instant::now() >= deadline {
             Err(arboard::Error::Timeout)
@@ -263,6 +279,24 @@ impl SelectionFallback for Provider {
         } else {
             Ok(text.clone())
         }
+    }
+
+    fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        self.asked.push("files");
+        Ok(self.files.clone())
+    }
+
+    fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+        self.asked.push("image");
+        let bytes = self
+            .pixels
+            .clone()
+            .ok_or(arboard::Error::ContentNotAvailable)?;
+        Ok(arboard::ImageData {
+            width: bytes.len() / 4,
+            height: 1,
+            bytes: bytes.into(),
+        })
     }
 }
 
@@ -386,5 +420,226 @@ fn unsupported_primary_writes_use_fallback_and_keep_native_clipboard() {
             .unwrap(),
         "copied text",
         "failed PRIMARY writes must not overwrite native CLIPBOARD"
+    );
+}
+
+fn error_name(error: &arboard::Error) -> &'static str {
+    match error {
+        arboard::Error::ContentNotAvailable => "ContentNotAvailable",
+        arboard::Error::Timeout => "Timeout",
+        arboard::Error::LimitExceeded => "LimitExceeded",
+        _ => "another error",
+    }
+}
+
+/// A paste's outcome, for comparing.
+fn outcome(content: PasteContent) -> String {
+    match content {
+        PasteContent::Files(paths) => format!("files {paths:?}"),
+        PasteContent::Image(PasteImage::Rgba(image)) => format!("pixels {:?}", image.bytes),
+        PasteContent::Image(PasteImage::Png(png)) => format!("png {png:?}"),
+        PasteContent::Text(Ok(text)) => format!("text {text:?}"),
+        PasteContent::Text(Err(error)) => format!("no text: {}", error_name(&error)),
+        PasteContent::FilesOff => "files off".into(),
+        PasteContent::Refused(refusal) => format!("refused {refusal:?}"),
+    }
+}
+
+/// A clipboard asked one format at a time, as arboard is on X11, macOS and
+/// Windows, holding `text`, `pixels` and `files`.
+fn holding(text: &str, pixels: bool, files: &[&str]) -> Clipboard<Provider> {
+    Clipboard {
+        arboard: Some(Provider {
+            selections: [text.into(), String::new()],
+            pixels: pixels.then(|| vec![1, 2, 3, 255]),
+            files: files.iter().map(PathBuf::from).collect(),
+            ..Default::default()
+        }),
+        wayland: None,
+    }
+}
+
+fn asked(clipboard: &Clipboard<Provider>) -> &[&'static str] {
+    &clipboard.arboard.as_ref().unwrap().asked
+}
+
+#[test]
+fn text_wins_over_an_image_on_a_format_at_a_time_clipboard() {
+    // Spreadsheet cells: the text and a picture of it.
+    let mut both = holding("a\tb", true, &[]);
+    assert_eq!(outcome(both.paste_content(ALL, 100)), "text \"a\\tb\"");
+    assert_eq!(asked(&both), ["files", "text"], "the image is not read");
+
+    // A screenshot: pixels with no text behind them.
+    let mut image = holding("", true, &[]);
+    assert_eq!(
+        outcome(image.paste_content(ALL, 100)),
+        "pixels [1, 2, 3, 255]"
+    );
+    assert_eq!(asked(&image), ["files", "text", "image"]);
+
+    // `paste-images = off` leaves an image-only clipboard with nothing.
+    let mut image = holding("", true, &[]);
+    let no_images = PasteWant {
+        files: true,
+        images: false,
+    };
+    assert_eq!(outcome(image.paste_content(no_images, 100)), "text \"\"");
+    assert_eq!(asked(&image), ["files", "text"]);
+
+    // A copied file still comes first, whatever else is offered.
+    let mut file = holding("/tmp/a", true, &["/tmp/a"]);
+    assert_eq!(outcome(file.paste_content(ALL, 100)), "files [\"/tmp/a\"]");
+    assert_eq!(asked(&file), ["files"]);
+
+    // Text that is too large or timed out is still the text: the paste says
+    // so instead of pasting a picture in its place.
+    let mut large = holding("0123456789", true, &[]);
+    assert_eq!(
+        outcome(large.paste_content(ALL, 4)),
+        "no text: LimitExceeded"
+    );
+    assert_eq!(asked(&large), ["files", "text"]);
+    let mut slow = holding("", true, &[]);
+    slow.arboard.as_mut().unwrap().text_error = Some(|| arboard::Error::Timeout);
+    assert_eq!(outcome(slow.paste_content(ALL, 100)), "no text: Timeout");
+    assert_eq!(asked(&slow), ["files", "text"]);
+    // A clipboard with no text format at all goes on to its image.
+    let mut none = holding("", true, &[]);
+    none.arboard.as_mut().unwrap().text_error = Some(|| arboard::Error::ContentNotAvailable);
+    assert_eq!(
+        outcome(none.paste_content(ALL, 100)),
+        "pixels [1, 2, 3, 255]"
+    );
+    let mut empty = holding("", false, &[]);
+    assert_eq!(outcome(empty.paste_content(ALL, 100)), "text \"\"");
+}
+
+#[test]
+fn paste_files_off_pastes_neither_copied_files_nor_their_text_or_image() {
+    let off = PasteWant {
+        files: false,
+        images: true,
+    };
+    // A file manager's copy: the list, the paths as text, sometimes a picture.
+    let mut copied = holding("/home/u/a b.png", true, &["/home/u/a b.png"]);
+    assert_eq!(outcome(copied.paste_content(off, 100)), "files off");
+    assert_eq!(asked(&copied), ["files"], "neither text nor image is read");
+    // Without a file list the policy changes nothing.
+    let mut text = holding("/home/u/typed", false, &[]);
+    assert_eq!(
+        outcome(text.paste_content(off, 100)),
+        "text \"/home/u/typed\""
+    );
+    let mut image = holding("", true, &[]);
+    assert_eq!(
+        outcome(image.paste_content(off, 100)),
+        "pixels [1, 2, 3, 255]"
+    );
+}
+
+/// A native provider that negotiates: it holds files or a PNG.
+struct Negotiating {
+    paste: fn(PasteWant) -> PasteContent,
+    files: Option<Vec<PathBuf>>,
+}
+
+impl TextProvider for Negotiating {
+    fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+        Err(arboard::Error::ContentNotAvailable)
+    }
+    fn store(&mut self, _: bool, _: String, _: Instant) -> Result<(), arboard::Error> {
+        Ok(())
+    }
+    fn paste(&mut self, want: PasteWant, _: usize, _: Instant) -> PasteContent {
+        (self.paste)(want)
+    }
+    fn files(&mut self, _: Instant) -> Option<Vec<PathBuf>> {
+        self.files.clone()
+    }
+}
+
+#[test]
+fn native_files_and_images_are_pasted_without_arboard_and_arboard_is_not_asked() {
+    let native = |paste: fn(PasteWant) -> PasteContent, files: Option<Vec<PathBuf>>| {
+        Some(TextWorker::start(move || Ok(Negotiating { paste, files })).unwrap())
+    };
+    // No arboard at all: a Wayland session without XWayland.
+    let mut clipboard = Clipboard::<Provider> {
+        arboard: None,
+        wayland: native(
+            |want| {
+                assert_eq!(want, ALL, "the policy reaches the provider");
+                PasteContent::Image(PasteImage::Png(vec![0x89, b'P', b'N', b'G']))
+            },
+            Some(vec![PathBuf::from("/tmp/a b")]),
+        ),
+    };
+    assert_eq!(
+        outcome(clipboard.paste_content(ALL, 100)),
+        "png [137, 80, 78, 71]"
+    );
+    assert_eq!(clipboard.file_list().unwrap(), [PathBuf::from("/tmp/a b")]);
+
+    // With arboard present the bridge is still the authority: a native
+    // refusal is the answer, and arboard is not asked for a second opinion.
+    let mut clipboard = Clipboard {
+        arboard: Some(Provider {
+            selections: ["x11 text".into(), String::new()],
+            files: vec![PathBuf::from("/x11/file")],
+            pixels: Some(vec![9, 9, 9, 9]),
+            ..Default::default()
+        }),
+        wayland: native(|_| PasteContent::Refused(PasteRefusal::Files), None),
+    };
+    assert_eq!(outcome(clipboard.paste_content(ALL, 100)), "refused Files");
+    assert!(matches!(
+        clipboard.file_list(),
+        Err(arboard::Error::ContentNotAvailable)
+    ));
+    assert!(asked(&clipboard).is_empty());
+}
+
+#[test]
+fn a_stalled_native_paste_returns_at_its_deadline() {
+    let (entered_tx, entered) = crossbeam_channel::bounded(1);
+    let (release, blocked) = crossbeam_channel::bounded::<()>(1);
+    struct Stalled {
+        entered: crossbeam_channel::Sender<()>,
+        release: crossbeam_channel::Receiver<()>,
+    }
+    impl TextProvider for Stalled {
+        fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+            Ok("fresh".into())
+        }
+        fn store(&mut self, _: bool, _: String, _: Instant) -> Result<(), arboard::Error> {
+            Ok(())
+        }
+        fn paste(&mut self, _: PasteWant, _: usize, _: Instant) -> PasteContent {
+            self.entered.send(()).unwrap();
+            let _ = self.release.recv_timeout(Duration::from_secs(5));
+            PasteContent::Files(vec![PathBuf::from("/stale")])
+        }
+    }
+    let worker = TextWorker::start(move || {
+        Ok(Stalled {
+            entered: entered_tx,
+            release: blocked,
+        })
+    })
+    .unwrap();
+    let started = Instant::now();
+    let content = worker.paste(ALL, 100, Instant::now() + Duration::from_millis(100));
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(outcome(content), "no text: Timeout");
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    // The late files answer no later request.
+    release.send(()).unwrap();
+    assert_eq!(
+        worker
+            .load(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "fresh"
     );
 }
