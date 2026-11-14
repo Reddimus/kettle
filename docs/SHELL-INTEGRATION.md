@@ -11,6 +11,11 @@ between commands:
 
 (Rebind with `keybind = ctrl+up=prev_prompt` / `next_prompt`.)
 
+The right-click menu offers the same jumps as **Previous Prompt** and **Next
+Prompt**, after **Find…**, once the pane has a prompt mark. Each row shows
+only while a jump that way would move the view, with its current chord beside
+it.
+
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 
@@ -79,6 +84,29 @@ Unknown exit status and unmatched or duplicate completion events add no tick.
 Marks are limited to 2048 retained commands per pane, disappear when their rows
 leave scrollback, and stay hidden on the alternate screen. Column reflow clears
 outcomes whose original row positions can no longer be trusted.
+
+## Selecting a command's output
+
+**Select Command Output** selects one finished command's output as whole rows,
+ready to copy: from the row after the command line, where OSC 133 C arrives,
+up to the row where D arrives and the next prompt starts. A cursor past the
+first column at C or D counts its row with the command line or the output, so
+output without a final newline is included. Right-click a row of a command's
+output and the menu offers it after **Select All**; the command palette's
+**Select output of last command**, or the `select_command_output` action bound
+to a chord, takes the newest command. No platform binds it by default, so
+programs keep their chords: bind one with
+`keybind = ctrl+alt+o=select_command_output`. When the first output row is
+off screen, above or below the view, the view scrolls to put it at the top.
+
+There is nothing to select for a command without C, one that printed nothing,
+one whose rows a scroll region split, before or after D, or on the alternate
+screen. The output rows are kept with the command's mark, within the same 2048
+retained commands, and leave scrollback with its prompt row; column reflow and
+a full reset (RIS) clear them with the marks. If scrollback has already dropped
+some of the rows by the time they are selected, the rows that remain are
+selected: they are still that command's output, in order, and the lookup cuts
+every span to the retained rows the same way.
 
 ## Enabling it manually in your shell
 

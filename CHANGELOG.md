@@ -275,6 +275,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   backspaces sent to a pane with nothing left unpainted, and only that pane's
   output: Enter, Tab, arrows, control keys, pastes, other panes' output and
   type-ahead while a pane prints are left out. Counts only, never text.
+- The right-click menu has **Previous Prompt** and **Next Prompt** rows after
+  **Find…** once shell integration has marked a prompt in the pane. Each
+  shows when a jump that way would move the view, with the chord it is bound
+  to beside it (Ctrl+Up and Ctrl+Down by default, also Cmd+Up and Cmd+Down
+  on macOS), and no chord once it is unbound.
+- **Select Command Output** selects one finished command's output as whole
+  rows, from the row after its command line to the next prompt, using the
+  OSC 133 C and D marks shell integration sends. Right-click a row of the
+  output to find it after **Select All**; the command palette's **Select
+  output of last command** and the new `select_command_output` action take
+  the newest command and scroll its first row into view. The action has no
+  default chord on any platform. The rows are kept with each command's mark,
+  within the same 2048 retained commands.
 
 ### Changed
 

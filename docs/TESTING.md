@@ -493,6 +493,14 @@ without treating that stream as a byte-preserving scroll oracle. Native Windows
 CI is required to accept this fixture change; portable passes alone do not prove
 ConPTY behavior.
 
+The command-output tests parse their wires into a bare engine through the same
+extractor and VT parser, applying each scroll journal before the next mark, so
+they need no pseudoterminal; only the reflow test opens one, because reflow is
+the `Terminal`'s work. The fixtures open one terminal at a time and retry a
+failed open a few times: on macOS, opening `/dev/ptmx` fails now and then with
+errno -6 while other threads or processes open pseudoterminals at the same
+moment, with far fewer in use than `kern.tty.ptmx_max` allows.
+
 Native PTY tests need permission to create Unix PTYs or Windows ConPTYs.
 Restricted sandboxes can skip those tests.
 
