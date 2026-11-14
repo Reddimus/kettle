@@ -1120,9 +1120,6 @@ context = "crates/kettle-ui/src/app.rs: SSH launcher row when no host is configu
 [messages.picker_no_matching_command]
 context = "crates/kettle-ui/src/app.rs: Command palette row when nothing matches the query."
 
-[messages.picker_no_matching_host]
-context = "crates/kettle-ui/src/app.rs: SSH launcher row when no configured host matches the query."
-
 [messages.picker_no_matching_layout]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when nothing matches the query."
 

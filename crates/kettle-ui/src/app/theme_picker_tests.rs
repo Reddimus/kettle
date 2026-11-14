@@ -894,8 +894,8 @@ fn rows_other_than_themes_carry_no_swatches() {
         ),
         super::layout_picker_list("", 0, &layouts, &EN),
         super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),
-        super::ssh_picker_list("", 0, &hosts, &EN),
-        super::ssh_picker_list("", 0, &[], &EN),
+        super::ssh_picker_list("", 0, &hosts, &[], &EN),
+        super::ssh_picker_list("", 0, &[], &[], &EN),
         theme_picker_list("zzqqxxjj", 0, "TokyoNight Night", &EN),
     ];
     for list in lists {

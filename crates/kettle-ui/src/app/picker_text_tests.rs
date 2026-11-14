@@ -275,14 +275,40 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
         "Ningún diseño coincide"
     );
 
-    let ssh = ssh_picker_list("", 0, &[], &ES);
+    let ssh = ssh_picker_list("", 0, &[], &[], &ES);
     assert_eq!(ssh.rows[0].label, "No hay hosts configurados");
     assert_eq!(ssh.rows[0].hint, "Enter usa el destino escrito");
     let hosts = [("prod".to_string(), "me@prod".to_string())];
     assert_eq!(
-        ssh_picker_list("zzz", 0, &hosts, &EN).rows[0].label,
-        "No configured host matches"
+        ssh_picker_list("zzz", 0, &hosts, &[], &EN).rows[0].label,
+        "Connect to \"zzz\""
     );
+    assert_eq!(
+        ssh_picker_list("zzz", 0, &hosts, &[], &ES).rows[0].label,
+        "Conectar a \"zzz\""
+    );
+    for (tr, refusal) in [
+        (&EN, "Targets can't start with - or contain spaces"),
+        (&ES, "El destino no puede empezar con - ni tener espacios"),
+    ] {
+        let row = &ssh_picker_list("-oProxyCommand=x", 0, &hosts, &[], tr).rows[0];
+        assert_eq!(row.label, refusal);
+        assert!(!row.enabled);
+    }
+    // Imported rows say where they came from, by a fixed display path.
+    let imported = ["web".to_string()];
+    let source = |tr| {
+        ssh_picker_list("", 0, &[], &imported, tr).rows[0]
+            .hint
+            .clone()
+    };
+    if cfg!(windows) {
+        assert_eq!(source(&EN), r"from ~\.ssh\config");
+        assert_eq!(source(&ES), r"de ~\.ssh\config");
+    } else {
+        assert_eq!(source(&EN), "from ~/.ssh/config");
+        assert_eq!(source(&ES), "de ~/.ssh/config");
+    }
 }
 
 /// The command palette's empty field says what to type, in the UI language;
@@ -311,5 +337,44 @@ fn palette_placeholder_is_translated_and_only_in_the_palette() {
     assert_ne!(
         ES.text(Text::PickerPlaceholderCommand),
         EN.text(Text::PickerPlaceholderCommand)
+    );
+}
+
+/// Screen readers hear an imported row's source as its description, the same
+/// text the row paints, and never hear a disabled placeholder as selected.
+#[test]
+fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
+    use super::picker_context_menu;
+    let option = |query: &str, imported: &[String], label: &str| {
+        let list = ssh_picker_list(query, 0, &[], imported, &EN);
+        let menu = picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), 0.0).unwrap();
+        let painted = menu.rows[0].hint.trim().to_string();
+        let overlay = kettle_render::Overlay {
+            ssh_query: Some(query.to_string()),
+            context_menu: Some(menu),
+            ..kettle_render::Overlay::default()
+        };
+        let projection =
+            modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN);
+        let node = projection
+            .nodes
+            .into_iter()
+            .map(|(_, node)| node)
+            .find(|node| {
+                node.role() == accesskit::Role::ListBoxOption && node.label() == Some(label)
+            })
+            .unwrap_or_else(|| panic!("no option {label:?}"));
+        (node, painted)
+    };
+    let (imported, painted) = option("", &["web".to_string()], "web");
+    assert!(!painted.is_empty());
+    assert_eq!(imported.description(), Some(painted.as_str()));
+    assert_eq!(imported.is_selected(), Some(true));
+    let (placeholder, _) = option("-x", &[], "Targets can't start with - or contain spaces");
+    assert!(placeholder.is_disabled());
+    assert_ne!(
+        placeholder.is_selected(),
+        Some(true),
+        "a disabled row is never selected"
     );
 }

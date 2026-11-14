@@ -278,31 +278,30 @@ impl App {
             use kettle_i18n::Text as T;
             let theme_hints =
                 theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true);
-            let hints: &[(&str, T)] = if ws.palette_input.is_some() {
-                &[
+            // `None` is the SSH launcher, whose hint has one shared builder.
+            let hints: Option<&[(&str, T)]> = if ws.palette_input.is_some() {
+                Some(&[
                     ("Enter", T::PickerHintRun),
                     ("Tab/↑↓", T::PickerHintSelect),
                     ("Esc", T::PickerHintCancel),
-                ]
+                ])
             } else if ws.theme_picker_input.is_some() {
-                &theme_hints
+                Some(&theme_hints)
             } else if ws.layout_picker_input.is_some() {
-                &[
+                Some(&[
                     ("Enter", T::PickerHintSpawn),
                     ("Tab/↑↓", T::PickerHintSelect),
                     ("Esc", T::PickerHintCancel),
-                ]
+                ])
             } else if ws.ssh_input.is_some() {
-                &[
-                    ("Enter", T::PickerHintConnect),
-                    ("Tab", T::PickerHintComplete),
-                    ("↑↓", T::PickerHintSelect),
-                    ("Esc", T::PickerHintCancel),
-                ]
+                None
             } else {
-                &[("Enter", T::EditHintApply), ("Esc", T::PickerHintCancel)]
+                Some(&[("Enter", T::EditHintApply), ("Esc", T::PickerHintCancel)])
             };
-            hint = picker_hint(&self.ui_text, hints);
+            hint = hints.map_or_else(
+                || ssh_picker_hint(&self.ui_text),
+                |hints| picker_hint(&self.ui_text, hints),
+            );
         }
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
@@ -2658,6 +2657,13 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
+        // One step over `ssh_rows`, the list the painter and pointer use.
+        let step = |ws: &mut WindowState, hosts: &[(String, String)], down: bool| {
+            if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                let rows = ssh_rows(query, hosts, &ws.ssh_imported);
+                *selected = ssh_step_selection(&rows, *selected, down);
+            }
+        };
         match key {
             Key::Named(NamedKey::Escape) => {
                 ws.ssh_input = None;
@@ -2669,41 +2675,24 @@ impl App {
                     *selected = 0;
                 }
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                if let Some((query, selected)) = ws.ssh_input.as_mut() {
-                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
-                    if count > 0 {
-                        *selected = (*selected + 1) % count;
-                    }
-                }
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                if let Some((query, selected)) = ws.ssh_input.as_mut() {
-                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
-                    if count > 0 {
-                        *selected = (*selected + count - 1) % count;
-                    }
-                }
-            }
+            Key::Named(NamedKey::ArrowDown) => step(ws, &self.cfg.ssh_hosts, true),
+            Key::Named(NamedKey::ArrowUp) => step(ws, &self.cfg.ssh_hosts, false),
             Key::Named(NamedKey::Tab) => {
-                // Complete to the highlighted configured host, not merely the
+                // Complete to the highlighted host or alias, not merely the
                 // first fuzzy result, so keyboard navigation and the input line
                 // cannot disagree about what Enter will connect to.
-                if let Some((query, selected)) = ws.ssh_input.as_mut() {
-                    let ranked = rank_ssh_hosts(query, &self.cfg.ssh_hosts);
-                    if let Some(&index) = ranked.get(*selected) {
-                        query.replace_all(
-                            &self.cfg.ssh_hosts[index].0,
-                            crate::modal_input::MAX_MODAL_INPUT_BYTES,
-                        );
-                        *selected = 0;
-                    }
+                if let Some((query, selected)) = ws.ssh_input.as_mut()
+                    && let Some(name) =
+                        ssh_completion(query, *selected, &self.cfg.ssh_hosts, &ws.ssh_imported)
+                {
+                    query.replace_all(&name, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+                    *selected = 0;
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let (typed, selected) = ws.ssh_input.take().unwrap_or_default();
-                let target = selected_ssh_target(&typed, selected, &self.cfg.ssh_hosts);
-                if let Some(target) = target {
+                // An invalid typed target returns `None` and leaves the
+                // launcher open on the row that explains it.
+                if let Some(target) = take_ssh_enter_target(ws, &self.cfg.ssh_hosts) {
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
                     let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -2724,15 +2713,7 @@ impl App {
                     && !ws.mods.alt_key()
                     && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
             {
-                if let Some((query, selected)) = ws.ssh_input.as_mut() {
-                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
-                    if count > 0 {
-                        *selected = match s.as_str() {
-                            "j" | "n" => (*selected + 1) % count,
-                            _ => (*selected + count - 1) % count,
-                        };
-                    }
-                }
+                step(ws, &self.cfg.ssh_hosts, matches!(s.as_str(), "j" | "n"));
             }
             Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
                 if let Some(pasted) = self.modal_clipboard_text()

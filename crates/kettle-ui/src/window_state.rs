@@ -1108,10 +1108,13 @@ pub(crate) struct WindowState {
     /// suppress the first same-coordinate report in another.
     pub(crate) last_mouse_cell: Option<(u64, usize, usize)>,
     pub(crate) links: Vec<kettle_core::Link>,
-    /// `Some((query, selected))` while the SSH launcher is open. Selection is
-    /// over the fuzzy-ranked configured-host list; a query with no match still
-    /// connects to the typed target on Enter.
+    /// `Some((query, selected))` while the SSH launcher is open. Selection
+    /// indexes the rows `ssh_rows` builds: configured hosts, imported aliases,
+    /// then Connect to the typed target.
     pub(crate) ssh_input: Option<(crate::text_editor::TextEditor, usize)>,
+    /// `Host` aliases read from `~/.ssh/config` when the launcher last opened
+    /// (`ssh-config-hosts`). Replaced on every open; never persisted.
+    pub(crate) ssh_imported: Vec<String>,
     /// Profile names captured when opening the palette; all projections use this list.
     pub(crate) palette_profiles: Vec<String>,
     /// `Some((query, selected))` while the command palette is open.
@@ -1737,6 +1740,7 @@ impl WindowState {
             last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
+            ssh_imported: Vec::new(),
             palette_input: None,
             palette_profiles: Vec::new(),
             palette_bound_only: false,

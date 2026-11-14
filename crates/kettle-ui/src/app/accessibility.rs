@@ -2329,8 +2329,11 @@ fn push_picker_accessibility(
             if !row.enabled {
                 option.set_disabled();
             }
-            option.set_selected(index == menu.highlight);
-            if index == menu.highlight {
+            // A disabled placeholder is never the selected option: Enter does
+            // not act on it, so announcing it as selected would mislead.
+            let is_selected = index == menu.highlight && row.enabled;
+            option.set_selected(is_selected);
+            if is_selected {
                 selected = Some(id);
             }
             list_children.push(id);
