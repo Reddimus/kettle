@@ -918,6 +918,10 @@ pub struct ConfirmDialogFinding {
     pub token: String,
     pub meaning: String,
     pub count: String,
+    /// The control does not reach the program whichever choice is made, and
+    /// `meaning` says so. Its token is drawn as plain text, not in the
+    /// warning colour.
+    pub removed: bool,
 }
 
 /// Most lane images one frame draws: one per pane with a lane.

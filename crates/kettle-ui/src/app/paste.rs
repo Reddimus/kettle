@@ -2044,6 +2044,7 @@ pub(super) fn text_paste_confirmation(
                 token,
                 meaning: meaning.to_string(),
                 count: format!("\u{d7}{}", finding.count),
+                removed: false,
             }
         })
         .collect();

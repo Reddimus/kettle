@@ -184,7 +184,14 @@ impl DetailMeasure {
                     }
                     lines.push(line);
                 }
-                (lines, 2..2 + finding.token.len())
+                // An empty range marks nothing: a removed control is no
+                // warning.
+                let token = if finding.removed {
+                    0..0
+                } else {
+                    2..2 + finding.token.len()
+                };
+                (lines, token)
             })
             .collect();
         if !detail.more.is_empty() {
@@ -1266,6 +1273,33 @@ pub(crate) fn choice_accent(
         .unwrap_or_else(|| color::over(theme.background, theme.foreground, 0.35, false))
 }
 
+/// The accent a dialog draws its recommended button, link and focus ring in.
+/// A dialog that shows the warning colour (a destructive button, or a paste
+/// question's control tokens) takes [`choice_accent`]; any other keeps the
+/// window's accent.
+pub(crate) fn dialog_accent(
+    theme: &kettle_config::Theme,
+    window_accent: kettle_config::Rgb,
+    dialog: &ConfirmDialogOverlay,
+) -> kettle_config::Rgb {
+    if dialog.detail.is_some() || dialog.buttons.iter().any(|button| button.destructive) {
+        choice_accent(theme, window_accent)
+    } else {
+        window_accent
+    }
+}
+
+/// The focus ring of a dialog. It follows [`dialog_accent`]: a ring in the
+/// theme's red around Cancel would match the destructive button, and around
+/// that button it would not show at all.
+pub(crate) fn focus_ring_color(
+    theme: &kettle_config::Theme,
+    window_accent: kettle_config::Rgb,
+    dialog: &ConfirmDialogOverlay,
+) -> kettle_config::Rgb {
+    focus_color(theme, dialog_accent(theme, window_accent, dialog))
+}
+
 pub(crate) fn detail_colors(
     theme: &kettle_config::Theme,
     accent: kettle_config::Rgb,
@@ -1571,6 +1605,7 @@ mod paste_layout_tests {
                     token: "ESC[201~".into(),
                     meaning: "ends bracketed paste".into(),
                     count: "\u{d7}1".into(),
+                    removed: false,
                 }],
                 more: String::new(),
                 policy: text[4].into(),
@@ -1828,6 +1863,118 @@ mod paste_layout_tests {
     }
 
     #[test]
+    fn a_removed_finding_is_not_drawn_in_the_warning_colour() {
+        let mut dialog = paste(EN);
+        let detail = dialog.detail.as_mut().unwrap();
+        detail.findings = vec![
+            ConfirmDialogFinding {
+                token: "ESC[201~".into(),
+                meaning: "ends bracketed paste; Kettle removes it".into(),
+                count: "\u{d7}1".into(),
+                removed: true,
+            },
+            ConfirmDialogFinding {
+                token: "BEL".into(),
+                meaning: "bell".into(),
+                count: "\u{d7}2".into(),
+                removed: false,
+            },
+        ];
+        let layout = ConfirmDialogLayout::new((1280.0, 800.0), (8.0, 16.0), 1.0, &dialog);
+        let findings = layout
+            .items
+            .iter()
+            .find(|item| item.role == TextRole::Findings)
+            .unwrap();
+        // Both rows are drawn; only the live one is marked.
+        assert!(findings.text.contains("ESC[201~") && findings.text.contains("BEL"));
+        let marked: Vec<_> = findings
+            .marks
+            .iter()
+            .map(|range| &findings.text[range.clone()])
+            .collect();
+        assert_eq!(marked, ["BEL"]);
+    }
+
+    #[test]
+    fn the_focus_ring_and_every_label_keep_contrast_on_any_accent() {
+        use super::super::color::contrast_ratio;
+        let dialog = paste(EN);
+        let mut rings_moved = 0;
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let warning = theme.palette[1];
+            // Every accent a window can carry, and so every hue
+            // `choice_accent` can hand the dialog, the fallback included.
+            for window_accent in (0..16).map(|index| theme.palette[index]) {
+                let accent = dialog_accent(&theme, window_accent, &dialog);
+                assert_eq!(accent, choice_accent(&theme, window_accent));
+                assert_ne!(accent, warning, "{name}");
+                // The ring is drawn from that accent, and shows on the
+                // dialog.
+                let ring = focus_ring_color(&theme, window_accent, &dialog);
+                assert_eq!(ring, focus_color(&theme, accent));
+                assert!(
+                    contrast_ratio(ring, theme.background) + 1e-6 >= 3.0,
+                    "{name}: ring {ring:?}"
+                );
+                // Label on fill, for every button, at rest, hovered and
+                // pressed.
+                for index in 0..dialog.buttons.len() {
+                    for (hover, pressed) in [(None, None), (Some(index), None), (None, Some(index))]
+                    {
+                        let mut state = dialog.clone();
+                        state.hover_idx = hover;
+                        state.pressed_idx = pressed;
+                        let (fill, label) = button_colors(&theme, accent, &state, index);
+                        assert!(
+                            contrast_ratio(fill, label) + 1e-6 >= 4.5,
+                            "{name}: button {index} label {label:?} on {fill:?}"
+                        );
+                    }
+                }
+                // The link and a control token, on the dialog.
+                let colors = detail_colors(&theme, accent);
+                assert!(contrast_ratio(colors.link, theme.background) + 1e-6 >= 4.5);
+                assert!(contrast_ratio(colors.warning, theme.background) + 1e-6 >= 4.5);
+            }
+            // The case the review saw: the window's accent is the theme's
+            // red. The ring no longer comes from it.
+            let from_red = focus_ring_color(&theme, warning, &dialog);
+            assert_eq!(
+                from_red,
+                focus_color(&theme, choice_accent(&theme, warning))
+            );
+            if from_red != focus_color(&theme, warning) {
+                rings_moved += 1;
+            }
+            // A dialog with no warning colour in it keeps the window's own.
+            let plain = ConfirmDialogOverlay {
+                buttons: vec![
+                    ConfirmDialogButton {
+                        label: "Cancel".into(),
+                        ..Default::default()
+                    },
+                    ConfirmDialogButton {
+                        label: "Reassign".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            assert_eq!(dialog_accent(&theme, warning, &plain), warning);
+            assert_eq!(
+                focus_ring_color(&theme, warning, &plain),
+                focus_color(&theme, warning)
+            );
+        }
+        assert!(
+            rings_moved > 100,
+            "the ring left the red in {rings_moved} themes"
+        );
+    }
+
+    #[test]
     fn a_short_window_caps_the_dialog_and_keeps_every_stop_reachable() {
         for (text, surface) in [
             (EN, (520.0, 420.0)),
@@ -1968,16 +2115,19 @@ mod paste_layout_tests {
                 token: "ESC[201~".into(),
                 meaning: "ends bracketed paste".into(),
                 count: "\u{d7}1".into(),
+                removed: false,
             },
             ConfirmDialogFinding {
                 token: "^C".into(),
                 meaning: "interrupt (Ctrl+C)".into(),
                 count: "\u{d7}12".into(),
+                removed: false,
             },
             ConfirmDialogFinding {
                 token: "ESC".into(),
                 meaning: "read as the Esc key or the start of a key sequence".into(),
                 count: "\u{d7}3".into(),
+                removed: false,
             },
         ];
         detail.more = "and 2\u{a0}more kinds".into();

@@ -5259,17 +5259,11 @@ impl Renderer {
         let mut confirmation_surfaces = Vec::new();
         let mut confirmation_colors = None;
         if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
-            // The window's accent draws the focus ring. The recommended
-            // button and the link take an accent that cannot be mistaken for
-            // the warning colour beside them.
+            // The recommended button, the link and the focus ring take an
+            // accent that cannot be mistaken for the warning colour beside
+            // them.
             let window_accent = self.ui_accent(cfg, theme);
-            let accent = if dialog.detail.is_some()
-                || dialog.buttons.iter().any(|button| button.destructive)
-            {
-                confirm::choice_accent(theme, window_accent)
-            } else {
-                window_accent
-            };
+            let accent = confirm::dialog_accent(theme, window_accent, dialog);
             let detail_colors = confirm::detail_colors(theme, accent);
             self.confirmation_text.prepare(
                 &mut self.font_system,
@@ -5319,7 +5313,7 @@ impl Renderer {
                 link: gc(detail_colors.link),
                 buttons: Vec::with_capacity(layout.buttons.len()),
             };
-            let focus = confirm::focus_color(theme, window_accent);
+            let focus = confirm::focus_ring_color(theme, window_accent, dialog);
             let focus_ring = |rect: Rect4, grow: f32| {
                 confirm::intersect(
                     (
