@@ -561,31 +561,24 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_button(&mut self, ws: &mut WindowState, index: usize) {
-        let Some(dialog) = ws.confirm_dialog.as_ref() else {
+        let Some(action) = ws
+            .confirm_dialog
+            .as_ref()
+            .and_then(|dialog| confirm_stop_action(dialog, index))
+        else {
             return;
         };
-        if dialog.link_stop() == Some(index) {
-            // The link answers the question with "not now": nothing is
-            // pasted, and Settings opens on the row that decides when Kettle
-            // asks. `open_settings` closes this dialog like any other modal.
-            self.open_settings(ws);
-            self.focus_settings_key(ws, "paste-protection");
-            ws.wheel.reset();
-            ws.lane_wheel.reset();
-            ws.accessibility_pending = true;
-            return;
-        }
-        let Some(button) = dialog.buttons.get(index) else {
-            return;
-        };
-        match button {
-            ConfirmButton::Cancel => self.cancel_confirm_dialog(ws),
-            ConfirmButton::Confirm { .. }
-            | ConfirmButton::PasteOneLine { .. }
-            | ConfirmButton::PasteWithoutControls { .. } => {
-                let Some(action) = confirmation_button_action(dialog, index) else {
-                    return;
-                };
+        match action {
+            ConfirmStopAction::Cancel => self.cancel_confirm_dialog(ws),
+            // The link answers the question with Cancel: nothing is pasted
+            // and the consent it carried is gone. Then Settings opens on the
+            // row that decides when Kettle asks.
+            ConfirmStopAction::PasteSettings => {
+                self.cancel_confirm_dialog(ws);
+                self.open_settings(ws);
+                self.focus_settings_key(ws, "paste-protection");
+            }
+            ConfirmStopAction::Dispatch(action) => {
                 ws.confirm_dialog = None;
                 self.dispatch_confirm_action(ws, action);
             }
@@ -1176,10 +1169,7 @@ impl App {
     }
 
     pub(super) fn cancel_confirm_dialog(&mut self, ws: &mut WindowState) {
-        ws.confirm_dialog = None;
-        ws.wheel.reset();
-        ws.lane_wheel.reset();
-        ws.accessibility_pending = true;
+        cancel_confirm_dialog_in(ws);
     }
 
     pub(super) fn dispatch_confirm_action_arms(
@@ -1289,110 +1279,55 @@ impl App {
         key: &Key,
         _event_loop: &ActiveEventLoop,
     ) {
-        if confirmation_space_key(key) {
-            if !ws.mods.control_key()
-                && !ws.mods.alt_key()
-                && !ws.mods.super_key()
-                && let Some(dialog) = ws.confirm_dialog.as_mut()
-            {
-                dialog.space_pressed = Some(dialog.focus_idx);
-                dialog.armed_press = None;
-            }
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-            return;
-        }
-        // An access key answers before anything else reads the letter. A
-        // bare letter never does: a paste question opens right after a
-        // keystroke, and a key typed ahead must not be able to choose.
-        if let Some(index) = ws.confirm_dialog.as_ref().and_then(|dialog| {
-            confirm_access_key_target(dialog, key, ws.mods, cfg!(target_os = "macos"))
-        }) {
-            self.resolve_confirm_button(ws, index);
-            ws.accessibility_pending = true;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
-            return;
-        }
         let layout = self.confirmation_layout(ws);
-        let page = layout.as_ref().map_or(1, |layout| {
-            (layout.body_rect.3 / layout.body_line).floor().max(1.0) as isize
-        });
-        let scroll = match key {
-            Key::Named(NamedKey::PageUp) => Some(-page),
-            Key::Named(NamedKey::PageDown) => Some(page),
-            Key::Named(NamedKey::Home) => Some(isize::MIN),
-            Key::Named(NamedKey::End) => Some(isize::MAX),
-            _ => None,
-        };
-        if let Some(delta) = scroll {
-            self.confirm_scroll(ws, delta, false);
+        let Some(outcome) = ws.confirm_dialog.as_ref().map(|dialog| {
+            confirm_key_outcome(
+                dialog,
+                key,
+                ws.mods,
+                ConfirmKeyContext {
+                    vim_menu_nav: self.cfg.vim_menu_nav,
+                    stacked: layout.as_ref().is_some_and(|layout| layout.stacked),
+                    macos: cfg!(target_os = "macos"),
+                },
+            )
+        }) else {
             return;
-        }
-        let key = match key {
-            Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
-            Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
-            Key::Named(NamedKey::Tab) => Some(if ws.mods.shift_key() {
-                ConfirmKey::ShiftTab
-            } else {
-                ConfirmKey::Tab
-            }),
-            Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
-            Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
-            Key::Named(NamedKey::ArrowUp) => Some(ConfirmKey::Up),
-            Key::Named(NamedKey::ArrowDown) => Some(ConfirmKey::Down),
-            Key::Character(s)
-                if self.cfg.vim_menu_nav
-                    && !ws.mods.control_key()
-                    && !ws.mods.alt_key()
-                    && !ws.mods.super_key() =>
-            {
-                match s.to_ascii_lowercase().as_str() {
-                    "y" => Some(ConfirmKey::Yes),
-                    "n" => Some(ConfirmKey::No),
-                    "h" => Some(ConfirmKey::Left),
-                    "l" => Some(ConfirmKey::Right),
-                    _ => None,
-                }
-            }
-            _ => None,
         };
-        if let Some(key) = key
-            && let Some(state) = ws.confirm_dialog.as_ref()
-        {
-            let stops = ConfirmStops {
-                buttons: state.buttons.len(),
-                link: state.link_stop().is_some(),
-                stacked: layout.as_ref().is_some_and(|layout| layout.stacked),
-            };
-            let result = confirm_stop_keypress(state.focus_idx, stops, key);
-            match result {
-                ConfirmKeyResult::Move(index) => {
-                    if let Some(dialog) = ws.confirm_dialog.as_mut() {
-                        dialog.focus_idx = index;
-                        dialog.space_pressed = None;
-                        dialog.armed_press = None;
-                    }
-                    self.confirm_scroll(ws, 0, true);
+        match outcome {
+            ConfirmKeyOutcome::Ignore => return,
+            ConfirmKeyOutcome::Arm => {
+                if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                    dialog.space_pressed = Some(dialog.focus_idx);
+                    dialog.armed_press = None;
                 }
-                ConfirmKeyResult::Scroll(delta) => self.confirm_scroll(ws, delta, false),
-                ConfirmKeyResult::Activate(index) => self.resolve_confirm_button(ws, index),
-                // `y` takes the recommended choice of a paste question, never
-                // its raw paste; elsewhere it is the affirmative button.
-                ConfirmKeyResult::Confirm => {
-                    if let Some(index) = state.yes_button() {
-                        self.resolve_confirm_button(ws, index);
-                    }
+            }
+            ConfirmKeyOutcome::Activate(index) => self.resolve_confirm_button(ws, index),
+            ConfirmKeyOutcome::Focus(index) => {
+                if let Some(dialog) = ws.confirm_dialog.as_mut() {
+                    dialog.focus_idx = index;
+                    dialog.space_pressed = None;
+                    dialog.armed_press = None;
                 }
-                ConfirmKeyResult::Cancel => self.cancel_confirm_dialog(ws),
-                ConfirmKeyResult::Ignore => {}
+                self.confirm_scroll(ws, 0, true);
             }
-            ws.accessibility_pending = true;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
+            ConfirmKeyOutcome::Scroll(scroll) => {
+                let page = layout.as_ref().map_or(1, |layout| {
+                    (layout.body_rect.3 / layout.body_line).floor().max(1.0) as isize
+                });
+                let delta = match scroll {
+                    ConfirmScroll::Lines(lines) => lines,
+                    ConfirmScroll::Pages(pages) => pages.saturating_mul(page),
+                    ConfirmScroll::Start => isize::MIN,
+                    ConfirmScroll::End => isize::MAX,
+                };
+                self.confirm_scroll(ws, delta, false);
             }
+            ConfirmKeyOutcome::Cancel => self.cancel_confirm_dialog(ws),
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
     }
 
@@ -3362,6 +3297,150 @@ pub(super) fn confirm_stop_keypress(
     }
 }
 
+/// How far a key scrolls a confirmation's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfirmScroll {
+    Lines(isize),
+    /// Whole pages of the visible body; the handler knows the page size.
+    Pages(isize),
+    Start,
+    End,
+}
+
+/// What a key press in a confirmation does. `confirm_dialog_key` only carries
+/// it out, so every rule about keys lives in [`confirm_key_outcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfirmKeyOutcome {
+    /// Space went down on the focused stop; its release activates it.
+    Arm,
+    Activate(usize),
+    Focus(usize),
+    Scroll(ConfirmScroll),
+    Cancel,
+    Ignore,
+}
+
+/// What a key press depends on beside the dialog and the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfirmKeyContext {
+    pub vim_menu_nav: bool,
+    /// The buttons are stacked, from the dialog's resolved layout.
+    pub stacked: bool,
+    pub macos: bool,
+}
+
+/// The whole key map of a confirmation, as a function of the dialog, the
+/// logical key and the modifiers.
+///
+/// A bare letter never sends a raw paste. Access keys need Alt. Under
+/// `vim-menu-nav`, `n` cancels, `h` and `l` move focus, and `y` answers yes
+/// only where yes cannot be the unfiltered text: see
+/// [`ConfirmDialogState::yes_button`].
+pub(super) fn confirm_key_outcome(
+    dialog: &ConfirmDialogState,
+    key: &Key,
+    mods: winit::keyboard::ModifiersState,
+    context: ConfirmKeyContext,
+) -> ConfirmKeyOutcome {
+    let chorded = mods.control_key() || mods.alt_key() || mods.super_key();
+    if confirmation_space_key(key) {
+        return if chorded {
+            ConfirmKeyOutcome::Ignore
+        } else {
+            ConfirmKeyOutcome::Arm
+        };
+    }
+    // An access key answers before anything else reads the letter.
+    if let Some(index) = confirm_access_key_target(dialog, key, mods, context.macos) {
+        return ConfirmKeyOutcome::Activate(index);
+    }
+    let key = match key {
+        Key::Named(NamedKey::PageUp) => {
+            return ConfirmKeyOutcome::Scroll(ConfirmScroll::Pages(-1));
+        }
+        Key::Named(NamedKey::PageDown) => {
+            return ConfirmKeyOutcome::Scroll(ConfirmScroll::Pages(1));
+        }
+        Key::Named(NamedKey::Home) => return ConfirmKeyOutcome::Scroll(ConfirmScroll::Start),
+        Key::Named(NamedKey::End) => return ConfirmKeyOutcome::Scroll(ConfirmScroll::End),
+        Key::Named(NamedKey::Escape) => ConfirmKey::Escape,
+        Key::Named(NamedKey::Enter) => ConfirmKey::Enter,
+        Key::Named(NamedKey::Tab) if mods.shift_key() => ConfirmKey::ShiftTab,
+        Key::Named(NamedKey::Tab) => ConfirmKey::Tab,
+        Key::Named(NamedKey::ArrowLeft) => ConfirmKey::Left,
+        Key::Named(NamedKey::ArrowRight) => ConfirmKey::Right,
+        Key::Named(NamedKey::ArrowUp) => ConfirmKey::Up,
+        Key::Named(NamedKey::ArrowDown) => ConfirmKey::Down,
+        Key::Character(letter) if context.vim_menu_nav && !chorded => {
+            match letter.to_ascii_lowercase().as_str() {
+                "y" => ConfirmKey::Yes,
+                "n" => ConfirmKey::No,
+                "h" => ConfirmKey::Left,
+                "l" => ConfirmKey::Right,
+                _ => return ConfirmKeyOutcome::Ignore,
+            }
+        }
+        _ => return ConfirmKeyOutcome::Ignore,
+    };
+    let stops = ConfirmStops {
+        buttons: dialog.buttons.len(),
+        link: dialog.link_stop().is_some(),
+        stacked: context.stacked,
+    };
+    match confirm_stop_keypress(dialog.focus_idx, stops, key) {
+        ConfirmKeyResult::Move(index) => ConfirmKeyOutcome::Focus(index),
+        ConfirmKeyResult::Scroll(lines) => ConfirmKeyOutcome::Scroll(ConfirmScroll::Lines(lines)),
+        ConfirmKeyResult::Activate(index) => ConfirmKeyOutcome::Activate(index),
+        ConfirmKeyResult::Confirm => dialog
+            .yes_button()
+            .map_or(ConfirmKeyOutcome::Ignore, ConfirmKeyOutcome::Activate),
+        ConfirmKeyResult::Cancel => ConfirmKeyOutcome::Cancel,
+        ConfirmKeyResult::Ignore => ConfirmKeyOutcome::Ignore,
+    }
+}
+
+/// What activating a focus stop does.
+#[derive(Debug, Clone)]
+pub(super) enum ConfirmStopAction {
+    Cancel,
+    /// The Settings link of a paste question: Cancel, then Settings on the
+    /// Paste protection row. It carries no paste, so it can deliver none.
+    PasteSettings,
+    Dispatch(ConfirmAction),
+}
+
+/// The action of focus stop `index`: a button, or the link one past them.
+/// `None` for an index that is no stop.
+pub(super) fn confirm_stop_action(
+    dialog: &ConfirmDialogState,
+    index: usize,
+) -> Option<ConfirmStopAction> {
+    if dialog.link_stop() == Some(index) {
+        return Some(ConfirmStopAction::PasteSettings);
+    }
+    match dialog.buttons.get(index)? {
+        ConfirmButton::Cancel => Some(ConfirmStopAction::Cancel),
+        ConfirmButton::Confirm { .. }
+        | ConfirmButton::PasteOneLine { .. }
+        | ConfirmButton::PasteWithoutControls { .. } => {
+            confirmation_button_action(dialog, index).map(ConfirmStopAction::Dispatch)
+        }
+    }
+}
+
+/// Dismiss a confirmation without its action: the whole of Cancel. The
+/// dialog owns its pending action (a paste's text, target and broadcast
+/// consent), so dropping it discards them. The paste queue is not touched:
+/// input that came ready while the question was open was already refused
+/// (see `confirmation_refuses_queued_input`), and what is still waiting is
+/// delivered or refused on its own terms afterwards.
+pub(super) fn cancel_confirm_dialog_in(ws: &mut WindowState) {
+    ws.confirm_dialog = None;
+    ws.wheel.reset();
+    ws.lane_wheel.reset();
+    ws.accessibility_pending = true;
+}
+
 /// Whether a confirmation shows and answers access keys (Alt and a letter).
 /// macOS has no such convention, so its dialogs have none.
 pub(super) fn confirm_access_keys(macos: bool) -> bool {
@@ -3669,11 +3748,22 @@ impl ConfirmDialogState {
         self.buttons.len() + usize::from(self.link_stop().is_some())
     }
 
-    /// The button `y` answers with: the recommended one of a paste question,
-    /// else the dialog's affirmative button.
+    /// The button a bare `y` (`vim-menu-nav`) answers with, if any.
+    ///
+    /// A bare letter can be typed ahead of the dialog, so in a paste question
+    /// it must never send the text as it is. `y` takes the recommended choice
+    /// only when that choice is the sanitising one. When the recommended
+    /// choice is the plain Paste (multi-line text without controls), `y` does
+    /// nothing: Enter on the focused button or the access key chooses. Any
+    /// other confirmation keeps `y` on its affirmative button.
     pub(super) fn yes_button(&self) -> Option<usize> {
         match &self.paste {
-            Some(paste) => Some(paste.recommended).filter(|index| *index < self.buttons.len()),
+            Some(paste) => Some(paste.recommended).filter(|&index| {
+                matches!(
+                    self.buttons.get(index),
+                    Some(ConfirmButton::PasteWithoutControls { .. })
+                )
+            }),
             None => self
                 .buttons
                 .iter()

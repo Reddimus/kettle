@@ -1399,36 +1399,17 @@ impl App {
         let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
             let geometry = kettle_render::ConfirmDialogLayout::new(
                 (surface.0 as f32, surface.1 as f32),
-                (self.overlay_text_cell_width(target), self.overlay_text_line_height(target)),
-                target.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32), dialog,
+                (
+                    self.overlay_text_cell_width(target),
+                    self.overlay_text_line_height(target),
+                ),
+                target
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor() as f32),
+                dialog,
             );
-            serde_json::json!({
-                "rect": rect_json(geometry.rect),
-                "heading_rect": rect_json(geometry.heading_rect),
-                "body_rect": rect_json(geometry.body_rect),
-                "max_scroll": geometry.max_scroll,
-                "scroll_offset": geometry.scroll_offset,
-                "whole_scroll": geometry.whole_scroll,
-                "stacked": geometry.stacked,
-                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "neutral":dialog.buttons[index].neutral, "access_key":dialog.buttons[index].access_key, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
-                // Rectangles and the link's fixed label only: the preview,
-                // the findings and the reason are the pasted text's and stay
-                // out of control output.
-                "detail": geometry.detail.as_ref().map(|detail| serde_json::json!({
-                    "preview_rect": rect_json(detail.preview_rect),
-                    "token_rects": detail.tokens.iter().map(|rect| rect_json(*rect)).collect::<Vec<_>>(),
-                    "summary_rect": rect_json(detail.summary_rect),
-                    "finding_rects": detail.finding_rects.iter().map(|rect| rect_json(*rect)).collect::<Vec<_>>(),
-                    "policy_rect": rect_json(detail.policy_rect),
-                    "link": {
-                        "rect": rect_json(detail.link_rect),
-                        "label": dialog.detail.as_ref().map(|detail| detail.link.as_str()),
-                        "wrapped": detail.link_wrapped,
-                        "focused": geometry.link_stop() == Some(dialog.focus_idx),
-                        "access_key": dialog.detail.as_ref().and_then(|detail| detail.link_access_key),
-                    },
-                })),
-            })
+            confirmation_json(dialog, &geometry)
         });
         let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {
             Some("confirm_dialog")

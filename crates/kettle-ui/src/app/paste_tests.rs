@@ -1435,6 +1435,79 @@ fn paste_ask(policy: kettle_config::PasteProtection, unbracketed: bool) -> super
     }
 }
 
+/// What a key press does to a dialog, as `confirm_dialog_key` computes it:
+/// the handler only carries the outcome out.
+fn key_outcome(
+    dialog: &super::ConfirmDialogState,
+    key: &str,
+    mods: winit::keyboard::ModifiersState,
+    stacked: bool,
+) -> super::ConfirmKeyOutcome {
+    use winit::keyboard::{Key, NamedKey};
+    let key = match key {
+        "Enter" => Key::Named(NamedKey::Enter),
+        "Escape" => Key::Named(NamedKey::Escape),
+        "Tab" => Key::Named(NamedKey::Tab),
+        "Up" => Key::Named(NamedKey::ArrowUp),
+        "Down" => Key::Named(NamedKey::ArrowDown),
+        "Left" => Key::Named(NamedKey::ArrowLeft),
+        "Right" => Key::Named(NamedKey::ArrowRight),
+        "PageUp" => Key::Named(NamedKey::PageUp),
+        "PageDown" => Key::Named(NamedKey::PageDown),
+        "Home" => Key::Named(NamedKey::Home),
+        "End" => Key::Named(NamedKey::End),
+        "Space" => Key::Named(NamedKey::Space),
+        letter => Key::Character(letter.into()),
+    };
+    super::confirm_key_outcome(
+        dialog,
+        &key,
+        mods,
+        super::ConfirmKeyContext {
+            vim_menu_nav: true,
+            stacked,
+            macos: false,
+        },
+    )
+}
+
+/// The text activating a stop would paste, or `None` when it pastes nothing.
+fn stop_paste(dialog: &super::ConfirmDialogState, index: usize) -> Option<String> {
+    match super::confirm_stop_action(dialog, index)? {
+        super::ConfirmStopAction::Dispatch(super::ConfirmAction::Paste { text, .. }) => Some(text),
+        _ => None,
+    }
+}
+
+/// The bytes a key press makes a pane receive: the outcome is carried out the
+/// way the handler does, against a real pane with bracketed paste on.
+fn key_bytes(dialog: &super::ConfirmDialogState, key: &str, stacked: bool) -> Vec<Vec<u8>> {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    let (mut mux, ids) = title_test_tab_mux(1);
+    let captured = mux.panes.get_mut(&ids[0]).unwrap().capture_input_for_test();
+    mux.panes[&ids[0]]
+        .term
+        .term
+        .lock()
+        .unwrap()
+        .set_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let outcome = key_outcome(
+        dialog,
+        key,
+        winit::keyboard::ModifiersState::empty(),
+        stacked,
+    );
+    if let super::ConfirmKeyOutcome::Activate(index) = outcome
+        && let Some(text) = stop_paste(dialog, index)
+    {
+        super::paste::paste_text_into_target(&mut mux, Some(ids[0]), &text, &modes);
+    }
+    let bytes = captured();
+    mux.kill_children();
+    bytes
+}
+
 /// The question for `text` under the default policy, in English, as a
 /// program without bracketed paste gets it.
 fn paste_question(text: &str) -> super::ConfirmDialogState {
@@ -2124,47 +2197,118 @@ fn findings_list_each_kind_with_its_meaning_most_serious_first() {
 
 #[test]
 fn vim_y_takes_the_recommended_paste_never_the_raw_one() {
-    use super::{ConfirmButton, ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
+    use super::{ConfirmButton, ConfirmKeyOutcome as O};
+    use winit::keyboard::ModifiersState as M;
     let text = "safe\x1b[201~; rm -rf ~\x03\n";
-    let dialog = paste_question(text);
-    // `y` answers the question whatever is focused.
-    assert_eq!(
-        confirm_dialog_keypress(0, dialog.buttons.len(), ConfirmKey::Yes),
-        ConfirmKeyResult::Confirm
-    );
-    let yes = dialog.yes_button().expect("a recommended button");
-    assert!(matches!(
-        dialog.buttons[yes],
-        ConfirmButton::PasteWithoutControls { .. }
-    ));
-    let super::ConfirmAction::Paste { text: sent, .. } =
-        super::confirmation_button_action(&dialog, yes).unwrap()
-    else {
-        panic!("paste action")
-    };
-    assert_eq!(sent, "safe; rm -rf ~\n");
-    assert!(!sent.contains(['\x1b', '\x03']));
-    // The raw paste is still there, as its own button, in the warning colour.
-    let raw = dialog
+    let mut dialog = paste_question(text);
+    let sanitised = dialog
         .buttons
         .iter()
-        .position(|button| matches!(button, ConfirmButton::Confirm { .. }))
+        .position(|button| matches!(button, ConfirmButton::PasteWithoutControls { .. }))
         .unwrap();
-    assert_ne!(raw, yes);
-    // Without controls the plain paste is the recommended choice.
-    let plain = paste_question("one\ntwo");
-    let yes = plain.yes_button().unwrap();
-    assert!(matches!(plain.buttons[yes], ConfirmButton::Confirm { .. }));
-    // The key handler asks the dialog, not the button order.
-    let handler = include_str!("modals.rs")
-        .split("ConfirmKeyResult::Confirm => {")
-        .nth(1)
-        .unwrap()
-        .split("ConfirmKeyResult::Cancel =>")
-        .next()
-        .unwrap();
-    assert!(handler.contains("state.yes_button()"), "{handler}");
-    assert!(!handler.contains("ConfirmButton::Confirm"));
+    // `y` answers with the sanitising choice whatever is focused, the raw
+    // Paste and the link included.
+    for focus in 0..dialog.stop_count() {
+        dialog.focus_idx = focus;
+        for key in ["y", "Y"] {
+            assert_eq!(
+                key_outcome(&dialog, key, M::empty(), false),
+                O::Activate(sanitised)
+            );
+        }
+    }
+    assert_eq!(
+        stop_paste(&dialog, sanitised).as_deref(),
+        Some("safe; rm -rf ~\n")
+    );
+    // What a pane receives for that `y`: the sanitised text, bracketed.
+    dialog.focus_idx = 3;
+    assert_eq!(
+        key_bytes(&dialog, "y", false),
+        [b"\x1b[200~safe; rm -rf ~\n\x1b[201~".to_vec()]
+    );
+
+    // Without controls the recommended choice is the plain Paste, which is
+    // the text as it is. A bare `y` must not send that: it does nothing, on
+    // every focus, and nothing reaches the pane.
+    let raw_lines = "echo one\necho two\n";
+    let mut plain = paste_question(raw_lines);
+    assert!(matches!(
+        plain.buttons[plain.paste.as_ref().unwrap().recommended],
+        ConfirmButton::Confirm { .. }
+    ));
+    assert_eq!(plain.yes_button(), None);
+    for focus in 0..plain.stop_count() {
+        plain.focus_idx = focus;
+        for key in ["y", "Y"] {
+            assert_eq!(key_outcome(&plain, key, M::empty(), false), O::Ignore);
+        }
+    }
+    assert!(key_bytes(&plain, "y", false).is_empty());
+    // Enter on the focused button still chooses it.
+    plain.focus_idx = 1;
+    assert_eq!(
+        key_outcome(&plain, "Enter", M::empty(), false),
+        O::Activate(1)
+    );
+    assert_eq!(stop_paste(&plain, 1).as_deref(), Some(raw_lines));
+
+    // No bare key, on any focus, in either dialog, sends the text as it is.
+    for (dialog, raw) in [(&mut dialog, text), (&mut plain, raw_lines)] {
+        for focus in 0..dialog.stop_count() {
+            dialog.focus_idx = focus;
+            for code in 0x21u8..0x7f {
+                let key = char::from(code).to_string();
+                for mods in [M::empty(), M::SHIFT] {
+                    if let O::Activate(index) = key_outcome(dialog, &key, mods, false) {
+                        assert_ne!(
+                            stop_paste(dialog, index).as_deref(),
+                            Some(raw),
+                            "bare {key:?} on focus {focus} sends the raw text"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // `n` cancels; `h` and `l` only move focus.
+    dialog.focus_idx = 1;
+    assert_eq!(key_outcome(&dialog, "n", M::empty(), false), O::Cancel);
+    assert_eq!(key_outcome(&dialog, "l", M::empty(), false), O::Focus(2));
+    assert_eq!(key_outcome(&dialog, "h", M::empty(), false), O::Focus(0));
+    // With `vim-menu-nav` off none of the letters does anything.
+    for key in ["y", "n", "h", "l"] {
+        let off = super::confirm_key_outcome(
+            &dialog,
+            &winit::keyboard::Key::Character(key.into()),
+            M::empty(),
+            super::ConfirmKeyContext {
+                vim_menu_nav: false,
+                stacked: false,
+                macos: false,
+            },
+        );
+        assert_eq!(off, O::Ignore, "{key}");
+    }
+    // Any other confirmation keeps `y` on its affirmative button.
+    let close = super::ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: "Close".into(),
+                destructive: true,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: super::ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    };
+    assert_eq!(key_outcome(&close, "y", M::empty(), false), O::Activate(1));
 }
 
 #[test]
@@ -2263,20 +2407,42 @@ fn access_keys_match_the_typed_letter_with_alt_and_do_not_exist_on_macos() {
         target(&dialog, &Key::Named(NamedKey::Enter), M::ALT, false),
         None
     );
-    // The handler passes the logical key and nothing positional.
-    let handler = include_str!("modals.rs")
-        .split("pub(super) fn confirm_dialog_key(")
-        .nth(1)
-        .unwrap()
-        .split("pub(super) fn confirm_wheel(")
-        .next()
-        .unwrap();
-    assert!(
-        handler.contains(
-            "confirm_access_key_target(dialog, key, ws.mods, cfg!(target_os = \"macos\"))"
-        )
+    // The same through the whole key map the handler runs: Alt+W is the
+    // sanitised paste; a bare letter is nothing and reaches no pane. The map
+    // takes a logical key and modifiers, and has no position to read.
+    use super::ConfirmKeyOutcome as O;
+    assert_eq!(key_outcome(&dialog, "w", M::ALT, false), O::Activate(1));
+    assert_eq!(
+        key_outcome(&dialog, "W", M::ALT | M::SHIFT, true),
+        O::Activate(1)
     );
-    assert!(!handler.contains("physical_key") && !handler.contains("KeyCode"));
+    assert_eq!(key_outcome(&dialog, "s", M::ALT, false), O::Activate(4));
+    assert_eq!(stop_paste(&dialog, 1).as_deref(), Some("ab"));
+    assert_eq!(stop_paste(&dialog, 4), None);
+    for letter in ["w", "o", "p", "c", "s", "z"] {
+        assert_eq!(
+            key_outcome(&dialog, letter, M::empty(), false),
+            O::Ignore,
+            "{letter}"
+        );
+        assert!(key_bytes(&dialog, letter, false).is_empty(), "{letter}");
+    }
+    assert_eq!(key_outcome(&dialog, "z", M::ALT, false), O::Ignore);
+    assert_eq!(
+        key_outcome(&dialog, "w", M::ALT | M::CONTROL, false),
+        O::Ignore
+    );
+    let on_macos = super::confirm_key_outcome(
+        &dialog,
+        &key("w"),
+        M::ALT,
+        super::ConfirmKeyContext {
+            vim_menu_nav: true,
+            stacked: false,
+            macos: true,
+        },
+    );
+    assert_eq!(on_macos, O::Ignore);
 
     // Spanish letters, each in its own label.
     let tr = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
@@ -2392,19 +2558,82 @@ fn focus_walks_the_link_then_the_buttons_and_arrows_follow_the_layout() {
     assert_eq!(confirm_stop_keypress(0, plain(true), K::Down), R::Move(1));
     assert_eq!(confirm_stop_keypress(1, plain(true), K::Up), R::Move(0));
     assert_eq!(confirm_stop_keypress(0, plain(true), K::Up), R::Ignore);
-    // The handler asks the layout whether the buttons are stacked, and no
-    // longer turns Up and Down into scrolling before focus sees them.
-    let handler = include_str!("modals.rs")
-        .split("pub(super) fn confirm_dialog_key(")
-        .nth(1)
-        .unwrap()
-        .split("pub(super) fn confirm_wheel(")
-        .next()
-        .unwrap();
-    assert!(handler.contains("stacked: layout.as_ref().is_some_and(|layout| layout.stacked)"));
-    assert!(handler.contains("Key::Named(NamedKey::ArrowUp) => Some(ConfirmKey::Up)"));
-    assert!(handler.contains("Key::Named(NamedKey::ArrowDown) => Some(ConfirmKey::Down)"));
-    assert!(!handler.contains("ArrowUp) => Some(-1)"));
+    // The same from real keys through the handler's key map, with the
+    // layout's own answer to "are the buttons stacked".
+    use super::{ConfirmKeyOutcome as O, ConfirmScroll};
+    use winit::keyboard::ModifiersState as M;
+    let tr = kettle_i18n::Translator::default();
+    let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+    let mut dialog = dialog;
+    for (surface, expect_stacked) in [((1280.0, 800.0), false), ((520.0, 700.0), true)] {
+        let stacked =
+            kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay).stacked;
+        assert_eq!(stacked, expect_stacked);
+        dialog.focus_idx = 0;
+        assert_eq!(
+            key_outcome(&dialog, "Up", M::empty(), stacked),
+            O::Focus(LINK)
+        );
+        assert_eq!(
+            key_outcome(&dialog, "Down", M::empty(), stacked),
+            if stacked { O::Focus(1) } else { O::Ignore }
+        );
+        dialog.focus_idx = LINK;
+        assert_eq!(
+            key_outcome(&dialog, "Down", M::empty(), stacked),
+            O::Focus(0)
+        );
+        assert_eq!(
+            key_outcome(&dialog, "Tab", M::empty(), stacked),
+            O::Focus(0)
+        );
+        assert_eq!(key_outcome(&dialog, "Tab", M::SHIFT, stacked), O::Focus(3));
+        assert_eq!(
+            key_outcome(&dialog, "Enter", M::empty(), stacked),
+            O::Activate(LINK)
+        );
+        // Scrolling keeps its own keys in every layout.
+        for (key, scroll) in [
+            ("PageUp", ConfirmScroll::Pages(-1)),
+            ("PageDown", ConfirmScroll::Pages(1)),
+            ("Home", ConfirmScroll::Start),
+            ("End", ConfirmScroll::End),
+        ] {
+            assert_eq!(
+                key_outcome(&dialog, key, M::empty(), stacked),
+                O::Scroll(scroll)
+            );
+        }
+        assert_eq!(
+            key_outcome(&dialog, "Escape", M::empty(), stacked),
+            O::Cancel
+        );
+        assert_eq!(key_outcome(&dialog, "Space", M::empty(), stacked), O::Arm);
+        assert_eq!(key_outcome(&dialog, "Space", M::ALT, stacked), O::Ignore);
+    }
+    // A plain row of buttons keeps Up and Down for scrolling.
+    let close = super::ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![
+            super::ConfirmButton::Cancel,
+            super::ConfirmButton::Confirm {
+                label: "Close".into(),
+                destructive: true,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: super::ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    };
+    assert_eq!(
+        key_outcome(&close, "Down", M::empty(), false),
+        O::Scroll(ConfirmScroll::Lines(1))
+    );
+    assert_eq!(key_outcome(&close, "Down", M::empty(), true), O::Focus(1));
 }
 
 #[test]
@@ -2478,8 +2707,84 @@ fn the_settings_link_sends_nothing_and_opens_settings_at_paste_protection() {
         categories[nav.category].fields[nav.field].key,
         "paste-protection"
     );
-    // The link's activation closes the question through Settings' own modal
-    // reset, before any paste action could be dispatched.
+}
+
+#[test]
+fn the_settings_link_is_cancel_then_settings_for_queued_input_and_broadcast() {
+    use super::{ConfirmStopAction, cancel_confirm_dialog_in, confirm_stop_action};
+    // A paste question over a tab that broadcasts to two panes, each with
+    // its input captured, as it stands when the user reaches for the link.
+    let window = || {
+        let (mut mux, ids) = title_test_tab_mux(2);
+        mux.broadcast = BroadcastScope::Tab;
+        let captures: Vec<_> = ids
+            .iter()
+            .map(|id| mux.panes.get_mut(id).unwrap().capture_input_for_test())
+            .collect();
+        let mut ws = super::WindowState::new(0, mux);
+        ws.confirm_dialog = Some(super::text_paste_confirmation(
+            None,
+            "echo secret\x1b[201~; rm -rf ~\n",
+            BroadcastScope::Tab,
+            ids.clone(),
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            kettle_i18n::Translator::default(),
+        ));
+        (ws, captures)
+    };
+    let categories = crate::settings::categories(&[]);
+
+    // While the question is unanswered, input that comes ready behind it is
+    // refused, not delivered.
+    let (mut by_link, link_captures) = window();
+    let (mut by_cancel, cancel_captures) = window();
+    assert!(super::paste::confirmation_refuses_queued_input(&by_link));
+
+    // The link's action carries no paste and no consent to dispatch.
+    let dialog = by_link.confirm_dialog.as_ref().unwrap();
+    let link = dialog.link_stop().unwrap();
+    assert!(matches!(
+        confirm_stop_action(dialog, link),
+        Some(ConfirmStopAction::PasteSettings)
+    ));
+    assert!(matches!(
+        confirm_stop_action(dialog, 0),
+        Some(ConfirmStopAction::Cancel)
+    ));
+    assert!(confirm_stop_action(dialog, link + 1).is_none());
+
+    // The link: Cancel, then Settings on the row. Cancel alone beside it.
+    cancel_confirm_dialog_in(&mut by_link);
+    let mut nav = crate::settings::SettingsNav::default();
+    assert!(nav.focus_key(&categories, "paste-protection"));
+    by_link.settings_nav = Some(nav);
+    cancel_confirm_dialog_in(&mut by_cancel);
+
+    for (ws, captures) in [(&by_link, &link_captures), (&by_cancel, &cancel_captures)] {
+        // The question is gone with its text, target and broadcast consent.
+        assert!(ws.confirm_dialog.is_none());
+        // No pane of the broadcast received a byte.
+        for captured in captures {
+            assert!(captured().is_empty());
+        }
+        // Later input is judged on its own again, the same after either.
+        assert!(!super::paste::confirmation_refuses_queued_input(ws));
+        // The broadcast scope itself is the user's and is left alone.
+        assert_eq!(ws.mux.broadcast, BroadcastScope::Tab);
+    }
+    // Only Settings differs between the two windows.
+    assert!(by_cancel.settings_nav.is_none());
+    let nav = by_link.settings_nav.as_ref().unwrap();
+    assert_eq!(
+        categories[nav.category].fields[nav.field].key,
+        "paste-protection"
+    );
+    by_link.mux.kill_children();
+    by_cancel.mux.kill_children();
+
+    // No seam reaches `App`: the three calls the handler makes for the link
+    // are pinned by their order in the source. Cancel comes first, so the
+    // question is answered before Settings is touched.
     let resolve = include_str!("modals.rs")
         .split("pub(super) fn resolve_confirm_button(")
         .nth(1)
@@ -2487,22 +2792,20 @@ fn the_settings_link_sends_nothing_and_opens_settings_at_paste_protection() {
         .split("pub(super) fn confirm_cancel_press(")
         .next()
         .unwrap();
-    let link = resolve.find("dialog.link_stop() == Some(index)").unwrap();
-    let open = resolve.find("self.open_settings(ws);").unwrap();
-    let focus = resolve
-        .find("self.focus_settings_key(ws, \"paste-protection\");")
-        .unwrap();
-    let dispatch = resolve.find("self.dispatch_confirm_action(").unwrap();
-    assert!(link < open && open < focus && focus < dispatch);
-    assert!(resolve[link..dispatch].contains("return;"));
-    let open_settings = include_str!("actions.rs")
-        .split("pub(super) fn open_settings(")
+    let arm = resolve
+        .split("ConfirmStopAction::PasteSettings => {")
         .nth(1)
         .unwrap()
-        .split("pub(super) fn focus_settings_key(")
+        .split("ConfirmStopAction::Dispatch")
         .next()
         .unwrap();
-    assert!(open_settings.contains("self.close_all_modals(ws);"));
+    let cancel = arm.find("self.cancel_confirm_dialog(ws);").unwrap();
+    let open = arm.find("self.open_settings(ws);").unwrap();
+    let focus = arm
+        .find("self.focus_settings_key(ws, \"paste-protection\");")
+        .unwrap();
+    assert!(cancel < open && open < focus);
+    assert!(!arm.contains("dispatch_confirm_action"));
 }
 
 #[test]
@@ -2687,28 +2990,92 @@ fn the_accessibility_tree_names_what_the_dialog_paints() {
 
 #[test]
 fn control_output_carries_rectangles_and_fixed_labels_never_the_pasted_text() {
-    let source = include_str!("ctl.rs");
-    let confirmation = source
-        .split("let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {")
-        .nth(1)
-        .unwrap()
-        .split("let modal_name =")
-        .next()
-        .unwrap();
-    assert!(confirmation.contains("\"link\""));
-    assert!(confirmation.contains("\"token_rects\""));
+    // Every piece of text a paste question derives from the clipboard, or
+    // from who is asked, carries a canary. None may reach `ui_geometry`.
+    let canary = |name: &str| format!("CANARY-{name}-7f3a");
+    let button = |label: &str, key: char| kettle_render::ConfirmDialogButton {
+        label: label.into(),
+        access_key: Some(key),
+        ..Default::default()
+    };
+    let preview = format!("{} ESC[201~", canary("preview"));
+    let token = preview.len() - 8..preview.len() - 5;
+    let overlay = kettle_render::ConfirmDialogOverlay {
+        heading: canary("heading"),
+        body: canary("body"),
+        buttons: vec![button("Cancel", 'C'), button("Paste without controls", 'W')],
+        detail: Some(kettle_render::ConfirmDialogDetail {
+            preview,
+            preview_tokens: vec![token],
+            summary: vec![canary("summary-lines"), canary("summary-controls")],
+            findings: vec![kettle_render::ConfirmDialogFinding {
+                token: canary("finding-token"),
+                meaning: canary("finding-meaning"),
+                count: canary("finding-count"),
+                removed: false,
+            }],
+            more: canary("more"),
+            policy: canary("policy"),
+            link: "Paste settings…".into(),
+            link_access_key: Some('S'),
+            description: canary("description"),
+        }),
+        ..Default::default()
+    };
+    for surface in [(1280.0, 800.0), (420.0, 300.0)] {
+        let layout = kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+        let json = super::confirmation_json(&overlay, &layout);
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains("CANARY"), "{text}");
+        assert!(!text.contains("7f3a") && !text.contains("201~"), "{text}");
+        // What it does carry: rectangles, flags and the fixed labels.
+        assert_eq!(json["buttons"][0]["label"], "Cancel");
+        assert_eq!(json["buttons"][1]["label"], "Paste without controls");
+        assert_eq!(json["buttons"][1]["access_key"], "W");
+        assert_eq!(json["detail"]["link"]["label"], "Paste settings…");
+        assert_eq!(json["detail"]["link"]["access_key"], "S");
+        assert_eq!(json["detail"]["token_rects"].as_array().unwrap().len(), 1);
+        assert_eq!(json["detail"]["finding_rects"].as_array().unwrap().len(), 2);
+        assert!(json["detail"]["preview_rect"]["width"].is_number());
+        // Every string in the output is one of those labels or keys.
+        fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(text) => out.push(text.clone()),
+                serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+                serde_json::Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        strings(&json, &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "C",
+                "Cancel",
+                "Paste settings…",
+                "Paste without controls",
+                "S",
+                "W"
+            ]
+        );
+    }
+    // The real projection of a real paste question, the same way.
+    let secret = "printf 'zq-secret-zq'\x1b[201~; echo zq-injected-zq\n";
+    let tr = kettle_i18n::Translator::default();
+    let overlay = super::confirm_dialog_overlay(&paste_question(secret), &tr);
+    let layout =
+        kettle_render::ConfirmDialogLayout::new((1280.0, 800.0), (8.0, 16.0), 1.0, &overlay);
+    let text = serde_json::to_string(&super::confirmation_json(&overlay, &layout)).unwrap();
     for private in [
-        ".preview,",
-        ".preview.",
-        "preview_lines",
-        "finding_lines",
-        ".findings",
-        ".summary,",
-        ".description",
-        ".policy,",
-        "dialog.body",
-        "dialog.heading",
+        "zq-",
+        "printf",
+        "201~",
+        "bracketed",
+        "escape sequence",
+        "Automatic",
     ] {
-        assert!(!confirmation.contains(private), "{private} reaches ctl");
+        assert!(!text.contains(private), "{private} reaches ctl: {text}");
     }
 }

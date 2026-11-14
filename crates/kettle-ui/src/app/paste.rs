@@ -689,7 +689,7 @@ impl App {
             self.send_key_releases(None, &key_releases);
             return;
         };
-        if ws.confirm_dialog.is_some() {
+        if confirmation_refuses_queued_input(&ws) {
             self.discard_queued_paste(content);
             self.send_key_releases(Some(&ws), &key_releases);
             self.finish_window_dispatch(el, window, ws);
@@ -1719,6 +1719,13 @@ pub(super) fn clipboard_paste_result(
         Ok(text) if !local_paste_within_limit(&text) => Err(Text::NotifyBodyClipboardLimitExceeded),
         other => Ok(other.unwrap_or_default()),
     }
+}
+
+/// Queued input that comes ready while a confirmation is unanswered is
+/// discarded, never delivered behind the question. Once the question is
+/// gone, by any answer, later input is judged on its own.
+pub(super) fn confirmation_refuses_queued_input(ws: &WindowState) -> bool {
+    ws.confirm_dialog.is_some()
 }
 
 /// A bounded window of pasted text for the Confirm paste dialog.
