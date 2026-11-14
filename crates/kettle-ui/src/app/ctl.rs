@@ -2610,6 +2610,8 @@ impl App {
         let pre = self.focus_key(ws);
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
+        // As natively, a press in the terminal restarts the cursor blink.
+        self.reset_blink_phase(ws);
         if self.send_mouse(ws, bcode, true, false) {
             return true;
         }

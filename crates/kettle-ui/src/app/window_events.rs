@@ -960,6 +960,11 @@ impl App {
                 ws.mux
                     .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
                 self.note_focus_change(ws, pre);
+                // A press in the terminal shows the cursor at once and
+                // restarts its blink, as a click does in GTK and Cocoa text
+                // views, whether a program or a selection takes the press.
+                // Hover and the wheel leave the blink alone.
+                self.reset_blink_phase(ws);
                 if self.send_mouse(ws, bcode, true, false) {
                     return;
                 }

@@ -412,6 +412,12 @@ impl App {
         {
             self.copy_selection(ws);
         }
+        // The drag held the cursor solid (`cursor_held_steady`); its blink
+        // starts again from the visible phase rather than wherever the timer
+        // had run to underneath.
+        if ws.selecting {
+            self.reset_blink_phase(ws);
+        }
         clear_selection_gesture(ws);
     }
 

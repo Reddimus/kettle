@@ -314,7 +314,7 @@ impl App {
         // pure `&self` reader.)
         let pane_blink = self.pane_cursor_blinking(ws, reuse_pane_snapshots);
         let blink_enabled = self.cfg.cursor_blink && pane_blink;
-        let cursor_visible = if !blink_enabled || !window_focused || modal_holds_cursor_steady(ws) {
+        let cursor_visible = if !blink_enabled || !window_focused || cursor_held_steady(ws) {
             true
         } else {
             ws.blink_on
