@@ -120,14 +120,15 @@ pub enum ScrollbarState {
 /// that is grabbed and announced.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneScrollbar {
-    /// The bar's column, the terminal's full height, `edge` in from its
-    /// right side: the channel paints here, command ticks lie across it, and
-    /// it bounds the ScrollBar node.
+    /// The bar's column, the terminal's full height, 2 logical px in from
+    /// its right side: the channel paints here, command ticks lie across it,
+    /// and it bounds the ScrollBar node.
     pub track_rect: Rect4,
     /// Whether the channel paints in `track_rect`.
     pub channel: bool,
     /// The thumb, when there is history to scroll.
     pub thumb_rect: Option<Rect4>,
+    /// Which colours the thumb and channel take.
     pub state: ScrollbarState,
     /// The pointer's strip. It runs to the terminal's right edge, so a fling
     /// to the edge of the screen still lands, and is at least 12 logical px
@@ -154,6 +155,13 @@ pub fn scrollbar_hit_rect(terminal: Rect4, scale: f32, configured: f32) -> Rect4
 /// A pane's scrollbar. `terminal` is the pane's terminal rect, `rows`,
 /// `hist` and `off` its visible lines, history and lines scrolled back, and
 /// `interacting` whether the pointer hovers or drags its bar.
+///
+/// With history, `auto` draws a faint full-height channel under a dim thumb
+/// at rest. Scrolled back, hovered or dragged, the bar widens to at least 10
+/// logical px and brightens, its channel as wide as the thumb. `always` keeps
+/// one width while there is history, so hovering never makes it jump, and
+/// with none draws the empty channel at the configured width, which hovering
+/// leaves alone: there is nothing to grab.
 pub fn pane_scrollbar_geometry(
     terminal: Rect4,
     scale: f32,
@@ -166,13 +174,20 @@ pub fn pane_scrollbar_geometry(
     use kettle_config::ScrollbarMode;
     let (x, y, w, h) = terminal;
     let mode = cfg.scrollbar;
+    let scrollable = hist > 0;
     let shown = match mode {
         ScrollbarMode::Never => false,
-        ScrollbarMode::Auto => hist > 0,
+        ScrollbarMode::Auto => scrollable,
         ScrollbarMode::Always => true,
     };
-    let active = off > 0 || interacting;
-    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, scale, interacting);
+    let active = scrollable && (off > 0 || interacting);
+    let wide = match mode {
+        // No bar: command ticks keep the resting column.
+        ScrollbarMode::Never => false,
+        ScrollbarMode::Auto => active,
+        ScrollbarMode::Always => scrollable,
+    };
+    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, scale, wide);
     let edge = 2.0 * scale;
     let bx = x + w - bar_w - edge;
     let thumb_rect = if shown {
@@ -189,7 +204,7 @@ pub fn pane_scrollbar_geometry(
     };
     PaneScrollbar {
         track_rect: (bx, y, bar_w, h),
-        channel: shown && (active || mode == ScrollbarMode::Always),
+        channel: shown,
         thumb_rect,
         state: if active {
             ScrollbarState::Active
@@ -197,9 +212,40 @@ pub fn pane_scrollbar_geometry(
             ScrollbarState::Rest
         },
         hit_rect: scrollbar_hit_rect(terminal, scale, cfg.scrollbar_width),
-        opaque: false,
+        opaque: scrollbar_paints_opaque(cfg, scale),
     }
 }
+
+/// Whether the bar paints solid colours. Only where it cannot cover text,
+/// at its widest and with its edge inside the `padding-x` the grid keeps
+/// clear on its right, and only in an opaque window, where a solid bar does
+/// not stand out as the one thing the desktop cannot show through. Elsewhere
+/// it paints translucent layers that show as the same colours over the
+/// background, so a glyph under it stays visible.
+pub fn scrollbar_paints_opaque(cfg: &kettle_config::Config, scale: f32) -> bool {
+    crate::theme::composed_bg_alpha(cfg) >= 1.0
+        && scrollbar_draw_width(cfg.scrollbar_width, scale, true) + 2.0 * scale <= cfg.padding_x
+}
+
+/// The rest thumb against the background: the WCAG 2.2 1.4.11 floor for a
+/// control.
+pub(crate) const REST_THUMB_CONTRAST: f64 = crate::chrome::ICON_CONTRAST;
+/// The thumb while scrolled back, hovered or dragged: the text floor.
+pub(crate) const ACTIVE_THUMB_CONTRAST: f64 = crate::chrome::TEXT_CONTRAST;
+/// The channel against the background: there, but quieter than the thumb.
+pub(crate) const TRACK_CONTRAST: f64 = 1.5;
+/// The channel at rest goes no further than this, so a pane with history
+/// keeps a quiet edge.
+pub(crate) const REST_TRACK_MAX_CONTRAST: f64 = 1.6;
+/// The rest thumb against the channel it runs in.
+pub(crate) const REST_THUMB_ON_TRACK: f64 = 2.0;
+/// The active thumb against its channel.
+pub(crate) const ACTIVE_THUMB_ON_TRACK: f64 = crate::chrome::ICON_CONTRAST;
+/// A command tick against the background and the channel it lies across.
+pub(crate) const TICK_CONTRAST: f64 = crate::chrome::ICON_CONTRAST;
+/// Each colour is resolved this much past its floors, so the 8-bit
+/// rounding of a translucent layer cannot take it under one.
+const ROUNDING_MARGIN: f64 = 1.02;
 
 /// The scrollbar's colours as they show over the terminal background, and
 /// the translucent ink and alpha that show as each one.
@@ -211,6 +257,9 @@ pub(crate) struct ScrollbarColors {
     pub(crate) active_track: Rgb,
     /// `[rest, active, rest_track, active_track]` as translucent layers.
     pub(crate) layers: [(Rgb, f32); 4],
+    /// The success and failure ticks on the rest channel, then on the
+    /// active one.
+    pub(crate) ticks: [(Rgb, Rgb); 2],
 }
 
 impl ScrollbarColors {
@@ -237,21 +286,181 @@ impl ScrollbarColors {
             self.layers[layer]
         }
     }
+
+    /// A command tick's colour: success or failure, on the channel the bar
+    /// paints in `state`.
+    pub(crate) fn tick(&self, state: ScrollbarState, success: bool) -> Rgb {
+        let (ok, failed) = self.ticks[match state {
+            ScrollbarState::Rest => 0,
+            ScrollbarState::Active => 1,
+        }];
+        if success { ok } else { failed }
+    }
 }
 
-/// The scrollbar's colours: the theme foreground over its background.
+/// The scrollbar's colours. Each starts from the theme foreground over its
+/// background, as the bar was drawn before (0.42 for the rest thumb, 0.82
+/// active, 0.07 and 0.14 for the channel), and moves only as far as its
+/// floors need: the rest thumb 3:1 against the background and 2:1 against
+/// the rest channel, the active thumb 4.5:1 and 3:1 against its channel, and
+/// the channel 1.5:1, at rest no more than 1.6:1.
 pub(crate) fn scrollbar_colors(theme: &kettle_config::Theme, linear: bool) -> ScrollbarColors {
-    let layer = |alpha: f32| (theme.foreground, alpha);
-    let layers = [layer(0.42), layer(0.82), layer(0.07), layer(0.14)];
-    let shown =
-        |(ink, alpha): (Rgb, f32)| crate::color::over(theme.background, ink, alpha.into(), linear);
+    use crate::color::{self, with_min_contrast};
+    let bg = theme.background;
+    let mix = |alpha: f64| color::over(bg, theme.foreground, alpha, linear);
+    let floor = |ratio: f64| ratio * ROUNDING_MARGIN;
+    let rest_track = quiet_channel(mix(0.07), bg, linear);
+    let active_track = with_min_contrast(mix(0.14), bg, floor(TRACK_CONTRAST));
+    let thumb = |start: Rgb, on_bg: f64, track: Rgb, on_track: f64| {
+        let raised = with_min_contrast(start, bg, floor(on_bg));
+        let thumb = with_min_contrast(raised, track, floor(on_track));
+        if color::contrast_ratio(thumb, bg) >= floor(on_bg) {
+            thumb
+        } else {
+            color::with_min_contrast_on_both(raised, bg, track, floor(on_bg.max(on_track)), false)
+        }
+    };
+    let rest = thumb(
+        mix(0.42),
+        REST_THUMB_CONTRAST,
+        rest_track,
+        REST_THUMB_ON_TRACK,
+    );
+    let active = thumb(
+        mix(0.82),
+        ACTIVE_THUMB_CONTRAST,
+        active_track,
+        ACTIVE_THUMB_ON_TRACK,
+    );
+    let tick = |ink: Rgb, track: Rgb| {
+        color::with_min_contrast_on_both(ink, bg, track, floor(TICK_CONTRAST), true)
+    };
+    let ticks = |track: Rgb| (tick(theme.palette[2], track), tick(theme.palette[1], track));
+    let layer = |shown: Rgb| translucent_layer(bg, shown, linear);
     ScrollbarColors {
-        rest: shown(layers[0]),
-        active: shown(layers[1]),
-        rest_track: shown(layers[2]),
-        active_track: shown(layers[3]),
-        layers,
+        rest,
+        active,
+        rest_track,
+        active_track,
+        layers: [
+            layer(rest),
+            layer(active),
+            layer(rest_track),
+            layer(active_track),
+        ],
+        ticks: [ticks(rest_track), ticks(active_track)],
     }
+}
+
+/// The rest channel: the faint 0.07 mix raised to [`TRACK_CONTRAST`], or, on
+/// a theme where that mix is already stronger than
+/// [`REST_TRACK_MAX_CONTRAST`], eased back toward the background until it is
+/// not.
+fn quiet_channel(start: Rgb, bg: Rgb, linear: bool) -> Rgb {
+    use crate::color::{self, contrast_ratio};
+    let low = TRACK_CONTRAST * ROUNDING_MARGIN;
+    if contrast_ratio(start, bg) < low {
+        return color::with_min_contrast(start, bg, low);
+    }
+    if contrast_ratio(start, bg) <= REST_TRACK_MAX_CONTRAST / ROUNDING_MARGIN {
+        return start;
+    }
+    // The least of `start` over the background that still clears the floor.
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        if contrast_ratio(color::over(bg, start, mid, linear), bg) >= low {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    color::over(bg, start, hi, linear)
+}
+
+/// The most a translucent layer covers: a glyph under the bar keeps at least
+/// a tenth of its ink, so the rightmost column is never hidden.
+pub(crate) const MAX_LAYER_ALPHA: f32 = 0.9;
+
+/// The ink and alpha that show as `shown` painted over `bg`.
+///
+/// The ink lies on the line from `bg` through `shown`, as far out as colour
+/// goes, at the lowest alpha that reaches `shown`, so the layer shows as
+/// `shown` itself and lets as much of a glyph under it through as it can. The
+/// ink rounds away from `bg`, so the layer never shows weaker than `shown`.
+/// Where that needs more than [`MAX_LAYER_ALPHA`], white or black reaches the
+/// same contrast against `bg` with less, giving up some of the tint; where
+/// even that needs more, the layer stops at [`MAX_LAYER_ALPHA`] and falls
+/// short of `shown`.
+pub(crate) fn translucent_layer(bg: Rgb, shown: Rgb, linear: bool) -> (Rgb, f32) {
+    use crate::color::{self, contrast_ratio, encode_srgb, relative_luminance, srgb_to_linear};
+    let decode = |value: u8| {
+        if linear {
+            srgb_to_linear(value)
+        } else {
+            f64::from(value) / 255.0
+        }
+    };
+    let channels = |c: Rgb| [c.r, c.g, c.b].map(decode);
+    let (base, top) = (channels(bg), channels(shown));
+    let alpha = base
+        .iter()
+        .zip(&top)
+        .map(|(&b, &t)| {
+            let room = if t > b { 1.0 - b } else { b };
+            if room > 0.0 {
+                (t - b).abs() / room
+            } else {
+                0.0
+            }
+        })
+        .fold(0.0_f64, f64::max);
+    if alpha <= 0.0 {
+        return (shown, 0.0);
+    }
+    let ink = |b: f64, t: f64| {
+        let value = (b + (t - b) / alpha).clamp(0.0, 1.0);
+        let encoded = if linear {
+            encode_srgb(value)
+        } else {
+            value * 255.0
+        };
+        // Round away from the background.
+        let out = if t >= b {
+            encoded.ceil()
+        } else {
+            encoded.floor()
+        };
+        out.clamp(0.0, 255.0) as u8
+    };
+    let tinted = Rgb::new(
+        ink(base[0], top[0]),
+        ink(base[1], top[1]),
+        ink(base[2], top[2]),
+    );
+    if alpha <= f64::from(MAX_LAYER_ALPHA) {
+        return (tinted, alpha as f32);
+    }
+    let plain = if relative_luminance(shown) > relative_luminance(bg) {
+        Rgb::new(255, 255, 255)
+    } else {
+        Rgb::new(0, 0, 0)
+    };
+    let target = contrast_ratio(shown, bg);
+    let reaches = |a: f64| contrast_ratio(color::over(bg, plain, a, linear), bg) >= target;
+    if !reaches(f64::from(MAX_LAYER_ALPHA)) {
+        return (plain, MAX_LAYER_ALPHA);
+    }
+    let (mut lo, mut hi) = (0.0_f64, f64::from(MAX_LAYER_ALPHA));
+    for _ in 0..20 {
+        let mid = (lo + hi) / 2.0;
+        if reaches(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    (plain, hi as f32)
 }
 
 #[cfg(test)]

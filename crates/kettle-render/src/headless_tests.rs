@@ -7746,3 +7746,133 @@ fn background_tab_markers_have_distinct_shapes() {
     }
     eprintln!("TAB_MARKER_GPU_PASS");
 }
+
+/// A pane `back` lines up from the bottom of `lines` short lines, so the
+/// right side of every row is blank, with a completed command near the top
+/// of its history.
+fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSnapshot {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let proxy = EventProxy::new(tx, std::sync::Arc::new(|| {}));
+    let mut term =
+        alacritty_terminal::Term::new(TermConfig::default(), &Size { cols, rows }, proxy);
+    let bytes: String = (0..lines).map(|line| format!("{line}\r\n")).collect();
+    Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new()
+        .advance(&mut term, bytes.as_bytes());
+    term.scroll_display(alacritty_terminal::grid::Scroll::Delta(back));
+    let mut snap = PaneSnapshot::default();
+    snap.capture(&term);
+    snap.command_marks.push(kettle_core::term::CommandMark {
+        row: snap.history_origin + 10,
+        exit_code: 0,
+    });
+    snap
+}
+
+/// A pane with history paints its thumb in a full-height channel as wide as
+/// it, in the resolved colours, and the command tick across the whole bar:
+/// at its resting width at the bottom, and wide once scrolled back. On
+/// TokyoNight Night and Kettle Day, at 1x and 2x, painted solid inside a
+/// wide padding and as translucent layers over a narrow one. The colours are
+/// sampled where no glyph is, so the fonts on the host do not matter.
+#[test]
+fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (320_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snaps = [
+        history_snapshot(20, 20, 300, 100),
+        history_snapshot(20, 20, 300, 0),
+    ];
+    assert!(snaps[0].display_offset > 0 && snaps[0].history_size > snaps[0].display_offset);
+    assert!(snaps[1].display_offset == 0 && snaps[1].history_size > 0);
+    let linear = renderer.config.format.is_srgb();
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    for (name, snap) in ["TokyoNight Night", "Kettle Day"]
+        .into_iter()
+        .flat_map(|name| snaps.iter().map(move |snap| (name, snap)))
+    {
+        for scale in [1.0_f32, 2.0] {
+            renderer.set_scale(scale);
+            for padding in [12.0 * scale, 2.0] {
+                let cfg = Config {
+                    theme: kettle_config::Theme::by_name(name),
+                    background_opacity: 1.0,
+                    padding_x: padding,
+                    ..base.clone()
+                };
+                let panes = [pane(snap, width, height)];
+                let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+                let bar = crate::scrollback::pane_scrollbar_geometry(
+                    panes[0].terminal,
+                    scale,
+                    &cfg,
+                    snap.screen_lines,
+                    snap.history_size,
+                    snap.display_offset,
+                    false,
+                );
+                let back = snap.display_offset;
+                let context = format!("{name} scale {scale} padding {padding} back {back}");
+                assert_eq!(bar.opaque, padding >= 12.0 * scale, "{context}");
+                let colors = crate::scrollback::scrollbar_colors(&cfg.theme, linear);
+                let bg = cfg.theme.background;
+                let shown = |(ink, alpha): (kettle_config::Rgb, f32)| {
+                    crate::color::over(bg, ink, alpha.into(), linear)
+                };
+                let thumb = shown(colors.thumb(bar.state, bar.opaque));
+                let channel = shown(colors.track(bar.state, bar.opaque));
+                let (tx, ty, tw, _) = bar.track_rect;
+                assert_eq!(tw, if back > 0 { 10.0 } else { 6.0 } * scale, "{context}");
+                assert!(bar.channel, "{context}");
+                let (_, thumb_y, _, thumb_h) = bar.thumb_rect.expect("a thumb");
+                assert!(
+                    thumb_y - ty > 8.0 * scale,
+                    "{context}: room above the thumb"
+                );
+                let pixel = |x: f32, y: f32| *frame.get_pixel(x as u32, y as u32);
+                let mid_x = tx + tw / 2.0;
+                let thumb_px = pixel(mid_x, thumb_y + thumb_h / 2.0);
+                assert!(
+                    near(&thumb_px, thumb),
+                    "{context}: thumb {thumb_px:?} != {thumb:?}"
+                );
+                let above = ty + (thumb_y - ty) * 0.75;
+                for x in [tx + 0.5, mid_x, tx + tw - 0.5] {
+                    let channel_px = pixel(x, above);
+                    assert!(
+                        near(&channel_px, channel),
+                        "{context}: channel at x {x} {channel_px:?} != {channel:?}"
+                    );
+                }
+                let outside = pixel(tx - 1.0, above);
+                assert!(near(&outside, bg), "{context}: beside the bar {outside:?}");
+                let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
+                    panes[0].terminal,
+                    (tx, tw),
+                    scale,
+                    snap.history_origin,
+                    snap.history_size + snap.screen_lines,
+                    snap.command_marks[0],
+                )
+                .expect("a tick");
+                assert_eq!((x, w), (tx, tw), "{context}");
+                let tick = colors.tick(bar.state, true);
+                for x in [x + 0.5, x + w - 0.5] {
+                    let tick_px = pixel(x, y + h / 2.0);
+                    assert!(
+                        near(&tick_px, tick),
+                        "{context}: tick {tick_px:?} != {tick:?}"
+                    );
+                }
+            }
+        }
+    }
+}

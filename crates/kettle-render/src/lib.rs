@@ -1844,6 +1844,20 @@ impl Renderer {
         let scrollbar_colors = self
             .chrome_colors
             .scrollbar(theme, self.config.format.is_srgb());
+        let scale = self.scale;
+        let pane_bar = |pv: &PaneView<'_>| {
+            let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
+                || (pv.focused && overlay.scrollbar_active);
+            pane_scrollbar_geometry(
+                pv.terminal,
+                scale,
+                cfg,
+                pv.snap.screen_lines,
+                pv.snap.history_size,
+                pv.snap.display_offset,
+                interacting,
+            )
+        };
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -2132,30 +2146,21 @@ impl Renderer {
                 // logical pixels scaled to the surface DPI; input reads the
                 // same geometry and a larger invisible hit strip. The
                 // two-state look needs no fade timer or idle redraws.
-                let s = pv.snap;
-                let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
-                    || (pv.focused && overlay.scrollbar_active);
-                let bar = pane_scrollbar_geometry(
-                    pv.terminal,
-                    self.scale,
-                    cfg,
-                    s.screen_lines,
-                    s.history_size,
-                    s.display_offset,
-                    interacting,
-                );
+                let bar = pane_bar(pv);
                 if bar.channel {
-                    let (bx, ry, bar_w, rh) = bar.track_rect;
-                    let track_w = (1.5 * self.scale).clamp(1.0, bar_w);
+                    // The channel runs above and below the thumb, not under
+                    // it, so a translucent thumb shows over the background
+                    // alone, as its colour was resolved.
+                    let (x, top, w, h) = bar.track_rect;
                     let (ink, alpha) = scrollbar_colors.track(bar.state, bar.opaque);
-                    over.push(rect(
-                        bx + (bar_w - track_w) / 2.0,
-                        ry,
-                        track_w,
-                        rh,
-                        ink,
-                        alpha,
-                    ));
+                    let (gap_top, gap_bottom) = bar
+                        .thumb_rect
+                        .map_or((top + h, top + h), |(_, y, _, th)| (y, y + th));
+                    for (from, to) in [(top, gap_top), (gap_bottom, top + h)] {
+                        if to > from {
+                            over.push(rect(x, from, w, to - from, ink, alpha));
+                        }
+                    }
                 }
                 if let Some((x, y, w, h)) = bar.thumb_rect {
                     let (ink, alpha) = scrollbar_colors.thumb(bar.state, bar.opaque);
@@ -2165,8 +2170,12 @@ impl Renderer {
         }
 
         // Result ticks remain visible even when the scrollbar thumb is hidden.
+        // They lie across the bar as it is drawn, widening with it, and on a
+        // drawn channel take colours that stand out against it as well as
+        // against the background.
         for pv in panes {
-            let column = scrollbar_rest_column(pv.terminal, self.scale, cfg.scrollbar_width);
+            let bar = pane_bar(pv);
+            let column = (bar.track_rect.0, bar.track_rect.2);
             for mark in &pv.snap.command_marks {
                 if let Some([x, y, w, h]) = kettle_core::scrollbar::command_tick_rect(
                     pv.terminal,
@@ -2176,7 +2185,12 @@ impl Renderer {
                     pv.snap.history_size + pv.snap.screen_lines,
                     *mark,
                 ) {
-                    let color = theme.palette[if mark.exit_code == 0 { 2 } else { 1 }];
+                    let success = mark.exit_code == 0;
+                    let color = if bar.channel {
+                        scrollbar_colors.tick(bar.state, success)
+                    } else {
+                        theme.palette[if success { 2 } else { 1 }]
+                    };
                     over.push(rect(x, y, w, h, color, 1.0));
                 }
             }
@@ -6304,6 +6318,9 @@ mod search_bar_tests;
 
 #[cfg(test)]
 mod chrome_contrast_sweep_tests;
+
+#[cfg(test)]
+mod scrollbar_tests;
 
 #[cfg(test)]
 mod completion_panel_tests;
