@@ -273,6 +273,7 @@ fn menu_panel(items: &[ContextMenuItem], hint: &str) -> kettle_render::ContextMe
         panel_h_clamped: 600.0,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     }
 }
 

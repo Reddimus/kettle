@@ -377,6 +377,55 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
     }
 }
 
+/// A scrolling picker paints whole rows down to its bottom edge: it has no
+/// arrow strips, and its height is whole rows, so no blank part-row is left
+/// under the selection, and a long list paints all eight rows. The last
+/// painted row takes a click.
+#[test]
+fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
+    let names: Vec<String> = (0..30).map(|i| format!("layout {i}")).collect();
+    for surface in [(1280.0, 820.0), (800.0, 600.0), (640.0, 360.0), (800.0, 200.0)] {
+        for cell in [(8.0, 16.0), (16.0, 34.0)] {
+            for total in [3, 8, 9, 30] {
+                let menu = picker_context_menu(
+                    layout_picker_list("", 0, &names[..total], &EN_TEXT),
+                    surface,
+                    cell,
+                    32.0,
+                )
+                .unwrap();
+                let row_h = kettle_render::menu::row_height(cell.1);
+                let (_, content_h) =
+                    kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+                let painted = (content_h / row_h).floor();
+                let what = format!("{surface:?} {cell:?} {total} rows");
+                assert!(
+                    content_h - painted * row_h < 0.5,
+                    "{what}: {:.1}px of blank part-row",
+                    content_h - painted * row_h
+                );
+                let room = surface.1 - menu.anchor.1 - 16.0;
+                if room >= 8.0 * row_h {
+                    assert!(painted as usize >= total.min(8), "{what}: {painted} painted");
+                }
+                let last = menu.scroll_offset + painted as usize - 1;
+                let rect = menu.visible_row_rect(last).expect("last painted row");
+                let mut ws = WindowState::new(0, Mux::new());
+                ws.layout_picker_input = Some((Default::default(), 0));
+                ws.cursor.x = f64::from(rect.0 + 10.0);
+                ws.cursor.y = f64::from(rect.1 + rect.3 - 2.0);
+                assert!(super::apply_picker_pointer(
+                    &mut ws,
+                    &menu,
+                    cell.1,
+                    super::PickerPointer::Press
+                ));
+                assert_eq!(ws.layout_picker_input.as_ref().unwrap().1, last, "{what}");
+            }
+        }
+    }
+}
+
 /// A long picker list fills its panel: the first row sits right under the
 /// query header, all eight rows are painted and hit, and paint, pointer and
 /// accessibility agree on every row. A short window still shows a row.

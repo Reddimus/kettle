@@ -39,6 +39,7 @@ fn picker(rows: usize, scroll_offset: usize) -> ContextMenu {
         panel_w_clamped: 448.0,
         panel_h_clamped: rows.min(8) as f32 * row_h,
         a11y_label: None,
+        picker_footer: None,
     }
 }
 

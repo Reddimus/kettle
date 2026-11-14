@@ -380,6 +380,7 @@ fn painted_panel(items: &[ContextMenuItem], anchor: (f32, f32)) -> ContextMenu {
         .collect();
     ContextMenu {
         picker_header_height: 0.0,
+        picker_footer: None,
         anchor,
         rows,
         highlight: items.iter().position(item_is_dispatchable).unwrap_or(0),

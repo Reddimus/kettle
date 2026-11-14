@@ -8,6 +8,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Settings › Appearance has a Minimum contrast row after Theme, for
+  `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
+  config, such as 2.5, shows as it is until you step it.
+
+- The theme picker shows more under its list. A sample card draws the
+  highlighted theme as the terminal would: a prompt, an `ls -l` listing, a
+  diff and all 16 palette colours, with your colour overrides and
+  `minimum-contrast` applied. Its last line gives the contrast of the
+  theme's text and of its least readable colour, with that colour's swatch,
+  and marks a colour below 3:1. A status line says whether the theme
+  follows the system, a schedule, a forced side or is fixed, names the dark
+  and the light theme and marks the side a pick saves to, and has a
+  Contrast button that steps `minimum-contrast` through Off, 3:1, 4.5:1
+  and 7:1. The list now shows up to 14 rows when the window has room; on a
+  short window the card goes first.
+
+- The theme picker can change the theme for the appearance you are not in.
+  Click the other side's name on its status line, such as "Light:" while
+  the system is dark: the list moves to that theme, the window previews your
+  picks, and Enter (the hint reads "save for light appearance") writes only
+  `light-theme` and puts the window back on its dark theme. Screen readers
+  offer both sides as radio buttons. Tab or Shift+Tab switches to the other
+  side too (the hint reads "Tab: light theme"), while the arrows keep moving
+  rows; with a fixed theme, which has no sides, Tab moves down a row and
+  Shift+Tab now moves up one.
+
 - A searchable list of every keyboard shortcut. Choose Help > Keyboard
   Shortcuts on macOS, Keyboard shortcuts in the new-tab ▾ menu, or "Show
   keyboard shortcuts" in the command palette: the palette opens listing only
@@ -617,6 +643,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - In a top or bottom tab bar, tab activity marks in several light themes,
   and the Silent mark in TokyoNight Night, fell below 3:1 contrast.
   Vertical tabs keep the old dots until 6.1.
+
+- When the config file is saved while the theme picker previews a theme,
+  such as by the picker's Contrast button or an edit in another app, the
+  reload puts the preview back at once, so the window no longer briefly
+  shows the saved theme under the picker.
+
+- A scrolling picker (the command palette, theme, layout and SSH pickers) no
+  longer leaves a blank part-row under its last result. It used to paint six
+  whole rows in room for eight; it now paints eight, and the last row it
+  paints takes a click.
 
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the

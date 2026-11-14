@@ -183,22 +183,18 @@ impl App {
             })
         } else {
             field_hit
-                || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-                    .and_then(|list| {
-                        picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
-                    })
-                    .is_some_and(|menu| {
-                        rect_contains(
-                            (
-                                menu.anchor.0,
-                                menu.anchor.1,
-                                menu.panel_w_clamped,
-                                menu.panel_h_clamped,
-                            ),
-                            x,
-                            y,
-                        )
-                    })
+                || open_picker_list(
+                    ws,
+                    &self.cfg,
+                    self.theme_picker_key_for(ws),
+                    &self.ui_text,
+                    self.update_notice().as_ref(),
+                )
+                .and_then(|list| {
+                    picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
+                })
+                // The whole card, the theme picker's footer included.
+                .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
     }
@@ -222,7 +218,7 @@ impl App {
         let prefix = if ws.palette_input.is_some() {
             "  \u{2318} ".to_string()
         } else if ws.theme_picker_input.is_some() {
-            theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)
+            theme_picker_appearance_prefix(self.theme_picker_key_for(ws), &self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
             rect = kettle_render::settings_value_rect(
@@ -280,6 +276,8 @@ impl App {
                 .is_some_and(|nav| nav.search_focused)
         {
             use kettle_i18n::Text as T;
+            let theme_hints =
+                theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true);
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
                 &[
                     ("Enter", T::PickerHintRun),
@@ -287,11 +285,7 @@ impl App {
                     ("Esc", T::PickerHintCancel),
                 ]
             } else if ws.theme_picker_input.is_some() {
-                &[
-                    ("Enter", T::PickerHintKeep),
-                    ("↑↓", T::PickerHintSelect),
-                    ("Esc", T::PickerHintRestore),
-                ]
+                &theme_hints
             } else if ws.layout_picker_input.is_some() {
                 &[
                     ("Enter", T::PickerHintSpawn),
@@ -332,6 +326,16 @@ impl App {
             },
         };
         let cw = self.modal_field_cell_width(ws, &field);
+        // The theme picker's Tab hint is the first part to go in a narrow header.
+        if ws.theme_picker_input.is_some() && !field.hint.is_empty() {
+            field.hint = theme_picker_header_hint(
+                &field,
+                cw,
+                &self.ui_text,
+                self.theme_picker_key_for(ws),
+                self.theme_pick_key(),
+            );
+        }
         let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
             &field.text,
@@ -2177,6 +2181,44 @@ impl App {
         }
     }
 
+    /// Edit `slot`'s theme in the open theme picker (see
+    /// `switch_theme_picker_slot`) and preview it now: a screen reader's
+    /// click arrives as a user event, which skips `window_event`'s preview
+    /// sync.
+    pub(super) fn switch_theme_slot(
+        &mut self,
+        ws: &mut WindowState,
+        slot: kettle_render::ThemeSlot,
+    ) {
+        let active = self.theme_pick_key();
+        let Some(state) = ws.theme_picker_input.as_mut() else {
+            return;
+        };
+        if switch_theme_picker_slot(state, &self.cfg, active, slot, &self.ui_text) {
+            self.sync_theme_preview(ws);
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// The theme picker's contrast button: step `minimum-contrast` to the
+    /// next listed ratio and save it, as the Settings row does. It is not part
+    /// of the picker's preview, so Esc leaves it as set.
+    pub(super) fn step_picker_contrast(&mut self, ws: &mut WindowState) {
+        let next = kettle_render::step_minimum_contrast(self.cfg.minimum_contrast, true);
+        self.settings_store(
+            ws,
+            "minimum-contrast",
+            kettle_render::minimum_contrast_token(next),
+        );
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// Persist `new_val` for `key_str` from Settings, with the companion keys
     /// and restart notes some settings need, then reload.
     fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
@@ -2502,6 +2544,7 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
+        let save_key = self.theme_picker_key_for(ws);
         let Some(state) = ws.theme_picker_input.as_mut() else {
             return;
         };
@@ -2526,7 +2569,7 @@ impl App {
                 crate::modal_input::backspace(&mut state.query);
                 state.selected = 0;
             }
-            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+            Key::Named(NamedKey::ArrowDown) => {
                 let n = count(state);
                 step(state, true, n);
             }
@@ -2534,6 +2577,14 @@ impl App {
                 let n = count(state);
                 step(state, false, n);
             }
+            // Tab switches sides when the picker has them (see `theme_picker_tab`).
+            Key::Named(NamedKey::Tab) => match theme_picker_tab(save_key, ws.mods.shift_key()) {
+                ThemePickerTab::Side(slot) => self.switch_theme_slot(ws, slot),
+                ThemePickerTab::Row { forward } => {
+                    let n = count(state);
+                    step(state, forward, n);
+                }
+            },
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && ws.mods.control_key()
@@ -2545,9 +2596,10 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 let pick = theme_picker_selection(state, &self.ui_text);
+                let plan = theme_commit_plan(state, &self.cfg, self.theme_active_dark());
                 ws.theme_picker_input = None;
                 if let Some(name) = pick {
-                    self.commit_theme(ws, name);
+                    self.commit_theme(ws, name, plan);
                 }
             }
             Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
@@ -2568,18 +2620,26 @@ impl App {
         }
     }
 
-    /// Keep `name` as the theme. Dropping the preview's baseline makes the
-    /// post-event `sync_theme_preview` keep this pick instead of restoring the
-    /// theme the picker opened on.
-    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
-        ws.theme_preview = None;
-        let key = self.theme_pick_key();
+    /// Save `name` under `plan.key`. A pick for the side the window wears
+    /// is kept: dropping the preview's baseline makes the post-event
+    /// `sync_theme_preview` keep it instead of restoring the theme the picker
+    /// opened on. A pick for the other side is only saved, and the baseline
+    /// puts the window back on the theme it wore.
+    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str, plan: ThemeCommitPlan) {
+        let key = plan.key;
         match key {
             "light-theme" => self.cfg.light_theme = name.to_string(),
             "dark-theme" => self.cfg.dark_theme = name.to_string(),
             _ => {}
         }
-        self.set_runtime_theme_name(ws, name);
+        if !plan.restore_active {
+            ws.theme_preview = None;
+            self.set_runtime_theme_name(ws, name);
+        } else {
+            // Put the window's theme back now, not at the next window event:
+            // Enter can come from a control or remote command.
+            self.sync_theme_preview(ws);
+        }
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time
         // default on restore, so neither a default change nor a fresh-config

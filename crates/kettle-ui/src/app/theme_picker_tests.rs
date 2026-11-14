@@ -16,6 +16,7 @@ fn state(query: &str, selected: usize, opened_on: &str) -> ThemePickerState {
         query: query.into(),
         selected,
         opened_on: opened_on.to_string(),
+        slot: None,
     }
 }
 
@@ -232,15 +233,15 @@ fn closing_a_modal_ends_its_composition() {
         .expect("the control plane stops when its modal closes");
     assert!(dispatch.contains("end_modal_composition(ws);"));
     // Holding the Enter that opened the picker from Settings must not
-    // pick a theme: its repeats are gated like the palette's.
+    // pick a theme, nor a held Tab flip between the sides: their repeats
+    // are gated.
     let branch = src
-        .split(
-            "if ws.theme_picker_input.is_some() {\n                    if !modal_repeat_is_inert(",
-        )
+        .split("if ws.theme_picker_input.is_some() {\n                    let sides = ")
         .nth(1)
         .and_then(|rest| rest.split("return;").next())
         .expect("the theme picker's key branch gates repeats");
-    assert!(branch.contains("ModalRepeat::Palette,"));
+    assert!(branch.contains("self.theme_picker_key_for(ws) != \"theme\";"));
+    assert!(branch.contains("ModalRepeat::ThemePicker { sides },"));
     assert!(branch.contains("self.theme_picker_key(ws, &event.logical_key, text);"));
 }
 
@@ -415,7 +416,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     let cell = (8.0, 16.0);
     let project = |ws: &WindowState| {
         picker_context_menu(
-            open_picker_list(ws, &cfg, &ES, None).unwrap(),
+            open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
             surface,
             cell,
             0.0,
@@ -490,7 +491,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
             PickerPointer::Press
         ));
         assert!(
-            open_picker_list(&ws, &cfg, &ES, None).is_some(),
+            open_picker_list(&ws, &cfg, "dark-theme", &ES, None).is_some(),
             "picker stays open"
         );
         assert!(ws.context_menu.is_none());
@@ -573,7 +574,7 @@ fn picker_result_presses_select_the_visible_row() {
         }
         let project = |ws: &WindowState| {
             picker_context_menu(
-                open_picker_list(ws, &cfg, &ES, None).unwrap(),
+                open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
                 (800.0, 600.0),
                 (8.0, 16.0),
                 0.0,
@@ -680,7 +681,15 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
         .split("fn ssh_key(")
         .next()
         .unwrap();
-    assert!(commit.contains("let key = self.theme_pick_key();"));
+    assert!(commit.contains("let key = plan.key;"));
+    let enter = source
+        .split("fn theme_picker_key(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_theme(")
+        .next()
+        .unwrap();
+    assert!(enter.contains("theme_commit_plan(state, &self.cfg, self.theme_active_dark())"));
     assert!(commit.contains("self.persist_pref(key, name)"));
     assert!(commit.contains("self.cfg.light_theme = name.to_string()"));
     assert!(commit.contains("self.cfg.dark_theme = name.to_string()"));
@@ -701,6 +710,69 @@ fn theme_pick_persists_the_active_side_independently_of_preview_lightness() {
         .next()
         .unwrap();
     assert!(store.contains("self.persist_pref(key_str, &new_val)"));
+}
+
+/// A schedule picks the side the window wears whatever `theme-mode` says,
+/// so a pick saves to that side's key in every mode: a fixed theme or a
+/// forced side under a schedule would otherwise write a key the schedule
+/// overrides, and the pick would be lost. The status line then checks the
+/// worn side, marks it, and Enter keeps the pick.
+#[test]
+fn a_scheduled_pick_saves_to_the_side_the_schedule_wears_in_every_mode() {
+    use kettle_config::ThemeMode;
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config {
+        theme_schedule: kettle_config::parse_theme_schedule("19:00 dark,07:00 light"),
+        ..Default::default()
+    };
+    assert!(cfg.theme_schedule.is_some());
+    for mode in [
+        ThemeMode::Explicit,
+        ThemeMode::Light,
+        ThemeMode::Dark,
+        ThemeMode::Auto,
+    ] {
+        cfg.theme_mode = mode;
+        for (dark, key, slot) in [
+            (false, "light-theme", ThemeSlot::Light),
+            (true, "dark-theme", ThemeSlot::Dark),
+        ] {
+            assert_eq!(super::theme_pick_key(&cfg, Some(dark)), key, "{mode:?}");
+            let picker = state("", 0, "TokyoNight Night");
+            let save = super::theme_picker_save_key(Some(&picker), key);
+            assert_eq!(save, key, "{mode:?}");
+            assert_eq!(
+                super::theme_commit_plan(&picker, &cfg, Some(dark)),
+                super::ThemeCommitPlan {
+                    key,
+                    restore_active: false
+                },
+                "{mode:?}"
+            );
+            assert_eq!(
+                super::theme_picker_enter_hint(save, key),
+                kettle_i18n::Text::PickerHintKeep
+            );
+            let footer = super::theme_picker_footer(&picker, &cfg, save, &EN);
+            assert_eq!(footer.editing, Some(slot), "{mode:?}");
+            let slots = kettle_render::theme_footer_slots(&footer, &EN);
+            assert_eq!(slots.len(), 2);
+            for (side, _, checked) in slots {
+                assert_eq!(checked, side == slot, "{mode:?} {side:?}");
+            }
+            // The other side, chosen on the status line, saves its own key
+            // and puts the window back on the side the schedule wears.
+            let mut other = picker.clone();
+            other.slot = Some(match slot {
+                ThemeSlot::Dark => ThemeSlot::Light,
+                ThemeSlot::Light => ThemeSlot::Dark,
+            });
+            let plan = super::theme_commit_plan(&other, &cfg, Some(dark));
+            assert_ne!(plan.key, key, "{mode:?}");
+            assert_ne!(plan.key, "theme", "{mode:?}");
+            assert!(plan.restore_active, "{mode:?}");
+        }
+    }
 }
 
 #[test]
@@ -733,7 +805,9 @@ fn theme_picker_side_header_is_localized_and_shared_with_geometry() {
     assert!(super::theme_picker_appearance_prefix("light-theme", &ES).contains("tema claro:"));
     let source = production_source();
     assert!(
-        source.contains("theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)")
+        source.contains(
+            "theme_picker_appearance_prefix(self.theme_picker_key_for(ws), &self.ui_text)"
+        )
     );
 }
 
@@ -975,4 +1049,906 @@ fn swatches_leave_the_accessible_rows_unchanged() {
         );
         assert_eq!(with, read(true), "{surface:?}");
     }
+}
+
+/// The footer says what decides the theme: a schedule when one is set (it
+/// overrides following the system), the system otherwise, and the side a
+/// pick saves to is the one `theme_key` names.
+#[test]
+fn the_theme_picker_footer_names_the_schedule_over_the_system() {
+    use kettle_render::{ThemeFollow, ThemeSlot};
+    let picker = state("", 0, "TokyoNight Night");
+    let mut cfg = kettle_config::Config::default();
+    let footer = super::theme_picker_footer(&picker, &cfg, "dark-theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::System);
+    assert_eq!(footer.editing, Some(ThemeSlot::Dark));
+    assert_eq!(footer.dark_theme, cfg.dark_theme);
+    assert_eq!(footer.light_theme, cfg.light_theme);
+    cfg.theme_schedule = kettle_config::parse_theme_schedule("19:00 dark,07:00 light");
+    assert!(cfg.theme_schedule.is_some());
+    let footer = super::theme_picker_footer(&picker, &cfg, "light-theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::Schedule);
+    assert_eq!(footer.editing, Some(ThemeSlot::Light));
+    cfg.theme_schedule = None;
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let footer = super::theme_picker_footer(&picker, &cfg, "theme", &EN);
+    assert_eq!(footer.follow, ThemeFollow::Fixed);
+    assert_eq!(footer.editing, None);
+    assert_eq!(footer.fixed_theme, "TokyoNight Night");
+}
+
+/// The footer's sample is the highlighted theme with the user's colour
+/// overrides, so moving the selection changes the card's colours.
+#[test]
+fn the_theme_picker_sample_follows_the_selection_with_overrides() {
+    let cfg = kettle_config::Config::parse_text("palette = 4=#123456\n");
+    let first = super::theme_picker_footer(
+        &state("dracula", 0, "TokyoNight Night"),
+        &cfg,
+        "dark-theme",
+        &EN,
+    );
+    let second = super::theme_picker_footer(
+        &state("nord", 0, "TokyoNight Night"),
+        &cfg,
+        "dark-theme",
+        &EN,
+    );
+    assert_ne!(first.sample.background, second.sample.background);
+    for footer in [&first, &second] {
+        assert_eq!(
+            footer.sample.palette[4],
+            kettle_config::Rgb::parse("#123456").unwrap()
+        );
+    }
+}
+
+/// On a 1280x820 window at 1x and 2x, in English and Spanish, the theme
+/// picker shows its sample card and both status lines and still paints at
+/// least 12 whole rows, while the command palette keeps 8. The card's top
+/// edge lies under the last painted row, and the whole card, footer
+/// included, is the picker's.
+#[test]
+fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
+    use super::{command_picker_list, open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config::default();
+    for (cell, top) in [((8.4, 17.0), 32.0), ((16.8, 34.0), 64.0)] {
+        let scale = cell.0 / 8.4;
+        let surface = (1280.0 * scale, 820.0 * scale);
+        let row_h = kettle_render::menu::row_height(cell.1);
+        for tr in [&EN, &ES] {
+            let mut ws = WindowState::new(0, Mux::new());
+            ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+            let list = open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
+            let menu = picker_context_menu(list, surface, cell, top).unwrap();
+            let footer = menu.picker_footer.as_ref().expect("a footer");
+            assert!(footer.show_sample, "{scale}x: card");
+            assert_eq!(footer.status_lines, 2, "{scale}x");
+            let (_, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+            let painted = (content_h / row_h + 0.001).floor() as usize;
+            assert!(painted >= 12, "{scale}x: {painted} rows");
+            assert!(painted <= 14, "{scale}x: {painted} rows");
+            assert!(
+                (content_h - painted as f32 * row_h).abs() < 0.5,
+                "{scale}x: no blank part-row"
+            );
+            let card = menu.card_rect();
+            assert!(
+                card.1 + card.3 <= surface.1 - 0.0,
+                "{scale}x: the card fits"
+            );
+            let layout = menu.picker_footer_layout(tr, cell).unwrap();
+            assert!(layout.rect.1 >= menu.anchor.1 + menu.panel_h_clamped - 0.01);
+            assert!((layout.rect.1 + layout.rect.3 - (card.1 + card.3)).abs() < 0.01);
+            assert!(layout.contrast_button.is_some(), "{scale}x");
+        }
+        let palette = picker_context_menu(
+            command_picker_list(
+                "",
+                0,
+                &kettle_config::keybinds::defaults(),
+                &EN,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            ),
+            surface,
+            cell,
+            top,
+        )
+        .unwrap();
+        assert!(palette.picker_footer.is_none());
+        let (_, content_h) = kettle_render::menu::picker_scroll_content(palette.panel_h_clamped);
+        assert_eq!(
+            (content_h / row_h + 0.001).floor() as usize,
+            8,
+            "{scale}x palette"
+        );
+    }
+}
+
+/// A short window drops the sample card first, then a status line, and the
+/// list keeps at least four rows; a window of 600 pixels already shows the
+/// card.
+#[test]
+fn a_short_window_drops_the_theme_sample_before_the_rows() {
+    use super::{open_picker_list, picker_context_menu};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    let row_h = kettle_render::menu::row_height(cell.1);
+    let mut seen = std::collections::BTreeSet::new();
+    for height in (220..=820).step_by(20) {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let list = open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap();
+        let Some(menu) = picker_context_menu(list, (1280.0, height as f32), cell, 32.0) else {
+            continue;
+        };
+        let (_, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+        let painted = (content_h / row_h + 0.001).floor() as usize;
+        let parts = menu.picker_footer.as_ref().map_or((false, 0), |footer| {
+            (footer.show_sample, footer.status_lines)
+        });
+        if parts.1 > 0 {
+            assert!(painted >= 4, "{height}: footer with {painted} rows");
+        }
+        if height >= 600 {
+            assert!(parts.0, "{height}: no sample card");
+        }
+        let card = menu.card_rect();
+        assert!(card.1 + card.3 <= height as f32 + 0.01, "{height}");
+        seen.insert(parts);
+    }
+    assert!(seen.contains(&(true, 2)), "{seen:?}");
+    assert!(
+        seen.contains(&(false, 2)) || seen.contains(&(false, 1)),
+        "{seen:?}"
+    );
+}
+
+/// A press on the contrast button steps the setting; a press elsewhere on
+/// the footer stays in the picker; the rows are not the footer's. The
+/// pointer path saves the step through the Settings store.
+#[test]
+fn the_contrast_button_takes_its_press_and_saves_through_settings() {
+    use super::{FooterPress, open_picker_list, picker_context_menu, theme_footer_press};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+    let menu = picker_context_menu(
+        open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap(),
+        (1280.0, 820.0),
+        cell,
+        32.0,
+    )
+    .unwrap();
+    let layout = menu.picker_footer_layout(&EN, cell).unwrap();
+    let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+    let (bx, by, bw, bh) = layout.contrast_button.unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(bx + bw * 0.5, by + bh * 0.5)),
+        Some(FooterPress::Contrast)
+    );
+    let (cx, cy, _, _) = layout.card.unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(cx + 4.0, cy + 4.0)),
+        Some(FooterPress::Footer)
+    );
+    let row = menu.visible_row_rect(0).unwrap();
+    assert_eq!(
+        theme_footer_press(&menu, &EN, cell, at(row.0 + 4.0, row.1 + 4.0)),
+        None
+    );
+    let src = production_source();
+    let pointer = src
+        .split("fn picker_pointer(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(pointer.contains("self.step_picker_contrast(ws)"));
+    let step = src
+        .split("fn step_picker_contrast(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(step.contains("\"minimum-contrast\""));
+    assert!(step.contains("self.settings_store("));
+    // A press anywhere on the card counts as inside the picker.
+    let target = src
+        .split("fn modal_press_target(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(target.contains("rect_contains(menu.card_rect(), x, y)"));
+}
+
+/// A screen reader hears the footer as one line: the readout with the
+/// lowest colour's number, the mode, both sides and the contrast setting,
+/// inside the picker's dialog.
+#[test]
+fn the_theme_picker_footer_has_an_accessible_text() {
+    let cfg = kettle_config::Config::default();
+    for tr in [&EN, &ES] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let list = super::open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
+        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), 32.0).unwrap();
+        let overlay = kettle_render::Overlay {
+            theme_picker_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection =
+            modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.0), 1.0, tr);
+        let labels: Vec<String> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::Label)
+            .filter_map(|(_, node)| node.label().map(str::to_string))
+            .collect();
+        let text = labels
+            .iter()
+            .find(|label| label.contains(tr.text(kettle_i18n::Text::PickerThemeDarkSlot)))
+            .unwrap_or_else(|| panic!("no footer text in {labels:?}"));
+        assert!(
+            text.contains("TokyoNight Night") && text.contains("Kettle Day"),
+            "{text}"
+        );
+        assert!(
+            text.contains(tr.text(kettle_i18n::Text::SettingsValueFollowSystem)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&kettle_render::contrast_button_text(0.0, tr)),
+            "{text}"
+        );
+    }
+}
+
+/// Following a dark system, choosing the light side on the status line opens
+/// the list on the light theme, ticks and highlights it, and makes Enter save
+/// `light-theme` and put the window back on its dark theme. Choosing the
+/// dark side again saves and keeps the pick as before. A fixed theme has no
+/// sides, so `theme` is saved whatever was chosen.
+#[test]
+fn choosing_the_light_side_saves_light_theme_and_keeps_the_dark_one_on() {
+    use super::{ThemeCommitPlan, switch_theme_picker_slot, theme_commit_plan};
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config::default();
+    assert_eq!(cfg.theme_mode, kettle_config::ThemeMode::Auto);
+    assert_ne!(cfg.light_theme, cfg.dark_theme);
+    let dark = Some(true);
+    let mut picker = state("", 0, &cfg.dark_theme.clone());
+    picker.selected = theme_picker_start(&cfg.dark_theme);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "dark-theme",
+            restore_active: false
+        }
+    );
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(picker.slot, Some(ThemeSlot::Light));
+    assert_eq!(picker.opened_on, cfg.light_theme);
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.light_theme.as_str())
+    );
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "light-theme",
+            restore_active: true
+        }
+    );
+    assert!(!switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    // The status line and the hint follow the chosen side.
+    let key = super::theme_picker_save_key(Some(&picker), "dark-theme");
+    assert_eq!(key, "light-theme");
+    let footer = super::theme_picker_footer(&picker, &cfg, key, &EN);
+    assert_eq!(footer.editing, Some(ThemeSlot::Light));
+    assert_eq!(
+        super::theme_picker_enter_hint(key, "dark-theme"),
+        kettle_i18n::Text::PickerHintSaveForLight
+    );
+    assert_eq!(
+        super::theme_picker_enter_hint("dark-theme", "dark-theme"),
+        kettle_i18n::Text::PickerHintKeep
+    );
+    // The longer Enter hint still leaves the query its room in the
+    // narrowest header (the header drops a hint that does not fit beside
+    // the query), in Spanish, at 1x and 2x; the painter and the projection
+    // (IME, hit test and screen reader) build the same hint.
+    for tr in [&EN, &ES] {
+        for (cw, width) in [(8.4, 360.0), (16.8, 720.0), (8.4, 720.0)] {
+            let field = kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: String::new(),
+                text: "Tokyo".into(),
+                cursor_byte: 5,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, width, 32.0),
+                prefix: super::theme_picker_appearance_prefix(key, tr),
+                hint: super::picker_hint(tr, &super::theme_picker_hints(key, "dark-theme", true)),
+                accent_palette: 5,
+            };
+            let field = kettle_render::TextFieldOverlay {
+                hint: super::theme_picker_header_hint(&field, cw, tr, key, "dark-theme"),
+                ..field
+            };
+            let [prefix, editor, hint] = kettle_render::text_field_rects(&field, cw);
+            assert!(editor.2 >= 6.0 * cw, "{width} {cw}: {editor:?}");
+            assert!(prefix.0 + prefix.2 <= editor.0 + 0.01);
+            assert!(editor.0 + editor.2 <= hint.0 + 0.01);
+            assert!(hint.0 + hint.2 <= width + 0.01);
+        }
+    }
+    let source = production_source();
+    for builder in ["fn modal_text_projection(", "fn overlay("] {
+        let body = source.split(builder).nth(1).unwrap();
+        let body = body.split("\n    }\n").next().unwrap();
+        assert!(
+            body.contains(
+                "theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true)"
+            ),
+            "{builder}"
+        );
+    }
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker.opened_on, cfg.dark_theme);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "dark-theme",
+            restore_active: false
+        }
+    );
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    picker.slot = Some(ThemeSlot::Light);
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, dark),
+        ThemeCommitPlan {
+            key: "theme",
+            restore_active: false
+        }
+    );
+}
+
+/// A query typed for one side does not survive a switch to the other: the
+/// list moves to that side's theme, so Enter cannot save a match from the
+/// query, an unrelated theme, for the new side. The side the picker already
+/// saves to keeps the query and the highlighted row, and a fixed theme has
+/// no sides to switch to.
+#[test]
+fn switching_sides_clears_the_query_and_opens_on_that_sides_theme() {
+    use super::{switch_theme_picker_slot, theme_commit_plan};
+    use kettle_render::ThemeSlot;
+    let mut cfg = kettle_config::Config::default();
+    let mut picker = state("dracula", 0, &cfg.dark_theme.clone());
+    assert_eq!(theme_picker_selection(&picker, &EN), Some("Dracula"));
+    // The side it saves to already: nothing changes.
+    let before = picker.clone();
+    assert!(!switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker, before);
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(picker.query.text(), "");
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.light_theme.as_str())
+    );
+    let plan = theme_commit_plan(&picker, &cfg, Some(true));
+    assert_eq!(plan.key, "light-theme");
+    // Back to the dark side with a new query: it clears again.
+    picker.query = "nord".into();
+    assert!(switch_theme_picker_slot(
+        &mut picker,
+        &cfg,
+        "dark-theme",
+        ThemeSlot::Dark,
+        &EN
+    ));
+    assert_eq!(picker.query.text(), "");
+    assert_eq!(
+        theme_picker_selection(&picker, &EN),
+        Some(cfg.dark_theme.as_str())
+    );
+    cfg.theme_mode = kettle_config::ThemeMode::Explicit;
+    let mut fixed = state("dracula", 0, "TokyoNight Night");
+    let before = fixed.clone();
+    assert!(!switch_theme_picker_slot(
+        &mut fixed,
+        &cfg,
+        "theme",
+        ThemeSlot::Light,
+        &EN
+    ));
+    assert_eq!(fixed, before);
+}
+
+/// A screen reader finds the Contrast button as a button over its painted
+/// words and rect, and its click steps `minimum-contrast` as a press does.
+/// The two sides form one radio group; a fixed theme has no sides and no
+/// group. No footer node shares an id with another node or with a row.
+#[test]
+fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
+    use super::{open_picker_list, picker_context_menu};
+    let cell = (8.4, 17.0);
+    for (mode, key) in [
+        (kettle_config::ThemeMode::Auto, "dark-theme"),
+        (kettle_config::ThemeMode::Explicit, "theme"),
+    ] {
+        let cfg = kettle_config::Config {
+            theme_mode: mode,
+            minimum_contrast: 4.5,
+            ..Default::default()
+        };
+        for tr in [&EN, &ES] {
+            let mut ws = WindowState::new(0, Mux::new());
+            ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+            let menu = picker_context_menu(
+                open_picker_list(&ws, &cfg, key, tr, None).unwrap(),
+                (1280.0, 820.0),
+                cell,
+                32.0,
+            )
+            .unwrap();
+            let layout = menu.picker_footer_layout(tr, cell).unwrap();
+            let painted = layout.contrast_button.expect("the button fits");
+            let overlay = kettle_render::Overlay {
+                theme_picker_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            };
+            let projection =
+                modal_accessibility_projection(&overlay, (1280.0, 820.0), cell, 1.0, tr);
+            let role = |role| {
+                projection
+                    .nodes
+                    .iter()
+                    .filter(move |(_, node)| node.role() == role)
+                    .collect::<Vec<_>>()
+            };
+            let buttons = role(accesskit::Role::Button);
+            assert_eq!(buttons.len(), 1, "{mode:?}");
+            let (id, button) = buttons[0];
+            assert!(super::accessibility_theme_contrast(*id));
+            assert_eq!(
+                button.label(),
+                Some(kettle_render::contrast_button_text(4.5, tr).as_str())
+            );
+            assert!(button.supports_action(accesskit::Action::Click));
+            let bounds = button.bounds().unwrap();
+            assert_eq!(bounds.x0, f64::from(painted.0));
+            assert_eq!(bounds.y0, f64::from(painted.1));
+            assert_eq!(bounds.x1, f64::from(painted.0 + painted.2));
+            assert_eq!(bounds.y1, f64::from(painted.1 + painted.3));
+            let dialog = role(accesskit::Role::Dialog);
+            assert!(dialog[0].1.children().contains(id));
+            let groups = role(accesskit::Role::RadioGroup);
+            let radios = role(accesskit::Role::RadioButton);
+            if key == "theme" {
+                assert!(groups.is_empty() && radios.is_empty());
+            } else {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(
+                    groups[0].1.children(),
+                    radios.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    groups[0].1.label(),
+                    Some(kettle_render::theme_follow_label(
+                        kettle_render::ThemeFollow::System,
+                        tr
+                    ))
+                );
+            }
+            let mut ids: Vec<_> = projection.nodes.iter().map(|(id, _)| id.0).collect();
+            let all = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), all, "every node id is unique");
+        }
+    }
+    // Every bundled theme's row index stays below the lowest footer node.
+    let themes = Theme::look_order(true).len() + Theme::look_order(false).len();
+    assert!(themes + 3 < super::PICKER_CONTRAST_A11Y_INDEX);
+    const { assert!(super::PICKER_CONTRAST_A11Y_INDEX < super::PICKER_FOOTER_A11Y_INDEX) };
+    let src = production_source();
+    let action = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    let contrast = action
+        .split("accessibility_theme_contrast(request.target_node)")
+        .nth(1)
+        .expect("the Contrast button takes a click")
+        .split("return;")
+        .next()
+        .unwrap();
+    assert!(contrast.contains("self.step_picker_contrast(ws);"));
+}
+
+/// In a picker with sides, Tab and Shift+Tab both switch to the other side,
+/// as a click on it would: with the system or a schedule, and in every mode
+/// a schedule overrides. The hint names the side Tab goes to. The arrows
+/// keep moving rows, and the control plane's `tab` and `shift+tab` reach the
+/// same handler.
+#[test]
+fn tab_and_shift_tab_switch_sides_when_the_picker_has_them() {
+    use super::{ThemePickerTab, switch_theme_picker_slot, theme_pick_key, theme_picker_tab};
+    use kettle_render::ThemeSlot;
+    for shift in [false, true] {
+        assert_eq!(
+            theme_picker_tab("dark-theme", shift),
+            ThemePickerTab::Side(ThemeSlot::Light)
+        );
+        assert_eq!(
+            theme_picker_tab("light-theme", shift),
+            ThemePickerTab::Side(ThemeSlot::Dark)
+        );
+    }
+    // A fixed theme with a schedule still has sides, and Tab toggles them.
+    let cfg = kettle_config::Config {
+        theme_mode: kettle_config::ThemeMode::Explicit,
+        theme_schedule: kettle_config::parse_theme_schedule("19:00 dark,07:00 light"),
+        ..Default::default()
+    };
+    let active = theme_pick_key(&cfg, Some(false));
+    assert_eq!(active, "light-theme");
+    let mut picker = state("", 0, &cfg.light_theme.clone());
+    for (shift, to) in [
+        (false, ThemeSlot::Dark),
+        (true, ThemeSlot::Light),
+        (true, ThemeSlot::Dark),
+        (false, ThemeSlot::Light),
+    ] {
+        let save = super::theme_picker_save_key(Some(&picker), active);
+        let ThemePickerTab::Side(slot) = theme_picker_tab(save, shift) else {
+            panic!("{save} has sides");
+        };
+        assert_eq!(slot, to);
+        assert!(switch_theme_picker_slot(
+            &mut picker,
+            &cfg,
+            active,
+            slot,
+            &EN
+        ));
+        assert_eq!(
+            super::theme_picker_save_key(Some(&picker), active),
+            super::theme_slot_key(to)
+        );
+    }
+    // The hint names the side Tab goes to, and only a picker with sides has it.
+    for (save, text) in [
+        ("dark-theme", kettle_i18n::Text::PickerHintTabLightTheme),
+        ("light-theme", kettle_i18n::Text::PickerHintTabDarkTheme),
+    ] {
+        let hints = super::theme_picker_hints(save, "dark-theme", true);
+        assert!(hints.contains(&("Tab:", text)), "{hints:?}");
+        assert_eq!(hints.last().unwrap().0, "Esc");
+        assert!(
+            !super::theme_picker_hints(save, "dark-theme", false)
+                .iter()
+                .any(|(keys, _)| keys.starts_with("Tab"))
+        );
+    }
+    assert!(
+        !super::theme_picker_hints("theme", "theme", true)
+            .iter()
+            .any(|(keys, _)| keys.starts_with("Tab"))
+    );
+    assert!(
+        super::picker_hint(
+            &EN,
+            &super::theme_picker_hints("dark-theme", "dark-theme", true)
+        )
+        .contains("Tab: light theme")
+    );
+    assert!(
+        super::picker_hint(
+            &ES,
+            &super::theme_picker_hints("light-theme", "light-theme", true)
+        )
+        .contains("Tab: tema oscuro")
+    );
+    // The control plane's tokens are the keys a keyboard sends.
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+    assert_eq!(
+        super::parse_ui_key("tab"),
+        Some((ModifiersState::empty(), Key::Named(NamedKey::Tab)))
+    );
+    assert_eq!(
+        super::parse_ui_key("shift+tab"),
+        Some((ModifiersState::SHIFT, Key::Named(NamedKey::Tab)))
+    );
+    let src = production_source();
+    let keys = src
+        .split("fn theme_picker_key(")
+        .nth(1)
+        .unwrap()
+        .split("fn commit_theme(")
+        .next()
+        .unwrap();
+    assert!(keys.contains("let save_key = self.theme_picker_key_for(ws);"));
+    let tab = keys
+        .split("Key::Named(NamedKey::Tab) =>")
+        .nth(1)
+        .expect("Tab has its own arm")
+        .split("Key::Character(s)")
+        .next()
+        .unwrap();
+    assert!(tab.contains("theme_picker_tab(save_key, ws.mods.shift_key())"));
+    assert!(tab.contains("ThemePickerTab::Side(slot) => self.switch_theme_slot(ws, slot),"));
+    assert!(tab.contains("step(state, forward, n);"));
+    let down = keys
+        .split("Key::Named(NamedKey::ArrowDown) =>")
+        .nth(1)
+        .unwrap()
+        .split("Key::Named(NamedKey::ArrowUp)")
+        .next()
+        .unwrap();
+    assert!(down.contains("step(state, true, n);"));
+}
+
+/// A fixed theme has no sides: Tab moves down a row as before, and Shift+Tab
+/// now moves up one instead of down.
+#[test]
+fn tab_in_a_fixed_theme_moves_rows_as_before() {
+    use super::{ThemePickerTab, theme_pick_key, theme_picker_tab};
+    let cfg = kettle_config::Config {
+        theme_mode: kettle_config::ThemeMode::Explicit,
+        ..Default::default()
+    };
+    let save = theme_pick_key(&cfg, Some(true));
+    assert_eq!(save, "theme");
+    assert_eq!(
+        theme_picker_tab(save, false),
+        ThemePickerTab::Row { forward: true }
+    );
+    assert_eq!(
+        theme_picker_tab(save, true),
+        ThemePickerTab::Row { forward: false }
+    );
+}
+
+/// The Tab hint is optional: a header too narrow for the whole hint beside
+/// the query shows it without the Tab part before it drops the hint, in
+/// English and Spanish, measured as the painter measures it.
+#[test]
+fn a_narrow_theme_picker_header_drops_the_tab_hint_first() {
+    for tr in [&EN, &ES] {
+        let full = super::picker_hint(
+            tr,
+            &super::theme_picker_hints("dark-theme", "dark-theme", true),
+        );
+        let short = super::picker_hint(
+            tr,
+            &super::theme_picker_hints("dark-theme", "dark-theme", false),
+        );
+        assert!(full.contains("Tab:") && !short.contains("Tab"));
+        let (mut saw_full, mut saw_short) = (false, false);
+        for width in (160..=1200).step_by(8) {
+            let field = kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: String::new(),
+                text: "Tokyo".into(),
+                cursor_byte: 5,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, width as f32, 32.0),
+                prefix: super::theme_picker_appearance_prefix("dark-theme", tr),
+                hint: full.clone(),
+                accent_palette: 5,
+            };
+            let hint = super::theme_picker_header_hint(&field, 8.0, tr, "dark-theme", "dark-theme");
+            let painted = kettle_render::text_field_labels(
+                &kettle_render::TextFieldOverlay {
+                    hint: hint.clone(),
+                    ..field.clone()
+                },
+                8.0,
+            )
+            .1;
+            let full_fits = !kettle_render::text_field_labels(&field, 8.0).1.is_empty();
+            if full_fits {
+                assert_eq!(hint, full, "{width}");
+                saw_full = true;
+            } else if !painted.is_empty() {
+                assert_eq!(hint, short, "{width}");
+                saw_short = true;
+            }
+        }
+        assert!(saw_full && saw_short);
+    }
+    let src = production_source();
+    let projection = src
+        .split("fn modal_text_projection(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(projection.contains("field.hint = theme_picker_header_hint("));
+}
+
+/// The window previews the light side while it is edited, Esc puts back the
+/// theme from before the picker, and a pick for the side the window is not on
+/// leaves the baseline in place, so closing the picker puts that theme back.
+/// `commit_theme` drops the baseline and wears the pick only for the side
+/// the window is on.
+#[test]
+fn a_pick_for_the_other_side_puts_the_window_back_on_its_theme() {
+    let cfg = kettle_config::Config::default();
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, live(&cfg.dark_theme));
+    let picker = ws.theme_picker_input.as_mut().unwrap();
+    super::switch_theme_picker_slot(
+        picker,
+        &cfg,
+        "dark-theme",
+        kettle_render::ThemeSlot::Light,
+        &EN,
+    );
+    let previewed = settle(&mut ws, &cfg.dark_theme);
+    assert_eq!(previewed, cfg.light_theme);
+    // Enter for the light side: the picker closes and the baseline stays.
+    ws.theme_picker_input = None;
+    assert_eq!(settle(&mut ws, &previewed), cfg.dark_theme);
+    let source = production_source();
+    let commit = source
+        .split("fn commit_theme(")
+        .nth(1)
+        .unwrap()
+        .split("fn ssh_key(")
+        .next()
+        .unwrap();
+    let keep = commit
+        .split("if !plan.restore_active {")
+        .nth(1)
+        .expect("only a pick for the active side is worn")
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(keep.contains("ws.theme_preview = None;"));
+    assert!(keep.contains("self.set_runtime_theme_name(ws, name);"));
+    assert_eq!(commit.matches("ws.theme_preview = None;").count(), 1);
+    let back = commit
+        .split("} else {")
+        .nth(1)
+        .expect("the other side's branch");
+    assert!(back.contains("self.sync_theme_preview(ws);"));
+    assert_eq!(commit.matches("set_runtime_theme").count(), 1);
+}
+
+/// A press on a side of the status line chooses that side; the pointer and
+/// a screen reader's click both switch the picker through
+/// `switch_theme_slot`, and a screen reader hears each side as a radio
+/// button, checked on the side a pick saves to, over its painted words.
+#[test]
+fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
+    use super::{FooterPress, open_picker_list, picker_context_menu, theme_footer_press};
+    use kettle_render::ThemeSlot;
+    let cfg = kettle_config::Config::default();
+    let cell = (8.4, 17.0);
+    for tr in [&EN, &ES] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
+        let menu = picker_context_menu(
+            open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap(),
+            (1280.0, 820.0),
+            cell,
+            32.0,
+        )
+        .unwrap();
+        let layout = menu.picker_footer_layout(tr, cell).unwrap();
+        let at = |x: f32, y: f32| winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+        assert_eq!(layout.slot_chips.len(), 2);
+        for &((x, y, w, h), slot) in &layout.slot_chips {
+            assert_eq!(
+                theme_footer_press(&menu, tr, cell, at(x + w * 0.5, y + h * 0.5)),
+                Some(FooterPress::Slot(slot))
+            );
+        }
+        let overlay = kettle_render::Overlay {
+            theme_picker_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection = modal_accessibility_projection(&overlay, (1280.0, 820.0), cell, 1.0, tr);
+        let radios: Vec<_> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::RadioButton)
+            .collect();
+        assert_eq!(radios.len(), 2);
+        for ((id, node), &(rect, slot)) in radios.iter().zip(&layout.slot_chips) {
+            assert_eq!(super::accessibility_theme_slot(*id), Some(slot));
+            let label = node.label().unwrap();
+            let side = tr.text(match slot {
+                ThemeSlot::Dark => kettle_i18n::Text::PickerThemeDarkSlot,
+                ThemeSlot::Light => kettle_i18n::Text::PickerThemeLightSlot,
+            });
+            assert!(label.starts_with(side), "{label}");
+            assert_eq!(
+                node.toggled(),
+                Some((slot == ThemeSlot::Dark).into()),
+                "{label}"
+            );
+            let bounds = node.bounds().unwrap();
+            assert_eq!(bounds.x0, f64::from(rect.0));
+            assert_eq!(bounds.x1, f64::from(rect.0 + rect.2));
+            assert!(node.supports_action(accesskit::Action::Click));
+            // The radios sit in one group, which the dialog holds.
+            let group = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::RadioGroup)
+                .unwrap();
+            assert!(group.1.children().contains(id));
+            let dialog = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+                .unwrap();
+            assert!(!dialog.1.children().contains(id));
+            assert!(dialog.1.children().contains(&group.0));
+        }
+    }
+    let src = production_source();
+    let pointer = src
+        .split("fn picker_pointer(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(pointer.contains("FooterPress::Slot(slot) => self.switch_theme_slot(ws, slot)"));
+    let action = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(action.contains("accessibility_theme_slot(request.target_node)"));
+    assert!(action.contains("self.switch_theme_slot(ws, slot);"));
+    // A screen reader's click is a user event, past `window_event`'s
+    // preview sync, so switching previews the side's theme itself.
+    let switch = src
+        .split("fn switch_theme_slot(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(switch.contains("self.sync_theme_preview(ws);"));
 }

@@ -59,6 +59,8 @@ pub(super) fn selected_ssh_target(
 pub(super) struct PickerList {
     pub(super) rows: Vec<ContextMenuRow>,
     pub(super) selected: usize,
+    /// The theme picker's footer; `None` for every other picker.
+    pub(super) footer: Option<kettle_render::ThemePickerFooter>,
 }
 
 /// A picker's key hint: each key followed by what it does. The keys are the
@@ -74,7 +76,18 @@ pub(super) fn picker_hint(
     format!("({})", parts.join(" · "))
 }
 
+/// Rows a picker paints whole, at most.
 const PICKER_MAX_VISIBLE_ROWS: usize = 8;
+
+/// The height of a picker list of `total` rows that paints as many whole rows
+/// as fit in `available`, at most `cap`, and always at least one. Pickers have
+/// no arrow strips at their cut edges, so the list is whole rows with no
+/// slack: a part-row of room at the bottom would be blank panel that neither
+/// paints nor takes a press.
+pub(super) fn picker_rows_height(total: usize, cap: usize, available: f32, row_h: f32) -> f32 {
+    let fit = ((available / row_h).floor() as usize).max(1);
+    total.min(cap).min(fit) as f32 * row_h
+}
 
 /// Profile discovery is shared with `--list-profiles`; names remain config data.
 pub(crate) fn profile_launch_entries(
@@ -224,11 +237,13 @@ pub(super) fn command_picker_list(
                 hint: String::new(),
             }],
             selected: 0,
+            footer: None,
         }
     } else {
         PickerList {
             selected: selected.min(rows.len() - 1),
             rows,
+            footer: None,
         }
     }
 }
@@ -274,11 +289,13 @@ pub(super) fn layout_picker_list(
                 },
             }],
             selected: 0,
+            footer: None,
         }
     } else {
         PickerList {
             selected: selected.min(rows.len() - 1),
             rows,
+            footer: None,
         }
     }
 }
@@ -423,10 +440,15 @@ pub(super) fn theme_picker_list(
                 hint: String::new(),
             }],
             selected: 0,
+            footer: None,
         };
     }
     let selected = selected.min(rows.len() - 1);
-    PickerList { rows, selected }
+    PickerList {
+        rows,
+        selected,
+        footer: None,
+    }
 }
 
 /// The theme the picker's highlighted row names, if any row matches. Clamped
@@ -454,6 +476,7 @@ pub(super) fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Opti
         query: Default::default(),
         selected: theme_picker_start(&opened.0),
         opened_on: opened.0.clone(),
+        slot: None,
     });
     ws.theme_preview = Some(opened);
     restore
@@ -500,6 +523,169 @@ pub(super) fn theme_preview_change(
             .as_ref()
             .filter(|(name, _)| name != live_name)
             .cloned(),
+    }
+}
+
+/// The config key that holds `slot`'s theme.
+pub(super) fn theme_slot_key(slot: kettle_render::ThemeSlot) -> &'static str {
+    match slot {
+        kettle_render::ThemeSlot::Dark => "dark-theme",
+        kettle_render::ThemeSlot::Light => "light-theme",
+    }
+}
+
+/// The key the open picker `state` saves a pick to, while `active` (from
+/// `theme_pick_key`) is the side the window wears: the side chosen on the
+/// status line, else the active one. A fixed theme has no sides.
+pub(super) fn theme_picker_save_key(
+    state: Option<&crate::window_state::ThemePickerState>,
+    active: &'static str,
+) -> &'static str {
+    match state.and_then(|state| state.slot) {
+        Some(slot) if active != "theme" => theme_slot_key(slot),
+        _ => active,
+    }
+}
+
+/// What Enter in the theme picker does with its pick: the key it saves to,
+/// and whether the window goes back to the theme it wore, because the pick
+/// is for the side the window is not on now. `active_dark` is the side the
+/// schedule or the system calls for, as `theme_pick_key` takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ThemeCommitPlan {
+    pub(super) key: &'static str,
+    pub(super) restore_active: bool,
+}
+
+pub(super) fn theme_commit_plan(
+    state: &crate::window_state::ThemePickerState,
+    cfg: &Config,
+    active_dark: Option<bool>,
+) -> ThemeCommitPlan {
+    let active = super::theme_pick_key(cfg, active_dark);
+    let key = theme_picker_save_key(Some(state), active);
+    ThemeCommitPlan {
+        key,
+        restore_active: key != active,
+    }
+}
+
+/// Edit `slot`'s theme in the open picker, while `active` (from
+/// `theme_pick_key`) is the side the window wears: the list opens on that
+/// side's theme, ticks it and highlights it, and the window previews it. A
+/// typed query is cleared, so the list shows that theme instead of keeping
+/// a match from the other side, which Enter would then save for this one.
+/// The preview's baseline, which Esc restores, stays the theme from before
+/// the picker. The side the picker already saves to, and a fixed theme,
+/// which has no sides, change nothing. Returns whether anything changed.
+pub(super) fn switch_theme_picker_slot(
+    state: &mut crate::window_state::ThemePickerState,
+    cfg: &Config,
+    active: &'static str,
+    slot: kettle_render::ThemeSlot,
+    tr: &kettle_i18n::Translator,
+) -> bool {
+    let theme = match slot {
+        kettle_render::ThemeSlot::Dark => &cfg.dark_theme,
+        kettle_render::ThemeSlot::Light => &cfg.light_theme,
+    };
+    if active == "theme" || theme_picker_save_key(Some(state), active) == theme_slot_key(slot) {
+        return false;
+    }
+    state.slot = Some(slot);
+    state.opened_on = theme.clone();
+    state
+        .query
+        .replace_all("", crate::modal_input::MAX_MODAL_INPUT_BYTES);
+    state.selected = theme_picker_matches(&state.query, &state.opened_on, tr)
+        .iter()
+        .position(|(name, _)| name.eq_ignore_ascii_case(theme.trim()))
+        .unwrap_or(0);
+    true
+}
+
+/// The theme picker's key hint, for the painted header and its projection
+/// alike: Enter keeps the pick, or only saves it for the side the window is
+/// not on (see [`theme_picker_enter_hint`]). With `tab`, a picker with sides
+/// also says which side Tab switches to.
+pub(super) fn theme_picker_hints(
+    save_key: &str,
+    active: &str,
+    tab: bool,
+) -> Vec<(&'static str, kettle_i18n::Text)> {
+    use kettle_i18n::Text;
+    let mut hints = vec![
+        ("Enter", theme_picker_enter_hint(save_key, active)),
+        ("↑↓", Text::PickerHintSelect),
+    ];
+    if tab && let ThemePickerTab::Side(slot) = theme_picker_tab(save_key, false) {
+        hints.push((
+            "Tab:",
+            match slot {
+                kettle_render::ThemeSlot::Light => Text::PickerHintTabLightTheme,
+                kettle_render::ThemeSlot::Dark => Text::PickerHintTabDarkTheme,
+            },
+        ));
+    }
+    hints.push(("Esc", Text::PickerHintRestore));
+    hints
+}
+
+/// The theme picker header's hint in `field`, measured as the painter
+/// measures it in cells `cw` wide: the whole hint, or without its Tab part
+/// when only that fits beside the query. A header that has room for neither
+/// keeps the whole one, which the painter leaves out.
+pub(super) fn theme_picker_header_hint(
+    field: &kettle_render::TextFieldOverlay,
+    cw: f32,
+    tr: &kettle_i18n::Translator,
+    save_key: &str,
+    active: &str,
+) -> String {
+    let full = picker_hint(tr, &theme_picker_hints(save_key, active, true));
+    let fits = |hint: &String| {
+        let mut probe = field.clone();
+        probe.hint = hint.clone();
+        !kettle_render::text_field_labels(&probe, cw).1.is_empty()
+    };
+    if fits(&full) {
+        return full;
+    }
+    let short = picker_hint(tr, &theme_picker_hints(save_key, active, false));
+    if fits(&short) { short } else { full }
+}
+
+/// What Tab does in the theme picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ThemePickerTab {
+    /// Edit the other side's theme, as a click on it on the status line does.
+    Side(kettle_render::ThemeSlot),
+    /// Move the selection, down or up, as in the other pickers.
+    Row { forward: bool },
+}
+
+/// What Tab (or Shift+Tab, with `shift`) does in a theme picker that saves
+/// to `save_key`. A picker with sides switches to the other one, so both
+/// keys toggle between the two; a fixed theme has no sides, and Tab moves
+/// down a row and Shift+Tab up one. The arrows move rows either way.
+pub(super) fn theme_picker_tab(save_key: &str, shift: bool) -> ThemePickerTab {
+    use kettle_render::ThemeSlot;
+    match save_key {
+        "dark-theme" => ThemePickerTab::Side(ThemeSlot::Light),
+        "light-theme" => ThemePickerTab::Side(ThemeSlot::Dark),
+        _ => ThemePickerTab::Row { forward: !shift },
+    }
+}
+
+/// What Enter does in the theme picker's key hint: keep the pick, or only
+/// save it for the side the window is not on.
+pub(super) fn theme_picker_enter_hint(save_key: &str, active: &str) -> kettle_i18n::Text {
+    use kettle_i18n::Text;
+    match save_key {
+        _ if save_key == active => Text::PickerHintKeep,
+        "light-theme" => Text::PickerHintSaveForLight,
+        "dark-theme" => Text::PickerHintSaveForDark,
+        _ => Text::PickerHintKeep,
     }
 }
 
@@ -573,11 +759,13 @@ pub(super) fn ssh_picker_list(
                 hint: tr.text(kettle_i18n::Text::PickerTypedTarget).to_string(),
             }],
             selected: 0,
+            footer: None,
         }
     } else {
         PickerList {
             selected: selected.min(rows.len() - 1),
             rows,
+            footer: None,
         }
     }
 }
@@ -613,6 +801,23 @@ pub(super) fn picker_scroll_offset(
 pub(super) struct PickerGeometry {
     pub(super) header: (f32, f32, f32, f32),
     pub(super) rows: (f32, f32, f32, f32),
+    /// The theme picker's footer under the rows: whether the sample card
+    /// fits, how many status lines do, and its height.
+    pub(super) footer: Option<(bool, usize, f32)>,
+}
+
+/// Rows the theme picker paints whole, at most. It has the room: nothing
+/// else is open, and a longer list shows more of the themes' looks at once.
+const THEME_PICKER_MAX_VISIBLE_ROWS: usize = 14;
+/// Rows the theme picker keeps however short the window: its footer gives
+/// way first.
+const THEME_PICKER_MIN_VISIBLE_ROWS: usize = 4;
+
+/// How many whole rows a list of `total` rows `rows_h` high paints, in the
+/// content area the painter, hit tests and accessibility share.
+fn painted_rows(total: usize, rows_h: f32, row_h: f32) -> usize {
+    let (_, content_h) = kettle_render::menu::picker_scroll_content(rows_h);
+    ((content_h / row_h + 0.001).floor() as usize).min(total)
 }
 
 /// Physical menu pixels: fixed padding follows the menu painter, while cell
@@ -622,6 +827,31 @@ pub(super) fn picker_card_geometry(
     cell: (f32, f32),
     top_chrome: f32,
     row_count: usize,
+) -> Option<PickerGeometry> {
+    picker_card_geometry_with(surface, cell, top_chrome, row_count, None)
+}
+
+/// [`picker_card_geometry`] for the theme picker: up to 14 rows, then its
+/// footer in the room left. The footer gives way so the list keeps at least
+/// 4 rows (or the whole list): the sample card goes first, then one status
+/// line, then the other. The header is where every picker has it.
+/// `fits` says whether the card and the status lines fit a given width.
+pub(super) fn theme_picker_card_geometry(
+    surface: (f32, f32),
+    cell: (f32, f32),
+    top_chrome: f32,
+    row_count: usize,
+    fits: impl Fn(f32) -> (bool, bool),
+) -> Option<PickerGeometry> {
+    picker_card_geometry_with(surface, cell, top_chrome, row_count, Some(&fits))
+}
+
+fn picker_card_geometry_with(
+    surface: (f32, f32),
+    cell: (f32, f32),
+    top_chrome: f32,
+    row_count: usize,
+    theme_footer: Option<&dyn Fn(f32) -> (bool, bool)>,
 ) -> Option<PickerGeometry> {
     let (sw, sh) = surface;
     let (_, ch) = cell;
@@ -649,14 +879,99 @@ pub(super) fn picker_card_geometry(
     let top = 24.0_f32.max(remaining * 0.08).min(spacing - bottom);
     let y = top_chrome + top;
     let available = sh - bottom - y - header_h;
-    // Whole rows only: with no arrow strips, a part row of slack at the
-    // bottom would be blank panel that neither paints nor takes a press.
-    let fit = ((available / row_h).floor() as usize).max(1);
-    let rows_h = row_count.min(PICKER_MAX_VISIBLE_ROWS).min(fit) as f32 * row_h;
+    let header = (x, y, width, header_h);
+    let Some(fits) = theme_footer else {
+        let rows_h = picker_rows_height(row_count, PICKER_MAX_VISIBLE_ROWS, available, row_h);
+        return Some(PickerGeometry {
+            header,
+            rows: (x, y + header_h, width, rows_h),
+            footer: None,
+        });
+    };
+    let cap = THEME_PICKER_MAX_VISIBLE_ROWS;
+    let (card_fits, status_fits) = fits(width);
+    let footer = [(true, 2), (false, 2), (false, 1)]
+        .into_iter()
+        .filter(|&(sample, _)| status_fits && (card_fits || !sample))
+        .find_map(|(sample, lines)| {
+            let footer_h = kettle_render::theme_footer_height(ch, sample, lines);
+            let rows_h = picker_rows_height(row_count, cap, available - footer_h, row_h);
+            let want = row_count.min(THEME_PICKER_MIN_VISIBLE_ROWS);
+            (rows_h + footer_h <= available + 0.01
+                && painted_rows(row_count, rows_h, row_h) >= want)
+                .then_some(((sample, lines, footer_h), rows_h))
+        });
+    let (footer, rows_h) = match footer {
+        Some((footer, rows_h)) => (Some(footer), rows_h),
+        None => (None, picker_rows_height(row_count, cap, available, row_h)),
+    };
     Some(PickerGeometry {
-        header: (x, y, width, header_h),
+        header,
         rows: (x, y + header_h, width, rows_h),
+        footer,
     })
+}
+
+/// The theme picker's footer for `state`, before it is fitted: how the theme
+/// is chosen, the theme of each side and the one `theme_key` saves to, the
+/// contrast setting, and the highlighted theme as the sample.
+pub(super) fn theme_picker_footer(
+    state: &crate::window_state::ThemePickerState,
+    cfg: &Config,
+    theme_key: &str,
+    tr: &kettle_i18n::Translator,
+) -> kettle_render::ThemePickerFooter {
+    use kettle_render::{ThemeFollow, ThemeSlot};
+    // A schedule decides between the two sides, whatever the mode says.
+    let follow = if cfg.theme_schedule.is_some() {
+        ThemeFollow::Schedule
+    } else {
+        match cfg.theme_mode {
+            kettle_config::ThemeMode::Auto => ThemeFollow::System,
+            kettle_config::ThemeMode::Light => ThemeFollow::Light,
+            kettle_config::ThemeMode::Dark => ThemeFollow::Dark,
+            kettle_config::ThemeMode::Explicit => ThemeFollow::Fixed,
+        }
+    };
+    let editing = match theme_key {
+        "light-theme" => Some(ThemeSlot::Light),
+        "dark-theme" => Some(ThemeSlot::Dark),
+        _ => None,
+    };
+    // The window already wears the highlighted theme while it previews, so
+    // the open picker does not parse a theme on every frame.
+    let sample = match theme_picker_selection(state, tr) {
+        Some(name) if name != cfg.theme_name => cfg.theme_by_name(name),
+        _ => cfg.theme.clone(),
+    };
+    let mut footer = kettle_render::ThemePickerFooter {
+        follow,
+        editing,
+        dark_theme: cfg.dark_theme.clone(),
+        light_theme: cfg.light_theme.clone(),
+        fixed_theme: state.opened_on.clone(),
+        minimum_contrast: cfg.minimum_contrast,
+        sample,
+        show_sample: true,
+        status_lines: 2,
+        height: 0.0,
+        min_columns: (0, 0),
+        cell: (0.0, 0.0),
+    };
+    footer.min_columns = kettle_render::theme_footer_min_columns(&footer, tr);
+    footer
+}
+
+/// The theme picker's rows with its footer.
+pub(super) fn theme_picker_list_with_footer(
+    state: &crate::window_state::ThemePickerState,
+    cfg: &Config,
+    theme_key: &str,
+    tr: &kettle_i18n::Translator,
+) -> PickerList {
+    let mut list = theme_picker_list(&state.query, state.selected, &state.opened_on, tr);
+    list.footer = Some(theme_picker_footer(state, cfg, theme_key, tr));
+    list
 }
 
 /// The results rectangle shares its x and width with the query header.
@@ -666,7 +981,21 @@ pub(super) fn picker_context_menu(
     cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    let geometry = picker_card_geometry(surface, cell, top_chrome, list.rows.len())?;
+    let geometry = if let Some(footer) = &list.footer {
+        theme_picker_card_geometry(surface, cell, top_chrome, list.rows.len(), |width| {
+            footer.fits(width, cell.0)
+        })?
+    } else {
+        picker_card_geometry(surface, cell, top_chrome, list.rows.len())?
+    };
+    let footer = list.footer.take().and_then(|mut footer| {
+        let (sample, lines, height) = geometry.footer?;
+        footer.show_sample = sample;
+        footer.status_lines = lines;
+        footer.height = height;
+        footer.cell = cell;
+        Some(footer)
+    });
     let (x, y, width, height) = geometry.rows;
     let row_height = kettle_render::menu::row_height(cell.1);
     let max_columns = kettle_render::menu::panel_columns(width, cell.0);
@@ -698,6 +1027,7 @@ pub(super) fn picker_context_menu(
         panel_h_clamped: height,
         a11y_label: None,
         picker_header_height: geometry.header.3,
+        picker_footer: footer,
     })
 }
 
@@ -726,6 +1056,7 @@ pub(super) enum PickerPointer {
 pub(super) fn open_picker_list(
     ws: &WindowState,
     cfg: &Config,
+    theme_key: &str,
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
 ) -> Option<PickerList> {
@@ -741,12 +1072,7 @@ pub(super) fn open_picker_list(
             cfg.broadcast_default,
         ))
     } else if let Some(state) = &ws.theme_picker_input {
-        Some(theme_picker_list(
-            &state.query,
-            state.selected,
-            &state.opened_on,
-            tr,
-        ))
+        Some(theme_picker_list_with_footer(state, cfg, theme_key, tr))
     } else if let Some((query, selected)) = &ws.layout_picker_input {
         Some(layout_picker_list(
             query,
@@ -778,6 +1104,41 @@ fn picker_result_row(menu: &ContextMenu, cell_h: f32, cursor: (f64, f64)) -> Opt
         .get(index)
         .filter(|row| row.enabled && !row.separator)
         .map(|_| index)
+}
+
+/// What a press on the theme picker's footer lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FooterPress {
+    Contrast,
+    /// One side on the status line: the picker edits that side's theme.
+    Slot(kettle_render::ThemeSlot),
+    Footer,
+}
+
+/// Where a press at `cursor` lands in `menu`'s footer, measured with the
+/// painter's own layout; `None` outside it.
+pub(super) fn theme_footer_press(
+    menu: &ContextMenu,
+    tr: &kettle_i18n::Translator,
+    cell: (f32, f32),
+    cursor: winit::dpi::PhysicalPosition<f64>,
+) -> Option<FooterPress> {
+    let layout = menu.picker_footer_layout(tr, cell)?;
+    let (x, y) = (cursor.x as f32, cursor.y as f32);
+    if layout
+        .contrast_button
+        .is_some_and(|button| rect_contains(button, x, y))
+    {
+        Some(FooterPress::Contrast)
+    } else if let Some(&(_, slot)) = layout
+        .slot_chips
+        .iter()
+        .find(|(chip, _)| rect_contains(*chip, x, y))
+    {
+        Some(FooterPress::Slot(slot))
+    } else {
+        rect_contains(layout.rect, x, y).then_some(FooterPress::Footer)
+    }
 }
 
 pub(super) fn apply_picker_pointer(
@@ -865,9 +1226,13 @@ impl App {
         if ws.context_menu.is_some() {
             return false;
         }
-        let Some(list) =
-            open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-        else {
+        let Some(list) = open_picker_list(
+            ws,
+            &self.cfg,
+            self.theme_picker_key_for(ws),
+            &self.ui_text,
+            self.update_notice().as_ref(),
+        ) else {
             return false;
         };
         let surface = ws
@@ -883,6 +1248,18 @@ impl App {
         else {
             return false;
         };
+        // The theme picker's footer takes its own presses: its contrast
+        // button steps the setting, and the rest of it is part of the card.
+        if matches!(event, PickerPointer::Press)
+            && let Some(press) = theme_footer_press(&menu, &self.ui_text, cell, ws.cursor)
+        {
+            match press {
+                FooterPress::Contrast => self.step_picker_contrast(ws),
+                FooterPress::Slot(slot) => self.switch_theme_slot(ws, slot),
+                FooterPress::Footer => {}
+            }
+            return true;
+        }
         let activate = matches!(event, PickerPointer::Press)
             && picker_result_row(&menu, cell.1, (ws.cursor.x, ws.cursor.y)).is_some();
         let handled = apply_picker_pointer(ws, &menu, cell.1, event);

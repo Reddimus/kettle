@@ -6062,6 +6062,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let overlay = Overlay {
         context_menu: Some(ContextMenu {
             picker_header_height: 0.0,
+            picker_footer: None,
             anchor: (ax, ay),
             rows: vec![
                 row("Copy", "Ctrl+Shift+C", true),
@@ -6171,6 +6172,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
     ];
     let menu = |swatches| ContextMenu {
         picker_header_height: 0.0,
+        picker_footer: None,
         anchor: (40.0, 20.0),
         rows: ["Dracula", "Nord"]
             .into_iter()
@@ -6224,6 +6226,7 @@ fn menu_level(
 ) -> ContextMenu {
     ContextMenu {
         picker_header_height: 0.0,
+        picker_footer: None,
         anchor,
         rows: labels
             .iter()
@@ -6279,6 +6282,7 @@ fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     let child = menu_level((330.0, 40.0 + row_h), &["Right", "Down"], 1, (width, row_h));
     let picker = ContextMenu {
         picker_header_height: 30.0,
+        picker_footer: None,
         ..menu_level(
             (40.0, 70.0),
             &["Nord", "Dracula", "Solarized"],

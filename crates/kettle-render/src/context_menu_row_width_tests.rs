@@ -49,6 +49,7 @@ fn app_clamped_width_is_authoritative_for_every_render_pass() {
         panel_h_clamped: 0.0,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     assert_eq!(context_menu_panel_width(&menu, 9.6), 237.5);
 }
@@ -113,6 +114,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
         panel_h_clamped: 1.0,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     let theme = kettle_config::Theme::default();
     let quads = menu_chrome_quads(
@@ -204,6 +206,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         panel_h_clamped: 200.0,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     let arrows = |menu: &ContextMenu| {
         menu_chrome_quads(
@@ -252,6 +255,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             panel_h_clamped: panel_h,
             a11y_label: None,
             picker_header_height: 0.0,
+            picker_footer: None,
         };
         let (inset, _) = menu::scroll_content(280.0, panel_h, 28.0);
         // The panel is a rounded surface; the quads are the two arrows.
@@ -354,6 +358,7 @@ fn menu_and_picker_panels_are_rounded_and_keep_the_selection_inside() {
         panel_w_clamped: w,
         panel_h_clamped: h,
         picker_header_height: header,
+        picker_footer: None,
         a11y_label: None,
     };
     let picker = |highlight| level(&["one", "two"], highlight, (360.0, 56.0, 30.0));
@@ -487,6 +492,7 @@ fn natural_menu(rows: Vec<ContextMenuRow>) -> ContextMenu {
         panel_h_clamped: 0.0,
         a11y_label: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     }
 }
 
@@ -642,6 +648,7 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         panel_w_clamped: 360.0,
         panel_h_clamped: 56.0,
         picker_header_height: 30.0,
+        picker_footer: None,
         a11y_label: None,
     };
     assert!(menu_row_selected(&menu, 0) && !menu_row_selected(&menu, 1));

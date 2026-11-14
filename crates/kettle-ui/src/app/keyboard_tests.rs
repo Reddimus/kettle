@@ -458,12 +458,21 @@ fn modal_activation_keys_act_once_per_press() {
     let space = Key::Named(NamedKey::Space);
     let down = Key::Named(NamedKey::ArrowDown);
     let right = Key::Named(NamedKey::ArrowRight);
+    let tab = Key::Named(NamedKey::Tab);
     let chr = |c: &str| Key::Character(c.into());
     let menu = ContextMenu { vim_nav: true };
     let plain_menu = ContextMenu { vim_nav: false };
     let toggle_row = Settings { steps: false };
     let number_row = Settings { steps: true };
-    for modal in [ConfirmDialog, menu, ViMode, Hint, Palette, toggle_row] {
+    for modal in [
+        ConfirmDialog,
+        menu,
+        ViMode,
+        Hint,
+        Palette,
+        ThemePicker { sides: true },
+        toggle_row,
+    ] {
         for key in [&enter, &space, &down, &chr("v"), &chr("l")] {
             assert!(
                 !modal_repeat_is_inert(modal, false, key, false),
@@ -493,6 +502,14 @@ fn modal_activation_keys_act_once_per_press() {
         (Palette, &enter, false, true),
         (Palette, &chr("a"), false, false),
         (Palette, &down, false, false),
+        // A held Tab in a picker with sides would flip them at the repeat
+        // rate; without sides it moves rows and repeats.
+        (ThemePicker { sides: true }, &tab, false, true),
+        (ThemePicker { sides: true }, &enter, false, true),
+        (ThemePicker { sides: true }, &down, false, false),
+        (ThemePicker { sides: true }, &chr("a"), false, false),
+        (ThemePicker { sides: false }, &tab, false, false),
+        (ThemePicker { sides: false }, &enter, false, true),
         (toggle_row, &enter, false, true),
         (toggle_row, &space, false, true),
         (toggle_row, &right, false, true),

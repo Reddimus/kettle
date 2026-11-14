@@ -195,7 +195,10 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
 }
 
 /// The most swatch squares one frame paints; whole rows past it are skipped.
-pub(crate) const MENU_SWATCH_SURFACES: usize = 32 * menu::SWATCH_COUNT;
+/// The theme picker's footer adds its card, 16 palette squares, the lowest
+/// colour's square, two marks and the contrast button.
+pub(crate) const MENU_SWATCH_SURFACES: usize =
+    32 * menu::SWATCH_COUNT + crate::theme_picker::FOOTER_SURFACES;
 
 /// Rounded swatch squares for every open menu level, outlined in the theme's
 /// foreground so a swatch matching the panel background stays visible.
@@ -238,6 +241,9 @@ pub(crate) fn menu_swatch_surfaces<'a>(
 pub struct ContextMenu {
     /// Picker header above `anchor`; zero for ordinary context menus.
     pub picker_header_height: f32,
+    /// The theme picker's sample and status line under its rows, inside its
+    /// card; `None` for every other menu.
+    pub picker_footer: Option<crate::ThemePickerFooter>,
     /// Top-left of the panel in surface pixels (already clamped).
     pub anchor: (f32, f32),
     pub rows: Vec<ContextMenuRow>,
@@ -278,8 +284,26 @@ impl ContextMenu {
             x,
             y - self.picker_header_height,
             w,
-            h + self.picker_header_height,
+            h + self.picker_header_height + self.picker_footer_height(),
         )
+    }
+
+    /// The height of the theme picker's footer under the rows, or zero.
+    pub fn picker_footer_height(&self) -> f32 {
+        self.picker_footer
+            .as_ref()
+            .map_or(0.0, |footer| footer.height.max(0.0))
+    }
+
+    /// The theme picker's footer laid out under the rows, in `tr`'s words.
+    pub fn picker_footer_layout(
+        &self,
+        tr: &Translator,
+        cell: (f32, f32),
+    ) -> Option<crate::ThemeFooterLayout> {
+        let footer = self.picker_footer.as_ref()?;
+        let (x, y, w, h) = self.rows_rect();
+        Some(crate::theme_footer_layout(footer, tr, (x, y + h, w), cell))
     }
 
     /// Only fully painted picker rows have pointer/accessibility targets.
@@ -1725,7 +1749,7 @@ pub(crate) fn menu_level_surfaces(
             x,
             rows_y - menu.picker_header_height,
             context_menu_panel_width(menu, cw),
-            menu.picker_header_height + menu.panel_h_clamped,
+            menu.picker_header_height + menu.panel_h_clamped + menu.picker_footer_height(),
         ))
     } else {
         panel.as_ref().map(|p| (p.ax, p.ay, p.panel_w, p.panel_h))

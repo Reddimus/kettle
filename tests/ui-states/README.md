@@ -32,6 +32,13 @@ artifact `ui-states-43527358684-1`, in the same environment: Settings control
 outlines now keep 3:1 against the panel, and the footer separates its hint
 groups with "·". The PR description shows each before and after.
 
+The 16 `settings` and `theme-picker` captures were last replaced by PR #857
+from the Linux CI job in
+[run 43529693080](https://github.com/Reddimus/kettle/actions/runs/43529693080),
+artifact `ui-states-43529693080-1`, in the same environment: the theme picker
+gains its sample card and footer, and Settings its Minimum contrast row. The PR
+description shows each before and after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |
@@ -40,12 +47,12 @@ The states pin these visible arrangements:
 | `palette-empty` | Initial command rows and shortcut hints |
 | `palette-query` | Commands matching `split`: word-start and contiguous matches only, so scattered mid-word matches drop out while a stronger match exists |
 | `palette-nomatch` | Empty-result message with the query retained |
-| `settings` | Appearance controls and responsive navigation |
+| `settings` | Appearance controls, including Minimum contrast, with 3:1 control outlines, responsive navigation and a footer whose hint groups are separated by "·" |
 | `search-matches` | Match highlight, count and search controls |
 | `search-nomatch` | Search query and no-match state |
 | `tabs` | Three tabs with one active tab |
 | `splits` | Three nonoverlapping panes and active-pane border |
-| `theme-picker` | Theme rows filling the panel with their colour swatches, light/dark labels, a scrollbar thumb, and active selection (the narrow window drops the swatches) |
+| `theme-picker` | Theme rows with their colour swatches, light/dark labels, a scrollbar thumb and active selection, then a sample card with its contrast readout and a footer with the appearance mode, the side being edited and the Contrast button (the narrow window drops the swatches and, where the rows need the room, the sample) |
 
 CI regenerates these files through the private Wayland runner and compares
 each name against this directory. The existing thresholds remain 24 per
