@@ -1358,7 +1358,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; macOS restores its clipboard, other hosts need isolation | Linux/macOS |
 | Program keys | `just program-keys-smoke` | Client-owned Shift+Left reaches Kitty client, then returns to split resize | Linux/macOS |
 | Search selection | `just search-selection-smoke --isolated-clipboard` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
-| Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
+| Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline. Needs motion allowed: `reduce-motion = off`, or the system's Reduce Motion off under `auto` | Linux/macOS |
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
 | Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, minimized New Tab restoration and New Window effect; accessibility, plus an isolated bundle or no other Kettle instance | macOS |

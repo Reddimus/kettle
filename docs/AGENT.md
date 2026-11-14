@@ -948,7 +948,9 @@ cursor at all (vim's command line, fzf and less hide it).
 
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
 `agent_attached`, `protocol_notification` (`{title, body}` from a pane's OSC 9
-or OSC 777 notification), `tab_moved` (`{from_window, to_window, tab}` — a tab
+or OSC 777 notification, with control and bidi formatting characters removed
+and whitespace runs collapsed; sent whether Kettle shows it as a toast or a
+desktop notification), `tab_moved` (`{from_window, to_window, tab}` — a tab
 was torn off / moved to another window), `ping` (idle keepalive), and `lag`
 (when a slow subscriber's queue overflowed).
 
