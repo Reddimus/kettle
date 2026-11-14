@@ -5,6 +5,10 @@
 //! `rows` = visible lines, `hist` = scrollback lines, `off` = lines scrolled
 //! back from the bottom (`0` = at the prompt). `total = rows + hist`.
 
+/// The shortest thumb, in logical pixels. The renderer and the pointer scale
+/// it by the display's scale factor, so both draw and grab the same thumb.
+pub const MIN_THUMB_LOGICAL: f32 = 24.0;
+
 /// The thumb as `(y_offset_within_track, height)` in track pixels, or `None`
 /// when everything fits (no scrollbar needed). The compatibility wrapper uses
 /// a 12-pixel minimum; DPI-aware callers should use [`thumb_with_min`].
@@ -166,10 +170,12 @@ mod tests {
 
 /// Command tick rectangle in physical pixels. This overlay never moves the
 /// terminal grid. Failure ticks are thicker as well as differently colored.
+/// `column` is the scrollbar's column, its left edge and width, so a tick
+/// lies across the bar the pane paints; the tick stays inside the terminal.
 pub fn command_tick_rect(
     terminal: (f32, f32, f32, f32),
+    column: (f32, f32),
     scale: f32,
-    width: f32,
     origin: u64,
     total: usize,
     mark: crate::term::CommandMark,
@@ -179,10 +185,14 @@ pub fn command_tick_rect(
     if total == 0 || row >= total as u64 || w <= 0.0 || h <= 0.0 || scale <= 0.0 {
         return None;
     }
-    let width = (width.clamp(2.0, 40.0) * scale).min(w);
+    let width = column.1.min(w);
+    if width.is_nan() || width <= 0.0 {
+        return None;
+    }
+    let left = column.0.max(x).min(x + w - width);
     let height = ((if mark.exit_code == 0 { 2.0 } else { 4.0 }) * scale).min(h);
     let top = ((row as f32 + 0.5) / total as f32 * h - height / 2.0).clamp(0.0, h - height);
-    Some([(x + w - width - 2.0 * scale).max(x), y + top, width, height])
+    Some([left, y + top, width, height])
 }
 
 #[cfg(test)]
@@ -194,11 +204,12 @@ mod command_tick_tests {
     fn ticks_share_bounded_geometry_at_every_scale_and_history_origin() {
         for scale in [1.0, 1.5, 2.0] {
             let rect = (20.0, 40.0, 200.0 * scale, 100.0 * scale);
+            let column = (rect.0 + rect.2 - 8.0 * scale, 6.0 * scale);
             for (row, code) in [(500, 0), (599, 7)] {
                 let [x, y, w, h] = command_tick_rect(
                     rect,
+                    column,
                     scale,
-                    6.0,
                     500,
                     100,
                     CommandMark {
@@ -210,12 +221,13 @@ mod command_tick_tests {
                 assert!(x >= rect.0 && x + w <= rect.0 + rect.2);
                 assert!(y >= rect.1 && y + h <= rect.1 + rect.3);
                 assert_eq!(h, if code == 0 { 2.0 * scale } else { 4.0 * scale });
+                assert_eq!((x, w), column, "a tick lies across the bar's column");
             }
             assert!(
                 command_tick_rect(
                     rect,
+                    column,
                     scale,
-                    6.0,
                     500,
                     100,
                     CommandMark {
@@ -228,8 +240,8 @@ mod command_tick_tests {
             assert!(
                 command_tick_rect(
                     rect,
+                    column,
                     scale,
-                    6.0,
                     500,
                     100,
                     CommandMark {

@@ -775,9 +775,13 @@ pub fn capture_png_with_annotation(
                 theme.foreground,
                 0.14,
             ));
-            if let Some((thumb_y, thumb_h)) =
-                kettle_core::scrollbar::thumb_with_min(rows as usize, 400, 200, track_h, 24.0)
-            {
+            if let Some((thumb_y, thumb_h)) = kettle_core::scrollbar::thumb_with_min(
+                rows as usize,
+                400,
+                200,
+                track_h,
+                kettle_core::scrollbar::MIN_THUMB_LOGICAL,
+            ) {
                 menu_q.push(rect(
                     bar_x,
                     track_y + thumb_y,

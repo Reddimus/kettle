@@ -1,4 +1,5 @@
 use super::{Rect4, Translator, display_width};
+use kettle_config::Rgb;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrollbackPill {
@@ -104,6 +105,153 @@ pub fn scrollbar_draw_width(configured: f32, scale: f32, hovered: bool) -> f32 {
 
 pub fn scrollbar_hit_width(configured: f32, scale: f32) -> f32 {
     (configured.clamp(2.0, 40.0) + 2.0).max(12.0) * scale
+}
+
+/// How a pane's scrollbar looks: dim at rest, brighter while the pane is
+/// scrolled back or the pointer hovers or drags the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollbarState {
+    Rest,
+    Active,
+}
+
+/// One pane's scrollbar in physical pixels. The painter, the pointer and the
+/// AccessKit ScrollBar node all read it, so the bar that is drawn is the bar
+/// that is grabbed and announced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneScrollbar {
+    /// The bar's column, the terminal's full height, `edge` in from its
+    /// right side: the channel paints here, command ticks lie across it, and
+    /// it bounds the ScrollBar node.
+    pub track_rect: Rect4,
+    /// Whether the channel paints in `track_rect`.
+    pub channel: bool,
+    /// The thumb, when there is history to scroll.
+    pub thumb_rect: Option<Rect4>,
+    pub state: ScrollbarState,
+    /// The pointer's strip. It runs to the terminal's right edge, so a fling
+    /// to the edge of the screen still lands, and is at least 12 logical px
+    /// wide whatever the bar's width.
+    pub hit_rect: Rect4,
+    /// Paint solid colours rather than translucent ones.
+    pub opaque: bool,
+}
+
+/// The bar's column at its resting width: where command ticks lie.
+pub fn scrollbar_rest_column(terminal: Rect4, scale: f32, configured: f32) -> (f32, f32) {
+    let (x, _, w, _) = terminal;
+    let width = scrollbar_draw_width(configured, scale, false);
+    (x + w - width - 2.0 * scale, width)
+}
+
+/// The pointer's strip along a terminal's right edge.
+pub fn scrollbar_hit_rect(terminal: Rect4, scale: f32, configured: f32) -> Rect4 {
+    let (x, y, w, h) = terminal;
+    let width = scrollbar_hit_width(configured, scale);
+    (x + w - width, y, width, h)
+}
+
+/// A pane's scrollbar. `terminal` is the pane's terminal rect, `rows`,
+/// `hist` and `off` its visible lines, history and lines scrolled back, and
+/// `interacting` whether the pointer hovers or drags its bar.
+pub fn pane_scrollbar_geometry(
+    terminal: Rect4,
+    scale: f32,
+    cfg: &kettle_config::Config,
+    rows: usize,
+    hist: usize,
+    off: usize,
+    interacting: bool,
+) -> PaneScrollbar {
+    use kettle_config::ScrollbarMode;
+    let (x, y, w, h) = terminal;
+    let mode = cfg.scrollbar;
+    let shown = match mode {
+        ScrollbarMode::Never => false,
+        ScrollbarMode::Auto => hist > 0,
+        ScrollbarMode::Always => true,
+    };
+    let active = off > 0 || interacting;
+    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, scale, interacting);
+    let edge = 2.0 * scale;
+    let bx = x + w - bar_w - edge;
+    let thumb_rect = if shown {
+        kettle_core::scrollbar::thumb_with_min(
+            rows,
+            hist,
+            off,
+            h,
+            kettle_core::scrollbar::MIN_THUMB_LOGICAL * scale,
+        )
+        .map(|(top, height)| (bx, y + top, bar_w, height))
+    } else {
+        None
+    };
+    PaneScrollbar {
+        track_rect: (bx, y, bar_w, h),
+        channel: shown && (active || mode == ScrollbarMode::Always),
+        thumb_rect,
+        state: if active {
+            ScrollbarState::Active
+        } else {
+            ScrollbarState::Rest
+        },
+        hit_rect: scrollbar_hit_rect(terminal, scale, cfg.scrollbar_width),
+        opaque: false,
+    }
+}
+
+/// The scrollbar's colours as they show over the terminal background, and
+/// the translucent ink and alpha that show as each one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollbarColors {
+    pub(crate) rest: Rgb,
+    pub(crate) active: Rgb,
+    pub(crate) rest_track: Rgb,
+    pub(crate) active_track: Rgb,
+    /// `[rest, active, rest_track, active_track]` as translucent layers.
+    pub(crate) layers: [(Rgb, f32); 4],
+}
+
+impl ScrollbarColors {
+    /// The thumb's ink and alpha in `state`.
+    pub(crate) fn thumb(&self, state: ScrollbarState, opaque: bool) -> (Rgb, f32) {
+        match state {
+            ScrollbarState::Rest => self.paint(self.rest, 0, opaque),
+            ScrollbarState::Active => self.paint(self.active, 1, opaque),
+        }
+    }
+
+    /// The channel's ink and alpha in `state`.
+    pub(crate) fn track(&self, state: ScrollbarState, opaque: bool) -> (Rgb, f32) {
+        match state {
+            ScrollbarState::Rest => self.paint(self.rest_track, 2, opaque),
+            ScrollbarState::Active => self.paint(self.active_track, 3, opaque),
+        }
+    }
+
+    fn paint(&self, shown: Rgb, layer: usize, opaque: bool) -> (Rgb, f32) {
+        if opaque {
+            (shown, 1.0)
+        } else {
+            self.layers[layer]
+        }
+    }
+}
+
+/// The scrollbar's colours: the theme foreground over its background.
+pub(crate) fn scrollbar_colors(theme: &kettle_config::Theme, linear: bool) -> ScrollbarColors {
+    let layer = |alpha: f32| (theme.foreground, alpha);
+    let layers = [layer(0.42), layer(0.82), layer(0.07), layer(0.14)];
+    let shown =
+        |(ink, alpha): (Rgb, f32)| crate::color::over(theme.background, ink, alpha.into(), linear);
+    ScrollbarColors {
+        rest: shown(layers[0]),
+        active: shown(layers[1]),
+        rest_track: shown(layers[2]),
+        active_track: shown(layers[3]),
+        layers,
+    }
 }
 
 #[cfg(test)]

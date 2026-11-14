@@ -320,11 +320,16 @@ impl App {
                         &self.ui_text,
                     ),
                 ));
+                let column = kettle_render::scrollbar_rest_column(
+                    partition.terminal,
+                    scale,
+                    self.cfg.scrollbar_width,
+                );
                 for mark in pane.term.command_marks() {
                     if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
                         partition.terminal,
+                        column,
                         scale,
-                        self.cfg.scrollbar_width,
                         origin,
                         total,
                         mark,
