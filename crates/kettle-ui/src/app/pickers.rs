@@ -95,8 +95,9 @@ impl SshRow {
 /// The launcher's rows for `query`, in display order. A host row whose name or
 /// alias equals the trimmed query (ignoring ASCII case) comes first. Otherwise
 /// a valid typed target comes first as `ConnectTyped`, so it is what Enter
-/// connects to, and an invalid one is the `Placeholder`. The fuzzy matches
-/// follow: configured hosts, then imported aliases, each ranked. An imported
+/// connects to. The fuzzy matches follow: configured hosts, then imported
+/// aliases, each ranked. A query that is not a valid target shows only the
+/// `Placeholder` refusal, or the one host it names exactly. An imported
 /// alias equal to a configured name or target, ignoring ASCII case, is not
 /// shown twice.
 pub(super) fn ssh_rows(
@@ -132,19 +133,19 @@ pub(super) fn ssh_rows(
         }
         return rows;
     }
-    if let Some(position) = rows.iter().position(exact) {
+    let exact = rows.iter().position(exact);
+    if !kettle_config::ssh_config::is_valid_ssh_target(query) {
+        // No fuzzy match is offered for text ssh must not receive, so Enter
+        // cannot reach one. A configured name with a space can still be
+        // typed in full: it is the only row then.
+        return vec![exact.map_or(SshRow::Placeholder, |position| rows[position])];
+    }
+    if let Some(position) = exact {
         let row = rows.remove(position);
         rows.insert(0, row);
         return rows;
     }
-    rows.insert(
-        0,
-        if kettle_config::ssh_config::is_valid_ssh_target(query) {
-            SshRow::ConnectTyped
-        } else {
-            SshRow::Placeholder
-        },
-    );
+    rows.insert(0, SshRow::ConnectTyped);
     rows
 }
 

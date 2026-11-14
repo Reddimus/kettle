@@ -680,7 +680,7 @@ fn ssh_an_exact_name_or_alias_is_row_zero_with_no_connect_row() {
 }
 
 #[test]
-fn ssh_enter_on_an_invalid_typed_target_spawns_nothing_and_stays_open() {
+fn ssh_an_invalid_typed_target_hides_the_hosts_spawns_nothing_and_stays_open() {
     for typed in ["-oProxyCommand=x", "me@h -p 22", "a\u{202E}b"] {
         let mut ws = ssh_launcher_with(typed);
         assert_eq!(ssh_rows(typed, &[], &[]), [super::SshRow::Placeholder]);
@@ -703,6 +703,22 @@ fn ssh_enter_on_an_invalid_typed_target_spawns_nothing_and_stays_open() {
     let mut ws = ssh_launcher_with("");
     assert_eq!(super::take_ssh_enter_target(&mut ws, &[]), None);
     assert!(ws.ssh_input.is_none());
+    // Host rows that fuzzy-match an invalid query are hidden, so Enter cannot
+    // connect to one: only the refusal row shows.
+    let hosts = ssh_fixture_hosts(&[("h-1", "me@h1"), ("my box", "me@box")]);
+    for typed in ["-", "-oProxyCommand=x", "h -1"] {
+        assert_eq!(ssh_rows(typed, &hosts, &[]), [super::SshRow::Placeholder], "{typed:?}");
+        let mut ws = ssh_launcher_with(typed);
+        assert_eq!(super::take_ssh_enter_target(&mut ws, &hosts), None, "{typed:?}");
+        assert!(ws.ssh_input.is_some(), "{typed:?}");
+    }
+    // A configured name with a space, typed in full, is still that host.
+    assert_eq!(ssh_rows("my box", &hosts, &[]), [super::SshRow::Configured(1)]);
+    let mut ws = ssh_launcher_with("My Box");
+    assert_eq!(
+        super::take_ssh_enter_target(&mut ws, &hosts).as_deref(),
+        Some("me@box")
+    );
     // The key handler goes through it, and keeps the spawn inside `ssh_key`.
     let body = finding_body(include_str!("modals.rs"), "ssh_key");
     assert!(body.contains("if let Some(target) = take_ssh_enter_target(ws, &self.cfg.ssh_hosts)"));
