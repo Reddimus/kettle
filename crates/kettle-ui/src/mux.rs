@@ -9064,6 +9064,67 @@ mod node_tests {
         assert!(mux.tabs.is_empty(), "an invalid target must not spawn");
     }
 
+    /// Configuration-only probe of the installed OpenSSH, on every runner
+    /// that has one (Windows CI is the one that matters: Win32-OpenSSH).
+    /// `-G` prints the resolved configuration and exits without connecting,
+    /// and `-F none` reads no config file, so the user's own `~/.ssh/config`
+    /// is never read. The launcher's argv tail (`-- <target>`) must make ssh
+    /// treat the target as the host: `box` resolves as `hostname box`, and a
+    /// target shaped like options is never applied as one. The output is
+    /// checked line by line and never printed. Without ssh it is skipped.
+    #[test]
+    fn installed_ssh_reads_the_launcher_target_after_double_dash_as_the_host() {
+        // `trailing` gives an option-shaped target a host to apply to, had
+        // ssh parsed it as an option, so the probe can tell the two apart.
+        let probe = |target: &str, trailing: &[&str]| {
+            // The launcher's own argv shape, with validation bypassed on
+            // purpose: this asks what ssh itself does with an option-shaped
+            // word in the target's place.
+            let mut argv = ssh_tab_argv("placeholder").unwrap();
+            *argv.last_mut().unwrap() = target.to_string();
+            assert_eq!(argv[..2], ["ssh", "-t"]);
+            std::process::Command::new(&argv[0])
+                .args(["-F", "none", "-G"])
+                .args(&argv[2..])
+                .args(trailing)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+        };
+        let resolved = match probe("box", &[]) {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipped: no ssh on PATH");
+                return;
+            }
+            Err(error) => panic!("ssh -G could not run: {:?}", error.kind()),
+        };
+        let lines = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        assert!(resolved.status.success(), "ssh -F none -G -- box failed");
+        assert!(
+            lines(&resolved).iter().any(|line| line == "hostname box"),
+            "ssh -G -- box did not resolve hostname box"
+        );
+        // After `--`, `-oProxyCommand=…` is a (bad) host name, never an
+        // option, and `-bogus` is never `-b ogus`. ssh may reject either as
+        // a host name; it must not apply them.
+        for (target, applied) in [
+            ("-oProxyCommand=kettle-probe", "proxycommand kettle-probe"),
+            ("-bogus", "bindaddress ogus"),
+        ] {
+            let output = probe(target, &["probe-host"]).expect("ssh ran above");
+            assert!(
+                !lines(&output).iter().any(|line| line == applied),
+                "ssh applied {target:?} as an option"
+            );
+        }
+    }
+
     #[test]
     fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
         // Plain shell (or empty argv) → "kettle" placeholder; the
