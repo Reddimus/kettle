@@ -2029,14 +2029,29 @@ fn shell_window(
         ..kettle_config::Config::default()
     };
     let mut mux = Mux::new();
-    mux.new_tab_with_geometry(
-        &cfg,
-        kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
-        std::sync::Arc::new(|| {}),
-        &["/bin/sh".into(), "-c".into(), script.into()],
-        None,
-    )
-    .expect("PTY fixture");
+    // As kettle-core's command-mark fixture does: macOS fails a /dev/ptmx
+    // open now and then with errno -6 while others open at the same moment.
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let opening = OPENING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut retries = 0;
+    loop {
+        match mux.new_tab_with_geometry(
+            &cfg,
+            kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+            std::sync::Arc::new(|| {}),
+            &["/bin/sh".into(), "-c".into(), script.into()],
+            None,
+        ) {
+            Err(error) if retries < 4 && format!("{error:#}").contains("failed to openpty") => {
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            opened => break opened.expect("PTY fixture"),
+        }
+    }
+    drop(opening);
     let pane = mux.active_focus().unwrap();
     let ws = WindowState::new(1, mux);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2196,6 +2211,85 @@ fn the_select_output_row_is_enabled_only_inside_a_commands_output() {
     assert_eq!(super::viewport_row_id(&term, 0), Some(12));
 }
 
+/// Rows scrollback has already dropped are left out: the rows of the span
+/// that remain are selected, and a span with none left selects nothing.
+#[test]
+fn select_command_output_keeps_the_rows_scrollback_still_holds() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut engine = alacritty_terminal::Term::new(
+        alacritty_terminal::term::Config {
+            scrolling_history: 10,
+            ..alacritty_terminal::term::Config::default()
+        },
+        &kettle_core::term::TermSize::new(80, 24),
+        kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+    );
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(&mut engine, lines.as_bytes());
+    // 41 rows, 24 on screen and 10 kept above them: rows 0 to 6 are gone.
+    assert_eq!(kettle_core::Dimensions::history_size(engine.grid()), 10);
+    assert_eq!(engine.grid().history_origin(), 7);
+    let term = std::sync::Arc::new(std::sync::Mutex::new(engine));
+    let expected: Vec<String> = (7..20).map(|n| format!("line{n}")).collect();
+    assert!(super::select_output_rows(&term, (3, 20)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some(expected.join("\n")), "line7".into())
+    );
+    term.lock().unwrap().selection = None;
+    assert!(!super::select_output_rows(&term, (0, 7)), "all gone");
+    assert_eq!(selected_and_top_row(&term).0, None);
+}
+
+/// `wire` as a `printf` format.
+#[cfg(unix)]
+fn printf_format(wire: &str) -> String {
+    wire.replace('\x1b', "\\033")
+        .replace('\x07', "\\007")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+/// The path `open_context_menu` and `context_menu_items` take from the
+/// pointer, with the view scrolled back into history: the row under the
+/// pointer is named by the stable id of the output row it shows, and Select
+/// Command Output is offered there and not over the command line or the next
+/// prompt. A real pane, because the lookup is `Terminal::command_output_rows`.
+#[cfg(unix)]
+#[test]
+fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let script = format!("printf '{}'; sleep 10", printf_format(&format!("{OUTPUT_WIRE}{lines}")));
+    let (ws, pane) = shell_window(&script, |term| {
+        term.command_output_rows(None).is_some() && term.keyboard_claims().history_size == 20
+    });
+    let term = &ws.mux.panes[&pane].term;
+    let out1 = term.command_marks()[0].row + 1;
+    let (rect, cell, pad) = ((0.0, 0.0, 664.0, 408.0), (8.0, 16.0), (12.0, 12.0));
+    let at_row = |row: f32| (100.0, pad.1 + row * cell.1 + 5.0);
+    let clicked = |row| super::pointer_row_id(&term.term, rect, at_row(row), cell, pad);
+    // At the bottom the pointer's row 1 shows line18, no command's output.
+    assert_eq!(clicked(1.0), Some(out1 + 20));
+    assert!(!super::clicked_in_output(term, clicked(1.0)));
+    // Scrolled back to the top, rows 0 to 3 show the command line, out1,
+    // out2 and the next prompt.
+    term.term
+        .lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Top);
+    assert_eq!(clicked(1.0), Some(out1));
+    let offered: Vec<bool> = (0..4)
+        .map(|row| super::clicked_in_output(term, clicked(row as f32)))
+        .collect();
+    assert_eq!(offered, [false, true, true, false]);
+    assert!(super::select_command_output(term, clicked(2.0)));
+    assert_eq!(
+        selected_and_top_row(&term.term),
+        (Some("out1\nout2".into()), "$ cmd".into())
+    );
+}
+
 /// The menu row acts on the row the menu was opened over, captured as a
 /// stable id when it opened, and a chord or the palette on the newest
 /// command. A real menu needs a live App, so the wiring is pinned at the
@@ -2211,12 +2305,10 @@ fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
     };
     let open = body("open_context_menu");
     assert!(open.contains("ws.context_menu_output_row = ws.mux.active_focus().zip(clicked_row);"));
-    assert!(open.contains(
-        "viewport_row_id(&ws.mux.panes.get(&ws.mux.active_focus()?)?.term.term, row)"
-    ));
+    assert!(open.contains("pointer_row_id(&pane.term.term, rect, (px, py), cell, pad)"));
     let items = body("context_menu_items");
     assert!(items.contains(
-        "let in_output = clicked_row.is_some_and(|row| pane.term.command_output_rows(Some(row)).is_some()); items.push(command_output_menu_row(in_output, &tr));"
+        "items.push(command_output_menu_row( clicked_in_output(&pane.term, clicked_row), &tr, ));"
     ));
     assert!(open.contains("items.extend(self.context_menu_items(ws, clicked_row));"));
     let dispatch = body("dispatch_context_menu_click");

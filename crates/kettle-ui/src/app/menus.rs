@@ -472,9 +472,10 @@ impl App {
         // `grouped_terminal_menu` puts the first after Select All and the
         // jumps after Find.
         if let Some(pane) = ws.mux.focused() {
-            let in_output =
-                clicked_row.is_some_and(|row| pane.term.command_output_rows(Some(row)).is_some());
-            items.push(command_output_menu_row(in_output, &tr));
+            items.push(command_output_menu_row(
+                clicked_in_output(&pane.term, clicked_row),
+                &tr,
+            ));
             items.extend(pane_prompt_menu_rows(&pane.term, &tr));
         }
         // The Broadcast Input rows, as radio rows; `grouped_terminal_menu`
@@ -683,10 +684,15 @@ impl App {
         // The row under the pointer, as a stable id, so output that scrolls
         // the grid before the click cannot retarget Select Command Output.
         let clicked_row = if in_focused_pane {
+            // The cell and padding `px_to_point` measures the grid with.
+            let cell = ws
+                .renderer
+                .as_ref()
+                .map_or((8.0, 16.0), |r| (r.cell_w, r.cell_h));
+            let pad = (self.cfg.padding_x, self.cfg.padding_y);
             self.focused_terminal(ws, self.area(ws)).and_then(|rect| {
-                let (point, _) = self.px_to_point(ws, rect, px, py);
-                let row = usize::try_from(point.line.0).ok()?;
-                viewport_row_id(&ws.mux.panes.get(&ws.mux.active_focus()?)?.term.term, row)
+                let pane = ws.mux.panes.get(&ws.mux.active_focus()?)?;
+                pointer_row_id(&pane.term.term, rect, (px, py), cell, pad)
             })
         } else {
             None
@@ -3545,6 +3551,27 @@ pub(super) fn command_output_menu_row(
         action: Action::SelectCommandOutput,
         enabled: in_output,
     }
+}
+
+/// Whether the row the terminal menu opened over, `clicked`, lies in a
+/// completed command's output in `term`.
+pub(super) fn clicked_in_output(term: &kettle_core::Terminal, clicked: Option<u64>) -> bool {
+    clicked.is_some_and(|row| term.command_output_rows(Some(row)).is_some())
+}
+
+/// The stable row id under the pointer `pointer` in the pane's `terminal`
+/// rect, measured with `cell` and `pad` as `px_to_point` measures it. Its
+/// line counts visible rows from the top of the view, whatever the view's
+/// scroll, which `viewport_row_id` turns into a stable id.
+pub(super) fn pointer_row_id(
+    term: &kettle_core::term::SharedTerm,
+    terminal: Rect,
+    pointer: (f32, f32),
+    cell: (f32, f32),
+    pad: (f32, f32),
+) -> Option<u64> {
+    let (_, line, _) = px_to_cell(pointer.0, pointer.1, terminal, cell, pad);
+    viewport_row_id(term, usize::try_from(line).ok()?)
 }
 
 /// The stable row id of visible row `row` of `term`'s view, while that row
