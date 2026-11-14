@@ -5420,9 +5420,12 @@ changes from earlier user snippets. Zsh wrappers accept readable text or compile
 
 The core reader stores bounded known command outcomes separately from prompt
 navigation, anchored to primary-grid document rows at command start. The UI
-captures outcomes into render snapshots. `scrollbar::command_tick_rect` owns
-the shared overlay geometry for rendering, AccessKit and control diagnostics.
-Terminal grid, hit tests and IME layout do not change.
+captures outcomes into render snapshots. `scrollbar::command_tick_rect` places
+a tick across the scrollbar's column. `kettle_render::pane_scrollbar_geometry`
+gives that column, the thumb and the pointer's hit strip to rendering, the
+pointer, AccessKit and control diagnostics alike, so each sees the bar as it
+is painted, widened or not. Terminal grid, text hit tests and IME layout do
+not change.
 
 ## Process exits and persistent chrome notices
 

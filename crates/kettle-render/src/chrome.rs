@@ -12,6 +12,9 @@ pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 /// they came from.
 type PillColors = (([u32; 3], bool), (Rgb, Rgb));
 
+/// The scrollbar's colours, keyed the same way.
+type ScrollbarColorKey = ([u32; 4], bool);
+
 #[derive(Default)]
 pub(crate) struct Colors {
     cache: MinimumContrastCache,
@@ -23,6 +26,7 @@ pub(crate) struct Colors {
     markers: std::collections::HashMap<([u32; 2], bool), Rgb>,
     backed: std::collections::HashMap<([u32; 3], u64, bool), Rgb>,
     pub(crate) pill: Option<PillColors>,
+    pub(crate) scrollbar: Option<(ScrollbarColorKey, crate::scrollback::ScrollbarColors)>,
 }
 
 impl Colors {
@@ -69,6 +73,34 @@ impl Colors {
         }
         let colors = crate::scrollback::scrollback_pill_colors(theme, linear);
         self.pill = Some((key, colors));
+        colors
+    }
+
+    /// The scrollbar's colours
+    /// ([`crate::scrollback::scrollbar_colors`]), resolved once per theme
+    /// rather than every frame.
+    pub(crate) fn scrollbar(
+        &mut self,
+        theme: &kettle_config::Theme,
+        linear: bool,
+    ) -> crate::scrollback::ScrollbarColors {
+        let key = (
+            [
+                theme.foreground,
+                theme.background,
+                theme.palette[1],
+                theme.palette[2],
+            ]
+            .map(MinimumContrastCache::color_key),
+            linear,
+        );
+        if let Some((saved, colors)) = self.scrollbar
+            && saved == key
+        {
+            return colors;
+        }
+        let colors = crate::scrollback::scrollbar_colors(theme, linear);
+        self.scrollbar = Some((key, colors));
         colors
     }
 

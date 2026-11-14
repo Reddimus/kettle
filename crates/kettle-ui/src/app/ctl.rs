@@ -1572,9 +1572,18 @@ impl App {
                             let origin = term.grid().history_origin();
                             let total = term.grid().history_size() + term.grid().screen_lines();
                             let scale = target.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+                            let lines = (
+                                term.grid().screen_lines(),
+                                term.grid().history_size(),
+                                term.grid().display_offset(),
+                            );
+                            let bar = super::pointer::pane_scrollbar(
+                                &self.cfg, target, *id, partition.terminal, scale, lines,
+                            );
+                            let column = (bar.track_rect.0, bar.track_rect.2);
                             marks.into_iter().filter_map(|mark| {
                                 let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
-                                    partition.terminal, scale, self.cfg.scrollbar_width, origin, total, mark,
+                                    partition.terminal, column, scale, origin, total, mark,
                                 )?;
                                 Some(serde_json::json!({"row": mark.row, "exit_code": mark.exit_code,
                                     "rect": rect_json((x, y, w, h))}))
