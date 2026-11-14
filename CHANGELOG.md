@@ -650,13 +650,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   replaced at most every 30 seconds instead of every 2, and within about 4
   seconds after it stops. SESSION-RESTORE.md states the tested bounds.
 
-- `kettle -e` and `kettle -d` launches, profile windows, `--config` and
-  `--new-process` launches, and a second Kettle process no longer reopen a
-  copy of the saved session or replace it with their own windows. One process
-  owns the session, the first started without those options; the others open
-  fresh, and `kettle --restore` there says why in a notification.
-  `restore-scrollback-lines = 0` in a profile no longer deletes the main
-  process's saved output.
+- `kettle -e` and `kettle -d` launches, profile windows, `--new-process`
+  launches, and a second Kettle process no longer reopen a copy of the saved
+  session or replace it with their own windows. One process owns the
+  session, the first started in restore mode without those options; the
+  others open fresh, and `kettle --restore` there says why in a
+  notification. `restore-scrollback-lines = 0` in a profile no longer
+  deletes the main process's saved output.
+
+- `kettle --config FILE` restores and saves a session of that file's own
+  instead of sharing `session.json` with every other launch: two config
+  files no longer overwrite each other's windows. Its files sit beside
+  `session.json`, named by a digest of the config file's path. Its saved
+  session used to be `session.json`, so the first `--config` launch after
+  updating opens fresh; a `--config` naming the default config file keeps
+  `session.json`.
 
 - `session.json` and `session.content` are written under one lock, so another
   process can no longer pair its layout with this one's output. A save that

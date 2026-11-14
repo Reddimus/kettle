@@ -1162,7 +1162,11 @@ when set). Saved in restore mode, within 2 seconds of a change, and
 replayed on the next launch when restoration is enabled. Only the Kettle
 process holding
 .I session.owner.lock
-beside it restores and saves the session. The default
+beside it restores and saves the session. A
+.BI \-\-config \ FILE
+launch has a session of that file's own,
+.IR session\-<digest>.json ,
+named by a digest of the file's path. The default
 .B restore-session = auto
 restores on Linux, follows the keep-windows setting on macOS and opens fresh
 on Windows. Use

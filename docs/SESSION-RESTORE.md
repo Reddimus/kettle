@@ -29,14 +29,27 @@ at most the last 2 seconds of layout changes; of output that is still
 arriving, at most the last 32 seconds (a write every 30 seconds, on the next
 2-second sweep); of output that has stopped, at most the last 4 seconds.
 
-One Kettle process owns the saved session: the first one started without
-`--profile`, `--config`, `--new-process`, `-e`, `-d` or `--layout`. It holds
+One Kettle process owns the saved session: the first one started in restore
+mode without `--profile`, `--new-process`, `-e`, `-d` or `--layout`. It holds
 `session.owner.lock` beside `session.json` until it exits. Any other Kettle
 process opens fresh and leaves both session files alone, whatever its settings
 say; `kettle --restore` there opens fresh too, with a notification saying why.
-A process that was already running does not take the session over when the
-owner exits; the next launch owns it. After an update, a newer build that
-started while the older one ran waits for that one to exit and then saves.
+A process started with restore mode off claims nothing, so a `kettle --restore`
+beside it owns the session. A process that was already running does not take
+the session over when the owner exits; the next launch owns it. After an
+update, a newer build that started while the older one ran waits for that one
+to exit and then saves.
+
+`kettle --config FILE` restores and saves a session of that file's own,
+never the default one: `session-<digest>.json`, with its `.content`,
+`.json.lock` and `.owner.lock` beside it, in the same private directory as
+`session.json` and with the same limits. The digest is of the file's
+canonical path, so the names hold no part of the path, the same file reached
+through a link or a relative path has one session, and two files never share
+one. The same ownership rules apply to it: two processes with the same
+`--config` behave as two default launches do. A `--config` naming the default
+config file uses the default session. `--profile` and `--new-process` stay
+separate, also when given with `--config`.
 
 ## Recent output
 

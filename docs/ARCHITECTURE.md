@@ -5081,15 +5081,25 @@ arguments runs as its own process, and the activation lock cannot tell which
 one owns the session: an `-e` or `--profile` process that starts first holds
 it, and a bare launch it refuses then runs beside it with no lock. So the
 owner holds `session.owner.lock` beside `session.json` from startup until it
-exits (`DefaultSessionClaim`). Profile, `--config`, `--new-process`, `-e`,
-`-d`, quick-terminal and `--layout` launches never take it. A launch that
-finds it held is a secondary for life: no restore, no write, no cleanup of
-either file, no sweep wake, and no takeover when the owner exits. Another
+exits (`DefaultSessionClaim`). Profile, `--new-process`, `-e`, `-d`,
+quick-terminal and `--layout` launches never take it. A launch whose restore
+mode is off takes it only once restore mode is on, so it cannot hold the
+session it will not restore, and it creates no file meanwhile; it removes a
+leftover output file only under a lock held for that and released. A launch
+that finds it held is a secondary for life: no restore, no write, no cleanup
+of either file, no sweep wake, and no takeover when the owner exits. Another
 build's primary (#575) is the exception, as before: a newer build waits for it
-to exit, then takes the lock. One predicate, `should_restore_session` fed
-`default_session_elsewhere`, gates the load, every save and the content
-cleanup, so they cannot disagree. An explicit `--restore` the launch cannot
+to exit, then takes the lock. `default_session_restoring` (restore mode, then
+ownership) gates the load and every save, and the content cleanup asks the
+same claim, so they cannot disagree. An explicit `--restore` the launch cannot
 honour opens fresh with a translated notification.
+
+A `--config FILE` launch's default session is that file's own
+(`launch_session_path`, chosen once at startup and given to the claim, the
+writer and the load): `session-<digest>.json` beside `session.json`, the
+digest being 32 hex digits of SHA-256 over the file's canonical path, with
+the same `.content`, `.json.lock` and `.owner.lock` siblings and rules. A
+`--config` that names the default config file keeps `session.json`.
 
 Saving has three triggers. Gestures save at the end of dispatch: tab, split
 and window changes, and every key-bound action except scrolling. A sweep
