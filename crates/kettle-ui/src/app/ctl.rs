@@ -1107,7 +1107,19 @@ impl App {
             .iter()
             .filter_map(|(pane, partition)| {
                 let pill = self.scrollback_pill_for(target, *pane, partition.terminal)?;
-                Some(serde_json::json!({"pane": pane, "rect": rect_json(pill.rect)}))
+                let state = kettle_render::ScrollbackPillState::of(
+                    *pane,
+                    target.scrollback_pill_hover,
+                    target.scrollback_pill_press,
+                );
+                Some(scrollback_pill_json(*pane, &pill, state))
+            })
+            .collect();
+        let kept_history_labels: Vec<_> = pane_layout
+            .iter()
+            .filter_map(|(pane, partition)| {
+                let label = self.kept_history_label_for(target, *pane, partition.terminal)?;
+                Some(kept_history_label_json(*pane, &label))
             })
             .collect();
         let preview_lanes: Vec<serde_json::Value> = pane_layout
@@ -1753,6 +1765,10 @@ impl App {
             fields.insert(
                 "scrollback_pills".into(),
                 serde_json::Value::Array(scrollback_pills),
+            );
+            fields.insert(
+                "kept_history_labels".into(),
+                serde_json::Value::Array(kept_history_labels),
             );
             fields.insert(
                 "preview_lanes".into(),
@@ -2412,6 +2428,11 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        // A new primary press ends a jump button's press whose release never
+        // came.
+        if bcode == 0 {
+            ws.scrollback_pill_press = None;
+        }
         // As natively: a card press whose release never came is over, as is
         // a lane's drag, a program still holding this button gets its
         // release, and the press is Kettle's own gesture until a program
@@ -2695,6 +2716,9 @@ impl App {
             return true;
         }
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.release_scrollback_pill(ws, px, py, bcode) {
+            return true;
+        }
         if self.release_card(ws, px, py, bcode) {
             return true;
         }

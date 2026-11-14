@@ -1865,7 +1865,7 @@ impl App {
                 })
             });
         let outer_resize = self.linux_resize_at(ws, cursor_x, cursor_y);
-        let want = outer_resize
+        let above_pill = outer_resize
             .map(linux_resize_cursor)
             .or(control_hover.map(|_| CursorIcon::Pointer))
             .or(drag_icon)
@@ -1874,13 +1874,21 @@ impl App {
             .or(new_tab_hover_icon)
             .or(confirm_hover)
             .or(search_hover)
-            .or(media_receipt_hover)
-            .or_else(|| {
-                (!self.pointer_modal_open(ws))
-                    .then(|| self.scrollback_pill_at(ws, ws.cursor.x as f32, ws.cursor.y as f32))
-                    .flatten()
-                    .map(|_| CursorIcon::Pointer)
-            })
+            .or(media_receipt_hover);
+        // The jump button under the pointer, where a press would reach it:
+        // it takes the hand and paints its hover fill, repainted only as the
+        // pointer enters or leaves it.
+        let pill_hover = scrollback_pill_hover(above_pill.is_some(), || {
+            self.scrollback_pill_target(ws, cursor_x, cursor_y)
+        });
+        if pill_hover != ws.scrollback_pill_hover {
+            ws.scrollback_pill_hover = pill_hover;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        let want = above_pill
+            .or(pill_hover.map(|_| CursorIcon::Pointer))
             .or(chrome)
             // A card takes a press before a split seam does, so its hand
             // wins where the two overlap.
@@ -1999,6 +2007,9 @@ impl App {
 }
 
 impl App {
+    /// `pane`'s jump-to-bottom button as the renderer paints it this frame:
+    /// the same count, the same key hint from the live bindings, the same
+    /// rect.
     pub(super) fn scrollback_pill_for(
         &self,
         ws: &WindowState,
@@ -2007,6 +2018,9 @@ impl App {
     ) -> Option<kettle_render::ScrollbackPill> {
         let pane = ws.mux.panes.get(&pane_id)?;
         let offset = pane.term.term.lock().ok()?.grid().display_offset();
+        if offset == 0 {
+            return None;
+        }
         kettle_render::scrollback_pill(
             terminal,
             offset,
@@ -2019,6 +2033,30 @@ impl App {
             ),
             self.cfg.scrollbar_width,
             kettle_render::scrollback_pill_hint(&self.cfg.keybinds).as_deref(),
+            &self.ui_text,
+        )
+    }
+
+    /// `pane`'s "Start of kept history" label as the renderer paints it.
+    pub(super) fn kept_history_label_for(
+        &self,
+        ws: &WindowState,
+        pane_id: u64,
+        terminal: Rect,
+    ) -> Option<kettle_render::KeptHistoryLabel> {
+        let pane = ws.mux.panes.get(&pane_id)?;
+        let view = kettle_render::HistoryView::of(&*pane.term.term.lock().ok()?);
+        kettle_render::kept_history_label(
+            terminal,
+            view,
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            self.cfg.scrollbar_width,
             &self.ui_text,
         )
     }
@@ -2049,6 +2087,31 @@ impl App {
         )
     }
 
+    /// The pane whose jump button a press at `(px, py)` reaches: the one
+    /// rule the hover fill, the pointer cursor, the press and its release
+    /// share. A dialog or menu, the completion list and a paste receipt over
+    /// the button each take the pointer first.
+    pub(super) fn scrollback_pill_target(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
+        if self.pointer_modal_open(ws) || ws.preview_overlay.is_some() {
+            return None;
+        }
+        let hit = self.scrollback_pill_at(ws, px, py)?;
+        let completion = self.completion_overlay_projection(ws, terminal_surface_available(ws));
+        if completion_overlay_hit_test(completion.as_ref(), self.menu_cell(ws), (px, py)) {
+            return None;
+        }
+        let receipt = self
+            .media_paste_receipt_projection(ws)
+            .map(|(receipt, completion)| {
+                self.media_paste_receipt_placement(ws, receipt, completion)
+            });
+        scrollback_pill_reached(Some(hit), receipt.as_ref(), (px, py))
+    }
+
+    /// Take a press on a jump button, before focus, links, selection and
+    /// mouse reporting. A primary press arms the button; it acts on release,
+    /// as a native button does, so its pressed state shows and moving off it
+    /// cancels.
     pub(super) fn press_scrollback_pill(
         &self,
         ws: &mut WindowState,
@@ -2056,27 +2119,38 @@ impl App {
         py: f32,
         button: u8,
     ) -> bool {
-        let hit = self.scrollback_pill_at(ws, px, py);
-        if let Some(pane) = hit {
-            let completion = self.completion_overlay_projection(ws, terminal_surface_available(ws));
-            if completion_overlay_hit_test(completion.as_ref(), self.menu_cell(ws), (px, py)) {
-                return false;
-            }
-            let receipt = self
-                .media_paste_receipt_projection(ws)
-                .map(|(receipt, completion)| {
-                    self.media_paste_receipt_placement(ws, receipt, completion)
-                });
-            return Self::press_scrollback_pill_with_receipt(
-                ws,
-                Some(pane),
-                receipt.as_ref(),
-                (px, py),
-                button,
-            );
-        }
-        false
+        let Some(pane) = self.scrollback_pill_target(ws, px, py) else {
+            return false;
+        };
+        Self::press_scrollback_pill_with_receipt(ws, Some(pane), None, (px, py), button)
     }
+
+    /// End a press a jump button took. Released over the same button, it
+    /// returns that pane to live output; anywhere else it is dropped. Either
+    /// way the terminal saw neither the press nor the release.
+    pub(super) fn release_scrollback_pill(
+        &self,
+        ws: &mut WindowState,
+        px: f32,
+        py: f32,
+        button: u8,
+    ) -> bool {
+        if button != 0 || ws.scrollback_pill_press.is_none() {
+            return false;
+        }
+        let over = self.scrollback_pill_target(ws, px, py);
+        Self::release_scrollback_pill_with_receipt(ws, over, None, (px, py), button)
+    }
+}
+
+/// The jump button that shows as hovered and gives the pointer its hand:
+/// the one a press would reach, unless something drawn over it (a toast, a
+/// dialog button, the search bar, a paste receipt) has the pointer.
+pub(super) fn scrollback_pill_hover(
+    pointer_taken: bool,
+    target: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    if pointer_taken { None } else { target() }
 }
 
 pub(super) fn scrollback_pill_hit(
@@ -2088,7 +2162,27 @@ pub(super) fn scrollback_pill_hit(
         .find_map(|(pane, pill)| rect_contains(pill.rect, point.0, point.1).then_some(pane))
 }
 
+/// The pane whose jump button `point` reaches, given the button under it
+/// and the paste receipt on screen: a receipt over the button keeps the
+/// pointer.
+pub(super) fn scrollback_pill_reached(
+    hit: Option<u64>,
+    receipt: Option<&MediaPasteReceiptPlacement>,
+    point: (f32, f32),
+) -> Option<u64> {
+    hit.filter(|_| {
+        !receipt.is_some_and(|placement| {
+            placement
+                .geometry()
+                .is_some_and(|geometry| geometry.hit_test(point.0, point.1).is_some())
+        })
+    })
+}
+
 impl App {
+    /// A press at `point` with `hit` the jump button under it. A primary
+    /// press arms that button for its release; any other button is taken and
+    /// does nothing.
     pub(super) fn press_scrollback_pill_with_receipt(
         ws: &mut WindowState,
         hit: Option<u64>,
@@ -2096,18 +2190,38 @@ impl App {
         point: (f32, f32),
         button: u8,
     ) -> bool {
-        let Some(pane) = hit else {
+        let Some(pane) = scrollback_pill_reached(hit, receipt, point) else {
             return false;
         };
-        if receipt.is_some_and(|placement| {
-            placement
-                .geometry()
-                .is_some_and(|geometry| geometry.hit_test(point.0, point.1).is_some())
-        }) {
+        if button == 0 {
+            ws.scrollback_pill_press = Some(pane);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        true
+    }
+
+    /// The primary release that ends a press a jump button took, with `hit`
+    /// the button now under `point`. Only a release over the button that
+    /// took the press returns its pane to live output.
+    pub(super) fn release_scrollback_pill_with_receipt(
+        ws: &mut WindowState,
+        hit: Option<u64>,
+        receipt: Option<&MediaPasteReceiptPlacement>,
+        point: (f32, f32),
+        button: u8,
+    ) -> bool {
+        if button != 0 {
             return false;
         }
-        if button == 0 {
-            Self::return_pane_to_live(ws, pane);
+        let Some(pressed) = ws.scrollback_pill_press.take() else {
+            return false;
+        };
+        if scrollback_pill_reached(hit, receipt, point) == Some(pressed) {
+            Self::return_pane_to_live(ws, pressed);
+        } else if let Some(window) = &ws.window {
+            window.request_redraw();
         }
         true
     }

@@ -237,21 +237,21 @@ impl App {
             );
             let mut pane_children: Vec<_> = text_nodes.iter().map(|(id, _)| *id).collect();
             nodes.extend(text_nodes);
-            if let Some(pill) = self.scrollback_pill_for(ws, pane_id, (x, y, width, height)) {
-                let id = accessibility_scrollback_id(pane_id);
-                let mut button = Node::new(Role::Button);
-                button.set_label(pill.accessible_label);
-                let (x, y, w, h) = pill.rect;
-                button.set_bounds(accesskit::Rect::new(
-                    x as f64,
-                    y as f64,
-                    (x + w) as f64,
-                    (y + h) as f64,
-                ));
-                button.add_action(AccessibilityAction::Click);
-                pane_children.push(id);
-                nodes.push((id, button));
-            }
+            // What the pane shows of its place in history: the jump
+            // button, the label at the start of kept history, and for the
+            // focused pane a status that it is viewing history at all.
+            let history = scrollback_accessibility_nodes(
+                pane_id,
+                partition.terminal,
+                self.scrollback_pill_for(ws, pane_id, partition.terminal)
+                    .as_ref(),
+                self.kept_history_label_for(ws, pane_id, partition.terminal)
+                    .as_ref(),
+                viewing_history_pane(ws) == Some(pane_id),
+                &self.ui_text,
+            );
+            pane_children.extend(history.iter().map(|(id, _)| *id));
+            nodes.extend(history);
             for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
                 let id = accessibility_card_id(*instance);
                 pane_children.push(id);
@@ -879,11 +879,22 @@ impl App {
             if let Some(pill) = self.scrollback_pill_for(ws, pane, partition.terminal) {
                 pane.hash(&mut hasher);
                 pill.label.hash(&mut hasher);
+                pill.hint.as_ref().map(|hint| &hint.text).hash(&mut hasher);
                 [pill.rect.0, pill.rect.1, pill.rect.2, pill.rect.3]
                     .map(f32::to_bits)
                     .hash(&mut hasher);
             }
+            if let Some(label) = self.kept_history_label_for(ws, pane, partition.terminal) {
+                pane.hash(&mut hasher);
+                label.label.hash(&mut hasher);
+                [label.rect.0, label.rect.1, label.rect.2, label.rect.3]
+                    .map(f32::to_bits)
+                    .hash(&mut hasher);
+            }
         }
+        // The "Viewing history" status comes and goes with this, in a pane
+        // too small for a button as well.
+        viewing_history_pane(ws).hash(&mut hasher);
         ws.search.open.hash(&mut hasher);
         if ws.search.open {
             ws.search.query().hash(&mut hasher);
@@ -3305,6 +3316,85 @@ pub(super) fn accessibility_parent_menu_item(
 
 fn accessibility_scrollback_id(pane: u64) -> NodeId {
     NodeId((1 << 52) | pane)
+}
+
+/// The pane that carries the "Viewing history" status: the focused pane,
+/// while it shows its history instead of its live output. Whether the pane
+/// has room for a jump button does not come into it.
+pub(super) fn viewing_history_pane(ws: &WindowState) -> Option<u64> {
+    let pane = ws.mux.active_focus()?;
+    ws.mux
+        .panes
+        .get(&pane)?
+        .term
+        .term
+        .lock()
+        .ok()
+        .is_some_and(|term| term.grid().display_offset() > 0)
+        .then_some(pane)
+}
+
+/// A pane's "Start of kept history" label.
+fn accessibility_kept_history_id(pane: u64) -> NodeId {
+    NodeId((1 << 48) | (pane << 1))
+}
+
+/// A pane's "Viewing history" status. One id per pane whatever its offset,
+/// so scrolling further changes nothing a screen reader would speak.
+fn accessibility_viewing_history_id(pane: u64) -> NodeId {
+    NodeId((1 << 48) | (pane << 1) | 1)
+}
+
+/// The AccessKit nodes for a pane's place in its history, each bounded
+/// where it is painted:
+///
+/// - the jump button, named for what it does and how far back the view is,
+///   with the key bound to the same action as its shortcut;
+/// - the "Start of kept history" label, read as the text it shows;
+/// - while `viewing_history` (the focused pane is scrolled back), one polite
+///   status, "Viewing history". It carries no count and keeps the terminal's
+///   bounds, so it is spoken when the pane leaves live output and not again
+///   as the view scrolls.
+pub(super) fn scrollback_accessibility_nodes(
+    pane: u64,
+    terminal: kettle_render::Rect4,
+    pill: Option<&kettle_render::ScrollbackPill>,
+    kept: Option<&kettle_render::KeptHistoryLabel>,
+    viewing_history: bool,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(NodeId, Node)> {
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(x + w),
+            f64::from(y + h),
+        )
+    };
+    let mut nodes = Vec::with_capacity(3);
+    if let Some(pill) = pill {
+        let mut button = Node::new(Role::Button);
+        button.set_label(pill.accessible_label.clone());
+        if let Some(hint) = &pill.hint {
+            button.set_keyboard_shortcut(hint.text.clone());
+        }
+        button.set_bounds(bounds(pill.rect));
+        button.add_action(AccessibilityAction::Click);
+        nodes.push((accessibility_scrollback_id(pane), button));
+    }
+    if let Some(kept) = kept {
+        let mut label = static_text_node(kept.label.clone());
+        label.set_bounds(bounds(kept.rect));
+        nodes.push((accessibility_kept_history_id(pane), label));
+    }
+    if viewing_history {
+        let mut status = Node::new(Role::Status);
+        status.set_label(tr.text(kettle_i18n::Text::ScrollbackA11yViewing));
+        status.set_live(accesskit::Live::Polite);
+        status.set_bounds(bounds(terminal));
+        nodes.push((accessibility_viewing_history_id(pane), status));
+    }
+    nodes
 }
 
 fn accessibility_scrollbar_id(pane: u64) -> NodeId {

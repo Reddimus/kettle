@@ -109,6 +109,17 @@ impl Fixture {
         let hit = self.hit(height, point);
         App::press_scrollback_pill_with_receipt(&mut self.ws, hit, receipt, point, button)
     }
+
+    fn release(
+        &mut self,
+        height: f32,
+        receipt: Option<&MediaPasteReceiptPlacement>,
+        point: (f32, f32),
+        button: u8,
+    ) -> bool {
+        let hit = self.hit(height, point);
+        App::release_scrollback_pill_with_receipt(&mut self.ws, hit, receipt, point, button)
+    }
 }
 
 impl Drop for Fixture {
@@ -195,6 +206,8 @@ fn scrollback_receipt_hit_expanded_notice_preserves_receipt_recipient() {
         !fixture.press(192.0, Some(&receipt), point, 0),
         "the displayed receipt must keep the press instead of returning its pane to live output"
     );
+    assert_eq!(fixture.ws.scrollback_pill_press, None);
+    assert!(!fixture.release(192.0, Some(&receipt), point, 0));
     assert_eq!(fixture.offsets(), [30, 30]);
     assert!(!fixture.ws.accessibility_pending);
 }
@@ -236,7 +249,16 @@ fn scrollback_receipt_hit_uncovered_pills_only_scroll_their_recipient() {
                 .is_none_or(|geometry| geometry.hit_test(point.0, point.1).is_none())
         );
         assert_eq!(fixture.hit(height, point), Some(fixture.panes[recipient]));
+        // The press arms the button; its release there is the click.
         assert!(fixture.press(height, receipt.as_ref(), point, 0));
+        assert_eq!(
+            fixture.ws.scrollback_pill_press,
+            Some(fixture.panes[recipient])
+        );
+        assert_eq!(fixture.offsets(), [30, 30]);
+        assert!(!fixture.ws.accessibility_pending);
+        assert!(fixture.release(height, receipt.as_ref(), point, 0));
+        assert_eq!(fixture.ws.scrollback_pill_press, None);
         let mut expected = [30, 30];
         expected[recipient] = 0;
         assert_eq!(fixture.offsets(), expected);
@@ -252,6 +274,10 @@ fn scrollback_receipt_hit_secondary_and_outside_presses_preserve_scrollback() {
     for button in [1, 2] {
         assert!(!fixture.press(192.0, Some(&receipt), (740.0, 170.0), button));
         assert!(fixture.press(192.0, None, (740.0, 170.0), button));
+        // A middle or right press is taken and arms nothing, so its release
+        // is not the button's.
+        assert_eq!(fixture.ws.scrollback_pill_press, None);
+        assert!(!fixture.release(192.0, None, (740.0, 170.0), button));
         assert_eq!(fixture.offsets(), [30, 30]);
         assert!(!fixture.ws.accessibility_pending);
     }
@@ -266,4 +292,58 @@ fn scrollback_receipt_hit_secondary_and_outside_presses_preserve_scrollback() {
     assert!(!fixture.press(192.0, None, (740.0, 170.0), 0));
     assert_eq!(fixture.offsets(), [0, 30]);
     assert!(!fixture.ws.accessibility_pending);
+}
+
+/// The jump button is a button: a primary press arms it and shows it
+/// pressed, and only a release over the same button returns its pane to
+/// live output. A release anywhere else, over the other pane's button, or
+/// under a receipt that has since covered it, ends the press and scrolls
+/// nothing; so does a release with nothing armed.
+#[test]
+fn scrollback_receipt_hit_jump_button_acts_on_release_over_the_same_button() {
+    let mut fixture = Fixture::new(1);
+    let (first, second) = (fixture.panes[0], fixture.panes[1]);
+    let on_first = (740.0, 170.0);
+    let on_second = (1540.0, 170.0);
+    assert_eq!(fixture.hit(192.0, on_first), Some(first));
+    assert_eq!(fixture.hit(192.0, on_second), Some(second));
+    let covering = placement(192.0, true, Some((0.0, 0.0, 800.0, 192.0)));
+    assert!(
+        covering
+            .geometry()
+            .unwrap()
+            .hit_test(on_first.0, on_first.1)
+            .is_some()
+    );
+
+    // Nothing armed: the release is not the button's.
+    assert!(!fixture.release(192.0, None, on_first, 0));
+    assert_eq!(fixture.offsets(), [30, 30]);
+
+    for (release_at, receipt) in [
+        ((200.0, 100.0), None),
+        (on_second, None),
+        (on_first, Some(&covering)),
+    ] {
+        fixture.reset();
+        assert!(fixture.press(192.0, None, on_first, 0));
+        assert_eq!(fixture.ws.scrollback_pill_press, Some(first));
+        assert_eq!(fixture.offsets(), [30, 30], "a press alone scrolls nothing");
+        assert!(
+            fixture.release(192.0, receipt, release_at, 0),
+            "the release ends the gesture the button took"
+        );
+        assert_eq!(fixture.ws.scrollback_pill_press, None);
+        assert_eq!(fixture.offsets(), [30, 30], "released at {release_at:?}");
+        assert!(!fixture.ws.accessibility_pending);
+    }
+
+    fixture.reset();
+    assert!(fixture.press(192.0, None, on_first, 0));
+    // Another button's release leaves the press armed.
+    assert!(!fixture.release(192.0, None, on_first, 2));
+    assert_eq!(fixture.ws.scrollback_pill_press, Some(first));
+    assert!(fixture.release(192.0, None, on_first, 0));
+    assert_eq!(fixture.offsets(), [0, 30]);
+    assert!(fixture.ws.accessibility_pending);
 }

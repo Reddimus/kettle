@@ -885,6 +885,7 @@ impl App {
         self.close_all_modals(ws);
         self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
+        ws.scrollback_pill_press = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;

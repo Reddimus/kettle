@@ -1190,6 +1190,14 @@ pub(crate) struct WindowState {
     /// The inline card, by pane and nonce, that took the primary press now
     /// held; its release over the same card opens the card's item.
     pub(crate) card_press: Option<(u64, kettle_core::InlineNonce)>,
+    /// The pane whose jump-to-bottom button is under the pointer, where a
+    /// press would reach it: it paints its hover fill. Repainted on the
+    /// enter and leave edges only.
+    pub(crate) scrollback_pill_hover: Option<u64>,
+    /// The pane whose jump-to-bottom button took the primary press now
+    /// held; its release over the same button returns the pane to live
+    /// output.
+    pub(crate) scrollback_pill_press: Option<u64>,
     /// The cards on screen as of the last presented frame: since when each
     /// is where it is, and the instance that names it.
     pub(crate) card_sightings: crate::media::CardSightings,
@@ -1798,6 +1806,8 @@ impl WindowState {
             theme_preview: None,
             preview_panels: std::collections::HashMap::new(),
             card_press: None,
+            scrollback_pill_hover: None,
+            scrollback_pill_press: None,
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
             tab_focus: None,
