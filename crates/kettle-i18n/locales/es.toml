@@ -1052,6 +1052,9 @@ notification_toast_show_a11y = "Mostrar {source}"
 notification_toast_a11y = "Notificación de {source}: {message}"
 notification_toast_a11y_unsourced = "Notificación: {message}"
 
+scrollback_kept = "Inicio del historial conservado"
+scrollback_a11y_viewing = "Viendo el historial"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -1119,3 +1122,7 @@ other = "{count} notificaciones más"
 [notification_toast_a11y_repeats]
 one = "Enviada una vez"
 other = "Enviada {count} veces"
+
+[scrollback_kept_lines]
+one = "Inicio del historial conservado · {lines} línea"
+other = "Inicio del historial conservado · {lines} líneas"
