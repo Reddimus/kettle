@@ -164,7 +164,8 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `word-delimiters` (`selection-word-chars`, `semantic-escape-chars`) | string | engine default | Characters that delimit a word for double-click selection. Leave empty for the engine default. For example, `()[]{}` makes `/` part of a word so paths and URLs select as one unit |
 | `font-feature` | string | — | OpenType feature(s), repeatable / comma-list. Forms: `liga`, `+calt`, `-liga`, `liga off`, `ss01`, `cv01=2`, `zero 1`. Applied on top of the ligature toggle |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
-| `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
+| `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher. The name is a label of 1–128 bytes with no `=` and no control or bidi characters; interior spaces are fine. The target is at most 512 bytes, cannot start with `-` and cannot contain whitespace, control or bidi characters; Kettle passes it to `ssh` after `--`. Entries that break these rules are ignored and reported by `--check-config` |
+| `ssh-config-hosts` | bool | `true` | The SSH launcher also lists the `Host` aliases in `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows), read each time the launcher opens. See [SSH launcher](#ssh-launcher). `false` stops Kettle reading that file |
 | `keybind` | `trigger=action` | built in map | Repeatable |
 | `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
 | `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | Show a thin strip at the configured edge with `HH:MM:SS` in local time, the theme, and the focused pane title. Disabled by default. Aliases: `none` / `false` = off, `on` / `true` = bottom |
@@ -193,6 +194,54 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 
 SSH pane titles show the destination after skipping option operands, including
 `-p`, `-J`, and `-i` (for example, `ssh -p 2222 alice@server` shows `ssh alice@server`).
+
+### SSH launcher
+
+The SSH launcher (`Ctrl+Shift+S`, or the `ssh` action) lists, in order:
+
+1. the `ssh-host` entries, best match first;
+2. the `Host` aliases in `~/.ssh/config`, with the hint `from ~/.ssh/config`;
+3. **Connect to "…"**, when the typed text is a valid target that is not
+   exactly a listed name or alias (ignoring case), so a fuzzy match can never
+   take over a target you typed in full.
+
+An exact name or alias match is always the first row. Enter connects to the
+selected row as `ssh -t -- <target>`. A typed target that starts with `-` or
+contains a space is refused with a message, and nothing is started. `Up` from
+the first row does not wrap onto the Connect row.
+
+**What is read.** Only when `ssh-config-hosts` is on (the default), and only
+when the launcher opens: `$HOME/.ssh/config`, or `%USERPROFILE%\.ssh\config`
+on Windows (a Git Bash `HOME` is ignored there). Kettle never writes that file.
+Only `Host` lines are parsed, and only literal aliases made of ASCII letters,
+digits and `. _ ~ + : -` that do not start with `-` are kept. Patterns (`*`,
+`?`, `!`, `,`), quoted names with spaces, aliases containing `@`, and
+non-ASCII aliases are skipped. `Match` blocks contribute nothing, and `Include`
+is not followed, so hosts kept in `~/.ssh/config.d/*` do not appear (you can
+still type them). An alias equal to an `ssh-host` name or target, ignoring
+case, is shown once, as the `ssh-host` row; aliases that differ only in case
+are one alias.
+
+**Bounds and permissions.** At most 256 KiB of the file is read; a longer file
+is parsed up to its last complete line within that prefix. At most 256 aliases
+of at most 255 bytes each are kept. The file is opened the way Kettle opens its
+own config: a symlinked dotfile is followed only through folders other users
+cannot write, and the file is skipped if anyone other than you or an
+administrator can change it, if it has more than one hard link, or if it is not
+a regular file. A skip leaves the list empty and logs a fixed reason, never the
+path or any alias. A missing file is not an error.
+
+**Privacy.** The list of imported aliases is never saved: not to the config, the
+session file or the log. While the launcher is open, its rows are visible to
+screen readers and to local `kettle ctl` clients through the accessibility
+tree, as configured names already are. Connecting is different: the alias you
+connect to becomes part of the pane's command (`ssh -t -- <alias>`), which the
+session file stores so the tab can be restored, and it appears in the tab title
+and the window title, as a typed target always has. Set
+`ssh-config-hosts = false` to keep Kettle from reading the file at all.
+
+`kettle --list-ssh-hosts` prints only the `ssh-host` entries in the config; it
+never reads `~/.ssh/config`.
 
 ### Scrollback search
 
@@ -1097,10 +1146,11 @@ separate processes/windows. The empty Create Profile action opens that directory
 Named layouts use `layouts/*.json` beside the default config; Save Layout
 replaces an existing name and excludes quick-terminal windows.
 
-No new configuration keys are needed. Optional `keybind` actions
+Optional `keybind` actions
 `save_layout` (name prompt), `open_layout_picker` (Open Layout) and
 `open_profiles_directory` (create/open the profiles directory) expose the same
 routes. `ssh` opens the SSH launcher; `ssh-host = name=target` supplies its
-configured targets. Save names accept 1–128 ASCII letters, digits, `.`, `_` and
+configured targets, and `ssh-config-hosts` adds the aliases in `~/.ssh/config`
+(see [SSH launcher](#ssh-launcher)). Save names accept 1–128 ASCII letters, digits, `.`, `_` and
 `-`, except `.` and `..`. Restore policy remains controlled by `restore-session`
 and the launch flags described above.
