@@ -344,6 +344,10 @@ in the config. The default
 .B restore-session = auto
 follows the macOS keep-windows setting, restores the previous session on Linux,
 and opens fresh on Windows.
+One Kettle process owns the saved session. While another one has it open, and
+with
+.BR \-\-profile ", " \-\-config ", " \-\-new\-process ", " \-e " or " \-d ,
+this flag opens a fresh window and a notification says why.
 .TP
 .BI \-\-agent\-server \ MODE
 Enable kettle's agent control server for this launch, overriding the

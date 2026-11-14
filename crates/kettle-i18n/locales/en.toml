@@ -984,6 +984,12 @@ notify_layout_failed = "Layout not saved"
 
 notify_layout_failed_body = "Use a name of 1–128 letters, digits, dots, underscores or hyphens. Check that the layouts directory is writable."
 
+notify_session_not_restored = "Session not restored"
+
+notify_session_not_restored_owned_body = "Another Kettle process already has the saved session open, so this window opens without it."
+
+notify_session_not_restored_separate_body = "Windows opened with --profile, --config, --new-process, -e or -d never restore the saved session."
+
 notify_profiles_failed = "Profiles directory not opened"
 
 notify_profiles_failed_body = "Check that the config directory is available and writable, and that your file manager can open folders."

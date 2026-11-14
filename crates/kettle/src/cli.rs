@@ -221,6 +221,9 @@ pub(crate) struct Cli {
     /// fresh on Windows.
     /// Set `restore-session = true` to enable restore on every launch, or
     /// `restore-session = false` to open fresh unless this flag is passed.
+    /// One Kettle process owns the saved session. While another one has it
+    /// open, and with `--profile`, `--config`, `--new-process`, `-e` or `-d`,
+    /// this flag opens a fresh window and a notification says why.
     #[arg(long, verbatim_doc_comment)]
     pub(crate) restore: bool,
 

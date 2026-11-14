@@ -290,6 +290,12 @@ impl Session {
             .and_then(|p| p.parent().map(|d| d.join("session.json")))
     }
 
+    /// The lock the process that owns the default session holds for as long
+    /// as it runs, beside `session.json`.
+    pub(crate) fn owner_lock_path() -> Option<PathBuf> {
+        Self::path().map(|path| path.with_file_name("session.owner.lock"))
+    }
+
     /// The named-layout path: returns
     /// `<config-dir>/layouts/<sanitized>.json`. The name is sanitized
     /// to `[A-Za-z0-9._-]` so a user can't traverse out of the

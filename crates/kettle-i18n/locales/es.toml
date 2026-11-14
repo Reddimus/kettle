@@ -985,6 +985,12 @@ notify_layout_failed = "No se guardó el diseño"
 
 notify_layout_failed_body = "Usar un nombre de 1 a 128 letras, dígitos, puntos, guiones bajos o guiones. Comprobar que se pueda escribir en el directorio de diseños."
 
+notify_session_not_restored = "No se restauró la sesión"
+
+notify_session_not_restored_owned_body = "Otro proceso de Kettle ya tiene abierta la sesión guardada, así que esta ventana se abre sin ella."
+
+notify_session_not_restored_separate_body = "Las ventanas abiertas con --profile, --config, --new-process, -e o -d nunca restauran la sesión guardada."
+
 notify_profiles_failed = "No se abrió el directorio de perfiles"
 
 notify_profiles_failed_body = "Comprobar que el directorio de configuración esté disponible y permita escribir, y que el administrador de archivos pueda abrir carpetas."

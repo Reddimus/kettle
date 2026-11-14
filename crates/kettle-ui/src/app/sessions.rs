@@ -184,19 +184,31 @@ impl App {
         Some(s)
     }
 
+    /// Whether the default session is someone else's for this launch: see
+    /// [`DefaultSessionClaim`]. Restoring, saving and cleaning up
+    /// `session.json` and `session.content` all wait on it.
+    pub(super) fn default_session_elsewhere(&self) -> bool {
+        let another_build = self.other_builds.running();
+        another_build || !self.default_session.borrow_mut().owns(another_build)
+    }
+
     pub(super) fn clear_disabled_content(&self) {
-        if self.other_builds.running() {
+        let owned = match self.startup.layout.as_deref() {
+            Some(_) => self.named_layout_writable && !self.other_builds.running(),
+            None => !self.default_session_elsewhere(),
+        };
+        if !content_cleanup_due(
+            owned,
+            self.startup.layout.is_some(),
+            self.cfg.restore_scrollback_lines,
+            should_restore_session(self.startup.restore, self.cfg.restore_session, false),
+        ) {
             return;
         }
-        let disabled = self.cfg.restore_scrollback_lines == 0
-            || (self.startup.layout.is_none()
-                && !should_restore_session(self.startup.restore, self.cfg.restore_session, false));
-        if disabled {
-            // Whatever is written next is a fresh snapshot, never a keep.
-            self.content_throttle.borrow_mut().reset();
-            self.session_writer
-                .remove_content(self.startup.layout.clone());
-        }
+        // Whatever is written next is a fresh snapshot, never a keep.
+        self.content_throttle.borrow_mut().reset();
+        self.session_writer
+            .remove_content(self.startup.layout.clone());
     }
 
     /// Where automatic saves go right now, before any snapshot is taken.
@@ -207,7 +219,7 @@ impl App {
             should_restore_session(
                 self.startup.restore,
                 self.cfg.restore_session,
-                self.other_builds.running(),
+                self.default_session_elsewhere(),
             ),
             false,
         )
@@ -386,7 +398,7 @@ impl App {
         } else if should_restore_session(
             self.startup.restore,
             self.cfg.restore_session,
-            self.other_builds.running(),
+            self.default_session_elsewhere(),
         ) {
             self.restore_source = crate::session::Session::path();
             let (session, identity) = loaded_startup_snapshot(
@@ -396,7 +408,9 @@ impl App {
             self.restore_identity = Some(identity);
             Some(session)
         } else {
-            if !self.other_builds.running()
+            // Restore is off, so the output file goes, but only this launch's
+            // own: never one another process owns or this launch never loads.
+            if !self.default_session_elsewhere()
                 && let Some(path) = crate::session::Session::path()
             {
                 crate::session_content::remove(&path);
@@ -871,6 +885,141 @@ pub(super) fn session_write_target(
     }
 }
 
+/// Whether a launch removes the output file beside the session it owns:
+/// only when it owns that file (`owned`), and output saving is off for it,
+/// either `restore-scrollback-lines = 0` or, for the default session, restore
+/// mode off. A launch override, a secondary or a profile owns nothing to
+/// remove, so a `restore-scrollback-lines = 0` there cannot erase the main
+/// process's file.
+pub(super) fn content_cleanup_due(
+    owned: bool,
+    named_layout: bool,
+    lines: usize,
+    restore_mode: bool,
+) -> bool {
+    owned && (lines == 0 || (!named_layout && !restore_mode))
+}
+
+/// Who restores and writes the default session (`session.json` and
+/// `session.content`) while this process runs.
+///
+/// Only one process should. Each restores the session it finds, so a second
+/// one opens a copy of the first one's tabs; and each writes whenever what it
+/// has differs from the file, so two take turns replacing each other's
+/// windows, and a `kettle -d DIR` launch would replace the saved session
+/// with its one window on its first sweep.
+///
+/// The activation lock does not settle it. This build's primary holds that
+/// lock, but so does a process started with `-e` or `--profile` while no
+/// primary ran, and a bare launch that such a process refuses then runs beside
+/// it holding no lock at all. So the owner holds a lock of its own,
+/// `session.owner.lock` beside `session.json`, taken at startup and kept
+/// until it exits. A process that finds it held does not take it over when
+/// its holder exits: the last process to quit would otherwise replace the
+/// session the user meant to keep. The one exception is another build's
+/// primary (#575): a new build's primary waits for the old one to exit and
+/// then saves, as it did before the lock existed.
+#[derive(Debug)]
+pub(crate) enum DefaultSessionClaim {
+    /// This process holds the owner lock, released when it exits. `None`
+    /// when the lock could not be taken for a reason other than a holder (no
+    /// config directory, a read-only one): restore and saving then go ahead
+    /// as before the lock existed.
+    Owner {
+        _lock: Option<kettle_state::ExclusiveFileLock>,
+    },
+    /// The lock was held while another build's primary ran: take it once
+    /// that build has exited.
+    Waiting(std::path::PathBuf),
+    /// Another process of this build owns the default session. This one
+    /// neither restores nor writes it, and never takes it over.
+    Secondary,
+    /// A launch that never touches the default session: a profile, `--config`
+    /// or `--new-process` (see [`separate_launch`]).
+    Separate,
+}
+
+impl DefaultSessionClaim {
+    /// Claim the default session for a launch, at startup. `lock` is where the
+    /// owner lock lives (`None` without a config directory).
+    pub(super) fn claim(
+        separate: bool,
+        another_build_running: bool,
+        lock: Option<&std::path::Path>,
+    ) -> Self {
+        if separate {
+            return Self::Separate;
+        }
+        let Some(path) = lock else {
+            return Self::Owner { _lock: None };
+        };
+        match take_owner_lock(path) {
+            Ok(Some(lock)) => Self::Owner { _lock: Some(lock) },
+            Ok(None) if another_build_running => Self::Waiting(path.to_path_buf()),
+            Ok(None) => Self::Secondary,
+            Err(error) => {
+                log::warn!(
+                    "session owner lock unavailable ({:?}); restoring and saving as before",
+                    error.kind()
+                );
+                Self::Owner { _lock: None }
+            }
+        }
+    }
+
+    /// Whether this process owns the default session now. A waiting one takes
+    /// the lock over once no other build runs and the lock is free.
+    pub(super) fn owns(&mut self, another_build_running: bool) -> bool {
+        if let Self::Waiting(path) = self
+            && !another_build_running
+            && let Ok(Some(lock)) = take_owner_lock(path)
+        {
+            *self = Self::Owner { _lock: Some(lock) };
+        }
+        matches!(self, Self::Owner { .. })
+    }
+}
+
+fn take_owner_lock(
+    path: &std::path::Path,
+) -> std::io::Result<Option<kettle_state::ExclusiveFileLock>> {
+    if let Some(dir) = path.parent() {
+        kettle_state::create_private_dirs(dir)?;
+    }
+    kettle_state::ExclusiveFileLock::try_acquire(path)
+}
+
+/// Whether a launch never touches the default session: `--profile`,
+/// `--config` or `--new-process` (`separate_process`), `-e` or `-d`, a
+/// quick-terminal launch, or `--layout NAME`, which saves to its own file.
+pub(super) fn separate_launch(options: &crate::Options) -> bool {
+    options.separate_process
+        || options.command.is_some()
+        || options.cwd.is_some()
+        || options.quick_terminal
+        || options.layout.is_some()
+}
+
+/// The notification body for a `--restore` this launch cannot honour, if
+/// any. `explicit` is `--restore` with no other restore target (a named
+/// layout or a tab handoff).
+pub(super) fn restore_refusal(
+    explicit: bool,
+    claim: &DefaultSessionClaim,
+    elsewhere: bool,
+) -> Option<kettle_i18n::Text> {
+    if !explicit {
+        return None;
+    }
+    match claim {
+        DefaultSessionClaim::Separate => {
+            Some(kettle_i18n::Text::NotifySessionNotRestoredSeparateBody)
+        }
+        _ if elsewhere => Some(kettle_i18n::Text::NotifySessionNotRestoredOwnedBody),
+        _ => None,
+    }
+}
+
 /// Is the default last-session (`session.json`) active for THIS launch?
 /// Drives BOTH the startup restore gate (whether to `load()`) and the
 /// `save_session` gate (whether to `save()` the default session). They MUST
@@ -880,15 +1029,17 @@ pub(super) fn session_write_target(
 /// `--layout NAME` is independent (its own file, explicit intent) and never
 /// consults this gate.
 ///
-/// While another build's primary still runs, typically the old version after
-/// an update, the session is its: restoring it here would duplicate its open
-/// tabs, and saving would overwrite them (#575). Both wait until it exits.
+/// While the session is someone else's (`owned_elsewhere`: another build's
+/// primary still runs, typically the old version after an update (#575);
+/// another process of this build owns it; or this launch never touches it,
+/// see [`DefaultSessionClaim`]), restoring it here would duplicate its open
+/// tabs, and saving would overwrite them. Both wait.
 pub(super) fn should_restore_session(
     startup_restore: bool,
     cfg_restore_session: kettle_config::RestoreSession,
-    another_build_running: bool,
+    owned_elsewhere: bool,
 ) -> bool {
-    (startup_restore || restore_session_enabled(cfg_restore_session)) && !another_build_running
+    (startup_restore || restore_session_enabled(cfg_restore_session)) && !owned_elsewhere
 }
 
 fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {

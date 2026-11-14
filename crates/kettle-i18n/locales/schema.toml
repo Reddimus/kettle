@@ -2772,6 +2772,15 @@ context = "crates/kettle-ui/src/app/title.rs: Layout save failure notification t
 [messages.notify_layout_failed_body]
 context = "crates/kettle-ui/src/app/title.rs: Layout save failure: invalid ASCII filename or write error."
 
+[messages.notify_session_not_restored]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: notification title when `kettle --restore` cannot reopen the saved session (windows, tabs, splits) in this launch. The window opens with a fresh shell instead."
+
+[messages.notify_session_not_restored_owned_body]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: body under notify_session_not_restored. A Kettle process that was already running owns the saved session; restoring it here as well would open a second copy of its tabs."
+
+[messages.notify_session_not_restored_separate_body]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: body under notify_session_not_restored. Launches with these command-line options run as separate processes that never restore or save the session. The options are literal command-line flags; keep them verbatim."
+
 [messages.notify_profiles_failed]
 context = "crates/kettle-ui/src/app/actions.rs: Failure opening or creating the profiles directory."
 

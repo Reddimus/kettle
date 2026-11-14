@@ -379,6 +379,8 @@ pub struct App {
     session_writer: crate::session::SessionWriter,
     /// When the next save takes a fresh output snapshot.
     content_throttle: std::cell::RefCell<ContentThrottle>,
+    /// Whether this process owns the default session, claimed at startup.
+    default_session: std::cell::RefCell<DefaultSessionClaim>,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,

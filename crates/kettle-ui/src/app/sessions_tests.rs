@@ -350,7 +350,7 @@ fn explicit_restore_paths_precede_default_session() {
     // default-session arm is the only thing that predicate unlocks.
     assert!(
         src.contains(
-            "should_restore_session(\n                self.startup.restore,\n                self.cfg.restore_session,\n                self.other_builds.running(),\n            ),"
+            "should_restore_session(\n                self.startup.restore,\n                self.cfg.restore_session,\n                self.default_session_elsewhere(),\n            ),"
         ),
         "save_session must pass should_restore_session into the write \
              routing — symmetric with the load gate (audit M1)"
@@ -814,5 +814,183 @@ fn a_put_off_content_write_asks_for_the_sweeps_wake() {
     let flat: String = app.split_whitespace().collect();
     assert!(flat.contains(
         "letpending=self.content_throttle.borrow().pending;letsession_wake=sweep.deadline(std::time::Instant::now(),pending,"
+    ));
+}
+
+/// The owner lock decides which process restores and writes the default
+/// session, for that process's life. Another holder makes a launch a
+/// secondary that never takes over; another build's primary makes it wait
+/// and take over once that build has gone (#575); a separate launch never
+/// takes the lock at all.
+#[test]
+fn default_session_claim_truth_table() {
+    use super::sessions::DefaultSessionClaim;
+    let dir = kettle_test_support::private_tempdir("kettle-session-owner-");
+    let lock = dir.path().join("config").join("session.owner.lock");
+    let claim = |separate, another_build| {
+        DefaultSessionClaim::claim(separate, another_build, Some(lock.as_path()))
+    };
+
+    let mut separate = claim(true, false);
+    assert!(matches!(separate, DefaultSessionClaim::Separate));
+    assert!(!separate.owns(false));
+    let mut owner = claim(false, false);
+    assert!(matches!(owner, DefaultSessionClaim::Owner { _lock: Some(_) }), "{owner:?}");
+    assert!(owner.owns(false));
+
+    let mut secondary = claim(false, false);
+    assert!(matches!(secondary, DefaultSessionClaim::Secondary), "{secondary:?}");
+    let mut waiting = claim(false, true);
+    assert!(matches!(waiting, DefaultSessionClaim::Waiting(_)), "{waiting:?}");
+    assert!(!waiting.owns(true), "the other build still runs");
+    assert!(!waiting.owns(false), "the lock is still held");
+
+    drop(owner);
+    assert!(!secondary.owns(false), "a secondary never takes over");
+    assert!(!waiting.owns(true));
+    assert!(waiting.owns(false), "the waiting build takes over once alone");
+    assert!(matches!(waiting, DefaultSessionClaim::Owner { _lock: Some(_) }));
+    assert!(matches!(claim(false, false), DefaultSessionClaim::Secondary));
+    drop(waiting);
+    assert!(matches!(claim(false, false), DefaultSessionClaim::Owner { _lock: Some(_) }));
+    // No config directory: nothing to lock, and nothing else to coordinate.
+    assert!(matches!(
+        DefaultSessionClaim::claim(false, false, None),
+        DefaultSessionClaim::Owner { _lock: None }
+    ));
+}
+
+/// `-e` and `-d` never restore the default session, and now never write it
+/// either: a launch override used to replace the saved session with its one
+/// window on its first sweep. Profiles, `--config`, `--new-process`, the
+/// quick terminal and `--layout` stay out of it the same way.
+#[test]
+fn a_launch_override_never_writes_the_default_session() {
+    use super::sessions::{SessionWriteTarget, separate_launch};
+    let options = |edit: fn(&mut crate::Options)| {
+        let mut options = crate::Options::default();
+        edit(&mut options);
+        options
+    };
+    for (name, launch) in [
+        ("-e", options(|o| o.command = Some(vec!["htop".into()]))),
+        ("-d", options(|o| o.cwd = Some("/tmp".into()))),
+        ("--profile/--config/--new-process", options(|o| o.separate_process = true)),
+        ("quick terminal", options(|o| o.quick_terminal = true)),
+        ("--layout", options(|o| o.layout = Some("dev".into()))),
+    ] {
+        assert!(separate_launch(&launch), "{name}");
+    }
+    for launch in [options(|_| {}), options(|o| o.restore = true)] {
+        assert!(!separate_launch(&launch));
+    }
+    // A launch that does not own the session saves nothing to it and plans
+    // no restore; a named layout keeps its own file.
+    let restore = kettle_config::RestoreSession::Always;
+    assert_eq!(
+        super::session_write_target(None, true, should_restore_session(true, restore, true), false),
+        SessionWriteTarget::Skip
+    );
+    assert_eq!(
+        super::session_write_target(Some("dev"), true, should_restore_session(true, restore, true), false),
+        SessionWriteTarget::NamedLayout("dev")
+    );
+    let cfg = kettle_config::Config {
+        restore_session: restore,
+        ..Default::default()
+    };
+    assert!(super::startup_plan(&options(|_| {}), &cfg, false).may_restore);
+    assert!(!super::startup_plan(&options(|_| {}), &cfg, true).may_restore);
+    assert!(super::startup_plan(&options(|o| o.layout = Some("dev".into())), &cfg, true).may_restore);
+}
+
+/// A secondary, a launch override or a profile neither restores, writes nor
+/// deletes the default session's files: `restore-scrollback-lines = 0` in a
+/// profile must not erase the main process's output file.
+#[test]
+fn profile_and_secondary_processes_leave_the_default_session_alone() {
+    use super::sessions::content_cleanup_due;
+    for (lines, restore_mode) in [(0, true), (0, false), (1000, false)] {
+        assert!(content_cleanup_due(true, false, lines, restore_mode));
+        assert!(!content_cleanup_due(false, false, lines, restore_mode), "not this launch's");
+        assert!(!content_cleanup_due(false, true, lines, restore_mode), "a layout it did not load");
+    }
+    assert!(!content_cleanup_due(true, false, 1000, true), "output saving is on");
+    assert!(content_cleanup_due(true, true, 0, false));
+    assert!(!content_cleanup_due(true, true, 1000, false), "a layout does not follow restore mode");
+
+    // Every default-session gate asks who owns it: the save target, the
+    // load, the cleanup, and the removal when restore is off.
+    let src = production_source();
+    let body = |start: &str| {
+        src.split(start)
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap_or_else(|| panic!("{start}"))
+            .to_string()
+    };
+    assert!(body("fn autosave_target(&self)").contains("self.default_session_elsewhere(),"));
+    let clear = body("fn clear_disabled_content(&self)");
+    assert!(clear.contains("None => !self.default_session_elsewhere(),"));
+    assert!(clear.contains("Some(_) => self.named_layout_writable && !self.other_builds.running(),"));
+    assert!(clear.find("content_cleanup_due(").unwrap() < clear.find("remove_content(").unwrap());
+    let load = body("fn load_startup_session(&mut self)");
+    assert!(load.contains("self.default_session_elsewhere(),\n        ) {"));
+    assert!(load.contains("if !self.default_session_elsewhere()\n                && let Some(path) = crate::session::Session::path()"));
+    assert!(!load.contains("other_builds"), "the load must ask who owns the session");
+    let exit = body("fn save_session_on_exit(&mut self)");
+    assert!(exit.contains("self.save_session_as(&ws, SaveKind::Exit);"));
+    let run = body("pub fn run_with(mut startup: crate::Options)");
+    let claim = run.find("DefaultSessionClaim::claim(").unwrap();
+    assert!(claim < run.find("let plan = startup_plan(&startup, &initial_cfg, session_elsewhere);").unwrap());
+}
+
+/// `kettle --restore` in a launch that cannot have the session says why, in
+/// the UI language.
+#[test]
+fn a_refused_restore_is_explained_in_english_and_spanish() {
+    use super::sessions::{DefaultSessionClaim, restore_refusal};
+    use kettle_i18n::{Language, Text, Translator};
+    let owner = DefaultSessionClaim::Owner { _lock: None };
+    assert_eq!(restore_refusal(true, &owner, false), None);
+    assert_eq!(restore_refusal(false, &DefaultSessionClaim::Secondary, true), None);
+    assert_eq!(restore_refusal(false, &DefaultSessionClaim::Separate, true), None);
+    let owned = restore_refusal(true, &DefaultSessionClaim::Secondary, true).unwrap();
+    assert_eq!(owned, Text::NotifySessionNotRestoredOwnedBody);
+    assert_eq!(restore_refusal(true, &owner, true), Some(owned), "another build runs");
+    let separate = restore_refusal(true, &DefaultSessionClaim::Separate, true).unwrap();
+    assert_eq!(separate, Text::NotifySessionNotRestoredSeparateBody);
+
+    let en = Translator::new(Language::En);
+    assert_eq!(en.text(Text::NotifySessionNotRestored), "Session not restored");
+    assert_eq!(
+        en.text(owned),
+        "Another Kettle process already has the saved session open, so this window opens without it."
+    );
+    assert_eq!(
+        en.text(separate),
+        "Windows opened with --profile, --config, --new-process, -e or -d never restore the saved session."
+    );
+    let es = Translator::new(Language::Es);
+    assert_eq!(es.text(Text::NotifySessionNotRestored), "No se restauró la sesión");
+    assert_eq!(
+        es.text(owned),
+        "Otro proceso de Kettle ya tiene abierta la sesión guardada, así que esta ventana se abre sin ella."
+    );
+    assert_eq!(
+        es.text(separate),
+        "Las ventanas abiertas con --profile, --config, --new-process, -e o -d nunca restauran la sesión guardada."
+    );
+    // Shown from the first window's startup, before anything is restored.
+    let src = production_source();
+    let resumed = src
+        .split("fn resumed_inner(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {")
+        .nth(1)
+        .unwrap();
+    let notice = resumed.find("restore_refusal(explicit_restore,").unwrap();
+    assert!(notice < resumed.find("self.load_startup_session()").unwrap());
+    let shown: String = resumed[notice..].split_whitespace().collect();
+    assert!(shown.contains(
+        "fire_notify(self.ui_text.text(kettle_i18n::Text::NotifySessionNotRestored),self.ui_text.text(body),"
     ));
 }
