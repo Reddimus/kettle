@@ -23,6 +23,8 @@ pub(crate) enum HeaderIcon {
     TabNew,
     /// `open-menu-symbolic`: three bars with round ends.
     MainMenu,
+    /// `edit-find-symbolic`: a magnifier.
+    Find,
     /// `window-minimize-symbolic`: a bar low in the square.
     Minimize,
     /// `window-maximize-symbolic`: a square outline.
@@ -97,6 +99,10 @@ fn icon_ink(icon: HeaderIcon, x: f32, y: f32) -> bool {
         HeaderIcon::MainMenu => [3.0, 8.0, 13.0]
             .into_iter()
             .any(|row| capsule((2.0, row), (14.0, row))),
+        HeaderIcon::Find => {
+            let r = (x - 6.5).hypot(y - 6.5);
+            (3.5..=5.5).contains(&r) || segment_distance(p, (10.5, 10.5), (14.0, 14.0)) <= 1.1
+        }
         HeaderIcon::Minimize => capsule((5.0, 11.0), (11.0, 11.0)),
         HeaderIcon::Maximize => in_outline(p, (4.0, 4.0, 12.0, 12.0), 2.0, thin),
         HeaderIcon::Restore => {
@@ -329,6 +335,27 @@ mod tests {
             );
             // Round ends: the corner pixel of a bar is only partly covered.
             assert!(menu[(2 * scale * side + scale) as usize] < 255);
+        }
+    }
+
+    /// The magnifier is a ring 2 points thick around a 7-point hole, with a
+    /// handle out to the lower right, all inside the 16-point square.
+    #[test]
+    fn find_icon_is_a_ring_with_a_handle() {
+        for scale in [1_u32, 2] {
+            let side = 16 * scale;
+            let find = header_icon_mask(HeaderIcon::Find, side);
+            let (l, t, w, h) = ink_box(&find, side);
+            assert!(l >= scale && t >= scale, "{scale}x");
+            assert!(l + w <= 15 * scale && t + h <= 15 * scale, "{scale}x");
+            // Down the ring's centre: a stroke, the hole, a stroke.
+            let runs = column_runs(&find, side, (6.5 * scale as f32) as u32);
+            assert_eq!(runs.len(), 2, "{scale}x {runs:?}");
+            for (_, len) in &runs {
+                assert_eq!(*len, 2 * scale, "{scale}x ring stroke");
+            }
+            // The handle reaches the lower right.
+            assert!(find[((13 * scale) * side + 13 * scale) as usize] >= 128);
         }
     }
 

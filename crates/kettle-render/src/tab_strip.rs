@@ -170,6 +170,9 @@ pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
     if bar.linux_header && bar.hovered_new_tab && !bar.pressed_new_tab && bar.new_tab.2 > 0.0 {
         return (bar.new_tab.0, bar.band.1, bar.new_tab.2, bar.band.3);
     }
+    if bar.hovered_search && !bar.pressed_search && bar.search.2 > 0.0 {
+        return (bar.search.0, bar.band.1, bar.search.2, bar.band.3);
+    }
     bar.window_controls
         .iter()
         .find(|b| b.hovered && !b.pressed)
@@ -549,29 +552,73 @@ pub(crate) fn main_menu_icon(bar: &TabBar) -> bool {
     bar.linux_header && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
 }
 
-/// The GNOME header's flat buttons that show a symbolic icon, with the icon
-/// and each one's hover and press: `+` as `tab-new` and the main menu as
-/// `open-menu`. Buttons the header left out have a zero rect.
-pub(crate) fn header_icon_buttons(
-    bar: &TabBar,
-) -> impl Iterator<Item = (crate::header_icons::HeaderIcon, Rect4, bool, bool)> {
+/// One of the GNOME header's flat icon buttons as the painter draws it.
+pub(crate) struct HeaderIconButton {
+    pub icon: crate::header_icons::HeaderIcon,
+    pub rect: Rect4,
+    pub hovered: bool,
+    pub pressed: bool,
+    /// Shown toggled on: Find while it is open.
+    pub toggled: bool,
+}
+
+/// The GNOME header's flat buttons that show a symbolic icon: `+` as
+/// `tab-new`, Find as `edit-find` and the main menu as `open-menu`, with
+/// each one's state. Buttons the header left out have a zero rect and are
+/// skipped.
+pub(crate) fn header_icon_buttons(bar: &TabBar) -> impl Iterator<Item = HeaderIconButton> {
     use crate::header_icons::HeaderIcon;
+    let button = |icon, rect, hovered, pressed, toggled| HeaderIconButton {
+        icon,
+        rect,
+        hovered,
+        pressed,
+        toggled,
+    };
     [
-        (
+        button(
             HeaderIcon::TabNew,
             bar.new_tab,
             bar.hovered_new_tab,
             bar.pressed_new_tab,
+            false,
         ),
-        (
+        button(
+            HeaderIcon::Find,
+            bar.search,
+            bar.hovered_search,
+            bar.pressed_search,
+            bar.search_open,
+        ),
+        button(
             HeaderIcon::MainMenu,
             bar.new_tab_menu,
             bar.hovered_new_tab_menu,
             bar.pressed_new_tab_menu,
+            false,
         ),
     ]
     .into_iter()
-    .filter(|(_, rect, ..)| rect.2 > 0.0 && rect.3 > 0.0)
+    .filter(|b| b.rect.2 > 0.0 && b.rect.3 > 0.0)
+}
+
+/// The fill behind one of the strip's flat buttons, or `None` at rest: the
+/// strip's hover fill under the pointer and a deeper one pressed. A button
+/// toggled on (Find while it is open) keeps a fill at rest, `tab_detail`'s
+/// 1.5:1, deepening to 1.8:1 under the pointer, as GNOME fills a checked
+/// flat button.
+pub(crate) fn flat_button_fill(
+    strip: Rgb,
+    fg: Rgb,
+    hovered: bool,
+    pressed: bool,
+    toggled: bool,
+) -> Option<Rgb> {
+    match (toggled, hovered) {
+        (false, false) => None,
+        (false, true) => Some(crate::chrome::strip_hover(strip, fg, pressed)),
+        (true, hovered) => Some(crate::chrome::tab_detail(strip, fg, hovered || pressed)),
+    }
 }
 
 #[cfg(test)]
@@ -1665,13 +1712,13 @@ mod tests {
         }
     }
 
-    /// The GNOME header's `+` and `≡` are GNOME's `tab-new` and `open-menu`
-    /// symbolic icons, drawn as coverage masks 16 points square, centred on
-    /// whole pixels in their 34-point flat buttons at 1x and 2x, in the ink
-    /// the painter resolved. No other strip draws them, and the painter never
-    /// shapes a `+` or `≡` glyph in the header.
+    /// The GNOME header's `+`, Find and `≡` are GNOME's `tab-new`,
+    /// `edit-find` and `open-menu` symbolic icons, drawn as coverage masks 16
+    /// points square, centred on whole pixels in their 34-point flat buttons
+    /// at 1x and 2x, in the ink the painter resolved. No other strip draws
+    /// them, and the painter never shapes a `+` or `≡` glyph in the header.
     #[test]
-    fn gnome_header_plus_and_menu_are_symbolic_masks() {
+    fn gnome_header_plus_find_and_menu_are_symbolic_masks() {
         use crate::header_icons::{HeaderIcon, IconMasks, header_icon_mask, push_header_icon};
         let ink = Rgb::new(0xc0, 0xca, 0xf5);
         let painted = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
@@ -1679,17 +1726,26 @@ mod tests {
             let mut bar = gnome_header(1, scale);
             bar.new_tab = (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
             bar.new_tab_menu = (700.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search = (660.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search_open = true;
             let buttons: Vec<_> = header_icon_buttons(&bar).collect();
             assert_eq!(
-                buttons.iter().map(|b| (b.0, b.1)).collect::<Vec<_>>(),
+                buttons
+                    .iter()
+                    .map(|b| (b.icon, b.rect, b.toggled))
+                    .collect::<Vec<_>>(),
                 vec![
-                    (HeaderIcon::TabNew, bar.new_tab),
-                    (HeaderIcon::MainMenu, bar.new_tab_menu)
+                    (HeaderIcon::TabNew, bar.new_tab, false),
+                    (HeaderIcon::Find, bar.search, true),
+                    (HeaderIcon::MainMenu, bar.new_tab_menu, false)
                 ]
             );
             assert!(main_menu_icon(&bar));
             let mut masks = IconMasks::default();
-            for (icon, button, ..) in buttons {
+            for HeaderIconButton {
+                icon, rect: button, ..
+            } in buttons
+            {
                 let mut quads = Vec::new();
                 push_header_icon(&mut quads, icon, button, ink, scale, &mut masks);
                 let side = 16.0 * scale;
@@ -1711,6 +1767,7 @@ mod tests {
                 assert!((top + side * 0.5 - centre.1).abs() <= 0.5);
             }
             bar.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+            bar.search = (0.0, 0.0, 0.0, 0.0);
             assert_eq!(header_icon_buttons(&bar).count(), 1);
             assert!(!main_menu_icon(&bar), "no menu button, no icon");
         }
@@ -1721,9 +1778,92 @@ mod tests {
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
-        assert!(source.contains("iftabbar.linux_header{for(icon,bounds,hovered,pressed)intab_strip::header_icon_buttons(tabbar)"));
+        assert!(source.contains(
+            "iftabbar.linux_header{forbuttonintab_strip::header_icon_buttons(tabbar){letbackground=tab_strip::flat_button_fill("
+        ));
         assert!(source.contains("//TheGNOMEheader's`+`isdrawnwiththestrip'squadsinstead.if!tabbar.linux_header{areas.push(TextArea{buffer:&self.tabbar_buffer,"));
         assert!(!source.contains("\"≡\""), "a shaped ≡ glyph");
+    }
+
+    /// A flat button has no fill at rest, the strip's hover fill under the
+    /// pointer and a deeper one pressed. Find, toggled on while Find is
+    /// open, keeps a fill at rest that shows (1.5:1 against the header) and
+    /// deepens under the pointer, and its icon's ink keeps 4.5:1 against
+    /// every one of those fills, focused, in both default themes. The
+    /// painter fills every strip button, Find included, from this one rule.
+    #[test]
+    fn a_toggled_find_button_keeps_a_fill_its_icon_reads_on() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let fg = theme.foreground;
+            assert_eq!(flat_button_fill(strip, fg, false, false, false), None);
+            assert_eq!(
+                flat_button_fill(strip, fg, true, false, false),
+                Some(crate::chrome::strip_hover(strip, fg, false))
+            );
+            let toggled = flat_button_fill(strip, fg, false, false, true).unwrap();
+            let hovered = flat_button_fill(strip, fg, true, false, true).unwrap();
+            let pressed = flat_button_fill(strip, fg, true, true, true).unwrap();
+            let ratio = |c| crate::color::contrast_ratio(c, strip);
+            assert!(
+                ratio(toggled) >= 1.5 - 1e-9,
+                "{name}: {:.2}:1",
+                ratio(toggled)
+            );
+            assert!(ratio(hovered) > ratio(toggled), "{name}");
+            assert!(ratio(pressed) >= ratio(hovered), "{name}");
+            let mut colors = crate::chrome::Colors::default();
+            for fill in [toggled, hovered, pressed] {
+                for (ink, focused, floor) in
+                    [(fg, true, 4.5), (theme.accent, true, 4.5), (fg, false, 3.0)]
+                {
+                    let ink = colors.tab_text(ink, fill, focused);
+                    let r = crate::color::contrast_ratio(ink, fill);
+                    assert!(r >= floor - 0.01, "{name}: {r:.2}:1 on {fill:?}");
+                }
+            }
+        }
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "(tabbar.search,tabbar.hovered_search,tabbar.pressed_search,tabbar.search_open,),]{ifbounds.2>0.0&&letSome(fill)=tab_strip::flat_button_fill("
+        ));
+    }
+
+    /// Find's tooltip hangs under Find, inside the window, at 1x and 2x,
+    /// and none shows while it is pressed or absent.
+    #[test]
+    fn find_tooltip_hangs_under_the_find_button() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 800.0 * scale;
+            let mut bar = gnome_header(1, scale);
+            bar.search = (
+                width - 128.0 * scale,
+                6.0 * scale,
+                34.0 * scale,
+                34.0 * scale,
+            );
+            bar.hovered_search = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (bar.search.0, 0.0, bar.search.2, bar.band.3));
+            let tip = tooltip_rect(
+                anchor,
+                (width, 600.0 * scale),
+                (120.0 * scale, 20.0 * scale),
+                scale,
+            );
+            assert!(tip.0 >= 0.0 && tip.0 + tip.2 <= width, "{tip:?}");
+            assert!(tip.0 + tip.2 <= bar.search.0 + bar.search.2, "{tip:?}");
+            assert_eq!(tip.1, 50.0 * scale);
+            bar.pressed_search = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_search = false;
+            bar.search = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+        }
     }
 
     /// A hovered tab is shaded at about 1.3:1, less than half the active

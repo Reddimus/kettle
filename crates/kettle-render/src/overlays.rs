@@ -1420,6 +1420,15 @@ pub struct TabBar {
     pub settings: Rect4,
     pub hovered_settings: bool,
     pub pressed_settings: bool,
+    /// The GNOME header's Find button, left of its main menu: GNOME's
+    /// `edit-find` magnifier, which opens Find and closes it again.
+    /// Zero-area `(0,0,0,0)` on every other strip and in a header too narrow
+    /// to keep it; the renderer then draws nothing.
+    pub search: Rect4,
+    pub hovered_search: bool,
+    pub pressed_search: bool,
+    /// Find is open in this window, so the Find button shows as toggled on.
+    pub search_open: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1500,6 +1509,10 @@ impl TabBar {
             settings: (0.0, 0.0, 0.0, 0.0),
             hovered_settings: false,
             pressed_settings: false,
+            search: (0.0, 0.0, 0.0, 0.0),
+            hovered_search: false,
+            pressed_search: false,
+            search_open: false,
             broadcast: false,
             hovered_close_idx: None,
             hovered_tab_idx: None,

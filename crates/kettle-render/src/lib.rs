@@ -1596,31 +1596,47 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                for (bounds, hovered, pressed) in [
+                for (bounds, hovered, pressed, toggled) in [
                     (
                         tabbar.new_tab_menu,
                         tabbar.hovered_new_tab_menu,
                         tabbar.pressed_new_tab_menu,
+                        false,
                     ),
                     (
                         tabbar.new_tab,
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
+                        false,
                     ),
                     (
                         tabbar.settings,
                         tabbar.hovered_settings,
                         tabbar.pressed_settings,
+                        false,
+                    ),
+                    (
+                        tabbar.search,
+                        tabbar.hovered_search,
+                        tabbar.pressed_search,
+                        tabbar.search_open,
                     ),
                 ] {
-                    if hovered && bounds.2 > 0.0 {
-                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
+                    if bounds.2 > 0.0
+                        && let Some(fill) = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            hovered,
+                            pressed,
+                            toggled,
+                        )
+                    {
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
                             6.0 * self.scale,
                             (true, true),
-                            (hover, 1.0),
+                            (fill, 1.0),
                             None,
                         );
                     }
@@ -1652,27 +1668,32 @@ impl Renderer {
                         &mut self.settings_gear_mask,
                     );
                 }
-                // The GNOME header's `+` and `≡` are GNOME's 16 px symbolic
-                // icons, drawn rather than shaped, in the ink the strip's
-                // glyphs have: the accent while hovered, at 4.5:1 focused and
-                // 3:1 unfocused.
+                // The GNOME header's `+`, Find and `≡` are GNOME's 16 px
+                // symbolic icons, drawn rather than shaped, in the ink the
+                // strip's glyphs have: the accent while hovered, at 4.5:1
+                // focused and 3:1 unfocused, against the fill they sit on.
                 if tabbar.linux_header {
-                    for (icon, bounds, hovered, pressed) in tab_strip::header_icon_buttons(tabbar) {
-                        let (ink, background) = if hovered {
-                            (
-                                accent,
-                                chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed),
-                            )
+                    for button in tab_strip::header_icon_buttons(tabbar) {
+                        let background = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            button.hovered,
+                            button.pressed,
+                            button.toggled,
+                        )
+                        .unwrap_or(chrome_strip_bg);
+                        let ink = if button.hovered {
+                            accent
                         } else {
-                            (theme.foreground, chrome_strip_bg)
+                            theme.foreground
                         };
                         let ink =
                             self.chrome_colors
                                 .tab_text(ink, background, overlay.window_focused);
                         header_icons::push_header_icon(
                             &mut quads,
-                            icon,
-                            bounds,
+                            button.icon,
+                            button.rect,
                             ink,
                             self.scale,
                             &mut self.header_icon_masks,
