@@ -441,14 +441,17 @@ fn agent_display_reloads_widen_the_live_policy_once() {
         .split_once("\n    }\n")
         .expect("end of ensure_ctl_started")
         .0;
-    let marked = ensure
-        .find("self.ctl_start = CtlStart::Attempted;")
-        .expect("a start is recorded");
+    // `start_ctl_once` records the attempt before it builds the server
+    // (`the_control_server_start_is_attempted_once`); the one start sits
+    // inside it.
+    let gated = ensure
+        .find("start_ctl_once(")
+        .expect("ensure starts through the once-only gate");
     let started = ensure
         .find("crate::ctl_server::CtlServer::start(")
         .expect("ensure starts the server");
     assert!(
-        marked < started,
+        gated < started,
         "a failed start must not be retried by every reload"
     );
     let resumed = src

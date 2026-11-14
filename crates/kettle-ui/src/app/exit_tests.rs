@@ -24,6 +24,8 @@ struct ExitFixture {
     ctl: Option<crate::ctl_server::CtlServer>,
     /// What a client finds `ctl` by: its entry, its alias, its socket.
     ctl_files: Vec<std::path::PathBuf>,
+    /// Where the server's start stood when the quit came.
+    ctl_start: super::CtlStart,
 }
 
 impl ExitFixture {
@@ -54,6 +56,7 @@ impl ExitFixture {
             session,
             ctl: Some(ctl),
             ctl_files,
+            ctl_start: super::CtlStart::Attempted,
         }
     }
 
@@ -68,6 +71,7 @@ impl ExitFixture {
             video_copies: &self.videos,
             session_writer: &mut self.writer,
             ctl: &mut self.ctl,
+            ctl_start: &mut self.ctl_start,
         }
     }
 }
@@ -113,6 +117,7 @@ fn the_exit_teardown_deletes_the_private_copies_and_waits_for_the_session_write(
     assert!(done);
     // Checked while the fixture lives: nothing here may wait for a drop.
     assert!(fixture.ctl.is_none(), "the control server outlived the exit");
+    assert_eq!(fixture.ctl_start, super::CtlStart::Closed);
     for file in &fixture.ctl_files {
         assert!(!file.exists(), "{} outlived the exit", file.display());
     }
@@ -141,6 +146,7 @@ fn the_exit_teardown_runs_once_when_both_exit_paths_call_it() {
         assert!(file.exists(), "the second teardown deleted {}", file.display());
     }
     assert!(second.ctl.is_some(), "the second teardown took its server");
+    assert_eq!(second.ctl_start, super::CtlStart::Attempted);
     // The second call must not have finished its writer either: a save
     // submitted now is still written.
     second.writer.submit(
@@ -236,12 +242,61 @@ fn the_exiting_handler_saves_and_runs_the_exit_teardown() {
         "the teardown must withdraw the control server"
     );
     assert!(
-        finish.contains("self.ctl_start = CtlStart::Closed;"),
-        "a quit before the first pane must keep the server from starting after it"
+        finish.contains("ctl_start: &mut self.ctl_start,"),
+        "the teardown must close the control server's start"
     );
     assert_eq!(
         src.matches(call.as_str()).count(),
         2,
         "run_exit_teardown is defined once and called only from finish_exit"
     );
+}
+
+/// A quit closes the control server's start for good. Afterwards neither
+/// path that leads to a start reaches one: the first pane coming up, as
+/// `resumed` runs it, or display being newly granted, as a reload runs it.
+/// That holds wherever the start stood, including a quit that came before
+/// the first pane; without the quit, each of those states does start one.
+#[test]
+fn nothing_starts_the_control_server_after_the_exit_teardown() {
+    let policy = kettle_ctl::CtlPolicy::new(kettle_config::AgentServer::Full, true);
+    let root = kettle_test_support::private_tempdir("kettle-exit-closed-");
+    for (index, before) in [super::CtlStart::NotReady, super::CtlStart::Ready, super::CtlStart::Attempted]
+        .into_iter()
+        .enumerate()
+    {
+        let mut live = before;
+        let mut started = false;
+        live.first_pane_exists();
+        live.display_granted();
+        super::start_ctl_once(&mut live, &mut None, policy, || {
+            started = true;
+            None
+        });
+        assert!(started, "{before:?} reaches a start while Kettle runs");
+
+        let mut fixture = ExitFixture::new(root.path(), &format!("closed-{index}"));
+        fixture.ctl_start = before;
+        if before == super::CtlStart::NotReady {
+            // The quit came before the first pane: nothing had started.
+            fixture.ctl = None;
+        }
+        let mut done = false;
+        assert!(super::exit::run_exit_teardown(
+            fixture.parts(&mut done),
+            std::time::Duration::from_secs(10),
+            || {}
+        ));
+        assert_eq!(fixture.ctl_start, super::CtlStart::Closed, "{before:?}");
+        fixture.ctl_start.first_pane_exists();
+        super::start_ctl_once(&mut fixture.ctl_start, &mut fixture.ctl, policy, || {
+            panic!("the first pane started a server after the quit ({before:?})")
+        });
+        fixture.ctl_start.display_granted();
+        super::start_ctl_once(&mut fixture.ctl_start, &mut fixture.ctl, policy, || {
+            panic!("a display grant started a server after the quit ({before:?})")
+        });
+        assert_eq!(fixture.ctl_start, super::CtlStart::Closed, "{before:?}");
+        assert!(fixture.ctl.is_none(), "{before:?}");
+    }
 }
