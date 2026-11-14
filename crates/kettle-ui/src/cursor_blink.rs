@@ -12,8 +12,41 @@
 //! an edge falls `interval` after the previous one and flips the phase, and
 //! the blink stops for good at the first edge that finds the cursor visible
 //! at or after `activity + timeout`, so an idle blink always rests visible.
+//!
+//! A restart shows the cursor and records its edge one half-period ahead
+//! (`restart_edge`), so the edge that first hides the cursor falls a whole
+//! period after the restart. That is the only rule the hold adds: an edge
+//! recorded ahead of the clock is an ordinary edge to everything here, and
+//! the timeline, the layer's plan and the idle stop follow from it unchanged.
 
 use std::time::{Duration, Instant};
+
+/// The edge a restart at `now` records: one half-period ahead. The next edge
+/// falls `interval` after the recorded one, so the cursor stays visible for a
+/// whole period (1060 ms at the default 530 ms) before the first edge hides
+/// it, and the half-period cadence resumes from there. A cursor that could
+/// vanish half a period after a key or a click reads as missing; GTK text
+/// views also keep theirs shown for about one blink period after either.
+pub(crate) fn restart_edge(now: Instant, interval: Duration) -> Instant {
+    now.checked_add(interval).unwrap_or(now)
+}
+
+/// How long the scheduler sleeps before the edge after `last_edge`, or `None`
+/// while the blink is not running. It counts to the edge itself, so a restart,
+/// whose edge is recorded ahead of `now`, wakes once, at the end of its hold.
+pub(crate) fn wait_for_edge(
+    active: bool,
+    last_edge: Instant,
+    interval: Duration,
+    now: Instant,
+) -> Option<Duration> {
+    active.then(|| {
+        last_edge
+            .checked_add(interval)
+            .map_or(interval, |edge| edge.saturating_duration_since(now))
+            .max(Duration::from_millis(1))
+    })
+}
 
 /// Whether an idle cursor has stopped blinking. It stops only in its visible
 /// phase, so the final toggle always leaves the cursor showing. Each blink
@@ -261,6 +294,8 @@ pub(crate) struct HandoffInputs {
 /// half-periods after the last other frame (1.59 s at the default 530 ms),
 /// and the driver pools go about 1.2 s after that. A shorter window, or entry
 /// at off-to-on edges too, brings the worst case closer to the last frame.
+/// After a restart whose frame was the last one, it lands two half-periods
+/// later, at the end of the hold: that edge hides the cursor and is quiet.
 pub(crate) fn quiet_window(interval: Duration) -> Duration {
     interval
 }
@@ -544,6 +579,28 @@ mod tests {
     }
 
     impl Scheduler {
+        /// A scheduler as `reset_blink_phase` leaves it at `now`.
+        fn restarted(now: Instant, interval: Duration, timeout: Option<Duration>) -> Self {
+            Self {
+                on: true,
+                last: restart_edge(now, interval),
+                activity: now,
+                interval,
+                timeout,
+                stopped: false,
+            }
+        }
+
+        /// `reset_blink_phase` at `now`.
+        fn restart(&mut self, now: Instant) {
+            *self = Self::restarted(now, self.interval, self.timeout);
+        }
+
+        /// The sleep the event loop is given after a pass at `now`.
+        fn wait(&self, now: Instant) -> Option<Duration> {
+            wait_for_edge(!self.stopped, self.last, self.interval, now)
+        }
+
         fn step_to(&mut self, now: Instant) {
             let timed_out = cursor_blink_timed_out(
                 now.saturating_duration_since(self.activity),
@@ -597,15 +654,9 @@ mod tests {
                 _ => Some(Duration::from_secs(1 + rng.below(60))),
             };
             let activity = origin + MS * rng.below(3000) as u32;
-            // Run the scheduler from the activity until an on-to-off edge.
-            let mut gpu = Scheduler {
-                on: true,
-                last: activity,
-                activity,
-                interval,
-                timeout,
-                stopped: false,
-            };
+            // Run the scheduler from the activity's restart, through its
+            // hold, until an on-to-off edge.
+            let mut gpu = Scheduler::restarted(activity, interval, timeout);
             let mut now = activity;
             let skip = rng.below(6);
             let mut offs = 0;
@@ -650,9 +701,9 @@ mod tests {
         let origin = Instant::now();
         let interval = MS * 530;
         let activity = origin;
-        // The first on-to-off edge, 530 ms after activity, with the default
-        // 10 s timeout.
-        let edge = origin + interval;
+        // The first on-to-off edge, at the end of the hold 1060 ms after
+        // activity, with the default 10 s timeout.
+        let edge = origin + interval * 2;
         let plan = layer_plan(
             false,
             edge,
@@ -661,7 +712,7 @@ mod tests {
             Some(Duration::from_secs(10)),
         )
         .unwrap();
-        // Off edges before the 10 s stop: 530, 1590, ..., 9010 ms.
+        // Off edges before the 10 s stop: 1060, 2120, ..., 9540 ms.
         assert_eq!(plan.half_periods, Some(17));
         let anim = plan.animation(edge, 100.0);
         assert_eq!(anim.values, [0.0, 1.0]);
@@ -682,6 +733,260 @@ mod tests {
         let plan = layer_plan(false, origin, origin, MS * 500, None).unwrap();
         let anim = plan.animation(origin + MS * 40, 10.0);
         assert!((anim.begin_time - 9.96).abs() < 1e-9);
+    }
+
+    /// After a restart the cursor is visible at every instant of one whole
+    /// period, hidden for the next half-period, and then alternates every
+    /// half-period as it always has: the hold delays the cadence by one
+    /// half-period and changes nothing else. `materialize` agrees throughout.
+    #[test]
+    fn a_restart_holds_the_cursor_visible_for_a_whole_period() {
+        let t0 = Instant::now();
+        for half_ms in [50, 200, 530, 1000, 5000] {
+            let half = MS * half_ms;
+            let hold = half * 2;
+            assert_eq!(restart_edge(t0, half), t0 + half);
+            let mut gpu = Scheduler::restarted(t0, half, None);
+            let (on, edge) = (gpu.on, gpu.last);
+            let mut toggles = Vec::new();
+            let mut t = t0;
+            while t < t0 + half * 8 {
+                let was_on = gpu.on;
+                gpu.step_to(t);
+                let since = t - t0;
+                let expected =
+                    since < hold || ((since - hold).as_nanos() / half.as_nanos()) % 2 == 1;
+                assert_eq!(
+                    gpu.on, expected,
+                    "interval {half:?}: {since:?} after the restart"
+                );
+                assert_eq!(
+                    materialize(on, edge, t0, half, None, t).0,
+                    expected,
+                    "interval {half:?}: materialize {since:?} after the restart"
+                );
+                if gpu.on != was_on {
+                    toggles.push(since);
+                }
+                t += MS;
+            }
+            assert_eq!(
+                toggles,
+                [hold, half * 3, half * 4, half * 5, half * 6, half * 7],
+                "interval {half:?}"
+            );
+        }
+    }
+
+    /// A second restart during the hold starts the hold again from its own
+    /// time, and typing, a restart per key, keeps the cursor solid until one
+    /// whole period after the last key.
+    #[test]
+    fn a_restart_during_the_hold_starts_the_hold_again() {
+        let t0 = Instant::now();
+        let half = MS * 530;
+        let mut gpu = Scheduler::restarted(t0, half, Some(Duration::from_secs(10)));
+        // 160 ms before the first hold would have ended.
+        let again = t0 + MS * 900;
+        let mut t = t0;
+        while t < again {
+            gpu.step_to(t);
+            assert!(gpu.on);
+            t += MS;
+        }
+        gpu.restart(again);
+        assert_eq!(gpu.wait(again), Some(half * 2));
+        while t < again + half * 2 {
+            gpu.step_to(t);
+            assert!(gpu.on, "{:?} after the second restart", t - again);
+            t += MS;
+        }
+        gpu.step_to(t);
+        assert!(
+            !gpu.on,
+            "the first off phase starts where the second hold ends"
+        );
+        assert_eq!(gpu.last, again + half * 2);
+
+        // A key every 100 ms for three seconds.
+        let mut gpu = Scheduler::restarted(t0, half, Some(Duration::from_secs(10)));
+        let last_key = t0 + MS * 3000;
+        let mut t = t0;
+        while t < last_key + half * 2 {
+            if t <= last_key && (t - t0).as_millis().is_multiple_of(100) {
+                gpu.restart(t);
+            }
+            gpu.step_to(t);
+            assert!(gpu.on, "{:?} after the first key", t - t0);
+            t += MS;
+        }
+        gpu.step_to(t);
+        assert!(!gpu.on);
+    }
+
+    /// The idle stop is unchanged by the hold: the blink still ends on its
+    /// visible phase within a half-period of the timeout and asks for no more
+    /// wakes, and a timeout shorter than the hold never hides the cursor.
+    #[test]
+    fn an_idle_blink_still_rests_visible_after_a_hold() {
+        let t0 = Instant::now();
+        let half = MS * 530;
+        let timeout = Duration::from_secs(10);
+        let mut gpu = Scheduler::restarted(t0, half, Some(timeout));
+        let (mut toggles, mut last_toggle) = (0, Duration::ZERO);
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(20) {
+            let was_on = gpu.on;
+            gpu.step_to(t);
+            if gpu.on != was_on {
+                toggles += 1;
+                last_toggle = t - t0;
+            }
+            t += MS;
+        }
+        assert!(gpu.on && gpu.stopped, "an idle blink must rest visible");
+        // Hidden from 9540 ms, shown for good at the next edge.
+        assert_eq!(last_toggle, MS * 10_070);
+        assert_eq!(toggles, 18);
+        assert_eq!(gpu.wait(t), None);
+        assert_eq!(
+            next_edge(true, restart_edge(t0, half), t0, half, Some(timeout), t),
+            None
+        );
+
+        let mut rng = SplitMix(31);
+        for _ in 0..200 {
+            let half = MS * (50 + rng.below(4951) as u32);
+            let timeout = MS * (1 + rng.below(30_000) as u32);
+            let mut gpu = Scheduler::restarted(t0, half, Some(timeout));
+            let end = t0 + timeout + half * 3;
+            let mut last_toggle = None;
+            let mut t = t0;
+            while t < end {
+                let was_on = gpu.on;
+                gpu.step_to(t);
+                if gpu.on != was_on {
+                    last_toggle = Some(t - t0);
+                }
+                t += MS;
+            }
+            assert!(
+                gpu.on && gpu.stopped,
+                "interval {half:?} timeout {timeout:?}"
+            );
+            assert!(
+                last_toggle.is_none_or(|at| at < timeout + half),
+                "interval {half:?} timeout {timeout:?}: last toggle {last_toggle:?}"
+            );
+            if timeout <= half * 2 {
+                assert_eq!(last_toggle, None, "a stop inside the hold never hides");
+            }
+            assert_eq!(
+                materialize(true, restart_edge(t0, half), t0, half, Some(timeout), end),
+                (gpu.on, gpu.last),
+                "interval {half:?} timeout {timeout:?}"
+            );
+        }
+    }
+
+    /// The window server takes the blink only at an edge that hides the
+    /// cursor, and after a restart the first such edge is the end of the hold.
+    /// The plan made there shows exactly what the scheduler would have drawn,
+    /// so the hold a restart planned is the hold the screen showed, and the
+    /// app resumes from the same phase whenever a frame ends the animation.
+    #[test]
+    fn the_layer_plan_starts_where_a_hold_ends() {
+        let t0 = Instant::now();
+        let half = MS * 530;
+        let timeout = Some(Duration::from_secs(10));
+        let mut gpu = Scheduler::restarted(t0, half, timeout);
+        assert!(
+            layer_plan(gpu.on, gpu.last, gpu.activity, half, timeout).is_none(),
+            "nothing hands over while the hold shows the cursor"
+        );
+        let mut t = t0;
+        while gpu.on {
+            t += MS;
+            gpu.step_to(t);
+        }
+        assert_eq!(t, t0 + half * 2, "the hold ends at the first hiding edge");
+        let plan = layer_plan(gpu.on, gpu.last, gpu.activity, half, timeout)
+            .expect("the end of a hold is an on-to-off edge");
+        assert_eq!(plan.begin, t0 + half * 2);
+        // Hidden at 1060, 2120, ..., 9540 ms, then visible for good at
+        // 10070 ms, where the scheduler stops too.
+        assert_eq!(plan.half_periods, Some(17));
+        assert!(plan.can_start(t));
+        let anim = plan.animation(t, 50.0);
+        assert_eq!((anim.begin_time, anim.repeat_count), (50.0, 8.5));
+        while t < t0 + Duration::from_secs(12) {
+            t += MS;
+            gpu.step_to(t);
+            assert_eq!(plan.visible_at(t), gpu.on, "{:?} after the restart", t - t0);
+            assert_eq!(
+                materialize(false, plan.begin, t0, half, timeout, t).0,
+                gpu.on,
+                "materialize {:?} after the restart",
+                t - t0
+            );
+        }
+        assert!(gpu.on && gpu.stopped);
+
+        // A restart while the layer blinks records an edge off its anchor, so
+        // the app keeps the restart's phase, hold included, for the exit frame.
+        let mut layer = BlinkLayer::default();
+        layer.started(plan, [0, 0, 8, 16]);
+        let restart = t0 + MS * 3000;
+        let edge = restart_edge(restart, half);
+        assert_eq!(layer.materialize(true, edge, restart + MS * 900), None);
+        assert_eq!(
+            next_edge(true, edge, restart, half, timeout, restart + MS * 900),
+            Some(restart + half * 2)
+        );
+    }
+
+    /// An event loop that sleeps exactly as long as the scheduler asks: a
+    /// restart wakes it once, at the end of the hold, where the first hiding
+    /// edge is due, and then once per half-period. A pass for any other reason
+    /// during the hold still sleeps to the hold's end.
+    #[test]
+    fn the_wake_after_a_restart_is_the_end_of_the_hold() {
+        let t0 = Instant::now();
+        for half_ms in [50, 530, 5000] {
+            let half = MS * half_ms;
+            let mut gpu = Scheduler::restarted(t0, half, None);
+            assert_eq!(gpu.wait(t0), Some(half * 2));
+            for into in [MS, half / 2, half, half + MS, half * 2 - MS] {
+                gpu.step_to(t0 + into);
+                assert!(gpu.on, "interval {half:?}: {into:?} into the hold");
+                assert_eq!(gpu.wait(t0 + into), Some(half * 2 - into));
+                assert_eq!(
+                    next_edge(gpu.on, gpu.last, t0, half, None, t0 + into),
+                    Some(t0 + half * 2)
+                );
+            }
+
+            let mut gpu = Scheduler::restarted(t0, half, None);
+            let mut now = t0;
+            let mut wakes = Vec::new();
+            for _ in 0..5 {
+                now += gpu.wait(now).expect("a running blink sleeps to its edge");
+                let was_on = gpu.on;
+                gpu.step_to(now);
+                assert_ne!(gpu.on, was_on, "interval {half:?}: a wake with no edge");
+                wakes.push(now - t0);
+            }
+            assert_eq!(
+                wakes,
+                [half * 2, half * 3, half * 4, half * 5, half * 6],
+                "interval {half:?}"
+            );
+        }
+        let half = MS * 530;
+        // A pass that runs late still asks for a real sleep, and a blink that
+        // is off, unfocused or timed out asks for none.
+        assert_eq!(wait_for_edge(true, t0, half, t0 + MS * 600), Some(MS));
+        assert_eq!(wait_for_edge(false, restart_edge(t0, half), half, t0), None);
     }
 
     /// Materializing after any gap equals stepping the scheduler through it,

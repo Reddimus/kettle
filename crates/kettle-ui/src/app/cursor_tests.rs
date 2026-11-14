@@ -453,11 +453,278 @@ fn cursor_blink_waits_until_the_actual_deadline() {
         "advance the blink deadline before requesting a compositor frame so repeated \
              about_to_wait callbacks cannot enqueue the same blink"
     );
+    let wait = body
+        .find(
+            "crate::cursor_blink::wait_for_edge(blink_active, ws.last_blink, blink_interval, now);",
+        )
+        .expect("the blink wake is the time left to the next edge, not a fixed poll");
+    assert!(!body.contains("Some(120)"));
     assert!(
-        body.contains("blink_interval.saturating_sub(blink_elapsed)")
-            && !body.contains("Some(120)"),
-        "blink wait time must be the remaining configured interval, not a fixed poll"
+        blink + blink_body.find("ws.last_blink = now").expect("blink edge") < wait,
+        "the wake counts from the edge this pass recorded"
     );
+    assert!(
+        !body.contains("blink_interval.saturating_sub("),
+        "a half-period from now would wake in the middle of a restart's hold"
+    );
+}
+
+/// One scheduler pass at `now` over a window's blink state: the pure rules
+/// `about_to_wait_inner` applies, returning the sleep it would ask for.
+fn blink_pass(
+    ws: &mut WindowState,
+    configured: bool,
+    interval: std::time::Duration,
+    timeout: Option<std::time::Duration>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    let timed_out = super::cursor_blink_timed_out(
+        now.saturating_duration_since(ws.last_blink_activity),
+        timeout,
+        ws.blink_on,
+    );
+    let active = !timed_out && super::cursor_blink_active(configured, true, true);
+    if let Some(next) = super::next_cursor_blink_phase(
+        active,
+        now.saturating_duration_since(ws.last_blink),
+        interval,
+        ws.blink_on,
+    ) {
+        ws.blink_on = next;
+        ws.last_blink = now;
+    }
+    crate::cursor_blink::wait_for_edge(active, ws.last_blink, interval, now)
+}
+
+/// Every restart of the blink holds the cursor visible for one whole period:
+/// `restart_blink` is the only writer that shows the cursor, `reset_blink_phase`
+/// and the DEC mode 12 path both go through it, and from a window's state it
+/// leaves, the scheduler's rules draw the hold and then the old cadence.
+#[test]
+fn every_blink_restart_holds_the_cursor_for_a_whole_period() {
+    use std::time::{Duration, Instant};
+    let ms = Duration::from_millis(1);
+    let half = Duration::from_millis(kettle_config::Config::default().cursor_blink_interval);
+    assert_eq!(half, ms * 530);
+    let timeout = kettle_config::Config::default().cursor_blink_timeout();
+    let t0 = Instant::now();
+    let mut ws = WindowState::new(1, Mux::new());
+    // Mid off phase, an edge 200 ms ago.
+    ws.blink_on = false;
+    ws.last_blink = t0 - ms * 200;
+    super::restart_blink(&mut ws, t0, half);
+    ws.last_blink_activity = t0;
+    assert!(ws.blink_on);
+    assert_eq!(ws.last_blink, t0 + half);
+    assert_eq!(
+        blink_pass(&mut ws, true, half, timeout, t0),
+        Some(half * 2),
+        "one wake, at the end of the hold"
+    );
+    for at in 0..=3180u32 {
+        blink_pass(&mut ws, true, half, timeout, t0 + ms * at);
+        let expected = match at {
+            0..1060 => true,
+            1060..1590 => false,
+            1590..2120 => true,
+            2120..2650 => false,
+            2650..3180 => true,
+            _ => false,
+        };
+        assert_eq!(ws.blink_on, expected, "{at} ms after the restart");
+    }
+    // A second restart inside a hold starts the hold again.
+    let again = t0 + ms * 4000;
+    super::restart_blink(&mut ws, again, half);
+    for at in 0..1760u32 {
+        if at == 700 {
+            super::restart_blink(&mut ws, again + ms * at, half);
+        }
+        blink_pass(&mut ws, true, half, timeout, again + ms * at);
+        assert!(ws.blink_on, "{at} ms after the first of two restarts");
+    }
+    blink_pass(&mut ws, true, half, timeout, again + ms * 1760);
+    assert!(!ws.blink_on);
+
+    let src = super::production_source();
+    assert_eq!(
+        src.matches("ws.blink_on = true;").count(),
+        1,
+        "only restart_blink shows the cursor"
+    );
+    // restart_blink, the scheduler's edge and the layer's materialized edge.
+    assert_eq!(src.matches("ws.last_blink = ").count(), 3);
+    let restart = finding_body(&src, "restart_blink");
+    assert!(restart.contains("ws.last_blink = crate::cursor_blink::restart_edge(now, interval);"));
+    let reset: String = finding_body(&src, "reset_blink_phase")
+        .split_whitespace()
+        .collect();
+    assert!(
+        reset.contains(
+            "restart_blink(ws,now,std::time::Duration::from_millis(self.cfg.cursor_blink_interval)"
+        ),
+        "{reset}"
+    );
+    // DEC mode 12: the drain reports the flip and its caller restarts the
+    // phase with the configured interval. It is output, so the idle timeout
+    // keeps counting (`last_blink_activity` has its one writer above).
+    let drain = src
+        .split_once("fn drain_pane_events(")
+        .expect("pane drain")
+        .1
+        .split_once("\n}\n")
+        .expect("end of pane drain")
+        .0;
+    assert!(drain.contains("cursor_blinking_changed = true;"));
+    assert!(!drain.contains("ws.last_blink") && !drain.contains("ws.blink_on"));
+    let app_drain: String = finding_body(&src, "drain_events")
+        .split_whitespace()
+        .collect();
+    let flipped = app_drain
+        .split_once("ifcursor_blinking_changed{")
+        .expect("the drain's caller handles the flip")
+        .1;
+    assert!(
+        flipped.starts_with(
+            "restart_blink(ws,std::time::Instant::now(),\
+             std::time::Duration::from_millis(self.cfg.cursor_blink_interval)"
+        ),
+        "{flipped}"
+    );
+}
+
+/// `cursor-blink = false` is untouched by the hold: a restart schedules no
+/// edge and no wake, the phase never leaves visible, and the frame draws the
+/// cursor solid whatever the phase.
+#[test]
+fn a_restart_with_cursor_blink_off_schedules_nothing() {
+    use std::time::{Duration, Instant};
+    let ms = Duration::from_millis(1);
+    let half = ms * 530;
+    let timeout = Some(Duration::from_secs(10));
+    let t0 = Instant::now();
+    let mut ws = WindowState::new(1, Mux::new());
+    super::restart_blink(&mut ws, t0, half);
+    ws.last_blink_activity = t0;
+    for at in (0..15_000u32).step_by(10) {
+        assert_eq!(
+            blink_pass(&mut ws, false, half, timeout, t0 + ms * at),
+            None,
+            "a wake {at} ms after the restart"
+        );
+        assert!(ws.blink_on);
+        assert_eq!(ws.last_blink, t0 + half);
+    }
+    assert_eq!(
+        super::shown_blink_phase(
+            &ws,
+            || super::cursor_blink_active(false, true, true),
+            half,
+            timeout,
+            t0 + ms * 700,
+        ),
+        (true, None)
+    );
+    let src = super::production_source();
+    let frame: String = src
+        .split_once("let blink_enabled = self.cfg.cursor_blink && pane_blink;")
+        .expect("the frame's blink gate")
+        .1
+        .split_once("ws.blink_on")
+        .expect("the frame's phase read")
+        .0
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        frame,
+        "letcursor_visible=if!blink_enabled||!window_focused||cursor_held_steady(ws){true}else{"
+    );
+}
+
+/// `ui_geometry.cursor_blink` reports a hold as the visible phase with its
+/// next edge at the hold's end, then each phase with the edge that ends it,
+/// whether the scheduler or the window server draws the blink.
+#[test]
+fn blink_diagnostics_report_the_hold_and_the_phases_after_it() {
+    use std::time::{Duration, Instant};
+    let ms = Duration::from_millis(1);
+    let half = ms * 530;
+    let timeout = Some(Duration::from_secs(10));
+    let t0 = Instant::now();
+    let mut ws = WindowState::new(1, Mux::new());
+    super::restart_blink(&mut ws, t0, half);
+    ws.last_blink_activity = t0;
+    for at in 0..3180u32 {
+        let now = t0 + ms * at;
+        blink_pass(&mut ws, true, half, timeout, now);
+        let (on, next_ms) = match at {
+            0..1060 => (true, 1060),
+            1060..1590 => (false, 1590),
+            1590..2120 => (true, 2120),
+            2120..2650 => (false, 2650),
+            _ => (true, 3180),
+        };
+        assert_eq!(
+            super::shown_blink_phase(&ws, || true, half, timeout, now),
+            (on, Some(t0 + ms * next_ms)),
+            "{at} ms after the restart"
+        );
+        // Blink off, an unfocused or a hidden window: the phase, no edge.
+        assert_eq!(
+            super::shown_blink_phase(&ws, || false, half, timeout, now),
+            (on, None)
+        );
+    }
+
+    // The window server takes the blink at the end of a hold. The report then
+    // follows its plan with no scheduler pass at all.
+    let mut ws = WindowState::new(1, Mux::new());
+    super::restart_blink(&mut ws, t0, half);
+    ws.last_blink_activity = t0;
+    blink_pass(&mut ws, true, half, timeout, t0 + ms * 1060);
+    let plan = crate::cursor_blink::layer_plan(
+        ws.blink_on,
+        ws.last_blink,
+        ws.last_blink_activity,
+        half,
+        timeout,
+    )
+    .expect("the end of a hold hides the cursor");
+    ws.blink_layer.started(plan, [0, 0, 8, 16]);
+    for (at, on, next_ms) in [
+        (1060u32, false, 1590u32),
+        (1589, false, 1590),
+        (1590, true, 2120),
+        (2119, true, 2120),
+        (2120, false, 2650),
+    ] {
+        assert_eq!(
+            super::shown_blink_phase(
+                &ws,
+                || unreachable!("the layer's plan needs no scheduler"),
+                half,
+                timeout,
+                t0 + ms * at,
+            ),
+            (on, Some(t0 + ms * next_ms)),
+            "{at} ms after the restart, on the layer"
+        );
+    }
+    // A restart while the layer blinks: until its exit frame presents, the
+    // report is already the restart's hold, not the layer's old plan.
+    let restart = t0 + ms * 2300;
+    super::restart_blink(&mut ws, restart, half);
+    assert!(ws.blink_layer.is_active());
+    assert_eq!(
+        super::shown_blink_phase(&ws, || true, half, timeout, restart + ms * 900),
+        (true, Some(restart + half * 2))
+    );
+    // The control reply is this function's answer, taken once per read.
+    let src = super::production_source();
+    let diagnostics = finding_body(&src, "cursor_blink_diagnostics");
+    assert_eq!(diagnostics.matches("shown_blink_phase(").count(), 1);
+    assert!(diagnostics.contains("let (phase_on, next_edge) = shown_blink_phase("));
+    assert!(!diagnostics.contains("cursor_blink::"));
 }
 
 #[test]

@@ -1779,49 +1779,21 @@ impl App {
     pub(super) fn cursor_blink_diagnostics(&self, ws: &WindowState) -> serde_json::Value {
         let now = std::time::Instant::now();
         let layer = &ws.blink_layer;
-        let (phase_on, next_edge) = match layer.active() {
-            Some((anchor, plan, _)) if ws.last_blink == anchor => {
-                let (on, edge) = crate::cursor_blink::materialize(
-                    ws.blink_on,
-                    ws.last_blink,
-                    plan.activity,
-                    plan.interval,
-                    plan.timeout,
-                    now,
-                );
-                let next = crate::cursor_blink::next_edge(
-                    on,
-                    edge,
-                    plan.activity,
-                    plan.interval,
-                    plan.timeout,
-                    now,
-                );
-                (on, next)
-            }
-            _ => {
-                let running = ws.window_focused
+        let (phase_on, next_edge) = shown_blink_phase(
+            ws,
+            || {
+                ws.window_focused
                     && !window_is_render_hidden(ws)
                     && cursor_blink_active(
                         self.cfg.cursor_blink,
                         self.pane_cursor_blinking(ws, false),
                         ws.window_focused,
-                    );
-                let next = running
-                    .then(|| {
-                        crate::cursor_blink::next_edge(
-                            ws.blink_on,
-                            ws.last_blink,
-                            ws.last_blink_activity,
-                            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
-                            self.cfg.cursor_blink_timeout(),
-                            now,
-                        )
-                    })
-                    .flatten();
-                (ws.blink_on, next)
-            }
-        };
+                    )
+            },
+            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+            self.cfg.cursor_blink_timeout(),
+            now,
+        );
         let exit_frames = &layer.exit_frames;
         serde_json::json!({
             "renderer": if layer.is_active() { "layer" } else { "gpu" },
