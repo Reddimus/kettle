@@ -3248,6 +3248,25 @@ Accessibility tests check English/Spanish exit-code descriptions against that
 geometry. Native UI/GPU acceptance still requires rendered ticks on each OS;
 headless source and geometry checks do not establish visual acceptance.
 
+`kettle-render`'s `scrollbar_tests` pin the pane scrollbar.
+`scrollbar_colours_meet_their_floors_on_every_bundled_theme` sweeps every
+bundled theme in both blend modes, solid and translucent: the rest thumb 3:1
+against the background and 2:1 against its channel, the active thumb 4.5:1
+and 3:1 against its channel, the channel 1.5:1 and at rest at most 1.6:1, and
+no translucent layer over 90% cover.
+`command_ticks_stand_out_on_the_channel_on_every_bundled_theme` holds ticks to
+3:1 against both. The geometry tests cover the scrolled-back width and
+full-height channel, the rest channel only with history, `always`'s steady
+width, the 40 logical px thumb at 1x and 2x, the edge-touching hit strip, the
+jump button's clearance at widths 2-40, and when the bar paints solid.
+`headless_tests::a_pane_with_history_paints_its_thumb_channel_and_ticks`
+samples the thumb, channel and a tick in rendered frames, at rest and
+scrolled back, on TokyoNight Night and Kettle Day at 1x and 2x, solid and
+translucent, away from any glyph.
+`kettle-ui`'s `scrollbar_tests` check that the pointer grabs the thumb the
+renderer draws and that the AccessKit ScrollBar bounds are its painted
+channel.
+
 Chrome state regression coverage includes the auto tab default, exit-policy
 status matrix, replay of original launch environment and cwd in the same pane,
 source-located config diagnostics and notice limits, persistent-notice hit

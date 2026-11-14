@@ -130,8 +130,8 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `minimum-contrast` | float 0–21 | `0.0` | WCAG 2.0 minimum contrast ratio of cell text against its background; `0` = off. `4.5` ≈ WCAG AA, `7.0` ≈ AAA. Foreground is lifted toward white/black as needed. Settings › Appearance and the theme picker's Contrast button step it through Off, 3, 4.5 and 7 |
 | `window-title-format` (`title-format`) | string | `{title} — kettle` | OS title template: `{title}` uses the pane title, cwd basename, or `kettle`; `{cwd}` abbreviates home; `{tab}` is 1-based. `{{`/`}}` escape braces. Native titlebars omit Private Use/Nerd Font glyphs; tabs and pane titles retain them |
 | `tab-format` (`tab-title-format`) | string | `{title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). Horizontal tabs show a close button on the active or hovered tab and, on macOS, a Cmd+1 through Cmd+9 hint when space permits and the window is focused |
-| `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane overlay scrollbar. `auto` shows it whenever the pane has scrollback history — dim at rest, brighter while scrolled back or while the pointer hovers/drags it; `always` also draws the empty gutter with no history. Click or drag the thumb to scroll |
-| `scrollbar-width` | float 2–40 logical px | `6` | Visible overlay-thumb width. Kettle scales it for display DPI and keeps a separate invisible hit strip of at least 12 logical px. Dragging preserves the pointer's position inside the thumb |
+| `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane overlay scrollbar. `auto` shows it whenever the pane has scrollback history: a dim thumb in a faint channel the height of the terminal at rest, wider and brighter while scrolled back or while the pointer hovers or drags it. `always` also draws the empty channel with no history, and keeps one width while there is history. Its colours are worked out per theme: the thumb is at least 3:1 against the background at rest and 4.5:1 while scrolled back or under the pointer. Click or drag the thumb to scroll |
+| `scrollbar-width` | float 2–40 logical px | `6` | Overlay-thumb width at rest. Kettle scales it for display DPI, widens the bar to at least 10 logical px while scrolled back, hovered or dragged (with `scrollbar = always`, whenever there is history), and keeps a separate invisible hit strip of at least 12 logical px that reaches the pane's edge. The thumb is at least 40 logical px long. Dragging preserves the pointer's position inside the thumb |
 | `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
 | `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent. Pane borders are drawn only when a tab has more than one pane, or while broadcast input is on. While **broadcast mode** is on (`Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, or `Super+G` elsewhere), this is temporarily overridden by theme `palette[3]` (yellow) to signal the active state; the configured color is restored when broadcast turns off |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
@@ -702,9 +702,16 @@ rules, and [Settings](SETTINGS.md) for live cursor and copy controls.
 A pane scrolled into history shows a bottom-right **↓ 1,234 lines** pill. Click it
 to return that pane to live output. It disappears at the bottom and when a pane
 is too small to fit its label. It remains available with `scrollbar = never`.
-The scrollbar retains its configured resting width, grows to at least 10 logical
-pixels on hover or drag, and has a hit strip at least 12 logical pixels wide.
-All sizes scale with display DPI.
+The scrollbar keeps its configured width at rest and grows to at least 10
+logical pixels while the pane is scrolled back or the pointer hovers or drags
+it, in a channel as wide as the thumb; with `scrollbar = always` it keeps that
+width whenever there is history. Its thumb is at least 40 logical pixels long,
+and its hit strip is at least 12 logical pixels wide and reaches the pane's
+edge. All sizes scale with display DPI. The bar is painted solid only when, at
+its widest and with its 2-pixel edge, it fits in `window-padding-x` and the
+window is opaque (`background-opacity = 1`). Otherwise it is translucent, at
+most 90% cover, so text under it stays visible; it still shows in the same
+colours over the background.
 
 
 ## Editing the config from inside kettle (Preferences submenu)

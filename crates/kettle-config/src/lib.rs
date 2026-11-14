@@ -1260,13 +1260,15 @@ pub enum ReduceMotion {
 pub enum ScrollbarMode {
     Never,
     /// Visible whenever the pane has scrollback history (not only
-    /// while scrolled back). Drawn dim at rest and brighter while the pointer
-    /// hovers the bar, the view is scrolled back, or the thumb is being
-    /// dragged — an overlay-scrollbar look that stays out of the way but is
-    /// always grabbable with the mouse.
+    /// while scrolled back). Drawn as a dim thumb in a faint full-height
+    /// channel at rest, and wider and brighter while the pointer hovers the
+    /// bar, the view is scrolled back, or the thumb is being dragged — an
+    /// overlay-scrollbar look that stays out of the way but is always
+    /// grabbable with the mouse.
     Auto,
-    /// Like `Auto`, but the track gutter is drawn even when there is no
-    /// scrollback yet (a permanent right-edge channel).
+    /// Like `Auto`, but the channel is drawn even when there is no
+    /// scrollback yet (a permanent right-edge channel), and the bar keeps one
+    /// width while there is history.
     Always,
 }
 
