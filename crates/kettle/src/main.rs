@@ -101,6 +101,7 @@ mod exec;
 // Agent-first: `kettle ctl` — thin control-plane client over
 // kettle-ctl (discover a running server, call a method, or stream events).
 mod ctl_cli;
+mod ctl_discovery;
 // `kettle show` — send media to the shelf of the pane it runs in.
 mod agent_artifacts;
 mod agent_setup;

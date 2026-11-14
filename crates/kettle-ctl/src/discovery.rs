@@ -2106,6 +2106,10 @@ mod tests {
     /// own registry.
     #[test]
     fn the_test_variable_replaces_every_os_named_registry_dir() {
+        assert_eq!(
+            kettle_test_support::OS_CTL_DIR_ENV,
+            TEST_OS_REGISTRY_DIR_ENV
+        );
         let stand_in = std::env::temp_dir().join("kettle-os-ctl");
         assert_eq!(
             os_registry_dirs_from(Some(stand_in.clone().into_os_string()), os_bases_unused),

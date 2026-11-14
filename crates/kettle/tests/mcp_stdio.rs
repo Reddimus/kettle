@@ -10,8 +10,13 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
-fn kettle() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_kettle"))
+/// The real `kettle`, kept to a control registry under `root`, so it can
+/// neither find the Kettle this test may run inside nor read or prune the
+/// account's own registry.
+fn kettle(root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kettle"));
+    kettle_test_support::isolate_ctl_registry(&mut command, root);
+    command
 }
 
 fn run_mcp_stdio(messages: &[Value]) -> (i32, String, String) {
@@ -19,7 +24,8 @@ fn run_mcp_stdio(messages: &[Value]) -> (i32, String, String) {
 }
 
 fn run_mcp_stdio_with(args: &[&str], messages: &[Value]) -> (i32, String, String) {
-    let mut child = kettle()
+    let registry = kettle_test_support::private_tempdir("kettle-mcp-stdio-");
+    let mut child = kettle(registry.path())
         .args(args)
         // A display server outside Kettle must not find the Kettle this test
         // may itself run in.
@@ -117,8 +123,9 @@ fn codex_artifact_inbox_is_removed_on_termination_signals() {
 
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         let temporary = tempfile::tempdir().unwrap();
+        let registry = kettle_test_support::private_tempdir("kettle-mcp-signal-");
         let mut peer = Peer(
-            kettle()
+            kettle(registry.path())
                 .args(["mcp", "--display", "--codex-card-hook"])
                 .env_remove("KETTLE_PID")
                 .env_remove("KETTLE_PANE_ID")
@@ -677,7 +684,9 @@ impl FakeKettle {
     }
 
     fn spawn(&self, args: &[&str]) -> std::process::Child {
-        kettle()
+        // The fixture's server is registered in `runtime`, so the registry
+        // stays there; only the OS-named directory moves.
+        kettle(self.runtime.path())
             .args(args)
             .env("XDG_RUNTIME_DIR", self.runtime.path())
             .env("XDG_CONFIG_HOME", self.runtime.path().join("config"))

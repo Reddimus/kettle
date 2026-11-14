@@ -1042,6 +1042,31 @@ mod sweep_tests {
     }
 }
 
+/// The variable `kettle_ctl::discovery::TEST_OS_REGISTRY_DIR_ENV` names: an
+/// absolute directory that stands in for every control registry directory
+/// the OS names for this account.
+pub const OS_CTL_DIR_ENV: &str = "KETTLE_TEST_OS_CTL_DIR";
+
+/// Keep a `kettle` a test starts away from this account's own control
+/// registry (`~/.local/state/kettle/ctl`, or `/run/user/<uid>/kettle/ctl`)
+/// and from any Kettle the test runs inside. Whatever it runs as (`kettle
+/// mcp`, `kettle ctl`, `kettle show`, the GUI), it registers, publishes its
+/// alias, prunes and looks for servers only under `root`, a private
+/// directory that must outlive the child. Its registry is `root/run/kettle/
+/// ctl` through `XDG_RUNTIME_DIR` on Unix (set that after this call to move
+/// it), and `root/os-ctl` stands in for the directory the OS names. Call it
+/// after any `env_clear`, which would undo it. On Windows the registry
+/// follows `LOCALAPPDATA`, which this leaves alone.
+pub fn isolate_ctl_registry<'a>(
+    command: &'a mut std::process::Command,
+    root: &Path,
+) -> &'a mut std::process::Command {
+    command.env(OS_CTL_DIR_ENV, root.join("os-ctl"));
+    #[cfg(unix)]
+    command.env("XDG_RUNTIME_DIR", root.join("run"));
+    command
+}
+
 /// Poll for an observed result within a finite bound, attempting once even at zero.
 pub fn poll_until<T>(
     within: std::time::Duration,
@@ -1103,6 +1128,24 @@ mod tests {
     #[should_panic(expected = "failed in its child process")]
     fn a_misspelled_test_name_fails() {
         super::run_alone_in_child("tests::no_such_test", || {});
+    }
+
+    /// An isolated `kettle` gets its OS-named registry directory, and on Unix
+    /// its whole registry, under the test's own root.
+    #[test]
+    fn an_isolated_kettle_registers_under_the_tests_root() {
+        let root = std::path::Path::new("/private/root");
+        let mut command = std::process::Command::new("kettle");
+        super::isolate_ctl_registry(&mut command, root);
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        let set = |name: &str| envs.get(std::ffi::OsStr::new(name)).copied().flatten();
+        assert_eq!(
+            set(super::OS_CTL_DIR_ENV),
+            Some(root.join("os-ctl").as_os_str())
+        );
+        if cfg!(unix) {
+            assert_eq!(set("XDG_RUNTIME_DIR"), Some(root.join("run").as_os_str()));
+        }
     }
 
     #[test]

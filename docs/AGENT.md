@@ -735,7 +735,10 @@ Kettle. Because the registry directory comes from the environment, each
 server also leaves a `<pid>.alias.json` pointer where the OS puts the registry
 for this user (`/run/user/<uid>` or the account's home on Unix, the Local
 AppData known folder on Windows), and clients read that location too, so one
-started with a stripped environment still finds its Kettle. The pointer only
+started with a stripped environment still finds its Kettle. Tests and smokes
+set `KETTLE_TEST_OS_CTL_DIR` to an absolute directory that stands in for that
+location, or to anything else to leave it out, so a Kettle under test neither
+writes there nor finds the user's own (see docs/TESTING.md). The pointer only
 names the real entry, which is read and checked in its own registry. A
 quitting Kettle removes its entry, socket and pointer before its quit waits
 on anything, so no client finds it while it saves. That holds for closing its
