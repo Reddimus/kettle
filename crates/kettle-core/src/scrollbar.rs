@@ -5,15 +5,18 @@
 //! `rows` = visible lines, `hist` = scrollback lines, `off` = lines scrolled
 //! back from the bottom (`0` = at the prompt). `total = rows + hist`.
 
-/// The shortest thumb, in logical pixels. The renderer and the pointer scale
-/// it by the display's scale factor, so both draw and grab the same thumb.
-pub const MIN_THUMB_LOGICAL: f32 = 24.0;
+/// The shortest thumb, in logical pixels: the overlay thumb length GTK's
+/// terminals draw, so 10,000 lines of history still leave a thumb a pointer
+/// can find. The renderer and the pointer scale it by the display's scale
+/// factor, so both draw and grab the same thumb.
+pub const MIN_THUMB_LOGICAL: f32 = 40.0;
 
 /// The thumb as `(y_offset_within_track, height)` in track pixels, or `None`
-/// when everything fits (no scrollbar needed). The compatibility wrapper uses
-/// a 12-pixel minimum; DPI-aware callers should use [`thumb_with_min`].
+/// when everything fits (no scrollbar needed). This wrapper takes the track
+/// at 1x, with the [`MIN_THUMB_LOGICAL`] minimum; DPI-aware callers should
+/// use [`thumb_with_min`].
 pub fn thumb(rows: usize, hist: usize, off: usize, track: f32) -> Option<(f32, f32)> {
-    thumb_with_min(rows, hist, off, track, 12.0)
+    thumb_with_min(rows, hist, off, track, MIN_THUMB_LOGICAL)
 }
 
 /// DPI-aware thumb geometry. `minimum` is in the same physical-pixel space as
@@ -103,7 +106,7 @@ mod tests {
         assert_eq!(y2, 0.0, "off=hist → top of track");
         // Minimum thumb height is enforced.
         let (_, hmin) = thumb(1, 100_000, 0, 300.0).unwrap();
-        assert_eq!(hmin, 12.0);
+        assert_eq!(hmin, MIN_THUMB_LOGICAL);
     }
 
     #[test]
