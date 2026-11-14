@@ -132,7 +132,7 @@ pub use overlays::{
     media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
     notification_geometry_with_notices, persistent_notice_geometry,
     persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_geometry,
+    toast_text_rows, update_toast_columns, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
