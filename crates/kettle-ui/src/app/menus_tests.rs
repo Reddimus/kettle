@@ -1393,6 +1393,11 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             Action::ToggleBroadcastGroup,
             Action::OpenSettings,
             Action::OpenThemePicker,
+            Action::SelectCommandOutput,
+            Action::StartSearch,
+            Action::JumpPrevPrompt,
+            Action::JumpNextPrompt,
+            Action::ClearHistory,
         ]
         .into_iter()
         .map(|action| ContextMenuItem::Item {
@@ -1445,7 +1450,16 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             count_rows_fitting(&grouped, 0, 592.0, 28.0, 8.0),
             grouped.len()
         );
-        for item in grouped.iter().skip(6) {
+        assert!(matches!(
+            grouped[5],
+            ContextMenuItem::Item {
+                action: Action::SelectCommandOutput,
+                ..
+            }
+        ));
+        // Find, the prompt jumps and Clear Scrollback end the top block.
+        assert!(matches!(grouped[10], ContextMenuItem::Separator));
+        for item in grouped.iter().skip(11) {
             assert!(matches!(item, ContextMenuItem::Submenu { .. }));
         }
     }
@@ -1590,12 +1604,15 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
     let tr = Translator::new(Language::En);
     let items: Vec<_> = [
         Action::ClearHistory,
+        Action::JumpNextPrompt,
         Action::SplitAuto,
         Action::Reset,
         Action::StartSearch,
         Action::HintMode,
         Action::SelectAll,
         Action::Paste,
+        Action::JumpPrevPrompt,
+        Action::SelectCommandOutput,
         Action::Copy,
     ]
     .into_iter()
@@ -1620,8 +1637,11 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
             Action::Copy,
             Action::Paste,
             Action::SelectAll,
+            Action::SelectCommandOutput,
             Action::HintMode,
             Action::StartSearch,
+            Action::JumpPrevPrompt,
+            Action::JumpNextPrompt,
             Action::ClearHistory,
         ]
     );
@@ -1883,4 +1903,424 @@ fn confirm_close_radio_labels_do_not_single_out_the_titlebar() {
             );
         }
     }
+}
+
+/// The prompt-jump rows' claims: a jump up would move the view, one down
+/// would not, as with every retained prompt above a view at the bottom.
+fn prompt_above_only() -> kettle_core::KeyboardClaims {
+    kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: false,
+        ..kettle_core::KeyboardClaims::default()
+    }
+}
+
+fn menu_rows(items: &[ContextMenuItem]) -> Vec<(&'static str, Action, bool)> {
+    items
+        .iter()
+        .map(|item| match item {
+            ContextMenuItem::Item {
+                label,
+                action,
+                enabled,
+            } => (*label, action.clone(), *enabled),
+            _ => panic!("unexpected row kind"),
+        })
+        .collect()
+}
+
+/// Previous Prompt and Next Prompt are offered once the pane holds a
+/// retained prompt mark, and each is enabled when a jump that way would
+/// move the view: with a prompt above only, Previous is enabled, Next is
+/// not, and the menu then shows Previous alone.
+#[test]
+fn prompt_rows_need_a_prompt_mark_and_follow_the_jump_claims() {
+    let both = kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: true,
+        ..kettle_core::KeyboardClaims::default()
+    };
+    assert!(super::prompt_menu_rows(false, &both, &EN_TEXT).is_empty());
+    assert_eq!(
+        menu_rows(&super::prompt_menu_rows(true, &both, &EN_TEXT)),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, true),
+        ]
+    );
+    let rows = super::prompt_menu_rows(true, &prompt_above_only(), &EN_TEXT);
+    assert_eq!(
+        menu_rows(&rows),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, false),
+        ]
+    );
+    assert_eq!(
+        menu_rows(&filter_disabled(rows)),
+        [("Previous Prompt", Action::JumpPrevPrompt, true)]
+    );
+}
+
+/// The hint column shows the chord bound to each jump, a rebound chord once
+/// the user rebinds it, and nothing once it is unbound.
+#[test]
+fn prompt_row_hints_follow_rebinds_and_vanish_when_unbound() {
+    use kettle_config::keybinds::parse_trigger;
+    let chord = |text: &str| {
+        parse_trigger(text)
+            .unwrap()
+            .ui_label(cfg!(target_os = "macos"))
+    };
+    let both = kettle_core::KeyboardClaims {
+        prompt_above: true,
+        prompt_below: true,
+        ..kettle_core::KeyboardClaims::default()
+    };
+    let rows = super::prompt_menu_rows(true, &both, &EN_TEXT);
+    let hints = |config: &str| {
+        super::menu_item_hints(&kettle_config::Config::parse_text(config).keybinds, &rows)
+    };
+    let defaults = hints("");
+    // Ctrl+Up everywhere; macOS also binds Cmd+Up and may show either.
+    assert!(
+        [chord("ctrl+up"), chord("super+up")].contains(&defaults[0]),
+        "{defaults:?}"
+    );
+    assert!(
+        [chord("ctrl+down"), chord("super+down")].contains(&defaults[1]),
+        "{defaults:?}"
+    );
+    let freed = "keybind = ctrl+up=unbind\nkeybind = super+up=unbind\n";
+    assert_eq!(
+        hints(&format!("{freed}keybind = alt+shift+p=prev_prompt")),
+        [chord("alt+shift+p"), defaults[1].clone()]
+    );
+    assert_eq!(hints(freed), [String::new(), defaults[1].clone()]);
+}
+
+/// Under `language = es` the rows read as the palette's Spanish does.
+#[test]
+fn prompt_rows_are_spanish_under_language_es() {
+    let cfg = kettle_config::Config::parse_text("language = es");
+    let tr = kettle_i18n::Translator::new(cfg.language.resolve(|| None));
+    let rows = super::prompt_menu_rows(true, &prompt_above_only(), &tr);
+    let labels: Vec<_> = menu_rows(&rows).into_iter().map(|row| row.0).collect();
+    assert_eq!(
+        labels,
+        [
+            "Indicador anterior de la shell",
+            "Indicador siguiente de la shell"
+        ]
+    );
+}
+
+/// A window whose one pane runs `/bin/sh -c SCRIPT` in a real PTY, once
+/// `ready` accepts its terminal. The script sleeps after printing so its
+/// screen stays put; dropping the window ends it.
+#[cfg(unix)]
+fn shell_window(
+    script: &str,
+    ready: impl Fn(&kettle_core::Terminal) -> bool,
+) -> (WindowState, u64) {
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let mut mux = Mux::new();
+    // As kettle-core's command-mark fixture does: macOS fails a /dev/ptmx
+    // open now and then with errno -6 while others open at the same moment.
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let opening = OPENING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut retries = 0;
+    loop {
+        match mux.new_tab_with_geometry(
+            &cfg,
+            kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+            std::sync::Arc::new(|| {}),
+            &["/bin/sh".into(), "-c".into(), script.into()],
+            None,
+        ) {
+            Err(error) if retries < 4 && format!("{error:#}").contains("failed to openpty") => {
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            opened => break opened.expect("PTY fixture"),
+        }
+    }
+    drop(opening);
+    let pane = mux.active_focus().unwrap();
+    let ws = WindowState::new(1, mux);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !ready(&ws.mux.panes[&pane].term) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PTY fixture timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    (ws, pane)
+}
+
+/// A real pane offers the rows only once its output carried a prompt mark,
+/// and with that prompt scrolled up into history, Previous alone is enabled.
+#[cfg(unix)]
+#[test]
+fn a_pane_offers_prompt_rows_only_once_it_has_a_prompt_mark() {
+    let lines: String = (0..40).map(|n| format!("line{n}\\n")).collect();
+    let (plain, pane) = shell_window(&format!("printf '{lines}'; sleep 10"), |term| {
+        term.keyboard_claims().history_size > 10
+    });
+    assert!(super::pane_prompt_menu_rows(&plain.mux.panes[&pane].term, &EN_TEXT).is_empty());
+
+    let script = format!("printf '\\033]133;A\\007$ \\n{lines}'; sleep 10");
+    let (marked, pane) = shell_window(&script, |term| {
+        term.keyboard_claims().history_size > 10 && !term.prompt_marks().is_empty()
+    });
+    let term = &marked.mux.panes[&pane].term;
+    assert_eq!(
+        menu_rows(&super::pane_prompt_menu_rows(term, &EN_TEXT)),
+        [
+            ("Previous Prompt", Action::JumpPrevPrompt, true),
+            ("Next Prompt", Action::JumpNextPrompt, false),
+        ]
+    );
+}
+
+/// `A … C \\r\\n out1 \\r\\n out2 \\r\\n D;0 A …`: a command line, two output
+/// rows and the next prompt, on rows 0 to 3. kettle-core's
+/// `command_output_rows_are_the_rows_between_the_command_line_and_the_next_prompt`
+/// finds the output of this wire at rows 1 and 2, the stable rows `1..3` of
+/// a fresh terminal.
+const OUTPUT_WIRE: &str =
+    "\x1b]133;A\x07$ cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
+
+/// `wire` parsed into a bare 80x24 engine, with no pseudoterminal: its rows
+/// are stable ids from 0, as in a fresh pane.
+fn parsed_screen(wire: &str) -> kettle_core::term::SharedTerm {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut term = alacritty_terminal::Term::new(
+        alacritty_terminal::term::Config::default(),
+        &kettle_core::term::TermSize::new(80, 24),
+        kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+    );
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(&mut term, wire.as_bytes());
+    std::sync::Arc::new(std::sync::Mutex::new(term))
+}
+
+/// The selected text and the text of the top row of the view.
+fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>, String) {
+    use kettle_core::Dimensions as _;
+    let t = term.lock().unwrap();
+    let top = kettle_core::Line(-(t.grid().display_offset() as i32));
+    let row: String = (0..t.grid().columns())
+        .map(|col| t.grid()[top][kettle_core::Column(col)].c)
+        .collect();
+    (
+        kettle_core::term::selection_text_bounded(&t, 1 << 16).unwrap(),
+        row.trim_end().to_string(),
+    )
+}
+
+/// The command's output rows are selected as whole rows, exactly the rows
+/// between its command line and the next prompt, copying as `out1\nout2`,
+/// and a view that already shows them stays where it is.
+#[test]
+fn select_command_output_selects_exactly_the_output_lines() {
+    let term = parsed_screen(OUTPUT_WIRE);
+    assert!(super::select_output_rows(&term, (1, 3)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some("out1\nout2".into()), "$ cmd".into())
+    );
+    // Whole rows: every column of the two output rows and nothing else.
+    let t = term.lock().unwrap();
+    let range = t.selection.as_ref().and_then(|s| s.to_range(&t)).unwrap();
+    assert_eq!(
+        (range.start, range.end),
+        (
+            kettle_core::Point::new(kettle_core::Line(1), kettle_core::Column(0)),
+            kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(79)),
+        )
+    );
+    assert_eq!(t.grid().display_offset(), 0);
+}
+
+/// A first output row off screen is scrolled to the top of the view, one on
+/// screen is not, and rows that are not retained select nothing.
+#[test]
+fn select_command_output_scrolls_its_first_row_into_view() {
+    // Rows 0 to 3 as in OUTPUT_WIRE, then a second command's 40 rows of
+    // output, 4 to 43, and its prompt on row 44: 21 rows went into history.
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let term = parsed_screen(&format!(
+        "{OUTPUT_WIRE}big\x1b]133;C\x07\r\n{lines}\x1b]133;D;0\x07\x1b]133;A\x07$ "
+    ));
+    let expected: Vec<String> = (0..40).map(|n| format!("line{n}")).collect();
+    assert!(super::select_output_rows(&term, (4, 44)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some(expected.join("\n")), "line0".into())
+    );
+    assert!(super::select_output_rows(&term, (1, 3)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some("out1\nout2".into()), "out1".into())
+    );
+    term.lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Delta(1));
+    assert!(super::select_output_rows(&term, (1, 3)));
+    assert_eq!(selected_and_top_row(&term).1, "$ cmd", "already on screen");
+    assert!(!super::select_output_rows(&term, (45, 50)), "past the grid");
+    assert!(!super::select_output_rows(&term, (3, 3)), "an empty span");
+}
+
+/// The terminal menu's Select Command Output row is enabled only over a
+/// command's output, reads in the UI language, and the row under the pointer
+/// is named by the stable id of the visible row, wherever the view is.
+#[test]
+fn the_select_output_row_is_enabled_only_inside_a_commands_output() {
+    assert_eq!(
+        menu_rows(&[super::command_output_menu_row(true, &EN_TEXT)]),
+        [("Select Command Output", Action::SelectCommandOutput, true)]
+    );
+    assert_eq!(
+        menu_rows(&[super::command_output_menu_row(false, &EN_TEXT)]),
+        [("Select Command Output", Action::SelectCommandOutput, false)]
+    );
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    assert_eq!(
+        menu_rows(&[super::command_output_menu_row(true, &es)])[0].0,
+        "Seleccionar la salida del comando"
+    );
+
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let term = parsed_screen(&lines);
+    // 40 rows and the cursor's: the view starts at stable row 17.
+    assert_eq!(super::viewport_row_id(&term, 0), Some(17));
+    assert_eq!(super::viewport_row_id(&term, 23), Some(40));
+    assert_eq!(super::viewport_row_id(&term, 24), None, "below the view");
+    term.lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Delta(5));
+    assert_eq!(super::viewport_row_id(&term, 0), Some(12));
+}
+
+/// Rows scrollback has already dropped are left out: the rows of the span
+/// that remain are selected, and a span with none left selects nothing.
+#[test]
+fn select_command_output_keeps_the_rows_scrollback_still_holds() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut engine = alacritty_terminal::Term::new(
+        alacritty_terminal::term::Config {
+            scrolling_history: 10,
+            ..alacritty_terminal::term::Config::default()
+        },
+        &kettle_core::term::TermSize::new(80, 24),
+        kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+    );
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(&mut engine, lines.as_bytes());
+    // 41 rows, 24 on screen and 10 kept above them: rows 0 to 6 are gone.
+    assert_eq!(kettle_core::Dimensions::history_size(engine.grid()), 10);
+    assert_eq!(engine.grid().history_origin(), 7);
+    let term = std::sync::Arc::new(std::sync::Mutex::new(engine));
+    let expected: Vec<String> = (7..20).map(|n| format!("line{n}")).collect();
+    assert!(super::select_output_rows(&term, (3, 20)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some(expected.join("\n")), "line7".into())
+    );
+    term.lock().unwrap().selection = None;
+    assert!(!super::select_output_rows(&term, (0, 7)), "all gone");
+    assert_eq!(selected_and_top_row(&term).0, None);
+}
+
+/// `wire` as a `printf` format.
+#[cfg(unix)]
+fn printf_format(wire: &str) -> String {
+    wire.replace('\x1b', "\\033")
+        .replace('\x07', "\\007")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+/// The path `open_context_menu` and `context_menu_items` take from the
+/// pointer, with the view scrolled back into history: the row under the
+/// pointer is named by the stable id of the output row it shows, and Select
+/// Command Output is offered there and not over the command line or the next
+/// prompt. A real pane, because the lookup is `Terminal::command_output_rows`.
+#[cfg(unix)]
+#[test]
+fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let script = format!("printf '{}'; sleep 10", printf_format(&format!("{OUTPUT_WIRE}{lines}")));
+    let (ws, pane) = shell_window(&script, |term| {
+        term.command_output_rows(None).is_some() && term.keyboard_claims().history_size == 20
+    });
+    let term = &ws.mux.panes[&pane].term;
+    let out1 = term.command_marks()[0].row + 1;
+    let (rect, cell, pad) = ((0.0, 0.0, 664.0, 408.0), (8.0, 16.0), (12.0, 12.0));
+    let at_row = |row: f32| (100.0, pad.1 + row * cell.1 + 5.0);
+    let clicked = |row| super::pointer_row_id(&term.term, rect, at_row(row), cell, pad);
+    // At the bottom the pointer's row 1 shows line18, no command's output.
+    assert_eq!(clicked(1.0), Some(out1 + 20));
+    assert!(!super::clicked_in_output(term, clicked(1.0)));
+    // Scrolled back to the top, rows 0 to 3 show the command line, out1,
+    // out2 and the next prompt.
+    term.term
+        .lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Top);
+    assert_eq!(clicked(1.0), Some(out1));
+    let offered: Vec<bool> = (0..4)
+        .map(|row| super::clicked_in_output(term, clicked(row as f32)))
+        .collect();
+    assert_eq!(offered, [false, true, true, false]);
+    assert!(super::select_command_output(term, clicked(2.0)));
+    assert_eq!(
+        selected_and_top_row(&term.term),
+        (Some("out1\nout2".into()), "$ cmd".into())
+    );
+}
+
+/// The menu row acts on the row the menu was opened over, captured as a
+/// stable id when it opened, and a chord or the palette on the newest
+/// command. A real menu needs a live App, so the wiring is pinned at the
+/// source.
+#[test]
+fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
+    let src = production_source();
+    let body = |name| {
+        finding_body(&src, name)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let open = body("open_context_menu");
+    assert!(open.contains("ws.context_menu_output_row = ws.mux.active_focus().zip(clicked_row);"));
+    assert!(open.contains("pointer_row_id(&pane.term.term, rect, (px, py), cell, pad)"));
+    let items = body("context_menu_items");
+    assert!(items.contains(
+        "items.push(command_output_menu_row( clicked_in_output(&pane.term, clicked_row), &tr, ));"
+    ));
+    assert!(open.contains("items.extend(self.context_menu_items(ws, clicked_row));"));
+    let dispatch = body("dispatch_context_menu_click");
+    assert!(dispatch.contains(
+        "match (action, ws.context_menu_output_row.take()) { (Action::SelectCommandOutput, Some((pane, row))) => { if let Some(pane) = ws.mux.panes.get(&pane) { select_command_output(&pane.term, Some(row)); } }"
+    ));
+    let actions = body("handle_action");
+    assert!(actions.contains(
+        "Action::SelectCommandOutput => { if let Some(p) = ws.mux.focused() { select_command_output(&p.term, None); } }"
+    ));
+    // A pane's lookup, then the selection over that pane's grid.
+    assert!(body("select_command_output").contains(
+        "term.command_output_rows(at) .is_some_and(|rows| select_output_rows(&term.term, rows))"
+    ));
 }
