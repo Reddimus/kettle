@@ -193,6 +193,12 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_write"
                         | "mouse_override_hint"
                         | "font_size_chip"
+                        // The SSH launcher's status line is also a polite
+                        // live region.
+                        | "ssh_status_saved"
+                        | "ssh_status_removed"
+                        | "ssh_status_not_saved"
+                        | "ssh_status_not_removed"
                 )
         })
         .cloned()

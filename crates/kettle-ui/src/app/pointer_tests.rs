@@ -802,8 +802,9 @@ fn native_and_control_selection_motion_share_the_drag_threshold() {
         normalized_src
             .matches("self.install_confirm_dialog(")
             .count(),
-        3,
-        "every confirmation path (closing, keybind conflicts, and pasting) must use the shared transition"
+        5,
+        "every confirmation path (closing, keybind conflicts, pasting, and SSH host removal and \
+         replacement) must use the shared transition"
     );
     assert_eq!(
         normalized_src.matches("ws.confirm_dialog = Some(").count(),

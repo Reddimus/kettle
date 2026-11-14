@@ -2126,6 +2126,15 @@ failure. Unix job control has no equivalent Windows acceptance leg.
   `ssh-config-hosts = false` (no aliases) and on Windows with `USERPROFILE`.
   Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep the
   owner's real aliases out of screenshots and audit artifacts.
+- [ ] Check Save and Remove with the same scratch `HOME` and a scratch
+  `--config` file. Type `me@db.example.com`, press Down to the Save row and
+  Enter: the name editor suggests `db.example.com`; Enter adds the
+  `ssh-host` line and reopens the launcher on it with `Saved "…"` announced.
+  Save a new target under the same name and confirm the Replace question
+  starts on Cancel. Type the name exactly, press Down to Remove and confirm:
+  the line goes and `~/.ssh/config` is unchanged. Check that the wheel, Up
+  from the first row and a hover never select either action row, and that a
+  host added to the file by hand before the reload makes Save refuse.
 
 See [AGENT.md](AGENT.md) for the control and agent surfaces.
 Keep large request/response examples there rather than duplicating them here.

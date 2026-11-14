@@ -1263,6 +1263,7 @@ impl App {
                 TitleEditScope::Pane => "pane",
                 TitleEditScope::Group => "group",
                 TitleEditScope::SaveLayout => "save_layout",
+                TitleEditScope::SaveSshHost => "save_ssh_host",
             };
             serde_json::json!({
                 "scope": scope,

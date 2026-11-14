@@ -234,9 +234,15 @@ confirm_action_send_text = "Enviar texto"
 confirm_action_custom = "Acción personalizada"
 confirm_rebind_title = "¿Reasignar {chord}?"
 confirm_rebind_body = "Asignar este atajo a \"{action}\". \"{taken}\" perderá este atajo."
+confirm_title_remove_ssh_host = "¿Quitar el host \"{name}\"?"
+confirm_body_remove_ssh_host = "Kettle olvidará \"{name}\", que se conecta a {target}. {path} no cambia."
+confirm_title_replace_ssh_host = "¿Reemplazar el host \"{name}\"?"
+confirm_body_replace_ssh_host = "\"{name}\" se conecta a {old_target}. Pasará a conectarse a {new_target}."
 confirm_button_cancel = "Cancelar"
 confirm_button_close = "Cerrar"
 confirm_button_reassign = "Reasignar"
+confirm_button_remove = "Quitar"
+confirm_button_replace = "Reemplazar"
 confirm_close_pane = "¿Cerrar este panel?"
 confirm_rebind = "{chord} ya está asignada a \"{taken}\". ¿Reasignarla a \"{action}\"?"
 macos_menu_about = "Acerca de Kettle"
@@ -581,6 +587,8 @@ picker_placeholder_shortcuts = "Buscar un atajo de teclado…"
 picker_ssh_config_source = "de {path}"
 picker_ssh_connect_typed = "Conectar a \"{target}\""
 picker_ssh_invalid_target = "El destino no puede empezar con - ni tener espacios ni caracteres de control"
+picker_ssh_remove = "Quitar \"{name}\" de Kettle…"
+picker_ssh_save_typed = "Guardar \"{target}\" como host…"
 picker_theme_dark = "oscuro"
 picker_theme_light = "claro"
 picker_theme_prompt = "tema:"
@@ -971,6 +979,8 @@ menu_open_layout = "Abrir diseño…"
 
 edit_layout_name = "Nombre del diseño"
 
+edit_ssh_host_name = "Nombre del host"
+
 notify_layout_failed = "No se guardó el diseño"
 
 notify_layout_failed_body = "Usar un nombre de 1 a 128 letras, dígitos, puntos, guiones bajos o guiones. Comprobar que se pueda escribir en el directorio de diseños."
@@ -982,6 +992,22 @@ notify_profiles_failed_body = "Comprobar que el directorio de configuración est
 notify_profile_launch_failed = "No se abrió el perfil"
 
 notify_profile_launch_failed_body = "Es posible que se haya eliminado el perfil o que Kettle no haya podido iniciar otro proceso."
+
+notify_ssh_host_not_saved = "No se guardó el host"
+
+notify_ssh_host_not_saved_body = "Usar un nombre sin = ni caracteres de control. Puede que el archivo de configuración haya cambiado desde que el lanzador lo leyó o que no se pueda escribir; volver a intentarlo."
+
+notify_ssh_host_not_removed = "No se quitó el host"
+
+notify_ssh_host_not_removed_body = "El host cambió en el archivo de configuración o no se pudo escribir el archivo; volver a intentarlo."
+
+ssh_status_saved = "Se guardó \"{name}\""
+
+ssh_status_removed = "Se quitó \"{name}\""
+
+ssh_status_not_saved = "No se guardó \"{name}\": el host cambió en el archivo de configuración o no se pudo escribir el archivo"
+
+ssh_status_not_removed = "No se quitó \"{name}\": el host cambió en el archivo de configuración o no se pudo escribir el archivo"
 
 confirm_paste_without_controls = "Pegar sin caracteres de control"
 osc52_denied_read = "La política osc52 bloqueó la lectura del portapapeles por un programa. Las lecturas requieren osc52 = paste o both."

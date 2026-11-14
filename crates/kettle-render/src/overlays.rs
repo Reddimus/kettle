@@ -493,6 +493,10 @@ pub struct Overlay {
     /// Keyboard help for the SSH input lane. Ranked hosts are projected through
     /// `context_menu` so each match gets its own row.
     pub ssh_hint: String,
+    /// The SSH launcher's status line after a host was saved or removed. The
+    /// input lane paints it in place of the key hint, and accessibility
+    /// announces it through a polite status node.
+    pub ssh_status: Option<String>,
     /// `Some(typed)` while the command palette is open.
     pub palette_query: Option<String>,
     /// Keyboard help for the palette input lane. Ranked commands are projected

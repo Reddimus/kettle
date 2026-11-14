@@ -63,10 +63,15 @@ pub(super) enum SshRow {
     /// Disabled and never selected: no hosts and nothing typed, or a typed
     /// target ssh must not receive.
     Placeholder,
-    /// Reserved for the Save row, which writes the config and comes later.
-    /// It will sit last, after the host rows.
-    #[expect(dead_code, reason = "the Save row that constructs it has not landed")]
+    /// Save the trimmed query as a host. Last, and shown only when the query
+    /// is a valid target that no configured name or target equals (ignoring
+    /// ASCII case). Opens the name editor.
     SaveTyped,
+    /// Remove `cfg.ssh_hosts[i]`. Last, and shown only when the trimmed query
+    /// is that configured host's name (ignoring ASCII case), never for an
+    /// imported alias: Kettle does not write `~/.ssh/config`. Opens a
+    /// confirmation.
+    Remove(usize),
 }
 
 impl SshRow {
@@ -74,8 +79,11 @@ impl SshRow {
         !matches!(self, Self::Placeholder)
     }
 
-    fn is_host(self) -> bool {
-        matches!(self, Self::Configured(_) | Self::Imported(_))
+    /// Save and Remove change the config, so only a deliberate Down or a
+    /// click on the row itself selects one: never the wheel, an Up wrap, a
+    /// hover, or a selection clamped after the list shrank.
+    pub(super) fn is_action(self) -> bool {
+        matches!(self, Self::SaveTyped | Self::Remove(_))
     }
 
     /// The host name or alias a host row shows; `None` for other rows.
@@ -87,7 +95,7 @@ impl SshRow {
         match self {
             Self::Configured(index) => hosts.get(index).map(|(name, _)| name.as_str()),
             Self::Imported(index) => imported.get(index).map(String::as_str),
-            Self::ConnectTyped | Self::Placeholder | Self::SaveTyped => None,
+            Self::ConnectTyped | Self::Placeholder | Self::SaveTyped | Self::Remove(_) => None,
         }
     }
 }
@@ -99,7 +107,9 @@ impl SshRow {
 /// aliases, each ranked. A query that is not a valid target shows only the
 /// `Placeholder` refusal, or the one host it names exactly. An imported
 /// alias equal to a configured name or target, ignoring ASCII case, is not
-/// shown twice.
+/// shown twice. At most one action row ends the list: `Remove` when row 0 is
+/// the configured host the query names, else `SaveTyped` when the query is a
+/// valid target no configured name or target equals.
 pub(super) fn ssh_rows(
     query: &str,
     hosts: &[(String, String)],
@@ -134,55 +144,81 @@ pub(super) fn ssh_rows(
         return rows;
     }
     let exact = rows.iter().position(exact);
-    if !kettle_config::ssh_config::is_valid_ssh_target(query) {
+    let mut rows = if !kettle_config::ssh_config::is_valid_ssh_target(query) {
         // No fuzzy match is offered for text ssh must not receive, so Enter
         // cannot reach one. A configured name with a space can still be
-        // typed in full: it is the only row then.
-        return vec![exact.map_or(SshRow::Placeholder, |position| rows[position])];
-    }
-    if let Some(position) = exact {
+        // typed in full: it is the only host row then.
+        vec![exact.map_or(SshRow::Placeholder, |position| rows[position])]
+    } else if let Some(position) = exact {
         let row = rows.remove(position);
         rows.insert(0, row);
-        return rows;
+        rows
+    } else {
+        rows.insert(0, SshRow::ConnectTyped);
+        rows
+    };
+    if let (Some(_), SshRow::Configured(index)) = (exact, rows[0]) {
+        rows.push(SshRow::Remove(index));
+    } else if kettle_config::ssh_config::is_valid_ssh_target(query)
+        && !hosts.iter().any(|(name, target)| {
+            name.eq_ignore_ascii_case(query) || target.eq_ignore_ascii_case(query)
+        })
+    {
+        rows.push(SshRow::SaveTyped);
     }
-    rows.insert(0, SshRow::ConnectTyped);
     rows
 }
 
 /// `selected` moved onto a selectable row: itself, else the nearest one above,
-/// else below. A list with no selectable row keeps 0.
+/// else below. A list with no selectable row keeps 0. An index past the end,
+/// left by a list that shrank under it (a config reload), lands on the last
+/// row that is not an action row: Save and Remove are never reached by a
+/// clamp.
 pub(super) fn ssh_clamp_selection(rows: &[SshRow], selected: usize) -> usize {
     let Some(last) = rows.len().checked_sub(1) else {
         return 0;
     };
+    let past_end = selected > last;
     let selected = selected.min(last);
     (0..=selected)
         .rev()
         .chain(selected + 1..rows.len())
-        .find(|&index| rows[index].selectable())
+        .find(|&index| rows[index].selectable() && !(past_end && rows[index].is_action()))
         .unwrap_or(selected)
 }
 
 /// The selection after one arrow (or Ctrl+J/K/N/P) step. Disabled rows are
-/// skipped. Down wraps from the last row to the first. Up from the first row
-/// wraps only onto a host row: the Save row that will sit last must take a
-/// deliberate Down, never one Up press.
+/// skipped. Down moves onto the action row that ends the list, and wraps
+/// from it to the first row. Up from the first row wraps past the action
+/// row onto the last other row, so Save and Remove take a deliberate Down,
+/// never one Up press.
 pub(super) fn ssh_step_selection(rows: &[SshRow], selected: usize, down: bool) -> usize {
     let current = ssh_clamp_selection(rows, selected);
     let selectable: Vec<usize> = (0..rows.len())
         .filter(|&index| rows[index].selectable())
         .collect();
-    let (Some(&first), Some(&last)) = (selectable.first(), selectable.last()) else {
+    let Some(&first) = selectable.first() else {
         return current;
     };
     let position = selectable.iter().position(|&index| index == current);
     match (down, position) {
         (true, Some(position)) => selectable.get(position + 1).copied().unwrap_or(first),
-        (false, Some(position)) if position > 0 => selectable[position - 1],
-        (false, _) if rows[last].is_host() => last,
         (true, None) => first,
-        (false, _) => current,
+        (false, Some(position)) if position > 0 => selectable[position - 1],
+        (false, _) => selectable
+            .iter()
+            .rev()
+            .copied()
+            .find(|&index| !rows[index].is_action())
+            .unwrap_or(current),
     }
+}
+
+/// The index of the action row, before which the wheel may select: only a
+/// deliberate Down or a click on it selects Save or Remove. `None` without
+/// one.
+pub(super) fn ssh_wheel_limit(rows: &[SshRow]) -> Option<usize> {
+    rows.iter().position(|row| row.is_action())
 }
 
 /// What Enter (or a click, which is a synthetic Enter) does on the launcher.
@@ -190,6 +226,10 @@ pub(super) fn ssh_step_selection(rows: &[SshRow], selected: usize, down: bool) -
 pub(super) enum SshEnter {
     /// Spawn `ssh -t -- <target>`.
     Connect(String),
+    /// Open the name editor to save this target as a host.
+    Save(String),
+    /// Ask before removing this configured host.
+    Remove { name: String, target: String },
     /// The typed target is not one ssh may receive; nothing is spawned and
     /// the launcher stays open on the row that says why.
     Invalid,
@@ -217,29 +257,30 @@ pub(super) fn ssh_row_action(
         SshRow::Imported(index) => connect(imported.get(index)?),
         SshRow::ConnectTyped => connect(query.trim()),
         SshRow::Placeholder => (!query.trim().is_empty()).then_some(SshEnter::Invalid),
-        SshRow::SaveTyped => None,
+        SshRow::SaveTyped => Some(match connect(query.trim())? {
+            SshEnter::Connect(target) => SshEnter::Save(target),
+            _ => SshEnter::Invalid,
+        }),
+        SshRow::Remove(index) => {
+            let (name, target) = hosts.get(index)?;
+            Some(SshEnter::Remove {
+                name: name.clone(),
+                target: target.clone(),
+            })
+        }
     }
 }
 
-/// Resolve Enter on the open launcher. A connection closes it and returns the
-/// target to spawn; an invalid typed target leaves it open; an empty launcher
-/// closes as it always has.
-pub(super) fn take_ssh_enter_target(
-    ws: &mut WindowState,
-    hosts: &[(String, String)],
-) -> Option<String> {
+/// Resolve Enter on the open launcher. A connection, a Save or a Remove
+/// closes it and is returned; an invalid typed target leaves it open and
+/// returns `Invalid`; an empty launcher closes as it always has.
+pub(super) fn take_ssh_enter(ws: &mut WindowState, hosts: &[(String, String)]) -> Option<SshEnter> {
     let (query, selected) = ws.ssh_input.as_ref()?;
-    match ssh_row_action(query, *selected, hosts, &ws.ssh_imported) {
-        Some(SshEnter::Connect(target)) => {
-            ws.ssh_input = None;
-            Some(target)
-        }
-        Some(SshEnter::Invalid) => None,
-        None => {
-            ws.ssh_input = None;
-            None
-        }
+    let action = ssh_row_action(query, *selected, hosts, &ws.ssh_imported);
+    if action != Some(SshEnter::Invalid) {
+        ws.ssh_input = None;
     }
+    action
 }
 
 /// The text Tab completes to: the selected host row's name or alias, or, on
@@ -275,6 +316,17 @@ pub(super) fn open_ssh_launcher(
         Vec::new()
     };
     ws.ssh_input = Some((Default::default(), 0));
+    ws.ssh_hosts_shown = cfg.ssh_hosts.clone();
+    ws.ssh_status = None;
+}
+
+/// The launcher's status line, while the query it was set for is unchanged.
+pub(super) fn ssh_status_line(ws: &WindowState) -> Option<&str> {
+    let (query, _) = ws.ssh_input.as_ref()?;
+    ws.ssh_status
+        .as_ref()
+        .filter(|status| status.query == query.text())
+        .map(|status| status.text.as_str())
 }
 
 pub(super) struct PickerList {
@@ -987,7 +1039,10 @@ pub(super) fn ssh_picker_list(
                 String::new(),
                 false,
             ),
-            SshRow::SaveTyped => row(String::new(), String::new(), false),
+            SshRow::SaveTyped => row(tr.picker_ssh_save_typed(query.trim()), String::new(), true),
+            SshRow::Remove(index) => {
+                row(tr.picker_ssh_remove(&hosts[index].0), String::new(), true)
+            }
         })
         .collect();
     PickerList {
@@ -1014,10 +1069,14 @@ pub(super) fn ssh_picker_list_for(
     ))
 }
 
-/// The SSH launcher's key hint, shared by the overlay and the text-field
-/// projection so the painted and announced hints cannot drift.
-pub(super) fn ssh_picker_hint(tr: &kettle_i18n::Translator) -> String {
+/// The SSH launcher's hint lane: the status line after a save or removal,
+/// else the key hint. Shared by the overlay and the text-field projection so
+/// the painted and announced text cannot drift.
+pub(super) fn ssh_picker_hint(status: Option<&str>, tr: &kettle_i18n::Translator) -> String {
     use kettle_i18n::Text as T;
+    if let Some(status) = status {
+        return status.to_string();
+    }
     picker_hint(
         tr,
         &[
@@ -1400,6 +1459,7 @@ pub(super) fn theme_footer_press(
 
 pub(super) fn apply_picker_pointer(
     ws: &mut WindowState,
+    cfg: &Config,
     menu: &ContextMenu,
     cell_h: f32,
     event: PickerPointer,
@@ -1433,7 +1493,19 @@ pub(super) fn apply_picker_pointer(
         // The picker viewport follows selection. Crossing the cut edge selects
         // the newly exposed row and keeps keyboard/preview routing in sync. A
         // disabled row (a placeholder) is never selected: the nearest enabled
-        // row above it in view is.
+        // row above it in view is. Nor is the SSH launcher's Save or Remove
+        // row, which takes a deliberate Down or a click on it.
+        let wheel_rows = match &ws.ssh_input {
+            Some((query, _))
+                if ws.palette_input.is_none()
+                    && ws.theme_picker_input.is_none()
+                    && ws.layout_picker_input.is_none() =>
+            {
+                ssh_wheel_limit(&ssh_rows(query, &cfg.ssh_hosts, &ws.ssh_imported))
+            }
+            _ => None,
+        }
+        .unwrap_or(usize::MAX);
         if offset == menu.scroll_offset {
             menu.highlight
         } else {
@@ -1441,9 +1513,11 @@ pub(super) fn apply_picker_pointer(
             (offset..=exposed)
                 .rev()
                 .find(|&index| {
-                    menu.rows
-                        .get(index)
-                        .is_some_and(|row| row.enabled && !row.separator)
+                    index < wheel_rows
+                        && menu
+                            .rows
+                            .get(index)
+                            .is_some_and(|row| row.enabled && !row.separator)
                 })
                 .unwrap_or(menu.highlight)
         }
@@ -1529,7 +1603,7 @@ impl App {
         }
         let activate = matches!(event, PickerPointer::Press)
             && picker_result_row(&menu, cell.1, (ws.cursor.x, ws.cursor.y)).is_some();
-        let handled = apply_picker_pointer(ws, &menu, cell.1, event);
+        let handled = apply_picker_pointer(ws, &self.cfg, &menu, cell.1, event);
         if handled
             && activate
             && let Some(event_loop) = event_loop
@@ -1549,5 +1623,426 @@ impl App {
             ws.mods = mods;
         }
         handled || matches!(event, PickerPointer::Wheel(_))
+    }
+}
+
+/// What Enter in the Save row's name editor does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SshSavePlan {
+    /// `ssh-host` cannot hold this name; the editor stays open.
+    Invalid,
+    /// Write the host, expecting the file to hold `expect` for the name.
+    Write {
+        name: String,
+        expect: kettle_config::ssh_config::HostExpect,
+    },
+    /// The name is saved with another target: ask before replacing it.
+    Replace { name: String, old_target: String },
+}
+
+/// The Save of `target` under the name typed as `input`, judged against the
+/// configured `hosts`. Names compare ignoring ASCII case, as the launcher's
+/// exact row does.
+pub(super) fn ssh_save_plan(hosts: &[(String, String)], input: &str, target: &str) -> SshSavePlan {
+    use kettle_config::ssh_config::{HostExpect, is_valid_ssh_host_name, is_valid_ssh_target};
+    let name = input.trim();
+    if !is_valid_ssh_host_name(name) || !is_valid_ssh_target(target) {
+        return SshSavePlan::Invalid;
+    }
+    let name = name.to_string();
+    match hosts
+        .iter()
+        .find(|(saved, _)| saved.eq_ignore_ascii_case(&name))
+    {
+        None => SshSavePlan::Write {
+            name,
+            expect: HostExpect::Absent,
+        },
+        Some((_, old)) if old == target => SshSavePlan::Write {
+            name,
+            expect: HostExpect::Target(old.clone()),
+        },
+        Some((_, old)) => SshSavePlan::Replace {
+            name,
+            old_target: old.clone(),
+        },
+    }
+}
+
+/// The question before the configured host `name` is removed. Cancel is the
+/// default and Remove is destructive. The body names the OpenSSH file by the
+/// platform's display path, the one the imported rows show.
+pub(super) fn ssh_remove_dialog(
+    tr: &kettle_i18n::Translator,
+    name: String,
+    target: String,
+) -> ConfirmDialogState {
+    ConfirmDialogState {
+        heading: tr.confirm_title_remove_ssh_host(&name),
+        body: tr.confirm_body_remove_ssh_host(
+            &name,
+            &target,
+            kettle_config::ssh_config::SSH_CONFIG_DISPLAY_PATH,
+        ),
+        buttons: vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: tr.text(kettle_i18n::Text::ConfirmButtonRemove).to_string(),
+                destructive: true,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: ConfirmAction::RemoveSshHost { name, target },
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+    }
+}
+
+/// The question before a Save gives the existing host `name` a new target.
+/// Cancel is the default; Replace is not destructive, as nothing is lost
+/// that saving the old target again would not restore.
+pub(super) fn ssh_replace_dialog(
+    tr: &kettle_i18n::Translator,
+    name: String,
+    old_target: String,
+    new_target: String,
+) -> ConfirmDialogState {
+    ConfirmDialogState {
+        heading: tr.confirm_title_replace_ssh_host(&name),
+        body: tr.confirm_body_replace_ssh_host(&name, &old_target, &new_target),
+        buttons: vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: tr.text(kettle_i18n::Text::ConfirmButtonReplace).to_string(),
+                destructive: false,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: ConfirmAction::ReplaceSshHost {
+            name,
+            old_target,
+            new_target,
+        },
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+    }
+}
+
+/// `hosts` after `upsert_ssh_host` wrote `name` and `target`: the first host
+/// with the name (ignoring ASCII case) takes them and later ones go, as in
+/// the file; a new name goes last.
+pub(super) fn upsert_ssh_host_in(hosts: &mut Vec<(String, String)>, name: &str, target: &str) {
+    let mut found = false;
+    hosts.retain_mut(|(saved, to)| {
+        if !saved.eq_ignore_ascii_case(name) {
+            return true;
+        }
+        if found {
+            return false;
+        }
+        found = true;
+        *saved = name.to_string();
+        *to = target.to_string();
+        true
+    });
+    if !found {
+        hosts.push((name.to_string(), target.to_string()));
+    }
+}
+
+/// `hosts` after `remove_ssh_host` dropped `name` (ignoring ASCII case) with
+/// exactly `target`.
+pub(super) fn remove_ssh_host_in(hosts: &mut Vec<(String, String)>, name: &str, target: &str) {
+    hosts.retain(|(saved, to)| !(saved.eq_ignore_ascii_case(name) && to == target));
+}
+
+/// Save `name` with `target` to the config at `path`, then to `hosts`, so the
+/// launcher shows it without waiting for the file watcher. A failure is
+/// logged by its kind only: never the name, the target or the path.
+pub(super) fn save_ssh_host_to(
+    path: Option<&std::path::Path>,
+    hosts: &mut Vec<(String, String)>,
+    name: &str,
+    target: &str,
+    expect: &kettle_config::ssh_config::HostExpect,
+) -> Result<(), std::io::ErrorKind> {
+    let written = path.ok_or(std::io::ErrorKind::NotFound).and_then(|path| {
+        kettle_config::ssh_config::upsert_ssh_host(path, name, target, expect)
+            .map_err(|error| error.kind())
+    });
+    match written {
+        Ok(_) => {
+            upsert_ssh_host_in(hosts, name, target);
+            Ok(())
+        }
+        Err(kind) => {
+            log::warn!("ssh host not saved: {kind:?}");
+            Err(kind)
+        }
+    }
+}
+
+/// Remove `name` with `target` from the config at `path`, then from `hosts`.
+/// Logged as [`save_ssh_host_to`] is.
+pub(super) fn remove_ssh_host_from(
+    path: Option<&std::path::Path>,
+    hosts: &mut Vec<(String, String)>,
+    name: &str,
+    target: &str,
+) -> Result<(), std::io::ErrorKind> {
+    let written = path.ok_or(std::io::ErrorKind::NotFound).and_then(|path| {
+        kettle_config::ssh_config::remove_ssh_host(path, name, target).map_err(|error| error.kind())
+    });
+    match written {
+        Ok(_) => {
+            remove_ssh_host_in(hosts, name, target);
+            Ok(())
+        }
+        Err(kind) => {
+            log::warn!("ssh host not removed: {kind:?}");
+            Err(kind)
+        }
+    }
+}
+
+/// Put an open launcher's selection back on row 0 when `hosts` is not the
+/// list it was showing. Called for every window after a reload and after a
+/// Save or Remove in any window, since `cfg` is shared: rows shift, and an
+/// index that pointed at a host could otherwise land on the Save or Remove
+/// row that ends a shorter list. Row 0 is never an action row.
+pub(super) fn sync_ssh_hosts(ws: &mut WindowState, hosts: &[(String, String)]) {
+    if ws.ssh_hosts_shown == hosts {
+        return;
+    }
+    ws.ssh_hosts_shown = hosts.to_vec();
+    if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        *selected = 0;
+        ws.accessibility_pending = true;
+    }
+}
+
+/// Open the launcher again after a save, a removal or a failed write, with
+/// `query` typed and `status` in its hint lane. `select` names the configured
+/// host to select by identity, not by rank; otherwise row 0 is selected.
+pub(super) fn reopen_ssh_launcher(
+    ws: &mut WindowState,
+    cfg: &Config,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+    query: &str,
+    select: Option<(&str, &str)>,
+    status: String,
+) {
+    open_ssh_launcher(ws, cfg, ssh_config);
+    let Some((editor, selected)) = ws.ssh_input.as_mut() else {
+        return;
+    };
+    let _ = editor.replace_all(query, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+    if let Some((name, target)) = select {
+        let rows = ssh_rows(editor, &cfg.ssh_hosts, &ws.ssh_imported);
+        let row = rows.iter().position(|row| {
+            matches!(row, SshRow::Configured(index)
+                if cfg.ssh_hosts.get(*index).is_some_and(|(n, t)| n == name && t == target))
+        });
+        *selected = row.unwrap_or(0);
+    }
+    ws.ssh_status = Some(crate::window_state::SshStatus {
+        text: status,
+        query: editor.text().to_string(),
+    });
+    ws.accessibility_pending = true;
+}
+
+/// What the App still has to do after a Save or Remove step changed the
+/// window: everything that needs the event loop or other windows.
+#[derive(Debug)]
+pub(super) enum SshHostEffect {
+    /// The config changed: reset other windows' launcher selections.
+    Changed,
+    /// Ask before replacing the saved host.
+    Ask(Box<ConfirmDialogState>),
+    /// The write was refused or failed; notify.
+    NotSaved,
+    NotRemoved,
+    /// Nothing more.
+    None,
+}
+
+/// Enter in the Save row's name editor, with the editor already taken out of
+/// `ws`. An unusable name, or a write that fails, puts the editor back so the
+/// typed name is kept. A name saved with another target asks first. A save
+/// reopens the launcher on the saved host.
+pub(super) fn submit_ssh_host_name(
+    ws: &mut WindowState,
+    cfg: &mut Config,
+    path: Option<&std::path::Path>,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+    state: TitleEditState,
+    tr: &kettle_i18n::Translator,
+) -> SshHostEffect {
+    let TitleEditTarget::SshHost(target) = &state.target else {
+        return SshHostEffect::None;
+    };
+    let target = target.clone();
+    match ssh_save_plan(&cfg.ssh_hosts, state.input.text(), &target) {
+        SshSavePlan::Invalid => {
+            ws.editing_title = Some(state);
+            SshHostEffect::NotSaved
+        }
+        SshSavePlan::Replace { name, old_target } => {
+            SshHostEffect::Ask(Box::new(ssh_replace_dialog(tr, name, old_target, target)))
+        }
+        SshSavePlan::Write { name, expect } => {
+            if save_ssh_host_to(path, &mut cfg.ssh_hosts, &name, &target, &expect).is_err() {
+                ws.editing_title = Some(state);
+                return SshHostEffect::NotSaved;
+            }
+            let status = tr.ssh_status_saved(&name);
+            reopen_ssh_launcher(ws, cfg, ssh_config, &name, Some((&name, &target)), status);
+            SshHostEffect::Changed
+        }
+    }
+}
+
+/// A confirmed Replace or Remove. A Replace writes only if the file still
+/// gives the name the target the question showed. Success reopens the
+/// launcher as a Save or a removal does; a failure reopens it on what was
+/// typed (the new target, or the name) with a "not saved" or "not removed"
+/// status, so the failure shows even with notifications off.
+pub(super) fn confirm_ssh_host_change(
+    ws: &mut WindowState,
+    cfg: &mut Config,
+    path: Option<&std::path::Path>,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+    action: ConfirmAction,
+    tr: &kettle_i18n::Translator,
+) -> SshHostEffect {
+    use kettle_config::ssh_config::HostExpect;
+    match action {
+        ConfirmAction::ReplaceSshHost {
+            name,
+            old_target,
+            new_target,
+        } => {
+            let expect = HostExpect::Target(old_target);
+            if save_ssh_host_to(path, &mut cfg.ssh_hosts, &name, &new_target, &expect).is_err() {
+                let status = tr.ssh_status_not_saved(&name);
+                reopen_ssh_launcher(ws, cfg, ssh_config, &new_target, None, status);
+                return SshHostEffect::NotSaved;
+            }
+            let status = tr.ssh_status_saved(&name);
+            reopen_ssh_launcher(
+                ws,
+                cfg,
+                ssh_config,
+                &name,
+                Some((&name, &new_target)),
+                status,
+            );
+            SshHostEffect::Changed
+        }
+        ConfirmAction::RemoveSshHost { name, target } => {
+            if remove_ssh_host_from(path, &mut cfg.ssh_hosts, &name, &target).is_err() {
+                let status = tr.ssh_status_not_removed(&name);
+                reopen_ssh_launcher(ws, cfg, ssh_config, &name, None, status);
+                return SshHostEffect::NotRemoved;
+            }
+            let status = tr.ssh_status_removed(&name);
+            reopen_ssh_launcher(ws, cfg, ssh_config, "", None, status);
+            SshHostEffect::Changed
+        }
+        _ => SshHostEffect::None,
+    }
+}
+
+impl App {
+    /// The SSH launcher's Save row: close it and ask for a name.
+    pub(super) fn begin_ssh_host_save(&mut self, ws: &mut WindowState, target: &str) {
+        self.close_all_modals(ws);
+        ws.editing_title = begin_ssh_host_name_edit(target);
+        ws.pending_resize = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The SSH launcher's Remove row: close it and ask, Cancel first.
+    pub(super) fn confirm_ssh_host_removal(
+        &mut self,
+        ws: &mut WindowState,
+        name: String,
+        target: String,
+    ) {
+        self.close_all_modals(ws);
+        self.install_confirm_dialog(ws, ssh_remove_dialog(&self.ui_text, name, target));
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The config file Save and Remove write: the active one, which is the
+    /// profile file under `--profile`.
+    fn ssh_host_config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+    }
+
+    /// Enter in the Save row's name editor.
+    pub(super) fn apply_ssh_host_name(&mut self, ws: &mut WindowState, state: TitleEditState) {
+        let path = self.ssh_host_config_path();
+        self.close_all_modals(ws);
+        let tr = self.ui_text;
+        let effect = submit_ssh_host_name(
+            ws,
+            &mut self.cfg,
+            path.as_deref(),
+            kettle_config::ssh_config::user_ssh_config_path,
+            state,
+            &tr,
+        );
+        self.finish_ssh_host_effect(ws, effect);
+    }
+
+    /// A confirmed Replace or Remove question.
+    pub(super) fn run_ssh_host_confirm(&mut self, ws: &mut WindowState, action: ConfirmAction) {
+        let path = self.ssh_host_config_path();
+        self.close_all_modals(ws);
+        let tr = self.ui_text;
+        let effect = confirm_ssh_host_change(
+            ws,
+            &mut self.cfg,
+            path.as_deref(),
+            kettle_config::ssh_config::user_ssh_config_path,
+            action,
+            &tr,
+        );
+        self.finish_ssh_host_effect(ws, effect);
+    }
+
+    fn finish_ssh_host_effect(&mut self, ws: &mut WindowState, effect: SshHostEffect) {
+        use kettle_i18n::Text;
+        match effect {
+            SshHostEffect::Changed => {
+                // `cfg` is shared: every other open launcher's rows moved.
+                for sibling in self.windows.values_mut() {
+                    sync_ssh_hosts(sibling, &self.cfg.ssh_hosts);
+                }
+            }
+            SshHostEffect::Ask(dialog) => self.install_confirm_dialog(ws, *dialog),
+            SshHostEffect::NotSaved => fire_notify(
+                self.ui_text.text(Text::NotifySshHostNotSaved),
+                self.ui_text.text(Text::NotifySshHostNotSavedBody),
+            ),
+            SshHostEffect::NotRemoved => fire_notify(
+                self.ui_text.text(Text::NotifySshHostNotRemoved),
+                self.ui_text.text(Text::NotifySshHostNotRemovedBody),
+            ),
+            SshHostEffect::None => {}
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
     }
 }

@@ -113,10 +113,11 @@ impl App {
 
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
+        let ssh_status = ssh_status_line(ws).map(str::to_string);
         let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
             Some((query, _)) => (
                 Some(with_preedit(query)),
-                ssh_picker_hint(tr),
+                ssh_picker_hint(ssh_status.as_deref(), tr),
                 ssh_picker_list_for(ws, &self.cfg, tr),
             ),
             None => (None, String::new(), None),
@@ -402,6 +403,7 @@ impl App {
                 links,
                 ssh_query,
                 ssh_hint,
+                ssh_status,
                 palette_query,
                 palette_hint,
                 layout_picker_query,
@@ -557,6 +559,7 @@ impl App {
             links,
             ssh_query,
             ssh_hint,
+            ssh_status,
             palette_query,
             palette_hint,
             layout_picker_query,

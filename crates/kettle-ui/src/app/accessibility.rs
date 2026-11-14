@@ -2254,9 +2254,12 @@ const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
 ];
 /// The radio group that holds the two sides, below them.
 const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
-/// The footer's Contrast button, below the group. It is the lowest footer
-/// index, so the rows below it never reach the footer's nodes.
+/// The footer's Contrast button, below the group.
 pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
+/// The SSH launcher's polite status line, after a save, a removal or a failed
+/// write. It is the lowest of these fixed indices, so the rows below it never
+/// reach them.
+pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
 /// Whether `node` is the theme picker's Contrast button.
 pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
@@ -2428,6 +2431,39 @@ fn push_picker_accessibility(
     projection.nodes.push((container_id, dialog));
     if projection.focus.is_none() {
         projection.focus = selected.or(Some(input_id));
+    }
+}
+
+/// The SSH launcher's status line, announced politely as search announces
+/// its count, over the hint lane that paints it (the field when a narrow
+/// header leaves the lane empty). A child of the launcher's dialog.
+fn push_ssh_status_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    overlay: &Overlay,
+    metrics: (f32, f32),
+) {
+    let Some(status) = overlay.ssh_status.as_deref() else {
+        return;
+    };
+    let status_id = accessibility_modal_id(MODAL_KIND_SSH, PICKER_STATUS_A11Y_INDEX);
+    let mut node = Node::new(Role::Status);
+    node.set_label(status);
+    node.set_live(accesskit::Live::Polite);
+    if let Some(field) = overlay.text_field.as_ref() {
+        let cw = kettle_render::text_field_cell_width(field, metrics.0, metrics.1);
+        let lane = kettle_render::text_field_rects(field, cw)[2];
+        let (x, y, w, h) = if lane.2 > 0.0 { lane } else { field.rect };
+        node.set_bounds(accesskit::Rect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64,
+        ));
+    }
+    projection.nodes.push((status_id, node));
+    let dialog_id = accessibility_modal_id(MODAL_KIND_SSH, 0);
+    if let Some((_, dialog)) = projection.nodes.iter_mut().find(|(id, _)| *id == dialog_id) {
+        dialog.push_child(status_id);
     }
 }
 
@@ -2807,6 +2843,7 @@ pub(super) fn modal_accessibility_projection(
             full_bounds,
             tr,
         );
+        push_ssh_status_accessibility(&mut projection, overlay, metrics);
     }
 
     if let Some(edit) = overlay.edit_title.as_ref() {

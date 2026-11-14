@@ -443,6 +443,9 @@ impl App {
         // A config change, including a Settings edit or a menu toggle, is
         // activity: a new blink or timeout value takes effect visibly now.
         self.reset_blink_phase(ws);
+        // An open SSH launcher whose hosts changed starts again from row 0,
+        // so its selection cannot slide onto the Save or Remove row.
+        sync_ssh_hosts(ws, &self.cfg.ssh_hosts);
         // A changed schedule applies the theme it picks now, not at its next
         // boundary.
         self.poll_theme_schedule(ws);

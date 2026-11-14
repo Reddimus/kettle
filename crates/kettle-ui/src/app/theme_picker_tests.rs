@@ -446,6 +446,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped - 0.25);
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Press
@@ -461,6 +462,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
             ws.cursor.y = f64::from(y);
             assert!(!apply_picker_pointer(
                 &mut ws,
+                &cfg,
                 &menu,
                 cell.1,
                 PickerPointer::Hover
@@ -469,6 +471,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         }
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Wheel(3)
@@ -477,6 +480,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         assert_eq!(menu.scroll_offset, 3, "picker {kind}: wheel down");
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Wheel(-100)
@@ -486,6 +490,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         ws.cursor.x = f64::from(menu.anchor.0 - 1.0);
         assert!(!apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Press
@@ -589,7 +594,7 @@ fn picker_result_presses_select_the_visible_row() {
         ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
         ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 1.5);
         assert!(
-            apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Press),
+            apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Press),
             "picker result rows must accept primary presses"
         );
         assert_eq!(

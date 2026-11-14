@@ -890,7 +890,9 @@ verification; retry Previous/Next after interrupted navigation.
 URL / path quick-select hints
 .TP
 .B Ctrl+Shift+S
-SSH-host launcher
+SSH-host launcher; it can also save a typed target as an
+.B ssh-host
+entry and remove one, after confirmation
 .SS Scrollback / clipboard
 .TP
 .B Ctrl+Shift+C
@@ -1129,7 +1131,10 @@ overrides the install root.
 .SH FILES
 .TP
 .I ~/.config/kettle/config
-User config file (Linux). See CONFIGURATION above.
+User config file (Linux). See CONFIGURATION above. Theme picks, Settings and
+the SSH launcher's Save and Remove rows edit it in place and keep a
+.I .bak
+of it from before the first edit.
 .TP
 .I ~/.ssh/config
 OpenSSH client config. Read, never written, each time the SSH launcher opens,

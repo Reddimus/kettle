@@ -22,6 +22,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and is selected, with the fuzzy matches below it, so typing `prod` connects
   to `prod` even when `~/.ssh/config` has `prod-db`.
 
+- The SSH launcher saves and removes hosts. For a typed target that is not
+  saved yet, a last row **Save "…" as a host…** asks for a name (starting
+  from the target's host) and adds an `ssh-host` line to the active config
+  file; a name that already has another target asks before it replaces it,
+  and other lines with that name are removed. Typing a saved name exactly
+  offers **Remove "…" from Kettle…**, which asks first and never touches
+  `~/.ssh/config`. Neither row is reached by the mouse wheel, an Up press
+  from the top or a hover: press Down to it or click it, and an open launcher
+  whose host list changes goes back to its first row. If that host's own
+  entry changed by hand since Kettle read the file, nothing is written, a
+  notification says so, and the launcher or name editor keeps what you typed
+  with a "not saved" or "not removed" line. After a write, the launcher
+  reopens with "Saved" or "Removed" in its hint line, announced politely to
+  screen readers.
+
 - Settings › Appearance has a Minimum contrast row after Theme, for
   `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
   config, such as 2.5, shows as it is until you step it.

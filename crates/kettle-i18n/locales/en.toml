@@ -233,9 +233,15 @@ confirm_action_send_text = "Send text"
 confirm_action_custom = "Custom action"
 confirm_rebind_title = "Reassign {chord}?"
 confirm_rebind_body = "Assign this shortcut to \"{action}\". \"{taken}\" will lose this shortcut."
+confirm_title_remove_ssh_host = "Remove host \"{name}\"?"
+confirm_body_remove_ssh_host = "Kettle will forget \"{name}\", which connects to {target}. {path} is not changed."
+confirm_title_replace_ssh_host = "Replace host \"{name}\"?"
+confirm_body_replace_ssh_host = "\"{name}\" connects to {old_target}. It will connect to {new_target} instead."
 confirm_button_cancel = "Cancel"
 confirm_button_close = "Close"
 confirm_button_reassign = "Reassign"
+confirm_button_remove = "Remove"
+confirm_button_replace = "Replace"
 confirm_close_pane = "Close this pane?"
 confirm_rebind = "{chord} is already bound to \"{taken}\". Reassign it to \"{action}\"?"
 macos_menu_about = "About Kettle"
@@ -580,6 +586,8 @@ picker_placeholder_shortcuts = "Search keyboard shortcuts…"
 picker_ssh_config_source = "from {path}"
 picker_ssh_connect_typed = "Connect to \"{target}\""
 picker_ssh_invalid_target = "Targets can't start with - or contain spaces or control characters"
+picker_ssh_remove = "Remove \"{name}\" from Kettle…"
+picker_ssh_save_typed = "Save \"{target}\" as a host…"
 picker_theme_dark = "dark"
 picker_theme_light = "light"
 picker_theme_prompt = "theme:"
@@ -970,6 +978,8 @@ menu_open_layout = "Open Layout…"
 
 edit_layout_name = "Layout name"
 
+edit_ssh_host_name = "Host name"
+
 notify_layout_failed = "Layout not saved"
 
 notify_layout_failed_body = "Use a name of 1–128 letters, digits, dots, underscores or hyphens. Check that the layouts directory is writable."
@@ -981,6 +991,22 @@ notify_profiles_failed_body = "Check that the config directory is available and 
 notify_profile_launch_failed = "Profile not opened"
 
 notify_profile_launch_failed_body = "The profile may have been removed, or Kettle could not start another process."
+
+notify_ssh_host_not_saved = "Host not saved"
+
+notify_ssh_host_not_saved_body = "Use a name without = or control characters. The config file may have changed since the launcher read it, or it is not writable; try again."
+
+notify_ssh_host_not_removed = "Host not removed"
+
+notify_ssh_host_not_removed_body = "The host changed in the config file, or the file could not be written; try again."
+
+ssh_status_saved = "Saved \"{name}\""
+
+ssh_status_removed = "Removed \"{name}\""
+
+ssh_status_not_saved = "\"{name}\" was not saved: the host changed in the config file, or the file could not be written"
+
+ssh_status_not_removed = "\"{name}\" was not removed: the host changed in the config file, or the file could not be written"
 
 confirm_paste_without_controls = "Paste without controls"
 osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."

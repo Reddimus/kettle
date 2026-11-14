@@ -36,6 +36,15 @@ notify_profiles_failed = "draft"
 notify_layout_failed_body = "draft"
 notify_layout_failed = "draft"
 edit_layout_name = "draft"
+edit_ssh_host_name = "draft"
+notify_ssh_host_not_saved = "draft"
+notify_ssh_host_not_saved_body = "draft"
+notify_ssh_host_not_removed = "draft"
+notify_ssh_host_not_removed_body = "draft"
+ssh_status_saved = "draft"
+ssh_status_removed = "draft"
+ssh_status_not_saved = "draft"
+ssh_status_not_removed = "draft"
 menu_open_layout = "draft"
 menu_save_layout = "draft"
 palette_launch_profile = "draft"
@@ -406,10 +415,16 @@ confirm_action_send_text = "draft"
 confirm_action_custom = "draft"
 confirm_rebind_title = "draft"
 confirm_rebind_body = "draft"
+confirm_title_remove_ssh_host = "draft"
+confirm_body_remove_ssh_host = "draft"
+confirm_title_replace_ssh_host = "draft"
+confirm_body_replace_ssh_host = "draft"
 confirm_close_scope = "draft"
 confirm_button_cancel = "accepted"
 confirm_button_close = "accepted"
 confirm_button_reassign = "accepted"
+confirm_button_remove = "draft"
+confirm_button_replace = "draft"
 confirm_close_pane = "accepted"
 confirm_close_tab = "accepted"
 confirm_close_window = "accepted"
@@ -751,6 +766,8 @@ picker_placeholder_shortcuts = "draft"
 picker_ssh_config_source = "draft"
 picker_ssh_connect_typed = "draft"
 picker_ssh_invalid_target = "draft"
+picker_ssh_remove = "draft"
+picker_ssh_save_typed = "draft"
 picker_theme_dark = "accepted"
 picker_theme_light = "accepted"
 picker_theme_prompt = "accepted"
@@ -1070,10 +1087,20 @@ keys = [
     "confirm_action_custom",
     "confirm_rebind_title",
     "confirm_rebind_body",
+    "confirm_title_remove_ssh_host",
+    "confirm_body_remove_ssh_host",
+    "confirm_title_replace_ssh_host",
+    "confirm_body_replace_ssh_host",
     "confirm_close_scope",
     "confirm_button_cancel",
     "confirm_button_close",
     "confirm_button_reassign",
+    "confirm_button_remove",
+    "confirm_button_replace",
+    "ssh_status_saved",
+    "ssh_status_removed",
+    "ssh_status_not_saved",
+    "ssh_status_not_removed",
     "confirm_close_pane",
     "confirm_close_tab",
     "confirm_close_window",

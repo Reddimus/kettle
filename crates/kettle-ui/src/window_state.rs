@@ -757,6 +757,15 @@ impl MediaPasteReceiptState {
     }
 }
 
+/// The SSH launcher's status line after a save or removal, and the query it
+/// was set for. It shows while the query is unchanged, so the next edit
+/// brings the key hint back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SshStatus {
+    pub(crate) text: String,
+    pub(crate) query: String,
+}
+
 /// The theme picker's query and selected row, and the theme it opened on. That
 /// theme fixes the list's order while the preview changes the live theme and
 /// is ticked; the window's theme before the picker is what Esc restores.
@@ -1115,6 +1124,12 @@ pub(crate) struct WindowState {
     /// `Host` aliases read from `~/.ssh/config` when the launcher last opened
     /// (`ssh-config-hosts`). Replaced on every open; never persisted.
     pub(crate) ssh_imported: Vec<String>,
+    /// The launcher's status line; see [`SshStatus`]. Cleared on every open.
+    pub(crate) ssh_status: Option<SshStatus>,
+    /// The configured hosts the open launcher's selection was made against.
+    /// When `cfg.ssh_hosts` no longer equals it, `sync_ssh_hosts` moves the
+    /// selection back to row 0.
+    pub(crate) ssh_hosts_shown: Vec<(String, String)>,
     /// Profile names captured when opening the palette; all projections use this list.
     pub(crate) palette_profiles: Vec<String>,
     /// `Some((query, selected))` while the command palette is open.
@@ -1741,6 +1756,8 @@ impl WindowState {
             links: Vec::new(),
             ssh_input: None,
             ssh_imported: Vec::new(),
+            ssh_status: None,
+            ssh_hosts_shown: Vec::new(),
             palette_input: None,
             palette_profiles: Vec::new(),
             palette_bound_only: false,
