@@ -202,12 +202,9 @@ impl App {
         }
     }
 
-    pub(super) fn save_session(&self, ws: &WindowState) {
-        self.clear_disabled_content();
-        if self.session_load_failed {
-            return;
-        }
-        let target = session_write_target(
+    /// Where automatic saves go right now, before any snapshot is taken.
+    pub(super) fn autosave_target(&self) -> SessionWriteTarget<'_> {
+        session_write_target(
             self.startup.layout.as_deref(),
             self.named_layout_writable,
             should_restore_session(
@@ -216,7 +213,27 @@ impl App {
                 self.other_builds.running(),
             ),
             false,
-        );
+        )
+    }
+
+    /// [`autosave_eligible`] for this launch, as the sweep's wake asks it.
+    pub(super) fn session_autosave_eligible(&self) -> bool {
+        let quick = self.quick_terminal.model.window;
+        autosave_eligible(
+            self.session_load_failed,
+            &self.autosave_target(),
+            self.windows
+                .values()
+                .any(|w| quick != Some(w.seq) && !w.mux.tabs.is_empty()),
+        )
+    }
+
+    pub(super) fn save_session(&self, ws: &WindowState) {
+        self.clear_disabled_content();
+        if self.session_load_failed {
+            return;
+        }
+        let target = self.autosave_target();
         if target == SessionWriteTarget::Skip {
             return;
         }
@@ -553,8 +570,7 @@ mod tests {
     }
 }
 
-/// How much of the saved session can be stale before the next event-loop turn
-/// writes it out.
+/// How much of the saved session can be stale before it is written out.
 ///
 /// Most of what `session.json` holds is announced by a gesture that already
 /// saves — splitting, closing, opening a tab. Some of it is not: a shell `cd`
@@ -564,13 +580,103 @@ mod tests {
 /// bring back directories the user left an hour ago.
 ///
 /// Saving on every turn instead would serialize the whole tree at PTY-output
-/// rates, and arming a timer for it would keep the process awake and show up as
-/// idle CPU — kettle measures that. So the sweep rides on turns the event loop
-/// was running anyway: it never wakes the process on its own account, and an
-/// idle kettle simply saves the moment anything next happens. The write itself
-/// is skipped when the serialized text matches what is already on disk, so a
+/// rates. So the sweep rides on turns the event loop was running anyway, at
+/// most once per interval. That alone leaves the last change before Kettle goes
+/// quiet unwritten until something else happens, which on macOS can be the
+/// next key press: an idle window there gets no turns at all. So a turn that
+/// delivered an event and did not sweep asks for one wake at the end of the
+/// interval ([`session_sweep_wake`]). The wake itself delivers no event and so
+/// asks for nothing more, and an idle Kettle, which gets no events, never asks:
+/// a crash loses at most this much, and idle stays idle. The write itself is
+/// skipped when the serialized text matches what is already on disk, so a
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 pub(super) const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the session sweep last ran, and whether anything has happened since
+/// that it has not seen.
+///
+/// Only [`SessionSweep::take_due`], the sweep itself, clears the flag.
+#[derive(Debug, Default)]
+pub(super) struct SessionSweep {
+    last: Option<std::time::Instant>,
+    touched: bool,
+    wake: Option<std::time::Instant>,
+}
+
+impl SessionSweep {
+    /// Something happened that may have changed what the session holds: any
+    /// window event except a redraw, and any user event.
+    pub(super) fn touch(&mut self) {
+        self.touched = true;
+    }
+
+    /// Whether this window's turn sweeps, per [`session_sweep_due`]. A sweep
+    /// starts a new interval and has seen everything so far.
+    pub(super) fn take_due(&mut self, now: std::time::Instant, window_has_tabs: bool) -> bool {
+        if !session_sweep_due(self.last, now, window_has_tabs) {
+            return false;
+        }
+        self.last = Some(now);
+        self.touched = false;
+        self.wake = None;
+        true
+    }
+
+    /// The wake this turn should ask for, once every window has had its turn.
+    ///
+    /// `pending` is a save the sweep owes but put off; it asks for the wake as
+    /// a change does. `eligible` (see [`autosave_eligible`]) is asked at most
+    /// once per interval, and a sweep that could not save then asks for
+    /// nothing. A wake whose time has come without a sweep means no window had
+    /// anything to sweep, so it is dropped rather than left in the past, where
+    /// it would spin the loop.
+    pub(super) fn deadline(
+        &mut self,
+        now: std::time::Instant,
+        pending: bool,
+        eligible: impl FnOnce() -> bool,
+    ) -> Option<std::time::Instant> {
+        if self.wake.is_some_and(|wake| wake <= now) {
+            self.wake = None;
+            self.touched = false;
+        }
+        if (self.touched || pending) && self.wake.is_none() {
+            self.wake = session_sweep_wake(self.last, now, true, eligible());
+            if self.wake.is_none() {
+                self.touched = false;
+            }
+        }
+        self.wake
+    }
+}
+
+/// When to wake for the sweep a change is owed: the end of the current
+/// interval, if something has happened since the last sweep (`touched`), this
+/// launch saves at all (`eligible`) and the interval is still running. A sweep
+/// that is already due runs on the turn it is due; with no sweep yet there is
+/// no interval, and the first turn always sweeps.
+pub(super) fn session_sweep_wake(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    touched: bool,
+    eligible: bool,
+) -> Option<std::time::Instant> {
+    let due = last
+        .filter(|_| touched && eligible)?
+        .checked_add(SESSION_SWEEP)?;
+    (due > now).then_some(due)
+}
+
+/// Whether automatic saving can write anything for this launch: its startup
+/// snapshot was read, it has a destination, and some window other than the
+/// quick terminal has tabs. The sweep's wake is armed only when it is.
+pub(super) fn autosave_eligible(
+    load_failed: bool,
+    target: &SessionWriteTarget<'_>,
+    any_window_with_tabs: bool,
+) -> bool {
+    !load_failed && *target != SessionWriteTarget::Skip && any_window_with_tabs
+}
 
 /// Whether a session sweep is owed as of `now`. The first turn always sweeps,
 /// so a workspace that changes and then goes quiet is written once rather than

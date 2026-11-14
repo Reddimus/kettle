@@ -915,7 +915,7 @@ impl App {
             executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
             version_line: startup_version,
             torn_drag: None,
-            last_session_sweep: None,
+            session_sweep: SessionSweep::default(),
             exit_teardown_done: false,
         };
         if let Some((path, diagnostics)) = config_diagnostics {

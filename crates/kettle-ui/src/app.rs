@@ -653,9 +653,10 @@ pub struct App {
     /// the drop-merge. App-level (not per-window) because exactly one tear-off
     /// drag can be in flight per pointer.
     torn_drag: Option<TornDrag>,
-    /// When the session was last considered for writing. Drives the sweep
-    /// described on [`SESSION_SWEEP`]; `None` until the first one runs.
-    last_session_sweep: Option<std::time::Instant>,
+    /// When the session was last considered for writing, and whether
+    /// anything has happened since. Drives the sweep described on
+    /// [`SESSION_SWEEP`] and the one wake it may ask for.
+    session_sweep: SessionSweep,
     /// Set once the exit teardown in `exit.rs` has run.
     exit_teardown_done: bool,
 }
@@ -733,6 +734,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
+        // Output, a cwd report, a process scan, a ctl request: any of them can
+        // change what the session holds.
+        self.session_sweep.touch();
         match ev {
             #[cfg(target_os = "macos")]
             UserEvent::ProfilesReady => {
@@ -1037,6 +1041,10 @@ impl ApplicationHandler<UserEvent> for App {
         let phase_name = if matches!(&event, WindowEvent::RedrawRequested) {
             "redraw"
         } else {
+            // A redraw changes nothing the session holds. Any other window
+            // event may, and a redraw counted here would re-arm the sweep's
+            // wake on every frame.
+            self.session_sweep.touch();
             "window_event"
         };
         let runtime_tracker = self.runtime_tracker.clone();
@@ -1139,6 +1147,17 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.config_reload_deadline {
             let deadline =
                 deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        // Once per app, after every window's turn: a second window must not
+        // re-arm the wake the first one's sweep just consumed.
+        let mut sweep = std::mem::take(&mut self.session_sweep);
+        let session_wake = sweep.deadline(std::time::Instant::now(), false, || {
+            self.session_autosave_eligible()
+        });
+        self.session_sweep = sweep;
+        if let Some(deadline) = session_wake {
             earliest_deadline =
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }

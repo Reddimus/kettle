@@ -17,12 +17,10 @@ fn failed_additional_window_restore_preserves_source_session() {
 
 /// A shell `cd`, a dragged divider and a renamed tab all change what
 /// `session.json` should say without any gesture that saves it, so a sweep
-/// picks them up. The sweep is affordable because it only runs on a turn
-/// the event loop was taking anyway. As a wakeup deadline, it would wake an
-/// idle kettle every two seconds forever, and the idle CPU figure the perf
-/// suite publishes would go with it.
+/// picks them up. It rides turns the event loop takes anyway, at most once per
+/// interval, and the one wake it may ask for is the end of that interval.
 #[test]
-fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
+fn the_session_sweep_rides_existing_turns_at_most_once_per_interval() {
     let t0 = std::time::Instant::now();
     assert!(
         session_sweep_due(None, t0, true),
@@ -56,11 +54,138 @@ fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
         t0 + super::SESSION_SWEEP * 1000,
         false
     ));
+}
 
-    // And the constant is named in exactly two places: its own
-    // declaration and the predicate above. A third mention would mean it
-    // had found its way into a deadline. Comment lines are dropped first so
-    // prose about the constant does not count as a use of it.
+/// The wake a change is owed is the end of the interval that the last sweep
+/// started, and nothing else asks for one: not a turn with nothing new, not a
+/// sweep that is already due (it runs this turn), not a launch that saves
+/// nothing, and not before the first sweep has run.
+#[test]
+fn session_sweep_wake_truth_table() {
+    use super::sessions::{SessionWriteTarget, autosave_eligible, session_sweep_wake};
+    use kettle_config::RestoreSession::{Always, Never};
+    let t0 = std::time::Instant::now();
+    let sweep = super::SESSION_SWEEP;
+    let half = sweep / 2;
+    assert_eq!(
+        session_sweep_wake(Some(t0), t0 + half, true, true),
+        Some(t0 + sweep)
+    );
+    assert_eq!(
+        session_sweep_wake(Some(t0), t0, true, true),
+        Some(t0 + sweep)
+    );
+    // Untouched: nothing happened since the sweep, so idle stays idle.
+    assert_eq!(session_sweep_wake(Some(t0), t0 + half, false, true), None);
+    // Due: the sweep runs on this turn, never from a deadline in the past.
+    assert_eq!(session_sweep_wake(Some(t0), t0 + sweep, true, true), None);
+    assert_eq!(
+        session_sweep_wake(Some(t0), t0 + sweep * 3, true, true),
+        None
+    );
+    // No sweep yet: the first turn with a window that has tabs sweeps.
+    assert_eq!(session_sweep_wake(None, t0, true, true), None);
+    assert_eq!(session_sweep_wake(Some(t0), t0 + half, true, false), None);
+
+    // What makes a launch ineligible.
+    let target = |restore_mode| super::session_write_target(None, true, restore_mode, false);
+    let restore_off = target(should_restore_session(false, Never, false));
+    let another_build = target(should_restore_session(false, Always, true));
+    let saving = target(should_restore_session(false, Always, false));
+    assert_eq!(restore_off, SessionWriteTarget::Skip);
+    assert_eq!(another_build, SessionWriteTarget::Skip);
+    assert!(autosave_eligible(false, &saving, true));
+    assert!(!autosave_eligible(false, &restore_off, true), "restore off");
+    assert!(!autosave_eligible(false, &another_build, true), "another build runs");
+    assert!(!autosave_eligible(true, &saving, true), "the load failed");
+    assert!(!autosave_eligible(false, &saving, false), "no window has tabs");
+}
+
+/// Drives `SessionSweep` the way `about_to_wait` does, on a fake clock: each
+/// turn gives every window `take_due` and then asks for the app's one
+/// deadline. Returns the times the sweep saved, the state each one saw, and
+/// the deadline left when the events stop.
+fn model_sweep_turns(
+    events: &[(f64, u32)],
+    until: f64,
+    eligible: bool,
+) -> (Vec<(f64, u32)>, Option<f64>) {
+    let t0 = std::time::Instant::now();
+    let at = |secs: f64| t0 + std::time::Duration::from_secs_f64(secs);
+    let secs = |instant: std::time::Instant| instant.duration_since(t0).as_secs_f64();
+    let mut sweep = super::sessions::SessionSweep::default();
+    let mut saves = Vec::new();
+    let mut state = 0;
+    let mut deadline = None;
+    let mut next_event = 0;
+    loop {
+        // The loop wakes for the next event or the deadline, whichever is
+        // first; a wake for the deadline delivers no event.
+        let event_time = events.get(next_event).map(|&(time, _)| time);
+        let now = match (event_time, deadline) {
+            (Some(event), Some(wake)) if wake < event => wake,
+            (Some(event), _) => event,
+            (None, Some(wake)) => wake,
+            (None, None) => break,
+        };
+        if now > until {
+            break;
+        }
+        if event_time == Some(now) {
+            state = events[next_event].1;
+            next_event += 1;
+            sweep.touch();
+        }
+        // The sweep runs on time whatever the launch saves; `save_session`
+        // is what writes nothing for an ineligible one.
+        if sweep.take_due(at(now), true) && eligible {
+            saves.push((now, state));
+        }
+        deadline = sweep.deadline(at(now), false, || eligible).map(secs);
+    }
+    (saves, deadline)
+}
+
+/// The trailing edge: a change made after the last sweep and before Kettle
+/// goes quiet reaches the session within one interval, and once it has, no
+/// deadline is left to keep waking an idle Kettle.
+#[test]
+fn a_change_before_going_quiet_is_swept_within_the_interval() {
+    let (saves, left) = model_sweep_turns(&[(0.0, 1), (0.4, 2), (1.1, 3)], 60.0, true);
+    let interval = super::SESSION_SWEEP.as_secs_f64();
+    assert_eq!(saves.first(), Some(&(0.0, 1)), "the first turn sweeps");
+    let last = saves.last().copied().unwrap();
+    assert_eq!(last.1, 3, "the state at 1.1 s was never written: {saves:?}");
+    assert!(last.0 <= interval + 1e-9, "written only at {} s", last.0);
+    assert_eq!(saves.len(), 2, "one trailing sweep, not a loop: {saves:?}");
+    assert_eq!(left, None, "a deadline outlived the change");
+
+    // Idle: one event, one sweep, nothing after it.
+    let (saves, left) = model_sweep_turns(&[(5.0, 1)], 60.0, true);
+    assert_eq!(saves, [(5.0, 1)]);
+    assert_eq!(left, None);
+
+    // A launch that saves nothing never asks to be woken.
+    let (saves, left) = model_sweep_turns(&[(0.0, 1), (0.4, 2)], 60.0, false);
+    assert!(saves.is_empty());
+    assert_eq!(left, None);
+
+    // Events that keep coming are swept on their own turns, at most once
+    // per interval, and the wake adds only the one after the last of them.
+    let events: Vec<_> = (0..100).map(|i| (f64::from(i) * 0.1, i as u32 + 1)).collect();
+    let (saves, left) = model_sweep_turns(&events, 60.0, true);
+    for pair in saves.windows(2) {
+        assert!(pair[1].0 - pair[0].0 >= interval - 1e-9, "{saves:?}");
+    }
+    assert_eq!(saves.last().unwrap().1, 100);
+    assert_eq!(left, None);
+}
+
+/// Source guards for the wake: one deadline per app, from the turn's events.
+#[test]
+fn the_session_sweep_wake_is_armed_only_by_events_and_cleared_only_by_the_sweep() {
+    // Comment lines are dropped first so prose about the constant does not
+    // count as a use of it.
     let code = production_source()
         .lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -68,20 +193,60 @@ fn the_session_sweep_rides_existing_turns_and_never_schedules_one() {
         .join("\n");
     assert_eq!(
         code.matches("SESSION_SWEEP").count(),
-        2,
-        "SESSION_SWEEP should be named only by its declaration and \
-             `session_sweep_due`; a third reference means it reached a wakeup"
+        3,
+        "SESSION_SWEEP should be named only by its declaration, \
+             `session_sweep_due` and `session_sweep_wake`"
     );
     let wait = code
         .split("fn about_to_wait_inner(")
         .nth(1)
         .expect("about_to_wait_inner present");
     assert!(
-        wait.contains("session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty())"),
+        wait.contains("if self.session_sweep.take_due(now, !ws.mux.tabs.is_empty()) {\n            self.save_session(ws);"),
         "the sweep must be driven from the event-loop turn itself, and must \
              pass the window's own emptiness so it cannot overwrite a saved \
              session with a window that has nothing in it"
     );
+    let app = code
+        .split("fn about_to_wait(&mut self")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("about_to_wait body");
+    let per_window = app.find("self.about_to_wait_inner(&mut ws, event_loop)").unwrap();
+    let wake = app.find("sweep.deadline(").expect("the app asks for the wake");
+    assert!(per_window < wake, "the wake is asked for after every window's turn");
+    assert!(
+        app[wake..].contains("if let Some(deadline) = session_wake {\n            earliest_deadline ="),
+        "the wake merges into the turn's earliest deadline"
+    );
+    let window_event = code
+        .split("fn window_event(&mut self")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    let redraw = window_event
+        .split("if matches!(&event, WindowEvent::RedrawRequested) {")
+        .nth(1)
+        .unwrap();
+    let (redraw_arm, other_arm) = redraw.split_once("} else {").unwrap();
+    assert!(!redraw_arm.contains("touch()"), "a redraw would re-arm the wake every frame");
+    assert!(other_arm.split("};").next().unwrap().contains("self.session_sweep.touch();"));
+    let user_event = code
+        .split("fn user_event(&mut self")
+        .nth(1)
+        .and_then(|body| body.split("match ev {").next())
+        .unwrap();
+    assert!(user_event.contains("self.session_sweep.touch();"));
+    // Only `take_due` (the sweep) and a deadline whose time came and went
+    // without one clear the flag; nothing outside the type can.
+    let sweep_type = code
+        .split("struct SessionSweep {")
+        .nth(1)
+        .and_then(|body| body.split("\nfn session_sweep_wake(").next())
+        .unwrap();
+    assert_eq!(sweep_type.matches("self.touched = false;").count(), 3);
+    assert_eq!(code.matches("touched = false").count(), 3);
+    assert!(!code.contains("session_sweep.touched"));
 }
 
 /// The same predicate gates both default-session load and save. Disabling

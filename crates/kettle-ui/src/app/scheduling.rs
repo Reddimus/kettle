@@ -294,6 +294,9 @@ impl App {
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
         if reaped.layout_changed || stale_title {
+            // Another window's turn may already have swept this turn, from
+            // before this pane went.
+            self.session_sweep.touch();
             ws.pending_resize = true;
             if let Some(window) = &ws.window {
                 window.request_redraw();
@@ -358,10 +361,9 @@ impl App {
         #[cfg(windows)]
         let bounded_pty_exit_wait = next_bounded_pty_exit_wait(ws, now);
         // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
-        // Deliberately NOT part of the returned deadline: this must never be a
-        // reason to wake up.
-        if session_sweep_due(self.last_session_sweep, now, !ws.mux.tabs.is_empty()) {
-            self.last_session_sweep = Some(now);
+        // Not part of this window's returned deadline: `about_to_wait` asks
+        // once per app for the one wake a change since the sweep is owed.
+        if self.session_sweep.take_due(now, !ws.mux.tabs.is_empty()) {
             self.save_session(ws);
         }
         let lua_wait = self.poll_pending_lua_commands(ws, event_loop, now);
