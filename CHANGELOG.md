@@ -705,6 +705,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   "Type a command…" follows the same rule, so it also shows in windows that
   used to keep only the hint.
 
+- Control-server pointer files (`<pid>.alias.json`) no longer pile up in
+  `~/.local/state/kettle/ctl` (`/run/user/<uid>/kettle/ctl` on Linux when it
+  exists, `%LOCALAPPDATA%\kettle\ctl` on Windows). A Kettle whose
+  environment puts its registry somewhere else, such as a test instance with
+  a private `XDG_RUNTIME_DIR`, leaves one there so clients with a stripped
+  environment still find it. One that crashed, was killed or quit with ⌘Q
+  left it behind, and once the directory it pointed at was deleted nothing
+  removed it, so thousands collected and every `kettle ctl` read them all. A
+  starting control server now removes up to 256 per location whose server is
+  gone, on a background thread. Pointers now record their server's start
+  time, so a process that later gets the same pid does not keep one alive;
+  one written by an earlier release goes once the entry it names is gone or
+  belongs to a process that is gone. A running server's pointer stays.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the

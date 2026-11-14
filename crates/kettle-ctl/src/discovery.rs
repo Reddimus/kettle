@@ -12,7 +12,8 @@
 //! `<pid>.alias.json` pointer where the OS puts the registry for this user
 //! ([`canonical_registry_dir`]); a client started with a stripped environment
 //! reads that location too. An alias only points: the entry it names is read
-//! and validated in its own registry.
+//! and validated in its own registry. A starting server removes a bounded
+//! batch of aliases whose server is gone ([`prune_stale_aliases`]).
 //!
 //! Registry dir:
 //! - Unix: `$XDG_RUNTIME_DIR/kettle/ctl` (else `$XDG_STATE_HOME/kettle/ctl`,
@@ -270,12 +271,34 @@ struct AliasRecord {
     pid: u32,
     /// The absolute registry directory holding `<pid>.json`.
     registry: String,
+    /// The publishing process's [`crate::presence::process_start_token`], so
+    /// pruning can tell that process from a stranger that inherited the pid.
+    /// `None` in an alias written before the field existed (older readers
+    /// ignore it) or when the OS could not name the instance.
+    #[serde(default)]
+    start_token: Option<u64>,
 }
 
 /// Path of the `<pid>.alias.json` pointer. Older clients skip it: its stem
 /// is not a pid.
 fn alias_path(dir: &std::path::Path, pid: u32) -> PathBuf {
     dir.join(format!("{pid}.alias.json"))
+}
+
+/// The pid an `<pid>.alias.json` path names, if it is one.
+fn alias_file_pid(path: &std::path::Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_suffix(".alias.json")?
+        .parse()
+        .ok()
+}
+
+/// The v1 alias at `path`, when it names `pid`.
+fn read_alias(path: &std::path::Path, pid: u32) -> Option<AliasRecord> {
+    read_registry_entry(path)
+        .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
+        .filter(|record| record.v == 1 && record.pid == pid)
 }
 
 fn alias_lock_path(dir: &std::path::Path) -> PathBuf {
@@ -310,6 +333,7 @@ pub fn publish_alias(
         v: 1,
         pid,
         registry: registry.to_string(),
+        start_token: crate::presence::process_start_token(pid),
     };
     let json = crate::protocol::to_json_vec_bounded(&record, MAX_REGISTRY_ENTRY_BYTES)
         .map_err(std::io::Error::other)?;
@@ -386,6 +410,138 @@ fn withdraw_missing_alias(dir: &std::path::Path, record: &AliasRecord) {
     }
 }
 
+/// How many `<pid>.alias.json` files one [`prune_stale_aliases`] pass reads
+/// in each directory. Each costs a small read, a process lookup and maybe an
+/// unlink, all under the aliases lock that a starting server's publication
+/// waits on, so a pass stays short however large the backlog; later passes
+/// work through the rest. Files the pass keeps (live servers, ones it cannot
+/// judge) count too.
+const MAX_ALIAS_PRUNE_PER_PASS: usize = 256;
+
+/// Remove aliases whose server is gone from every directory the OS names for
+/// this user's registry, reading at most 256 aliases within a walk of at most
+/// 8,192 directory entries in each, and return how many went. A starting
+/// server calls this.
+///
+/// An alias's owner withdraws it only when its control server is dropped, so
+/// one that crashed, was killed, or quit through a path that runs no
+/// destructor (AppKit's `exit()` after Cmd+Q) leaves it behind. Discovery
+/// withdraws one only while the registry it names still exists, so an alias
+/// into a deleted directory (a test's private `XDG_RUNTIME_DIR`) stayed
+/// forever.
+pub fn prune_stale_aliases() -> usize {
+    os_registry_bases()
+        .into_iter()
+        .map(|base| prune_stale_aliases_in(&base.join("kettle").join("ctl")))
+        .sum()
+}
+
+fn prune_stale_aliases_in(dir: &std::path::Path) -> usize {
+    prune_aliases_with(
+        dir,
+        MAX_ALIAS_PRUNE_PER_PASS,
+        crate::presence::owner_state,
+        |_| {},
+    )
+}
+
+/// The core of [`prune_stale_aliases`] for one directory, with the process
+/// table injected and a hook run after each alias is judged.
+///
+/// Every judgment and removal happens under the aliases lock, which every
+/// publisher takes, so an alias cannot be replaced between the read that
+/// judged it and its removal: a new server that inherited the pid waits and
+/// then writes its own. A pass that finds the lock held skips the directory;
+/// the holder is publishing or pruning, and the next start prunes.
+fn prune_aliases_with(
+    dir: &std::path::Path,
+    limit: usize,
+    state: impl Fn(u32, Option<u64>) -> crate::presence::OwnerState,
+    mut after_judging: impl FnMut(u32),
+) -> usize {
+    if !crate::private_dir_is_valid(dir) {
+        return 0;
+    }
+    let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&alias_lock_path(dir))
+    else {
+        return 0;
+    };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for (path, pid) in alias_paths(read.flatten().map(|entry| entry.path()), limit) {
+        // Unreadable files and records of another version are left alone: a
+        // later release may own them.
+        let stale = read_alias(&path, pid).is_some_and(|record| alias_is_stale(&record, &state));
+        after_judging(pid);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// The `<pid>.alias.json` paths among the first `MAX_REGISTRY_DIR_WALK` of
+/// `paths`, at most `limit` of them. Other files count toward the walk only.
+fn alias_paths(paths: impl IntoIterator<Item = PathBuf>, limit: usize) -> Vec<(PathBuf, u32)> {
+    paths
+        .into_iter()
+        .take(MAX_REGISTRY_DIR_WALK)
+        .filter_map(|path| alias_file_pid(&path).map(|pid| (path, pid)))
+        .take(limit)
+        .collect()
+}
+
+/// Whether `record`'s server is gone. An alias whose writer the OS confirms
+/// is still running is never stale.
+///
+/// The alias's own start token decides when the OS can check it: a dead pid
+/// or another instance under it is gone, the same instance is live. Without
+/// that proof (an alias from before the token, or a process the OS will not
+/// describe), what the alias leads to decides: a registry or entry that no
+/// longer exists, or an entry whose own token shows its server gone.
+fn alias_is_stale(
+    record: &AliasRecord,
+    state: &impl Fn(u32, Option<u64>) -> crate::presence::OwnerState,
+) -> bool {
+    use crate::presence::OwnerState;
+    match state(record.pid, record.start_token) {
+        OwnerState::Gone => return true,
+        OwnerState::Same => return false,
+        OwnerState::Unknown => {}
+    }
+    let registry = std::path::Path::new(&record.registry);
+    if !registry.is_absolute() {
+        // Discovery never follows it.
+        return true;
+    }
+    let missing = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    };
+    if missing(registry) {
+        return true;
+    }
+    if !crate::private_dir_is_valid(registry) {
+        return false;
+    }
+    let entry = entry_path(registry, record.pid);
+    match std::fs::symlink_metadata(&entry) {
+        // A server starting there holds the registry lock until its entry is
+        // written; leave the alias to the next pass.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            kettle_state::ExclusiveFileLock::try_acquire(&lock_path(registry))
+                .is_ok_and(|lock| lock.is_some() && missing(&entry))
+        }
+        Err(_) => false,
+        Ok(_) => read_registry_entry(&entry)
+            .and_then(|text| serde_json::from_str::<RegistryEntry>(&text).ok())
+            .filter(|current| registry_entry_is_valid(registry, record.pid, current))
+            .is_some_and(|current| state(current.pid, current.start_token) == OwnerState::Gone),
+    }
+}
+
 /// The entries `dir`'s aliases point at, each read and validated in the
 /// registry it names, with that registry.
 fn list_aliased(dir: &std::path::Path) -> Vec<(RegistryEntry, PathBuf)> {
@@ -401,18 +557,10 @@ fn list_aliased(dir: &std::path::Path) -> Vec<(RegistryEntry, PathBuf)> {
         .map(|entry| entry.path())
         .take(MAX_REGISTRY_DIR_WALK)
     {
-        let Some(pid) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".alias.json"))
-            .and_then(|pid| pid.parse::<u32>().ok())
-        else {
+        let Some(pid) = alias_file_pid(&path) else {
             continue;
         };
-        let Some(record) = read_registry_entry(&path)
-            .and_then(|text| serde_json::from_str::<AliasRecord>(&text).ok())
-            .filter(|record| record.v == 1 && record.pid == pid)
-        else {
+        let Some(record) = read_alias(&path, pid) else {
             continue;
         };
         let registry = PathBuf::from(&record.registry);
@@ -1612,6 +1760,311 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A pid no process can hold: above `i32::MAX`, so `kill` and
+    /// `OpenProcess` never find it.
+    fn never_alive(n: u32) -> u32 {
+        u32::MAX - 16 - n
+    }
+
+    /// Write an alias as any release might have, token or not.
+    fn write_alias(
+        dir: &std::path::Path,
+        pid: u32,
+        registry: &std::path::Path,
+        token: Option<u64>,
+    ) {
+        crate::ensure_private_dir(dir).unwrap();
+        let record = AliasRecord {
+            v: 1,
+            pid,
+            registry: registry.to_str().unwrap().to_string(),
+            start_token: token,
+        };
+        kettle_state::atomic_replace(
+            &alias_path(dir, pid),
+            &serde_json::to_vec(&record).unwrap(),
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )
+        .unwrap();
+    }
+
+    fn alias_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| alias_file_pid(&entry.path()).is_some())
+            .count()
+    }
+
+    fn own_token() -> u64 {
+        crate::presence::process_start_token(std::process::id()).expect("own start token")
+    }
+
+    /// A child that runs until it is dropped.
+    struct Sleeper(std::process::Child);
+
+    impl Sleeper {
+        fn spawn() -> Self {
+            let child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sleep" })
+                .args(if cfg!(windows) {
+                    &["/C", "ping -n 5 127.0.0.1 >NUL"][..]
+                } else {
+                    &["30"][..]
+                })
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn child");
+            Self(child)
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+    }
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The leak: a server killed after publishing leaves its alias, and when
+    /// the registry it named is deleted (a test's private runtime dir),
+    /// discovery never withdraws it. A starting server's prune does.
+    #[test]
+    fn a_dead_servers_alias_is_pruned_even_after_its_registry_is_deleted() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-dead-");
+        let canonical = root.join("canonical");
+        let deleted = root.join("deleted");
+        let child = Sleeper::spawn();
+        let killed = child.pid();
+        publish_alias(&canonical, &deleted, killed).unwrap();
+        drop(child);
+        write_alias(&canonical, never_alive(0), &deleted, None);
+        live_candidates_by(std::slice::from_ref(&canonical), |_| false);
+        assert_eq!(alias_count(&canonical), 2, "discovery leaves both behind");
+        assert_eq!(prune_stale_aliases_in(&canonical), 2);
+        assert!(!alias_path(&canonical, killed).exists());
+        assert!(!alias_path(&canonical, never_alive(0)).exists());
+        assert!(canonical.is_dir(), "only the aliases go");
+    }
+
+    /// A live server's alias stays, even one whose registry has gone: its
+    /// start token proves the process that wrote it is still running.
+    #[test]
+    fn a_live_servers_alias_is_kept_wherever_it_points() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-live-");
+        let canonical = root.join("canonical");
+        let primary = root.join("primary");
+        let child = Sleeper::spawn();
+        register(
+            &primary,
+            &RegistryEntry::registering(
+                "gui",
+                child.pid(),
+                default_endpoint(&primary, child.pid()),
+                "x",
+                1,
+            ),
+        )
+        .unwrap();
+        publish_alias(&canonical, &primary, child.pid()).unwrap();
+        let me = std::process::id();
+        publish_alias(&canonical, &root.join("deleted"), me).unwrap();
+        write_alias(&canonical, never_alive(1), &primary, None);
+        for _ in 0..2 {
+            prune_stale_aliases_in(&canonical);
+            assert!(alias_path(&canonical, child.pid()).exists());
+            assert!(alias_path(&canonical, me).exists());
+        }
+        assert!(
+            !alias_path(&canonical, never_alive(1)).exists(),
+            "a dead one beside them goes"
+        );
+    }
+
+    /// A pid that now names another process: the alias's own token shows the
+    /// writer is gone, or, for an alias from before the token, what it leads
+    /// to does. Only a tokenless alias that still leads to a live entry
+    /// stays.
+    #[test]
+    fn an_alias_whose_pid_now_names_another_process_is_pruned() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-reused-");
+        let me = std::process::id();
+        let deleted = root.join("deleted");
+        let canonical = |case: &str| root.join(case);
+        let registry_with = |case: &str, token: Option<u64>| {
+            let dir = root.join(format!("{case}-registry"));
+            let mut entry =
+                RegistryEntry::registering("gui", me, default_endpoint(&dir, me), "x", 1);
+            entry.start_token = token;
+            register(&dir, &entry).unwrap();
+            dir
+        };
+        // No token, and the registry is gone.
+        write_alias(&canonical("gone"), me, &deleted, None);
+        // No token, and the registry no longer holds the entry.
+        let emptied = registry_with("emptied", Some(own_token()));
+        std::fs::remove_file(entry_path(&emptied, me)).unwrap();
+        write_alias(&canonical("emptied"), me, &emptied, None);
+        // No token, and the entry's own token is another instance's.
+        let stale = registry_with("stale", Some(own_token() ^ 1));
+        write_alias(&canonical("stale"), me, &stale, None);
+        // No token, but the entry is this live process's.
+        let live = registry_with("live", Some(own_token()));
+        write_alias(&canonical("live"), me, &live, None);
+        // Another instance's token, though it points at the live entry: the
+        // pid's current holder publishes an alias of its own.
+        write_alias(&canonical("token"), me, &live, Some(own_token() ^ 1));
+        for case in ["token", "gone", "emptied", "stale"] {
+            assert_eq!(prune_stale_aliases_in(&canonical(case)), 1, "{case}");
+            assert!(!alias_path(&canonical(case), me).exists(), "{case}");
+        }
+        assert_eq!(prune_stale_aliases_in(&canonical("live")), 0);
+        assert!(alias_path(&canonical("live"), me).exists());
+        // A server registering there holds the lock until its entry is
+        // written, so its alias waits for the next pass.
+        let starting = registry_with("starting", None);
+        std::fs::remove_file(entry_path(&starting, me)).unwrap();
+        write_alias(&canonical("starting"), me, &starting, None);
+        let registration = begin_registration(&starting);
+        assert_eq!(prune_stale_aliases_in(&canonical("starting")), 0);
+        drop(registration);
+        assert_eq!(prune_stale_aliases_in(&canonical("starting")), 1);
+    }
+
+    /// Prunes running at once in several processes share the aliases lock
+    /// with publishers: a live alias survives any number of them, and each
+    /// stale one is removed exactly once.
+    #[test]
+    fn concurrent_prunes_remove_each_stale_alias_once_and_keep_live_ones() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-concurrent-");
+        let canonical = root.join("canonical");
+        let deleted = root.join("deleted");
+        let me = std::process::id();
+        for n in 0..64 {
+            write_alias(&canonical, never_alive(n), &deleted, None);
+        }
+        publish_alias(&canonical, &deleted, me).unwrap();
+        let removed = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..16 {
+                        let n = prune_stale_aliases_in(&canonical);
+                        removed.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+            scope.spawn(|| {
+                for _ in 0..16 {
+                    publish_alias(&canonical, &deleted, me).unwrap();
+                }
+            });
+        });
+        removed.fetch_add(
+            prune_stale_aliases_in(&canonical),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(removed.into_inner(), 64);
+        assert_eq!(alias_count(&canonical), 1);
+        assert!(alias_path(&canonical, me).exists());
+    }
+
+    /// A server that inherits a stale alias's pid and publishes while a prune
+    /// is between judging that alias and removing it must keep its own.
+    #[test]
+    fn an_alias_published_while_its_stale_predecessor_is_pruned_survives() {
+        use crate::presence::OwnerState;
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-race-");
+        let canonical = root.join("canonical");
+        let (deleted, elsewhere) = (root.join("deleted"), root.join("elsewhere"));
+        let me = std::process::id();
+        // Token 1 is the dead predecessor; anything else is the new server.
+        let state = |_pid: u32, token: Option<u64>| {
+            if token == Some(1) {
+                OwnerState::Gone
+            } else {
+                OwnerState::Same
+            }
+        };
+        write_alias(&canonical, me, &deleted, Some(1));
+        write_alias(&canonical, never_alive(0), &deleted, Some(1));
+        std::thread::scope(|scope| {
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let canonical = &canonical;
+            let elsewhere = &elsewhere;
+            let publisher = scope.spawn(move || {
+                start_rx.recv().unwrap();
+                publish_alias(canonical, elsewhere, me).unwrap();
+                done_tx.send(()).unwrap();
+            });
+            let removed = prune_aliases_with(canonical, MAX_ALIAS_PRUNE_PER_PASS, state, |pid| {
+                if pid == me {
+                    start_tx.send(()).unwrap();
+                    let _ = done_rx.recv_timeout(std::time::Duration::from_millis(100));
+                }
+            });
+            assert_eq!(removed, 2);
+            publisher.join().unwrap();
+        });
+        let record = read_alias(&alias_path(&canonical, me), me).expect("the new alias survives");
+        assert_eq!(std::path::Path::new(&record.registry), elsewhere);
+        assert!(!alias_path(&canonical, never_alive(0)).exists());
+    }
+
+    /// One pass reads at most its bound, kept aliases included, and later
+    /// passes reach the rest.
+    #[test]
+    fn a_prune_pass_reads_at_most_its_bound() {
+        use crate::presence::OwnerState;
+        let root = kettle_test_support::private_tempdir("kettle-ctl-prune-bound-");
+        let canonical = root.join("canonical");
+        let deleted = root.join("deleted");
+        let extra = 44;
+        for n in 0..(MAX_ALIAS_PRUNE_PER_PASS + extra) as u32 {
+            write_alias(&canonical, never_alive(n), &deleted, None);
+        }
+        let mut judged = 0;
+        let kept = prune_aliases_with(&canonical, 5, |_, _| OwnerState::Same, |_| judged += 1);
+        assert_eq!(
+            (kept, judged),
+            (0, 5),
+            "a kept alias counts toward the bound"
+        );
+        assert_eq!(prune_stale_aliases_in(&canonical), MAX_ALIAS_PRUNE_PER_PASS);
+        assert_eq!(alias_count(&canonical), extra);
+        assert_eq!(prune_stale_aliases_in(&canonical), extra);
+        assert_eq!(alias_count(&canonical), 0);
+    }
+
+    /// New aliases name their writer's instance, and the field changes
+    /// nothing for a reader on either side of it.
+    #[test]
+    fn aliases_carry_a_start_token_that_older_readers_ignore() {
+        #[derive(Deserialize)]
+        struct OlderAlias {
+            v: u32,
+            pid: u32,
+            registry: String,
+        }
+        let root = kettle_test_support::private_tempdir("kettle-ctl-alias-token-");
+        let canonical = root.join("canonical");
+        let me = std::process::id();
+        publish_alias(&canonical, &root.join("primary"), me).unwrap();
+        let text = read_registry_entry(&alias_path(&canonical, me)).unwrap();
+        let record = read_alias(&alias_path(&canonical, me), me).unwrap();
+        assert_eq!(record.start_token, Some(own_token()));
+        let older: OlderAlias = serde_json::from_str(&text).unwrap();
+        assert_eq!((older.v, older.pid), (1, me));
+        assert_eq!(std::path::Path::new(&older.registry), root.join("primary"));
+        let legacy: AliasRecord =
+            serde_json::from_str(r#"{"v":1,"pid":5,"registry":"/k/ctl"}"#).unwrap();
+        assert_eq!(legacy.start_token, None);
+    }
+
     #[cfg(unix)]
     #[test]
     fn fallback_endpoint_stays_within_sun_path_when_tmpdir_is_long() {
@@ -1727,6 +2180,26 @@ mod tests {
             (0..MAX_REGISTRY_DIR_WALK as u32).map(|pid| PathBuf::from(format!("ctl-{pid}.sock")));
         let paths = sockets.chain(std::iter::once(PathBuf::from("4242.json")));
         assert!(registry_entry_paths(paths).is_empty());
+    }
+
+    /// A prune walks at most `MAX_REGISTRY_DIR_WALK` entries, other files
+    /// included, and judges at most its limit of the aliases among them.
+    #[test]
+    fn the_alias_prune_walk_stays_bounded() {
+        let alias = |pid: u32| PathBuf::from(format!("{pid}.alias.json"));
+        let sockets =
+            (0..MAX_REGISTRY_DIR_WALK as u32).map(|pid| PathBuf::from(format!("ctl-{pid}.sock")));
+        assert!(alias_paths(sockets.chain([alias(4242)]), usize::MAX).is_empty());
+        let aliases = (0..MAX_REGISTRY_DIR_WALK as u32 + 10).map(alias);
+        assert_eq!(
+            alias_paths(aliases.clone(), usize::MAX).len(),
+            MAX_REGISTRY_DIR_WALK
+        );
+        let picked = alias_paths(aliases, 3);
+        assert_eq!(
+            picked,
+            (0..3).map(|pid| (alias(pid), pid)).collect::<Vec<_>>()
+        );
     }
 
     #[cfg(unix)]
