@@ -1126,6 +1126,10 @@ pub(crate) struct WindowState {
     pub(crate) ssh_imported: Vec<String>,
     /// The launcher's status line; see [`SshStatus`]. Cleared on every open.
     pub(crate) ssh_status: Option<SshStatus>,
+    /// The configured hosts the open launcher's selection was made against.
+    /// When `cfg.ssh_hosts` no longer equals it, `sync_ssh_hosts` moves the
+    /// selection back to row 0.
+    pub(crate) ssh_hosts_shown: Vec<(String, String)>,
     /// Profile names captured when opening the palette; all projections use this list.
     pub(crate) palette_profiles: Vec<String>,
     /// `Some((query, selected))` while the command palette is open.
@@ -1753,6 +1757,7 @@ impl WindowState {
             ssh_input: None,
             ssh_imported: Vec::new(),
             ssh_status: None,
+            ssh_hosts_shown: Vec::new(),
             palette_input: None,
             palette_profiles: Vec::new(),
             palette_bound_only: false,

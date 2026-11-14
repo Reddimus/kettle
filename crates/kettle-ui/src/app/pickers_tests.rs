@@ -1155,8 +1155,9 @@ fn ssh_remove_and_replace_confirmations_default_to_cancel() {
     }
 }
 
-/// Log lines this thread emitted from the pickers module.
-fn picker_log_lines(run: impl FnOnce()) -> Vec<String> {
+/// Log lines this thread emitted from the pickers module, or `None` when
+/// another logger was installed first in this test binary (`run` still runs).
+fn picker_log_lines(run: impl FnOnce()) -> Option<Vec<String>> {
     use std::sync::{Mutex, OnceLock};
     struct Capture(Mutex<Vec<(std::thread::ThreadId, String)>>);
     impl log::Log for Capture {
@@ -1173,24 +1174,29 @@ fn picker_log_lines(run: impl FnOnce()) -> Vec<String> {
         }
         fn flush(&self) {}
     }
-    static CAPTURE: OnceLock<&'static Capture> = OnceLock::new();
-    let capture = *CAPTURE.get_or_init(|| {
+    static CAPTURE: OnceLock<Option<&'static Capture>> = OnceLock::new();
+    let Some(capture) = *CAPTURE.get_or_init(|| {
         let capture: &'static Capture = Box::leak(Box::new(Capture(Mutex::new(Vec::new()))));
-        log::set_logger(capture).expect("no other logger in this test binary");
+        log::set_logger(capture).ok()?;
         log::set_max_level(log::LevelFilter::Warn);
-        capture
-    });
+        Some(capture)
+    }) else {
+        run();
+        return None;
+    };
     let me = std::thread::current().id();
     capture.0.lock().unwrap().retain(|(thread, _)| *thread != me);
     run();
-    capture
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(thread, _)| *thread == me)
-        .map(|(_, line)| line.clone())
-        .collect()
+    Some(
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(thread, _)| *thread == me)
+            .map(|(_, line)| line.clone())
+            .collect(),
+    )
 }
 
 /// After a save the in-memory hosts change at once, the launcher reopens with
@@ -1219,7 +1225,14 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
     );
     let mut ws = WindowState::new(0, Mux::new());
     let status = tr.ssh_status_saved("db");
-    super::reopen_ssh_launcher(&mut ws, &cfg, || None, Some(("db", "me@db")), status.clone());
+    super::reopen_ssh_launcher(
+        &mut ws,
+        &cfg,
+        || None,
+        "db",
+        Some(("db", "me@db")),
+        status.clone(),
+    );
     let (query, selected) = ws.ssh_input.as_ref().unwrap();
     assert_eq!(query.text(), "db");
     assert_eq!(*selected, 0, "the saved host is the exact row 0");
@@ -1235,10 +1248,27 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
     assert_eq!(super::ssh_status_line(&ws), Some(status.as_str()));
     let lane = super::ssh_picker_hint(super::ssh_status_line(&ws), &tr);
     assert_eq!(lane, status, "the hint lane paints the status");
-    // The projection announces the painted status politely.
+    // The projection announces the painted status politely, over the lane
+    // that paints it.
+    let field = kettle_render::TextFieldOverlay {
+        picker_header: true,
+        placeholder: String::new(),
+        text: "db".into(),
+        cursor_byte: 2,
+        selection: None,
+        horizontal_scroll: 0,
+        rect: (100.0, 20.0, 600.0, 24.0),
+        prefix: "  ssh \u{276f} ".into(),
+        hint: lane.clone(),
+        accent_palette: 4,
+    };
+    let cw = kettle_render::text_field_cell_width(&field, 8.0, 16.0);
+    let painted = kettle_render::text_field_rects(&field, cw)[2];
+    assert!(painted.2 > 0.0, "the lane paints the status");
     let overlay = kettle_render::Overlay {
         ssh_query: Some("db".into()),
         ssh_status: super::ssh_status_line(&ws).map(str::to_string),
+        text_field: Some(field),
         context_menu: super::picker_context_menu(
             super::ssh_picker_list_for(&ws, &cfg, &tr).unwrap(),
             (800.0, 600.0),
@@ -1257,6 +1287,16 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
         .expect("a status node");
     assert_eq!(node.label(), Some(lane.as_str()));
     assert_eq!(node.live(), Some(accesskit::Live::Polite));
+    let (x, y, w, h) = painted;
+    assert_eq!(
+        node.bounds(),
+        Some(accesskit::Rect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64
+        ))
+    );
     // The next edit brings the key hint back.
     ws.ssh_input
         .as_mut()
@@ -1284,7 +1324,9 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
     });
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     assert_eq!(cfg.ssh_hosts, hosts);
-    assert_eq!(lines, ["ssh host not saved: WouldBlock"]);
+    if let Some(lines) = lines {
+        assert_eq!(lines, ["ssh host not saved: WouldBlock"]);
+    }
 
     // Remove, then reopen empty with its status.
     super::remove_ssh_host_from(Some(&path), &mut cfg.ssh_hosts, "db", "me@db").unwrap();
@@ -1295,11 +1337,214 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
             Err(std::io::ErrorKind::NotFound)
         );
     });
-    assert_eq!(lines, ["ssh host not removed: NotFound"]);
-    super::reopen_ssh_launcher(&mut ws, &cfg, || None, None, tr.ssh_status_removed("db"));
+    if let Some(lines) = lines {
+        assert_eq!(lines, ["ssh host not removed: NotFound"]);
+    }
+    super::reopen_ssh_launcher(&mut ws, &cfg, || None, "", None, tr.ssh_status_removed("db"));
     assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "");
     assert_eq!(super::ssh_status_line(&ws), Some("Removed \"db\""));
     // Opening the launcher afresh clears it.
     super::open_ssh_launcher(&mut ws, &cfg, || None);
     assert_eq!(super::ssh_status_line(&ws), None);
+}
+
+/// A host list that changes under an open launcher (a reload, or a Save or
+/// Remove in another window, since `cfg` is shared) sends its selection back
+/// to row 0. Without that, an index on the last host slides onto the Save or
+/// Remove row that now ends the shorter list.
+#[test]
+fn ssh_a_host_list_change_moves_the_launcher_back_to_row_zero() {
+    use super::SshEnter::{Connect, Remove, Save};
+    let open = |query: &str, cfg: &kettle_config::Config| {
+        let mut ws = WindowState::new(0, Mux::new());
+        super::open_ssh_launcher(&mut ws, cfg, || None);
+        let (editor, _) = ws.ssh_input.as_mut().unwrap();
+        let _ = editor.replace_all(query, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+        ws
+    };
+    let enter = |ws: &WindowState, hosts: &[(String, String)]| {
+        let (query, selected) = ws.ssh_input.as_ref().unwrap();
+        ssh_row_action(query, *selected, hosts, &ws.ssh_imported)
+    };
+    // Save: [Connect, alpha, beta, Save] with beta selected, then alpha goes.
+    let mut cfg = kettle_config::Config {
+        ssh_hosts: ssh_fixture_hosts(&[("alpha", "me@alpha"), ("beta", "me@beta")]),
+        ..Default::default()
+    };
+    let mut ws = open("a", &cfg);
+    assert_eq!(ssh_rows("a", &cfg.ssh_hosts, &[]).len(), 4);
+    ws.ssh_input.as_mut().unwrap().1 = 2;
+    assert_eq!(enter(&ws, &cfg.ssh_hosts), Some(Connect("me@beta".into())));
+    // Unchanged hosts keep the selection.
+    super::sync_ssh_hosts(&mut ws, &cfg.ssh_hosts);
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 2);
+    cfg.ssh_hosts.remove(0);
+    assert_eq!(
+        enter(&ws, &cfg.ssh_hosts),
+        Some(Save("a".into())),
+        "the stale index now names Save"
+    );
+    super::sync_ssh_hosts(&mut ws, &cfg.ssh_hosts);
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 0);
+    assert_eq!(enter(&ws, &cfg.ssh_hosts), Some(Connect("a".into())));
+    // Remove: [db, db-a, db-b, Remove(db)] with db-b selected, then db-a goes.
+    let mut cfg = kettle_config::Config {
+        ssh_hosts: ssh_fixture_hosts(&[("db", "me@db"), ("db-a", "me@a"), ("db-b", "me@b")]),
+        ..Default::default()
+    };
+    let mut ws = open("db", &cfg);
+    ws.ssh_input.as_mut().unwrap().1 = 2;
+    assert_eq!(enter(&ws, &cfg.ssh_hosts), Some(Connect("me@b".into())));
+    cfg.ssh_hosts.remove(1);
+    assert_eq!(
+        enter(&ws, &cfg.ssh_hosts),
+        Some(Remove {
+            name: "db".into(),
+            target: "me@db".into()
+        }),
+        "the stale index now names Remove"
+    );
+    super::sync_ssh_hosts(&mut ws, &cfg.ssh_hosts);
+    assert_eq!(enter(&ws, &cfg.ssh_hosts), Some(Connect("me@db".into())));
+    // A reload runs it for every window, and a write for every other one.
+    let src = production_source();
+    let reload = src
+        .split("fn apply_reloaded_config(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .unwrap();
+    assert!(reload.contains("sync_ssh_hosts(ws, &self.cfg.ssh_hosts);"));
+    let finish = src
+        .split("fn finish_ssh_host_effect(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .unwrap();
+    assert!(finish.contains("for sibling in self.windows.values_mut() {"));
+    assert!(finish.contains("sync_ssh_hosts(sibling, &self.cfg.ssh_hosts);"));
+}
+
+/// A scratch config file holding `text`, and the config parsed from it.
+fn ssh_scratch_config(text: &str) -> (kettle_test_support::PrivateTempDir, std::path::PathBuf, kettle_config::Config) {
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("config");
+    std::fs::write(&path, text).unwrap();
+    let cfg = kettle_config::Config::parse_text(text);
+    (dir, path, cfg)
+}
+
+/// The name editor for `target` with `name` typed.
+fn ssh_name_editor(target: &str, name: &str) -> super::TitleEditState {
+    let mut state = super::begin_ssh_host_name_edit(target).unwrap();
+    let _ = state
+        .input
+        .replace_all(name, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+    state
+}
+
+/// Enter in the name editor: an unusable name and a refused write keep the
+/// editor and what was typed; a name saved with another target asks; a
+/// write reopens the launcher on the saved host.
+#[test]
+fn ssh_name_editor_enter_keeps_the_editor_on_failure() {
+    use super::SshHostEffect;
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let (_dir, path, mut cfg) = ssh_scratch_config("ssh-host = db=me@old\n");
+    let mut ws = WindowState::new(0, Mux::new());
+    let submit = |ws: &mut WindowState, cfg: &mut kettle_config::Config, state| {
+        super::submit_ssh_host_name(ws, cfg, Some(&path), || None, state, &tr)
+    };
+    // An unusable name.
+    let effect = submit(&mut ws, &mut cfg, ssh_name_editor("me@web", "a=b"));
+    assert!(matches!(effect, SshHostEffect::NotSaved), "{effect:?}");
+    assert_eq!(ws.editing_title.take().unwrap().input.text(), "a=b");
+    // A host added by hand since the last reload: refused, editor kept.
+    let hand = "ssh-host = db=me@old\nssh-host = web=me@hand\n";
+    std::fs::write(&path, hand).unwrap();
+    let effect = submit(&mut ws, &mut cfg, ssh_name_editor("me@web", "web"));
+    assert!(matches!(effect, SshHostEffect::NotSaved), "{effect:?}");
+    let kept = ws.editing_title.take().expect("the editor stays open");
+    assert_eq!(kept.input.text(), "web");
+    assert_eq!(kept.target, super::TitleEditTarget::SshHost("me@web".into()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), hand);
+    assert!(ws.ssh_input.is_none());
+    // A name saved with another target asks, Cancel first.
+    let effect = submit(&mut ws, &mut cfg, ssh_name_editor("me@new", "db"));
+    let SshHostEffect::Ask(dialog) = effect else {
+        panic!("{effect:?}");
+    };
+    assert!(matches!(
+        &dialog.on_confirm,
+        super::ConfirmAction::ReplaceSshHost { name, old_target, new_target }
+            if name == "db" && old_target == "me@old" && new_target == "me@new"
+    ));
+    // A new name is written and the launcher reopens on it.
+    let effect = submit(&mut ws, &mut cfg, ssh_name_editor("me@box", "box"));
+    assert!(matches!(effect, SshHostEffect::Changed), "{effect:?}");
+    assert!(ws.editing_title.is_none());
+    assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "box");
+    assert_eq!(super::ssh_status_line(&ws), Some("Saved \"box\""));
+    assert!(std::fs::read_to_string(&path).unwrap().contains("ssh-host = box=me@box"));
+}
+
+/// A confirmed Replace writes only over the target the question showed, and
+/// a refused Replace or Remove reopens the launcher on what was typed with a
+/// status line, so the failure shows even with notifications off.
+#[test]
+fn ssh_confirmed_replace_and_remove_report_refusals_in_the_launcher() {
+    use super::{ConfirmAction, SshHostEffect};
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let (_dir, path, mut cfg) = ssh_scratch_config("ssh-host = db=me@old\n");
+    let mut ws = WindowState::new(0, Mux::new());
+    let confirm = |ws: &mut WindowState, cfg: &mut kettle_config::Config, action| {
+        super::confirm_ssh_host_change(ws, cfg, Some(&path), || None, action, &tr)
+    };
+    let replace = |old: &str| ConfirmAction::ReplaceSshHost {
+        name: "db".into(),
+        old_target: old.into(),
+        new_target: "me@new".into(),
+    };
+    // The file was changed by hand after the question went up.
+    std::fs::write(&path, "ssh-host = db=me@hand\n").unwrap();
+    let effect = confirm(&mut ws, &mut cfg, replace("me@old"));
+    assert!(matches!(effect, SshHostEffect::NotSaved), "{effect:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ssh-host = db=me@hand\n");
+    assert_eq!(cfg.ssh_hosts, ssh_fixture_hosts(&[("db", "me@old")]));
+    assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "me@new");
+    assert_eq!(
+        super::ssh_status_line(&ws),
+        Some(tr.ssh_status_not_saved("db").as_str())
+    );
+    // Unchanged since the question: the Replace writes over the old target.
+    std::fs::write(&path, "ssh-host = db=me@old\n").unwrap();
+    let effect = confirm(&mut ws, &mut cfg, replace("me@old"));
+    assert!(matches!(effect, SshHostEffect::Changed), "{effect:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ssh-host = db=me@new\n");
+    assert_eq!(cfg.ssh_hosts, ssh_fixture_hosts(&[("db", "me@new")]));
+    let (query, selected) = ws.ssh_input.as_ref().unwrap();
+    assert_eq!(query.text(), "db");
+    assert_eq!(
+        ssh_row_action(query, *selected, &cfg.ssh_hosts, &[]),
+        Some(super::SshEnter::Connect("me@new".into()))
+    );
+    // A Remove for a target the file no longer has.
+    let remove = |target: &str| ConfirmAction::RemoveSshHost {
+        name: "db".into(),
+        target: target.into(),
+    };
+    let effect = confirm(&mut ws, &mut cfg, remove("me@old"));
+    assert!(matches!(effect, SshHostEffect::NotRemoved), "{effect:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ssh-host = db=me@new\n");
+    assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "db");
+    assert_eq!(
+        super::ssh_status_line(&ws),
+        Some(tr.ssh_status_not_removed("db").as_str())
+    );
+    let effect = confirm(&mut ws, &mut cfg, remove("me@new"));
+    assert!(matches!(effect, SshHostEffect::Changed), "{effect:?}");
+    assert!(cfg.ssh_hosts.is_empty());
+    assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "");
+    assert_eq!(super::ssh_status_line(&ws), Some("Removed \"db\""));
+    // The dispatch arms go through this function.
+    let dispatch = finding_body(include_str!("modals.rs"), "dispatch_confirm_action_arms");
+    assert!(dispatch.contains("self.run_ssh_host_confirm(ws, action);"));
 }

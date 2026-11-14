@@ -316,6 +316,7 @@ pub(super) fn open_ssh_launcher(
         Vec::new()
     };
     ws.ssh_input = Some((Default::default(), 0));
+    ws.ssh_hosts_shown = cfg.ssh_hosts.clone();
     ws.ssh_status = None;
 }
 
@@ -1806,38 +1807,153 @@ pub(super) fn remove_ssh_host_from(
     }
 }
 
-/// Open the launcher again after a save or a removal, with `status` in its
-/// hint lane. After a save the query is the saved name and the saved host's
-/// row is selected by identity, not by rank; after a removal the query is
-/// empty.
+/// Put an open launcher's selection back on row 0 when `hosts` is not the
+/// list it was showing. Called for every window after a reload and after a
+/// Save or Remove in any window, since `cfg` is shared: rows shift, and an
+/// index that pointed at a host could otherwise land on the Save or Remove
+/// row that ends a shorter list. Row 0 is never an action row.
+pub(super) fn sync_ssh_hosts(ws: &mut WindowState, hosts: &[(String, String)]) {
+    if ws.ssh_hosts_shown == hosts {
+        return;
+    }
+    ws.ssh_hosts_shown = hosts.to_vec();
+    if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        *selected = 0;
+        ws.accessibility_pending = true;
+    }
+}
+
+/// Open the launcher again after a save, a removal or a failed write, with
+/// `query` typed and `status` in its hint lane. `select` names the configured
+/// host to select by identity, not by rank; otherwise row 0 is selected.
 pub(super) fn reopen_ssh_launcher(
     ws: &mut WindowState,
     cfg: &Config,
     ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
-    saved: Option<(&str, &str)>,
+    query: &str,
+    select: Option<(&str, &str)>,
     status: String,
 ) {
     open_ssh_launcher(ws, cfg, ssh_config);
-    let Some((query, selected)) = ws.ssh_input.as_mut() else {
+    let Some((editor, selected)) = ws.ssh_input.as_mut() else {
         return;
     };
-    let _ = query.replace_all(
-        saved.map_or("", |(name, _)| name),
-        crate::modal_input::MAX_MODAL_INPUT_BYTES,
-    );
-    if let Some((name, target)) = saved {
-        let rows = ssh_rows(query, &cfg.ssh_hosts, &ws.ssh_imported);
-        let saved_row = rows.iter().position(|row| {
+    let _ = editor.replace_all(query, crate::modal_input::MAX_MODAL_INPUT_BYTES);
+    if let Some((name, target)) = select {
+        let rows = ssh_rows(editor, &cfg.ssh_hosts, &ws.ssh_imported);
+        let row = rows.iter().position(|row| {
             matches!(row, SshRow::Configured(index)
                 if cfg.ssh_hosts.get(*index).is_some_and(|(n, t)| n == name && t == target))
         });
-        *selected = saved_row.unwrap_or(0);
+        *selected = row.unwrap_or(0);
     }
     ws.ssh_status = Some(crate::window_state::SshStatus {
         text: status,
-        query: query.text().to_string(),
+        query: editor.text().to_string(),
     });
     ws.accessibility_pending = true;
+}
+
+/// What the App still has to do after a Save or Remove step changed the
+/// window: everything that needs the event loop or other windows.
+#[derive(Debug)]
+pub(super) enum SshHostEffect {
+    /// The config changed: reset other windows' launcher selections.
+    Changed,
+    /// Ask before replacing the saved host.
+    Ask(Box<ConfirmDialogState>),
+    /// The write was refused or failed; notify.
+    NotSaved,
+    NotRemoved,
+    /// Nothing more.
+    None,
+}
+
+/// Enter in the Save row's name editor, with the editor already taken out of
+/// `ws`. An unusable name, or a write that fails, puts the editor back so the
+/// typed name is kept. A name saved with another target asks first. A save
+/// reopens the launcher on the saved host.
+pub(super) fn submit_ssh_host_name(
+    ws: &mut WindowState,
+    cfg: &mut Config,
+    path: Option<&std::path::Path>,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+    state: TitleEditState,
+    tr: &kettle_i18n::Translator,
+) -> SshHostEffect {
+    let TitleEditTarget::SshHost(target) = &state.target else {
+        return SshHostEffect::None;
+    };
+    let target = target.clone();
+    match ssh_save_plan(&cfg.ssh_hosts, state.input.text(), &target) {
+        SshSavePlan::Invalid => {
+            ws.editing_title = Some(state);
+            SshHostEffect::NotSaved
+        }
+        SshSavePlan::Replace { name, old_target } => {
+            SshHostEffect::Ask(Box::new(ssh_replace_dialog(tr, name, old_target, target)))
+        }
+        SshSavePlan::Write { name, expect } => {
+            if save_ssh_host_to(path, &mut cfg.ssh_hosts, &name, &target, &expect).is_err() {
+                ws.editing_title = Some(state);
+                return SshHostEffect::NotSaved;
+            }
+            let status = tr.ssh_status_saved(&name);
+            reopen_ssh_launcher(ws, cfg, ssh_config, &name, Some((&name, &target)), status);
+            SshHostEffect::Changed
+        }
+    }
+}
+
+/// A confirmed Replace or Remove. A Replace writes only if the file still
+/// gives the name the target the question showed. Success reopens the
+/// launcher as a Save or a removal does; a failure reopens it on what was
+/// typed (the new target, or the name) with a "not saved" or "not removed"
+/// status, so the failure shows even with notifications off.
+pub(super) fn confirm_ssh_host_change(
+    ws: &mut WindowState,
+    cfg: &mut Config,
+    path: Option<&std::path::Path>,
+    ssh_config: impl FnOnce() -> Option<std::path::PathBuf>,
+    action: ConfirmAction,
+    tr: &kettle_i18n::Translator,
+) -> SshHostEffect {
+    use kettle_config::ssh_config::HostExpect;
+    match action {
+        ConfirmAction::ReplaceSshHost {
+            name,
+            old_target,
+            new_target,
+        } => {
+            let expect = HostExpect::Target(old_target);
+            if save_ssh_host_to(path, &mut cfg.ssh_hosts, &name, &new_target, &expect).is_err() {
+                let status = tr.ssh_status_not_saved(&name);
+                reopen_ssh_launcher(ws, cfg, ssh_config, &new_target, None, status);
+                return SshHostEffect::NotSaved;
+            }
+            let status = tr.ssh_status_saved(&name);
+            reopen_ssh_launcher(
+                ws,
+                cfg,
+                ssh_config,
+                &name,
+                Some((&name, &new_target)),
+                status,
+            );
+            SshHostEffect::Changed
+        }
+        ConfirmAction::RemoveSshHost { name, target } => {
+            if remove_ssh_host_from(path, &mut cfg.ssh_hosts, &name, &target).is_err() {
+                let status = tr.ssh_status_not_removed(&name);
+                reopen_ssh_launcher(ws, cfg, ssh_config, &name, None, status);
+                return SshHostEffect::NotRemoved;
+            }
+            let status = tr.ssh_status_removed(&name);
+            reopen_ssh_launcher(ws, cfg, ssh_config, "", None, status);
+            SshHostEffect::Changed
+        }
+        _ => SshHostEffect::None,
+    }
 }
 
 impl App {
@@ -1865,112 +1981,68 @@ impl App {
         }
     }
 
-    /// Enter in the Save row's name editor. An unusable name keeps the
-    /// editor open, as a failed layout save does; a name saved with another
-    /// target asks first.
+    /// The config file Save and Remove write: the active one, which is the
+    /// profile file under `--profile`.
+    fn ssh_host_config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+    }
+
+    /// Enter in the Save row's name editor.
     pub(super) fn apply_ssh_host_name(&mut self, ws: &mut WindowState, state: TitleEditState) {
-        let TitleEditTarget::SshHost(target) = &state.target else {
-            return;
-        };
-        let target = target.clone();
-        match ssh_save_plan(&self.cfg.ssh_hosts, state.input.text(), &target) {
-            SshSavePlan::Invalid => {
-                self.notify_ssh_host_not_saved();
-                ws.editing_title = Some(state);
-            }
-            SshSavePlan::Replace { name, old_target } => {
-                let dialog = ssh_replace_dialog(&self.ui_text, name, old_target, target);
-                self.close_all_modals(ws);
-                self.install_confirm_dialog(ws, dialog);
-            }
-            SshSavePlan::Write { name, expect } => {
-                if !self.write_ssh_host(ws, &name, &target, &expect) {
-                    ws.editing_title = Some(state);
+        let path = self.ssh_host_config_path();
+        self.close_all_modals(ws);
+        let tr = self.ui_text;
+        let effect = submit_ssh_host_name(
+            ws,
+            &mut self.cfg,
+            path.as_deref(),
+            kettle_config::ssh_config::user_ssh_config_path,
+            state,
+            &tr,
+        );
+        self.finish_ssh_host_effect(ws, effect);
+    }
+
+    /// A confirmed Replace or Remove question.
+    pub(super) fn run_ssh_host_confirm(&mut self, ws: &mut WindowState, action: ConfirmAction) {
+        let path = self.ssh_host_config_path();
+        self.close_all_modals(ws);
+        let tr = self.ui_text;
+        let effect = confirm_ssh_host_change(
+            ws,
+            &mut self.cfg,
+            path.as_deref(),
+            kettle_config::ssh_config::user_ssh_config_path,
+            action,
+            &tr,
+        );
+        self.finish_ssh_host_effect(ws, effect);
+    }
+
+    fn finish_ssh_host_effect(&mut self, ws: &mut WindowState, effect: SshHostEffect) {
+        use kettle_i18n::Text;
+        match effect {
+            SshHostEffect::Changed => {
+                // `cfg` is shared: every other open launcher's rows moved.
+                for sibling in self.windows.values_mut() {
+                    sync_ssh_hosts(sibling, &self.cfg.ssh_hosts);
                 }
             }
+            SshHostEffect::Ask(dialog) => self.install_confirm_dialog(ws, *dialog),
+            SshHostEffect::NotSaved => fire_notify(
+                self.ui_text.text(Text::NotifySshHostNotSaved),
+                self.ui_text.text(Text::NotifySshHostNotSavedBody),
+            ),
+            SshHostEffect::NotRemoved => fire_notify(
+                self.ui_text.text(Text::NotifySshHostNotRemoved),
+                self.ui_text.text(Text::NotifySshHostNotRemovedBody),
+            ),
+            SshHostEffect::None => {}
         }
-    }
-
-    /// Write a Save to the active config file (the profile file under
-    /// `--profile`) and reopen the launcher on the saved host.
-    pub(super) fn write_ssh_host(
-        &mut self,
-        ws: &mut WindowState,
-        name: &str,
-        target: &str,
-        expect: &kettle_config::ssh_config::HostExpect,
-    ) -> bool {
-        let path = self
-            .config_path
-            .clone()
-            .or_else(kettle_config::Config::default_path);
-        if save_ssh_host_to(
-            path.as_deref(),
-            &mut self.cfg.ssh_hosts,
-            name,
-            target,
-            expect,
-        )
-        .is_err()
-        {
-            self.notify_ssh_host_not_saved();
-            return false;
-        }
-        let status = self.ui_text.ssh_status_saved(name);
-        self.close_all_modals(ws);
-        reopen_ssh_launcher(
-            ws,
-            &self.cfg,
-            kettle_config::ssh_config::user_ssh_config_path,
-            Some((name, target)),
-            status,
-        );
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
-        true
-    }
-
-    /// A confirmed Remove: drop the host from the active config file and
-    /// reopen the launcher.
-    pub(super) fn remove_configured_ssh_host(
-        &mut self,
-        ws: &mut WindowState,
-        name: &str,
-        target: &str,
-    ) {
-        let path = self
-            .config_path
-            .clone()
-            .or_else(kettle_config::Config::default_path);
-        if remove_ssh_host_from(path.as_deref(), &mut self.cfg.ssh_hosts, name, target).is_err() {
-            fire_notify(
-                self.ui_text
-                    .text(kettle_i18n::Text::NotifySshHostNotRemoved),
-                self.ui_text
-                    .text(kettle_i18n::Text::NotifySshHostNotRemovedBody),
-            );
-            return;
-        }
-        let status = self.ui_text.ssh_status_removed(name);
-        self.close_all_modals(ws);
-        reopen_ssh_launcher(
-            ws,
-            &self.cfg,
-            kettle_config::ssh_config::user_ssh_config_path,
-            None,
-            status,
-        );
-        if let Some(window) = &ws.window {
-            window.request_redraw();
-        }
-    }
-
-    fn notify_ssh_host_not_saved(&self) {
-        fire_notify(
-            self.ui_text.text(kettle_i18n::Text::NotifySshHostNotSaved),
-            self.ui_text
-                .text(kettle_i18n::Text::NotifySshHostNotSavedBody),
-        );
     }
 }

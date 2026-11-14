@@ -1262,20 +1262,9 @@ impl App {
             } => {
                 self.apply_keybind_rebind(trig, act, action_name);
             }
-            ConfirmAction::ReplaceSshHost {
-                name,
-                old_target,
-                new_target,
-            } => {
-                self.write_ssh_host(
-                    ws,
-                    &name,
-                    &new_target,
-                    &kettle_config::ssh_config::HostExpect::Target(old_target),
-                );
-            }
-            ConfirmAction::RemoveSshHost { name, target } => {
-                self.remove_configured_ssh_host(ws, &name, &target);
+            action @ (ConfirmAction::ReplaceSshHost { .. }
+            | ConfirmAction::RemoveSshHost { .. }) => {
+                self.run_ssh_host_confirm(ws, action);
             }
         }
     }
