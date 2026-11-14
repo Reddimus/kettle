@@ -1045,6 +1045,53 @@ notification_toast_a11y_unsourced = "draft"
 notification_toast_more = "draft"
 notification_toast_a11y_repeats = "draft"
 
+# 2026-11-14: the C14 paste-safety messages below (Confirm paste reasons,
+# findings, access keys, policy line, the Paste protection and Clipboard
+# access rows, and the named OSC 52 notices) are model drafts. They await
+# the reviewer in rendered Spanish UI; the confirm_paste_* and osc52_*_by
+# messages are also listed for the screen-reader second pass.
+confirm_paste_reason_lines = "draft"
+confirm_paste_reason_controls = "draft"
+confirm_paste_reason_always = "draft"
+confirm_paste_finding_end_marker = "draft"
+confirm_paste_finding_end_marker_c1 = "draft"
+confirm_paste_finding_interrupt = "draft"
+confirm_paste_finding_suspend = "draft"
+confirm_paste_finding_quit = "draft"
+confirm_paste_finding_end_of_input = "draft"
+confirm_paste_finding_escape = "draft"
+confirm_paste_finding_bell = "draft"
+confirm_paste_finding_backspace = "draft"
+confirm_paste_finding_delete = "draft"
+confirm_paste_finding_control = "draft"
+confirm_paste_finding_c1 = "draft"
+confirm_paste_settings = "draft"
+confirm_paste_key_cancel = "draft"
+confirm_paste_key_without_controls = "draft"
+confirm_paste_key_one_line = "draft"
+confirm_paste_key_paste = "draft"
+confirm_paste_key_settings = "draft"
+confirm_paste_a11y_escape = "draft"
+confirm_paste_a11y_settings = "draft"
+settings_field_paste_protection = "draft"
+settings_description_field_paste_protection = "draft"
+settings_field_osc52 = "draft"
+settings_description_field_osc52 = "draft"
+settings_value_copy_only = "draft"
+settings_value_read_only = "draft"
+settings_value_copy_and_read = "draft"
+confirm_paste_reason_marker = "draft"
+confirm_paste_trailing_break = "draft"
+confirm_paste_policy = "draft"
+confirm_paste_a11y_control = "draft"
+confirm_paste_a11y_preview = "draft"
+confirm_paste_a11y_access_key = "draft"
+osc52_denied_read_by = "draft"
+osc52_denied_write_by = "draft"
+confirm_paste_more_kinds = "draft"
+confirm_paste_a11y_finding = "draft"
+osc52_copied_by = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1209,4 +1256,38 @@ keys = [
     "notification_toast_a11y_unsourced",
     "notification_toast_more",
     "notification_toast_a11y_repeats",
+    "confirm_paste_reason_lines",
+    "confirm_paste_reason_controls",
+    "confirm_paste_reason_always",
+    "confirm_paste_finding_end_marker",
+    "confirm_paste_finding_end_marker_c1",
+    "confirm_paste_finding_interrupt",
+    "confirm_paste_finding_suspend",
+    "confirm_paste_finding_quit",
+    "confirm_paste_finding_end_of_input",
+    "confirm_paste_finding_escape",
+    "confirm_paste_finding_bell",
+    "confirm_paste_finding_backspace",
+    "confirm_paste_finding_delete",
+    "confirm_paste_finding_control",
+    "confirm_paste_finding_c1",
+    "confirm_paste_settings",
+    "confirm_paste_key_cancel",
+    "confirm_paste_key_without_controls",
+    "confirm_paste_key_one_line",
+    "confirm_paste_key_paste",
+    "confirm_paste_key_settings",
+    "confirm_paste_a11y_escape",
+    "confirm_paste_a11y_settings",
+    "confirm_paste_reason_marker",
+    "confirm_paste_trailing_break",
+    "confirm_paste_policy",
+    "confirm_paste_a11y_control",
+    "confirm_paste_a11y_preview",
+    "confirm_paste_a11y_access_key",
+    "osc52_denied_read_by",
+    "osc52_denied_write_by",
+    "confirm_paste_more_kinds",
+    "confirm_paste_a11y_finding",
+    "osc52_copied_by",
 ]

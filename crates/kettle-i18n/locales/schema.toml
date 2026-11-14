@@ -3112,3 +3112,140 @@ plural = "count"
 context = "crates/kettle-ui/src/app/notification_toast.rs: screen-reader description of a notification toast whose program sent the same notification count times; read instead of the visible repeat counter. The subject is the notification (feminine in Spanish)."
 args = [{ name = "count", type = "u64" }]
 plural = "count"
+
+[messages.confirm_paste_reason_lines]
+context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when the text has line breaks and a receiving program (one pane, or several under broadcast) has bracketed paste off. Also read by screen readers. Bracketed paste is the terminal mode that marks pasted text; Enter is the key."
+
+[messages.confirm_paste_reason_controls]
+context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when the text has control characters, no line break, and a receiving program has bracketed paste off. Also read by screen readers."
+
+[messages.confirm_paste_reason_always]
+context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when only the paste-protection = always policy asked. Always is the Settings value settings_value_always; Paste protection is the Settings row settings_field_paste_protection."
+
+[messages.confirm_paste_finding_end_marker]
+context = "crates/kettle-ui/src/app/paste.rs: meaning column of a findings row in the Confirm paste dialog, beside the token ESC[201~. Lower case, no period."
+
+[messages.confirm_paste_finding_end_marker_c1]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token CSI 201~, the same end code written with the one-character 8-bit CSI control. Lower case, no period."
+
+[messages.confirm_paste_finding_interrupt]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ^C in the paste findings: the terminal interrupts the running program. Keep the key name."
+
+[messages.confirm_paste_finding_suspend]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ^Z in the paste findings: the terminal suspends the running program. Keep the key name."
+
+[messages.confirm_paste_finding_quit]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ^\\ in the paste findings: the terminal makes the running program quit. Keep the key name, with no code marks around it."
+
+[messages.confirm_paste_finding_end_of_input]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ^D in the paste findings: a shell reads it as the end of its input and may exit. Keep the key name."
+
+[messages.confirm_paste_finding_escape]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ESC in the paste findings. The receiving program reads the character as input. Lower case, no period."
+
+[messages.confirm_paste_finding_bell]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token BEL in the paste findings, and the name a screen reader hears for that control in the preview."
+
+[messages.confirm_paste_finding_backspace]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token ^H in the paste findings, and the name a screen reader hears for that control in the preview."
+
+[messages.confirm_paste_finding_delete]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of the token DEL in the paste findings, and the name a screen reader hears for that control in the preview."
+
+[messages.confirm_paste_finding_control]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of any other control character in the paste findings, beside its caret form such as ^A."
+
+[messages.confirm_paste_finding_c1]
+context = "crates/kettle-ui/src/app/paste.rs: meaning of a C1 control (CSI, OSC, DCS, ST or U+0085 style) in the paste findings."
+
+[messages.confirm_paste_settings]
+context = "crates/kettle-ui/src/app/paste.rs: link at the end of the policy line in the Confirm paste dialog. It cancels the paste and opens Settings on the Paste protection row. Keep the ellipsis."
+
+[messages.confirm_paste_key_cancel]
+context = "crates/kettle-ui/src/app/paste.rs: access key of the Cancel button (confirm_button_cancel) in the Confirm paste dialog on Linux and Windows, pressed with Alt. One letter that occurs in that label and is unique among the confirm_paste_key letters of the language."
+
+[messages.confirm_paste_key_without_controls]
+context = "crates/kettle-ui/src/app/paste.rs: access key of Paste without controls (confirm_paste_without_controls). One letter of that label, unique among the confirm_paste_key letters of the language."
+
+[messages.confirm_paste_key_one_line]
+context = "crates/kettle-ui/src/app/paste.rs: access key of Paste as one line (confirm_paste_one_line). One letter of that label, unique among the confirm_paste_key letters of the language."
+
+[messages.confirm_paste_key_paste]
+context = "crates/kettle-ui/src/app/paste.rs: access key of the Paste button (menu_paste) in the Confirm paste dialog. One letter of that label, unique among the confirm_paste_key letters of the language."
+
+[messages.confirm_paste_key_settings]
+context = "crates/kettle-ui/src/app/paste.rs: access key of the Paste settings link (confirm_paste_settings). One letter of that label, unique among the confirm_paste_key letters of the language."
+
+[messages.confirm_paste_a11y_escape]
+context = "crates/kettle-ui/src/app/paste.rs: what a screen reader hears for an ESC character inside the paste preview, so it cannot be mistaken for the typed word. Needs screen-reader second pass."
+
+[messages.confirm_paste_a11y_settings]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader description of the Paste settings link in the Confirm paste dialog. Paste protection is the Settings row settings_field_paste_protection. Needs screen-reader second pass."
+
+[messages.settings_field_paste_protection]
+context = "crates/kettle-ui/src/settings.rs: Settings row in Behavior for the paste-protection key: when Kettle asks before pasting text. Also named in the Confirm paste dialog."
+
+[messages.settings_description_field_paste_protection]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters."
+
+[messages.settings_field_osc52]
+context = "crates/kettle-ui/src/settings.rs: Settings row in Behavior for the osc52 key: whether programs running in a pane may set or read the system clipboard through the OSC 52 escape sequence."
+
+[messages.settings_description_field_osc52]
+context = "crates/kettle-ui/src/settings.rs: Settings description; English budget 70 characters. Keep OSC 52."
+
+[messages.settings_value_copy_only]
+context = "crates/kettle-ui/src/settings.rs: value of Clipboard access by programs: programs may set the clipboard and may not read it (osc52 = copy)."
+
+[messages.settings_value_read_only]
+context = "crates/kettle-ui/src/settings.rs: value of Clipboard access by programs: programs may read the clipboard and may not set it (osc52 = paste). Not the read-only pane state."
+
+[messages.settings_value_copy_and_read]
+context = "crates/kettle-ui/src/settings.rs: value of Clipboard access by programs: programs may both set and read the clipboard (osc52 = both)."
+
+[messages.confirm_paste_reason_marker]
+context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when the text holds a bracketed-paste end code. marker is the code found, ESC[201~ or CSI 201~, shown verbatim. Also read by screen readers."
+args = [{ name = "marker", type = "str" }]
+
+[messages.confirm_paste_trailing_break]
+context = "crates/kettle-ui/src/app/paste.rs: line-count fragment of the paste summary when the text ends with a line break. lines is confirm_paste_lines already formatted, such as 1 line."
+args = [{ name = "lines", type = "str" }]
+
+[messages.confirm_paste_policy]
+context = "crates/kettle-ui/src/app/paste.rs: policy line above the buttons of the Confirm paste dialog. value is the Settings value in force, settings_value_automatic or settings_value_always."
+args = [{ name = "value", type = "str" }]
+
+[messages.confirm_paste_a11y_control]
+context = "crates/kettle-ui/src/app/paste.rs: what a screen reader hears for a control character inside the paste preview. name is its meaning (bell, backspace, delete), its key such as Ctrl+C, or its code such as CSI or U+0085. Needs screen-reader second pass."
+args = [{ name = "name", type = "str" }]
+
+[messages.confirm_paste_a11y_preview]
+context = "crates/kettle-ui/src/app/paste.rs: last part of the Confirm paste dialog's screen-reader description. preview is the bounded preview of the pasted text with each control character spoken as words. Needs screen-reader second pass."
+args = [{ name = "preview", type = "str" }]
+
+[messages.confirm_paste_a11y_access_key]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader description of a Confirm paste button or link on Linux and Windows. key is its one-letter access key. Keep Alt. Needs screen-reader second pass."
+args = [{ name = "key", type = "str" }]
+
+[messages.osc52_denied_read_by]
+context = "crates/kettle-ui/src/app/clipboard.rs: pane clipboard-policy notice when the program in the pane is known. program is its name only, shown verbatim, at most 32 characters. Keep the osc52 key and values literal. Also a screen-reader live region."
+args = [{ name = "program", type = "str" }]
+
+[messages.osc52_denied_write_by]
+context = "crates/kettle-ui/src/app/clipboard.rs: pane clipboard-policy notice when the program in the pane is known. program is its name only, shown verbatim, at most 32 characters. Keep the osc52 key and values literal. Also a screen-reader live region."
+args = [{ name = "program", type = "str" }]
+
+[messages.confirm_paste_more_kinds]
+context = "crates/kettle-ui/src/app/paste.rs: last findings row of the Confirm paste dialog when the text holds more kinds of control character than the four rows shown. count is the number of kinds left out."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste_a11y_finding]
+context = "crates/kettle-ui/src/app/paste.rs: one findings row of the Confirm paste dialog as a screen reader hears it. token is the control as shown (ESC[201~, ^C), meaning its confirm_paste_finding text, count how often it occurs. Needs screen-reader second pass."
+args = [{ name = "token", type = "str" }, { name = "meaning", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
+
+[messages.osc52_copied_by]
+context = "crates/kettle-ui/src/app/clipboard.rs: per-pane notice after a known program sets the clipboard. program is its name only, shown verbatim, at most 32 characters; count is Unicode code points. No clipboard text is shown. Also a screen-reader live region."
+args = [{ name = "program", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
