@@ -30,7 +30,7 @@ graph TD
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     cfg --> i18n
     cfg --> ctl
-    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · ssh_config Host aliases · fuzzy matcher<br/>command palette · atomic persist_config_toggle"] --> state
+    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · ssh_config Host aliases · fuzzy matcher<br/>command palette · atomic persist_config_toggle · ssh-host writers"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
@@ -1815,6 +1815,25 @@ is never persisted or logged. A connected alias does reach the pane's argv,
 and so the session file and titles, as a typed target does. Every launcher
 spawn is `ssh -t -- <target>` from `mux::ssh_tab_argv`, which refuses a target
 that `is_valid_ssh_target` rejects.
+
+At most one action row ends that list: `SaveTyped` for a valid target no
+configured name or target equals, or `Remove` when row 0 is the configured
+host the query names. `SshRow::is_action` keeps them out of everything but a
+deliberate Down or a press on the row: the Up wrap, the clamp after the list
+shrinks, and the wheel limit in `apply_picker_pointer` all skip them, and a
+hover selects nothing. Save opens the title editor with
+`TitleEditScope::SaveSshHost` and `TitleEditTarget::SshHost`, which no pane
+exit makes stale. Remove and a Save over an existing name go through
+`ConfirmAction::RemoveSshHost` and `ReplaceSshHost`, Cancel first. The
+writes are `kettle_config::ssh_config::upsert_ssh_host` and
+`remove_ssh_host`, built on the same `ConfigEdit` as the other config
+writers. The upsert takes a `HostExpect` (absent, or a specific old target)
+and checks it against the file as read under the lock, so a hand edit the
+in-memory list has not reloaded yet is refused as `WouldBlock` rather than
+overwritten. On success `cfg.ssh_hosts` changes in place and the launcher
+reopens with `ws.ssh_status`, which the hint lane paints and the picker's
+accessibility projection announces as a polite `Status` node. Failures are
+logged by `ErrorKind` only.
 
 Transient popups share one outside-press dispatch and consume the dismissing
 click: context menus, the command palette, theme/layout pickers, SSH, title

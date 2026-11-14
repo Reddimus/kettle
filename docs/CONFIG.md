@@ -164,7 +164,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `word-delimiters` (`selection-word-chars`, `semantic-escape-chars`) | string | engine default | Characters that delimit a word for double-click selection. Leave empty for the engine default. For example, `()[]{}` makes `/` part of a word so paths and URLs select as one unit |
 | `font-feature` | string | — | OpenType feature(s), repeatable / comma-list. Forms: `liga`, `+calt`, `-liga`, `liga off`, `ss01`, `cv01=2`, `zero 1`. Applied on top of the ligature toggle |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
-| `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher. The name is a label of 1–128 bytes with no `=` and no control or bidi characters; interior spaces are fine. The target is at most 512 bytes, cannot start with `-` and cannot contain whitespace, control or bidi characters; Kettle passes it to `ssh` after `--`. Entries that break these rules are ignored and reported by `--check-config` |
+| `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher, which can also add and remove these lines (see [SSH launcher](#ssh-launcher)). The name is a label of 1–128 bytes with no `=` and no control or bidi characters; interior spaces are fine. The target is at most 512 bytes, cannot start with `-` and cannot contain whitespace, control or bidi characters; Kettle passes it to `ssh` after `--`. Entries that break these rules are ignored and reported by `--check-config` |
 | `ssh-config-hosts` | bool | `true` | The SSH launcher also lists the `Host` aliases in `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows), read each time the launcher opens. See [SSH launcher](#ssh-launcher). `false` stops Kettle reading that file |
 | `keybind` | `trigger=action` | built in map | Repeatable |
 | `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
@@ -215,6 +215,35 @@ connects to without any navigation, depends on what you typed (trimmed):
 
 Enter connects to the selected row as `ssh -t -- <target>`. Tab completes to
 the selected host, or from the Connect row to the best match below it.
+
+**Saving and removing hosts.** One action row ends the list when it applies.
+The mouse wheel, an Up press from the first row, a hover, and a selection
+moved after the list shrank never land on it: press Down to it, or click it.
+
+- **Save "…" as a host…** shows when the typed text is a valid target that no
+  `ssh-host` name or target equals, ignoring ASCII case. It asks for a name,
+  starting from the target's host (`me@db.example.com:2222` suggests
+  `db.example.com`), and adds `ssh-host = NAME=TARGET` to the active config
+  file: the `--config` or `--profile` file when one is in use, otherwise the
+  default one. A name that already has another target asks first
+  (**Replace**, with Cancel as the default) and then rewrites that line in
+  place; other lines with the same name are removed. To change a host's
+  target, type the new target, choose Save, and give the same name.
+- **Remove "…" from Kettle…** shows when the typed text is exactly an
+  `ssh-host` name, ignoring ASCII case. It asks first (**Remove**, with Cancel
+  as the default), then deletes that name's lines with that target. Kettle
+  never writes `~/.ssh/config`, so an imported alias has no Remove row.
+
+Both check the file as it is when they write. If it changed since Kettle last
+read it, for example a host added by hand that has not been reloaded yet,
+nothing is written and a notification says so; try again once the config has
+reloaded. The write keeps comments, line endings and the file's encoding,
+lands where Kettle reads it in a Terminator-style file, and keeps a `.bak` of
+the file as it was before Kettle first changed it. The launcher then reopens,
+on the saved host after a save or empty after a removal, with `Saved "…"` or
+`Removed "…"` in place of the key hint until you type; screen readers hear
+it as a polite status. Logs name the kind of failure only, never a host, a
+target or a path.
 
 **What is read.** Only when `ssh-config-hosts` is on (the default), and only
 when the launcher opens: `$HOME/.ssh/config`, or `%USERPROFILE%\.ssh\config`

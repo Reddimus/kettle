@@ -57,6 +57,15 @@ save when empty. Layouts keep normal windows, tabs, splits and directories;
 quick-terminal windows are excluded. Opening a layout launches new shells or
 saved commands, without prior terminal output or running process state.
 
+The **SSH launcher** (`Ctrl+Shift+S`) lists your `ssh-host` entries and the
+`Host` aliases in `~/.ssh/config`. Type a target such as `me@db.example.com`
+and press Enter to connect to it. To keep it, press Down to
+**Save "…" as a host…**, accept or change the suggested name, and press Enter;
+the launcher reopens with the new host selected. Type a saved name exactly and
+press Down to **Remove "…" from Kettle…**, which asks before it deletes the
+entry. Saving under a name that already exists asks before it replaces that
+host's target. Kettle never edits `~/.ssh/config` itself.
+
 Use the palette's broadcast actions to send input to all panes, a group or a
 window, and choose broadcast off to stop. See
 [Sessions, profiles and layouts](../README.md#sessions-profiles-and-layouts)
