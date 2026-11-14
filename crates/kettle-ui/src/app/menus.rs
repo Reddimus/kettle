@@ -472,7 +472,9 @@ impl App {
         // `grouped_terminal_menu` puts the first after Select All and the
         // jumps after Find.
         if let Some(pane) = ws.mux.focused() {
-            items.push(command_output_menu_row(&pane.term, clicked_row, &tr));
+            let in_output =
+                clicked_row.is_some_and(|row| pane.term.command_output_rows(Some(row)).is_some());
+            items.push(command_output_menu_row(in_output, &tr));
             items.extend(pane_prompt_menu_rows(&pane.term, &tr));
         }
         // The Broadcast Input rows, as radio rows; `grouped_terminal_menu`
@@ -684,7 +686,7 @@ impl App {
             self.focused_terminal(ws, self.area(ws)).and_then(|rect| {
                 let (point, _) = self.px_to_point(ws, rect, px, py);
                 let row = usize::try_from(point.line.0).ok()?;
-                viewport_row_id(&ws.mux.panes.get(&ws.mux.active_focus()?)?.term, row)
+                viewport_row_id(&ws.mux.panes.get(&ws.mux.active_focus()?)?.term.term, row)
             })
         } else {
             None
@@ -3532,25 +3534,24 @@ pub(super) fn pane_prompt_menu_rows(
     prompt_menu_rows(!term.prompt_marks().is_empty(), &term.keyboard_claims(), tr)
 }
 
-/// Select Command Output, enabled only when the right-clicked row `clicked`
-/// lies in a completed command's output in `term`.
+/// Select Command Output, enabled only when the right-clicked row lies in a
+/// completed command's output (`in_output`).
 pub(super) fn command_output_menu_row(
-    term: &kettle_core::Terminal,
-    clicked: Option<u64>,
+    in_output: bool,
     tr: &kettle_i18n::Translator,
 ) -> ContextMenuItem {
     ContextMenuItem::Item {
         label: tr.text(kettle_i18n::Text::MenuSelectCommandOutput),
         action: Action::SelectCommandOutput,
-        enabled: clicked.is_some_and(|row| term.command_output_rows(Some(row)).is_some()),
+        enabled: in_output,
     }
 }
 
 /// The stable row id of visible row `row` of `term`'s view, while that row
 /// is on screen.
-pub(super) fn viewport_row_id(term: &kettle_core::Terminal, row: usize) -> Option<u64> {
+pub(super) fn viewport_row_id(term: &kettle_core::term::SharedTerm, row: usize) -> Option<u64> {
     use kettle_core::Dimensions as _;
-    let term = term.term.lock().ok()?;
+    let term = term.lock().ok()?;
     let grid = term.grid();
     (row < grid.screen_lines()).then(|| {
         grid.history_origin()

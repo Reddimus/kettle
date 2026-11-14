@@ -1934,15 +1934,24 @@ impl App {
 /// there is no such output (see
 /// [`kettle_core::Terminal::command_output_rows`]).
 pub(super) fn select_command_output(term: &kettle_core::Terminal, at: Option<u64>) -> bool {
+    term.command_output_rows(at)
+        .is_some_and(|rows| select_output_rows(&term.term, rows))
+}
+
+/// Select stable row ids `start..end` of `term` as whole rows, and scroll the
+/// first into view when it is off screen. `false`, changing nothing, when
+/// none of the rows is retained.
+pub(super) fn select_output_rows(
+    term: &kettle_core::term::SharedTerm,
+    (start, end): (u64, u64),
+) -> bool {
     use kettle_core::Dimensions as _;
-    let Some((start, end)) = term.command_output_rows(at) else {
+    let Ok(mut t) = term.lock() else {
         return false;
     };
-    let Ok(mut t) = term.term.lock() else {
-        return false;
-    };
-    // The reader may have scrolled between the two locks. Row ids hold still
-    // while text moves, so convert under this lock and keep what is retained.
+    // The reader may have scrolled since the rows were looked up. Row ids hold
+    // still while text moves, so convert under this lock and keep what is
+    // retained.
     let grid = t.grid();
     let history = grid.history_size();
     let screen_lines = grid.screen_lines();

@@ -162,6 +162,28 @@ impl CommandMarks {
         }
     }
 
+    /// [`Self::output_rows`] over `term`'s retained rows, as
+    /// [`super::Terminal::command_output_rows`] answers: nothing while the
+    /// alternate screen is up.
+    pub(super) fn output_rows_in(
+        &mut self,
+        term: &super::Term<crate::EventProxy>,
+        at: Option<u64>,
+    ) -> Option<(u64, u64)> {
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return None;
+        }
+        let grid = term.grid();
+        let origin = grid.history_origin();
+        let end = origin
+            .saturating_add(grid.history_size() as u64)
+            .saturating_add(grid.screen_lines() as u64);
+        self.output_rows(at, origin, end)
+    }
+
     pub(super) fn apply_batch(&mut self, batch: &GraphicsEventBatch) {
         if batch.overflowed {
             self.invalidate();
@@ -545,36 +567,60 @@ mod tests {
             tx.send(super::super::TermEvent::PtyWrite("REPLY\r\n".into()))
                 .unwrap();
         }
-        let pane = super::super::test_input::with_input(raw.then_some(input_tx), || {
-            Terminal::new_with_launch_environment(
-                &[
-                    std::env::current_exe().unwrap().to_str().unwrap().into(),
-                    "--exact".into(),
-                    "term::command_marks::tests::command_mark_wire_child".into(),
-                    "--nocapture".into(),
-                    "--quiet".into(),
-                ],
-                None,
-                history,
-                0,
-                PtyGeometry::from_cell_size(80, 6, 8, 16),
-                false,
-                CursorShape::Block,
-                None,
-                "xterm-256color",
-                "truecolor",
-                &[(FIXTURE_ENV.into(), if raw { "" } else { wire }.into())],
-                &LaunchOverrides::default(),
-                false,
-                false,
-                &crate::shell_startup::ShellStartup::default(),
-                TerminalCapabilities::default(),
-                WorkingDirectoryPolicy::FallbackToHome,
-                tx,
-                waker,
-                raw.then(|| PtyOutputSender::lossless(output_tx)),
-            )
-        });
+        // Opening /dev/ptmx (posix_openpt, under openpty) on macOS fails now
+        // and then with errno -6 while other threads or processes open
+        // pseudoterminals at the same moment, with far fewer in use than
+        // kern.tty.ptmx_max allows. Open one fixture terminal at a time, and
+        // retry that failure a few times for opens elsewhere on the machine.
+        static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let opening = OPENING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut retries = 0;
+        let pane = loop {
+            let created =
+                super::super::test_input::with_input(raw.then(|| input_tx.clone()), || {
+                    Terminal::new_with_launch_environment(
+                        &[
+                            std::env::current_exe().unwrap().to_str().unwrap().into(),
+                            "--exact".into(),
+                            "term::command_marks::tests::command_mark_wire_child".into(),
+                            "--nocapture".into(),
+                            "--quiet".into(),
+                        ],
+                        None,
+                        history,
+                        0,
+                        PtyGeometry::from_cell_size(80, 6, 8, 16),
+                        false,
+                        CursorShape::Block,
+                        None,
+                        "xterm-256color",
+                        "truecolor",
+                        &[(FIXTURE_ENV.into(), if raw { "" } else { wire }.into())],
+                        &LaunchOverrides::default(),
+                        false,
+                        false,
+                        &crate::shell_startup::ShellStartup::default(),
+                        TerminalCapabilities::default(),
+                        WorkingDirectoryPolicy::FallbackToHome,
+                        tx.clone(),
+                        waker.clone(),
+                        raw.then(|| PtyOutputSender::lossless(output_tx.clone())),
+                    )
+                });
+            match created {
+                Err(error) if retries < 4 && format!("{error:#}").contains("failed to openpty") => {
+                    eprintln!("command-mark fixture: retrying after {error:#}");
+                    retries += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                created => break created,
+            }
+        };
+        drop(opening);
+        // The terminal holds the only senders, as it did before a retry.
+        drop((tx, input_tx, output_tx));
         let pane = pane.expect("command-mark fixture");
         #[cfg(windows)]
         let mut pane = pane;
@@ -675,23 +721,112 @@ mod tests {
         assert_rows(&pane, &[(2, 7)]);
     }
 
-    /// The output rows of the command holding relative row `at`, or of the
-    /// newest command, relative to the active screen's top.
-    fn relative_output(pane: &super::super::Terminal, at: Option<i64>) -> Option<(i128, i128)> {
-        use alacritty_terminal::grid::Dimensions;
-        let screen_top = {
-            let term = pane.term.lock().unwrap();
-            term.grid().history_origin() + term.grid().history_size() as u64
-        };
-        let at = at.map(|row| screen_top.checked_add_signed(row).unwrap());
-        let (start, end) = pane.command_output_rows(at)?;
-        Some((
-            i128::from(start) - i128::from(screen_top),
-            i128::from(end) - i128::from(screen_top),
-        ))
+    /// `wire` parsed into a bare 80x6 engine with `history` rows of
+    /// scrollback, after the fixture's clear, and its command marks kept as
+    /// the reader keeps them: the real extractor splits off OSC 133, the VT
+    /// parser takes the rest, and each text chunk's scroll journal reaches the
+    /// marks before the next mark applies. There is no pseudoterminal, child
+    /// or reader thread, and no DEC 2026: these wires never synchronize.
+    struct Parsed {
+        term: super::super::Term<crate::EventProxy>,
+        marks: CommandMarks,
+        _events: crossbeam_channel::Receiver<super::super::TermEvent>,
+    }
+
+    fn parse(wire: &str, history: usize) -> Parsed {
+        use kettle_vt::{Chunk, Extractor, PromptKind};
+        let (tx, events) = crossbeam_channel::unbounded();
+        let mut term = super::super::Term::new(
+            super::super::TermConfig {
+                scrolling_history: history,
+                ..super::super::TermConfig::default()
+            },
+            &super::super::TermSize::new(80, 6),
+            crate::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        let mut processor: alacritty_terminal::vte::ansi::Processor = Default::default();
+        let mut marks = CommandMarks::default();
+        let wire = [b"\x1b[H\x1b[2J".as_slice(), wire.as_bytes()].concat();
+        for chunk in Extractor::for_shell().feed(&wire) {
+            // The reader's OSC 133 arms.
+            let boundary = match chunk {
+                Chunk::Pass(bytes) | Chunk::Terminal(bytes) => {
+                    processor.advance(&mut term, &bytes);
+                    marks.apply_batch(&term.take_graphics_events());
+                    continue;
+                }
+                Chunk::Prompt(
+                    PromptKind::PromptStart
+                    | PromptKind::IntegratedPromptStart(_)
+                    | PromptKind::CorrelationDisabledPromptStart,
+                ) => Boundary::PromptStart,
+                Chunk::Prompt(PromptKind::OutputStart | PromptKind::CorrelatedOutputStart(_)) => {
+                    Boundary::Begin
+                }
+                Chunk::Prompt(
+                    PromptKind::CommandEnd(code) | PromptKind::CorrelatedCommandEnd(code, _),
+                ) => Boundary::End(code),
+                Chunk::Prompt(PromptKind::CommandStart) => Boundary::Cancel,
+                _ => continue,
+            };
+            marks.apply_boundary(boundary, &term);
+        }
+        Parsed {
+            term,
+            marks,
+            _events: events,
+        }
+    }
+
+    impl Parsed {
+        fn screen_top(&self) -> u64 {
+            use alacritty_terminal::grid::Dimensions;
+            let grid = self.term.grid();
+            grid.history_origin() + grid.history_size() as u64
+        }
+
+        /// The output rows of the command holding relative row `at`, or of
+        /// the newest command, relative to the active screen's top, as
+        /// `Terminal::command_output_rows` finds them.
+        fn output(&mut self, at: Option<i64>) -> Option<(i128, i128)> {
+            let top = self.screen_top();
+            let at = at.map(|row| top.checked_add_signed(row).unwrap());
+            let (start, end) = self.marks.output_rows_in(&self.term, at)?;
+            Some((
+                i128::from(start) - i128::from(top),
+                i128::from(end) - i128::from(top),
+            ))
+        }
+
+        /// Completed commands' prompt rows, relative to the screen's top, and
+        /// exit codes.
+        fn rows(&mut self) -> Vec<(i128, i32)> {
+            use alacritty_terminal::grid::Dimensions;
+            let top = self.screen_top();
+            let end = top + self.term.grid().screen_lines() as u64;
+            let origin = self.term.grid().history_origin();
+            self.marks
+                .retained(origin, end)
+                .iter()
+                .map(|mark| (i128::from(mark.row) - i128::from(top), mark.exit_code))
+                .collect()
+        }
+
+        fn text(&self, row: i32) -> String {
+            use alacritty_terminal::index::{Column, Line};
+            (0..80)
+                .map(|col| self.term.grid()[Line(row)][Column(col)].c)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        }
     }
 
     const PROMPT: &str = "\x1b]133;A\x07$ ";
+
+    fn two_line_command() -> String {
+        format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}")
+    }
 
     /// `A … C \r\n out1 \r\n out2 \r\n D;0 A …`: the output is exactly the
     /// two rows between the command line and the next prompt, wherever the
@@ -701,23 +836,21 @@ mod tests {
     fn command_output_rows_are_the_rows_between_the_command_line_and_the_next_prompt() {
         for wire in [
             // C right after the command line, D at the start of the next row.
-            format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}"),
+            two_line_command(),
             // C at the start of the first output row, as bash, zsh and fish do.
             format!("{PROMPT}cmd\r\n\x1b]133;C\x07out1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}"),
             // Output without a final newline: D on its last row.
             format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\x1b]133;D;0\x07\r\n{PROMPT}"),
         ] {
-            let pane = pane(&wire, 4);
-            assert_text(&pane, 0, "$ cmd");
-            assert_text(&pane, 1, "out1");
-            assert_text(&pane, 2, "out2");
-            assert_text(&pane, 3, "$ ");
-            assert_rows(&pane, &[(0, 0)]);
-            assert_eq!(relative_output(&pane, None), Some((1, 3)), "{wire:?}");
-            assert_eq!(relative_output(&pane, Some(1)), Some((1, 3)));
-            assert_eq!(relative_output(&pane, Some(2)), Some((1, 3)));
-            assert_eq!(relative_output(&pane, Some(0)), None, "the command line");
-            assert_eq!(relative_output(&pane, Some(3)), None, "the next prompt");
+            let mut parsed = parse(&wire, 4);
+            let text: Vec<_> = (0..4).map(|row| parsed.text(row)).collect();
+            assert_eq!(text, ["$ cmd", "out1", "out2", "$"], "{wire:?}");
+            assert_eq!(parsed.rows(), [(0, 0)]);
+            assert_eq!(parsed.output(None), Some((1, 3)), "{wire:?}");
+            assert_eq!(parsed.output(Some(1)), Some((1, 3)));
+            assert_eq!(parsed.output(Some(2)), Some((1, 3)));
+            assert_eq!(parsed.output(Some(0)), None, "the command line");
+            assert_eq!(parsed.output(Some(3)), None, "the next prompt");
         }
     }
 
@@ -725,42 +858,67 @@ mod tests {
     /// command that printed nothing has no output either.
     #[test]
     fn a_command_without_c_or_output_has_no_output_rows() {
-        let no_c = pane(
+        let mut no_c = parse(
             &format!("{PROMPT}cmd\r\nout1\r\n\x1b]133;D;0\x07{PROMPT}"),
             4,
         );
-        assert_text(&no_c, 1, "out1");
-        assert_rows(&no_c, &[]);
-        assert_eq!(relative_output(&no_c, None), None);
-        assert_eq!(relative_output(&no_c, Some(1)), None);
+        assert_eq!(no_c.text(1), "out1");
+        assert_eq!(no_c.rows(), []);
+        assert_eq!(no_c.output(None), None);
+        assert_eq!(no_c.output(Some(1)), None);
 
-        let quiet = pane(
+        let mut quiet = parse(
             &format!("{PROMPT}cd\r\n\x1b]133;C\x07\x1b]133;D;0\x07{PROMPT}"),
             4,
         );
-        assert_rows(&quiet, &[(0, 0)]);
-        assert_eq!(relative_output(&quiet, None), None);
-    }
-
-    fn two_line_command() -> String {
-        format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}")
+        assert_eq!(quiet.rows(), [(0, 0)]);
+        assert_eq!(quiet.output(None), None);
     }
 
     /// The alternate screen hides the output as it hides the marks, and
-    /// leaving it shows them again; a column reflow drops them for good.
+    /// leaving it shows them again.
     #[test]
-    fn output_rows_are_hidden_on_the_alternate_screen_and_dropped_by_reflow() {
-        let alternate = pane(&format!("{}\x1b[?1049h", two_line_command()), 4);
-        assert_eq!(alternate.command_output_rows(None), None);
-        let mut back = pane(&format!("{}\x1b[?1049h\x1b[?1049l", two_line_command()), 4);
-        assert_eq!(relative_output(&back, None), Some((1, 3)));
+    fn output_rows_are_hidden_on_the_alternate_screen() {
+        for mode in [47, 1047, 1049] {
+            let mut alternate = parse(&format!("{}\x1b[?{mode}h", two_line_command()), 4);
+            assert_eq!(alternate.output(None), None, "?{mode}h");
+            let mut back = parse(
+                &format!("{}\x1b[?{mode}h\x1b[?{mode}l", two_line_command()),
+                4,
+            );
+            assert_eq!(back.output(None), Some((1, 3)), "?{mode}l");
+        }
+    }
 
+    /// A column reflow drops the output rows with the marks. This one runs
+    /// the wire through a real `Terminal` (one raw-input fixture, so one
+    /// pseudoterminal): reflow is `Terminal::try_resize_geometry`'s work, and
+    /// every `Terminal` owns a pseudoterminal. It is also the end-to-end run of
+    /// the wire through the reader thread to `Terminal::command_output_rows`.
+    #[test]
+    fn output_rows_are_dropped_by_reflow() {
+        let mut pane = pane_observed(
+            &two_line_command(),
+            4,
+            std::sync::Arc::new(|| {}),
+            |_, _| {},
+        );
+        let top = {
+            use alacritty_terminal::grid::Dimensions;
+            let term = pane.term.lock().unwrap();
+            term.grid().history_origin() + term.grid().history_size() as u64
+        };
+        assert_eq!(pane.command_output_rows(None), Some((top + 1, top + 3)));
+        assert_eq!(
+            pane.command_output_rows(Some(top + 2)),
+            Some((top + 1, top + 3))
+        );
         // The grid reflows before the native resize, which may refuse the
         // pseudoterminal of a child that has exited.
-        let _ = back.try_resize_geometry(super::super::PtyGeometry::from_cell_size(60, 6, 8, 16));
-        assert_eq!(back.cols, 60, "the grid reflowed");
-        assert_eq!(back.command_output_rows(None), None);
-        assert_eq!(relative_rows(&back), vec![]);
+        let _ = pane.try_resize_geometry(super::super::PtyGeometry::from_cell_size(60, 6, 8, 16));
+        assert_eq!(pane.cols, 60, "the grid reflowed");
+        assert_eq!(pane.command_output_rows(None), None);
+        assert_eq!(relative_rows(&pane), vec![]);
     }
 
     /// The span follows scrolls that move all of it together, into history
@@ -771,9 +929,11 @@ mod tests {
         for (scroll, span, prompt) in [
             // The whole screen moves down a row.
             ("\x1b[T", Some((2, 4)), 1),
-            // A region holding the span moves it up a row; row 0 is outside.
+            // A region scroll pushes the span's first row out of the region;
+            // row 0 is outside it.
             ("\x1b[2;5r\x1b[2;1H\x1b[M", None, 0),
             ("\x1b[3;6r\x1b[S", None, 0),
+            // A region holding the span moves it down a row.
             ("\x1b[2;6r\x1b[T", Some((2, 4)), 0),
             // A region edge splits the span.
             ("\x1b[3;6r\x1b[T", None, 0),
@@ -782,9 +942,9 @@ mod tests {
             // Narrow margins cannot move whole rows.
             ("\x1b[?69h\x1b[2;5s\x1b[2;5r\x1b[S", None, 0),
         ] {
-            let scrolled = pane(&format!("{}{scroll}", two_line_command()), 4);
-            assert_eq!(relative_output(&scrolled, None), span, "{scroll:?}");
-            assert_rows(&scrolled, &[(prompt, 0)]);
+            let mut scrolled = parse(&format!("{}{scroll}", two_line_command()), 4);
+            assert_eq!(scrolled.output(None), span, "{scroll:?}");
+            assert_eq!(scrolled.rows(), [(prompt, 0)], "{scroll:?}");
         }
     }
 

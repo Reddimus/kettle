@@ -8143,18 +8143,7 @@ impl Terminal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let term = self.term.lock().ok()?;
-        if term
-            .mode()
-            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
-        {
-            return None;
-        }
-        let grid = term.grid();
-        let origin = grid.history_origin();
-        let end = origin
-            .saturating_add(grid.history_size() as u64)
-            .saturating_add(grid.screen_lines() as u64);
-        self.command_marks.lock().ok()?.output_rows(at, origin, end)
+        self.command_marks.lock().ok()?.output_rows_in(&term, at)
     }
 
     /// Visible row span occupied by the active prompt and command line.

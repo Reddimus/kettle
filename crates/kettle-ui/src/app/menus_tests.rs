@@ -2075,17 +2075,32 @@ fn a_pane_offers_prompt_rows_only_once_it_has_a_prompt_mark() {
     );
 }
 
-/// `A … C \\r\\n out1 \\r\\n out2 \\r\\n D;0 A …` as a `printf` format: a
-/// command line, two output rows and the next prompt, on rows 0 to 3.
-#[cfg(unix)]
+/// `A … C \\r\\n out1 \\r\\n out2 \\r\\n D;0 A …`: a command line, two output
+/// rows and the next prompt, on rows 0 to 3. kettle-core's
+/// `command_output_rows_are_the_rows_between_the_command_line_and_the_next_prompt`
+/// finds the output of this wire at rows 1 and 2, the stable rows `1..3` of
+/// a fresh terminal.
 const OUTPUT_WIRE: &str =
-    "\\033]133;A\\007$ cmd\\033]133;C\\007\\r\\nout1\\r\\nout2\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ ";
+    "\x1b]133;A\x07$ cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
 
-/// The pane's selected text and the text of the top row of its view.
-#[cfg(unix)]
-fn selected_and_top_row(term: &kettle_core::Terminal) -> (Option<String>, String) {
+/// `wire` parsed into a bare 80x24 engine, with no pseudoterminal: its rows
+/// are stable ids from 0, as in a fresh pane.
+fn parsed_screen(wire: &str) -> kettle_core::term::SharedTerm {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut term = alacritty_terminal::Term::new(
+        alacritty_terminal::term::Config::default(),
+        &kettle_core::term::TermSize::new(80, 24),
+        kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {})),
+    );
+    let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+    parser.advance(&mut term, wire.as_bytes());
+    std::sync::Arc::new(std::sync::Mutex::new(term))
+}
+
+/// The selected text and the text of the top row of the view.
+fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>, String) {
     use kettle_core::Dimensions as _;
-    let t = term.term.lock().unwrap();
+    let t = term.lock().unwrap();
     let top = kettle_core::Line(-(t.grid().display_offset() as i32));
     let row: String = (0..t.grid().columns())
         .map(|col| t.grid()[top][kettle_core::Column(col)].c)
@@ -2096,20 +2111,19 @@ fn selected_and_top_row(term: &kettle_core::Terminal) -> (Option<String>, String
     )
 }
 
-/// The action selects a command's output as whole rows, exactly the rows
+/// The command's output rows are selected as whole rows, exactly the rows
 /// between its command line and the next prompt, copying as `out1\nout2`,
-/// and leaves a view that already shows them where it is.
-#[cfg(unix)]
+/// and a view that already shows them stays where it is.
 #[test]
 fn select_command_output_selects_exactly_the_output_lines() {
-    let (ws, pane) = shell_window(&format!("printf '{OUTPUT_WIRE}'; sleep 10"), |term| {
-        term.command_output_rows(None).is_some()
-    });
-    let term = &ws.mux.panes[&pane].term;
-    assert!(super::select_command_output(term, None));
-    assert_eq!(selected_and_top_row(term), (Some("out1\nout2".into()), "$ cmd".into()));
+    let term = parsed_screen(OUTPUT_WIRE);
+    assert!(super::select_output_rows(&term, (1, 3)));
+    assert_eq!(
+        selected_and_top_row(&term),
+        (Some("out1\nout2".into()), "$ cmd".into())
+    );
     // Whole rows: every column of the two output rows and nothing else.
-    let t = term.term.lock().unwrap();
+    let t = term.lock().unwrap();
     let range = t.selection.as_ref().and_then(|s| s.to_range(&t)).unwrap();
     assert_eq!(
         (range.start, range.end),
@@ -2121,66 +2135,65 @@ fn select_command_output_selects_exactly_the_output_lines() {
     assert_eq!(t.grid().display_offset(), 0);
 }
 
-/// From a chord or the palette the newest command's output is selected; the
-/// menu's row selects the command it was opened over. Either way a first row
-/// off screen is scrolled to the top of the view, and one on screen is not.
-#[cfg(unix)]
+/// A first output row off screen is scrolled to the top of the view, one on
+/// screen is not, and rows that are not retained select nothing.
 #[test]
 fn select_command_output_scrolls_its_first_row_into_view() {
-    let lines: String = (0..40).map(|n| format!("line{n}\\r\\n")).collect();
-    let script = format!(
-        "printf '{OUTPUT_WIRE}big\\033]133;C\\007\\r\\n{lines}\\033]133;D;0\\007\\033]133;A\\007$ '; sleep 10"
-    );
-    let (ws, pane) = shell_window(&script, |term| term.command_marks().len() == 2);
-    let term = &ws.mux.panes[&pane].term;
+    // Rows 0 to 3 as in OUTPUT_WIRE, then a second command's 40 rows of
+    // output, 4 to 43, and its prompt on row 44: 21 rows went into history.
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let term = parsed_screen(&format!(
+        "{OUTPUT_WIRE}big\x1b]133;C\x07\r\n{lines}\x1b]133;D;0\x07\x1b]133;A\x07$ "
+    ));
     let expected: Vec<String> = (0..40).map(|n| format!("line{n}")).collect();
-    assert!(super::select_command_output(term, None));
+    assert!(super::select_output_rows(&term, (4, 44)));
     assert_eq!(
-        selected_and_top_row(term),
+        selected_and_top_row(&term),
         (Some(expected.join("\n")), "line0".into())
     );
-
-    let out1 = term.command_marks()[0].row + 1;
-    assert!(super::select_command_output(term, Some(out1)));
+    assert!(super::select_output_rows(&term, (1, 3)));
     assert_eq!(
-        selected_and_top_row(term),
+        selected_and_top_row(&term),
         (Some("out1\nout2".into()), "out1".into())
     );
-    term.term
-        .lock()
+    term.lock()
         .unwrap()
         .scroll_display(kettle_core::Scroll::Delta(1));
-    assert!(super::select_command_output(term, Some(out1)));
-    assert_eq!(selected_and_top_row(term).1, "$ cmd", "already on screen");
-    // The command line and the prompt rows hold no output.
-    assert!(!super::select_command_output(term, Some(out1 - 1)));
-    assert!(!super::select_command_output(term, Some(out1 + 2)));
+    assert!(super::select_output_rows(&term, (1, 3)));
+    assert_eq!(selected_and_top_row(&term).1, "$ cmd", "already on screen");
+    assert!(!super::select_output_rows(&term, (45, 50)), "past the grid");
+    assert!(!super::select_output_rows(&term, (3, 3)), "an empty span");
 }
 
-/// The terminal menu's Select Command Output row is enabled only for a
-/// right-click on a row of a command's output, and reads in the UI language.
-#[cfg(unix)]
+/// The terminal menu's Select Command Output row is enabled only over a
+/// command's output, reads in the UI language, and the row under the pointer
+/// is named by the stable id of the visible row, wherever the view is.
 #[test]
 fn the_select_output_row_is_enabled_only_inside_a_commands_output() {
-    let (ws, pane) = shell_window(&format!("printf '{OUTPUT_WIRE}'; sleep 10"), |term| {
-        term.command_output_rows(None).is_some()
-    });
-    let term = &ws.mux.panes[&pane].term;
-    let row = |clicked, tr| menu_rows(&[super::command_output_menu_row(term, clicked, tr)])[0].clone();
-    let enabled: Vec<bool> = (0..6)
-        .map(|r| row(super::viewport_row_id(term, r), &EN_TEXT).2)
-        .collect();
-    assert_eq!(enabled, [false, true, true, false, false, false]);
     assert_eq!(
-        row(None, &EN_TEXT),
-        ("Select Command Output", Action::SelectCommandOutput, false)
+        menu_rows(&[super::command_output_menu_row(true, &EN_TEXT)]),
+        [("Select Command Output", Action::SelectCommandOutput, true)]
     );
-    assert_eq!(super::viewport_row_id(term, 24), None, "below the view");
+    assert_eq!(
+        menu_rows(&[super::command_output_menu_row(false, &EN_TEXT)]),
+        [("Select Command Output", Action::SelectCommandOutput, false)]
+    );
     let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
     assert_eq!(
-        row(super::viewport_row_id(term, 1), &es),
-        ("Seleccionar la salida del comando", Action::SelectCommandOutput, true)
+        menu_rows(&[super::command_output_menu_row(true, &es)])[0].0,
+        "Seleccionar la salida del comando"
     );
+
+    let lines: String = (0..40).map(|n| format!("line{n}\r\n")).collect();
+    let term = parsed_screen(&lines);
+    // 40 rows and the cursor's: the view starts at stable row 17.
+    assert_eq!(super::viewport_row_id(&term, 0), Some(17));
+    assert_eq!(super::viewport_row_id(&term, 23), Some(40));
+    assert_eq!(super::viewport_row_id(&term, 24), None, "below the view");
+    term.lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Delta(5));
+    assert_eq!(super::viewport_row_id(&term, 0), Some(12));
 }
 
 /// The menu row acts on the row the menu was opened over, captured as a
@@ -2198,6 +2211,13 @@ fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
     };
     let open = body("open_context_menu");
     assert!(open.contains("ws.context_menu_output_row = ws.mux.active_focus().zip(clicked_row);"));
+    assert!(open.contains(
+        "viewport_row_id(&ws.mux.panes.get(&ws.mux.active_focus()?)?.term.term, row)"
+    ));
+    let items = body("context_menu_items");
+    assert!(items.contains(
+        "let in_output = clicked_row.is_some_and(|row| pane.term.command_output_rows(Some(row)).is_some()); items.push(command_output_menu_row(in_output, &tr));"
+    ));
     assert!(open.contains("items.extend(self.context_menu_items(ws, clicked_row));"));
     let dispatch = body("dispatch_context_menu_click");
     assert!(dispatch.contains(
@@ -2206,5 +2226,9 @@ fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
     let actions = body("handle_action");
     assert!(actions.contains(
         "Action::SelectCommandOutput => { if let Some(p) = ws.mux.focused() { select_command_output(&p.term, None); } }"
+    ));
+    // A pane's lookup, then the selection over that pane's grid.
+    assert!(body("select_command_output").contains(
+        "term.command_output_rows(at) .is_some_and(|rows| select_output_rows(&term.term, rows))"
     ));
 }
