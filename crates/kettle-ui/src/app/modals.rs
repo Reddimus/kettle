@@ -1379,12 +1379,10 @@ impl App {
                 }
                 ConfirmKeyResult::Scroll(delta) => self.confirm_scroll(ws, delta, false),
                 ConfirmKeyResult::Activate(index) => self.resolve_confirm_button(ws, index),
+                // `y` takes the recommended choice of a paste question, never
+                // its raw paste; elsewhere it is the affirmative button.
                 ConfirmKeyResult::Confirm => {
-                    let index = state
-                        .buttons
-                        .iter()
-                        .position(|button| matches!(button, ConfirmButton::Confirm { .. }));
-                    if let Some(index) = index {
+                    if let Some(index) = state.yes_button() {
                         self.resolve_confirm_button(ws, index);
                     }
                 }
@@ -3669,6 +3667,18 @@ impl ConfirmDialogState {
     /// Buttons plus the link.
     pub(super) fn stop_count(&self) -> usize {
         self.buttons.len() + usize::from(self.link_stop().is_some())
+    }
+
+    /// The button `y` answers with: the recommended one of a paste question,
+    /// else the dialog's affirmative button.
+    pub(super) fn yes_button(&self) -> Option<usize> {
+        match &self.paste {
+            Some(paste) => Some(paste.recommended).filter(|index| *index < self.buttons.len()),
+            None => self
+                .buttons
+                .iter()
+                .position(|button| matches!(button, ConfirmButton::Confirm { .. })),
+        }
     }
 
     /// The stop whose access key is `letter`, compared without case.

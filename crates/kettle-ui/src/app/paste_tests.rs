@@ -2123,6 +2123,51 @@ fn findings_list_each_kind_with_its_meaning_most_serious_first() {
 }
 
 #[test]
+fn vim_y_takes_the_recommended_paste_never_the_raw_one() {
+    use super::{ConfirmButton, ConfirmKey, ConfirmKeyResult, confirm_dialog_keypress};
+    let text = "safe\x1b[201~; rm -rf ~\x03\n";
+    let dialog = paste_question(text);
+    // `y` answers the question whatever is focused.
+    assert_eq!(
+        confirm_dialog_keypress(0, dialog.buttons.len(), ConfirmKey::Yes),
+        ConfirmKeyResult::Confirm
+    );
+    let yes = dialog.yes_button().expect("a recommended button");
+    assert!(matches!(
+        dialog.buttons[yes],
+        ConfirmButton::PasteWithoutControls { .. }
+    ));
+    let super::ConfirmAction::Paste { text: sent, .. } =
+        super::confirmation_button_action(&dialog, yes).unwrap()
+    else {
+        panic!("paste action")
+    };
+    assert_eq!(sent, "safe; rm -rf ~\n");
+    assert!(!sent.contains(['\x1b', '\x03']));
+    // The raw paste is still there, as its own button, in the warning colour.
+    let raw = dialog
+        .buttons
+        .iter()
+        .position(|button| matches!(button, ConfirmButton::Confirm { .. }))
+        .unwrap();
+    assert_ne!(raw, yes);
+    // Without controls the plain paste is the recommended choice.
+    let plain = paste_question("one\ntwo");
+    let yes = plain.yes_button().unwrap();
+    assert!(matches!(plain.buttons[yes], ConfirmButton::Confirm { .. }));
+    // The key handler asks the dialog, not the button order.
+    let handler = include_str!("modals.rs")
+        .split("ConfirmKeyResult::Confirm => {")
+        .nth(1)
+        .unwrap()
+        .split("ConfirmKeyResult::Cancel =>")
+        .next()
+        .unwrap();
+    assert!(handler.contains("state.yes_button()"), "{handler}");
+    assert!(!handler.contains("ConfirmButton::Confirm"));
+}
+
+#[test]
 fn one_button_is_recommended_and_cancel_keeps_focus() {
     for (text, styles) in [
         // (destructive, neutral) per button.
