@@ -2941,6 +2941,16 @@ check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
 field name alone, including on macOS.
 
+## Static text names on every platform
+
+`theme_picker_readout_is_spoken_on_every_platform` and
+`settings_no_matches_is_spoken_on_every_platform` hand the modal projection to
+AccessKit's consumer, as the platform adapters do, and read each node's name as
+AT-SPI and UI Automation do: a label's from its value, any other node's from its
+label. They check the theme picker's footer text (with the lowest colour's
+number and the below-3:1 warning) and Settings' no-match line in English and
+Spanish. They do not run Orca or Narrator.
+
 ## Configured-session and desktop acceptance, 2026-11-01
 
 On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,

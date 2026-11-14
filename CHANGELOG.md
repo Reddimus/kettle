@@ -639,6 +639,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Screen readers on Linux and Windows heard nothing for the theme picker's
+  footer: its contrast readout, with the least readable palette colour's
+  number and a warning below 3:1, the theme mode and both sides' themes.
+  Settings' "No settings match" was silent there too. Both were text labels
+  that AT-SPI and UI Automation name from a value Kettle left empty; they now
+  read the same text as VoiceOver on macOS, in the UI language.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the

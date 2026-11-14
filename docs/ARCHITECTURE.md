@@ -3917,7 +3917,11 @@ fills in `ThemePickerFooter` from the config and decides, with
 `theme_footer_height` and the footer's own minimum columns, whether the card
 and how many status lines fit; kettle-render owns the words, layout and
 colours, so painting, the button's hit test and the footer's AccessKit text
-all come from `theme_footer_layout` and `theme_footer_description`. Each side
+all come from `theme_footer_layout` and `theme_footer_description`. That text
+is a `Role::Label` built by `static_text_node`, which sets it as both label and
+value: the locked adapters name a label from its value on AT-SPI and UI
+Automation and show its label as the value on macOS, so a label alone reads
+as an empty name to Orca and Narrator. Each side
 on the status line is a `slot_chips` target in that layout, and the same rect
 is its AccessKit radio button's bounds (`theme_footer_slots` gives its words);
 the two radios sit in one radio group, and the layout's `contrast_button` rect
