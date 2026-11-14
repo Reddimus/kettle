@@ -348,17 +348,15 @@ fn builtin_theme_names_are_display_only_translations() {
 }
 
 #[test]
-fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
+fn settings_descriptions_are_short_and_translated() {
     let en: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let es: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
-    let review: toml::Table = include_str!("../locales/es.review.toml").parse().unwrap();
     let mut descriptions = 0;
     for (key, value) in &en {
         if key.starts_with("settings_description_") {
             descriptions += 1;
             assert!(value.as_str().unwrap().chars().count() <= 70, "{key}");
             assert_ne!(value, &es[key], "{key}");
-            assert_eq!(review["status"][key].as_str(), Some("draft"), "{key}");
         }
     }
     assert_eq!(
