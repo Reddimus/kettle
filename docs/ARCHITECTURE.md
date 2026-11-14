@@ -5076,6 +5076,32 @@ restore and `false` always opens fresh; legacy boolean spellings still work.
 The session is saved only in restore mode, so a fresh window never clobbers a
 saved layout. Privacy rules and crash recovery prompts do not change.
 
+Only one process restores and writes the default session. Any launch with
+arguments runs as its own process, and the activation lock cannot tell which
+one owns the session: an `-e` or `--profile` process that starts first holds
+it, and a bare launch it refuses then runs beside it with no lock. So the
+owner holds `session.owner.lock` beside `session.json` from startup until it
+exits (`DefaultSessionClaim`). Profile, `--config`, `--new-process`, `-e`,
+`-d`, quick-terminal and `--layout` launches never take it. A launch that
+finds it held is a secondary for life: no restore, no write, no cleanup of
+either file, no sweep wake, and no takeover when the owner exits. Another
+build's primary (#575) is the exception, as before: a newer build waits for it
+to exit, then takes the lock. One predicate, `should_restore_session` fed
+`default_session_elsewhere`, gates the load, every save and the content
+cleanup, so they cannot disagree. An explicit `--restore` the launch cannot
+honour opens fresh with a translated notification.
+
+Saving has three triggers. Gestures save at the end of dispatch: tab, split
+and window changes, and every key-bound action except scrolling. A sweep
+catches what no gesture announces (a `cd`, a divider, a window move, output)
+at most every `SESSION_SWEEP` (2 s), on event-loop turns that run anyway. Any
+window event except a redraw, and any user event, marks the session touched;
+after every window's turn, a touched session whose sweep is not yet due asks
+for one wake at the end of the interval (`SessionSweep`). The wake carries no
+event and asks for nothing more, and an idle Kettle gets no events, so a
+change before going quiet is written within 2 s and idle stays idle. Quitting
+saves once more through the same gates and waits at most 1.5 s for the write.
+
 Save Layout reuses the title editor's single-line field and all of its layout,
 IME, hit-test, control-geometry and accessibility projections. It captures the
 same multi-window snapshot as automatic saving, excluding the quick terminal,
@@ -5099,27 +5125,33 @@ sequenceDiagram
     autonumber
     participant Shell as Shell (PTY)
     participant Core as kettle-core
-    participant Mux as kettle-ui::Mux
-    participant FS as session.json (atomic)
-    participant App as App (next launch)
+    participant App as App (event loop)
+    participant W as Session writer thread
+    participant FS as session.json + session.content
+    participant Next as App (next launch)
 
-    Note over Shell,Mux: Per-keystroke / per-cd
-    Shell->>Core: OSC 7 (file://host/path/cwd)
-    Core->>Mux: Pane::cwd = path
-    Mux->>Mux: mark_dirty()
+    Note over App,W: Gestures save at once
+    App->>App: tab / split / window change, key-bound action
+    App->>W: SaveJob (content key unchanged → Keep, else Write)
 
-    Note over Mux,FS: Debounced autosave
-    Mux->>Mux: structural change (new tab / split / close)
-    Mux->>FS: private staged sibling + file sync
-    FS->>FS: atomic replace → session.json<br/>parent-directory sync
+    Note over Shell,App: Changes no gesture announces
+    Shell->>Core: output, OSC 7 cwd
+    Core->>App: Wakeup user event → session touched
+    App->>App: sweep due (2 s since the last)? sweep on this turn
+    App->>App: otherwise ask for one wake at last sweep + 2 s
+    App->>W: SaveJob from the sweep<br/>(streaming output at most every 30 s)
 
-    Note over App,FS: Next launch follows the resolved restore policy
-    App->>App: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
-    App->>FS: read session.json
-    FS-->>App: windows → tab trees + per-pane cwds
-    App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)
-    Mux->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
-    Note over Core,App: Pane reappears in same<br/>tab/split/cwd as last exit
+    Note over W,FS: One lock across both files
+    W->>FS: session.json.lock, then session.json if its bytes changed
+    W->>FS: session.content if its bytes changed<br/>(staged, synced, renamed, directory synced)
+    W-->>App: SessionResave on a stale file or a failed save
+
+    Note over Next,FS: Next launch, if it holds session.owner.lock
+    Next->>Next: resolved restore-session OR --restore?<br/>(else open a fresh single-pane window)
+    Next->>FS: read session.json, then session.content if its digest matches
+    FS-->>Next: windows → tab trees + per-pane cwds
+    Next->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
+    Note over Core,Next: Pane reappears in same<br/>tab/split/cwd as last exit
 ```
 
 Four notable invariants preserved by this flow:
@@ -5497,9 +5529,43 @@ are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
 sidecar next to the session layout through `kettle-state` private durable writes.
 The digest prevents applying an old sidecar to a changed layout; it is not an
 authentication mechanism. Content remains untrusted and is validated again on
-load. The existing coalescing session writer serializes layout, content and
+load. One coalescing writer thread serializes layout, content and
 output-disable cleanup; an interrupted pair safely loses content rather than
 applying it to another layout.
+
+A save builds a `ContentKey` before it walks any grid, without a grid lock:
+the layout hash, `restore-scrollback-lines` and `-remote`, the window order,
+and per pane its id, output and geometry generations, whether it counts as
+remote, and where its last remote session ended. The generations are sampled
+first, so output racing a snapshot changes the next key rather than hiding in
+this one. `ContentThrottle` then decides: the exit save, a stale file, the
+first save and a changed binding (layout hash or either setting) write; an
+unchanged key keeps the file (`ContentJob::Keep`, no grid walk); a sweep that
+sees the previous sweep's key writes, because the output went quiet; a save 30
+seconds after the last write writes; anything else is put off and asks for the
+sweep's wake. Gestures follow the same rules except the quiet one, so they
+cannot bypass the interval. The writer's single pending slot folds jobs: a
+newer session wins, and a `Keep` never replaces a `Write` or `Remove` still
+waiting. The writer holds the content file it last wrote open, with its size,
+time and a digest of its bytes; a `Write` of the same bytes to the same file is
+skipped, and a `Keep` that finds the file deleted or replaced reports it.
+
+Both files are written under one hold of `session.json.lock`, so another
+writer cannot pair its layout with this content in between. A lock timeout or a
+failed `session.json` write changes neither file; a failed content write
+removes the old content only when `session.json` was just replaced. A stale
+file or a failed save sets a flag the next save reads, taking a fresh snapshot,
+and wakes the UI thread (`UserEvent::SessionResave`), at most three failures
+in a row.
+
+With `restore-scrollback-remote = false`, a remote pane saves no rows. When a
+pane stops counting as remote (or restore replays output saved as remote), it
+records the document row just past the bottom of its primary screen
+(`kettle_core::restore::primary_end_row`, numbered from
+`Grid::history_origin`). Rows before it stay out of the saved output while any
+of them remains in the grid, and rows after it save as local
+(`snapshot_from`). Rows leave only from the grid's old end: eviction, a
+scrollback clear, or a reset.
 
 Restore consumes content in window, tab and DFS leaf order. Each terminal
 parses validated content and a localized divider before its PTY reader or child
