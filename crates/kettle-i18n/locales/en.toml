@@ -1004,6 +1004,10 @@ ssh_status_saved = "Saved \"{name}\""
 
 ssh_status_removed = "Removed \"{name}\""
 
+ssh_status_not_saved = "\"{name}\" was not saved: the host changed in the config file, or the file could not be written"
+
+ssh_status_not_removed = "\"{name}\" was not removed: the host changed in the config file, or the file could not be written"
+
 confirm_paste_without_controls = "Paste without controls"
 osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
 osc52_denied_write = "A program was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."

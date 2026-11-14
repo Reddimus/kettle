@@ -43,6 +43,8 @@ notify_ssh_host_not_removed = "draft"
 notify_ssh_host_not_removed_body = "draft"
 ssh_status_saved = "draft"
 ssh_status_removed = "draft"
+ssh_status_not_saved = "draft"
+ssh_status_not_removed = "draft"
 menu_open_layout = "draft"
 menu_save_layout = "draft"
 palette_launch_profile = "draft"
@@ -1097,6 +1099,8 @@ keys = [
     "confirm_button_replace",
     "ssh_status_saved",
     "ssh_status_removed",
+    "ssh_status_not_saved",
+    "ssh_status_not_removed",
     "confirm_close_pane",
     "confirm_close_tab",
     "confirm_close_window",

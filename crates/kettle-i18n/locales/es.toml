@@ -1005,6 +1005,10 @@ ssh_status_saved = "Se guardó \"{name}\""
 
 ssh_status_removed = "Se quitó \"{name}\""
 
+ssh_status_not_saved = "No se guardó \"{name}\": el host cambió en el archivo de configuración o no se pudo escribir el archivo"
+
+ssh_status_not_removed = "No se quitó \"{name}\": el host cambió en el archivo de configuración o no se pudo escribir el archivo"
+
 confirm_paste_without_controls = "Pegar sin caracteres de control"
 osc52_denied_read = "La política osc52 bloqueó la lectura del portapapeles por un programa. Las lecturas requieren osc52 = paste o both."
 osc52_denied_write = "La política osc52 bloqueó la copia al portapapeles por un programa. Las copias requieren osc52 = copy o both."

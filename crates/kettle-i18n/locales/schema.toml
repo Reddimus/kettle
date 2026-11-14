@@ -2804,6 +2804,14 @@ args = [{ name = "name", type = "str" }]
 context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a host was removed, painted in place of the key hint and announced politely to screen readers. name is the host's name, verbatim. Keep the straight quotes."
 args = [{ name = "name", type = "str" }]
 
+[messages.ssh_status_not_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a confirmed Replace was refused or failed, painted in place of the key hint and announced politely to screen readers. The launcher reopens on the typed target. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.ssh_status_not_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a confirmed Remove was refused or failed, painted in place of the key hint and announced politely to screen readers. The launcher reopens on the host's name. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
 [messages.settings_field_cursor_unfocused_style]
 context = "crates/kettle-ui/src/settings.rs: Settings row: cursor appearance in inactive windows and split panes."
 

@@ -197,6 +197,8 @@ fn every_spanish_message_has_a_review_status() {
                         // live region.
                         | "ssh_status_saved"
                         | "ssh_status_removed"
+                        | "ssh_status_not_saved"
+                        | "ssh_status_not_removed"
                 )
         })
         .cloned()
