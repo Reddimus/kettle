@@ -762,6 +762,11 @@ impl App {
                     if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native
                         // button; a middle press does nothing.
+                    } else if bcode == 0 && search_button_at(&bar, px, py) {
+                        // GNOME's Find button opens or closes Find, as its
+                        // shortcut does.
+                        ws.pressed_search = true;
+                        self.toggle_header_find(ws);
                     } else if bcode == 0
                         && bar.new_tab_menu.2 > 0.0
                         && in_bar(bar.new_tab_menu, px, py)
@@ -1059,9 +1064,12 @@ impl App {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                 }
-                if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+                if button == MouseButton::Left
+                    && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search)
+                {
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
+                    ws.pressed_search = false;
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }

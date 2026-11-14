@@ -1308,6 +1308,10 @@ pub(crate) struct WindowState {
     /// A press opens Settings on a release over the gear.
     pub(crate) hovered_settings: bool,
     pub(crate) pressed_settings: bool,
+    /// The pointer is over, or pressed, the GNOME header's Find button. A
+    /// press opens or closes Find; the press only shows until its release.
+    pub(crate) hovered_search: bool,
+    pub(crate) pressed_search: bool,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1543,6 +1547,8 @@ impl WindowState {
         self.pressed_new_tab_menu = false;
         self.hovered_settings = false;
         self.pressed_settings = false;
+        self.hovered_search = false;
+        self.pressed_search = false;
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
@@ -1811,6 +1817,8 @@ impl WindowState {
             hovered_new_tab_menu: false,
             hovered_settings: false,
             pressed_settings: false,
+            hovered_search: false,
+            pressed_search: false,
             context_menu_a11y_label: None,
             context_menu_output_row: None,
             vi_mode: None,

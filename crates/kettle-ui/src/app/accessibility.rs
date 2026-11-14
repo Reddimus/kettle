@@ -1339,6 +1339,8 @@ impl App {
                     self.activate_window_control(ws, control.action, event_loop);
                 } else if let Some(action) = tab_button_action(request.target_node) {
                     self.handle_action(ws, action, event_loop);
+                } else if request.target_node == ACCESSIBILITY_HEADER_FIND_ID {
+                    self.toggle_header_find(ws);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -3506,6 +3508,8 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
     )
 }
 
+/// The GNOME header's Find button, beside its window buttons' ids.
+pub(super) const ACCESSIBILITY_HEADER_FIND_ID: NodeId = NodeId((1 << 51) | 3);
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
@@ -3612,6 +3616,16 @@ pub(super) fn tab_accessibility_projection(
             nodes.push((id, button));
             children.push(id);
         }
+    }
+    // GNOME's Find button: a toggle, pressed while Find is open.
+    if bar.search.2 > 0.0 && bar.search.3 > 0.0 {
+        let mut button = Node::new(Role::Button);
+        button.set_label(tr.text(kettle_i18n::Text::A11yHeaderFind));
+        button.add_action(AccessibilityAction::Click);
+        button.set_bounds(accessibility_rect(bar.search));
+        button.set_toggled(accesskit::Toggled::from(bar.search_open));
+        nodes.push((ACCESSIBILITY_HEADER_FIND_ID, button));
+        children.push(ACCESSIBILITY_HEADER_FIND_ID);
     }
     for control in &bar.window_controls {
         let id = window_control_accessibility_id(control.action);

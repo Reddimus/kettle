@@ -107,6 +107,7 @@ impl App {
             || ws.pressed_new_tab
             || ws.pressed_new_tab_menu
             || ws.pressed_settings
+            || ws.pressed_search
             || ws.pressed_window_control.is_some()
         {
             return None;
@@ -119,6 +120,8 @@ impl App {
         }
         let target = if ws.hovered_settings {
             Some(NewTabHoverTarget::Settings)
+        } else if ws.hovered_search {
+            Some(NewTabHoverTarget::Search)
         } else if ws.hovered_new_tab_menu {
             Some(NewTabHoverTarget::Menu)
         } else {
@@ -225,6 +228,7 @@ impl App {
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
+            search_rect,
             settings_rect,
             lead,
             strip,
@@ -374,10 +378,10 @@ impl App {
             settings: settings_rect,
             hovered_settings: ws.hovered_settings,
             pressed_settings: ws.pressed_settings,
-            search: (0.0, 0.0, 0.0, 0.0),
-            hovered_search: false,
-            pressed_search: false,
-            search_open: false,
+            search: search_rect,
+            hovered_search: ws.hovered_search,
+            pressed_search: ws.pressed_search,
+            search_open: ws.search.open,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
@@ -1019,6 +1023,7 @@ pub(super) fn chrome_button_shortcut(
 ) -> Option<String> {
     let action = match target {
         NewTabHoverTarget::Settings => Action::OpenSettings,
+        NewTabHoverTarget::Search => Action::StartSearch,
         NewTabHoverTarget::Menu | NewTabHoverTarget::Plus => Action::NewTab,
     };
     kettle_config::keybinds::ui_hint_label(bindings, &action)
@@ -1033,6 +1038,7 @@ pub(super) fn new_tab_tooltip(
         NewTabHoverTarget::Menu => return Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
         NewTabHoverTarget::Plus => tr.text(kettle_i18n::Text::MenuNewTab),
         NewTabHoverTarget::Settings => tr.text(kettle_i18n::Text::SettingsA11yTitle),
+        NewTabHoverTarget::Search => tr.text(kettle_i18n::Text::A11yHeaderFind),
     };
     Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
 }
@@ -1057,6 +1063,13 @@ pub(super) enum NewTabHoverTarget {
     Plus,
     /// The Settings gear that leads the pair in a macOS title bar.
     Settings,
+    /// The GNOME header's Find button.
+    Search,
+}
+
+/// Whether `(x, y)` is on the GNOME header's Find button, when it has one.
+pub(super) fn search_button_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.search.2 > 0.0 && bar.search.3 > 0.0 && rect_contains(bar.search, x, y)
 }
 
 /// Whether `(x, y)` is on the title bar's Settings gear, when it has one.
@@ -1152,7 +1165,7 @@ pub(super) fn release_settings_gear(
 
 /// What in the tab bar is under the pointer. A change between two pointer
 /// moves calls for a redraw.
-pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool);
+pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool, bool);
 
 pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
     (
@@ -1161,6 +1174,7 @@ pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
         ws.hovered_new_tab,
         ws.hovered_new_tab_menu,
         ws.hovered_settings,
+        ws.hovered_search,
     )
 }
 
@@ -1179,12 +1193,15 @@ pub(super) fn hover_tab_bar(
     ws.hovered_new_tab = target == Some(NewTabHoverTarget::Plus);
     ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
     ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
+    ws.hovered_search = target == Some(NewTabHoverTarget::Search);
     (target, tab_bar_hover(ws) != before)
 }
 
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
     if settings_button_at(bar, x, y) {
         Some(NewTabHoverTarget::Settings)
+    } else if search_button_at(bar, x, y) {
+        Some(NewTabHoverTarget::Search)
     } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
@@ -1500,6 +1517,8 @@ pub(super) fn horizontal_tab_lane(band: Rect, reservations: (f32, f32)) -> Rect 
 pub(super) struct HorizontalTabGeometry {
     pub arrow_rect: Rect,
     pub plus_rect: Rect,
+    /// The GNOME header's Find button, zero elsewhere.
+    pub search_rect: Rect,
     /// The macOS title bar's Settings gear, zero elsewhere.
     pub settings_rect: Rect,
     /// How far into the lane the tabs start: past the GNOME header's
@@ -1520,13 +1539,19 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, lead, mut button_w) = if linux {
+    let (arrow_rect, plus_rect, search_rect, lead, mut button_w) = if linux {
         let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
-        (controls.menu, controls.plus, controls.lead, controls.trail)
+        (
+            controls.menu,
+            controls.plus,
+            controls.search,
+            controls.lead,
+            controls.trail,
+        )
     } else {
         let (menu, plus, reserve) =
             horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible());
-        (menu, plus, 0.0, reserve)
+        (menu, plus, (0.0, 0.0, 0.0, 0.0), 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
     // keep Settings in their `≡` / `▾` menus.
@@ -1569,6 +1594,7 @@ pub(super) fn horizontal_tab_geometry(
     HorizontalTabGeometry {
         arrow_rect,
         plus_rect,
+        search_rect,
         settings_rect,
         lead,
         strip,

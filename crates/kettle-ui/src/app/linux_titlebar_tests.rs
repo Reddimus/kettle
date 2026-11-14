@@ -99,9 +99,14 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
             let LinuxHeaderControls {
                 menu: arrow,
                 plus,
+                search,
                 lead,
                 trail,
             } = linux_header_tab_controls((0.0, 0.0, controls_start, height), scale, true);
+            // Find sits 6 points before `≡`, and the tabs end 6 before it.
+            assert_eq!(search.0 + search.2 + 6.0 * scale, arrow.0);
+            assert_eq!(search.2, 34.0 * scale);
+            assert_eq!(trail, controls_start - (search.0 - 6.0 * scale));
             let strip = controls_start - lead - trail;
             let layout =
                 titlebar_tab_layout(count, 0, (strip, trail, lead), height, 80.0 * scale, true);
@@ -364,12 +369,13 @@ fn linux_header_new_controls_clear_buttons_at_every_width_and_scale() {
                     let LinuxHeaderControls {
                         menu,
                         plus,
+                        search,
                         lead,
                         trail,
                     } = linux_header_tab_controls(lane, scale, dropdown);
                     assert!(lead >= 0.0 && trail >= 0.0 && lead + trail <= lane.2 + 0.01);
-                    // An absent `≡` is the usual zero rect.
-                    for target in [menu, plus].into_iter().filter(|r| r.2 > 0.0) {
+                    // An absent `≡` or Find is the usual zero rect.
+                    for target in [menu, plus, search].into_iter().filter(|r| r.2 > 0.0) {
                         assert!(target.0 >= lane.0 - 0.01);
                         assert!(target.0 + target.2 <= lane.0 + lane.2 + 0.01);
                         assert!(target.2 >= 0.0 && target.2 <= 34.0 * scale + 0.01);
@@ -382,6 +388,16 @@ fn linux_header_new_controls_clear_buttons_at_every_width_and_scale() {
                         menu.2 > 0.0,
                         dropdown && lane.2 >= 2.0 * (41.0 * scale) + 6.0 * scale
                     );
+                    // Find gives way before `≡`, and never overlaps `+`.
+                    assert_eq!(
+                        search.2 > 0.0,
+                        menu.2 > 0.0 && lane.2 >= 2.0 * (41.0 * scale) + 46.0 * scale - 0.01,
+                        "{scale}x {width} {layout:?}"
+                    );
+                    if search.2 > 0.0 {
+                        assert!(plus.0 + plus.2 + 6.0 * scale <= search.0 + 0.01);
+                        assert!((search.0 + search.2 + 6.0 * scale - menu.0).abs() < 0.01);
+                    }
                 }
             }
         }
@@ -486,6 +502,7 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
     bar.lone_title = lone_header_title(true, tabs, (false, false), cfg.tab_bar, cfg.tab_bar_pos);
     bar.new_tab = geometry.plus_rect;
     bar.new_tab_menu = geometry.arrow_rect;
+    bar.search = geometry.search_rect;
     bar.window_controls = linux_window_control_layout_with_preferences(
         band,
         false,
@@ -676,7 +693,9 @@ fn lone_header_title_presses_like_empty_header_space() {
             }
         }
         let last = two.segments[1].rect;
-        let space = ((last.0 + last.2 + two.new_tab_menu.0) * 0.5, y);
+        // Between the last tab and Find, the first button after the tabs.
+        assert!(two.search.0 > last.0 + last.2);
+        let space = ((last.0 + last.2 + two.search.0) * 0.5, y);
         assert_eq!(
             linux_header_press(&two, space, 0, false),
             Some(Title(G::Drag))
@@ -829,4 +848,229 @@ fn gnome_window_buttons_follow_adwaita_metrics() {
             }
         }
     }
+}
+
+/// The GNOME header's Find button is where the painter draws it for every
+/// consumer: the pointer's hover and press, the title space (a press there
+/// is not a window drag), AccessKit (a button named "Find", pressed while
+/// Find is open, with a click action) and ctl's ui_geometry, at 1x and 2x,
+/// with one tab or several, and with buttons on either side. The tabs and
+/// the lone title end before it.
+#[test]
+fn gnome_header_find_agrees_everywhere() {
+    for scale in [1.0_f32, 2.0] {
+        for layout in [":minimize,maximize,close", "close,minimize:maximize"] {
+            for tabs in [1, 3] {
+                let mut bar = gnome_header_bar(1000.0, scale, layout, tabs);
+                let case = format!("{scale}x {layout:?} {tabs} tabs");
+                let find = bar.search;
+                assert_eq!((find.2, find.3), (34.0 * scale, 34.0 * scale), "{case}");
+                assert!(
+                    (find.0 + find.2 + 6.0 * scale - bar.new_tab_menu.0).abs() < 1e-3,
+                    "{case}: Find sits just before ≡"
+                );
+                for tab in &bar.segments {
+                    assert!(
+                        tab.rect.0 + tab.rect.2 <= find.0 - 6.0 * scale + 1e-3,
+                        "{case}"
+                    );
+                }
+                let (fx, fy) = centre(find);
+                assert!(search_button_at(&bar, fx, fy));
+                assert_eq!(
+                    new_tab_hover_target(&bar, fx, fy),
+                    Some(NewTabHoverTarget::Search),
+                    "{case}"
+                );
+                assert!(titlebar_button_at(&bar, fx, fy));
+                assert!(!linux_title_space(&bar, fx, fy), "{case}: a drag over Find");
+                assert_eq!(linux_header_press(&bar, (fx, fy), 0, false), None);
+                assert!(tab_bar_pointer_region_contains(&bar, fx, fy));
+                for open in [false, true] {
+                    bar.search_open = open;
+                    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+                        let tr = kettle_i18n::Translator::new(language);
+                        let nodes = tab_accessibility_projection(&bar, &[1, 2, 3], false, &tr);
+                        let (id, node) = nodes
+                            .iter()
+                            .find(|(_, n)| {
+                                n.label() == Some(tr.text(kettle_i18n::Text::A11yHeaderFind))
+                            })
+                            .unwrap_or_else(|| panic!("{case}: no Find node"));
+                        assert_eq!(*id, super::accessibility::ACCESSIBILITY_HEADER_FIND_ID);
+                        assert_eq!(node.role(), Role::Button);
+                        assert!(node.supports_action(AccessibilityAction::Click));
+                        assert_eq!(
+                            node.toggled(),
+                            Some(accesskit::Toggled::from(open)),
+                            "{case}"
+                        );
+                        assert_eq!(
+                            node.bounds().unwrap(),
+                            accesskit::Rect::new(
+                                find.0 as f64,
+                                find.1 as f64,
+                                (find.0 + find.2) as f64,
+                                (find.1 + find.3) as f64
+                            ),
+                            "{case}"
+                        );
+                        let list = nodes
+                            .iter()
+                            .find(|(_, n)| n.role() == Role::TabList)
+                            .unwrap();
+                        assert!(list.1.children().contains(id), "{case}");
+                    }
+                    let json = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
+                    assert_eq!(json["search_button"], super::ctl_snapshot::rect_json(find));
+                    assert_eq!(json["search_open"], open);
+                }
+                // A header with no room for Find has no node and no target.
+                bar.search = (0.0, 0.0, 0.0, 0.0);
+                assert!(!search_button_at(&bar, fx, fy));
+                let nodes =
+                    tab_accessibility_projection(&bar, &[1, 2, 3], false, &Default::default());
+                assert!(
+                    !nodes
+                        .iter()
+                        .any(|(id, _)| *id == super::accessibility::ACCESSIBILITY_HEADER_FIND_ID)
+                );
+            }
+        }
+    }
+    // The window, an agent and a screen reader all toggle Find through the
+    // same call, and the press shows only until its release.
+    let source = super::production_source();
+    let native = source
+        .split_once("state: ElementState::Pressed,")
+        .unwrap()
+        .1
+        .split_once("state: ElementState::Released,")
+        .unwrap();
+    for body in [native.0, fn_body(&source, "ctl_mouse_press")] {
+        let flat: String = body.split_whitespace().collect();
+        let (_, press) = flat
+            .split_once("elseifbcode==0&&search_button_at(&bar,px,py){")
+            .expect("a press on Find");
+        let press = press.split("}elseif").next().unwrap();
+        assert!(
+            press.ends_with("ws.pressed_search=true;self.toggle_header_find(ws);"),
+            "{press}"
+        );
+    }
+    let release: String = native.1.split_whitespace().collect();
+    assert!(release.contains("ws.pressed_search=false;"));
+    let ctl_release: String = fn_body(&source, "ctl_mouse_release")
+        .split_whitespace()
+        .collect();
+    assert!(ctl_release.contains("ws.pressed_search=false;"));
+    let a11y: String = source.split_whitespace().collect();
+    assert!(a11y.contains(
+        "}elseifrequest.target_node==ACCESSIBILITY_HEADER_FIND_ID{self.toggle_header_find(ws);"
+    ));
+    let toggle: String = fn_body(&source, "toggle_header_find")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        toggle,
+        "&mutself,ws:&mutWindowState){ifws.search.open{self.close_search(ws);}else{self.open_search(ws);}"
+    );
+}
+
+/// Find's tooltip names Find with whatever key opens it: the default, a
+/// rebind's new key, or no key once the action is unbound; in both
+/// languages.
+#[test]
+fn gnome_header_find_tooltip_follows_the_start_search_binding() {
+    let defaults = kettle_config::keybinds::defaults();
+    let default_key = chrome_button_shortcut(&defaults, NewTabHoverTarget::Search);
+    assert_eq!(
+        default_key,
+        kettle_config::keybinds::ui_hint_label(&defaults, &Action::StartSearch)
+    );
+    assert!(default_key.is_some(), "Find has a default shortcut");
+    let parsed =
+        kettle_config::Config::parse_text("keybind = ctrl+shift+f4=start_search\n").keybinds;
+    let (trigger, action) = parsed
+        .iter()
+        .find(|(trigger, action)| **action == Action::StartSearch && trigger.label().contains("F4"))
+        .unwrap();
+    let mut custom = defaults.clone();
+    custom.retain(|_, bound| *bound != Action::StartSearch);
+    custom.insert(*trigger, action.clone());
+    let key = chrome_button_shortcut(&custom, NewTabHoverTarget::Search).unwrap();
+    assert!(key.contains("F4"), "{key}");
+    for (language, label) in [
+        (kettle_i18n::Language::En, "Find"),
+        (kettle_i18n::Language::Es, "Buscar"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Search), &tr, Some(&key)),
+            Some(format!("{label}  {key}"))
+        );
+        assert_eq!(
+            new_tab_tooltip(Some(NewTabHoverTarget::Search), &tr, None),
+            Some(label.into())
+        );
+    }
+    custom.retain(|_, bound| *bound != Action::StartSearch);
+    assert_eq!(
+        chrome_button_shortcut(&custom, NewTabHoverTarget::Search),
+        None
+    );
+    // The window asks with the live bindings, for a hovered, unpressed Find.
+    let source: String = super::production_source().split_whitespace().collect();
+    assert!(source.contains("}elseifws.hovered_search{Some(NewTabHoverTarget::Search)"));
+    assert!(source.contains("||ws.pressed_search||ws.pressed_window_control.is_some()"));
+}
+
+/// The lone title's lane keeps clear of `+` and of Find: at least the 6
+/// points between the header's buttons and the tabs, plus the title's own
+/// 8-pixel inset, at every width and scale the header lays out, with
+/// window buttons on either side.
+#[test]
+fn the_lone_title_keeps_clear_of_plus_and_find() {
+    for scale in [1.0_f32, 1.5, 2.0] {
+        for width in [360.0, 480.0, 640.0, 1000.0, 1600.0] {
+            for layout in [
+                ":minimize,maximize,close",
+                "close,minimize:maximize",
+                ":close",
+            ] {
+                let bar = gnome_header_bar(width, scale, layout, 1);
+                let case = format!("{scale}x {width} {layout:?}");
+                let lane = bar.segments[0].title_rect;
+                // As `tab_bar_at_height` centres it on the window, too.
+                let centred = centered_title_lane(lane, (bar.band.0 + bar.band.2) * 0.5);
+                let clear = 6.0 * scale + 8.0 - 1e-3;
+                let after = if bar.search.2 > 0.0 {
+                    bar.search
+                } else {
+                    bar.new_tab_menu
+                };
+                for title in [lane, centred] {
+                    assert!(
+                        title.0 - (bar.new_tab.0 + bar.new_tab.2) >= clear,
+                        "{case}: {title:?}"
+                    );
+                    if after.2 > 0.0 {
+                        assert!(after.0 - (title.0 + title.2) >= clear, "{case}: {title:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The body of `fn name(` in `source`, to its first closing brace at method
+/// depth.
+fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+    source
+        .split(&format!("fn {name}("))
+        .nth(1)
+        .unwrap()
+        .split("\n    }")
+        .next()
+        .unwrap()
 }

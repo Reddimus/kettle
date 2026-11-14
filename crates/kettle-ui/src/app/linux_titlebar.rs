@@ -423,14 +423,17 @@ impl App {
     }
 }
 
-/// The GNOME header's new-tab `+` and main menu `≡` in its tab lane.
+/// The GNOME header's new-tab `+`, Find button and main menu `≡` in its
+/// tab lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct LinuxHeaderControls {
     pub(super) menu: Rect,
     pub(super) plus: Rect,
+    /// Find, just before `≡`; a zero rect when the lane has no room for it.
+    pub(super) search: Rect,
     /// Room the tabs leave before them, for `+`.
     pub(super) lead: f32,
-    /// Room the tabs leave after them, for `≡`.
+    /// Room the tabs leave after them, for Find and `≡`.
     pub(super) trail: f32,
 }
 
@@ -442,13 +445,15 @@ pub(super) const LINUX_HEADER_BUTTON: f32 = 34.0;
 /// libadwaita's `border-spacing` in a header's start and end boxes.
 pub(super) const LINUX_HEADER_SPACING: f32 = 6.0;
 
-/// Lay out the GNOME header's `+` and `≡` in `band`, the header less its
-/// window buttons: 34-point flat buttons centred on the header's height,
-/// `+` leading the lane, as GNOME Terminal and Ghostty place it, and `≡`
-/// ending it, each 7 points from the lane's edge (libadwaita's header
-/// padding) and 6 from the tabs. In a lane too narrow for both, `≡` gives
-/// way first, as it did when it sat beside `+`; whatever is left is clipped
-/// to the lane.
+/// Lay out the GNOME header's `+`, Find and `≡` in `band`, the header less
+/// its window buttons: 34-point flat buttons centred on the header's
+/// height, `+` leading the lane, as GNOME Terminal and Ghostty place it,
+/// and `≡` ending it, each 7 points from the lane's edge (libadwaita's
+/// header padding), with Find 6 points before `≡`, as GNOME Terminal puts
+/// its search button, and the tabs 6 points from the buttons. In a lane too
+/// narrow for them all, Find gives way first, since its shortcut still
+/// opens Find, then `≡`, as it did when it sat beside `+`; whatever is left
+/// is clipped to the lane.
 pub(super) fn linux_header_tab_controls(
     band: Rect,
     scale: f32,
@@ -474,10 +479,18 @@ pub(super) fn linux_header_tab_controls(
     } else {
         (0.0, 0.0, 0.0, 0.0)
     };
-    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 };
+    let search = (menu.0 - gap - side, y, side, side);
+    let search = if menu.2 > 0.0 && search.0 >= plus.0 + plus.2 + gap {
+        search
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 }
+        + if search.2 > 0.0 { side + gap } else { 0.0 };
     LinuxHeaderControls {
         menu,
         plus,
+        search,
         lead,
         trail: trail.min(band.2 - lead),
     }
