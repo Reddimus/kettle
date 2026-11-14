@@ -295,6 +295,9 @@ pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
     if bar.linux_header && bar.hovered_new_tab && !bar.pressed_new_tab && bar.new_tab.2 > 0.0 {
         return (bar.new_tab.0, bar.band.1, bar.new_tab.2, bar.band.3);
     }
+    if bar.hovered_search && !bar.pressed_search && bar.search.2 > 0.0 {
+        return (bar.search.0, bar.band.1, bar.search.2, bar.band.3);
+    }
     bar.window_controls
         .iter()
         .find(|b| b.hovered && !b.pressed)
@@ -647,38 +650,80 @@ pub(crate) fn push_settings_gear(
     push_coverage(quads, (left, top), n, cache.get(n), ink);
 }
 
-/// Side of the GNOME header's main-menu icon at 1x, as GNOME's symbolic
-/// icons are drawn.
-const MENU_ICON_SIDE: f32 = 16.0;
-
 /// Whether the strip's menu button is the GNOME header's main menu, which
-/// is drawn as an icon rather than shaped as the `▾` glyph. Its tooltip
-/// and screen-reader name follow the same test.
+/// is drawn as GNOME's `open-menu` icon rather than shaped as the `▾` glyph.
+/// Its tooltip and screen-reader name follow the same test.
 pub(crate) fn main_menu_icon(bar: &TabBar) -> bool {
-    !bar.window_controls.is_empty() && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
+    bar.linux_header && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
 }
 
-/// GNOME's `open-menu-symbolic` in `button`: three bars in a
-/// `MENU_ICON_SIDE`-point square, each 14 points wide and 2 thick, 5 apart,
-/// so its ink is 14 by 12 points. Drawn, not shaped: a font's `≡` changes
-/// size and weight with the installed fonts. Bars snap to whole device
-/// pixels and the square to the button's centre. The icon shrinks with a
-/// button too small for it and is left out below half its size.
-pub(crate) fn main_menu_icon_bars(button: Rect4, scale: f32) -> Vec<Rect4> {
-    let (x, y, w, h) = button;
-    let unit = scale.max(0.5).min((w.min(h) - 4.0) / MENU_ICON_SIDE);
-    if unit < 0.5 {
-        return Vec::new();
+/// One of the GNOME header's flat icon buttons as the painter draws it.
+pub(crate) struct HeaderIconButton {
+    pub icon: crate::header_icons::HeaderIcon,
+    pub rect: Rect4,
+    pub hovered: bool,
+    pub pressed: bool,
+    /// Shown toggled on: Find while it is open.
+    pub toggled: bool,
+}
+
+/// The GNOME header's flat buttons that show a symbolic icon: `+` as
+/// `tab-new`, Find as `edit-find` and the main menu as `open-menu`, with
+/// each one's state. Buttons the header left out have a zero rect and are
+/// skipped.
+pub(crate) fn header_icon_buttons(bar: &TabBar) -> impl Iterator<Item = HeaderIconButton> {
+    use crate::header_icons::HeaderIcon;
+    let button = |icon, rect, hovered, pressed, toggled| HeaderIconButton {
+        icon,
+        rect,
+        hovered,
+        pressed,
+        toggled,
+    };
+    [
+        button(
+            HeaderIcon::TabNew,
+            bar.new_tab,
+            bar.hovered_new_tab,
+            bar.pressed_new_tab,
+            false,
+        ),
+        button(
+            HeaderIcon::Find,
+            bar.search,
+            bar.hovered_search,
+            bar.pressed_search,
+            bar.search_open,
+        ),
+        button(
+            HeaderIcon::MainMenu,
+            bar.new_tab_menu,
+            bar.hovered_new_tab_menu,
+            bar.pressed_new_tab_menu,
+            false,
+        ),
+    ]
+    .into_iter()
+    .filter(|b| b.rect.2 > 0.0 && b.rect.3 > 0.0)
+}
+
+/// The fill behind one of the strip's flat buttons, or `None` at rest: the
+/// strip's hover fill under the pointer and a deeper one pressed. A button
+/// toggled on (Find while it is open) keeps a fill at rest, `tab_detail`'s
+/// 1.5:1, deepening to 1.8:1 under the pointer, as GNOME fills a checked
+/// flat button.
+pub(crate) fn flat_button_fill(
+    strip: Rgb,
+    fg: Rgb,
+    hovered: bool,
+    pressed: bool,
+    toggled: bool,
+) -> Option<Rgb> {
+    match (toggled, hovered) {
+        (false, false) => None,
+        (false, true) => Some(crate::chrome::strip_hover(strip, fg, pressed)),
+        (true, hovered) => Some(crate::chrome::tab_detail(strip, fg, hovered || pressed)),
     }
-    let thickness = (2.0 * unit).round().max(1.0);
-    let pitch = (5.0 * unit).round().max(thickness + 1.0);
-    let width = (14.0 * unit).round();
-    let ink_h = 2.0 * pitch + thickness;
-    let left = (x + (w - width) * 0.5).round();
-    let top = (y + (h - ink_h) * 0.5).round();
-    (0..3)
-        .map(|i| (left, top + i as f32 * pitch, width, thickness))
-        .collect()
 }
 
 #[cfg(test)]
@@ -1705,9 +1750,10 @@ mod tests {
     }
 
     /// The lone title's text is resolved against the header it sits on, as
-    /// the painter resolves it: 4.5:1 or better in a focused window and at
-    /// least 3:1 in an unfocused one, in both default themes. Resolved
-    /// colours, not glyph pixels: local fonts would hide a CI difference.
+    /// the painter resolves it: the header's text colour at 4.5:1 or better
+    /// in a focused window, and faded halfway, as GNOME fades an unfocused
+    /// header, to no less than 3:1, in both default themes. Resolved colours,
+    /// not glyph pixels: local fonts would hide a CI difference.
     #[test]
     fn lone_header_title_ink_reads_against_the_header() {
         let cfg = kettle_config::Config::default();
@@ -1718,46 +1764,29 @@ mod tests {
                 strip, theme.background,
                 "{name}: header and terminal differ"
             );
-            let mut bar = gnome_header(1, 1.0);
-            for hovered in [None, Some(0)] {
-                bar.hovered_tab_idx = hovered;
-                let tab = &bar.segments[0];
-                let (active, hovered) = tab_paint_state(&bar, tab);
-                let surface = tab_title_background(
-                    active,
-                    hovered,
-                    false,
-                    theme.background,
-                    strip,
-                    theme.foreground,
-                );
-                assert_eq!(surface, strip, "{name}: the title sits on the header");
-                let mut colors = crate::chrome::Colors::default();
-                for focused in [true, false] {
-                    let ink = colors.tab_title(
-                        theme.foreground,
-                        surface,
-                        crate::color::Backing::opaque(surface),
-                        tab.active,
-                        focused,
-                    );
-                    let ratio = crate::color::contrast_ratio(ink, strip);
-                    let floor = if focused { 4.5 } else { 3.0 };
-                    assert!(
-                        ratio >= floor - 1e-9,
-                        "{name} focused={focused}: {ratio:.2}:1"
-                    );
-                }
-            }
+            let bar = gnome_header(1, 1.0);
+            let tab = &bar.segments[0];
+            assert_eq!(tab_paint_state(&bar, tab), (false, false));
+            let mut colors = crate::chrome::Colors::default();
+            let focused = colors.tab_text(theme.foreground, strip, true);
+            let unfocused = colors.tab_text(theme.foreground, strip, false);
+            let (lit, dim) = (
+                crate::color::contrast_ratio(focused, strip),
+                crate::color::contrast_ratio(unfocused, strip),
+            );
+            assert!(lit >= 4.5 - 1e-9, "{name}: focused {lit:.2}:1");
+            assert!(dim >= 3.0 - 1e-9, "{name}: unfocused {dim:.2}:1");
+            assert!(dim < lit, "{name}: an unfocused title is dimmer");
         }
-        // The painter picks the title's surface through the same state.
+        // The painter draws the lone title from its own buffer in this ink.
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
         assert!(source.contains(
-            "let(painted_active,painted_hover)=tab_strip::tab_paint_state(tabbar,s);\
-             lettab_background=tab_strip::tab_title_background(painted_active,painted_hover,"
+            "iftabbar.lone_title{letink=self.chrome_colors.tab_text(fg,chrome_strip_bg,overlay.window_focused);\
+             let(left,top)=header_title::header_title_origin(s.title_rect,self.header_title_width,"
         ));
+        assert!(source.contains("buffer:&self.header_title_buffer,"));
     }
 
     /// The hairline under the GNOME header keeps 1.5:1 against the header
@@ -1908,49 +1937,158 @@ mod tests {
         }
     }
 
-    /// The GNOME header's `≡` is GNOME's 16-point symbolic icon drawn as
-    /// three bars: 14 by 12 points of ink, 2 thick and 5 apart, centred in
-    /// its 28-point button, at 1x and 2x, in whole device pixels. The
-    /// painter draws it from these bars and never shapes a `≡` glyph.
+    /// The GNOME header's `+`, Find and `≡` are GNOME's `tab-new`,
+    /// `edit-find` and `open-menu` symbolic icons, drawn as coverage masks 16
+    /// points square, centred on whole pixels in their 34-point flat buttons
+    /// at 1x and 2x, in the ink the painter resolved. No other strip draws
+    /// them, and the painter never shapes a `+` or `≡` glyph in the header.
     #[test]
-    fn gnome_header_menu_icon_is_three_drawn_bars() {
+    fn gnome_header_plus_find_and_menu_are_symbolic_masks() {
+        use crate::header_icons::{HeaderIcon, IconMasks, header_icon_mask, push_header_icon};
+        let ink = Rgb::new(0xc0, 0xca, 0xf5);
+        let painted = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
         for scale in [1.0_f32, 2.0] {
-            let button = (620.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
-            let bars = main_menu_icon_bars(button, scale);
-            assert_eq!(bars.len(), 3, "{scale}x");
-            let left = bars.iter().map(|b| b.0).fold(f32::MAX, f32::min);
-            let top = bars.iter().map(|b| b.1).fold(f32::MAX, f32::min);
-            let right = bars.iter().map(|b| b.0 + b.2).fold(f32::MIN, f32::max);
-            let bottom = bars.iter().map(|b| b.1 + b.3).fold(f32::MIN, f32::max);
-            assert_eq!((right - left, bottom - top), (14.0 * scale, 12.0 * scale));
-            for (i, bar) in bars.iter().enumerate() {
-                assert_eq!(bar.3, 2.0 * scale);
-                assert_eq!(bar.1, top + i as f32 * 5.0 * scale);
-                assert_eq!((bar.0.fract(), bar.1.fract()), (0.0, 0.0));
+            let mut bar = gnome_header(1, scale);
+            bar.new_tab = (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.new_tab_menu = (700.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search = (660.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search_open = true;
+            let buttons: Vec<_> = header_icon_buttons(&bar).collect();
+            assert_eq!(
+                buttons
+                    .iter()
+                    .map(|b| (b.icon, b.rect, b.toggled))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (HeaderIcon::TabNew, bar.new_tab, false),
+                    (HeaderIcon::Find, bar.search, true),
+                    (HeaderIcon::MainMenu, bar.new_tab_menu, false)
+                ]
+            );
+            assert!(main_menu_icon(&bar));
+            let mut masks = IconMasks::default();
+            for HeaderIconButton {
+                icon, rect: button, ..
+            } in buttons
+            {
+                let mut quads = Vec::new();
+                push_header_icon(&mut quads, icon, button, ink, scale, &mut masks);
+                let side = 16.0 * scale;
+                let left = (button.0 + (button.2 - side) * 0.5).round();
+                let top = (button.1 + (button.3 - side) * 0.5).round();
+                // Exactly the mask, one quad per run, from its corner.
+                let mask = header_icon_mask(icon, side as u32);
+                let covered: f32 = quads.iter().map(|q| q.size[0] * q.color[3]).sum();
+                let expected: f32 = mask.iter().map(|&c| f32::from(c) / 255.0).sum();
+                assert!((covered - expected).abs() < 0.5, "{icon:?} at {scale}x");
+                for q in &quads {
+                    assert_eq!(q.color[..3], painted[..3]);
+                    assert!(q.pos[0] >= left && q.pos[0] + q.size[0] <= left + side);
+                    assert!(q.pos[1] >= top && q.pos[1] + q.size[1] <= top + side);
+                    assert_eq!((q.pos[0].fract(), q.pos[1].fract()), (0.0, 0.0));
+                }
+                let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
+                assert!((left + side * 0.5 - centre.0).abs() <= 0.5);
+                assert!((top + side * 0.5 - centre.1).abs() <= 0.5);
             }
-            let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
-            assert!(((left + right) * 0.5 - centre.0).abs() <= 0.5);
-            assert!(((top + bottom) * 0.5 - centre.1).abs() <= 0.5);
+            bar.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+            bar.search = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(header_icon_buttons(&bar).count(), 1);
+            assert!(!main_menu_icon(&bar), "no menu button, no icon");
         }
-        assert!(main_menu_icon_bars((0.0, 0.0, 8.0, 8.0), 1.0).is_empty());
-        let mut bar = gnome_header(1, 1.0);
-        assert!(!main_menu_icon(&bar), "no menu button, no icon");
-        bar.new_tab_menu = (620.0, 9.0, 28.0, 28.0);
-        bar.window_controls = vec![crate::WindowControlButton {
-            action: crate::WindowControl::Close,
-            rect: (763.0, 9.0, 28.0, 28.0),
-            label: String::new(),
-            hovered: false,
-            pressed: false,
-        }];
-        assert!(main_menu_icon(&bar));
-        bar.window_controls.clear();
-        assert!(!main_menu_icon(&bar), "a plain strip keeps its ▾");
+        let mut plain = gnome_header(2, 1.0);
+        plain.linux_header = false;
+        plain.new_tab_menu = (620.0, 0.0, 28.0, 28.0);
+        assert!(!main_menu_icon(&plain), "a plain strip keeps its ▾");
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
-        assert!(source.contains("tab_strip::main_menu_icon_bars(tabbar.new_tab_menu,self.scale)"));
+        assert!(source.contains(
+            "iftabbar.linux_header{forbuttonintab_strip::header_icon_buttons(tabbar){letbackground=tab_strip::flat_button_fill("
+        ));
+        assert!(source.contains("//TheGNOMEheader's`+`isdrawnwiththestrip'squadsinstead.if!tabbar.linux_header{areas.push(TextArea{buffer:&self.tabbar_buffer,"));
         assert!(!source.contains("\"≡\""), "a shaped ≡ glyph");
+    }
+
+    /// A flat button has no fill at rest, the strip's hover fill under the
+    /// pointer and a deeper one pressed. Find, toggled on while Find is
+    /// open, keeps a fill at rest that shows (1.5:1 against the header) and
+    /// deepens under the pointer, and its icon's ink keeps 4.5:1 against
+    /// every one of those fills, focused, in both default themes. The
+    /// painter fills every strip button, Find included, from this one rule.
+    #[test]
+    fn a_toggled_find_button_keeps_a_fill_its_icon_reads_on() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let fg = theme.foreground;
+            assert_eq!(flat_button_fill(strip, fg, false, false, false), None);
+            assert_eq!(
+                flat_button_fill(strip, fg, true, false, false),
+                Some(crate::chrome::strip_hover(strip, fg, false))
+            );
+            let toggled = flat_button_fill(strip, fg, false, false, true).unwrap();
+            let hovered = flat_button_fill(strip, fg, true, false, true).unwrap();
+            let pressed = flat_button_fill(strip, fg, true, true, true).unwrap();
+            let ratio = |c| crate::color::contrast_ratio(c, strip);
+            assert!(
+                ratio(toggled) >= 1.5 - 1e-9,
+                "{name}: {:.2}:1",
+                ratio(toggled)
+            );
+            assert!(ratio(hovered) > ratio(toggled), "{name}");
+            assert!(ratio(pressed) >= ratio(hovered), "{name}");
+            let mut colors = crate::chrome::Colors::default();
+            for fill in [toggled, hovered, pressed] {
+                for (ink, focused, floor) in
+                    [(fg, true, 4.5), (theme.accent, true, 4.5), (fg, false, 3.0)]
+                {
+                    let ink = colors.tab_text(ink, fill, focused);
+                    let r = crate::color::contrast_ratio(ink, fill);
+                    assert!(r >= floor - 0.01, "{name}: {r:.2}:1 on {fill:?}");
+                }
+            }
+        }
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "(tabbar.search,tabbar.hovered_search,tabbar.pressed_search,tabbar.search_open,),]{ifbounds.2>0.0&&letSome(fill)=tab_strip::flat_button_fill("
+        ));
+    }
+
+    /// Find's tooltip hangs under Find, inside the window, at 1x and 2x,
+    /// and none shows while it is pressed or absent.
+    #[test]
+    fn find_tooltip_hangs_under_the_find_button() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 800.0 * scale;
+            let mut bar = gnome_header(1, scale);
+            bar.search = (
+                width - 128.0 * scale,
+                6.0 * scale,
+                34.0 * scale,
+                34.0 * scale,
+            );
+            bar.hovered_search = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (bar.search.0, 0.0, bar.search.2, bar.band.3));
+            let tip = tooltip_rect(
+                anchor,
+                (width, 600.0 * scale),
+                (120.0 * scale, 20.0 * scale),
+                scale,
+            );
+            assert!(tip.0 >= 0.0 && tip.0 + tip.2 <= width, "{tip:?}");
+            assert!(tip.0 + tip.2 <= bar.search.0 + bar.search.2, "{tip:?}");
+            assert_eq!(tip.1, 50.0 * scale);
+            bar.pressed_search = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_search = false;
+            bar.search = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+        }
     }
 
     /// A hovered tab is shaded at about 1.3:1, less than half the active
@@ -2138,9 +2276,9 @@ mod tooltip_tests {
     }
 }
 
-/// Logical side of a GNOME header button's minimize/maximize/close glyph.
-pub(crate) const WINDOW_CONTROL_GLYPH: f32 = 12.0;
-
+/// The GNOME header's window buttons as libadwaita draws them: a disc
+/// [`WINDOW_BUTTON_DISC`](crate::header_icons::WINDOW_BUTTON_DISC) points
+/// across centred in each target, and the window's symbolic glyph on it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn window_control_quads(
     quads: &mut Vec<QuadInstance>,
@@ -2150,73 +2288,54 @@ pub(crate) fn window_control_quads(
     scale: f32,
     focused: bool,
     colors: &mut crate::chrome::Colors,
+    masks: &mut crate::header_icons::IconMasks,
 ) {
-    use crate::WindowControl as C;
+    use crate::header_icons::{HeaderIcon, push_header_icon, push_mask, window_button_disc};
     for button in &bar.window_controls {
-        let (x, y, w, h) = button.rect;
+        let (_, _, w, h) = button.rect;
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
-        let diameter = (28.0 * scale).min(w).min(h);
         let (fill, glyph) =
             window_control_colors(fg, bg, button.hovered, button.pressed, focused, colors);
-        if button.hovered {
-            rounded_fill(
-                quads,
-                button.rect,
-                6.0 * scale,
-                (true, true),
-                (fill, 1.0),
-                None,
-            );
-        }
-        if diameter < 12.0 * scale {
+        let disc = window_button_disc(button.rect, scale);
+        if disc.2 < 12.0 * scale {
             continue;
         }
-        let cx = x + w * 0.5;
-        let cy = y + h * 0.5;
-        let size = (WINDOW_CONTROL_GLYPH * scale).min(diameter * 0.5);
-        let stroke = (1.5 * scale).max(1.0);
-        let left = cx - size * 0.5;
-        let top = cy - size * 0.5;
-        let mut outline = |left: f32, top: f32, size: f32| {
-            for r in [
-                (left, top, size, stroke),
-                (left, top + size - stroke, size, stroke),
-                (left, top, stroke, size),
-                (left + size - stroke, top, stroke, size),
-            ] {
-                quads.push(rect(r.0, r.1, r.2, r.3, glyph, 1.0));
-            }
-        };
-        match button.action {
-            C::Minimize => quads.push(rect(left, cy, size, stroke, glyph, 1.0)),
-            C::Maximize => outline(left, top, size),
-            C::Restore => {
-                outline(left + 2.0 * scale, top, size - 2.0 * scale);
-                outline(left, top + 2.0 * scale, size - 2.0 * scale);
-            }
-            C::Close => {
-                let steps = size.ceil().max(1.0) as usize;
-                for i in 0..=steps {
-                    let offset = size * i as f32 / steps as f32;
-                    for y in [top + offset, top + size - offset] {
-                        quads.push(rect(
-                            left + offset - stroke * 0.5,
-                            y - stroke * 0.5,
-                            stroke,
-                            stroke,
-                            glyph,
-                            1.0,
-                        ));
-                    }
-                }
-            }
-        }
+        let side = disc.2 as u32;
+        push_mask(
+            quads,
+            masks.get(HeaderIcon::Disc, side),
+            side,
+            (disc.0, disc.1),
+            fill,
+        );
+        push_header_icon(
+            quads,
+            HeaderIcon::for_window_control(button.action),
+            disc,
+            glyph,
+            scale,
+            masks,
+        );
     }
 }
 
-fn window_control_colors(
+/// How strongly a window button's disc shows the header's foreground, as
+/// libadwaita's `alpha(currentColor, …)`: at rest, hovered and pressed.
+const WINDOW_BUTTON_FILL: [f64; 3] = [0.10, 0.15, 0.30];
+
+/// The least contrast the disc keeps against the header in the same three
+/// states, so it shows on a pale header too and each state reads stronger
+/// than the one before.
+const WINDOW_BUTTON_FILL_FLOOR: [f64; 3] = [1.15, 1.4, 2.0];
+
+/// A window button's disc and glyph colours. The disc is the foreground
+/// over the header, deeper hovered and deeper still pressed; the glyph is
+/// the foreground at 4.5:1 against the disc. An unfocused window shows both
+/// at about half strength, as libadwaita fades its header controls, with the
+/// glyph still at 3:1.
+pub(crate) fn window_control_colors(
     fg: Rgb,
     bg: Rgb,
     hovered: bool,
@@ -2224,10 +2343,16 @@ fn window_control_colors(
     focused: bool,
     colors: &mut crate::chrome::Colors,
 ) -> (Rgb, Rgb) {
-    let fill = if hovered {
-        crate::chrome::strip_hover(bg, fg, pressed)
+    let state = if pressed { 2 } else { usize::from(hovered) };
+    let fill = crate::color::with_min_contrast(
+        crate::color::over(bg, fg, WINDOW_BUTTON_FILL[state], false),
+        bg,
+        WINDOW_BUTTON_FILL_FLOOR[state],
+    );
+    let fill = if focused {
+        fill
     } else {
-        bg
+        crate::color::over(fill, bg, 0.5, false)
     };
     (fill, colors.tab_text(fg, fill, focused))
 }
@@ -2318,36 +2443,51 @@ mod window_control_tests {
         }
     }
 
+    /// The disc behind a window button is the header's foreground faintly
+    /// over the header, deeper hovered and deeper still pressed, and its
+    /// glyph keeps 4.5:1 against the disc in a focused window and 3:1 in an
+    /// unfocused one, where disc and glyph both fade toward the header. Both
+    /// default themes, and every bundled one for the glyph's floor.
     #[test]
-    fn linux_header_buttons_use_current_chrome_contrast_hover_and_dimming() {
+    fn window_button_discs_and_glyphs_keep_their_contrast() {
+        use crate::color::contrast_ratio;
         for name in kettle_config::Theme::list() {
             let theme = kettle_config::Theme::by_name(name);
             let mut colors = crate::chrome::Colors::default();
             let bg = crate::resolve_chrome_bg(&Default::default(), &theme, None);
-            for focused in [false, true] {
-                for hovered in [false, true] {
-                    for pressed in [false, true] {
-                        let (fill, glyph) = window_control_colors(
-                            theme.foreground,
-                            bg,
-                            hovered,
-                            pressed,
-                            focused,
-                            &mut colors,
-                        );
-                        assert_eq!(
-                            fill,
-                            if hovered {
-                                crate::chrome::strip_hover(bg, theme.foreground, pressed)
-                            } else {
-                                bg
-                            }
-                        );
-                        assert_eq!(glyph, colors.tab_text(theme.foreground, fill, focused));
-                        let floor = if focused { 4.5 } else { 3.0 };
+            let fg = theme.foreground;
+            let default_theme = ["TokyoNight Night", "Kettle Day"].contains(&name);
+            for focused in [true, false] {
+                let mut previous = 1.0;
+                for (hovered, pressed) in [(false, false), (true, false), (true, true)] {
+                    let (fill, glyph) =
+                        window_control_colors(fg, bg, hovered, pressed, focused, &mut colors);
+                    let case =
+                        format!("{name} focused={focused} hovered={hovered} pressed={pressed}");
+                    let floor = if focused { 4.5 } else { 3.0 };
+                    let ratio = contrast_ratio(glyph, fill);
+                    assert!(ratio >= floor - 0.01, "{case}: glyph {ratio:.2}:1");
+                    assert_eq!(glyph, colors.tab_text(fg, fill, focused), "{case}");
+                    let disc = contrast_ratio(fill, bg);
+                    assert!(
+                        disc > previous,
+                        "{case}: disc {disc:.2}:1 after {previous:.2}:1"
+                    );
+                    previous = disc;
+                    if default_theme && focused {
+                        let at_least =
+                            [1.15, 1.4, 2.0][usize::from(hovered) + usize::from(pressed)];
+                        assert!(disc >= at_least - 0.01, "{case}: disc {disc:.2}:1");
+                    }
+                    if !focused {
+                        // Dimmed: the disc is quieter, the glyph no louder,
+                        // than in a focused window.
+                        let (lit, lit_glyph) =
+                            window_control_colors(fg, bg, hovered, pressed, true, &mut colors);
+                        assert!(disc < contrast_ratio(lit, bg), "{case}");
                         assert!(
-                            crate::color::contrast_ratio(glyph, fill) >= floor - 0.01,
-                            "{name}"
+                            ratio <= contrast_ratio(lit_glyph, lit) + 0.01,
+                            "{case}: dimmed glyph {ratio:.2}:1"
                         );
                     }
                 }
@@ -2355,13 +2495,17 @@ mod window_control_tests {
         }
     }
 
+    /// Each window button paints a 24-point disc centred in its target and
+    /// its glyph centred on the disc, everything inside the target, at 1x,
+    /// 1.5x and 2x, hovered or not, for every action.
     #[test]
-    fn linux_header_button_shapes_follow_shared_bounds_at_fractional_scales() {
-        for scale in [1.0, 1.5, 2.0] {
+    fn window_buttons_paint_a_disc_and_glyph_inside_their_targets() {
+        use crate::header_icons::window_button_disc;
+        for scale in [1.0_f32, 1.5, 2.0] {
             for action in [C::Minimize, C::Maximize, C::Restore, C::Close] {
                 for hovered in [false, true] {
                     let mut bar = TabBar::hidden();
-                    let target = (756.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+                    let target = (750.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
                     bar.window_controls = vec![WindowControlButton {
                         action,
                         rect: target,
@@ -2369,39 +2513,70 @@ mod window_control_tests {
                         hovered,
                         pressed: hovered,
                     }];
+                    let (fg, bg) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+                    let mut colors = Default::default();
+                    let (fill, glyph) =
+                        window_control_colors(fg, bg, hovered, hovered, true, &mut colors);
                     let mut quads = Vec::new();
                     window_control_quads(
                         &mut quads,
                         &bar,
-                        Rgb::new(255, 255, 255),
-                        Rgb::new(0, 0, 0),
+                        fg,
+                        bg,
                         scale,
                         true,
+                        &mut colors,
                         &mut Default::default(),
                     );
-                    assert!(!quads.is_empty());
-                    if !hovered {
-                        // Every quad is glyph ink: it spans at least 12
-                        // logical pixels (10 read as tiny in the header).
-                        let left = quads.iter().map(|q| q.pos[0]).fold(f32::MAX, f32::min);
-                        let right = quads
+                    let disc = window_button_disc(target, scale);
+                    let bounds = |color: Rgb| {
+                        let painted = rect(0.0, 0.0, 1.0, 1.0, color, 1.0).color;
+                        let mine: Vec<_> = quads
+                            .iter()
+                            .filter(|q| q.color[..3] == painted[..3])
+                            .collect();
+                        assert!(!mine.is_empty(), "{action:?} at {scale}x paints {color:?}");
+                        let l = mine.iter().map(|q| q.pos[0]).fold(f32::MAX, f32::min);
+                        let t = mine.iter().map(|q| q.pos[1]).fold(f32::MAX, f32::min);
+                        let r = mine
                             .iter()
                             .map(|q| q.pos[0] + q.size[0])
                             .fold(f32::MIN, f32::max);
-                        assert!(
-                            right - left >= 12.0 * scale - 0.01,
-                            "{action:?} at {scale}x spans {}",
-                            right - left
-                        );
+                        let b = mine
+                            .iter()
+                            .map(|q| q.pos[1] + q.size[1])
+                            .fold(f32::MIN, f32::max);
+                        (l, t, r - l, b - t)
+                    };
+                    let case = format!("{action:?} at {scale}x hovered={hovered}");
+                    assert_eq!(bounds(fill), disc, "{case}: the disc");
+                    assert_eq!(disc.2, (24.0 * scale).round(), "{case}");
+                    let ink = bounds(glyph);
+                    let centre = |r: Rect4| (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+                    let (gx, gy) = centre(ink);
+                    let (dx, dy) = centre(disc);
+                    // Centred across; minimize's bar sits low, as GNOME's does.
+                    assert!((gx - dx).abs() <= 1.0, "{case}: {ink:?}");
+                    if action != C::Minimize {
+                        assert!((gy - dy).abs() <= 1.0, "{case}: {ink:?}");
                     }
-                    for q in quads {
+                    assert!(
+                        ink.0 >= disc.0
+                            && ink.1 >= disc.1
+                            && ink.0 + ink.2 <= disc.0 + disc.2
+                            && ink.1 + ink.3 <= disc.1 + disc.3,
+                        "{case}: {ink:?} outside {disc:?}"
+                    );
+                    // Glyph ink 6 to 10 points across, inside the disc.
+                    assert!(ink.2.max(ink.3) >= 6.0 * scale - 0.01, "{case}: {ink:?}");
+                    assert!(ink.2.max(ink.3) <= 10.0 * scale + 0.01, "{case}: {ink:?}");
+                    for q in &quads {
                         assert!(
                             q.pos[0] >= target.0
                                 && q.pos[0] + q.size[0] <= target.0 + target.2 + 0.01
-                        );
-                        assert!(
-                            q.pos[1] >= target.1
-                                && q.pos[1] + q.size[1] <= target.1 + target.3 + 0.01
+                                && q.pos[1] >= target.1
+                                && q.pos[1] + q.size[1] <= target.1 + target.3 + 0.01,
+                            "{case}"
                         );
                     }
                 }

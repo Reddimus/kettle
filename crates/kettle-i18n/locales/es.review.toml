@@ -1010,6 +1010,7 @@ update_a11y_failed = "draft"
 menu_a11y_update = "draft"
 window_title_gpu_lost = "accepted"
 window_title_software_fallback = "draft"
+a11y_header_find = "draft"
 
 # Messages whose review needs the second pass: destructive confirmations and
 # screen-reader names and descriptions.
@@ -1201,6 +1202,7 @@ keys = [
     "update_a11y_restart",
     "mouse_override_hint",
     "font_size_chip",
+    "a11y_header_find",
     "notification_toast_show",
     "notification_toast_show_a11y",
     "notification_toast_a11y",

@@ -116,7 +116,8 @@ Bundled assets:
   bBox Type GmbH and Carrois Corporate GbR, with Reserved Font Name "Fira".
   See assets/fonts/fira-sans/OFL.txt and README.md for exact source provenance.
   The media worker embeds matching regular, bold, italic and bold italic
-  outlines for proportional diagram labels.
+  outlines for proportional diagram labels. The Linux GUI embeds the bold
+  face for its GNOME header bar's title.
   Monospace inline code reuses the JetBrains Mono Nerd Font asset listed
   above; diagram layout and final SVG shaping use the same per-job database.
 

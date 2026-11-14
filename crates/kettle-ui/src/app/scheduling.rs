@@ -870,7 +870,7 @@ impl App {
                 || completion_hide_due
                 || completion_hide_wait.is_some(),
             ime_preedit: ws.ime_preedit.is_some(),
-            modal_steady: modal_holds_cursor_steady(ws),
+            modal_steady: cursor_held_steady(ws),
             work_pending: coalesce_due
                 || ws.output_pacer.is_deferred()
                 || ws.typed_echo.settle_pending()

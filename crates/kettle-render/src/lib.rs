@@ -35,6 +35,8 @@ pub use text_field::{
     TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
     text_field_placeholder, text_field_rects,
 };
+mod header_icons;
+mod header_title;
 mod settings;
 mod tab_strip;
 mod terminal;
@@ -661,6 +663,17 @@ pub struct Renderer {
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
+    /// The GNOME header's icons and window-button discs, by icon and side.
+    header_icon_masks: header_icons::IconMasks,
+    /// Whether the bundled title face is in `font_system`; `None` until the
+    /// first lone GNOME-header title asks for it.
+    header_title_face: Option<bool>,
+    /// The lone GNOME-header title as shaped, what it was fitted from, and
+    /// its width; `header_title_scratch` measures the candidates.
+    header_title_buffer: TextBuffer,
+    header_title_scratch: TextBuffer,
+    header_title_key: Option<header_title::HeaderTitleKey>,
+    header_title_width: f32,
     tab_bell_mask: tab_strip::BellMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
@@ -1584,31 +1597,47 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                for (bounds, hovered, pressed) in [
+                for (bounds, hovered, pressed, toggled) in [
                     (
                         tabbar.new_tab_menu,
                         tabbar.hovered_new_tab_menu,
                         tabbar.pressed_new_tab_menu,
+                        false,
                     ),
                     (
                         tabbar.new_tab,
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
+                        false,
                     ),
                     (
                         tabbar.settings,
                         tabbar.hovered_settings,
                         tabbar.pressed_settings,
+                        false,
+                    ),
+                    (
+                        tabbar.search,
+                        tabbar.hovered_search,
+                        tabbar.pressed_search,
+                        tabbar.search_open,
                     ),
                 ] {
-                    if hovered && bounds.2 > 0.0 {
-                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
+                    if bounds.2 > 0.0
+                        && let Some(fill) = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            hovered,
+                            pressed,
+                            toggled,
+                        )
+                    {
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
                             6.0 * self.scale,
                             (true, true),
-                            (hover, 1.0),
+                            (fill, 1.0),
                             None,
                         );
                     }
@@ -1640,29 +1669,36 @@ impl Renderer {
                         &mut self.settings_gear_mask,
                     );
                 }
-                // The GNOME header's `≡` is drawn too, as GNOME's 16 px
-                // symbolic icon, in the ink its glyph had: the accent while
-                // hovered, at 4.5:1 focused and 3:1 unfocused.
-                if tab_strip::main_menu_icon(tabbar) {
-                    let (ink, background) = if tabbar.hovered_new_tab_menu {
-                        (
-                            accent,
-                            chrome::strip_hover(
-                                chrome_strip_bg,
-                                theme.foreground,
-                                tabbar.pressed_new_tab_menu,
-                            ),
+                // The GNOME header's `+`, Find and `≡` are GNOME's 16 px
+                // symbolic icons, drawn rather than shaped, in the ink the
+                // strip's glyphs have: the accent while hovered, at 4.5:1
+                // focused and 3:1 unfocused, against the fill they sit on.
+                if tabbar.linux_header {
+                    for button in tab_strip::header_icon_buttons(tabbar) {
+                        let background = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            button.hovered,
+                            button.pressed,
+                            button.toggled,
                         )
-                    } else {
-                        (theme.foreground, chrome_strip_bg)
-                    };
-                    let ink = self
-                        .chrome_colors
-                        .tab_text(ink, background, overlay.window_focused);
-                    for (x, y, w, h) in
-                        tab_strip::main_menu_icon_bars(tabbar.new_tab_menu, self.scale)
-                    {
-                        quads.push(rect(x, y, w, h, ink, 1.0));
+                        .unwrap_or(chrome_strip_bg);
+                        let ink = if button.hovered {
+                            accent
+                        } else {
+                            theme.foreground
+                        };
+                        let ink =
+                            self.chrome_colors
+                                .tab_text(ink, background, overlay.window_focused);
+                        header_icons::push_header_icon(
+                            &mut quads,
+                            button.icon,
+                            button.rect,
+                            ink,
+                            self.scale,
+                            &mut self.header_icon_masks,
+                        );
                     }
                 }
             }
@@ -2681,6 +2717,17 @@ impl Renderer {
             self.tab_hint_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, title_w, title_h) = s.title_rect;
+                // The GNOME header's lone title is the window's title, in
+                // GNOME's bold sans at its title size, not a tab label.
+                if tabbar.lone_title {
+                    self.prepare_header_title(
+                        s,
+                        &cfg.tab_format,
+                        &tabbar.recording_notice,
+                        &family,
+                    );
+                    continue;
+                }
                 if let Some((hint_rect, hint)) = &s.hint {
                     let buf = &mut self.tab_hint_buffers[bi];
                     buf.set_metrics(tab_metrics);
@@ -4387,7 +4434,30 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
-                // A lone GNOME-header title sits on the header, not a tab.
+                // A lone GNOME-header title sits on the header, centred on
+                // it, in the header's text colour: 4.5:1, and in an
+                // unfocused window faded halfway as GNOME fades its header,
+                // at no less than 3:1.
+                if tabbar.lone_title {
+                    let ink =
+                        self.chrome_colors
+                            .tab_text(fg, chrome_strip_bg, overlay.window_focused);
+                    let (left, top) = header_title::header_title_origin(
+                        s.title_rect,
+                        self.header_title_width,
+                        header_title::header_title_metrics(self.scale).line_height,
+                    );
+                    areas.push(TextArea {
+                        buffer: &self.header_title_buffer,
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect(s.title_rect),
+                        default_color: gc(ink),
+                        custom_glyphs: &[],
+                    });
+                    continue;
+                }
                 let (painted_active, painted_hover) = tab_strip::tab_paint_state(tabbar, s);
                 let tab_background = tab_strip::tab_title_background(
                     painted_active,
@@ -4610,15 +4680,18 @@ impl Renderer {
                 )
             };
             let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, control_ch));
-            areas.push(TextArea {
-                buffer: &self.tabbar_buffer,
-                left: plus_left,
-                top: plus_top,
-                scale: 1.0,
-                bounds: text_bounds_for_rect(tabbar.new_tab),
-                default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
-                custom_glyphs: &[],
-            });
+            // The GNOME header's `+` is drawn with the strip's quads instead.
+            if !tabbar.linux_header {
+                areas.push(TextArea {
+                    buffer: &self.tabbar_buffer,
+                    left: plus_left,
+                    top: plus_top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(tabbar.new_tab),
+                    default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
+                    custom_glyphs: &[],
+                });
+            }
             // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
             // of `+`). Only present when the dropdown is enabled; the GNOME
             // header's `≡` is drawn with the strip's quads instead.
@@ -4745,6 +4818,7 @@ impl Renderer {
             self.scale,
             overlay.window_focused,
             &mut self.chrome_colors,
+            &mut self.header_icon_masks,
         );
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.

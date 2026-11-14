@@ -5525,6 +5525,7 @@ fn tab_strip_legibility_at(font_size: f32) {
             (renderer.cell_h + 12.0).max(28.0).round()
         };
         tabs.in_titlebar = gnome_header;
+        tabs.linux_header = gnome_header;
         tabs.band = (0.0, 0.0, 480.0, tabs.height);
         // GNOME's header centres 28 px buttons, the window's close last.
         let (button_y, side) = if gnome_header {
@@ -5567,8 +5568,12 @@ fn tab_strip_legibility_at(font_size: f32) {
                 activity: TabActivity::Normal,
             });
         }
-        let (inactive_title, inactive_close) =
+        let (inactive_title, mut inactive_close) =
             (tabs.segments[1].title_rect, tabs.segments[1].close);
+        if gnome_header {
+            // Above the header's 1-pixel hairline, which runs under the tab.
+            inactive_close.3 -= 1.0;
+        }
         let fg = theme.foreground;
         // The renderer's roles: inactive titles and resting close glyphs are
         // secondary text, the strip's controls primary. An unfocused window
@@ -5642,27 +5647,47 @@ fn tab_strip_legibility_at(font_size: f32) {
             // Smallest ink side, with a pixel to spare for rasterizer edges.
             // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
             // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
+            // The GNOME header's `+` and `≡` are 16-point icons at any font
+            // size, 14x14 and 14x12 points of ink.
+            let icon = if gnome_header { 12.0 } else { 0.66 * line };
             let mut controls = vec![
-                ("×", inactive_close, 0.42 * line, secondary, floors.0),
-                ("+", tabs.new_tab, 0.66 * line, control, floors.1),
+                ("×", inactive_close, 0.42 * line, strip, secondary, floors.0),
+                ("+", tabs.new_tab, icon, strip, control, floors.1),
                 if gnome_header {
-                    ("≡", tabs.new_tab_menu, 0.66 * line, control, floors.1)
+                    ("≡", tabs.new_tab_menu, icon, strip, control, floors.1)
                 } else {
-                    ("▾", tabs.new_tab_menu, 0.42 * line, control, floors.1)
+                    (
+                        "▾",
+                        tabs.new_tab_menu,
+                        0.42 * line,
+                        strip,
+                        control,
+                        floors.1,
+                    )
                 },
             ];
             if gnome_header {
+                // Adwaita's 8-point cross on its disc, judged on the disc.
+                let (disc, glyph) = crate::tab_strip::window_control_colors(
+                    fg,
+                    strip,
+                    false,
+                    false,
+                    window_focused,
+                    &mut colors,
+                );
                 controls.push((
                     "window close",
-                    tabs.window_controls[0].rect,
-                    13.0,
-                    control,
+                    crate::header_icons::window_button_disc(tabs.window_controls[0].rect, 1.0),
+                    8.0,
+                    disc,
+                    glyph,
                     floors.1,
                 ));
             }
-            for (glyph, button, min_side, ink, floor) in controls {
-                let (x, y, w, h) =
-                    glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
+            for (glyph, button, min_side, background, ink, floor) in controls {
+                let (x, y, w, h) = glyph_ink(&frame, button, background)
+                    .unwrap_or_else(|| panic!("{case}: {glyph}"));
                 assert!(
                     w >= min_side && h >= min_side,
                     "{case}: {glyph} ink {w}x{h} < {min_side}"
@@ -5670,7 +5695,7 @@ fn tab_strip_legibility_at(font_size: f32) {
                 assert_glyph_painted(
                     &frame,
                     button,
-                    (strip, ink),
+                    (background, ink),
                     floor,
                     &format!("{case}: {glyph}"),
                 );
@@ -8091,6 +8116,57 @@ fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
                     }
                 }
                 assert_eq!(on_thumb, back > 0, "{context}: a tick crosses the thumb");
+            }
+        }
+    }
+}
+
+/// The lone GNOME-header title is shaped in the bundled Fira Sans Bold at
+/// GNOME's 11 pt title size, whatever the terminal's font, at 1x and 2x: a
+/// long title is cut to the widest label its lane holds, ending in an
+/// ellipsis, and a short one stays whole.
+#[test]
+fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
+    let _serialized = gpu_test_guard();
+    let long = "a window title that a program set, far too long for the header lane";
+    for scale in [1.0_f32, 2.0] {
+        let cfg = gpu_test_config();
+        let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+        else {
+            eprintln!("lone header title at {scale}x skipped: no GPU adapter");
+            return;
+        };
+        let snap = snapshot_of(20, 2, b"");
+        let lane = (128.0 * scale, 0.0, 184.0 * scale, 46.0 * scale);
+        for (title, whole) in [(long, false), ("fixture", true)] {
+            let mut tabs = gnome_header_tabs(480.0 * scale, scale, 1);
+            tabs.segments[0].title = title.into();
+            tabs.segments[0].title_rect = lane;
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, 46.0 * scale, w as f32, h as f32 - 46.0 * scale);
+            terminal.terminal = terminal.rect;
+            capture_with_tabs(&mut renderer, &cfg, &[terminal], &Overlay::default(), &tabs);
+            let case = format!("{title:?} at {scale}x");
+            let buffer = &renderer.header_title_buffer;
+            assert!((buffer.metrics().font_size - 14.666_667 * scale).abs() < 0.01);
+            let text = buffer.lines[0].text().to_owned();
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(runs.len(), 1, "{case}: one line");
+            assert!(runs[0].line_w <= lane.2, "{case}: {} wide", runs[0].line_w);
+            assert_eq!(renderer.header_title_width, runs[0].line_w, "{case}");
+            if whole {
+                assert_eq!(text, title, "{case}");
+            } else {
+                assert!(
+                    text.contains('…') && text.len() < title.len(),
+                    "{case}: {text:?}"
+                );
+            }
+            for glyph in runs[0].glyphs {
+                let face = renderer.font_system.db().face(glyph.font_id).unwrap();
+                assert_eq!(face.post_script_name, "FiraSans-Bold", "{case}");
             }
         }
     }

@@ -763,6 +763,11 @@ impl App {
                     if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native
                         // button; a middle press does nothing.
+                    } else if bcode == 0 && search_button_at(&bar, px, py) {
+                        // GNOME's Find button opens or closes Find, as its
+                        // shortcut does.
+                        ws.pressed_search = true;
+                        self.toggle_header_find(ws);
                     } else if bcode == 0
                         && bar.new_tab_menu.2 > 0.0
                         && in_bar(bar.new_tab_menu, px, py)
@@ -967,6 +972,11 @@ impl App {
                     ws.mux.answer_bell_by_press(pressed);
                 }
                 self.note_focus_change(ws, pre);
+                // A press in the terminal shows the cursor at once and
+                // restarts its blink, as a click does in GTK and Cocoa text
+                // views, whether a program or a selection takes the press.
+                // Hover and the wheel leave the blink alone.
+                self.reset_blink_phase(ws);
                 if self.send_mouse(ws, bcode, true, false) {
                     return;
                 }
@@ -1061,9 +1071,12 @@ impl App {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                 }
-                if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+                if button == MouseButton::Left
+                    && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search)
+                {
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
+                    ws.pressed_search = false;
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
