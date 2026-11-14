@@ -5542,8 +5542,19 @@ path; colour-scheme reports use the resulting palette's lightness.
 negotiates client decorations, with a fixed 46 logical pixel height. The
 shared `WindowState::macos_titlebar_tabs` flag retains its historical name;
 `linux_titlebar` identifies windows that also need Kettle window controls.
-Top tabs, their dropdown and new-tab button share the header with reserved
-button lanes (three right-side buttons by default). `TabBar::window_controls`
+Top tabs, the leading new-tab button and the trailing main menu share the
+header with reserved button lanes (three right-side buttons by default);
+`horizontal_tab_geometry` reports the room `+` takes as `lead`, and tab
+positions count from past it. `lone_header_title` sets `TabBar::lone_title`
+for the Linux header with one tab, no title edit or dock preview, `tab-bar`
+not `always` and the bar at the top. The painter then skips the tab surface,
+accent line and hover fill and resolves the title against the header
+(`tab_strip::tab_paint_state`); the strip drops the close button and hint, and
+`linux_title_space` routes presses on the title like empty header space. The
+main menu is three pixel-snapped bars (`main_menu_icon_bars`), and
+`header_hairline_rects` draws a one-point line, 1.5:1 against the header and
+the terminal, along the header's bottom, broken under an active tab.
+`TabBar::window_controls`
 carries the same physical rectangles, localized names and hover/press state
 to painting, pointer routing, AccessKit and
 `kettle ctl ui_geometry`. Terminal layout, status/search bands, title editing
@@ -5566,8 +5577,8 @@ reloads keep `is_decorated()` equal to "Kettle does not own the header". Without
 a tiled-state query, maximized and fullscreen windows drop the resize band. No
 text renderer or font dependency is added.
 
-Empty-space primary presses call `drag_window`; a second nearby press within
-400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
+Primary presses on empty space or a lone title call `drag_window`; a second
+nearby press within 400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
 presses are consumed. The 6 logical pixel inner resize band takes priority over
 header input and uses `drag_resize_window`, except when maximized, fullscreen
 or non-resizable. Tiled windows retain the band because tiled state is not
