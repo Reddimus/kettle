@@ -114,7 +114,7 @@ impl App {
         if let Some(label) = window_control_tooltip_label(controls) {
             return Some(label.to_owned());
         }
-        if ws.hovered_new_tab_menu && !controls.is_empty() {
+        if ws.hovered_new_tab_menu && ws.linux_titlebar {
             return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
         }
         let target = if ws.hovered_settings {

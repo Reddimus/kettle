@@ -3592,10 +3592,10 @@ pub(super) fn tab_accessibility_projection(
             bar.new_tab_menu,
             // In a Kettle-drawn GNOME header bar the menu is the window's
             // primary menu, drawn as one.
-            tr.text(if bar.window_controls.is_empty() {
-                kettle_i18n::Text::A11yNewTabMenu
-            } else {
+            tr.text(if bar.linux_header {
                 kettle_i18n::Text::A11yMainMenu
+            } else {
+                kettle_i18n::Text::A11yNewTabMenu
             }),
         ),
         (

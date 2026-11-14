@@ -45,7 +45,7 @@ fn linux_header_controls_share_hit_bounds_names_and_accessible_actions() {
                 let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
                 for button in &bar.window_controls {
                     let (x, y, w, h) = button.rect;
-                    assert_eq!((w, h), (28.0 * scale, 28.0 * scale));
+                    assert_eq!((w, h), (34.0 * scale, 34.0 * scale));
                     assert!(x >= 0.0 && x + w <= band.2 && y >= 6.0 * scale);
                     assert_eq!(
                         window_control_at(&bar, x + w * 0.5, y + h * 0.5),
@@ -92,7 +92,10 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 None,
                 &Default::default(),
             );
-            let controls_start = width - 3.0 * height;
+            let controls_start = width
+                - crate::window_buttons::ButtonLayout::default()
+                    .reservations(width, height)
+                    .1;
             let LinuxHeaderControls {
                 menu: arrow,
                 plus,
@@ -102,11 +105,13 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
             let strip = controls_start - lead - trail;
             let layout =
                 titlebar_tab_layout(count, 0, (strip, trail, lead), height, 80.0 * scale, true);
-            // `+` leads the header and `≡` ends it, before the window buttons.
-            assert_eq!(plus.0, 8.0 * scale);
-            assert_eq!(arrow.0 + arrow.2, controls_start - 8.0 * scale);
-            assert_eq!(lead, plus.0 + plus.2 + 4.0 * scale);
-            assert_eq!(plus.2, 28.0 * scale);
+            // `+` leads the header and `≡` ends it, before the window
+            // buttons: 34-point buttons, 7 points from the lane's edges and
+            // 6 from the tabs.
+            assert_eq!(plus.0, 7.0 * scale);
+            assert_eq!(arrow.0 + arrow.2, controls_start - 7.0 * scale);
+            assert_eq!(lead, plus.0 + plus.2 + 6.0 * scale);
+            assert_eq!(plus.2, 34.0 * scale);
             let mut bar = TabBar::hidden();
             bar.height = height;
             bar.band = (0.0, 0.0, width, height);
@@ -314,7 +319,7 @@ fn linux_header_left_buttons_clear_the_tab_and_editor_lane() {
         [C::Close, C::Minimize, C::Maximize]
     );
     let (left, right) = preferences.reservations(band.2, band.3);
-    assert_eq!((left, right), (92.0, 46.0));
+    assert_eq!((left, right), (78.0, 41.0));
     assert!(buttons[1].rect.0 + buttons[1].rect.2 <= left);
     assert!(buttons[2].rect.0 >= band.2 - right);
     let no_buttons = crate::window_buttons::ButtonLayout::parse(":").unwrap();
@@ -367,15 +372,15 @@ fn linux_header_new_controls_clear_buttons_at_every_width_and_scale() {
                     for target in [menu, plus].into_iter().filter(|r| r.2 > 0.0) {
                         assert!(target.0 >= lane.0 - 0.01);
                         assert!(target.0 + target.2 <= lane.0 + lane.2 + 0.01);
-                        assert!(target.2 >= 0.0 && target.2 <= 28.0 * scale + 0.01);
+                        assert!(target.2 >= 0.0 && target.2 <= 34.0 * scale + 0.01);
                     }
                     // `+` leads and `≡` ends the lane, never overlapping.
                     if menu.2 > 0.0 && plus.2 > 0.0 {
-                        assert!(plus.0 + plus.2 + 4.0 * scale <= menu.0 + 0.01);
+                        assert!(plus.0 + plus.2 + 6.0 * scale <= menu.0 + 0.01);
                     }
                     assert_eq!(
                         menu.2 > 0.0,
-                        dropdown && lane.2 >= 2.0 * (36.0 * scale) + 4.0 * scale
+                        dropdown && lane.2 >= 2.0 * (41.0 * scale) + 6.0 * scale
                     );
                 }
             }
@@ -706,7 +711,7 @@ fn gnome_header_plus_leads_and_agrees_everywhere() {
                 let case = format!("{scale}x {layout:?} {tabs} tabs");
                 let plus = bar.new_tab;
                 let menu = bar.new_tab_menu;
-                assert_eq!((plus.2, plus.3), (28.0 * scale, 28.0 * scale), "{case}");
+                assert_eq!((plus.2, plus.3), (34.0 * scale, 34.0 * scale), "{case}");
                 let left = bar
                     .window_controls
                     .iter()
@@ -759,6 +764,68 @@ fn gnome_header_plus_leads_and_agrees_everywhere() {
                     "{case}"
                 );
                 assert_eq!(json["lone_title"], tabs == 1, "{case}");
+            }
+        }
+    }
+}
+
+/// GNOME's window buttons sit as libadwaita lays them out: 34-point
+/// targets (a 24-point disc and its padding, larger than the 28-point
+/// targets they replace) 3 points apart, so their discs are 37 points from
+/// centre to centre, the outermost 7 points from the header's end, centred
+/// on its height, on either side, at 1x, 1.5x and 2x. The tab lane starts
+/// and ends where they do.
+#[test]
+fn gnome_window_buttons_follow_adwaita_metrics() {
+    for scale in [1.0_f32, 1.5, 2.0] {
+        for layout in [
+            ":minimize,maximize,close",
+            "close,minimize:maximize",
+            "close:",
+        ] {
+            let preferences = crate::window_buttons::ButtonLayout::parse(layout).unwrap();
+            let band = (0.0, 0.0, 1000.0 * scale, LINUX_HEADER_HEIGHT * scale);
+            let buttons = linux_window_control_layout_with_preferences(
+                band,
+                false,
+                None,
+                None,
+                &Default::default(),
+                &preferences,
+            );
+            let (left, right) = preferences.reservations(band.2, band.3);
+            let case = format!("{scale}x {layout:?}");
+            let (lefts, rights): (Vec<_>, Vec<_>) =
+                buttons.iter().partition(|b| b.rect.0 < band.2 * 0.5);
+            for side in [&lefts, &rights] {
+                for button in side.iter() {
+                    let (_, y, w, h) = button.rect;
+                    assert_eq!((w, h), (34.0 * scale, 34.0 * scale), "{case}");
+                    assert!(w >= 28.0 * scale, "{case}: a smaller target");
+                    assert!((y + h * 0.5 - band.3 * 0.5).abs() < 1e-3, "{case}");
+                }
+                for pair in side.windows(2) {
+                    let gap = pair[1].rect.0 - (pair[0].rect.0 + pair[0].rect.2);
+                    assert!((gap - 3.0 * scale).abs() < 1e-3, "{case}: gap {gap}");
+                    let pitch = centre(pair[1].rect).0 - centre(pair[0].rect).0;
+                    assert!((pitch - 37.0 * scale).abs() < 1e-3, "{case}: pitch {pitch}");
+                }
+            }
+            if let Some(first) = lefts.first() {
+                assert!((first.rect.0 - 7.0 * scale).abs() < 1e-3, "{case}");
+                let end = lefts.last().unwrap().rect;
+                assert!((end.0 + end.2 - left).abs() < 1e-3, "{case}");
+            } else {
+                assert_eq!(left, 0.0, "{case}");
+            }
+            if let Some(last) = rights.last() {
+                let r = last.rect;
+                assert!((band.2 - (r.0 + r.2) - 7.0 * scale).abs() < 1e-3, "{case}");
+                // The outermost disc's centre, 24 points in, as in GNOME.
+                assert!((band.2 - centre(r).0 - 24.0 * scale).abs() < 1e-3, "{case}");
+                assert!((rights[0].rect.0 - (band.2 - right)).abs() < 1e-3, "{case}");
+            } else {
+                assert_eq!(right, 0.0, "{case}");
             }
         }
     }
