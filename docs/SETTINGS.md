@@ -226,9 +226,10 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter them,
 or move with ↑/↓; the window wears the selected theme while you browse. Enter
 keeps it and writes it to your config file, and Esc puts back the theme you
-started with. The prompt names the side a pick saves to: **light theme:** or
-**dark theme:**. Following the system saves a pick to the active side and
-keeps following. Forced Light/Dark modes also update their own side; Fixed
+started with, or, if the system or the schedule switched sides while the
+picker was open, that side's theme. The prompt names the side a pick saves
+to: **light theme:** or **dark theme:**. Following the system saves a pick
+to the active side and keeps following. Forced Light/Dark modes also update their own side; Fixed
 theme writes `theme`, and there Tab and Shift+Tab move down and up a row. With
 `theme-schedule` set, the schedule picks the side, so a pick saves to the side
 it wears now, whatever the mode. To change the other side's theme, press Tab
