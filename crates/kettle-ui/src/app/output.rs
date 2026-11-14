@@ -853,6 +853,7 @@ impl App {
             | UserEvent::SystemSettingsChanged(_)
             | UserEvent::ToggleQuickTerminal
             | UserEvent::Activation
+            | UserEvent::SessionResave
             | UserEvent::PastedImageEncoded
             | UserEvent::NativeFullscreenExited { .. }
             | UserEvent::AccessibilityActivated { .. }

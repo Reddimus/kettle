@@ -1382,6 +1382,8 @@ fn main() -> anyhow::Result<()> {
             None
         })
     };
+    let separate_process = separate_process(&cli);
+    let explicit_config = cli.config.is_some();
     kettle_ui::run_with(kettle_ui::Options {
         activation,
         quick_terminal,
@@ -1396,6 +1398,8 @@ fn main() -> anyhow::Result<()> {
         config_trust,
         layout: cli.layout,
         restore: cli.restore,
+        separate_process,
+        explicit_config,
         agent_server: cli.agent_server.map(|m| match m {
             AgentServerArg::Off => kettle_config::AgentServer::Off,
             AgentServerArg::ReadOnly => kettle_config::AgentServer::ReadOnly,
@@ -1585,6 +1589,13 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
                 .and_then(kettle_config::Config::path_for_profile)
         })
         .or_else(kettle_config::Config::default_path)
+}
+
+/// Whether this launch runs beside the main Kettle process: a profile or
+/// `--new-process`. Such a process leaves the default session to the main
+/// one. A `--config FILE` launch has a session of that file's own instead.
+fn separate_process(cli: &Cli) -> bool {
+    cli.profile.is_some() || cli.new_process
 }
 
 fn resolved_config_trust(cli: &Cli) -> kettle_config::ConfigTrust {
@@ -2031,9 +2042,51 @@ mod window_state_flag_tests {
 mod activation_cli_tests {
     use super::{
         Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, is_media_preview_worker_argv,
-        pending_update_exit_code,
+        pending_update_exit_code, separate_process,
     };
     use clap::Parser as _;
+
+    /// A profile or `--new-process` runs beside the main process and leaves
+    /// the default session alone. `--config FILE` is not separate: it has a
+    /// session of its own. Other options, and `-e`/`-d` (which the UI
+    /// recognizes itself), do not make a launch separate here.
+    #[test]
+    fn profile_and_new_process_launches_are_separate() {
+        for argv in [
+            &["kettle", "--profile", "work"][..],
+            &["kettle", "--profile=work"],
+            &["kettle", "--new-process"],
+            &["kettle", "--new-process", "--restore"],
+            &[
+                "kettle",
+                "--config",
+                "/tmp/kettle.conf",
+                "--profile",
+                "work",
+            ],
+            &["kettle", "--config", "/tmp/kettle.conf", "--new-process"],
+        ] {
+            assert!(
+                separate_process(&Cli::try_parse_from(argv).unwrap()),
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            &["kettle"][..],
+            &["kettle", "--restore"],
+            &["kettle", "--maximise"],
+            &["kettle", "-d", "/tmp"],
+            &["kettle", "--config", "/tmp/kettle.conf"],
+            &["kettle", "--config", "/tmp/kettle.conf", "--restore"],
+        ] {
+            assert!(
+                !separate_process(&Cli::try_parse_from(argv).unwrap()),
+                "{argv:?}"
+            );
+        }
+        let source = include_str!("main.rs");
+        assert!(source.contains("let explicit_config = cli.config.is_some();"));
+    }
 
     #[test]
     fn only_default_and_native_reopen_launches_join_a_primary() {

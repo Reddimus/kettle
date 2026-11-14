@@ -955,6 +955,21 @@ impl CtlServer {
                     }
                 },
             );
+        // Servers that crashed, were killed or quit without running their
+        // destructors left their aliases where the OS puts the registry.
+        // Clear a bounded batch off the startup path; this server's own
+        // alias stays, its owner being alive.
+        if let Err(e) = std::thread::Builder::new()
+            .name("kettle-ctl-prune".into())
+            .spawn(|| {
+                let removed = discovery::prune_stale_aliases();
+                if removed > 0 {
+                    log::debug!("agent-server: removed {removed} stale discovery aliases");
+                }
+            })
+        {
+            log::debug!("agent-server: cannot start alias cleanup: {e}");
+        }
         log::info!(
             "agent-server: listening on {endpoint} (mode {:?}, display {})",
             policy.server(),
@@ -2242,6 +2257,31 @@ mod tests {
                 wake,
             )
             .is_none()
+        );
+    }
+
+    /// Only a starting server's prune clears an alias into a registry that
+    /// was deleted, so `start` must run it, off its startup path. Pinned at
+    /// the source: starting a real server here would write into this
+    /// account's own registry, which no environment variable redirects.
+    #[test]
+    fn a_starting_server_prunes_stale_aliases_off_the_startup_path() {
+        let production = production_source();
+        let start = production
+            .split_once("    pub fn start(")
+            .expect("CtlServer::start present")
+            .1;
+        let start = &start[..start.find("\n    }\n").expect("end of start")];
+        let spawn = start
+            .find(".name(\"kettle-ctl-prune\".into())")
+            .expect("start prunes on its own thread");
+        let prune = start
+            .find("discovery::prune_stale_aliases()")
+            .expect("start prunes stale aliases");
+        assert!(spawn < prune, "the prune runs on that thread");
+        assert!(
+            !start.contains(".join("),
+            "start must not wait for the prune"
         );
     }
 

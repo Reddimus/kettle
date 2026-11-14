@@ -690,6 +690,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A crash, `kill -9`, power loss or a logout that hangs no longer loses the
+  last changes to a saved session. Kettle saved every tab, split and window
+  change at once, and every 2 seconds while busy, but the last `cd`, window
+  move or output before Kettle went quiet reached disk only when something
+  else happened; on macOS that was often not until you quit. It is now
+  written within 2 seconds, and an idle Kettle still writes nothing and does
+  not wake up. The saved output (`session.content`, up to 8 MiB) is no longer
+  rewritten when nothing in it changed, and while output keeps arriving it is
+  replaced at most every 30 seconds instead of every 2, and within about 4
+  seconds after it stops. SESSION-RESTORE.md states the tested bounds.
+
+- `kettle -e` and `kettle -d` launches, profile windows, `--new-process`
+  launches, and a second Kettle process no longer reopen a copy of the saved
+  session or replace it with their own windows. One process owns the
+  session, the first started in restore mode without those options; the
+  others open fresh, and `kettle --restore` there says why in a
+  notification. `restore-scrollback-lines = 0` in a profile no longer
+  deletes the main process's saved output.
+
+- `kettle --config FILE` restores and saves a session of that file's own
+  instead of sharing `session.json` with every other launch: two config
+  files no longer overwrite each other's windows. Its files sit beside
+  `session.json`, named by a digest of the config file's path. Its saved
+  session used to be `session.json`, so the first `--config` launch after
+  updating opens fresh; a `--config` naming the default config file keeps
+  `session.json`.
+
+- `session.json` and `session.content` are written under one lock, so another
+  process can no longer pair its layout with this one's output. A save that
+  timed out on the lock deleted `session.content`; it now changes neither file
+  and is tried again at the next sweep.
+
+- With `restore-scrollback-remote = false`, output from an `ssh` session that
+  has ended was saved as local output once the pane counted as local again.
+  It now stays out of the saved output until it has left the scrollback, and
+  output after it is saved as usual.
+
 - Screen readers on Linux and Windows heard nothing for the theme picker's
   footer: its contrast readout, with the least readable palette colour's
   number and a warning below 3:1, the theme mode and both sides' themes.
@@ -704,6 +741,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   do not fit, the hint is left out until you type. The command palette's
   "Type a command…" follows the same rule, so it also shows in windows that
   used to keep only the hint.
+
+- Control-server pointer files (`<pid>.alias.json`) no longer pile up in
+  `~/.local/state/kettle/ctl` (`/run/user/<uid>/kettle/ctl` on Linux when it
+  exists, `%LOCALAPPDATA%\kettle\ctl` on Windows). A Kettle whose
+  environment puts its registry somewhere else, such as a test instance with
+  a private `XDG_RUNTIME_DIR`, leaves one there so clients with a stripped
+  environment still find it. One that crashed, was killed or quit with ⌘Q
+  left it behind, and once the directory it pointed at was deleted nothing
+  removed it, so thousands collected and every `kettle ctl` read them all. A
+  starting control server now removes up to 256 per location whose server is
+  gone, on a background thread. Pointers now record their server's start
+  time, so a process that later gets the same pid does not keep one alive;
+  one written by an earlier release goes once the entry it names is gone or
+  belongs to a process that is gone. A running server's pointer stays.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,

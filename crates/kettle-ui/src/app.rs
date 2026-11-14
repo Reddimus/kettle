@@ -269,6 +269,11 @@ pub enum UserEvent {
         window_seq: u64,
         request: ActionRequest,
     },
+    /// The session writer found the output file was not the one it wrote,
+    /// or could not save (a lock held too long, a failed write), so the next
+    /// sweep must save again. Every user event marks the session touched,
+    /// which arms that sweep.
+    SessionResave,
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
@@ -377,6 +382,13 @@ pub struct App {
     /// An unread restore snapshot must survive automatic saves for this launch.
     session_load_failed: bool,
     session_writer: crate::session::SessionWriter,
+    /// When the next save takes a fresh output snapshot.
+    content_throttle: std::cell::RefCell<ContentThrottle>,
+    /// Whether this process owns the default session, claimed at startup.
+    default_session: std::cell::RefCell<DefaultSessionClaim>,
+    /// This launch's default-session file: `session.json`, or a `--config`
+    /// file's own (see `launch_session_path`).
+    session_path: Option<std::path::PathBuf>,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -663,9 +675,10 @@ pub struct App {
     /// the drop-merge. App-level (not per-window) because exactly one tear-off
     /// drag can be in flight per pointer.
     torn_drag: Option<TornDrag>,
-    /// When the session was last considered for writing. Drives the sweep
-    /// described on [`SESSION_SWEEP`]; `None` until the first one runs.
-    last_session_sweep: Option<std::time::Instant>,
+    /// When the session was last considered for writing, and whether
+    /// anything has happened since. Drives the sweep described on
+    /// [`SESSION_SWEEP`] and the one wake it may ask for.
+    session_sweep: SessionSweep,
     /// Set once the exit teardown in `exit.rs` has run.
     exit_teardown_done: bool,
 }
@@ -743,6 +756,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("user_event");
+        // Output, a cwd report, a process scan, a ctl request: any of them can
+        // change what the session holds.
+        self.session_sweep.touch();
         match ev {
             #[cfg(target_os = "macos")]
             UserEvent::ProfilesReady => {
@@ -807,6 +823,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_quick_terminal(el);
             }
             UserEvent::Activation => self.drain_activation_requests(el),
+            // `touch` above did what this asks.
+            UserEvent::SessionResave => {}
             #[cfg(target_os = "macos")]
             UserEvent::DockReopen => {
                 self.focus_or_open_window(el, None);
@@ -1048,6 +1066,10 @@ impl ApplicationHandler<UserEvent> for App {
         let phase_name = if matches!(&event, WindowEvent::RedrawRequested) {
             "redraw"
         } else {
+            // A redraw changes nothing the session holds. Any other window
+            // event may, and a redraw counted here would re-arm the sweep's
+            // wake on every frame.
+            self.session_sweep.touch();
             "window_event"
         };
         let runtime_tracker = self.runtime_tracker.clone();
@@ -1158,6 +1180,20 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.config_reload_deadline {
             let deadline =
                 deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        // Once per app, after every window's turn: a second window must not
+        // re-arm the wake the first one's sweep just consumed. The wake is
+        // judged at the instant the sweep was checked; this clock is only the
+        // fallback for a turn in which no window checked it.
+        let mut sweep = std::mem::take(&mut self.session_sweep);
+        let pending = self.content_throttle.borrow().pending;
+        let session_wake = sweep.deadline(std::time::Instant::now(), pending, || {
+            self.session_autosave_eligible()
+        });
+        self.session_sweep = sweep;
+        if let Some(deadline) = session_wake {
             earliest_deadline =
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
