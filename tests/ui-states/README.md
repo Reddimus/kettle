@@ -26,6 +26,12 @@ artifact `ui-states-43502436986-1`, in the same environment: pickers fill their
 rows and show a scrollbar thumb, and the palette drops weak matches. The PR
 description shows each before and after.
 
+Seven `settings` captures were then replaced by PR #862 from the Linux CI job
+in [run 43527358684](https://github.com/Reddimus/kettle/actions/runs/43527358684),
+artifact `ui-states-43527358684-1`, in the same environment: Settings control
+outlines now keep 3:1 against the panel, and the footer separates its hint
+groups with "·". The PR description shows each before and after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |
