@@ -277,6 +277,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The scrollbar is easier to find. A pane with history shows a faint channel
+  the height of the terminal under its thumb, and scrolled back the bar
+  widens to at least 10 px, its channel as wide as the thumb. The thumb is
+  at least 40 px long, so it stays findable with 10,000 lines of history.
+  Its colours are worked out per theme: at rest the thumb is at least 3:1
+  against the background on every bundled theme (it was 1.55:1 on Kettle
+  Day), and at least 4.5:1 while scrolled back or under the pointer. The
+  one exception is Hot Dog Stand's active thumb, at 3.57:1 when the bar is
+  translucent and blends in linear light, where reaching 4.5:1 would cover
+  the text under it. Command ticks widen with the bar and stand out from
+  the channel and from the thumb where they cross it. With
+  `scrollbar = always` the bar no longer changes width when hovered, and an
+  empty channel never widens. The bar is solid only where it fits in
+  `window-padding-x` in an opaque window; elsewhere it and its ticks stay
+  translucent so text under them shows. The bar stays inside a pane
+  narrower than it. Screen readers get the bar's painted bounds. A fresh
+  pane with no history still shows no scrollbar in `auto` mode, and
+  `scrollbar = never` is unchanged.
+
 - `ssh-host` entries whose target starts with `-` or contains whitespace,
   control or bidi characters, or whose name is longer than 128 bytes or holds
   control or bidi characters, are now ignored, and `--check-config` reports

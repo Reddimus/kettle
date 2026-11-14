@@ -1252,3 +1252,6 @@ mod link_hint_ux_tests;
 
 #[cfg(test)]
 mod scrollback_receipt_hit_tests;
+
+#[cfg(test)]
+mod scrollbar_tests;

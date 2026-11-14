@@ -26,7 +26,10 @@ mod scrollback;
 mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
-pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
+pub use scrollback::{
+    PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
+    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
+};
 mod text_field;
 pub use text_field::{
     TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
@@ -1862,6 +1865,23 @@ impl Renderer {
         let mut drawn_cards = std::mem::take(&mut self.drawn_cards);
         drawn_cards.clear();
         self.drawn_bidi.clear();
+        let scrollbar_colors = self
+            .chrome_colors
+            .scrollbar(theme, self.config.format.is_srgb());
+        let scale = self.scale;
+        let pane_bar = |pv: &PaneView<'_>| {
+            let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
+                || (pv.focused && overlay.scrollbar_active);
+            pane_scrollbar_geometry(
+                pv.terminal,
+                scale,
+                cfg,
+                pv.snap.screen_lines,
+                pv.snap.history_size,
+                pv.snap.display_offset,
+                interacting,
+            )
+        };
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -2146,62 +2166,65 @@ impl Renderer {
             }
             if cfg.scrollbar != ScrollbarMode::Never {
                 // The scrollbar runs the height of the terminal it scrolls,
-                // clear of the titlebar and lane.
-                let (rx, ry, rw, rh) = pv.terminal;
-                let s = pv.snap;
-                let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
-                let has_scroll = hist > 0 && rows + hist > rows;
-                // Compact overlay scrollbar. Width and minimum thumb are logical
-                // pixels scaled to the surface DPI; input uses the same scale but
-                // a larger invisible hit strip. Foreground-derived chrome keeps
-                // reliable contrast across light and dark themes. The two-state
-                // opacity still needs no fade timer or idle redraws.
-                if has_scroll || cfg.scrollbar == ScrollbarMode::Always {
-                    let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
-                        || (pv.focused && overlay.scrollbar_active);
-                    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, self.scale, interacting);
-                    let edge = 2.0 * self.scale;
-                    let bx = rx + rw - bar_w - edge;
-                    let active = off > 0 || interacting;
-                    let (track_a, thumb_a) = if active { (0.14, 0.82) } else { (0.07, 0.42) };
-                    let track_w = (1.5 * self.scale).clamp(1.0, bar_w);
-                    if active || cfg.scrollbar == ScrollbarMode::Always {
-                        over.push(rect(
-                            bx + (bar_w - track_w) / 2.0,
-                            ry,
-                            track_w,
-                            rh,
-                            theme.foreground,
-                            track_a,
-                        ));
+                // clear of the titlebar and lane. Width and minimum thumb are
+                // logical pixels scaled to the surface DPI; input reads the
+                // same geometry and a larger invisible hit strip. The
+                // two-state look needs no fade timer or idle redraws.
+                let bar = pane_bar(pv);
+                if bar.channel {
+                    // The channel runs above and below the thumb, not under
+                    // it, so a translucent thumb shows over the background
+                    // alone, as its colour was resolved.
+                    let (x, top, w, h) = bar.track_rect;
+                    let (ink, alpha) = scrollbar_colors.track(bar.state, bar.opaque);
+                    let (gap_top, gap_bottom) = bar
+                        .thumb_rect
+                        .map_or((top + h, top + h), |(_, y, _, th)| (y, y + th));
+                    for (from, to) in [(top, gap_top), (gap_bottom, top + h)] {
+                        if to > from {
+                            over.push(rect(x, from, w, to - from, ink, alpha));
+                        }
                     }
-                    // Thumb — only when there is actually something to scroll.
-                    if let Some((ty, th)) = kettle_core::scrollbar::thumb_with_min(
-                        rows,
-                        hist,
-                        off,
-                        rh,
-                        24.0 * self.scale,
-                    ) {
-                        over.push(rect(bx, ry + ty, bar_w, th, theme.foreground, thumb_a));
-                    }
+                }
+                if let Some((x, y, w, h)) = bar.thumb_rect {
+                    let (ink, alpha) = scrollbar_colors.thumb(bar.state, bar.opaque);
+                    over.push(rect(x, y, w, h, ink, alpha));
                 }
             }
         }
 
         // Result ticks remain visible even when the scrollbar thumb is hidden.
+        // They lie across the bar as it is drawn, widening with it. On a drawn
+        // bar each part of a tick takes the colour that stands out against
+        // what it lies on, the channel or the thumb, and is painted as the bar
+        // is: solid, or a layer a glyph under it still shows through. With no
+        // bar (`never`, or `auto` before any history) a tick lies on the
+        // background alone and keeps its palette colour, solid, as before.
         for pv in panes {
+            let bar = pane_bar(pv);
+            let column = (bar.track_rect.0, bar.track_rect.2);
             for mark in &pv.snap.command_marks {
-                if let Some([x, y, w, h]) = kettle_core::scrollbar::command_tick_rect(
+                let Some(tick) = kettle_core::scrollbar::command_tick_rect(
                     pv.terminal,
+                    column,
                     self.scale,
-                    cfg.scrollbar_width,
                     pv.snap.history_origin,
                     pv.snap.history_size + pv.snap.screen_lines,
                     *mark,
-                ) {
-                    let color = theme.palette[if mark.exit_code == 0 { 2 } else { 1 }];
+                ) else {
+                    continue;
+                };
+                let success = mark.exit_code == 0;
+                if !bar.channel {
+                    let [x, y, w, h] = tick;
+                    let color = theme.palette[if success { 2 } else { 1 }];
                     over.push(rect(x, y, w, h, color, 1.0));
+                    continue;
+                }
+                for ((x, y, w, h), on) in scrollback::tick_pieces(tick, bar.thumb_rect) {
+                    let (ink, alpha) =
+                        scrollbar_colors.tick_paint(bar.state, on, success, bar.opaque);
+                    over.push(rect(x, y, w, h, ink, alpha));
                 }
             }
         }
@@ -6327,6 +6350,9 @@ mod search_bar_tests;
 
 #[cfg(test)]
 mod chrome_contrast_sweep_tests;
+
+#[cfg(test)]
+mod scrollbar_tests;
 
 #[cfg(test)]
 mod completion_panel_tests;

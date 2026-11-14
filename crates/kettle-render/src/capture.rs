@@ -762,30 +762,32 @@ pub fn capture_png_with_annotation(
             }
         }
         if scene == DebugScene::Scrollbar {
-            let track_y = tab_h + pad;
-            let track_h = body_h;
-            let bar_w = cfg.scrollbar_width.clamp(2.0, 40.0);
-            let bar_x = wf - pad - bar_w - 2.0;
-            let track_w = 1.5_f32.clamp(1.0, bar_w);
-            menu_q.push(rect(
-                bar_x + (bar_w - track_w) / 2.0,
-                track_y,
-                track_w,
-                track_h,
-                theme.foreground,
-                0.14,
-            ));
-            if let Some((thumb_y, thumb_h)) =
-                kettle_core::scrollbar::thumb_with_min(rows as usize, 400, 200, track_h, 24.0)
-            {
-                menu_q.push(rect(
-                    bar_x,
-                    track_y + thumb_y,
-                    bar_w,
-                    thumb_h,
-                    theme.foreground,
-                    0.82,
-                ));
+            // A pane 200 of 400 history lines back, through the live
+            // renderer's geometry and colours.
+            let terminal = (pad, tab_h + pad, wf - 2.0 * pad, body_h);
+            let bar = crate::scrollback::pane_scrollbar_geometry(
+                terminal,
+                1.0,
+                cfg,
+                rows as usize,
+                400,
+                200,
+                false,
+            );
+            let colors = crate::scrollback::scrollbar_colors(theme, format.is_srgb());
+            let (x, top, w, h) = bar.track_rect;
+            let (ink, alpha) = colors.track(bar.state, bar.opaque);
+            let (gap_top, gap_bottom) = bar
+                .thumb_rect
+                .map_or((top + h, top + h), |(_, y, _, th)| (y, y + th));
+            for (from, to) in [(top, gap_top), (gap_bottom, top + h)] {
+                if to > from {
+                    menu_q.push(rect(x, from, w, to - from, ink, alpha));
+                }
+            }
+            if let Some((x, y, w, h)) = bar.thumb_rect {
+                let (ink, alpha) = colors.thumb(bar.state, bar.opaque);
+                menu_q.push(rect(x, y, w, h, ink, alpha));
             }
         }
         menu_surfaces_pipe.upload(&device, &queue, [wf, hf], &menu_surfaces);

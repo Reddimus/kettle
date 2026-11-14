@@ -66,8 +66,11 @@ releases ended in 3.3.0. WSL shells need manual setup inside their distribution.
 
 Completed commands with an OSC 133 D exit status leave a tick along the right
 edge of the terminal, over the scrollbar track: a thin green tick for success
-(exit code 0), a thicker red tick for failure. Ticks remain visible when the
-scrollbar thumb is hidden. Screen readers describe each tick and its exit code
+(exit code 0), a thicker red tick for failure. On a drawn scrollbar a tick
+takes a lighter or darker shade of its colour where needed to stand out from
+the channel and the background, or from the thumb where it crosses it, and is
+translucent where the bar is. Ticks remain visible when the scrollbar thumb is
+hidden. Screen readers describe each tick and its exit code
 in the selected UI language. `kettle ctl ui_geometry` reports the same tick
 rectangles and exit codes in each pane's `command_marks` array. They do not
 move the grid, input-method caret or selection coordinates.
