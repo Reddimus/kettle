@@ -309,22 +309,27 @@ impl App {
                 drop(term);
                 let id = accessibility_scrollbar_id(pane_id);
                 pane_children.push(id);
-                let bar_width = (self.cfg.scrollbar_width * scale).max(1.0);
+                // The bar as it is painted: its full-height channel, and
+                // the ticks across it.
+                let bar = pane_scrollbar(
+                    &self.cfg,
+                    ws,
+                    pane_id,
+                    partition.terminal,
+                    scale,
+                    (screen, history, offset),
+                );
                 nodes.push((
                     id,
                     scrollback_bar_accessibility_node(
                         history,
                         offset,
                         screen,
-                        (x + width - bar_width, y, bar_width, height),
+                        bar.track_rect,
                         &self.ui_text,
                     ),
                 ));
-                let column = kettle_render::scrollbar_rest_column(
-                    partition.terminal,
-                    scale,
-                    self.cfg.scrollbar_width,
-                );
+                let column = (bar.track_rect.0, bar.track_rect.2);
                 for mark in pane.term.command_marks() {
                     if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
                         partition.terminal,
@@ -849,6 +854,9 @@ impl App {
             .hash(&mut hasher);
         ws.card_focus.hash(&mut hasher);
         ws.tab_focus.hash(&mut hasher);
+        // Hovering or dragging a scrollbar widens it, and its node with it.
+        ws.scrollbar_hover.hash(&mut hasher);
+        ws.scrollbar_drag_offset.is_some().hash(&mut hasher);
         for (instance, card, item) in self.accessible_cards(ws) {
             instance.hash(&mut hasher);
             card.rect.map(f32::to_bits).hash(&mut hasher);

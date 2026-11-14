@@ -138,13 +138,6 @@ pub struct PaneScrollbar {
     pub opaque: bool,
 }
 
-/// The bar's column at its resting width: where command ticks lie.
-pub fn scrollbar_rest_column(terminal: Rect4, scale: f32, configured: f32) -> (f32, f32) {
-    let (x, _, w, _) = terminal;
-    let width = scrollbar_draw_width(configured, scale, false);
-    (x + w - width - 2.0 * scale, width)
-}
-
 /// The pointer's strip along a terminal's right edge.
 pub fn scrollbar_hit_rect(terminal: Rect4, scale: f32, configured: f32) -> Rect4 {
     let (x, y, w, h) = terminal;

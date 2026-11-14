@@ -28,7 +28,7 @@ mod search;
 use labels::overlay_label_cols;
 pub use scrollback::{
     PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
-    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width, scrollbar_rest_column,
+    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
 };
 mod text_field;
 pub use text_field::{

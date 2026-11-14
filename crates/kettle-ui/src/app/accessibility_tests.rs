@@ -1409,7 +1409,7 @@ fn completed_command_ticks_describe_status_and_exit_code_in_both_languages() {
         for code in [0, 7, -1] {
             let mark = kettle_core::term::CommandMark { row: 10, exit_code: code };
             let terminal = (0.0, 0.0, 300.0, 200.0);
-            let column = kettle_render::scrollbar_rest_column(terminal, 2.0, 6.0);
+            let column = (300.0 - 16.0, 12.0);
             let rect = kettle_core::scrollbar::command_tick_rect(terminal, column, 2.0, 0, 100, mark).unwrap();
             let node = command_mark_accessibility_node(mark, rect, &tr);
             assert!(node.description().unwrap().contains(&code.to_string()));
