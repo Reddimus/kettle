@@ -311,6 +311,9 @@ pub(super) struct PaneEventBatch {
     correlated_command_finished_local: Vec<(u64, kettle_core::CorrelatedCommandFinished)>,
     protocol_notifications_local: Vec<(u64, kettle_core::ProtocolNotification)>,
     pending_restarts_local: Vec<u64>,
+    /// A pane's DEC mode 12 (`CSI ?12 h/l`) flipped. The drain has no blink
+    /// interval, so its caller restarts the phase.
+    cursor_blinking_changed: bool,
 }
 
 pub(super) fn drain_pane_events(
@@ -321,6 +324,7 @@ pub(super) fn drain_pane_events(
 ) -> PaneEventBatch {
     let mut bell = false;
     let mut entered_hold = false;
+    let mut cursor_blinking_changed = false;
     // Pane ids that rang the bell this drain
     // pass — latched onto their containing tabs *after* the
     // iter_mut() loop so we don't double-borrow mux.panes.
@@ -410,16 +414,7 @@ pub(super) fn drain_pane_events(
             None => {}
         }
         if pane.term.take_cursor_blinking_changed() {
-            // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next
-            // redraw picks up the new state from
-            // `Terminal::cursor_blinking()`, but reset the blink
-            // phase now so *blink-on* starts visible and
-            // *blink-off* makes the cursor solid right away, not on
-            // whatever half-period we'd otherwise land in. It is
-            // program output, so it does not restart the blink
-            // timeout; only typing, focus, and settings do.
-            ws.blink_on = true;
-            ws.last_blink = std::time::Instant::now();
+            cursor_blinking_changed = true;
         }
         // A program that turned mouse reporting off ended the session the
         // Shift hint was shown for; the next one may show it again. Only a
@@ -561,6 +556,7 @@ pub(super) fn drain_pane_events(
         correlated_command_finished_local,
         protocol_notifications_local,
         pending_restarts_local,
+        cursor_blinking_changed,
     }
 }
 
@@ -649,12 +645,27 @@ impl App {
             correlated_command_finished_local,
             protocol_notifications_local,
             pending_restarts_local,
+            cursor_blinking_changed,
         } = drain_pane_events(
             ws,
             self.cfg.exit_action,
             self.cfg.force_no_bell,
             |pane, ev| self.pane_event_reply(pane, ev),
         );
+        // DEC mode 12 (`CSI ?12 h/l`) just flipped. The next redraw picks up
+        // the new state from `Terminal::cursor_blinking()`, but restart the
+        // phase now so *blink-on* starts visible, with the same hold as any
+        // other restart, and *blink-off* makes the cursor solid right away,
+        // not on whatever half-period we'd otherwise land in. It is program
+        // output, so it does not restart the blink timeout; only typing,
+        // focus, and settings do.
+        if cursor_blinking_changed {
+            restart_blink(
+                ws,
+                std::time::Instant::now(),
+                std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+            );
+        }
         if bell {
             if bell_flashes(self.cfg.bell, self.motion_allowed()) {
                 // Only the pane that rang flashes; a sibling split's bell
@@ -1105,6 +1116,45 @@ mod exit_behavior_tests {
             ws.mux.panes[&id].held
         });
         (ws, id)
+    }
+
+    /// A program that flips DEC mode 12 has it reported by the drain, which
+    /// leaves the blink phase to its caller: only the caller has the
+    /// configured interval a restart's hold is made of.
+    #[test]
+    fn a_dec_mode_12_flip_is_reported_for_a_blink_restart() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let policy = kettle_config::ExitAction::Hold;
+        for (program, flips) in [
+            ("printf '\\033[?12l'; exit 7", true),
+            ("printf plain; exit 7", false),
+        ] {
+            let mut mux = Mux::new();
+            mux.new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &["/bin/sh".into(), "-c".into(), program.into()],
+                None,
+            )
+            .unwrap();
+            let id = mux.active_focus().unwrap();
+            let mut ws = WindowState::new(1, mux);
+            let phase = (false, ws.last_blink);
+            ws.blink_on = phase.0;
+            let mut reported = false;
+            wait_until(|| {
+                reported |=
+                    drain_pane_events(&mut ws, policy, false, |_, _| None).cursor_blinking_changed;
+                ws.mux.panes[&id].held
+            });
+            assert_eq!(reported, flips, "{program}");
+            assert_eq!((ws.blink_on, ws.last_blink), phase, "{program}");
+        }
     }
 
     #[test]

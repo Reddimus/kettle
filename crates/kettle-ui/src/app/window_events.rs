@@ -1552,10 +1552,9 @@ impl App {
                     w.set_visible(false);
                 }
                 // Route through the shared helper so all
-                // user-driven blink-reset paths share one implementation. The
-                // CursorBlinkingChange handler still inlines the body
-                // because it runs inside `ws.mux.panes.values_mut()`
-                // and can't borrow `self` again — that one's documented.
+                // user-driven blink-reset paths share one implementation. A
+                // CursorBlinkingChange restarts the phase through the same
+                // `restart_blink`, after the pane drain that reports it.
                 self.reset_blink_phase(ws);
                 // Focus-event reporting (DEC private mode ?1004) follows
                 // `window_focused` in `sync_pane_focus_reports`, which runs

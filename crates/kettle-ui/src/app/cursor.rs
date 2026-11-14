@@ -37,6 +37,68 @@ pub(super) fn cursor_blink_active(
     configured && pane_requests_blink && window_focused
 }
 
+/// Restart the blink at `now`: the cursor shows at once and stays visible for
+/// one whole period before the first edge hides it
+/// (`cursor_blink::restart_edge`). Every restart goes through here, so none
+/// can cut another's hold short.
+pub(super) fn restart_blink(
+    ws: &mut WindowState,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) {
+    ws.blink_on = true;
+    ws.last_blink = crate::cursor_blink::restart_edge(now, interval);
+}
+
+/// The blink phase on screen at `now` and when it next changes, for
+/// `ui_geometry.cursor_blink`. While the window server blinks the cursor both
+/// come from its plan; otherwise they are the scheduler's, which has a next
+/// edge only while it is `running`.
+pub(super) fn shown_blink_phase(
+    ws: &WindowState,
+    running: impl FnOnce() -> bool,
+    interval: std::time::Duration,
+    timeout: Option<std::time::Duration>,
+    now: std::time::Instant,
+) -> (bool, Option<std::time::Instant>) {
+    match ws.blink_layer.active() {
+        Some((anchor, plan, _)) if ws.last_blink == anchor => {
+            let (on, edge) = crate::cursor_blink::materialize(
+                ws.blink_on,
+                ws.last_blink,
+                plan.activity,
+                plan.interval,
+                plan.timeout,
+                now,
+            );
+            let next = crate::cursor_blink::next_edge(
+                on,
+                edge,
+                plan.activity,
+                plan.interval,
+                plan.timeout,
+                now,
+            );
+            (on, next)
+        }
+        _ => {
+            let next = running()
+                .then(|| {
+                    crate::cursor_blink::next_edge(
+                        ws.blink_on,
+                        ws.last_blink,
+                        ws.last_blink_activity,
+                        interval,
+                        timeout,
+                        now,
+                    )
+                })
+                .flatten();
+            (ws.blink_on, next)
+        }
+    }
+}
+
 impl App {
     pub(super) fn pane_cursor_layer_eligible(ws: &WindowState) -> bool {
         use kettle_core::CursorShape;
@@ -75,19 +137,27 @@ impl App {
         )
     }
 
-    /// Force the next redraw to render the cursor visible. Shared by:
+    /// Force the next redraw to render the cursor visible, hold it visible
+    /// for one whole blink period (`restart_blink`), and restart the idle
+    /// timeout. Shared by:
+    /// - typing and pasting (`write_terminal_input`, the paste deliveries)
     /// - the focus-change path (`note_focus_change`)
     /// - a pointer press in the terminal area, and the release that ends a
     ///   selection drag, as a click does in GTK and Cocoa text views
     /// - `Action::Reset` so a "fresh start" cursor is visible
-    /// - `CursorBlinkingChange` events (DEC ?12 program-driven toggle)
     /// - the four modal Escape handlers so closing the
     ///   search/palette/hints/SSH overlay reveals the cursor immediately
     ///   instead of waiting up to one blink interval.
+    ///
+    /// A DEC ?12 toggle (`drain_events`) restarts the phase the same way but
+    /// is program output, so it leaves the idle timeout alone.
     pub(super) fn reset_blink_phase(&mut self, ws: &mut WindowState) {
         let now = std::time::Instant::now();
-        ws.blink_on = true;
-        ws.last_blink = now;
+        restart_blink(
+            ws,
+            now,
+            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+        );
         ws.last_blink_activity = now;
         // The window server's blink was planned from the old activity time.
         // A frame ends it (see `redraw`), so it never outlives new activity.

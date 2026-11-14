@@ -2123,7 +2123,9 @@ pub struct Config {
     /// case). Kept on `Config` so the renderer can resolve the accent from `cfg`
     /// + `theme` alone without threading a separate parameter.
     pub accent_seed: u64,
-    /// Cursor blink half-period in milliseconds.
+    /// Cursor blink half-period in milliseconds: how long each on and each
+    /// off phase lasts. A restart of the blink first holds the cursor visible
+    /// for two of them.
     pub cursor_blink_interval: u64,
     /// Seconds without typing after which the cursor stops blinking and stays
     /// visible. Output does not restart the blink, as in kitty and Alacritty.
