@@ -1,5 +1,6 @@
 //! One serialized, bounded worker for blocking native selection operations.
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, bounded};
@@ -10,9 +11,14 @@ type Result<T> = std::result::Result<T, arboard::Error>;
 
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Whether the provider serves PRIMARY now. It is asked on the UI thread at
+/// each use, not once: a compositor announces the primary-selection protocol
+/// after the worker has started, and the bridge can close.
+pub(super) type PrimaryProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub(super) trait TextProvider: Send + 'static {
-    fn supports_primary(&self) -> bool {
-        true
+    fn primary_probe(&self) -> PrimaryProbe {
+        Arc::new(|| true)
     }
     fn load(&mut self, primary: bool, max: usize, deadline: Instant) -> Result<String>;
     fn store(&mut self, primary: bool, text: String, deadline: Instant) -> Result<()>;
@@ -50,7 +56,7 @@ struct Request {
 #[derive(Clone)]
 pub(super) struct TextWorker {
     requests: Sender<Request>,
-    primary: bool,
+    primary: PrimaryProbe,
 }
 
 impl TextWorker {
@@ -69,7 +75,7 @@ impl TextWorker {
                         return;
                     }
                 };
-                if ready.send(Ok(provider.supports_primary())).is_err() {
+                if ready.send(Ok(provider.primary_probe())).is_err() {
                     return;
                 }
                 for request in incoming {
@@ -133,7 +139,7 @@ impl TextWorker {
     }
 
     pub(super) fn supports_primary(&self) -> bool {
-        self.primary
+        (self.primary)()
     }
 
     pub(super) fn load(&self, primary: bool, max: usize, deadline: Instant) -> Result<String> {

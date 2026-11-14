@@ -1,13 +1,15 @@
-//! CLIPBOARD through the bridge's own `wl_data_device`.
+//! CLIPBOARD and PRIMARY through the bridge's own devices.
 //!
 //! A compositor tells a client about the selection through one data device per
 //! seat; Mutter, for one, sends `selection` only to the first device a client
 //! created. The bridge already owns that device for drag and drop, so the
 //! clipboard reads and writes through it instead of a second device that would
-//! never hear of a selection.
+//! never hear of a selection. PRIMARY has its own protocol,
+//! `zwp_primary_selection_device_manager_v1`, with the same shape; the bridge
+//! binds it where the compositor has it (`super::primary`).
 //!
-//! The bridge records the current offer, the types it lists and the latest
-//! input serial while it dispatches on the UI thread. Reads run on
+//! The bridge records each channel's current offer, the types it lists and
+//! the latest input serial while it dispatches on the UI thread. Reads run on
 //! the clipboard worker: they send `receive` for the recorded offer and read
 //! the pipe within the caller's size cap and deadline. Wayland proxies are
 //! safe to use from that thread. A selection Kettle itself owns is answered
@@ -24,6 +26,12 @@ use wayland_client::protocol::{
     wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
 };
 use wayland_client::{Connection, QueueHandle};
+use wayland_protocols::wp::primary_selection::zv1::client::{
+    zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
+    zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+    zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1,
+    zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+};
 
 use super::super::offer::{self, Channel, Kinds, Offered, Owned, TEXT_MIMES, Transfer};
 use crate::clipboard::{PasteContent, PasteWant};
@@ -44,8 +52,27 @@ impl Owned for wl_data_source::WlDataSource {
     }
 }
 
+impl Offered for ZwpPrimarySelectionOfferV1 {
+    fn receive(&self, mime: &'static str, fd: BorrowedFd<'_>) {
+        ZwpPrimarySelectionOfferV1::receive(self, mime.to_string(), fd);
+    }
+
+    fn discard(self) {
+        self.destroy();
+    }
+}
+
+impl Owned for ZwpPrimarySelectionSourceV1 {
+    fn discard(self) {
+        self.destroy();
+    }
+}
+
 /// User data of a clipboard source, distinct from drag sources.
 pub(super) struct ClipSource(pub(super) u64);
+
+/// User data of a PRIMARY source.
+pub(super) struct PrimarySource(pub(super) u64);
 
 #[derive(Default)]
 struct Inner {
@@ -53,8 +80,11 @@ struct Inner {
     queue: Option<QueueHandle<super::State>>,
     manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     device: Option<wl_data_device::WlDataDevice>,
+    primary_manager: Option<ZwpPrimarySelectionDeviceManagerV1>,
+    primary_device: Option<ZwpPrimarySelectionDeviceV1>,
     serial: Option<u32>,
     clipboard: Channel<wl_data_offer::WlDataOffer, wl_data_source::WlDataSource>,
+    primary: Channel<ZwpPrimarySelectionOfferV1, ZwpPrimarySelectionSourceV1>,
     next: u64,
 }
 
@@ -93,12 +123,24 @@ impl Selection {
         self.lock().manager = Some(manager);
     }
 
-    /// Input on a seat: its device and serial authorize the next selection
+    pub(super) fn set_primary_manager(&self, manager: ZwpPrimarySelectionDeviceManagerV1) {
+        self.lock().primary_manager = Some(manager);
+    }
+
+    /// Input on a seat: its devices and serial authorize the next selection
     /// this client sets.
-    pub(super) fn input(&self, device: Option<&wl_data_device::WlDataDevice>, serial: u32) {
+    pub(super) fn input(
+        &self,
+        device: Option<&wl_data_device::WlDataDevice>,
+        primary: Option<&ZwpPrimarySelectionDeviceV1>,
+        serial: u32,
+    ) {
         let mut inner = self.lock();
         if let Some(device) = device {
             inner.device = Some(device.clone());
+        }
+        if let Some(primary) = primary {
+            inner.primary_device = Some(primary.clone());
         }
         inner.serial = Some(serial);
     }
@@ -108,19 +150,35 @@ impl Selection {
         self.lock().clipboard.set_offer(offer);
     }
 
+    /// The compositor's new PRIMARY offer (or none), replacing the last one.
+    pub(super) fn primary_offer(&self, offer: Option<(ZwpPrimarySelectionOfferV1, Kinds)>) {
+        self.lock().primary.set_offer(offer);
+    }
+
     pub(super) fn text_for(&self, id: u64) -> Option<Arc<str>> {
         self.lock().clipboard.text_for(id)
+    }
+
+    pub(super) fn primary_text_for(&self, id: u64) -> Option<Arc<str>> {
+        self.lock().primary.text_for(id)
     }
 
     pub(super) fn cancelled(&self, id: u64) {
         self.lock().clipboard.cancelled(id);
     }
 
+    pub(super) fn primary_cancelled(&self, id: u64) {
+        self.lock().primary.cancelled(id);
+    }
+
     pub(super) fn close(&self) {
         let mut inner = self.lock();
         inner.clipboard.close();
+        inner.primary.close();
         inner.device = None;
         inner.manager = None;
+        inner.primary_device = None;
+        inner.primary_manager = None;
     }
 
     /// Whether the bridge is connected and has a data device manager.
@@ -129,12 +187,36 @@ impl Selection {
         inner.connection.is_some() && inner.manager.is_some()
     }
 
+    /// Whether the compositor has the primary-selection protocol. Without
+    /// it PRIMARY is not Kettle's to serve here, and the caller falls back.
+    pub(crate) fn primary_available(&self) -> bool {
+        let inner = self.lock();
+        inner.connection.is_some() && inner.primary_manager.is_some()
+    }
+
     /// Read the CLIPBOARD text: at most `max` bytes (one more is an error) by
     /// `deadline`. Invalid UTF-8 is replaced rather than refused.
     pub(crate) fn load(&self, max: usize, deadline: Instant) -> Result<String> {
         let (held, connection) = {
             let inner = self.lock();
             (inner.clipboard.held(), inner.connection.clone())
+        };
+        transfer(connection, deadline, |transfer| {
+            offer::load_text(held, max, transfer)
+        })
+    }
+
+    /// Read the PRIMARY text, bounded as [`Selection::load`] is.
+    pub(crate) fn load_primary(&self, max: usize, deadline: Instant) -> Result<String> {
+        let (held, connection) = {
+            let inner = self.lock();
+            if inner.primary_manager.is_none() {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "no primary-selection protocol",
+                ));
+            }
+            (inner.primary.held(), inner.connection.clone())
         };
         transfer(connection, deadline, |transfer| {
             offer::load_text(held, max, transfer)
@@ -187,6 +269,30 @@ impl Selection {
         }
         device.set_selection(Some(&source), serial);
         inner.clipboard.own(id, source, Arc::from(text));
+        let connection = inner.connection.clone();
+        drop(inner);
+        flush(&connection.ok_or_else(no_bridge)?)
+    }
+
+    /// Own the PRIMARY selection with `text`, authorized by the latest input.
+    pub(crate) fn store_primary(&self, text: String) -> Result<()> {
+        let mut inner = self.lock();
+        let (Some(manager), Some(queue), Some(device), Some(serial)) = (
+            inner.primary_manager.clone(),
+            inner.queue.clone(),
+            inner.primary_device.clone(),
+            inner.serial,
+        ) else {
+            return Err(no_input());
+        };
+        let id = inner.next;
+        inner.next += 1;
+        let source = manager.create_source(&queue, PrimarySource(id));
+        for mime in TEXT_MIMES {
+            source.offer(mime.to_string());
+        }
+        device.set_selection(Some(&source), serial);
+        inner.primary.own(id, source, Arc::from(text));
         let connection = inner.connection.clone();
         drop(inner);
         flush(&connection.ok_or_else(no_bridge)?)
@@ -295,9 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_with_no_selection_gives_a_paste_nothing() {
+    fn without_the_primary_protocol_primary_is_unavailable_and_clipboard_is_untouched() {
         let selection = Selection(Mutex::new(Inner::default()));
         let deadline = Instant::now() + std::time::Duration::from_millis(50);
+        assert!(!selection.primary_available());
+        assert_eq!(
+            selection.load_primary(8, deadline).unwrap_err().kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            selection.store_primary("x".into()).unwrap_err().kind(),
+            ErrorKind::NotConnected
+        );
+        // A PRIMARY write that cannot happen must not become a CLIPBOARD one.
         assert!(matches!(selection.lock().clipboard.held(), Held::Empty));
         assert!(matches!(
             selection.paste(

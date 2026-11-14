@@ -1,5 +1,6 @@
 mod drag;
 mod files;
+mod primary;
 mod selection;
 pub(crate) use drag::{Point, Update};
 pub(crate) use files::FileUpdate;
@@ -60,6 +61,7 @@ struct State {
     pending: BTreeMap<u64, Pending>,
     next_request: u64,
     drag: drag::State,
+    primary_selection: primary::State,
     wake: Option<kettle_core::Waker>,
 }
 
@@ -134,6 +136,7 @@ impl Bridge {
         }
         if self.queue.dispatch_pending(&mut self.state).is_err() {
             self.state.drag.close();
+            self.state.primary_selection.close();
             for (_, request) in std::mem::take(&mut self.state.pending) {
                 request.token.destroy();
             }
@@ -144,6 +147,9 @@ impl Bridge {
         }
         self.state
             .drag
+            .ensure_devices(&self.state.seats, &self.queue.handle());
+        self.state
+            .primary_selection
             .ensure_devices(&self.state.seats, &self.queue.handle());
         self.state.drag.poll();
         let now = Instant::now();
@@ -371,6 +377,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 "xdg_toplevel_drag_manager_v1" if state.drag.manager.is_none() => {
                     state.drag.manager = Some(registry.bind(name, 1, qh, ()));
                 }
+                "zwp_primary_selection_device_manager_v1"
+                    if state.primary_selection.manager.is_none() =>
+                {
+                    let manager: primary::Manager = registry.bind(name, 1, qh, ());
+                    selection::shared().set_primary_manager(manager.clone());
+                    state.primary_selection.manager = Some(manager);
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
@@ -380,6 +393,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 state.gestures.0.remove(&name);
                 state.primary.0.remove(&name);
                 state.drag.remove_seat(name);
+                state.primary_selection.remove_seat(name);
             }
             _ => {}
         }
@@ -470,7 +484,11 @@ impl Dispatch<wl_pointer::WlPointer, u32> for State {
                 if let Some(window) = seat.mouse_window {
                     state.gestures.press(*name, window, serial, Instant::now());
                 }
-                selection::shared().input(state.drag.device(*name), serial);
+                selection::shared().input(
+                    state.drag.device(*name),
+                    state.primary_selection.device(*name),
+                    serial,
+                );
             }
             _ => {}
         }
@@ -497,7 +515,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
         match event {
             wl_keyboard::Event::Enter { serial, .. } => {
                 seat.key_window = entered;
-                selection::shared().input(state.drag.device(*name), serial);
+                selection::shared().input(
+                    state.drag.device(*name),
+                    state.primary_selection.device(*name),
+                    serial,
+                );
             }
             wl_keyboard::Event::Leave { .. } => seat.key_window = None,
             wl_keyboard::Event::Key {
@@ -508,7 +530,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
                 if let Some(window) = seat.key_window {
                     state.gestures.press(*name, window, serial, Instant::now());
                 }
-                selection::shared().input(state.drag.device(*name), serial);
+                selection::shared().input(
+                    state.drag.device(*name),
+                    state.primary_selection.device(*name),
+                    serial,
+                );
             }
             // Dropping Keymap closes its owned descriptor; no text is read.
             _ => {}
@@ -567,6 +593,7 @@ impl Drop for Bridge {
     fn drop(&mut self) {
         selection::shared().close();
         self.state.drag.close();
+        self.state.primary_selection.close();
         let _ = self.stop.write_all(&[0]);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();

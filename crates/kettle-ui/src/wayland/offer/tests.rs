@@ -196,6 +196,13 @@ fn kinds_flag_what_a_paste_reads_and_rank_text_utf8_first() {
             png: true,
         }
     );
+    assert_eq!(
+        kinds.text_only(),
+        Kinds {
+            text: Some(UTF8),
+            ..Kinds::default()
+        }
+    );
     for only in [URI_LIST, GNOME_COPIED_FILES, PNG] {
         let mut kinds = Kinds::default();
         kinds.note(only);
@@ -584,7 +591,7 @@ fn the_files_a_preview_names_are_local_ones_only() {
     );
 }
 
-/// One selection channel over the loopback source.
+/// PRIMARY and CLIPBOARD are two channels of the same shape.
 type Selection = Channel<Loopback, Sent>;
 
 fn text_of(channel: &Selection, max: usize) -> Result<String> {
@@ -594,13 +601,50 @@ fn text_of(channel: &Selection, max: usize) -> Result<String> {
 }
 
 #[test]
-fn a_selection_this_client_wrote_is_answered_from_memory_until_it_is_replaced() {
+fn a_primary_selection_is_read_from_its_offer_as_text_only() {
     let mut primary = Selection::default();
-    let mut clipboard = Selection::default();
     assert_eq!(
         text_of(&primary, 64).unwrap_err().kind(),
         ErrorKind::NotFound
     );
+
+    // Whatever else a source lists on PRIMARY, only its text is kept.
+    let offer = Loopback::new(&[
+        ("STRING", bytes("legacy")),
+        (UTF8, bytes("selected text")),
+        (URI_LIST, bytes("file:///tmp/a\r\n")),
+        (PNG, Answer::Bytes(vec![1])),
+    ]);
+    primary.set_offer(Some((offer.clone(), offer.kinds().text_only())));
+    assert_eq!(text_of(&primary, 64).unwrap(), "selected text");
+    assert_eq!(offer.asked(), [UTF8]);
+    assert_eq!(
+        text_of(&primary, 4).unwrap_err().kind(),
+        ErrorKind::FileTooLarge
+    );
+    let content = run(within(Duration::from_secs(10)), |transfer| {
+        paste(primary.held(), ALL, 64, transfer)
+    });
+    assert_eq!(outcome(content), "text \"selected text\"");
+    assert!(!offer.asked().contains(&URI_LIST) && !offer.asked().contains(&PNG));
+
+    // A new selection replaces the offer and lets the old one go.
+    let next = Loopback::new(&[("text/plain", bytes("next"))]);
+    primary.set_offer(Some((next.clone(), next.kinds().text_only())));
+    assert!(offer.0.discarded.load(Ordering::Acquire));
+    assert_eq!(text_of(&primary, 64).unwrap(), "next");
+    primary.set_offer(None);
+    assert!(next.0.discarded.load(Ordering::Acquire));
+    assert_eq!(
+        text_of(&primary, 64).unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn a_selection_this_client_wrote_is_answered_from_memory_until_it_is_replaced() {
+    let mut primary = Selection::default();
+    let mut clipboard = Selection::default();
     let offer = Loopback::new(&[(UTF8, bytes("from another client"))]);
     primary.set_offer(Some((offer.clone(), offer.kinds())));
 
@@ -619,7 +663,7 @@ fn a_selection_this_client_wrote_is_answered_from_memory_until_it_is_replaced() 
     assert_eq!(primary.text_for(2), None);
     assert!(
         matches!(clipboard.held(), Held::Empty),
-        "writing one channel leaves another alone"
+        "writing PRIMARY leaves CLIPBOARD alone"
     );
     clipboard.own(9, Sent(gone[0].clone()), Arc::from("copied"));
     assert_eq!(text_of(&clipboard, 64).unwrap(), "copied");

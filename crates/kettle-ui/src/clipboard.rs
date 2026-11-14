@@ -214,8 +214,9 @@ fn fallback_paste(
     PasteContent::Text(text)
 }
 
-// Native Wayland has no PRIMARY protocol; unsupported channels stay on
-// arboard (XWayland) without treating native CLIPBOARD errors as a fallback.
+// PRIMARY is native where the compositor has the primary-selection protocol.
+// Where it does not, that channel stays on arboard (XWayland); native
+// CLIPBOARD errors are never treated as a reason to fall back.
 impl<F: SelectionFallback> Clipboard<F> {
     /// What a paste takes from CLIPBOARD under `want`, with text capped at
     /// `text_max` bytes. On Wayland the bridge is the authority and arboard is

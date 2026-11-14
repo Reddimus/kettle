@@ -69,6 +69,14 @@ impl Kinds {
     pub(crate) fn any(self) -> bool {
         self.text.is_some() || self.uri_list || self.gnome_copied_files || self.png
     }
+
+    /// Only the text type: all a PRIMARY selection is read for.
+    pub(crate) fn text_only(self) -> Self {
+        Self {
+            text: self.text,
+            ..Self::default()
+        }
+    }
 }
 
 /// The preferred text type among `current` and `offered`.
@@ -97,8 +105,8 @@ pub(crate) trait Owned {
     fn discard(self);
 }
 
-/// One selection channel: the compositor's current offer and the sources
-/// behind the selections this client set.
+/// One selection channel, CLIPBOARD or PRIMARY: the compositor's current
+/// offer and the sources behind the selections this client set.
 pub(crate) struct Channel<O, S> {
     offer: Option<(O, Kinds)>,
     sources: BTreeMap<u64, (S, Arc<str>)>,

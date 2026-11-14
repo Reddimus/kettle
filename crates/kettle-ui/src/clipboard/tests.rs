@@ -1,6 +1,8 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use worker::{TextProvider, TextWorker};
+use worker::{PrimaryProbe, TextProvider, TextWorker};
 
 const ALL: PasteWant = PasteWant {
     files: true,
@@ -226,8 +228,8 @@ fn native_worker_refuses_a_full_queue_without_spawning_more_readers() {
 struct ClipboardOnly(Provider);
 
 impl TextProvider for ClipboardOnly {
-    fn supports_primary(&self) -> bool {
-        false
+    fn primary_probe(&self) -> PrimaryProbe {
+        Arc::new(|| false)
     }
 
     fn load(
@@ -642,4 +644,81 @@ fn a_stalled_native_paste_returns_at_its_deadline() {
             .unwrap(),
         "fresh"
     );
+}
+
+/// A native provider whose PRIMARY support can change while it runs, as the
+/// bridge's does when the compositor announces the protocol or goes away.
+struct Announced(Provider, Arc<AtomicBool>);
+
+impl TextProvider for Announced {
+    fn primary_probe(&self) -> PrimaryProbe {
+        let supported = self.1.clone();
+        Arc::new(move || supported.load(Ordering::Acquire))
+    }
+    fn load(&mut self, primary: bool, max: usize, at: Instant) -> Result<String, arboard::Error> {
+        TextProvider::load(&mut self.0, primary, max, at)
+    }
+    fn store(&mut self, primary: bool, text: String, at: Instant) -> Result<(), arboard::Error> {
+        TextProvider::store(&mut self.0, primary, text, at)
+    }
+}
+
+#[test]
+fn primary_is_native_while_the_protocol_is_there_and_falls_back_while_it_is_not() {
+    let supported = Arc::new(AtomicBool::new(false));
+    let announced = supported.clone();
+    let mut clipboard = Clipboard {
+        arboard: Some(Provider {
+            selections: [String::new(), "x11 primary".into()],
+            ..Default::default()
+        }),
+        wayland: Some(
+            TextWorker::start(move || Ok(Announced(Provider::default(), announced))).unwrap(),
+        ),
+    };
+    let primary = |clipboard: &mut Clipboard<Provider>| {
+        clipboard.get_selection_bounded(true, 100, Instant::now() + worker::READ_TIMEOUT)
+    };
+    // The worker starts before the compositor's globals are known.
+    assert_eq!(primary(&mut clipboard).unwrap(), "x11 primary");
+
+    // The primary-selection global arrives: selecting text writes PRIMARY
+    // natively and a middle click reads it back, without XWayland.
+    supported.store(true, Ordering::Release);
+    clipboard
+        .set_selection(true, "selected on Wayland".into())
+        .unwrap();
+    assert_eq!(primary(&mut clipboard).unwrap(), "selected on Wayland");
+    assert_eq!(
+        clipboard.arboard.as_ref().unwrap().selections[1],
+        "x11 primary",
+        "the fallback is not written while PRIMARY is native"
+    );
+    let arboard = clipboard.arboard.take();
+    assert_eq!(
+        primary(&mut clipboard).unwrap(),
+        "selected on Wayland",
+        "native PRIMARY needs no arboard"
+    );
+    clipboard.arboard = arboard;
+
+    // The bridge closes: PRIMARY is the fallback's again, in both directions.
+    supported.store(false, Ordering::Release);
+    assert_eq!(primary(&mut clipboard).unwrap(), "x11 primary");
+    clipboard
+        .set_selection(true, "selected on X11".into())
+        .unwrap();
+    assert_eq!(
+        clipboard.arboard.as_ref().unwrap().selections[1],
+        "selected on X11"
+    );
+    // CLIPBOARD never moved off the native provider.
+    clipboard.set_text("copied".into()).unwrap();
+    assert_eq!(
+        clipboard
+            .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
+            .unwrap(),
+        "copied"
+    );
+    assert_eq!(clipboard.arboard.as_ref().unwrap().selections[0], "");
 }
