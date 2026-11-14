@@ -85,6 +85,25 @@ fn show(notification: DesktopNotification) {
     }
 }
 
+/// `body` as text inside freedesktop notification body markup: `&`, `<`
+/// and `>` become entities, so a program's text never becomes a tag.
+#[cfg(any(target_os = "linux", test))]
+fn escape_body_markup(body: &str) -> std::borrow::Cow<'_, str> {
+    if !body.contains(['&', '<', '>']) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let mut out = String::with_capacity(body.len() + 16);
+    for ch in body.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            ch => out.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn discard_closed_sender<C>(sender: &mut Option<C>, is_closed: impl FnOnce(&C) -> bool) {
     if sender.as_ref().is_some_and(is_closed) {
@@ -227,6 +246,21 @@ mod tests {
     };
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// Markup in a program's body becomes text: tags, links and image
+    /// references are escaped, entities too, and plain text is untouched.
+    #[test]
+    fn body_markup_is_escaped_into_text() {
+        use super::escape_body_markup;
+        assert_eq!(
+            escape_body_markup("<b>x</b> <a href=\"u\">l</a> <img src=\"/f\"/> &amp;"),
+            "&lt;b&gt;x&lt;/b&gt; &lt;a href=\"u\"&gt;l&lt;/a&gt; &lt;img src=\"/f\"/&gt; &amp;amp;"
+        );
+        assert!(matches!(
+            escape_body_markup("Build finished"),
+            std::borrow::Cow::Borrowed("Build finished")
+        ));
+    }
 
     #[test]
     fn recoverable_call_errors_keep_the_notification_sender() {

@@ -10,6 +10,9 @@ const OBJECT: &str = "/org/freedesktop/Notifications";
 #[derive(Default)]
 pub(super) struct Backend {
     connection: Option<Connection>,
+    /// Whether the server renders markup in bodies, asked once per
+    /// connection (`GetCapabilities`).
+    body_markup: Option<bool>,
     #[cfg(test)]
     address: Option<String>,
 }
@@ -30,6 +33,9 @@ impl Backend {
     pub(super) fn show(&mut self, notification: DesktopNotification) {
         if let Err(error) = self.send(&notification) {
             super::discard_closed_sender(&mut self.connection, Connection::is_closed);
+            if self.connection.is_none() {
+                self.body_markup = None;
+            }
             log::warn!("kettle.notify: notification send failed: {error}");
         }
     }
@@ -39,6 +45,18 @@ impl Backend {
         let connection = match self.connection.take() {
             Some(connection) => connection,
             None => self.connect()?,
+        };
+        // A body is the program's text. A server that renders markup in
+        // bodies (GNOME renders <b>, <i> and <u>; the spec also allows links
+        // and images of local files) gets it escaped; one that does not shows
+        // the text as it is anyway.
+        let markup = *self
+            .body_markup
+            .get_or_insert_with(|| renders_body_markup(&connection));
+        let body = if markup {
+            super::escape_body_markup(&notification.body)
+        } else {
+            std::borrow::Cow::Borrowed(notification.body.as_str())
         };
         let hints = HashMap::<&str, Value<'_>>::new();
         let result = connection
@@ -52,7 +70,7 @@ impl Backend {
                     0u32,
                     "",
                     &notification.title,
-                    &notification.body,
+                    body.as_ref(),
                     Vec::<&str>::new(),
                     hints,
                     -1i32,
@@ -62,6 +80,20 @@ impl Backend {
         self.connection = Some(connection);
         result.map(|_| ())
     }
+}
+
+/// Whether the notification server says it renders markup in bodies. A
+/// server that does not answer is taken to: escaped text at worst shows an
+/// entity, where unescaped markup could load a local image or render a link.
+fn renders_body_markup(connection: &Connection) -> bool {
+    connection
+        .call_method(Some(SERVICE), OBJECT, Some(SERVICE), "GetCapabilities", &())
+        .and_then(|reply| reply.body().deserialize::<Vec<String>>())
+        .map_or(true, |capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == "body-markup")
+        })
 }
 
 #[cfg(test)]
@@ -76,6 +108,10 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.Notifications")]
     impl Service {
+        fn get_capabilities(&self) -> Vec<String> {
+            vec!["body".into(), "body-markup".into()]
+        }
+
         // The standard notification wire method has eight arguments.
         #[allow(clippy::too_many_arguments)]
         fn notify(
@@ -218,5 +254,76 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].1, "after service");
         assert_eq!(records[0].2, "delivered");
+    }
+
+    /// The same server without `body-markup`: it shows bodies as they are.
+    struct PlainService(Received);
+
+    #[zbus::interface(name = "org.freedesktop.Notifications")]
+    impl PlainService {
+        fn get_capabilities(&self) -> Vec<String> {
+            vec!["body".into()]
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn notify(
+            &self,
+            _app_name: &str,
+            _replaces_id: u32,
+            _app_icon: &str,
+            summary: &str,
+            body: &str,
+            _actions: Vec<String>,
+            _hints: HashMap<String, zbus::zvariant::OwnedValue>,
+            _timeout: i32,
+        ) -> u32 {
+            let mut received = self.0.lock().unwrap();
+            received.push((String::new(), summary.into(), body.into()));
+            received.len() as u32
+        }
+    }
+
+    /// A program's body never becomes markup: a server that renders body
+    /// markup receives it escaped, and one that does not receives the text
+    /// as written, which it shows as written. The summary is plain text by
+    /// specification and is never escaped.
+    #[test]
+    fn program_bodies_reach_markup_servers_escaped() {
+        let body =
+            "<b>bold</b> <a href=\"https://example.invalid\">x</a> <img src=\"/etc/passwd\"/> & co";
+        let escaped = "&lt;b&gt;bold&lt;/b&gt; &lt;a href=\"https://example.invalid\"&gt;x&lt;/a&gt; \
+                       &lt;img src=\"/etc/passwd\"/&gt; &amp; co";
+        for (markup, expected) in [(true, escaped), (false, body)] {
+            let bus = crate::test_bus::Bus::start();
+            let received = Received::default();
+            let builder = Builder::address(bus.address.as_str())
+                .unwrap()
+                .name(SERVICE)
+                .unwrap();
+            let _server = if markup {
+                builder.serve_at(OBJECT, Service(received.clone()))
+            } else {
+                builder.serve_at(OBJECT, PlainService(received.clone()))
+            }
+            .unwrap()
+            .build()
+            .unwrap();
+            let mut backend = Backend {
+                address: Some(bus.address.clone()),
+                ..Backend::default()
+            };
+            for _ in 0..2 {
+                backend.show(DesktopNotification {
+                    title: "<i>title</i>".into(),
+                    body: body.into(),
+                });
+            }
+            let records = received.lock().unwrap();
+            assert_eq!(records.len(), 2, "markup {markup}");
+            for record in records.iter() {
+                assert_eq!(record.1, "<i>title</i>", "markup {markup}");
+                assert_eq!(record.2, expected, "markup {markup}");
+            }
+        }
     }
 }
