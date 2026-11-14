@@ -4122,7 +4122,10 @@ Core Animation layer, with `macos-cursor-blink-layer` on by default.
   hidden half-period and the layer's model opacity is 1, so the cursor then
   rests visible with no wake, as the GPU blink stops on its visible phase.
   Kettle presents nothing and does not wake for the blink. The driver can
-  then release its render pool.
+  then release its render pool. After a restart the first edge that hides the
+  cursor is the end of its hold, so the layer never animates a hold: its plan
+  starts where the hold ends, and a restart during a layer blink ends it with
+  an exit frame that draws the new hold.
 - **Entry needs no synchronization.** The animation starts hidden, so the
   patch first shows at the next edge. A frame arriving more than half a
   half-period after its edge keeps GPU blink, leaving time for the drawable.
@@ -4220,11 +4223,19 @@ non-regression claim.
   pointer press in the terminal, or settings change, always on its visible
   phase. A selection drag holds the cursor solid (`cursor_held_steady`) and
   its release restarts the blink. Output does not restart it,
-  as in kitty and Alacritty. Blink phase advances at the timer edge before the
-  redraw request, so a delayed Wayland frame callback cannot enqueue the same
-  phase repeatedly. On macOS an idle window hands the blink to the window
-  server after one quiet half-period and stops waking for it (see "macOS cursor
-  blink layer"). Empty `Ime::Preedit` events normalize to absent state and
+  as in kitty and Alacritty. Every restart goes through `restart_blink`, which
+  shows the cursor and records the phase's edge one half-period ahead
+  (`cursor_blink::restart_edge`). The next edge falls a half-period after the
+  recorded one, so the cursor stays visible for one whole period before it
+  first goes dark, and the half-period cadence resumes there. The scheduler's
+  wake counts to the edge itself (`cursor_blink::wait_for_edge`), so the hold
+  costs one wake, at its end. A DEC mode 12 change restarts the phase the same
+  way but leaves the timeout running. Blink phase advances at the timer edge
+  before the redraw request, so a delayed Wayland frame callback cannot enqueue
+  the same phase repeatedly. On macOS an idle window hands the blink to the
+  window server after one quiet half-period and stops waking for it (see
+  "macOS cursor blink layer"). Empty `Ime::Preedit` events normalize to absent
+  state and
   do not reposition IME or request another frame unless visible preedit state
   actually changed. Terminal preedit has an opaque layer above terminal and card
   text. Its background follows the larger of the terminal-cell width and shaped
