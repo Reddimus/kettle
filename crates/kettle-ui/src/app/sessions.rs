@@ -192,17 +192,31 @@ impl App {
         another_build || !self.default_session.borrow_mut().owns(another_build)
     }
 
+    /// Whether this launch restores and saves the default session now:
+    /// restore mode is on for it and it owns the session. Ownership is only
+    /// asked, and so only claimed, while restore mode is on.
+    pub(super) fn default_session_restoring(&self) -> bool {
+        should_restore_session(self.startup.restore, self.cfg.restore_session, false)
+            && !self.default_session_elsewhere()
+    }
+
     pub(super) fn clear_disabled_content(&self) {
+        if self.other_builds.running() {
+            return;
+        }
+        let restoring =
+            should_restore_session(self.startup.restore, self.cfg.restore_session, false);
+        let lines = self.cfg.restore_scrollback_lines;
         let owned = match self.startup.layout.as_deref() {
-            Some(_) => self.named_layout_writable && !self.other_builds.running(),
+            Some(_) => self.named_layout_writable,
+            // Restore mode off: never claim the session to clean it up.
+            None if !restoring => {
+                self.remove_disabled_default_content();
+                return;
+            }
             None => !self.default_session_elsewhere(),
         };
-        if !content_cleanup_due(
-            owned,
-            self.startup.layout.is_some(),
-            self.cfg.restore_scrollback_lines,
-            should_restore_session(self.startup.restore, self.cfg.restore_session, false),
-        ) {
+        if !content_cleanup_due(owned, self.startup.layout.is_some(), lines, restoring) {
             return;
         }
         // Whatever is written next is a fresh snapshot, never a keep.
@@ -211,16 +225,33 @@ impl App {
             .remove_content(self.startup.layout.clone());
     }
 
+    /// Restore mode is off: remove the default session's output file if this
+    /// process owns the session, or, if it never claimed it, while nobody
+    /// does (see [`remove_unclaimed_content`]). A secondary, a waiting build
+    /// and a separate launch leave it alone.
+    fn remove_disabled_default_content(&self) {
+        match &*self.default_session.borrow() {
+            DefaultSessionClaim::Owner { .. } => {
+                self.content_throttle.borrow_mut().reset();
+                self.session_writer.remove_content(None);
+            }
+            DefaultSessionClaim::Unclaimed(lock) => {
+                if let Some(path) = crate::session::Session::path() {
+                    remove_unclaimed_content(lock, &path);
+                }
+            }
+            DefaultSessionClaim::Waiting(_)
+            | DefaultSessionClaim::Secondary
+            | DefaultSessionClaim::Separate => {}
+        }
+    }
+
     /// Where automatic saves go right now, before any snapshot is taken.
     pub(super) fn autosave_target(&self) -> SessionWriteTarget<'_> {
         session_write_target(
             self.startup.layout.as_deref(),
             self.named_layout_writable,
-            should_restore_session(
-                self.startup.restore,
-                self.cfg.restore_session,
-                self.default_session_elsewhere(),
-            ),
+            self.default_session_restoring(),
             false,
         )
     }
@@ -395,11 +426,7 @@ impl App {
             )?;
             self.restore_identity = Some(identity);
             Some(session)
-        } else if should_restore_session(
-            self.startup.restore,
-            self.cfg.restore_session,
-            self.default_session_elsewhere(),
-        ) {
+        } else if self.default_session_restoring() {
             self.restore_source = crate::session::Session::path();
             let (session, identity) = loaded_startup_snapshot(
                 crate::session::Session::load_with_identity(),
@@ -408,12 +435,13 @@ impl App {
             self.restore_identity = Some(identity);
             Some(session)
         } else {
-            // Restore is off, so the output file goes, but only this launch's
-            // own: never one another process owns or this launch never loads.
-            if !self.default_session_elsewhere()
-                && let Some(path) = crate::session::Session::path()
+            // Restore is off, so a leftover output file goes, but never one
+            // another process owns. A launch that does restore, only not
+            // this session, leaves it alone.
+            if !should_restore_session(self.startup.restore, self.cfg.restore_session, false)
+                && !self.other_builds.running()
             {
-                crate::session_content::remove(&path);
+                self.remove_disabled_default_content();
             }
             None
         };
@@ -928,6 +956,11 @@ pub(crate) enum DefaultSessionClaim {
     Owner {
         _lock: Option<kettle_state::ExclusiveFileLock>,
     },
+    /// Restore mode was off when this launch started, so it took no lock:
+    /// it neither restores nor writes the session, and holds nothing that
+    /// would stop a `kettle --restore` started beside it. It claims the lock
+    /// the first time restore mode is on, which a settings change can do.
+    Unclaimed(std::path::PathBuf),
     /// The lock was held while another build's primary ran: take it once
     /// that build has exited.
     Waiting(std::path::PathBuf),
@@ -940,11 +973,13 @@ pub(crate) enum DefaultSessionClaim {
 }
 
 impl DefaultSessionClaim {
-    /// Claim the default session for a launch, at startup. `lock` is where the
-    /// owner lock lives (`None` without a config directory).
+    /// Claim the default session for a launch, at startup. `restoring` is
+    /// whether restore mode is on for it; `lock` is where the owner lock lives
+    /// (`None` without a config directory).
     pub(super) fn claim(
         separate: bool,
         another_build_running: bool,
+        restoring: bool,
         lock: Option<&std::path::Path>,
     ) -> Self {
         if separate {
@@ -953,6 +988,15 @@ impl DefaultSessionClaim {
         let Some(path) = lock else {
             return Self::Owner { _lock: None };
         };
+        if !restoring {
+            // No lock file either: a launch that cannot restore or save
+            // leaves nothing behind.
+            return Self::Unclaimed(path.to_path_buf());
+        }
+        Self::take(path, another_build_running)
+    }
+
+    fn take(path: &std::path::Path, another_build_running: bool) -> Self {
         match take_owner_lock(path) {
             Ok(Some(lock)) => Self::Owner { _lock: Some(lock) },
             Ok(None) if another_build_running => Self::Waiting(path.to_path_buf()),
@@ -967,17 +1011,40 @@ impl DefaultSessionClaim {
         }
     }
 
-    /// Whether this process owns the default session now. A waiting one takes
-    /// the lock over once no other build runs and the lock is free.
+    /// Whether this process owns the default session now. Ask only while
+    /// restore mode is on: an unclaimed launch claims it here, as it would
+    /// have at startup, and a waiting one takes the lock over once no other
+    /// build runs and the lock is free.
     pub(super) fn owns(&mut self, another_build_running: bool) -> bool {
-        if let Self::Waiting(path) = self
-            && !another_build_running
-            && let Ok(Some(lock)) = take_owner_lock(path)
-        {
-            *self = Self::Owner { _lock: Some(lock) };
+        match self {
+            Self::Unclaimed(path) => {
+                let path = std::mem::take(path);
+                *self = Self::take(&path, another_build_running);
+            }
+            Self::Waiting(path) if !another_build_running => {
+                if let Ok(Some(lock)) = take_owner_lock(path) {
+                    *self = Self::Owner { _lock: Some(lock) };
+                }
+            }
+            _ => {}
         }
         matches!(self, Self::Owner { .. })
     }
+}
+
+/// With restore mode off, remove the output file beside `session` that an
+/// earlier launch left, but only while no process owns the session: the owner
+/// lock at `lock` is taken just for the removal and never kept. Returns
+/// whether it removed one. Nothing is created when there is no file.
+pub(super) fn remove_unclaimed_content(lock: &std::path::Path, session: &std::path::Path) -> bool {
+    if !crate::session_content::path(session).exists() {
+        return false;
+    }
+    let Ok(Some(_held)) = take_owner_lock(lock) else {
+        return false;
+    };
+    crate::session_content::remove(session);
+    true
 }
 
 fn take_owner_lock(

@@ -327,11 +327,11 @@ fn later_saved_windows_do_not_depend_on_the_first_restore_succeeding() {
 #[test]
 fn explicit_restore_paths_precede_default_session() {
     let src = production_source();
-    // The LOAD gate specifically (`} else if should_restore_session(...)`),
-    // not the save path's call with the same args earlier in the file.
+    // The LOAD gate specifically (`} else if self.default_session_restoring()`),
+    // not the save path's use of the same predicate earlier in the file.
     let gate = src
-        .find("else if should_restore_session(\n            self.startup.restore")
-        .expect("the load gate is `} else if should_restore_session(self.startup.restore, ...)`");
+        .find("} else if self.default_session_restoring() {")
+        .expect("the load gate is `} else if self.default_session_restoring()`");
     let before = &src[..gate];
     for marker in [
         "self.startup.tab_handoff_fd",
@@ -349,12 +349,13 @@ fn explicit_restore_paths_precede_default_session() {
     // halves: that `save_session` feeds it the predicate, and that the
     // default-session arm is the only thing that predicate unlocks.
     assert!(
-        src.contains(
-            "should_restore_session(\n                self.startup.restore,\n                self.cfg.restore_session,\n                self.default_session_elsewhere(),\n            ),"
-        ),
-        "save_session must pass should_restore_session into the write \
+        src.contains("self.named_layout_writable,\n            self.default_session_restoring(),\n            false,"),
+        "save_session must pass the load gate's predicate into the write \
              routing — symmetric with the load gate (audit M1)"
     );
+    assert!(src.contains(
+        "should_restore_session(self.startup.restore, self.cfg.restore_session, false)\n            && !self.default_session_elsewhere()"
+    ));
     let routing = src
         .split("fn session_write_target(")
         .nth(1)
@@ -848,7 +849,7 @@ fn default_session_claim_truth_table() {
     let dir = kettle_test_support::private_tempdir("kettle-session-owner-");
     let lock = dir.path().join("config").join("session.owner.lock");
     let claim = |separate, another_build| {
-        DefaultSessionClaim::claim(separate, another_build, Some(lock.as_path()))
+        DefaultSessionClaim::claim(separate, another_build, true, Some(lock.as_path()))
     };
 
     let mut separate = claim(true, false);
@@ -875,7 +876,7 @@ fn default_session_claim_truth_table() {
     assert!(matches!(claim(false, false), DefaultSessionClaim::Owner { _lock: Some(_) }));
     // No config directory: nothing to lock, and nothing else to coordinate.
     assert!(matches!(
-        DefaultSessionClaim::claim(false, false, None),
+        DefaultSessionClaim::claim(false, false, true, None),
         DefaultSessionClaim::Owner { _lock: None }
     ));
 }
@@ -949,15 +950,17 @@ fn profile_and_secondary_processes_leave_the_default_session_alone() {
             .unwrap_or_else(|| panic!("{start}"))
             .to_string()
     };
-    assert!(body("fn autosave_target(&self)").contains("self.default_session_elsewhere(),"));
+    assert!(body("fn autosave_target(&self)").contains("self.default_session_restoring(),"));
     let clear = body("fn clear_disabled_content(&self)");
     assert!(clear.contains("None => !self.default_session_elsewhere(),"));
-    assert!(clear.contains("Some(_) => self.named_layout_writable && !self.other_builds.running(),"));
+    assert!(clear.contains("Some(_) => self.named_layout_writable,"));
+    assert!(clear.starts_with(" {\n        if self.other_builds.running() {\n            return;"));
     assert!(clear.find("content_cleanup_due(").unwrap() < clear.find("remove_content(").unwrap());
     let load = body("fn load_startup_session(&mut self)");
-    assert!(load.contains("self.default_session_elsewhere(),\n        ) {"));
-    assert!(load.contains("if !self.default_session_elsewhere()\n                && let Some(path) = crate::session::Session::path()"));
-    assert!(!load.contains("other_builds"), "the load must ask who owns the session");
+    assert!(load.contains("} else if self.default_session_restoring() {"));
+    let load_gate = load.split("} else if self.default_session_restoring() {").next().unwrap();
+    assert!(!load_gate.contains("other_builds"), "the load must ask who owns the session");
+    assert!(load.contains("self.remove_disabled_default_content();"));
     let exit = body("fn save_session_on_exit(&mut self)");
     assert!(exit.contains("self.save_session_as(&ws, SaveKind::Exit);"));
     let run = body("pub fn run_with(mut startup: crate::Options)");
@@ -1066,4 +1069,68 @@ fn remote_output_stays_out_of_the_saved_content_after_ssh_exits() {
         .and_then(|body| body.split("\n    }\n").next())
         .unwrap();
     assert!(key.contains("remote_end: pane.remote_output_end,"));
+}
+
+/// A launch with restore mode off claims nothing and creates no lock file:
+/// a `kettle --restore` beside it owns the session instead of being told
+/// another process has it open, and smoke runs with throwaway `--config`
+/// files leave nothing in the config directory. Turned on later, restore
+/// mode claims the lock then, under the same rules.
+#[test]
+fn a_launch_with_restore_off_claims_nothing() {
+    use super::sessions::DefaultSessionClaim;
+    let dir = kettle_test_support::private_tempdir("kettle-session-unclaimed-");
+    let lock = dir.path().join("config").join("session.owner.lock");
+    let mut off = DefaultSessionClaim::claim(false, false, false, Some(lock.as_path()));
+    assert!(matches!(off, DefaultSessionClaim::Unclaimed(_)), "{off:?}");
+    assert!(!lock.exists(), "a launch that cannot save created the lock");
+    let restore = DefaultSessionClaim::claim(false, false, true, Some(lock.as_path()));
+    assert!(matches!(restore, DefaultSessionClaim::Owner { _lock: Some(_) }), "{restore:?}");
+    // Restore mode turned on in the first launch: it finds the session owned.
+    assert!(!off.owns(false));
+    assert!(matches!(off, DefaultSessionClaim::Secondary));
+    drop(restore);
+    let mut later = DefaultSessionClaim::claim(false, false, false, Some(lock.as_path()));
+    assert!(later.owns(false), "an unclaimed launch claims once restore mode is on");
+    assert!(matches!(later, DefaultSessionClaim::Owner { _lock: Some(_) }));
+
+    // Only `--restore` asks who owns the session at startup.
+    let src = production_source();
+    assert!(src.contains("let elsewhere = explicit_restore && self.default_session_elsewhere();"));
+    let run = src.split("pub fn run_with(mut startup: crate::Options)").nth(1).unwrap();
+    let flat: String = run.split_whitespace().collect();
+    assert!(flat.contains("letsession_elsewhere=another_build_running||!restoring||!default_session.owns(another_build_running);"));
+}
+
+/// With restore mode off, a leftover output file is removed only while no
+/// process owns the session, under a lock held just for the removal; with no
+/// file, nothing is created.
+#[test]
+fn a_restore_off_launch_removes_leftover_output_only_while_unowned() {
+    use super::sessions::remove_unclaimed_content;
+    let dir = kettle_test_support::private_tempdir("kettle-session-unclaimed-cleanup-");
+    let session = dir.path().join("session.json");
+    let content = crate::session_content::path(&session);
+    let lock = dir.path().join("session.owner.lock");
+    assert!(!remove_unclaimed_content(&lock, &session));
+    assert!(!lock.exists(), "nothing to remove created a lock");
+    kettle_state::atomic_replace(&content, b"old output", kettle_state::AtomicWriteOptions::PRIVATE)
+        .unwrap();
+    let held = kettle_state::ExclusiveFileLock::try_acquire(&lock).unwrap().unwrap();
+    assert!(!remove_unclaimed_content(&lock, &session));
+    assert!(content.exists(), "removed another process's output");
+    drop(held);
+    assert!(remove_unclaimed_content(&lock, &session));
+    assert!(!content.exists());
+    assert!(
+        kettle_state::ExclusiveFileLock::try_acquire(&lock).unwrap().is_some(),
+        "the cleanup kept the lock"
+    );
+    let src = production_source();
+    let clear = src
+        .split("fn clear_disabled_content(&self)")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(clear.contains("None if !restoring => {\n                self.remove_disabled_default_content();"));
 }

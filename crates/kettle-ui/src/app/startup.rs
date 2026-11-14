@@ -764,13 +764,15 @@ impl App {
             crate::video_preview::VideoPreviewer::new(proxy.clone(), startup.media.clone());
         // Before the plan: a launch that does not own the default session
         // neither restores it nor waits for one before its first pane.
+        let restoring = should_restore_session(startup.restore, initial_cfg.restore_session, false);
         let mut default_session = DefaultSessionClaim::claim(
             separate_launch(&startup),
             another_build_running,
+            restoring,
             crate::session::Session::owner_lock_path().as_deref(),
         );
         let session_elsewhere =
-            another_build_running || !default_session.owns(another_build_running);
+            another_build_running || !restoring || !default_session.owns(another_build_running);
         let plan = startup_plan(&startup, &initial_cfg, session_elsewhere);
         let session_writer = {
             let proxy = proxy.clone();
@@ -1100,7 +1102,9 @@ impl App {
             && self.startup.layout.is_none()
             && self.startup.tab_handoff.is_none()
             && self.startup.tab_handoff_fd.is_none();
-        let elsewhere = self.default_session_elsewhere();
+        // Asked only for `--restore`, so a launch with restore mode off never
+        // claims the session here.
+        let elsewhere = explicit_restore && self.default_session_elsewhere();
         if let Some(body) =
             restore_refusal(explicit_restore, &self.default_session.borrow(), elsewhere)
         {
