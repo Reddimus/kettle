@@ -4363,13 +4363,14 @@ dependencies = [
 
 [[package]]
 name = "roughr-merman"
-version = "0.12.4"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4accb6afabe559650a026a0938bf6ad84c7ebe66517e12b4385865e2179a070"
+checksum = "e197669bd3b80a7952e04bd8226f71a266c5e1d456dc48e4d576e32c57570e36"
 dependencies = [
  "euclid",
  "num-traits",
  "palette",
+ "ryu-js",
  "svgtypes",
 ]
 
