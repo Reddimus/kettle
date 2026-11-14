@@ -161,9 +161,14 @@ pub(crate) fn activity_marker_quads(
 }
 
 /// Anchor to the actual control while keeping tooltips outside the header.
+/// The GNOME header's `+` leads the strip, so its tooltip hangs under it
+/// rather than at the far end where every other strip keeps `+`.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
     if bar.hovered_settings && !bar.pressed_settings && bar.settings.2 > 0.0 {
         return (bar.settings.0, bar.band.1, bar.settings.2, bar.band.3);
+    }
+    if bar.linux_header && bar.hovered_new_tab && !bar.pressed_new_tab && bar.new_tab.2 > 0.0 {
+        return (bar.new_tab.0, bar.band.1, bar.new_tab.2, bar.band.3);
     }
     bar.window_controls
         .iter()
@@ -286,6 +291,72 @@ pub(crate) fn tab_title_background(
     }
 }
 
+/// Whether a horizontal tab paints as the active tab and as the hovered
+/// one. The GNOME header's lone title is neither: it sits on the header.
+pub(crate) fn tab_paint_state(bar: &TabBar, tab: &crate::TabSeg) -> (bool, bool) {
+    if bar.lone_title {
+        (false, false)
+    } else {
+        (tab.active, bar.hovered_tab_idx == Some(tab.idx))
+    }
+}
+
+/// The least contrast the GNOME header's bottom hairline keeps against the
+/// header above it and the terminal below it: the tab dividers' 1.5:1, so it
+/// reads as an edge without competing with the tabs.
+pub(crate) const HEADER_HAIRLINE_CONTRAST: f64 = 1.5;
+
+/// The hairline under the GNOME header: the foreground faintly over the
+/// header, resolved to [`HEADER_HAIRLINE_CONTRAST`] against both the header
+/// and `canvas`, the terminal's own colour. Without it a dark header and a
+/// dark terminal read as one band, and the top padding as a cramped gap.
+pub(crate) fn header_hairline(strip: Rgb, canvas: Rgb, foreground: Rgb) -> Rgb {
+    crate::color::with_min_contrast_on_both(
+        crate::color::over(strip, foreground, 0.10, false),
+        strip,
+        canvas,
+        HEADER_HAIRLINE_CONTRAST,
+        false,
+    )
+}
+
+/// The hairline's spans along the bottom of the header `band`, one device
+/// pixel per point thick: the full width, less the active tab, which joins
+/// the terminal below it. A lone title is no tab, so the line runs under it.
+pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Vec<Rect4> {
+    let (x, y, w, h) = band;
+    let thickness = scale.round().max(1.0).min(h);
+    let top = y + h - thickness;
+    let gap = bar
+        .segments
+        .iter()
+        .find(|tab| tab_paint_state(bar, tab).0)
+        .map(|tab| (tab.rect.0.max(x), (tab.rect.0 + tab.rect.2).min(x + w)))
+        .filter(|(start, end)| end > start);
+    match gap {
+        Some((start, end)) => [(x, start), (end, x + w)]
+            .into_iter()
+            .filter(|(left, right)| right > left)
+            .map(|(left, right)| (left, top, right - left, thickness))
+            .collect(),
+        None => vec![(x, top, w, thickness)],
+    }
+}
+
+/// The fills behind the new-tab controls at rest. A plain strip's `▾` sits
+/// just left of `+`, and one fill spans the pair so no strip shows between
+/// them. The GNOME header's `+` leads the strip with `≡` at its far end, so
+/// each gets its own fill rather than a span across the tabs between them.
+pub(crate) fn new_tab_control_fills(plus: Rect4, menu: Rect4) -> Vec<Rect4> {
+    if menu.2 <= 0.0 {
+        return vec![plus];
+    }
+    if menu.0 <= plus.0 {
+        return vec![(menu.0, plus.1, plus.0 + plus.2 - menu.0, plus.3)];
+    }
+    vec![plus, menu]
+}
+
 pub(crate) struct HorizontalTabQuads {
     pub chrome: Vec<QuadInstance>,
     /// Translucent tab backgrounds, including their opaque accent line.
@@ -305,25 +376,25 @@ pub(crate) fn horizontal_tab_quads(
     scale: f32,
 ) -> HorizontalTabQuads {
     let mut quads = Vec::new();
+    let bounds = band;
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
     let hover = tab_title_background(false, true, false, background.0, chrome, theme.foreground);
     let divider = crate::chrome::tab_detail(chrome, theme.foreground, false);
     for (i, tab) in bar.segments.iter().enumerate() {
-        let hovered = bar.hovered_tab_idx == Some(tab.idx);
-        if tab.active || hovered {
+        let (active, hovered) = tab_paint_state(bar, tab);
+        if active || hovered {
             let start = quads.len();
             rounded_fill(
                 &mut quads,
                 tab.rect,
                 6.0 * scale,
                 (!bottom, bottom),
-                if tab.active { background } else { (hover, 1.0) },
-                tab.active
-                    .then_some((accent, (3.0 * scale).round(), bottom)),
+                if active { background } else { (hover, 1.0) },
+                active.then_some((accent, (3.0 * scale).round(), bottom)),
             );
-            if tab.active && background.1 < 1.0 {
+            if active && background.1 < 1.0 {
                 // Cut with the actual surface slices so the rounded corners'
                 // outside stays chrome without painting beneath the tab.
                 for quad in quads.drain(start..) {
@@ -335,11 +406,10 @@ pub(crate) fn horizontal_tab_quads(
                 }
             }
         }
-        if !tab.active
+        if !active
             && !hovered
             && let Some(next) = bar.segments.get(i + 1)
-            && !next.active
-            && bar.hovered_tab_idx != Some(next.idx)
+            && tab_paint_state(bar, next) == (false, false)
             && (tab.rect.0 + tab.rect.2 - next.rect.0).abs() < 1.0
         {
             let (x, y, w, h) = tab.rect;
@@ -354,6 +424,12 @@ pub(crate) fn horizontal_tab_quads(
         }
     }
     band.extend(quads);
+    if bar.linux_header {
+        let line = header_hairline(chrome, background.0, theme.foreground);
+        for (x, y, w, h) in header_hairline_rects(bar, bounds, scale) {
+            band.push(rect(x, y, w, h, line, 1.0));
+        }
+    }
     HorizontalTabQuads {
         chrome: band,
         surface,
@@ -464,6 +540,40 @@ pub(crate) fn push_settings_gear(
             start = end;
         }
     }
+}
+
+/// Side of the GNOME header's main-menu icon at 1x, as GNOME's symbolic
+/// icons are drawn.
+const MENU_ICON_SIDE: f32 = 16.0;
+
+/// Whether the strip's menu button is the GNOME header's main menu, which
+/// is drawn as an icon rather than shaped as the `▾` glyph. Its tooltip
+/// and screen-reader name follow the same test.
+pub(crate) fn main_menu_icon(bar: &TabBar) -> bool {
+    !bar.window_controls.is_empty() && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
+}
+
+/// GNOME's `open-menu-symbolic` in `button`: three bars in a
+/// `MENU_ICON_SIDE`-point square, each 14 points wide and 2 thick, 5 apart,
+/// so its ink is 14 by 12 points. Drawn, not shaped: a font's `≡` changes
+/// size and weight with the installed fonts. Bars snap to whole device
+/// pixels and the square to the button's centre. The icon shrinks with a
+/// button too small for it and is left out below half its size.
+pub(crate) fn main_menu_icon_bars(button: Rect4, scale: f32) -> Vec<Rect4> {
+    let (x, y, w, h) = button;
+    let unit = scale.max(0.5).min((w.min(h) - 4.0) / MENU_ICON_SIDE);
+    if unit < 0.5 {
+        return Vec::new();
+    }
+    let thickness = (2.0 * unit).round().max(1.0);
+    let pitch = (5.0 * unit).round().max(thickness + 1.0);
+    let width = (14.0 * unit).round();
+    let ink_h = 2.0 * pitch + thickness;
+    let left = (x + (w - width) * 0.5).round();
+    let top = (y + (h - ink_h) * 0.5).round();
+    (0..3)
+        .map(|i| (left, top + i as f32 * pitch, width, thickness))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1260,6 +1370,362 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn header_tab(idx: usize, rect: Rect4, active: bool) -> crate::TabSeg {
+        crate::TabSeg {
+            idx,
+            rect,
+            title_rect: rect,
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: "fixture".into(),
+            path: None,
+            active,
+            activity: TabActivity::Normal,
+        }
+    }
+
+    /// A GNOME header 800 points wide at `scale` with `tabs` tabs, the first
+    /// active: one is a 400-point window title, more are 240-point tabs.
+    fn gnome_header(tabs: usize, scale: f32) -> TabBar {
+        let h = 46.0 * scale;
+        let mut bar = TabBar::hidden();
+        bar.linux_header = true;
+        bar.lone_title = tabs == 1;
+        bar.height = h;
+        bar.band = (0.0, 0.0, 800.0 * scale, h);
+        for i in 0..tabs {
+            let x = if tabs == 1 {
+                200.0
+            } else {
+                40.0 + i as f32 * 240.0
+            };
+            let w = if tabs == 1 { 400.0 } else { 240.0 };
+            bar.segments
+                .push(header_tab(i, (x * scale, 0.0, w * scale, h), i == 0));
+        }
+        bar
+    }
+
+    /// A lone GNOME-header title is the header itself: inside its rect there
+    /// is no tab surface, accent line or hover fill, opaque or over a
+    /// translucent window, and its top edge samples as the header. A second
+    /// tab brings the active tab's fill and 3-pixel accent back.
+    #[test]
+    fn lone_header_title_paints_no_surface_accent_or_hover() {
+        let cfg = kettle_config::Config::default();
+        let accent = Rgb::new(0xff, 0x00, 0xff);
+        let accent_color = rect(0.0, 0.0, 1.0, 1.0, accent, 1.0).color;
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let header = rect(0.0, 0.0, 1.0, 1.0, strip, 1.0).color;
+            for scale in [1.0_f32, 2.0] {
+                for alpha in [1.0_f32, 0.86] {
+                    for hovered in [false, true] {
+                        let mut bar = gnome_header(1, scale);
+                        bar.hovered_tab_idx = hovered.then_some(0);
+                        let band = bar.band;
+                        let quads = horizontal_tab_quads(
+                            &bar,
+                            band,
+                            &theme,
+                            (theme.background, alpha),
+                            strip,
+                            accent,
+                            TabBarPos::Top,
+                            scale,
+                        );
+                        let case = format!("{name} {scale}x alpha={alpha} hovered={hovered}");
+                        assert!(quads.surface.is_empty(), "{case}: a tab surface");
+                        assert!(
+                            !quads.chrome.iter().any(|q| q.color == accent_color),
+                            "{case}: an accent line"
+                        );
+                        let (x, _, w, h) = bar.segments[0].rect;
+                        for px in [x + 0.5, x + w * 0.5, x + w - 0.5] {
+                            // Above the header's bottom hairline.
+                            for py in [0.5, 3.0 * scale - 0.5, h * 0.5, h - 2.0 * scale] {
+                                assert_eq!(
+                                    sample(&quads.chrome, px, py),
+                                    Some(header),
+                                    "{case}: ({px}, {py}) is not the header"
+                                );
+                            }
+                        }
+                    }
+                }
+                let bar = gnome_header(2, scale);
+                let quads = horizontal_tab_quads(
+                    &bar,
+                    bar.band,
+                    &theme,
+                    (theme.background, 1.0),
+                    strip,
+                    accent,
+                    TabBarPos::Top,
+                    scale,
+                );
+                let active = bar.segments[0].rect;
+                let rows = (0..active.3 as u32)
+                    .filter(|&y| {
+                        sample(&quads.chrome, active.0 + active.2 * 0.5, y as f32 + 0.5)
+                            == Some(accent_color)
+                    })
+                    .count();
+                assert_eq!(rows, (3.0 * scale).round() as usize, "{name} {scale}x");
+            }
+        }
+    }
+
+    /// The lone title's text is resolved against the header it sits on, as
+    /// the painter resolves it: 4.5:1 or better in a focused window and at
+    /// least 3:1 in an unfocused one, in both default themes. Resolved
+    /// colours, not glyph pixels: local fonts would hide a CI difference.
+    #[test]
+    fn lone_header_title_ink_reads_against_the_header() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            assert_ne!(
+                strip, theme.background,
+                "{name}: header and terminal differ"
+            );
+            let mut bar = gnome_header(1, 1.0);
+            for hovered in [None, Some(0)] {
+                bar.hovered_tab_idx = hovered;
+                let tab = &bar.segments[0];
+                let (active, hovered) = tab_paint_state(&bar, tab);
+                let surface = tab_title_background(
+                    active,
+                    hovered,
+                    false,
+                    theme.background,
+                    strip,
+                    theme.foreground,
+                );
+                assert_eq!(surface, strip, "{name}: the title sits on the header");
+                let mut colors = crate::chrome::Colors::default();
+                for focused in [true, false] {
+                    let ink = colors.tab_title(
+                        theme.foreground,
+                        surface,
+                        crate::color::Backing::opaque(surface),
+                        tab.active,
+                        focused,
+                    );
+                    let ratio = crate::color::contrast_ratio(ink, strip);
+                    let floor = if focused { 4.5 } else { 3.0 };
+                    assert!(
+                        ratio >= floor - 1e-9,
+                        "{name} focused={focused}: {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+        // The painter picks the title's surface through the same state.
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "let(painted_active,painted_hover)=tab_strip::tab_paint_state(tabbar,s);\
+             lettab_background=tab_strip::tab_title_background(painted_active,painted_hover,"
+        ));
+    }
+
+    /// The hairline under the GNOME header keeps 1.5:1 against the header
+    /// and the terminal, one device pixel per point thick on the header's
+    /// last row. It runs the full width under a lone title, stops at the
+    /// active tab, which joins the terminal, and no other strip has one.
+    #[test]
+    fn gnome_header_hairline_separates_it_from_the_terminal() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let line = header_hairline(strip, theme.background, theme.foreground);
+            for against in [strip, theme.background] {
+                let ratio = crate::color::contrast_ratio(line, against);
+                assert!(
+                    ratio >= HEADER_HAIRLINE_CONTRAST - 1e-9,
+                    "{name}: {ratio:.2}:1"
+                );
+            }
+            let line_color = rect(0.0, 0.0, 1.0, 1.0, line, 1.0).color;
+            let header = rect(0.0, 0.0, 1.0, 1.0, strip, 1.0).color;
+            for scale in [1.0_f32, 1.5, 2.0] {
+                for tabs in [1, 2] {
+                    let bar = gnome_header(tabs, scale);
+                    let (_, _, w, h) = bar.band;
+                    let quads = horizontal_tab_quads(
+                        &bar,
+                        bar.band,
+                        &theme,
+                        (theme.background, 1.0),
+                        strip,
+                        theme.accent,
+                        TabBarPos::Top,
+                        scale,
+                    );
+                    let thickness = scale.round();
+                    let case = format!("{name} {scale}x {tabs} tabs");
+                    let column = |x: f32| {
+                        (0..h as u32)
+                            .filter(|&y| {
+                                sample(&quads.chrome, x, y as f32 + 0.5) == Some(line_color)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let bottom: Vec<u32> = (h as u32 - thickness as u32..h as u32).collect();
+                    let active = bar.segments[0].rect;
+                    for x in [0.5, w * 0.5, w - 0.5, active.0 + active.2 * 0.5] {
+                        let under_tab = tabs > 1 && x >= active.0 && x < active.0 + active.2;
+                        if under_tab {
+                            assert!(column(x).is_empty(), "{case}: a line under the tab");
+                        } else {
+                            assert_eq!(column(x), bottom, "{case}: x={x}");
+                            assert_eq!(
+                                sample(&quads.chrome, x, h - thickness - 0.5),
+                                Some(header),
+                                "{case}: x={x}"
+                            );
+                        }
+                    }
+                    let mut plain = bar;
+                    plain.linux_header = false;
+                    let quads = horizontal_tab_quads(
+                        &plain,
+                        plain.band,
+                        &theme,
+                        (theme.background, 1.0),
+                        strip,
+                        theme.accent,
+                        TabBarPos::Top,
+                        scale,
+                    );
+                    assert!(
+                        !quads.chrome.iter().any(|q| q.color == line_color),
+                        "{case}: a plain strip has no hairline"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The GNOME header's `+` leads the strip, so its tooltip hangs under
+    /// it, inside the window, at 1x and 2x. Every other strip keeps `+` at
+    /// its end and its tooltip where it was.
+    #[test]
+    fn gnome_header_plus_tooltip_hangs_under_the_leading_plus() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 800.0 * scale;
+            let mut bar = gnome_header(2, scale);
+            bar.new_tab = (8.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+            bar.new_tab_menu = (
+                width - 180.0 * scale,
+                9.0 * scale,
+                28.0 * scale,
+                28.0 * scale,
+            );
+            bar.hovered_new_tab = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (bar.new_tab.0, 0.0, bar.new_tab.2, bar.band.3));
+            let tip = tooltip_rect(
+                anchor,
+                (width, 600.0 * scale),
+                (160.0 * scale, 20.0 * scale),
+                scale,
+            );
+            assert!(
+                tip.0 >= 0.0 && tip.0 <= bar.new_tab.0 + bar.new_tab.2,
+                "{tip:?}"
+            );
+            assert_eq!(tip.1, 50.0 * scale);
+            bar.pressed_new_tab = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_new_tab = false;
+            bar.linux_header = false;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+        }
+    }
+
+    /// The resting fill behind the new-tab controls covers the `▾ +` pair on
+    /// a plain strip, but the GNOME header's `+` and `≡` each get their own:
+    /// a span between them would paint the header over the tabs.
+    #[test]
+    fn new_tab_control_fills_never_span_the_tabs() {
+        for scale in [1.0_f32, 2.0] {
+            let side = 28.0 * scale;
+            let plus = (752.0 * scale, 0.0, side, side);
+            let arrow = (720.0 * scale, 0.0, side, side);
+            assert_eq!(
+                new_tab_control_fills(plus, arrow),
+                vec![(arrow.0, 0.0, plus.0 + side - arrow.0, side)]
+            );
+            assert_eq!(
+                new_tab_control_fills(plus, (0.0, 0.0, 0.0, 0.0)),
+                vec![plus]
+            );
+            let plus = (8.0 * scale, 9.0 * scale, side, side);
+            let menu = (620.0 * scale, 9.0 * scale, side, side);
+            let fills = new_tab_control_fills(plus, menu);
+            assert_eq!(fills, vec![plus, menu]);
+            assert!(fills.iter().all(|r| r.2 > 0.0 && r.3 > 0.0));
+            let between = (plus.0 + plus.2 + menu.0) * 0.5;
+            assert!(
+                !fills
+                    .iter()
+                    .any(|r| between >= r.0.min(r.0 + r.2) && between < r.0.max(r.0 + r.2)),
+                "{fills:?} covers the tabs at {between}"
+            );
+        }
+    }
+
+    /// The GNOME header's `≡` is GNOME's 16-point symbolic icon drawn as
+    /// three bars: 14 by 12 points of ink, 2 thick and 5 apart, centred in
+    /// its 28-point button, at 1x and 2x, in whole device pixels. The
+    /// painter draws it from these bars and never shapes a `≡` glyph.
+    #[test]
+    fn gnome_header_menu_icon_is_three_drawn_bars() {
+        for scale in [1.0_f32, 2.0] {
+            let button = (620.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+            let bars = main_menu_icon_bars(button, scale);
+            assert_eq!(bars.len(), 3, "{scale}x");
+            let left = bars.iter().map(|b| b.0).fold(f32::MAX, f32::min);
+            let top = bars.iter().map(|b| b.1).fold(f32::MAX, f32::min);
+            let right = bars.iter().map(|b| b.0 + b.2).fold(f32::MIN, f32::max);
+            let bottom = bars.iter().map(|b| b.1 + b.3).fold(f32::MIN, f32::max);
+            assert_eq!((right - left, bottom - top), (14.0 * scale, 12.0 * scale));
+            for (i, bar) in bars.iter().enumerate() {
+                assert_eq!(bar.3, 2.0 * scale);
+                assert_eq!(bar.1, top + i as f32 * 5.0 * scale);
+                assert_eq!((bar.0.fract(), bar.1.fract()), (0.0, 0.0));
+            }
+            let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
+            assert!(((left + right) * 0.5 - centre.0).abs() <= 0.5);
+            assert!(((top + bottom) * 0.5 - centre.1).abs() <= 0.5);
+        }
+        assert!(main_menu_icon_bars((0.0, 0.0, 8.0, 8.0), 1.0).is_empty());
+        let mut bar = gnome_header(1, 1.0);
+        assert!(!main_menu_icon(&bar), "no menu button, no icon");
+        bar.new_tab_menu = (620.0, 9.0, 28.0, 28.0);
+        bar.window_controls = vec![crate::WindowControlButton {
+            action: crate::WindowControl::Close,
+            rect: (763.0, 9.0, 28.0, 28.0),
+            label: String::new(),
+            hovered: false,
+            pressed: false,
+        }];
+        assert!(main_menu_icon(&bar));
+        bar.window_controls.clear();
+        assert!(!main_menu_icon(&bar), "a plain strip keeps its ▾");
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains("tab_strip::main_menu_icon_bars(tabbar.new_tab_menu,self.scale)"));
+        assert!(!source.contains("\"≡\""), "a shaped ≡ glyph");
     }
 
     /// A hovered tab is shaded at about 1.3:1, less than half the active

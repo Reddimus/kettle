@@ -1385,6 +1385,13 @@ pub struct TabBar {
     pub tooltip: Option<String>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
+    /// Kettle draws this strip as the Linux (GNOME) header bar: `+` leads
+    /// it, and a hairline separates it from the terminal below.
+    pub linux_header: bool,
+    /// The header's only tab, drawn as the window title: no tab surface,
+    /// accent line, hover fill or close button, and its title is resolved
+    /// against the header. A second tab brings back the tab look.
+    pub lone_title: bool,
     /// Recording warning, independent of the configurable tab format.
     pub recording_notice: String,
     /// Bar height in px (0 = hidden).
@@ -1480,6 +1487,8 @@ impl TabBar {
             pressed_new_tab_menu: false,
             tooltip: None,
             in_titlebar: false,
+            linux_header: false,
+            lone_title: false,
             recording_notice: String::new(),
             height: 0.0,
             y: 0.0,
@@ -1506,8 +1515,6 @@ impl TabBar {
 }
 
 pub(crate) const NEW_TAB_MENU_GLYPH: &str = "▾";
-/// The same menu in a GNOME header bar, drawn as GNOME's primary menu.
-pub(crate) const MAIN_MENU_GLYPH: &str = "≡";
 
 pub(crate) const NEW_TAB_PLUS_GLYPH: &str = "+";
 

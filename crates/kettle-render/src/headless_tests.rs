@@ -5796,6 +5796,175 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
     }
 }
 
+/// A GNOME header `w` by 46 points at `scale`: a window close button, the
+/// main menu `≡` before it and the leading `+`, with `tabs` tabs.
+fn gnome_header_tabs(w: f32, scale: f32, tabs: usize) -> TabBar {
+    let h = 46.0 * scale;
+    let side = 28.0 * scale;
+    let y = 9.0 * scale;
+    let mut bar = TabBar::hidden();
+    bar.height = h;
+    bar.in_titlebar = true;
+    bar.linux_header = true;
+    bar.lone_title = tabs == 1;
+    bar.band = (0.0, 0.0, w, h);
+    bar.new_tab = (8.0 * scale, y, side, side);
+    bar.new_tab_menu = (w - 46.0 * scale - 8.0 * scale - side, y, side, side);
+    bar.window_controls = vec![WindowControlButton {
+        action: WindowControl::Close,
+        rect: (w - 37.0 * scale, y, side, side),
+        label: String::new(),
+        hovered: false,
+        pressed: false,
+    }];
+    for idx in 0..tabs {
+        let rect = if tabs == 1 {
+            (120.0 * scale, 0.0, 200.0 * scale, h)
+        } else {
+            ((40.0 + idx as f32 * 120.0) * scale, 0.0, 120.0 * scale, h)
+        };
+        bar.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: rect,
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: String::new(),
+            path: None,
+            active: idx == 0,
+            activity: TabActivity::Normal,
+        });
+    }
+    bar
+}
+
+/// The GNOME header's `≡` is drawn, not shaped: its ink is the 14 by 12
+/// point icon at 1x and 2x whatever the font size, where a font's `≡`
+/// grew and shrank with the text. It keeps its glyph's ink colour.
+#[test]
+fn gnome_header_menu_icon_keeps_its_size_at_every_font_size() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for font_size in [11.0_f32, 14.0, 20.0] {
+            let cfg = Config {
+                font_size,
+                ..gpu_test_config()
+            };
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("menu icon check skipped: no GPU adapter");
+                return;
+            };
+            let theme = cfg.theme.clone();
+            let strip = resolve_chrome_bg(&cfg, &theme, None);
+            let tabs = gnome_header_tabs(w as f32, scale, 1);
+            let snap = snapshot_of(20, 2, b"");
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, tabs.height, w as f32, h as f32 - tabs.height);
+            terminal.terminal = terminal.rect;
+            let overlay = Overlay {
+                window_focused: true,
+                ..Overlay::default()
+            };
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+            let case = format!("{scale}x, font {font_size}");
+            let button = tabs.new_tab_menu;
+            let (_, _, iw, ih) =
+                glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: no ≡"));
+            assert_eq!((iw, ih), (14.0 * scale, 12.0 * scale), "{case}");
+            let ink = chrome::Colors::default().tab_text(theme.foreground, strip, true);
+            assert_glyph_painted(&frame, button, (strip, ink), chrome::TEXT_CONTRAST, &case);
+            // The leading `+` is painted in the rect the pointer and
+            // AccessKit use, centred in it; nothing is left beside `≡`.
+            let plus = tabs.new_tab;
+            let (px, py, pw, ph) =
+                glyph_ink(&frame, plus, strip).unwrap_or_else(|| panic!("{case}: no +"));
+            assert!(
+                ((px + pw * 0.5) - (plus.0 + plus.2 * 0.5)).abs() <= 1.5
+                    && ((py + ph * 0.5) - (plus.1 + plus.3 * 0.5)).abs() <= 1.5,
+                "{case}: + ink {:?} off the centre of {plus:?}",
+                (px, py, pw, ph)
+            );
+            let tab = tabs.segments[0].rect;
+            let beside = (
+                tab.0 + tab.2 + 2.0,
+                plus.1,
+                button.0 - tab.0 - tab.2 - 4.0,
+                plus.3,
+            );
+            assert_eq!(glyph_ink(&frame, beside, strip), None, "{case}: ink by ≡");
+        }
+    }
+}
+
+/// The GNOME header ends in a hairline that reads apart from the header and
+/// the terminal below it, at 1.5:1 against each as painted, in both default
+/// themes, focused and unfocused, at 1x and 2x. It stops under the active
+/// tab when there are two, which still joins the terminal.
+#[test]
+fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
+    let _serialized = gpu_test_guard();
+    let pixel = |frame: &image::RgbaImage, x: f32, y: f32| {
+        let p = frame.get_pixel(x as u32, y as u32);
+        Rgb::new(p[0], p[1], p[2])
+    };
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("header hairline check skipped: no GPU adapter");
+                return;
+            };
+            let snap = snapshot_of(20, 2, b"");
+            for tabs in [1, 2] {
+                for window_focused in [true, false] {
+                    let bar = gnome_header_tabs(w as f32, scale, tabs);
+                    let mut terminal = pane(&snap, w, h);
+                    terminal.rect = (0.0, bar.height, w as f32, h as f32 - bar.height);
+                    terminal.terminal = terminal.rect;
+                    let overlay = Overlay {
+                        window_focused,
+                        ..Overlay::default()
+                    };
+                    let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &bar);
+                    let case =
+                        format!("{theme_name} {scale}x, {tabs} tabs, focused={window_focused}");
+                    let row = bar.height - 0.5;
+                    let thickness = scale.round();
+                    // Empty header space right of the tabs.
+                    let x = 400.0 * scale;
+                    let line = pixel(&frame, x, row);
+                    let header = pixel(&frame, x, bar.height - thickness - 0.5);
+                    let canvas = pixel(&frame, x, bar.height + 0.5);
+                    for (against, what) in [(header, "header"), (canvas, "terminal")] {
+                        let ratio = color::contrast_ratio(line, against);
+                        assert!(
+                            ratio >= 1.45,
+                            "{case}: hairline {line:?} reads {ratio:.2}:1 on the {what} {against:?}"
+                        );
+                    }
+                    for dy in 1..thickness as u32 {
+                        assert_eq!(pixel(&frame, x, row - dy as f32), line, "{case}");
+                    }
+                    let first = bar.segments[0].rect;
+                    let under = pixel(&frame, first.0 + first.2 * 0.5, row);
+                    if tabs == 1 {
+                        assert_eq!(under, line, "{case}: the line runs under the title");
+                    } else {
+                        assert_ne!(under, line, "{case}: the line crosses the active tab");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The size chip is sized from the text it shows, so a font-size caption
 /// ("Font size 14 · 80×24") sits whole inside its outline instead of in a
 /// chip sized for the bare grid.

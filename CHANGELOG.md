@@ -180,9 +180,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - GNOME/Wayland windows now show their title in a Kettle header, even with one
   tab, with minimize/maximize/close buttons, tooltips and screen-reader actions.
-  Drag empty header space to move, double-click to maximize, right-click for
-  the window menu, or drag an edge to resize. KDE server frames and X11 frames
-  stay native; `linux-titlebar-style = native` restores the previous header.
+  A single tab is drawn as the window title, as other GNOME apps title their
+  header bars; screen readers still find it as the selected tab, a second tab
+  brings the tabs back, and `tab-bar = always` keeps the tab look. New Tab (+)
+  leads the header, the main menu (≡) ends it, and a faint hairline separates
+  the header from the terminal. Drag empty header space or the title to move,
+  double-click to maximize, right-click for the window menu, or drag an edge to
+  resize. KDE server frames and X11 frames stay native;
+  `linux-titlebar-style = native` restores the previous header.
 
 - Quieter tab strips follow the terminal background, with readable separators
   and visibly dimmed inactive windows. Larger, separated New Tab and options
@@ -488,8 +493,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Window blur and Background opacity rows drops its hint about what blur
   needs.
 
-- In Kettle's GNOME header bar the new-tab options button is drawn and named as
-  the window's primary menu (≡, "Main menu"), as GNOME apps place it.
+- In Kettle's GNOME header bar the new-tab options button is the window's
+  primary menu, named "Main menu" and placed at the end of the header as GNOME
+  apps place it. It is drawn as GNOME's 16 px symbolic ≡ icon rather than a
+  font glyph, so it looks the same whatever fonts are installed.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.

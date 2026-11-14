@@ -170,6 +170,8 @@ impl App {
                 pressed_new_tab_menu: false,
                 tooltip: None,
                 in_titlebar: ws.macos_titlebar_tabs,
+                linux_header: ws.linux_titlebar,
+                lone_title: false,
                 recording_notice: String::new(),
                 height,
                 y,
@@ -204,6 +206,13 @@ impl App {
             String::new()
         };
         let n = labels.len().max(1);
+        let lone_title = lone_header_title(
+            ws.linux_titlebar,
+            labels.len(),
+            (ws.editing_title.is_some(), ws.dock_preview.is_some()),
+            self.cfg.tab_bar,
+            self.cfg.tab_bar_pos,
+        );
         let scale = ws
             .window
             .as_ref()
@@ -213,6 +222,7 @@ impl App {
             arrow_rect,
             plus_rect,
             settings_rect,
+            lead,
             strip,
             layout,
         } = horizontal_tab_geometry(
@@ -222,6 +232,8 @@ impl App {
             (n, active),
             &self.cfg,
         );
+        // Tab positions count from past the GNOME header's leading `+`.
+        let x0 = x0 + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -290,7 +302,8 @@ impl App {
                 } else {
                     cell_w
                 };
-                let show_controls = n > 1 || hovered;
+                // A lone header title is no tab: no close button or hint.
+                let show_controls = n > 1 || (hovered && !lone_title);
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     show_controls,
@@ -344,6 +357,8 @@ impl App {
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
             tooltip,
             in_titlebar: ws.macos_titlebar_tabs,
+            linux_header: ws.linux_titlebar,
+            lone_title,
             recording_notice,
             height,
             y,
@@ -359,7 +374,8 @@ impl App {
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
             hovered_close_idx: ws.hovered_close_idx,
-            hovered_tab_idx: segments_hovered,
+            // The lone title has no hover state of its own to paint.
+            hovered_tab_idx: segments_hovered.filter(|_| !lone_title),
             // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
@@ -513,6 +529,8 @@ impl App {
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
             tooltip: self.new_tab_tooltip(ws, &[]),
             in_titlebar: false,
+            linux_header: false,
+            lone_title: false,
             recording_notice: String::new(),
             height,
             y: strip_y,
@@ -1422,6 +1440,26 @@ pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
     }
 }
 
+/// Whether Kettle's Linux header draws its only tab as the window's title,
+/// the way GNOME apps title their header bars. Never while a title is being
+/// edited or another window's tab is being docked into this one, both of
+/// which show the tab; never off the top, where there is no header; and
+/// never with `tab-bar = always`, which asks for the tab look.
+pub(super) fn lone_header_title(
+    linux_header: bool,
+    tabs: usize,
+    (editing, docking): (bool, bool),
+    mode: TabBarMode,
+    pos: TabBarPos,
+) -> bool {
+    linux_header
+        && tabs == 1
+        && !editing
+        && !docking
+        && mode != TabBarMode::Always
+        && pos == TabBarPos::Top
+}
+
 pub(super) fn tab_strip_visible(
     mode: TabBarMode,
     tabs: usize,
@@ -1452,6 +1490,10 @@ pub(super) struct HorizontalTabGeometry {
     pub plus_rect: Rect,
     /// The macOS title bar's Settings gear, zero elsewhere.
     pub settings_rect: Rect,
+    /// How far into the lane the tabs start: past the GNOME header's
+    /// leading `+`, and zero on every other strip. `layout` positions count
+    /// from there.
+    pub lead: f32,
     pub strip: f32,
     pub layout: TabStripLayout,
 }
@@ -1466,10 +1508,13 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, mut button_w) = if linux {
-        linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
+    let (arrow_rect, plus_rect, lead, mut button_w) = if linux {
+        let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (controls.menu, controls.plus, controls.lead, controls.trail)
     } else {
-        horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
+        let (menu, plus, reserve) =
+            horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (menu, plus, 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
     // keep Settings in their `≡` / `▾` menus.
@@ -1480,9 +1525,9 @@ pub(super) fn horizontal_tab_geometry(
         settings_rect = rect;
         button_w += extra;
     }
-    let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+    let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
-        let space = (strip, button_w, lane.0);
+        let space = (strip, button_w, lane.0 + lead);
         let mut layout = titlebar_tab_layout(
             n,
             active,
@@ -1513,6 +1558,7 @@ pub(super) fn horizontal_tab_geometry(
         arrow_rect,
         plus_rect,
         settings_rect,
+        lead,
         strip,
         layout,
     }
@@ -1538,7 +1584,7 @@ pub(super) fn tear_off_destination_tab(
     let lane = horizontal_tab_lane(band, reservations);
     let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
     (
-        lane.0 + geometry.layout.xs[0].unwrap_or(0.0),
+        lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
         geometry.layout.last_width,
         band.3,
@@ -1547,7 +1593,7 @@ pub(super) fn tear_off_destination_tab(
 
 /// How far along a torn window's title bar its pointer holds it: `in_tab`
 /// into the lone tab the destination paints, which leaves room for the
-/// macOS Settings gear and the Linux header's window buttons.
+/// macOS Settings gear and the Linux header's leading `+` and window buttons.
 pub(super) fn titlebar_tear_off_grab_x(
     cfg: &Config,
     band: Rect,
