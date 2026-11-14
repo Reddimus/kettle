@@ -962,7 +962,8 @@ pub(super) fn theme_picker_enter_hint(save_key: &str, active: &str) -> kettle_i1
     }
 }
 
-/// Escape from a picker must restore the new system side after a live appearance change.
+/// Escape from a picker must restore the new side after the system or the
+/// schedule switches sides (see `App::wear_followed_theme`).
 pub(super) fn rebase_theme_preview(ws: &mut WindowState, baseline: &ThemeState) {
     if ws.theme_preview.is_some() {
         ws.theme_preview = Some(baseline.clone());

@@ -695,6 +695,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   reload puts the preview back at once, so the window no longer briefly
   shows the saved theme under the picker.
 
+- When `theme-schedule` switches sides while the theme picker is open, Esc
+  now puts back the side the schedule switched to, as a system appearance
+  change already did, and so does Enter for the side the window no longer
+  wears. Before, Esc put back the theme from before the switch, and the
+  window stayed on the old side until the next boundary.
+
 - A scrolling picker (the command palette, theme, layout and SSH pickers) no
   longer leaves a blank part-row under its last result. It used to paint six
   whole rows in room for eight; it now paints eight, and the last row it

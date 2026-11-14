@@ -3927,7 +3927,10 @@ row's. A press, Tab or a screen reader's click sets `ThemePickerState::slot`, wh
 re-seats the list on that side's theme but leaves the preview's baseline
 alone; at Enter, `theme_commit_plan` picks the key to save and, for the side
 the window is not on, leaves the baseline so the closed picker puts the
-window's theme back. Sample
+window's theme back. When the system or the schedule switches sides under an
+open picker, `App::wear_followed_theme` rebases that baseline on the new
+side's theme, so Esc and such an Enter put back the side the window wears
+now. Sample
 text goes through the same `MinimumContrastCache::resolve` as cell text. The
 card, its palette squares, marks and the button outline are swatch-layer
 rounded surfaces; each footer line is a rich-text buffer whose words and
