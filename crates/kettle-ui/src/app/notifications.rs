@@ -93,6 +93,22 @@ impl App {
         }
     }
 
+    /// Answer the focused bell of any pane focus has left, and repaint the
+    /// tab strip, the window title and the accessibility tree when the
+    /// marked pane changed. Runs after every window dispatch and drain, so
+    /// whichever route moved focus or answered the bell, the mark follows.
+    pub(super) fn sync_focused_bell(&mut self, ws: &mut WindowState) {
+        ws.mux.settle_focused_bells();
+        let marked = ws.mux.focused_bell_pane();
+        if marked != ws.focused_bell_drawn {
+            ws.focused_bell_drawn = marked;
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Reflect the FOCUSED pane's OSC 9;4 progress onto the OS
     /// taskbar button each frame (pwsh 7 / Windows Terminal parity). Reads the
     /// focused pane the same way the cursor-blink poll does; `Taskbar` dedups

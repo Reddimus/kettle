@@ -675,10 +675,11 @@ impl App {
         }
         // Latch any per-pane bells onto their tab's
         // activity flag so the tab-bar dot survives even on tabs the
-        // user isn't currently looking at. Active-tab bells were
-        // already handled visually (`bell_flashes` above drives the
-        // per-pane flash); the latching helper skips the active
-        // tab so we don't double-signal.
+        // user isn't currently looking at. A bell in the pane the user is
+        // looking at marks the active tab instead, until they answer it
+        // (`Pane::focused_bell`): the flash alone fades before anyone sees
+        // it. `bell = attention` and `bell = off` ask for no visual cue, so
+        // they mark nothing there.
         //
         // Terminator plugin parity:
         // fire LuaEvent::Bell(pane_id) for every belled pane after
@@ -689,6 +690,9 @@ impl App {
         // `fire_lua_event` drains through `drain_lua_hook_commands`, the one
         // canonical LuaCommand-match path that every Lua hook shares.
         for id in bell_panes {
+            if self.cfg.bell.visual() {
+                ws.mux.ring_focused_bell(id);
+            }
             ws.mux.touch_tab_bell(id);
             self.fire_lua_event(ws, crate::LuaEvent::Bell(id), "bell hook");
         }
@@ -701,6 +705,7 @@ impl App {
         // against the true current focus, so none of them can leave the latch
         // lit on a pane the user is staring at.
         ws.mux.clear_focused_pane_bell();
+        self.sync_focused_bell(ws);
         // A single destructive drain fans out to Lua and the
         // optional recorder so neither consumer can steal bytes from the other.
         self.dispatch_output_chunks(ws, output_chunks);

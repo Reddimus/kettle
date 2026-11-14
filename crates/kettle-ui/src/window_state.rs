@@ -1341,6 +1341,9 @@ pub(crate) struct WindowState {
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
     pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
+    /// The pane whose unanswered focused bell the last repaint was asked to
+    /// mark (`Mux::focused_bell_pane`), so a change repaints once.
+    pub(crate) focused_bell_drawn: Option<u64>,
     /// Coalesce output-driven repaints. `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
@@ -1825,6 +1828,7 @@ impl WindowState {
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
             bell_flashes: std::collections::HashMap::new(),
+            focused_bell_drawn: None,
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,

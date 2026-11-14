@@ -248,8 +248,10 @@ impl App {
                     .copied()
                     .flatten()
                     .map_or(PARKED_TAB, |x| x0 + x);
-                // Per-tab activity dot. Active tabs short-circuit to
-                // Normal (the focused-tab accent already signals "you are here").
+                // Per-tab activity marker. Active tabs short-circuit to
+                // Normal (the focused-tab accent already signals "you are
+                // here") unless the bell rang in the focused pane and the user
+                // has not answered it.
                 let activity = ws
                     .mux
                     .tabs
@@ -258,6 +260,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,
@@ -476,6 +479,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,

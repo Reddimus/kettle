@@ -3064,6 +3064,7 @@ impl App {
         }
         let mut ws = ws;
         self.sync_pane_focus_reports(&mut ws);
+        self.sync_focused_bell(&mut ws);
         if seq == self.focused_seq {
             self.sync_macos_menu(Some(&ws));
         }

@@ -1158,7 +1158,10 @@ impl App {
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
-                    let bell = diagnostic_titlebar_bell(self.cfg.icon_bell, pane.bell);
+                    let bell = diagnostic_titlebar_bell(
+                        self.cfg.icon_bell,
+                        pane.bell || pane.focused_bell(),
+                    );
                     let budget = (rect.2 / cell_w.max(1.0)).floor().max(1.0) as usize;
                     let group = pane.group_name.as_deref().filter(|g| !g.is_empty());
                     let fitted_title = kettle_render::fit_pane_titlebar_title(
@@ -2608,7 +2611,9 @@ impl App {
             return true;
         }
         let pre = self.focus_key(ws);
-        ws.mux.focus_at(area, px, py);
+        if let Some(pressed) = ws.mux.focus_at(area, px, py) {
+            ws.mux.answer_bell_by_press(pressed);
+        }
         self.note_focus_change(ws, pre);
         if self.send_mouse(ws, bcode, true, false) {
             return true;

@@ -304,6 +304,46 @@ fn native_window_title_strips_private_use_glyphs_only() {
     assert_eq!(sanitize_native_window_title("\u{f015}\u{e0b0}"), "kettle");
 }
 
+/// A bell the user has not answered marks the native title while no tab
+/// strip shows it (one tab under `tab-bar = auto` off GNOME's header, or
+/// `tab-bar = off`): ASCII off macOS, under the ASCII title rule, and the
+/// bell emoji on macOS, whose title font carries it.
+#[test]
+fn an_unanswered_bell_marks_the_native_title_only_without_a_tab_strip() {
+    assert_eq!(super::bell_title_mark(false), "[!] ");
+    assert!(super::bell_title_mark(false).is_ascii());
+    assert_eq!(super::bell_title_mark(true), "\u{1F514} ");
+    for macos in [false, true] {
+        let mark = super::bell_title_mark(macos);
+        assert_eq!(super::bell_window_title("fixture".into(), false, mark), "fixture");
+        let marked = super::bell_window_title("fixture".into(), true, mark);
+        assert_eq!(marked, format!("{mark}fixture"));
+        assert_eq!(sanitize_native_window_title(&marked), marked.trim_end());
+    }
+    // One tab under the default `tab-bar = auto` hides the strip off the
+    // macOS and GNOME titlebars; that is the window the title must mark.
+    assert!(!super::chrome::tab_strip_visible(
+        kettle_config::TabBarMode::Auto,
+        1,
+        false,
+        false,
+        false
+    ));
+    let src = production_source();
+    let desired = src
+        .split("fn desired_window_title(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("desired_window_title");
+    assert!(desired.contains(
+        "ws.mux.focused_bell_pane().is_some() && self.tab_bar_h(ws) <= 0.0,"
+    ));
+    assert!(desired.contains("bell_title_mark(cfg!(target_os = \"macos\")),"));
+    let mark = desired.find("bell_window_title(").unwrap();
+    let sanitize = desired.find("sanitize_native_window_title(").unwrap();
+    assert!(mark < sanitize, "the mark goes through the native-title filter");
+}
+
 #[test]
 fn the_shelf_badge_counts_unseen_items_only() {
     assert_eq!(super::media_shelf_badge(0), "");

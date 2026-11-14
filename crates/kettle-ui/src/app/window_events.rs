@@ -957,8 +957,14 @@ impl App {
                     return;
                 }
                 let pre = self.focus_key(ws);
-                ws.mux
-                    .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
+                // A press in a pane answers its bell, whether or not the
+                // program reports the mouse.
+                if let Some(pressed) = ws
+                    .mux
+                    .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32)
+                {
+                    ws.mux.answer_bell_by_press(pressed);
+                }
                 self.note_focus_change(ws, pre);
                 if self.send_mouse(ws, bcode, true, false) {
                     return;

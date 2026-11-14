@@ -970,8 +970,9 @@ impl App {
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
                         // Terminator parity (`icon_bell`): the pane's own bell
-                        // latch drives its titlebar bell indicator.
-                        p.bell,
+                        // latch drives its titlebar bell indicator, and so does
+                        // an unanswered bell in the focused pane.
+                        p.bell || p.focused_bell(),
                         ws.bell_flashes
                             .get(id)
                             .map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),
