@@ -838,6 +838,10 @@ in the command palette, bindable, no default chord), `select_to_top`
 extend the selection to the top / bottom of the buffer, bound by default to
 **Shift+Home** / **Shift+End** (Shift+click still extends to the click point).
 **Ctrl+Home** / **Ctrl+End** scroll to the top / bottom instead.
+`select_command_output` selects the newest finished command's output as whole
+rows, from its OSC 133 C and D marks (see
+[SHELL-INTEGRATION.md](SHELL-INTEGRATION.md#selecting-a-commands-output));
+in the command palette and the right-click menu, bindable, no default chord.
 
 **Search + jump**: `start_search` (`search`), `toggle_search_regex`, `prev_prompt`
 (`jump_to_prompt_prev`), `next_prompt` (`jump_to_prompt_next`).
