@@ -583,6 +583,16 @@ reads it, since smokes drive release builds.
   refuses a direct lookup anywhere else. `kettle-ui` tests start a control
   server through `ctl_server::start_private_for_tests`, which passes both
   directories in.
+- Smokes that start Kettle with its control server on set it too. The live
+  harness (`LiveKettle` in `check-live-ui-smoke.py`) points it at one private
+  directory per run, removed at exit: its `kettle ctl` calls run in the
+  harness's own environment and reach a Kettle given private XDG directories
+  through the alias there. Scripts whose Kettle and `kettle ctl` share one
+  environment set it to `none`. `test-script-regressions.py` refuses a script
+  that starts a control server without the variable or the harness. A smoke
+  that keeps the developer's `HOME` and XDG directories still registers in
+  the account's registry, as before; the variable moves only the directory
+  the OS names.
 
 To confirm on macOS that no test reaches the account's registry, run the
 suites under a sandbox that kills any process touching it and denies the rest

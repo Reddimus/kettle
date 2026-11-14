@@ -779,15 +779,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   no longer finds a Kettle that is quitting. A Kettle stopped by a signal, or
   ended by Windows at logoff or shutdown, still leaves them to that cleanup.
 
-- Kettle's own tests no longer read, prune or add to the control registry of
-  the account that runs them. A Kettle under test with a private
-  `XDG_RUNTIME_DIR` still published its pointer in, and pruned,
-  `~/.local/state/kettle/ctl`, and `kettle mcp` and the `kettle` crate's unit
-  tests looked for servers there, so a suite run inside Kettle could reach
-  the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for tests and smokes only,
-  names the directory to use instead of every one the OS names; a value that
-  is not an absolute path names none. The test suites set it, and the
-  `kettle` crate's unit tests no longer look for a running Kettle at all.
+- Kettle's own tests and smokes no longer read, prune or add to the control
+  registry directory the OS names for the account that runs them. A Kettle
+  under test with a private `XDG_RUNTIME_DIR` still published its pointer
+  in, and pruned, `~/.local/state/kettle/ctl`, and `kettle mcp` and the
+  `kettle` crate's unit tests looked for servers there, so a suite run inside
+  Kettle could reach the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for
+  tests and smokes only, names the directory to use instead of every one the
+  OS names; a value that is not an absolute path names none. The test suites
+  and smokes set it, and the `kettle` crate's unit tests no longer look for a
+  running Kettle at all.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
