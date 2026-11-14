@@ -90,6 +90,22 @@ args = [{ name = "chord", type = "str" }]
 context = "crates/kettle-ui/src/app.rs: Rebind body. taken and action are safe localized action labels, never raw config/debug names or SendText payloads."
 args = [{ name = "taken", type = "str" }, { name = "action", type = "str" }]
 
+[messages.confirm_title_remove_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: heading of the question before a saved SSH host is removed from Kettle's config. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.confirm_body_remove_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: body of the SSH host removal question. name and target are the host's name and ssh target, verbatim. path is the fixed display path of the OpenSSH config, ~/.ssh/config or ~\\.ssh\\config on Windows, verbatim; it is not edited. Read aloud by screen readers: use words, no arrows."
+args = [{ name = "name", type = "str" }, { name = "target", type = "str" }, { name = "path", type = "str" }]
+
+[messages.confirm_title_replace_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: heading of the question before a saved SSH host's target is replaced, when a Save reuses an existing name. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.confirm_body_replace_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: body of the SSH host replace question. name is the host's name; old_target is the target it has now and new_target the one being saved; all verbatim. A statement of what happens, not an instruction."
+args = [{ name = "name", type = "str" }, { name = "old_target", type = "str" }, { name = "new_target", type = "str" }]
+
 [messages.confirm_close_scope]
 context = "crates/kettle-ui/src/app.rs: Scope summary for a tab or window close; count is the number of panes. The caller uses a separate message for exactly two panes."
 args = [{ name = "count", type = "u64" }]
@@ -103,6 +119,12 @@ context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for clos
 
 [messages.confirm_button_reassign]
 context = "crates/kettle-ui/src/app.rs: Confirmation button for moving a key combination to another action."
+
+[messages.confirm_button_remove]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: destructive confirmation button that removes a saved SSH host from Kettle's config. Cancel is the default."
+
+[messages.confirm_button_replace]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: confirmation button that saves a new target under an existing SSH host name. Cancel is the default."
 
 [messages.confirm_close_pane]
 context = "crates/kettle-ui/src/app.rs: confirmation before closing the focused pane."
@@ -1146,6 +1168,14 @@ args = [{ name = "target", type = "str" }]
 
 [messages.picker_ssh_invalid_target]
 context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: disabled SSH launcher row when the typed target cannot be passed to ssh: it starts with a hyphen, or contains a space or a control character. Keep the hyphen."
+
+[messages.picker_ssh_remove]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: last SSH launcher row, shown when the typed text is exactly a host saved in Kettle's config. It opens a confirmation that removes the host from Kettle's config only. name is the host's name, verbatim. Keep the straight quotes and the trailing ellipsis (it opens a question)."
+args = [{ name = "name", type = "str" }]
+
+[messages.picker_ssh_save_typed]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: last SSH launcher row, shown when the typed text is a valid ssh target that is not saved yet. It opens a prompt for a name and saves the pair in Kettle's config. target is the typed text, verbatim. Keep the straight quotes and the trailing ellipsis (it opens a prompt)."
+args = [{ name = "target", type = "str" }]
 
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
@@ -2733,6 +2763,9 @@ context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/sr
 [messages.edit_layout_name]
 context = "crates/kettle-ui/src/app/title.rs: Single-line layout save prompt label."
 
+[messages.edit_ssh_host_name]
+context = "crates/kettle-ui/src/app/title.rs: Single-line prompt label for the name a typed SSH target is saved under in the launcher."
+
 [messages.notify_layout_failed]
 context = "crates/kettle-ui/src/app/title.rs: Layout save failure notification title."
 
@@ -2750,6 +2783,26 @@ context = "crates/kettle-ui/src/app/actions.rs: Profile process launch failure n
 
 [messages.notify_profile_launch_failed_body]
 context = "crates/kettle-ui/src/app/actions.rs: The selected profile disappeared or process/reaper creation failed."
+
+[messages.notify_ssh_host_not_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: Notification title when the SSH launcher's Save did not write the host."
+
+[messages.notify_ssh_host_not_saved_body]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH host save failure: the name has = or a control character, the config file changed since the launcher read it, or it could not be written. Infinitive instruction style."
+
+[messages.notify_ssh_host_not_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: Notification title when the SSH launcher's Remove did not change the config."
+
+[messages.notify_ssh_host_not_removed_body]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH host removal failure: the host changed in the config file since the launcher showed it, or the file could not be written."
+
+[messages.ssh_status_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a host was saved, painted in place of the key hint and announced politely to screen readers. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.ssh_status_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a host was removed, painted in place of the key hint and announced politely to screen readers. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
 
 [messages.settings_field_cursor_unfocused_style]
 context = "crates/kettle-ui/src/settings.rs: Settings row: cursor appearance in inactive windows and split panes."
