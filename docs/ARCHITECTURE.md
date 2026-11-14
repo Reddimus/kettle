@@ -1789,7 +1789,10 @@ shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
 Prefix and hint text have separate clipped slots of at most 30% of the field
 each outside pickers. Picker headers keep the complete right-aligned key hint
-only when it fits beside the query; otherwise they drop it. Other fields drop
+only when it fits beside the query; otherwise they drop it. An empty query's
+placeholder (`text_field_placeholder`) comes first: the hint is also dropped
+while only that lets the placeholder fit whole, and the placeholder is left
+out, never cut, when it does not fit alone. Other fields drop
 hint segments before truncating the final segment with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
@@ -3917,7 +3920,11 @@ fills in `ThemePickerFooter` from the config and decides, with
 `theme_footer_height` and the footer's own minimum columns, whether the card
 and how many status lines fit; kettle-render owns the words, layout and
 colours, so painting, the button's hit test and the footer's AccessKit text
-all come from `theme_footer_layout` and `theme_footer_description`. Each side
+all come from `theme_footer_layout` and `theme_footer_description`. That text
+is a `Role::Label` built by `static_text_node`, which sets it as both label and
+value: the locked adapters name a label from its value on AT-SPI and UI
+Automation and show its label as the value on macOS, so a label alone reads
+as an empty name to Orca and Narrator. Each side
 on the status line is a `slot_chips` target in that layout, and the same rect
 is its AccessKit radio button's bounds (`theme_footer_slots` gives its words);
 the two radios sit in one radio group, and the layout's `contrast_button` rect
