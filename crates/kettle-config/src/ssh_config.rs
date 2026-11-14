@@ -7,7 +7,9 @@
 //! when it opens; nothing here is persisted or logged beyond a fixed reason.
 //!
 //! The same module holds the validators that the `ssh-host` config key, the
-//! launcher and the spawn path share, so a target is judged by one rule.
+//! launcher and the spawn path share, so a target is judged by one rule, and
+//! the writers the launcher's Save and Remove rows use. Those edit Kettle's
+//! own config; nothing here ever writes the OpenSSH file.
 
 use std::ffi::OsString;
 use std::io::Read as _;
@@ -295,6 +297,238 @@ pub fn user_ssh_host_aliases(path: &Path) -> SshAliases {
             SshAliases::default()
         }
     }
+}
+
+/// What a Save expects the config file to hold for the name it writes. It is
+/// checked against the file as [`upsert_ssh_host`] reads it, under its lock,
+/// not against the in-memory copy, which can be older than a hand edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostExpect {
+    /// No applied `ssh-host` line has the name, ignoring ASCII case.
+    Absent,
+    /// The first applied `ssh-host` line with the name connects to exactly
+    /// this target.
+    Target(String),
+}
+
+/// One line of a config text, as the `ssh-host` writers see it.
+struct ConfigLine<'a> {
+    /// The line with its ending.
+    segment: &'a str,
+    ending: &'a str,
+    /// A `key = value` line in a section Kettle applies.
+    applied: bool,
+    /// The name and target of an applied `ssh-host` line the parser keeps.
+    host: Option<(String, String)>,
+}
+
+/// The lines of `text`, and whether its last section is one Kettle applies.
+fn config_lines(text: &str) -> (Vec<ConfigLine<'_>>, bool) {
+    let mut section = crate::parse::Section::default();
+    let lines = text
+        .split_inclusive('\n')
+        .map(|segment| {
+            let (line, ending) = crate::split_line_ending(segment);
+            if line.trim().starts_with('[') {
+                section.enter(crate::parse::section_header(line.trim()));
+                return ConfigLine {
+                    segment,
+                    ending,
+                    applied: false,
+                    host: None,
+                };
+            }
+            let applied = section.applies() && crate::parse_line_key(line).is_some();
+            ConfigLine {
+                segment,
+                ending,
+                applied,
+                host: applied.then(|| ssh_host_entry(line)).flatten(),
+            }
+        })
+        .collect();
+    (lines, section.applies())
+}
+
+/// The `(name, target)` a single config line declares, when it is an
+/// `ssh-host` line whose halves `Config::parse_text` keeps.
+fn ssh_host_entry(line: &str) -> Option<(String, String)> {
+    let entry = crate::parse::parse(line).into_iter().next()?;
+    if entry.key != "ssh-host" {
+        return None;
+    }
+    let (name, target) = entry.value.split_once('=')?;
+    let (name, target) = (name.trim(), target.trim());
+    (is_valid_ssh_host_name(name) && is_valid_ssh_target(target))
+        .then(|| (name.to_string(), target.to_string()))
+}
+
+/// The `ssh-host` line for `name` and `target`, refused unless the parser
+/// reads it back as exactly that host.
+fn ssh_host_line(name: &str, target: &str) -> std::io::Result<String> {
+    crate::validate_single_line("ssh host name", name)?;
+    crate::validate_single_line("ssh host target", target)?;
+    let line = format!("ssh-host = {name}={target}");
+    let valid = is_valid_ssh_host_name(name)
+        && is_valid_ssh_target(target)
+        && crate::Config::parse_text(&line).ssh_hosts == [(name.to_string(), target.to_string())]
+        && crate::Config::detect_malformed_values(&line).is_empty();
+    if valid {
+        Ok(line)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to persist an invalid ssh host",
+        ))
+    }
+}
+
+/// Refuse an edit that would add a malformed value to the file.
+fn refuse_new_malformed(existing: &str, out: &str) -> std::io::Result<()> {
+    if crate::Config::detect_malformed_values(out).len()
+        > crate::Config::detect_malformed_values(existing).len()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "refusing to persist the ssh host: it would introduce a malformed config value",
+        ));
+    }
+    Ok(())
+}
+
+/// Save `ssh-host = {name}={target}` in the config at `path`.
+///
+/// The first applied `ssh-host` line with `name` (ignoring ASCII case) is
+/// replaced in place and any later ones are dropped, so the name means one
+/// host. Without one, the line goes after the last applied `ssh-host` line,
+/// or else after the last line Kettle applies, so a Terminator section that
+/// Kettle ignores cannot swallow it.
+///
+/// `expect` is checked against the file as read here: a mismatch is
+/// `WouldBlock` and the file is not touched. Like the other config writers
+/// this is atomic and locked, refuses a change made while it runs, keeps
+/// comments, line endings and the encoding, makes a `.bak` on the first
+/// write (its path is returned) and refuses to add a malformed value. Error
+/// messages it composes name no host, target or path.
+pub fn upsert_ssh_host(
+    path: &Path,
+    name: &str,
+    target: &str,
+    expect: &HostExpect,
+) -> std::io::Result<PathBuf> {
+    let line = ssh_host_line(name, target)?;
+    let edit = crate::ConfigEdit::begin(path)?;
+    let out = with_ssh_host(&edit.document.text, name, &line, expect)?;
+    edit.commit(&out)
+}
+
+fn with_ssh_host(
+    existing: &str,
+    name: &str,
+    line: &str,
+    expect: &HostExpect,
+) -> std::io::Result<String> {
+    let (lines, tail_applies) = config_lines(existing);
+    let same_name = |config_line: &ConfigLine<'_>| {
+        config_line
+            .host
+            .as_ref()
+            .is_some_and(|(host, _)| host.eq_ignore_ascii_case(name))
+    };
+    let first = lines.iter().position(same_name);
+    let current = first.and_then(|index| lines[index].host.as_ref().map(|(_, t)| t.as_str()));
+    let expected = match expect {
+        HostExpect::Absent => current.is_none(),
+        HostExpect::Target(target) => current == Some(target.as_str()),
+    };
+    if !expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "the ssh host changed in the config file since it was shown",
+        ));
+    }
+    let line_ending = crate::preferred_line_ending(existing);
+    let last_host = lines
+        .iter()
+        .rposition(|config_line| config_line.host.is_some());
+    let mut out = String::with_capacity(existing.len() + line.len() + 2);
+    // The end of the last line Kettle reads, as in `with_keybinds`.
+    let mut applied_end = 0;
+    for (index, config_line) in lines.iter().enumerate() {
+        if Some(index) == first {
+            out.push_str(line);
+            out.push_str(config_line.ending);
+        } else if same_name(config_line) {
+            continue;
+        } else {
+            out.push_str(config_line.segment);
+        }
+        if first.is_none() && Some(index) == last_host {
+            if config_line.ending.is_empty() {
+                out.push_str(line_ending);
+            }
+            out.push_str(line);
+            out.push_str(line_ending);
+        }
+        if config_line.applied {
+            applied_end = out.len();
+        }
+    }
+    if first.is_none() && last_host.is_none() {
+        let tail = if tail_applies {
+            String::new()
+        } else {
+            out.split_off(applied_end)
+        };
+        crate::ensure_blank_line_before_append(&mut out, line_ending);
+        out.push_str(line);
+        out.push_str(line_ending);
+        out.push_str(&tail);
+    }
+    if !out.ends_with('\n') {
+        out.push_str(line_ending);
+    }
+    refuse_new_malformed(existing, &out)?;
+    Ok(out)
+}
+
+/// Remove the `ssh-host` host `name` (ignoring ASCII case) that connects to
+/// exactly `target` from the config at `path`.
+///
+/// Only applied lines that match both are dropped. With none, the result is
+/// `NotFound` and the file is not touched: the host changed by hand since the
+/// launcher showed it. Writes as [`upsert_ssh_host`] does.
+pub fn remove_ssh_host(path: &Path, name: &str, target: &str) -> std::io::Result<PathBuf> {
+    crate::validate_single_line("ssh host name", name)?;
+    crate::validate_single_line("ssh host target", target)?;
+    let edit = crate::ConfigEdit::begin(path)?;
+    let out = without_ssh_host(&edit.document.text, name, target)?;
+    edit.commit(&out)
+}
+
+fn without_ssh_host(existing: &str, name: &str, target: &str) -> std::io::Result<String> {
+    let (lines, _) = config_lines(existing);
+    let mut out = String::with_capacity(existing.len());
+    let mut removed = false;
+    for config_line in &lines {
+        if config_line
+            .host
+            .as_ref()
+            .is_some_and(|(host, to)| host.eq_ignore_ascii_case(name) && to == target)
+        {
+            removed = true;
+        } else {
+            out.push_str(config_line.segment);
+        }
+    }
+    if !removed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the ssh host is not in the config file",
+        ));
+    }
+    refuse_new_malformed(existing, &out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -764,6 +998,211 @@ mod tests {
                 .expect("opening a FIFO must not block");
             assert_eq!(result, Err(SshImportSkip::NotRegular));
             drop(home);
+        }
+    }
+
+    /// The `ssh-host` writers, against a scratch config file.
+    mod writers {
+        use super::super::*;
+        use std::io::ErrorKind;
+
+        fn scratch(name: &str, bytes: &[u8]) -> (kettle_test_support::PrivateTempDir, PathBuf) {
+            let dir = kettle_test_support::private_tempdir(&format!("kettle-ssh-write-{name}-"));
+            let path = dir.path().join("config");
+            std::fs::write(&path, bytes).unwrap();
+            (dir, path)
+        }
+
+        fn bak(path: &Path) -> PathBuf {
+            path.with_extension("bak")
+        }
+
+        fn read(path: &Path) -> String {
+            String::from_utf8(std::fs::read(path).unwrap()).unwrap()
+        }
+
+        fn hosts(path: &Path) -> Vec<(String, String)> {
+            crate::Config::parse_text(&read(path)).ssh_hosts
+        }
+
+        fn pair(name: &str, target: &str) -> (String, String) {
+            (name.to_string(), target.to_string())
+        }
+
+        #[test]
+        fn a_new_host_goes_after_the_last_host_keeping_comments_and_crlf() {
+            let original = "# kettle\r\nssh-host = box=me@box\r\n\r\n# fonts\r\nfont-size = 13\r\n";
+            let (_dir, path) = scratch("append", original.as_bytes());
+            let backup =
+                upsert_ssh_host(&path, "db", "me@db.example", &HostExpect::Absent).unwrap();
+            assert_eq!(
+                read(&path),
+                "# kettle\r\nssh-host = box=me@box\r\nssh-host = db=me@db.example\r\n\r\n\
+                 # fonts\r\nfont-size = 13\r\n"
+            );
+            assert_eq!(backup.file_name(), bak(&path).file_name());
+            assert_eq!(read(&backup), original, "the first write keeps a .bak");
+            // A file with no host gets the line at its end, after a blank line.
+            let (_dir, path) = scratch("first-host", b"# only a comment\nfont-size = 13");
+            upsert_ssh_host(&path, "db", "me@db", &HostExpect::Absent).unwrap();
+            assert_eq!(
+                read(&path),
+                "# only a comment\nfont-size = 13\n\nssh-host = db=me@db\n"
+            );
+            // A missing file is created.
+            let dir = kettle_test_support::private_tempdir("kettle-ssh-write-new-");
+            let path = dir.path().join("config");
+            upsert_ssh_host(&path, "db", "me@db", &HostExpect::Absent).unwrap();
+            assert_eq!(read(&path), "ssh-host = db=me@db\n");
+        }
+
+        #[test]
+        fn utf16_and_bom_files_keep_their_encoding() {
+            let text = "# c\r\nfont-size = 13\r\n";
+            let mut utf16 = vec![0xff, 0xfe];
+            utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            let (_dir, path) = scratch("utf16", &utf16);
+            upsert_ssh_host(&path, "db", "me@db", &HostExpect::Absent).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(&bytes[..2], [0xff, 0xfe]);
+            let units: Vec<u16> = bytes[2..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
+                .collect();
+            assert_eq!(
+                String::from_utf16(&units).unwrap(),
+                "# c\r\nfont-size = 13\r\n\r\nssh-host = db=me@db\r\n"
+            );
+            assert_eq!(std::fs::read(bak(&path)).unwrap(), utf16);
+            let (_dir, path) = scratch("bom", "\u{feff}ssh-host = a=me@a\n".as_bytes());
+            upsert_ssh_host(&path, "b", "me@b", &HostExpect::Absent).unwrap();
+            assert_eq!(
+                read(&path),
+                "\u{feff}ssh-host = a=me@a\nssh-host = b=me@b\n"
+            );
+        }
+
+        /// The first line with the name is rewritten where it stands and later
+        /// ones with the same name, in any ASCII case, are dropped.
+        #[test]
+        fn a_replace_rewrites_in_place_and_drops_later_same_name_lines() {
+            let (_dir, path) = scratch(
+                "replace",
+                b"ssh-host = db=me@old\n# keep\nssh-host = web=me@web\nssh-host = DB=me@older\n",
+            );
+            upsert_ssh_host(&path, "db", "me@new", &HostExpect::Target("me@old".into())).unwrap();
+            assert_eq!(
+                read(&path),
+                "ssh-host = db=me@new\n# keep\nssh-host = web=me@web\n"
+            );
+            assert_eq!(hosts(&path), [pair("db", "me@new"), pair("web", "me@web")]);
+        }
+
+        /// The precondition is read from the file under the lock. A hand edit
+        /// the in-memory list has not seen is never overwritten.
+        #[test]
+        fn a_stale_expectation_is_refused_and_leaves_the_file_byte_identical() {
+            let original = b"font-size = 13\nssh-host = db=me@hand-added\n";
+            for (expect, why) in [
+                (
+                    HostExpect::Absent,
+                    "a hand-added host since the last reload",
+                ),
+                (HostExpect::Target("me@old".into()), "a different target"),
+            ] {
+                let (_dir, path) = scratch("stale", original);
+                let error = upsert_ssh_host(&path, "db", "me@db", &expect).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::WouldBlock, "{why}");
+                assert_eq!(std::fs::read(&path).unwrap(), original, "{why}");
+                assert!(!bak(&path).exists(), "{why}: nothing was written");
+            }
+            // Expecting a target for a host the file no longer has.
+            let (_dir, path) = scratch("gone", b"font-size = 13\n");
+            let error = upsert_ssh_host(&path, "db", "me@db", &HostExpect::Target("me@old".into()))
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WouldBlock);
+            assert_eq!(read(&path), "font-size = 13\n");
+        }
+
+        #[test]
+        fn invalid_names_and_targets_are_refused_before_the_file_is_touched() {
+            let original = b"ssh-host = box=me@box\n";
+            for (name, target) in [
+                ("a=b", "me@h"),
+                ("two\nlines", "me@h"),
+                ("", "me@h"),
+                (" padded", "me@h"),
+                ("ok", "-oProxyCommand=x"),
+                ("ok", "me@h -p 22"),
+                ("ok", "two\nlines"),
+                ("ok", ""),
+                ("\"quoted", "me@h\""),
+            ] {
+                let (_dir, path) = scratch("invalid", original);
+                let error = upsert_ssh_host(&path, name, target, &HostExpect::Absent).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidInput, "{name:?}={target:?}");
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+                assert!(!bak(&path).exists());
+                let message = error.to_string();
+                assert!(
+                    !message.contains("me@h") && !message.contains(path.to_str().unwrap()),
+                    "{message}"
+                );
+            }
+        }
+
+        /// A Terminator file: the line goes where Kettle reads it, before a
+        /// section Kettle ignores, and a host inside that section is left alone.
+        #[test]
+        fn terminator_sections_are_respected() {
+            let original = "[global_config]\n  font-size = 13\n[layouts]\n  [[default]]\n    ssh-host = db=me@ignored\n";
+            let (_dir, path) = scratch("terminator", original.as_bytes());
+            upsert_ssh_host(&path, "db", "me@db", &HostExpect::Absent).unwrap();
+            assert_eq!(
+                read(&path),
+                "[global_config]\n  font-size = 13\n\nssh-host = db=me@db\n[layouts]\n  [[default]]\n    ssh-host = db=me@ignored\n"
+            );
+            assert_eq!(hosts(&path), [pair("db", "me@db")]);
+            // The applied line goes; the ignored one stays.
+            remove_ssh_host(&path, "db", "me@db").unwrap();
+            assert!(read(&path).contains("ssh-host = db=me@ignored"));
+            assert!(hosts(&path).is_empty());
+        }
+
+        /// A file that already has malformed values can still take a Save, and
+        /// keeps them: the writer only refuses to add one.
+        #[test]
+        fn existing_malformed_lines_are_kept_and_not_counted_against_a_save() {
+            let original = "ssh-host = bad=-oProxyCommand=x\nfont-size = huge\n";
+            let before = crate::Config::detect_malformed_values(original).len();
+            assert!(before >= 2);
+            let (_dir, path) = scratch("malformed", original.as_bytes());
+            upsert_ssh_host(&path, "bad", "me@good", &HostExpect::Absent).unwrap();
+            let after = read(&path);
+            assert!(after.starts_with(original), "{after}");
+            assert_eq!(crate::Config::detect_malformed_values(&after).len(), before);
+            assert_eq!(hosts(&path), [pair("bad", "me@good")]);
+        }
+
+        #[test]
+        fn remove_drops_only_the_exact_host_and_refuses_a_changed_one() {
+            let original = "ssh-host = db=me@db\r\nssh-host = web=me@web\r\nssh-host = DB=me@db\r\nssh-host = db=me@other\r\n";
+            let (_dir, path) = scratch("remove", original.as_bytes());
+            remove_ssh_host(&path, "db", "me@db").unwrap();
+            assert_eq!(
+                read(&path),
+                "ssh-host = web=me@web\r\nssh-host = db=me@other\r\n"
+            );
+            assert_eq!(read(&bak(&path)), original);
+            for (name, target) in [("db", "me@db"), ("web", "me@changed"), ("nobody", "me@web")] {
+                let before = std::fs::read(&path).unwrap();
+                let error = remove_ssh_host(&path, name, target).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::NotFound, "{name}={target}");
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert!(!error.to_string().contains(name));
+            }
         }
     }
 }
