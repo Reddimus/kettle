@@ -44,6 +44,8 @@ struct Provider {
     files: Vec<PathBuf>,
     pixels: Option<Vec<u8>>,
     text_error: Option<fn() -> arboard::Error>,
+    files_error: Option<fn() -> arboard::Error>,
+    image_error: Option<fn() -> arboard::Error>,
     /// The formats a paste asked for, in order.
     asked: Vec<&'static str>,
 }
@@ -285,11 +287,17 @@ impl SelectionFallback for Provider {
 
     fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
         self.asked.push("files");
+        if let Some(error) = self.files_error {
+            return Err(error());
+        }
         Ok(self.files.clone())
     }
 
     fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
         self.asked.push("image");
+        if let Some(error) = self.image_error {
+            return Err(error());
+        }
         let bytes = self
             .pixels
             .clone()
@@ -538,6 +546,77 @@ fn paste_files_off_pastes_neither_copied_files_nor_their_text_or_image() {
         outcome(image.paste_content(off, 100)),
         "pixels [1, 2, 3, 255]"
     );
+}
+
+#[test]
+fn an_image_that_is_there_and_cannot_be_read_is_said_not_passed_over() {
+    let unreadable = |error: fn() -> arboard::Error, want: PasteWant| {
+        let mut clipboard = holding("", false, &[]);
+        clipboard.arboard.as_mut().unwrap().image_error = Some(error);
+        let content = outcome(clipboard.paste_content(want, 100));
+        (content, asked(&clipboard).to_vec())
+    };
+    let read = ["files", "text", "image"];
+    // X11: a PNG over the 64 MiB read cap or the decode limits, and one
+    // that does not decode. macOS and Windows: a bitmap that does not decode.
+    assert_eq!(
+        unreadable(|| arboard::Error::LimitExceeded, ALL),
+        ("refused Image".into(), read.to_vec())
+    );
+    assert_eq!(
+        unreadable(|| arboard::Error::ConversionFailure, ALL),
+        ("refused Image".into(), read.to_vec())
+    );
+    // An owner that offers an image and never sends it.
+    assert_eq!(
+        unreadable(|| arboard::Error::Timeout, ALL),
+        ("no text: Timeout".into(), read.to_vec())
+    );
+    // No image on the clipboard is no news: nothing is pasted, quietly.
+    assert_eq!(
+        unreadable(|| arboard::Error::ContentNotAvailable, ALL).0,
+        "text \"\""
+    );
+    // Neither is an owner that answers the request with another type.
+    assert_eq!(
+        unreadable(
+            || arboard::Error::Unknown {
+                description: "incorrect type received from clipboard".into()
+            },
+            ALL
+        )
+        .0,
+        "text \"\""
+    );
+    // With `paste-images = off` the image is not asked for, so nothing is said.
+    let no_images = PasteWant {
+        files: true,
+        images: false,
+    };
+    assert_eq!(
+        unreadable(|| arboard::Error::LimitExceeded, no_images),
+        ("text \"\"".into(), vec!["files", "text"])
+    );
+    // Text still wins without the image being asked for at all.
+    let mut both = holding("the text", false, &[]);
+    both.arboard.as_mut().unwrap().image_error = Some(|| arboard::Error::LimitExceeded);
+    assert_eq!(outcome(both.paste_content(ALL, 100)), "text \"the text\"");
+    assert_eq!(asked(&both), ["files", "text"]);
+
+    // A file-list read that fails does not show a list exists (xclip answers
+    // every X11 request with its text), so the text is still pasted.
+    for error in [
+        (|| arboard::Error::Timeout) as fn() -> arboard::Error,
+        || arboard::Error::LimitExceeded,
+        || arboard::Error::ContentNotAvailable,
+    ] {
+        let mut text = holding("a megabyte of text", false, &[]);
+        text.arboard.as_mut().unwrap().files_error = Some(error);
+        assert_eq!(
+            outcome(text.paste_content(ALL, 100)),
+            "text \"a megabyte of text\""
+        );
+    }
 }
 
 /// A native provider that negotiates: it holds files or a PNG.

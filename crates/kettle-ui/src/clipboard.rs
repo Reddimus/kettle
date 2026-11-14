@@ -52,7 +52,6 @@ pub(crate) enum PasteContent {
     /// it, and nothing is said.
     FilesOff,
     /// Nothing is pasted and the user is told why.
-    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     Refused(PasteRefusal),
 }
 
@@ -70,7 +69,6 @@ pub(crate) enum PasteRefusal {
     #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     Files,
     /// An image that could not be read.
-    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     Image,
 }
 
@@ -188,7 +186,11 @@ fn fallback_paste(
     text_max: usize,
 ) -> PasteContent {
     // The list is read with `paste-files` off as well: copied files must
-    // then paste nothing, rather than the text copy of their paths.
+    // then paste nothing, rather than the text copy of their paths. A list
+    // read that fails is treated as no list. On X11 a failure does not show
+    // that a list exists: xclip answers every request with its own type, an
+    // owner may leave a request it cannot serve unanswered, and both still
+    // have text to paste.
     if let Ok(paths) = clipboard.files()
         && !paths.is_empty()
     {
@@ -207,10 +209,21 @@ fn fallback_paste(
         }
         Err(_) => {}
     }
-    if want.images
-        && let Ok(image) = clipboard.image()
-    {
-        return PasteContent::Image(PasteImage::Rgba(image));
+    if want.images {
+        match clipboard.image() {
+            Ok(image) => return PasteContent::Image(PasteImage::Rgba(image)),
+            // An image is there and could not be had: over the read cap or
+            // the decode limits, undecodable, or never sent. That is said,
+            // as the Wayland route says it. Any other error is a clipboard
+            // with no image, which pastes nothing quietly.
+            Err(arboard::Error::LimitExceeded | arboard::Error::ConversionFailure) => {
+                return PasteContent::Refused(PasteRefusal::Image);
+            }
+            Err(arboard::Error::Timeout) => {
+                return PasteContent::Text(Err(arboard::Error::Timeout));
+            }
+            Err(_) => {}
+        }
     }
     PasteContent::Text(text)
 }
