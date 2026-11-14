@@ -3790,6 +3790,9 @@ pub(super) enum CtlStart {
     NotReady,
     Ready,
     Attempted,
+    /// The app is quitting: the server was withdrawn, or never started, and
+    /// never starts now.
+    Closed,
 }
 
 pub(super) fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {

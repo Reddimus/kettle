@@ -769,6 +769,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   one written by an earlier release goes once the entry it names is gone or
   belongs to a process that is gone. A running server's pointer stays.
 
+- On macOS, quitting Kettle with ⌘Q, Quit in the app or Dock menu, or by
+  logging out no longer leaves its control server's files behind. These
+  quits end in AppKit's `exit()`, which ran none of the server's shutdown,
+  so each left `<pid>.json` and `ctl-<pid>.sock` in the registry, and a
+  `<pid>.alias.json` pointer for a Kettle whose registry is elsewhere, until
+  a later Kettle's cleanup found them. Quitting, on every platform, now
+  removes them first, before Kettle waits for the session write, so a client
+  no longer finds a Kettle that is quitting. A Kettle stopped by a signal, or
+  ended by Windows at logoff or shutdown, still leaves them to that cleanup.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the

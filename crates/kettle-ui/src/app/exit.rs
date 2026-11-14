@@ -7,6 +7,8 @@
 //! after `run_app` runs and no destructor does either. Everything that must
 //! happen before the process goes therefore happens from `exiting`, and again
 //! after `run_app` for the paths that never reach it, guarded so it runs once.
+//! That includes withdrawing the control server, whose own drop would never
+//! run on the first path.
 
 use super::*;
 
@@ -22,6 +24,8 @@ pub(super) struct ExitParts<'a> {
     pub(super) document_copies: &'a crate::media::PrivateCopies,
     pub(super) video_copies: &'a crate::media::PrivateCopies,
     pub(super) session_writer: &'a mut crate::session::SessionWriter,
+    /// The control server, withdrawn and taken first.
+    pub(super) ctl: &'a mut Option<crate::ctl_server::CtlServer>,
 }
 
 /// How long a quit waits for the session write handed over just before it.
@@ -35,7 +39,10 @@ pub(super) const EXIT_NOTIFICATION_WAIT: std::time::Duration =
 /// Release what must not outlive the process, the first time only, and say
 /// whether this call did it.
 ///
-/// Each wait has its own bound, so however stalled the disk is, a quit
+/// The control server goes first: its registry entry, socket and alias are
+/// unlinked before anything waits, so no client finds a Kettle that is
+/// quitting, and none are left behind by the `exit()` that follows a
+/// `terminate:`. Each wait has its own bound, so however stalled the disk is, a quit
 /// spends at most about 2.05 s waiting here: [`EXIT_RECORDING_WAIT`] for the
 /// recorder's tail, `session_wait` ([`EXIT_SESSION_WAIT`] from the App) for
 /// the session write, and [`EXIT_NOTIFICATION_WAIT`] for notifications,
@@ -50,6 +57,9 @@ pub(super) fn run_exit_teardown(
 ) -> bool {
     if std::mem::replace(parts.done, true) {
         return false;
+    }
+    if let Some(mut ctl) = parts.ctl.take() {
+        ctl.shutdown();
     }
     // `exit()` follows a quit and takes the recorder's writer thread with
     // it, so wait a little for the tail instead of only handing it over as
@@ -161,8 +171,11 @@ impl App {
     }
 
     /// The exit teardown, once: from `exiting` or after `run_app` returns,
-    /// whichever comes first. See [`run_exit_teardown`].
+    /// whichever comes first. See [`run_exit_teardown`]. The control server
+    /// does not start after this, even if the quit came before the first
+    /// pane that would have started it.
     pub(super) fn finish_exit(&mut self) {
+        self.ctl_start = CtlStart::Closed;
         run_exit_teardown(
             ExitParts {
                 done: &mut self.exit_teardown_done,
@@ -173,6 +186,7 @@ impl App {
                 document_copies: &self.document_copies,
                 video_copies: &self.video_copies,
                 session_writer: &mut self.session_writer,
+                ctl: &mut self.ctl,
             },
             EXIT_SESSION_WAIT,
             || crate::notifications::flush_desktop_notifications(EXIT_NOTIFICATION_WAIT),

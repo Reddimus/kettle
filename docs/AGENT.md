@@ -736,11 +736,15 @@ server also leaves a `<pid>.alias.json` pointer where the OS puts the registry
 for this user (`/run/user/<uid>` or the account's home on Unix, the Local
 AppData known folder on Windows), and clients read that location too, so one
 started with a stripped environment still finds its Kettle. The pointer only
-names the real entry, which is read and checked in its own registry. A server
-removes its pointer when it shuts down, but one that crashed, was killed, or
-quit with ⌘Q on macOS (which runs no shutdown code) leaves it behind, so each
-starting server also removes, on a background thread and under the pointers'
-lock, up to 256 pointers per location whose server is gone. A pointer records
+names the real entry, which is read and checked in its own registry. A
+quitting Kettle removes its entry, socket and pointer before its quit waits
+on anything, so no client finds it while it saves. That holds for closing its
+last window, for Quit, and on macOS for ⌘Q, the Dock's Quit and logging out,
+which end in AppKit's `exit()` and run no destructor. One that crashed or was
+killed, including by `SIGTERM`, which the GUI does not handle, or one Windows
+ends at logoff or shutdown (winit passes it no notice) leaves them behind, so
+each starting server also removes, on a background thread and under the
+pointers' lock, up to 256 pointers per location whose server is gone. A pointer records
 its server's start time: it goes when that pid is not running or now belongs
 to a process that started at another time, and it stays while that process
 runs, wherever it points. A pointer from an earlier release has no start time

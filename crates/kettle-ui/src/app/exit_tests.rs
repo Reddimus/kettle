@@ -21,6 +21,9 @@ struct ExitFixture {
     writer: crate::session::SessionWriter,
     files: Vec<std::path::PathBuf>,
     session: std::path::PathBuf,
+    ctl: Option<crate::ctl_server::CtlServer>,
+    /// What a client finds `ctl` by: its entry, its alias, its socket.
+    ctl_files: Vec<std::path::PathBuf>,
 }
 
 impl ExitFixture {
@@ -39,6 +42,7 @@ impl ExitFixture {
             crate::session::save_to_path(&snapshot, &destination).unwrap();
         })
         .unwrap();
+        let (ctl, ctl_files) = crate::ctl_server::start_private_for_tests(&root.join(format!("{tag}-ctl")));
         Self {
             pasted,
             viewer: std::sync::Mutex::new(viewer),
@@ -48,6 +52,8 @@ impl ExitFixture {
             writer,
             files: vec![screenshot, viewed, document, video],
             session,
+            ctl: Some(ctl),
+            ctl_files,
         }
     }
 
@@ -61,15 +67,17 @@ impl ExitFixture {
             document_copies: &self.documents,
             video_copies: &self.videos,
             session_writer: &mut self.writer,
+            ctl: &mut self.ctl,
         }
     }
 }
 
 /// Quitting through AppKit's `terminate:` ends in `exit()`, so the
-/// teardown is all there is: it deletes the pasted screenshots and the
-/// copies handed to the image viewer, the document viewer and the video
-/// player, all private screen or file content, and returns only once the
-/// session write handed to the writer is on disk.
+/// teardown is all there is: it withdraws the control server's registry
+/// entry, alias and socket, deletes the pasted screenshots and the copies
+/// handed to the image viewer, the document viewer and the video player,
+/// all private screen or file content, and returns only once the session
+/// write handed to the writer is on disk.
 #[test]
 fn the_exit_teardown_deletes_the_private_copies_and_waits_for_the_session_write() {
     let root = kettle_test_support::private_tempdir("kettle-exit-teardown-");
@@ -103,6 +111,11 @@ fn the_exit_teardown_deletes_the_private_copies_and_waits_for_the_session_write(
     );
     assert_eq!(flushed, 1);
     assert!(done);
+    // Checked while the fixture lives: nothing here may wait for a drop.
+    assert!(fixture.ctl.is_none(), "the control server outlived the exit");
+    for file in &fixture.ctl_files {
+        assert!(!file.exists(), "{} outlived the exit", file.display());
+    }
 }
 
 /// `exiting` runs the teardown and `run_app` returning runs it again on the
@@ -124,9 +137,10 @@ fn the_exit_teardown_runs_once_when_both_exit_paths_call_it() {
         flushed += 1
     }));
     assert_eq!(flushed, 1, "notifications were flushed twice");
-    for file in &second.files {
+    for file in second.files.iter().chain(&second.ctl_files) {
         assert!(file.exists(), "the second teardown deleted {}", file.display());
     }
+    assert!(second.ctl.is_some(), "the second teardown took its server");
     // The second call must not have finished its writer either: a save
     // submitted now is still written.
     second.writer.submit(
@@ -217,6 +231,14 @@ fn the_exiting_handler_saves_and_runs_the_exit_teardown() {
         .unwrap();
     assert!(finish.contains(call.as_str()));
     assert!(finish.contains("done: &mut self.exit_teardown_done,"));
+    assert!(
+        finish.contains("ctl: &mut self.ctl,"),
+        "the teardown must withdraw the control server"
+    );
+    assert!(
+        finish.contains("self.ctl_start = CtlStart::Closed;"),
+        "a quit before the first pane must keep the server from starting after it"
+    );
     assert_eq!(
         src.matches(call.as_str()).count(),
         2,
