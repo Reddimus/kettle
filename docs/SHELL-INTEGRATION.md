@@ -94,13 +94,16 @@ output and the menu offers it after **Select All**; the command palette's
 to a chord, takes the newest command. No platform binds it by default, so
 programs keep their chords: bind one with
 `keybind = ctrl+alt+o=select_command_output`. When the first output row is
-above the view, the view scrolls to put it at the top.
+off screen, above or below the view, the view scrolls to put it at the top.
 
 There is nothing to select for a command without C, one that printed nothing,
-one whose rows a scroll region split, or on the alternate screen. The output
-rows are kept with the command's mark, within the same 2048 retained commands,
-and leave scrollback with its prompt row; column reflow clears them with the
-marks.
+one whose rows a scroll region split, before or after D, or on the alternate
+screen. The output rows are kept with the command's mark, within the same 2048
+retained commands, and leave scrollback with its prompt row; column reflow and
+a full reset (RIS) clear them with the marks. If scrollback has already dropped
+some of the rows by the time they are selected, the rows that remain are
+selected: they are still that command's output, in order, and the lookup cuts
+every span to the retained rows the same way.
 
 ## Enabling it manually in your shell
 
