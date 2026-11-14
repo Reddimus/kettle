@@ -679,6 +679,9 @@ pub(super) struct SessionSweep {
     last: Option<std::time::Instant>,
     touched: bool,
     wake: Option<std::time::Instant>,
+    /// The latest time `take_due` was asked about since the last deadline:
+    /// the instant this turn's sweep decision was made.
+    checked: Option<std::time::Instant>,
 }
 
 impl SessionSweep {
@@ -691,6 +694,7 @@ impl SessionSweep {
     /// Whether this window's turn sweeps, per [`session_sweep_due`]. A sweep
     /// starts a new interval and has seen everything so far.
     pub(super) fn take_due(&mut self, now: std::time::Instant, window_has_tabs: bool) -> bool {
+        self.checked = Some(self.checked.map_or(now, |checked| checked.max(now)));
         if !session_sweep_due(self.last, now, window_has_tabs) {
             return false;
         }
@@ -705,15 +709,22 @@ impl SessionSweep {
     /// `pending` is a save the sweep owes but put off; it asks for the wake as
     /// a change does. `eligible` (see [`autosave_eligible`]) is asked at most
     /// once per interval, and a sweep that could not save then asks for
-    /// nothing. A wake whose time has come without a sweep means no window had
-    /// anything to sweep, so it is dropped rather than left in the past, where
-    /// it would spin the loop.
+    /// nothing. A wake whose time had come when the sweep was checked, without
+    /// a sweep, means no window had anything to sweep, so it is dropped rather
+    /// than left in the past, where it would spin the loop.
+    ///
+    /// All of that is judged at the instant this turn's sweep was checked, not
+    /// at `now`, which is only used when no window was. The clock can pass
+    /// the wake between the two: the sweep declined just before its time, and
+    /// judging the wake just after would drop the change it never saw. Judged
+    /// at the check, the wake stays, already due, and the next turn sweeps.
     pub(super) fn deadline(
         &mut self,
         now: std::time::Instant,
         pending: bool,
         eligible: impl FnOnce() -> bool,
     ) -> Option<std::time::Instant> {
+        let now = self.checked.take().unwrap_or(now);
         if self.wake.is_some_and(|wake| wake <= now) {
             self.wake = None;
             self.touched = false;

@@ -1165,7 +1165,9 @@ impl ApplicationHandler<UserEvent> for App {
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
         // Once per app, after every window's turn: a second window must not
-        // re-arm the wake the first one's sweep just consumed.
+        // re-arm the wake the first one's sweep just consumed. The wake is
+        // judged at the instant the sweep was checked; this clock is only the
+        // fallback for a turn in which no window checked it.
         let mut sweep = std::mem::take(&mut self.session_sweep);
         let pending = self.content_throttle.borrow().pending;
         let session_wake = sweep.deadline(std::time::Instant::now(), pending, || {

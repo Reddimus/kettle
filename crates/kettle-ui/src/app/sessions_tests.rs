@@ -1320,3 +1320,56 @@ fn a_same_config_secondary_leaves_it_alone() {
     drop(first);
     assert!(!second.owns(false), "a secondary never takes over");
 }
+
+/// The sweep's check and the wake are judged at one instant. The clock can
+/// pass the end of the interval between them: the sweep declines a moment
+/// before its time, and the deadline asked a moment after must still keep the
+/// wake, or the last change is never written.
+#[test]
+fn a_wake_is_kept_when_the_clock_passes_it_between_the_sweep_and_the_deadline() {
+    use super::sessions::SessionSweep;
+    let t0 = std::time::Instant::now();
+    let interval = super::SESSION_SWEEP;
+    let ms = std::time::Duration::from_millis;
+    let end = t0 + interval;
+
+    // A change, with the sweep checked just before the interval ends and
+    // the deadline asked just after.
+    let mut sweep = SessionSweep::default();
+    assert!(sweep.take_due(t0, true));
+    sweep.touch();
+    assert!(!sweep.take_due(end - ms(1), true));
+    assert_eq!(
+        sweep.deadline(end + ms(1), false, || true),
+        Some(end),
+        "the change was dropped unswept"
+    );
+    assert!(sweep.take_due(end + ms(1), true), "the next turn sweeps it");
+    assert_eq!(sweep.deadline(end + ms(2), false, || true), None);
+
+    // The wake already armed, and the timer firing a little early.
+    let mut sweep = SessionSweep::default();
+    assert!(sweep.take_due(t0, true));
+    sweep.touch();
+    assert!(!sweep.take_due(t0 + interval / 2, true));
+    assert_eq!(sweep.deadline(t0 + interval / 2, false, || true), Some(end));
+    assert!(!sweep.take_due(end - ms(1), true));
+    assert_eq!(sweep.deadline(end + ms(1), false, || true), Some(end));
+    assert!(sweep.take_due(end + ms(1), true));
+
+    // A content write the throttle put off is kept the same way.
+    let mut sweep = SessionSweep::default();
+    assert!(sweep.take_due(t0, true));
+    assert!(!sweep.take_due(end - ms(1), true));
+    assert_eq!(sweep.deadline(end + ms(1), true, || true), Some(end));
+
+    // A wake the sweep was checked at, with no window to sweep, still goes:
+    // it must not spin the loop.
+    let mut sweep = SessionSweep::default();
+    assert!(sweep.take_due(t0, true));
+    sweep.touch();
+    assert!(!sweep.take_due(t0 + interval / 2, true));
+    assert_eq!(sweep.deadline(t0 + interval / 2, false, || true), Some(end));
+    assert!(!sweep.take_due(end + ms(1), false));
+    assert_eq!(sweep.deadline(end + ms(2), false, || true), None);
+}
