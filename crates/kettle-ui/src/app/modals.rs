@@ -520,7 +520,7 @@ impl App {
             let armed = self.confirmation_layout(ws).and_then(|layout| {
                 let index =
                     confirm_dialog_button_hit(&layout, ws.cursor.x as f32, ws.cursor.y as f32)?;
-                Some((index, layout.buttons[index]))
+                Some((index, layout.stop_rect(index)?))
             });
             if let Some(dialog) = ws.confirm_dialog.as_mut() {
                 dialog.armed_press = armed;
@@ -564,6 +564,17 @@ impl App {
         let Some(dialog) = ws.confirm_dialog.as_ref() else {
             return;
         };
+        if dialog.link_stop() == Some(index) {
+            // The link answers the question with "not now": nothing is
+            // pasted, and Settings opens on the row that decides when Kettle
+            // asks. `open_settings` closes this dialog like any other modal.
+            self.open_settings(ws);
+            self.focus_settings_key(ws, "paste-protection");
+            ws.wheel.reset();
+            ws.lane_wheel.reset();
+            ws.accessibility_pending = true;
+            return;
+        }
         let Some(button) = dialog.buttons.get(index) else {
             return;
         };
@@ -1138,6 +1149,7 @@ impl App {
                 scroll: 0,
                 armed_press: None,
                 space_pressed: None,
+                paste: None,
             },
         );
         if let Some(w) = &ws.window {
@@ -1291,12 +1303,24 @@ impl App {
             }
             return;
         }
-        let page = self.confirmation_layout(ws).map_or(1, |layout| {
+        // An access key answers before anything else reads the letter. A
+        // bare letter never does: a paste question opens right after a
+        // keystroke, and a key typed ahead must not be able to choose.
+        if let Some(index) = ws.confirm_dialog.as_ref().and_then(|dialog| {
+            confirm_access_key_target(dialog, key, ws.mods, cfg!(target_os = "macos"))
+        }) {
+            self.resolve_confirm_button(ws, index);
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        let layout = self.confirmation_layout(ws);
+        let page = layout.as_ref().map_or(1, |layout| {
             (layout.body_rect.3 / layout.body_line).floor().max(1.0) as isize
         });
         let scroll = match key {
-            Key::Named(NamedKey::ArrowUp) => Some(-1),
-            Key::Named(NamedKey::ArrowDown) => Some(1),
             Key::Named(NamedKey::PageUp) => Some(-page),
             Key::Named(NamedKey::PageDown) => Some(page),
             Key::Named(NamedKey::Home) => Some(isize::MIN),
@@ -1315,8 +1339,10 @@ impl App {
             } else {
                 ConfirmKey::Tab
             }),
-            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(ConfirmKey::Left),
-            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(ConfirmKey::Right),
+            Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+            Key::Named(NamedKey::ArrowUp) => Some(ConfirmKey::Up),
+            Key::Named(NamedKey::ArrowDown) => Some(ConfirmKey::Down),
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && !ws.mods.control_key()
@@ -1336,7 +1362,12 @@ impl App {
         if let Some(key) = key
             && let Some(state) = ws.confirm_dialog.as_ref()
         {
-            let result = confirm_dialog_keypress(state.focus_idx, state.buttons.len(), key);
+            let stops = ConfirmStops {
+                buttons: state.buttons.len(),
+                link: state.link_stop().is_some(),
+                stacked: layout.as_ref().is_some_and(|layout| layout.stacked),
+            };
+            let result = confirm_stop_keypress(state.focus_idx, stops, key);
             match result {
                 ConfirmKeyResult::Move(index) => {
                     if let Some(dialog) = ws.confirm_dialog.as_mut() {
@@ -1346,6 +1377,7 @@ impl App {
                     }
                     self.confirm_scroll(ws, 0, true);
                 }
+                ConfirmKeyResult::Scroll(delta) => self.confirm_scroll(ws, delta, false),
                 ConfirmKeyResult::Activate(index) => self.resolve_confirm_button(ws, index),
                 ConfirmKeyResult::Confirm => {
                     let index = state
@@ -1946,6 +1978,7 @@ impl App {
                                 scroll: 0,
                                 armed_press: None,
                                 space_pressed: None,
+                                paste: None,
                                 on_confirm: ConfirmAction::RebindKeybind {
                                     trig,
                                     act,
@@ -2761,6 +2794,8 @@ pub enum ConfirmKey {
     ShiftTab,
     Left,
     Right,
+    Up,
+    Down,
     /// `y` (with `vim-menu-nav`): answer the dialog's QUESTION with yes,
     /// regardless of which button is focused.
     Yes,
@@ -2775,6 +2810,8 @@ pub enum ConfirmKeyResult {
     Activate(usize),
     /// Update `focus_idx` to the new value + redraw.
     Move(usize),
+    /// Scroll the body by this many lines.
+    Scroll(isize),
     /// Dispatch `on_confirm` + close the modal.
     Confirm,
     /// Close the modal without dispatching.
@@ -3202,50 +3239,155 @@ pub(super) fn read_etc_shells() -> String {
     text
 }
 
+/// The focus stops of a confirmation and how its buttons are laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfirmStops {
+    pub buttons: usize,
+    /// A link sits above the buttons. Its stop is `buttons`, and it comes
+    /// first in focus order, as it does on screen.
+    pub link: bool,
+    /// The buttons are stacked in one column instead of sharing a row.
+    pub stacked: bool,
+}
+
 /// Pure helper that maps a (current_focus, num_buttons,
 /// key) tuple to the next action for the confirm-dialog state
-/// machine, wired to the App's winit key handler.
+/// machine: a dialog of buttons in one row and nothing else, which is what
+/// the tests of the plain state machine drive. The key handler calls
+/// [`confirm_stop_keypress`] with the dialog's real arrangement.
+#[cfg(test)]
 pub(super) fn confirm_dialog_keypress(
     current_focus: usize,
     num_buttons: usize,
     key: ConfirmKey,
 ) -> ConfirmKeyResult {
+    confirm_stop_keypress(
+        current_focus,
+        ConfirmStops {
+            buttons: num_buttons,
+            link: false,
+            stacked: false,
+        },
+        key,
+    )
+}
+
+/// [`confirm_dialog_keypress`] for any arrangement of stops.
+///
+/// Focus order is what is on screen: the link, then the buttons. Tab and
+/// Shift+Tab walk it and wrap. Left and Right walk it and stop at the ends.
+/// Up and Down do the same wherever something sits above or below: always in
+/// a stack of buttons, and between the link and the row under it. Only a
+/// plain row of buttons has nothing vertical to reach, so there Up and Down
+/// scroll the body, as PageUp, PageDown, Home and End do in every dialog.
+pub(super) fn confirm_stop_keypress(
+    current_focus: usize,
+    stops: ConfirmStops,
+    key: ConfirmKey,
+) -> ConfirmKeyResult {
+    let num_buttons = stops.buttons;
     if num_buttons == 0 {
         return ConfirmKeyResult::Cancel;
     }
+    let count = num_buttons + usize::from(stops.link);
+    // Position in focus order, and the stop at a position.
+    let lead = usize::from(stops.link);
+    let position = if stops.link && current_focus == num_buttons {
+        0
+    } else {
+        current_focus.min(num_buttons - 1) + lead
+    };
+    let stop_at = |position: usize| {
+        if stops.link && position == 0 {
+            num_buttons
+        } else {
+            position - lead
+        }
+    };
+    let previous = || {
+        if position == 0 {
+            ConfirmKeyResult::Ignore
+        } else {
+            ConfirmKeyResult::Move(stop_at(position - 1))
+        }
+    };
+    let next = || {
+        if position + 1 >= count {
+            ConfirmKeyResult::Ignore
+        } else {
+            ConfirmKeyResult::Move(stop_at(position + 1))
+        }
+    };
     match key {
         ConfirmKey::Escape => ConfirmKeyResult::Cancel,
         ConfirmKey::Enter => {
-            if current_focus < num_buttons {
+            if current_focus < count {
                 ConfirmKeyResult::Activate(current_focus)
             } else {
                 ConfirmKeyResult::Cancel
             }
         }
-        ConfirmKey::Tab => ConfirmKeyResult::Move((current_focus + 1) % num_buttons),
-        ConfirmKey::ShiftTab => {
-            ConfirmKeyResult::Move((current_focus + num_buttons - 1) % num_buttons)
-        }
-        ConfirmKey::Left => {
-            if current_focus == 0 {
-                ConfirmKeyResult::Ignore
+        ConfirmKey::Tab => ConfirmKeyResult::Move(stop_at((position + 1) % count)),
+        ConfirmKey::ShiftTab => ConfirmKeyResult::Move(stop_at((position + count - 1) % count)),
+        ConfirmKey::Left => previous(),
+        ConfirmKey::Right => next(),
+        ConfirmKey::Up | ConfirmKey::Down if stops.stacked => {
+            if key == ConfirmKey::Up {
+                previous()
             } else {
-                ConfirmKeyResult::Move(current_focus - 1)
+                next()
             }
         }
-        ConfirmKey::Right => {
-            if current_focus + 1 >= num_buttons {
+        // A row under a link: Up reaches the link from any button, and Down
+        // returns to the first button, the safe one.
+        ConfirmKey::Up if stops.link => {
+            if position == 0 {
                 ConfirmKeyResult::Ignore
             } else {
-                ConfirmKeyResult::Move(current_focus + 1)
+                ConfirmKeyResult::Move(num_buttons)
             }
         }
+        ConfirmKey::Down if stops.link => {
+            if position == 0 {
+                ConfirmKeyResult::Move(0)
+            } else {
+                ConfirmKeyResult::Ignore
+            }
+        }
+        ConfirmKey::Up => ConfirmKeyResult::Scroll(-1),
+        ConfirmKey::Down => ConfirmKeyResult::Scroll(1),
         // `y`/`n` (`vim-menu-nav`) answer the dialog directly. Unlike Enter,
         // which fires the FOCUSED button, `y` is an explicit answer to the
         // question, so focus is irrelevant.
         ConfirmKey::Yes => ConfirmKeyResult::Confirm,
         ConfirmKey::No => ConfirmKeyResult::Cancel,
     }
+}
+
+/// Whether a confirmation shows and answers access keys (Alt and a letter).
+/// macOS has no such convention, so its dialogs have none.
+pub(super) fn confirm_access_keys(macos: bool) -> bool {
+    !macos
+}
+
+/// The stop an Alt+letter press activates. Only the character the keyboard
+/// layout produced is compared: a key's place on a US keyboard is never used,
+/// since on another Latin layout that place belongs to a different letter and
+/// could pick a button the user did not name. `None` unless Alt alone (Shift
+/// allowed) is held.
+pub(super) fn confirm_access_key_target(
+    dialog: &ConfirmDialogState,
+    key: &Key,
+    mods: winit::keyboard::ModifiersState,
+    macos: bool,
+) -> Option<usize> {
+    if !confirm_access_keys(macos) || !mods.alt_key() || mods.control_key() || mods.super_key() {
+        return None;
+    }
+    let Key::Character(letter) = key else {
+        return None;
+    };
+    dialog.access_key_stop(letter)
 }
 
 /// The text a confirmation button shows. Painting and hit testing both use it,
@@ -3295,27 +3437,39 @@ pub(super) fn confirm_dialog_overlay(
     dialog: &ConfirmDialogState,
     tr: &kettle_i18n::Translator,
 ) -> kettle_render::ConfirmDialogOverlay {
+    let paste = dialog.paste.as_deref();
     kettle_render::ConfirmDialogOverlay {
         heading: dialog.heading.clone(),
         body: dialog.body.clone(),
         buttons: dialog
             .buttons
             .iter()
-            .map(|button| kettle_render::ConfirmDialogButton {
-                label: confirm_button_label(button, tr).to_string(),
-                destructive: button.destructive(),
-                neutral: false,
-                access_key: None,
+            .enumerate()
+            .map(|(index, button)| {
+                let destructive = button.destructive();
+                kettle_render::ConfirmDialogButton {
+                    label: confirm_button_label(button, tr).to_string(),
+                    destructive,
+                    // A paste question marks one choice as recommended; the
+                    // others that are not destructive stay neutral.
+                    neutral: paste.is_some_and(|paste| paste.recommended != index) && !destructive,
+                    access_key: paste
+                        .and_then(|paste| paste.access_keys.get(index))
+                        .copied()
+                        .flatten(),
+                }
             })
             .collect(),
         focus_idx: dialog.focus_idx,
         hover_idx: None,
         pressed_idx: dialog.space_pressed,
         scroll: dialog.scroll,
-        detail: None,
+        detail: paste.map(|paste| paste.detail.clone()),
     }
 }
 
+/// The focus stop under the pointer: a button, or the link at
+/// `ConfirmDialogLayout::link_stop`.
 pub(super) fn confirm_dialog_button_hit(
     layout: &kettle_render::ConfirmDialogLayout,
     px: f32,
@@ -3325,6 +3479,10 @@ pub(super) fn confirm_dialog_button_hit(
         .buttons
         .iter()
         .position(|&rect| rect_contains(rect, px, py))
+        .or_else(|| {
+            let link = layout.link_stop()?;
+            rect_contains(layout.stop_rect(link)?, px, py).then_some(link)
+        })
 }
 
 pub(super) fn confirmation_space_key(key: &Key) -> bool {
@@ -3346,7 +3504,7 @@ pub(super) fn confirm_release_target(
     py: f32,
 ) -> Option<usize> {
     let (index, original_rect) = armed?;
-    (layout.buttons.get(index) == Some(&original_rect)
+    (layout.stop_rect(index) == Some(original_rect)
         && confirm_dialog_button_hit(layout, px, py) == Some(index))
     .then_some(index)
 }
@@ -3472,11 +3630,61 @@ pub struct ConfirmDialogState {
     pub heading: String,
     pub body: String,
     pub buttons: Vec<ConfirmButton>,
+    /// The focused stop: a button, or `buttons.len()` for the Settings link
+    /// of a paste question.
     pub focus_idx: usize,
     pub on_confirm: ConfirmAction,
     pub scroll: usize,
     pub armed_press: Option<(usize, (f32, f32, f32, f32))>,
     pub space_pressed: Option<usize>,
+    /// What only a paste question has: its preview, findings, policy link,
+    /// access keys and recommended choice.
+    pub paste: Option<Box<PasteQuestion>>,
+}
+
+/// The parts of a Confirm paste dialog beyond a heading, a body and buttons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteQuestion {
+    /// The preview, summary, findings and policy line as the renderer shows
+    /// them, and the question as assistive technology reads it. Private like
+    /// the pasted text: never logged or sent over ctl.
+    pub detail: kettle_render::ConfirmDialogDetail,
+    /// One access key per button, in button order; all `None` where the
+    /// platform has no access keys.
+    pub access_keys: Vec<Option<char>>,
+    /// The button `y` chooses under `vim-menu-nav`, and the only one drawn in
+    /// the accent colour: the sanitised paste when the text has controls.
+    pub recommended: usize,
+}
+
+impl ConfirmDialogState {
+    /// The focus stop of the Settings link, one past the last button.
+    pub(super) fn link_stop(&self) -> Option<usize> {
+        self.paste
+            .as_ref()
+            .filter(|paste| !paste.detail.link.is_empty())
+            .map(|_| self.buttons.len())
+    }
+
+    /// Buttons plus the link.
+    pub(super) fn stop_count(&self) -> usize {
+        self.buttons.len() + usize::from(self.link_stop().is_some())
+    }
+
+    /// The stop whose access key is `letter`, compared without case.
+    pub(super) fn access_key_stop(&self, letter: &str) -> Option<usize> {
+        let paste = self.paste.as_ref()?;
+        let same = |key: &Option<char>| {
+            key.is_some_and(|key| {
+                key.to_lowercase()
+                    .eq(letter.chars().flat_map(char::to_lowercase))
+            })
+        };
+        paste.access_keys.iter().position(same).or_else(|| {
+            self.link_stop()
+                .filter(|_| same(&paste.detail.link_access_key))
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

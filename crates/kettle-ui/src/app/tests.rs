@@ -402,13 +402,15 @@ include!("windowing_tests.rs");
 #[test]
 fn opening_settings_does_not_enumerate_gpus_on_event_loop() {
     let source = include_str!("actions.rs");
+    assert!(source.contains("Action::OpenSettings => self.open_settings(ws),"));
     let open_settings = source
-        .split("Action::OpenSettings => {")
+        .split("pub(super) fn open_settings(")
         .nth(1)
         .unwrap()
-        .split("Action::OpenLayoutPicker")
+        .split("pub(super) fn focus_settings_key(")
         .next()
         .unwrap();
+    assert!(open_settings.contains("GPU_DISCOVERY.request("));
     assert!(
         !open_settings.contains("kettle_render::detect_gpus()"),
         "opening Settings must not synchronously enumerate GPU drivers on the event loop"

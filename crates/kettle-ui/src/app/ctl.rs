@@ -1409,7 +1409,25 @@ impl App {
                 "max_scroll": geometry.max_scroll,
                 "scroll_offset": geometry.scroll_offset,
                 "whole_scroll": geometry.whole_scroll,
-                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
+                "stacked": geometry.stacked,
+                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "neutral":dialog.buttons[index].neutral, "access_key":dialog.buttons[index].access_key, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
+                // Rectangles and the link's fixed label only: the preview,
+                // the findings and the reason are the pasted text's and stay
+                // out of control output.
+                "detail": geometry.detail.as_ref().map(|detail| serde_json::json!({
+                    "preview_rect": rect_json(detail.preview_rect),
+                    "token_rects": detail.tokens.iter().map(|rect| rect_json(*rect)).collect::<Vec<_>>(),
+                    "summary_rect": rect_json(detail.summary_rect),
+                    "finding_rects": detail.finding_rects.iter().map(|rect| rect_json(*rect)).collect::<Vec<_>>(),
+                    "policy_rect": rect_json(detail.policy_rect),
+                    "link": {
+                        "rect": rect_json(detail.link_rect),
+                        "label": dialog.detail.as_ref().map(|detail| detail.link.as_str()),
+                        "wrapped": detail.link_wrapped,
+                        "focused": geometry.link_stop() == Some(dialog.focus_idx),
+                        "access_key": dialog.detail.as_ref().and_then(|detail| detail.link_access_key),
+                    },
+                })),
             })
         });
         let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {

@@ -17,6 +17,85 @@ pub(crate) fn without_controls(text: &str) -> String {
     clean
 }
 
+/// A kind of control found in pasted text, most serious first: the derived
+/// order ranks the findings list and picks the control the preview must show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Kind {
+    /// `ESC [ 201 ~`, which ends a bracketed paste.
+    EndMarker,
+    /// The same marker introduced by the C1 CSI, U+009B.
+    EndMarkerC1,
+    /// The bytes a terminal turns into a signal: 0x03, 0x1A and 0x1C.
+    Interrupt,
+    Suspend,
+    Quit,
+    /// 0x04, which a shell reads as the end of its input.
+    EndOfInput,
+    Escape,
+    /// A C1 control, U+0080 to U+009F.
+    C1(char),
+    Backspace,
+    Delete,
+    Bell,
+    /// Any other C0 control. TAB and the line breaks are never findings.
+    Control(char),
+}
+
+/// One row of the findings: how often a kind occurs, and where it first does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Finding {
+    pub kind: Kind,
+    pub count: u64,
+    /// Byte range of the first occurrence.
+    pub first: (usize, usize),
+}
+
+const END_MARKER: &str = "\x1b[201~";
+const END_MARKER_C1: &str = "\u{9b}201~";
+
+/// Every kind of control in `text`, most serious first. One linear pass; at
+/// most one entry per kind, so the result is bounded however long the text.
+pub(crate) fn findings(text: &str) -> Vec<Finding> {
+    let mut found = std::collections::BTreeMap::<Kind, Finding>::new();
+    let mut index = 0;
+    while let Some(c) = text[index..].chars().next() {
+        let rest = &text[index..];
+        let (kind, len) = if rest.starts_with(END_MARKER) {
+            (Some(Kind::EndMarker), END_MARKER.len())
+        } else if rest.starts_with(END_MARKER_C1) {
+            (Some(Kind::EndMarkerC1), END_MARKER_C1.len())
+        } else {
+            let kind = match c {
+                '\t' | '\n' | '\r' => None,
+                '\x03' => Some(Kind::Interrupt),
+                '\x1a' => Some(Kind::Suspend),
+                '\x1c' => Some(Kind::Quit),
+                '\x04' => Some(Kind::EndOfInput),
+                '\x1b' => Some(Kind::Escape),
+                '\x08' => Some(Kind::Backspace),
+                '\x7f' => Some(Kind::Delete),
+                '\x07' => Some(Kind::Bell),
+                '\0'..='\x1f' => Some(Kind::Control(c)),
+                '\u{80}'..='\u{9f}' => Some(Kind::C1(c)),
+                _ => None,
+            };
+            (kind, c.len_utf8())
+        };
+        if let Some(kind) = kind {
+            found
+                .entry(kind)
+                .or_insert(Finding {
+                    kind,
+                    count: 0,
+                    first: (index, index + len),
+                })
+                .count += 1;
+        }
+        index += len;
+    }
+    found.into_values().collect()
+}
+
 fn scan(text: &str, mut emit: impl FnMut(char)) -> Analysis {
     let mut found = Analysis {
         lines: 1,
@@ -129,6 +208,63 @@ mod tests {
             );
             assert_eq!(analyse(sequence).escapes, 1);
         }
+    }
+
+    #[test]
+    fn findings_rank_the_end_marker_first_and_count_each_kind_once() {
+        let text = "a\tb\n\x07\x03x\x1b[31m\x03\u{9b}201~\x1b[201~\x1b[201~\x7f";
+        let found = findings(text);
+        let kinds: Vec<_> = found.iter().map(|f| (f.kind, f.count)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (Kind::EndMarker, 2),
+                (Kind::EndMarkerC1, 1),
+                (Kind::Interrupt, 2),
+                (Kind::Escape, 1),
+                (Kind::Delete, 1),
+                (Kind::Bell, 1),
+            ]
+        );
+        // The first occurrence is a byte range of the text, the whole marker.
+        let (start, end) = found[0].first;
+        assert_eq!(&text[start..end], "\x1b[201~");
+        let (start, end) = found[1].first;
+        assert_eq!(&text[start..end], "\u{9b}201~");
+        assert_eq!(found[2].first, (5, 6));
+    }
+
+    #[test]
+    fn tab_and_line_breaks_are_never_findings() {
+        assert!(findings("plain\ttext\r\nnext\nlast\r").is_empty());
+        assert!(findings("").is_empty());
+        assert!(findings("café 界 \u{202e}").is_empty());
+        for c in (0..=0x9fu32).filter_map(char::from_u32) {
+            let found = findings(&c.to_string());
+            let expected = c.is_control() && !matches!(c, '\t' | '\n' | '\r');
+            assert_eq!(found.len(), usize::from(expected), "{c:?}");
+        }
+        let kinds = |text: &str| {
+            findings(text)
+                .into_iter()
+                .map(|f| f.kind)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds("\x1c\x1a\x04\x08\x01\u{85}\0"),
+            [
+                Kind::Suspend,
+                Kind::Quit,
+                Kind::EndOfInput,
+                Kind::C1('\u{85}'),
+                Kind::Backspace,
+                Kind::Control('\0'),
+                Kind::Control('\x01'),
+            ]
+        );
+        // A marker cut short is an ESC, or a C1 control, like any other.
+        assert_eq!(kinds("\x1b[201"), [Kind::Escape]);
+        assert_eq!(kinds("\u{9b}20"), [Kind::C1('\u{9b}')]);
     }
 
     #[test]

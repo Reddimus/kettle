@@ -288,6 +288,23 @@ pub(crate) enum SearchRoute {
 }
 
 impl SettingsNav {
+    /// Focus the row that edits config `key`, in its own category, with no
+    /// search in the way. An unknown key leaves the navigation where it is.
+    pub(crate) fn focus_key(&mut self, cats: &[Category], key: &str) -> bool {
+        let Some((category, field)) = cats.iter().enumerate().find_map(|(category, cat)| {
+            let field = cat.fields.iter().position(|field| field.key == key)?;
+            Some((category, field))
+        }) else {
+            return false;
+        };
+        self.query = Default::default();
+        self.search_focused = false;
+        self.capturing = false;
+        self.category = category;
+        self.field = field;
+        true
+    }
+
     pub(crate) fn apply_hit(
         &mut self,
         cats: &[Category],
