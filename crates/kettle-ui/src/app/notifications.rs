@@ -19,6 +19,14 @@ pub(crate) fn bell_flash_ramp(elapsed: std::time::Duration) -> f32 {
     let remaining = 1.0 - t.max(0.0);
     remaining * remaining
 }
+/// Whether a bell flashes the pane that rang: `bell` asks for a visual cue
+/// and motion is allowed. The flash is motion Kettle starts on its own, so
+/// `reduce-motion` holds it back; the focused-bell mark on the tab is drawn
+/// either way.
+pub(crate) fn bell_flashes(bell: kettle_config::BellMode, motion_allowed: bool) -> bool {
+    bell.visual() && motion_allowed
+}
+
 const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub(super) fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {

@@ -656,7 +656,7 @@ impl App {
             |pane, ev| self.pane_event_reply(pane, ev),
         );
         if bell {
-            if self.cfg.bell.visual() {
+            if bell_flashes(self.cfg.bell, self.motion_allowed()) {
                 // Only the pane that rang flashes; a sibling split's bell
                 // then tells you which one it was. Panes outside the current
                 // layout keep the tab dot and titlebar glyph as their cue.

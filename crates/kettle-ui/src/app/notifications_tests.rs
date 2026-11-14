@@ -91,7 +91,7 @@ fn bell_flash_ramp_is_instant_on_and_eases_out_within_the_duration() {
 fn the_bell_flash_is_stamped_per_pane_and_pruned_on_expiry() {
     let src = production_source();
     let drain = src
-        .split("if self.cfg.bell.visual() {")
+        .split("if bell_flashes(self.cfg.bell, self.motion_allowed()) {")
         .nth(1)
         .and_then(|body| body.split("if self.cfg.bell.attention()").next())
         .expect("visual bell branch in drain_events");
@@ -225,4 +225,35 @@ fn the_focused_bell_mark_is_set_by_visual_bells_and_settled_on_every_dispatch() 
     assert!(src.contains(
         "                {\n                    ws.mux.answer_bell_by_press(pressed);\n                }\n                self.note_focus_change(ws, pre);\n                if self.send_mouse(ws, bcode, true, false) {"
     ));
+}
+
+/// The flash is motion Kettle starts on its own: `reduce-motion` (or the
+/// system's Reduce Motion under `auto`) holds it back, and only the drain's
+/// flash branch asks. The focused-bell mark does not depend on it.
+#[test]
+fn the_bell_flash_honours_reduced_motion() {
+    use kettle_config::BellMode;
+    for bell in [BellMode::Visual, BellMode::Both] {
+        assert!(super::bell_flashes(bell, true), "{bell:?} with motion");
+        assert!(!super::bell_flashes(bell, false), "{bell:?} reduced");
+    }
+    for bell in [BellMode::Off, BellMode::Attention] {
+        for motion in [true, false] {
+            assert!(!super::bell_flashes(bell, motion), "{bell:?}");
+        }
+    }
+    let src = production_source();
+    let drain = src
+        .split("fn drain_events(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .and_then(|b| b.split("\n    }\n").next())
+        .expect("drain_events body");
+    let flash = drain
+        .find("if bell_flashes(self.cfg.bell, self.motion_allowed()) {")
+        .expect("the flash asks for motion");
+    let stamp = drain.find("ws.bell_flashes.insert(*id, now);").unwrap();
+    assert!(flash < stamp);
+    assert_eq!(drain.matches("ws.bell_flashes.insert(").count(), 1);
+    // The mark is set on the visual mode alone.
+    assert!(drain.contains("if self.cfg.bell.visual() {\n                ws.mux.ring_focused_bell(id);"));
 }
