@@ -2257,6 +2257,9 @@ const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
 /// The footer's Contrast button, below the group. It is the lowest footer
 /// index, so the rows below it never reach the footer's nodes.
 pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
+/// The picker's polite status line, after the SSH launcher saved or removed a
+/// host.
+pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
 /// Whether `node` is the theme picker's Contrast button.
 pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
@@ -2349,6 +2352,21 @@ fn push_picker_accessibility(
     projection.nodes.push((list_id, list));
 
     let mut dialog_children = vec![input_id, list_id];
+    // The SSH launcher's status line, which the hint lane paints, announced
+    // politely, as search announces its count.
+    if kind == MODAL_KIND_SSH
+        && let Some(status) = overlay.ssh_status.as_deref()
+    {
+        let status_id = accessibility_modal_id(kind, PICKER_STATUS_A11Y_INDEX);
+        let mut node = Node::new(Role::Status);
+        node.set_label(status);
+        node.set_live(accesskit::Live::Polite);
+        if let Some(field) = field {
+            node.set_bounds(bounds(field.rect));
+        }
+        projection.nodes.push((status_id, node));
+        dialog_children.push(status_id);
+    }
     // The theme picker's footer reads as one line of text: the painted
     // readout and status, plus what its swatch and marks show.
     if let Some(menu) = menu

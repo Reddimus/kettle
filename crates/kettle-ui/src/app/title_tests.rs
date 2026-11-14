@@ -1027,3 +1027,63 @@ fn a_zoomed_pane_says_how_many_panes_it_hides_and_how_to_restore_them() {
         "⤢ Ampliado · 2 paneles ocultos · Ctrl+Shift+X restaura  "
     );
 }
+
+/// The SSH launcher's name editor carries its target, starts from the host
+/// part, and is never swept as stale: it names no pane or tab, so a pane
+/// exiting cannot close it.
+#[test]
+fn the_ssh_host_name_editor_survives_the_stale_edit_sweep() {
+    let mut editing = super::begin_ssh_host_name_edit("me@db.example.com:2222");
+    let state = editing.as_ref().expect("a valid target opens the editor");
+    assert_eq!(state.scope, TitleEditScope::SaveSshHost);
+    assert_eq!(
+        state.target,
+        super::TitleEditTarget::SshHost("me@db.example.com:2222".into())
+    );
+    assert_eq!(state.input.text(), "db.example.com");
+    // A window whose pane has exited, as the redraw and the scheduler sweep
+    // it: a pane-title edit goes, the SSH host editor stays.
+    let (mut mux, panes) = title_test_tab_mux(1);
+    let mut pane_edit =
+        begin_title_edit(&mux, TitleEditScope::Pane, GroupBulkScope::Single, "window");
+    mux.panes.remove(&panes[0]);
+    assert!(clear_stale_title_edit(&mux, &mut pane_edit));
+    assert!(pane_edit.is_none());
+    for _ in 0..2 {
+        assert!(!clear_stale_title_edit(&mux, &mut editing));
+        assert!(!clear_stale_title_edit(&Mux::new(), &mut editing));
+    }
+    assert_eq!(
+        editing.map(|state| state.target),
+        Some(super::TitleEditTarget::SshHost("me@db.example.com:2222".into()))
+    );
+    // It opens only through the launcher, which has the target.
+    assert!(
+        begin_title_edit(
+            &Mux::new(),
+            TitleEditScope::SaveSshHost,
+            GroupBulkScope::Single,
+            ""
+        )
+        .is_none()
+    );
+    assert!(super::begin_ssh_host_name_edit("-oProxyCommand=x").is_none());
+    // Control clients see the scope by name.
+    assert!(production_source().contains("TitleEditScope::SaveSshHost => \"save_ssh_host\","));
+}
+
+#[test]
+fn the_ssh_host_name_starts_from_the_host_part_of_the_target() {
+    for (target, name) in [
+        ("box", "box"),
+        ("me@db.example.com:2222", "db.example.com"),
+        ("ssh://me@db.example.com:22/", "db.example.com"),
+        ("SSH://db", "db"),
+        ("me@[2001:db8::1]:22", "2001:db8::1"),
+        ("fe80::1", "fe80::1"),
+        ("a@b@host", "host"),
+        ("me@ho=st", ""),
+    ] {
+        assert_eq!(super::ssh_host_name_prefill(target), name, "{target}");
+    }
+}

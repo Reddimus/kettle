@@ -13,6 +13,7 @@ pub(super) fn title_edit_label(
         TitleEditScope::Pane => Text::EditTitlePane,
         TitleEditScope::Group => Text::EditTitleGroup,
         TitleEditScope::SaveLayout => Text::EditLayoutName,
+        TitleEditScope::SaveSshHost => Text::EditSshHostName,
     })
 }
 
@@ -481,6 +482,9 @@ pub enum TitleEditScope {
     /// Writes to pane.group_name. Empty input clears the group.
     Group,
     SaveLayout,
+    /// Name the typed SSH target carried by [`TitleEditTarget::SshHost`] and
+    /// save the pair to the config (the SSH launcher's Save row).
+    SaveSshHost,
 }
 
 #[derive(Debug, Clone)]
@@ -511,6 +515,9 @@ pub enum TitleEditTarget {
     Tab(Vec<u64>),
     /// One pane, used by pane-title and single-pane group edits.
     Pane(u64),
+    /// The SSH target a `SaveSshHost` edit names. It belongs to no pane or
+    /// tab, so no pane exiting makes it stale.
+    SshHost(String),
 }
 
 pub(super) fn begin_title_edit(
@@ -520,6 +527,9 @@ pub(super) fn begin_title_edit(
     window_title: &str,
 ) -> Option<TitleEditState> {
     let target = match (scope, bulk) {
+        // The target is the typed text, which only the launcher has; it opens
+        // this editor through `begin_ssh_host_name_edit`.
+        (TitleEditScope::SaveSshHost, _) => return None,
         (TitleEditScope::SaveLayout, _)
         | (TitleEditScope::Window, _)
         | (TitleEditScope::Group, GroupBulkScope::Window) => TitleEditTarget::Window,
@@ -563,20 +573,73 @@ pub(super) fn begin_title_edit(
     })
 }
 
+/// The name editor for saving `target` from the SSH launcher, prefilled with
+/// the target's host part. `None` for a target the launcher would refuse.
+pub(super) fn begin_ssh_host_name_edit(target: &str) -> Option<TitleEditState> {
+    if !kettle_config::ssh_config::is_valid_ssh_target(target) {
+        return None;
+    }
+    Some(TitleEditState {
+        scope: TitleEditScope::SaveSshHost,
+        target: TitleEditTarget::SshHost(target.to_string()),
+        input: ssh_host_name_prefill(target).as_str().into(),
+        bulk: GroupBulkScope::Single,
+    })
+}
+
+/// A name to start from for `target`: its host, without `ssh://`, a user, a
+/// port, a path or IPv6 brackets, so `me@db.example.com:2222` gives
+/// `db.example.com`. Empty when that is not a usable name.
+pub(super) fn ssh_host_name_prefill(target: &str) -> String {
+    let rest = target
+        .get(..6)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
+        .map_or(target, |_| &target[6..]);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let rest = rest.split_once('/').map_or(rest, |(host, _)| host);
+    let host = if let Some(bracketed) = rest.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map_or(bracketed, |(host, _)| host)
+    } else {
+        match rest.split_once(':') {
+            // One colon is a port; more is a bare IPv6 address.
+            Some((host, port)) if !port.contains(':') => host,
+            _ => rest,
+        }
+    };
+    if kettle_config::ssh_config::is_valid_ssh_host_name(host) {
+        host.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Whether the thing an open title edit names still exists. Matched on the
+/// scope first, with no wildcard, so a new scope cannot fall through to
+/// "stale" and have its editor closed by the next sweep.
 fn title_edit_target_is_live(mux: &Mux, state: &TitleEditState) -> bool {
-    match (state.scope, state.bulk, &state.target) {
-        (TitleEditScope::SaveLayout, _, TitleEditTarget::Window)
-        | (TitleEditScope::Window, _, TitleEditTarget::Window)
-        | (TitleEditScope::Group, GroupBulkScope::Window, TitleEditTarget::Window) => true,
-        (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes))
-        | (TitleEditScope::Group, GroupBulkScope::Tab, TitleEditTarget::Tab(panes)) => {
-            mux.tab_index_of_any_pane(panes).is_some()
+    match state.scope {
+        TitleEditScope::Window | TitleEditScope::SaveLayout => {
+            matches!(state.target, TitleEditTarget::Window)
         }
-        (TitleEditScope::Pane, _, TitleEditTarget::Pane(id))
-        | (TitleEditScope::Group, GroupBulkScope::Single, TitleEditTarget::Pane(id)) => {
-            mux.panes.contains_key(id)
-        }
-        _ => false,
+        TitleEditScope::SaveSshHost => matches!(state.target, TitleEditTarget::SshHost(_)),
+        TitleEditScope::Tab => match &state.target {
+            TitleEditTarget::Tab(panes) => mux.tab_index_of_any_pane(panes).is_some(),
+            _ => false,
+        },
+        TitleEditScope::Pane => match &state.target {
+            TitleEditTarget::Pane(id) => mux.panes.contains_key(id),
+            _ => false,
+        },
+        TitleEditScope::Group => match (state.bulk, &state.target) {
+            (GroupBulkScope::Window, TitleEditTarget::Window) => true,
+            (GroupBulkScope::Tab, TitleEditTarget::Tab(panes)) => {
+                mux.tab_index_of_any_pane(panes).is_some()
+            }
+            (GroupBulkScope::Single, TitleEditTarget::Pane(id)) => mux.panes.contains_key(id),
+            _ => false,
+        },
     }
 }
 
@@ -595,7 +658,11 @@ pub(super) fn clear_stale_title_edit(mux: &Mux, editing: &mut Option<TitleEditSt
 pub(super) fn apply_mux_title_edit(mux: &mut Mux, state: &TitleEditState) -> bool {
     let value = state.input.text();
     match (state.scope, state.bulk, &state.target) {
-        (TitleEditScope::Window | TitleEditScope::SaveLayout, _, _) => false,
+        (
+            TitleEditScope::Window | TitleEditScope::SaveLayout | TitleEditScope::SaveSshHost,
+            _,
+            _,
+        ) => false,
         (TitleEditScope::Tab, _, TitleEditTarget::Tab(panes)) => {
             let Some(idx) = mux.tab_index_of_any_pane(panes) else {
                 return false;
@@ -761,7 +828,8 @@ impl App {
                     };
                     self.sync_window_title(ws);
                 }
-                _ => {
+                TitleEditScope::SaveSshHost => self.apply_ssh_host_name(ws, state),
+                TitleEditScope::Tab | TitleEditScope::Pane | TitleEditScope::Group => {
                     apply_mux_title_edit(&mut ws.mux, &state);
                 }
             }

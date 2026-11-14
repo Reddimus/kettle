@@ -193,6 +193,7 @@ fn the_title_editor_caret_follows_the_painted_prefix() {
             (TitleEditScope::Pane, Text::EditTitlePane),
             (TitleEditScope::Group, Text::EditTitleGroup),
             (TitleEditScope::SaveLayout, Text::EditLayoutName),
+            (TitleEditScope::SaveSshHost, Text::EditSshHostName),
         ] {
             let painted = format!("  ✎ {} 界x", tr.text(text));
             assert_eq!(

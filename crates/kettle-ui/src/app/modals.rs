@@ -299,7 +299,7 @@ impl App {
                 Some(&[("Enter", T::EditHintApply), ("Esc", T::PickerHintCancel)])
             };
             hint = hints.map_or_else(
-                || ssh_picker_hint(&self.ui_text),
+                || ssh_picker_hint(ssh_status_line(ws), &self.ui_text),
                 |hints| picker_hint(&self.ui_text, hints),
             );
         }
@@ -1115,7 +1115,10 @@ impl App {
             ConfirmAction::ClosePane(_) => {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
-            ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => return false,
+            ConfirmAction::RebindKeybind { .. }
+            | ConfirmAction::Paste { .. }
+            | ConfirmAction::ReplaceSshHost { .. }
+            | ConfirmAction::RemoveSshHost { .. } => return false,
         };
         self.close_all_modals(ws);
         self.install_confirm_dialog(
@@ -1258,6 +1261,21 @@ impl App {
                 action_name,
             } => {
                 self.apply_keybind_rebind(trig, act, action_name);
+            }
+            ConfirmAction::ReplaceSshHost {
+                name,
+                old_target,
+                new_target,
+            } => {
+                self.write_ssh_host(
+                    ws,
+                    &name,
+                    &new_target,
+                    &kettle_config::ssh_config::HostExpect::Target(old_target),
+                );
+            }
+            ConfirmAction::RemoveSshHost { name, target } => {
+                self.remove_configured_ssh_host(ws, &name, &target);
             }
         }
     }
@@ -2689,10 +2707,8 @@ impl App {
                     *selected = 0;
                 }
             }
-            Key::Named(NamedKey::Enter) => {
-                // An invalid typed target returns `None` and leaves the
-                // launcher open on the row that explains it.
-                if let Some(target) = take_ssh_enter_target(ws, &self.cfg.ssh_hosts) {
+            Key::Named(NamedKey::Enter) => match take_ssh_enter(ws, &self.cfg.ssh_hosts) {
+                Some(SshEnter::Connect(target)) => {
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
                     let geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -2706,7 +2722,14 @@ impl App {
                     self.resize_all(ws);
                     self.save_session(ws);
                 }
-            }
+                Some(SshEnter::Save(target)) => self.begin_ssh_host_save(ws, &target),
+                Some(SshEnter::Remove { name, target }) => {
+                    self.confirm_ssh_host_removal(ws, name, target);
+                }
+                // An invalid typed target leaves the launcher open on the row
+                // that explains it; an empty launcher has closed.
+                Some(SshEnter::Invalid) | None => {}
+            },
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && ws.mods.control_key()
@@ -3032,7 +3055,10 @@ pub(super) fn lone_pane_in_scope(
             [id] => Some(*id),
             _ => None,
         },
-        ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => None,
+        ConfirmAction::RebindKeybind { .. }
+        | ConfirmAction::Paste { .. }
+        | ConfirmAction::ReplaceSshHost { .. }
+        | ConfirmAction::RemoveSshHost { .. } => None,
     }
 }
 
@@ -3405,6 +3431,16 @@ pub enum ConfirmAction {
         act: Action,
         action_name: &'static str,
     },
+    /// Save `new_target` under the existing SSH host `name`, which the
+    /// launcher showed connecting to `old_target`. The write refuses if the
+    /// file no longer holds `old_target` for the name.
+    ReplaceSshHost {
+        name: String,
+        old_target: String,
+        new_target: String,
+    },
+    /// Remove the configured SSH host `name` that connects to `target`.
+    RemoveSshHost { name: String, target: String },
 }
 
 /// Buttons in a confirmation. Close and rebind questions use Cancel/Confirm;
