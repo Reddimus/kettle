@@ -972,6 +972,9 @@ menu_broadcast_window = "Panes in This Window"
 
 menu_broadcast_group = "Panes in This Group"
 
+menu_profiles_pending = "Profiles weren't ready. Reopen to refresh."
+picker_profiles_pending = "Profiles weren't ready."
+
 menu_no_profiles = "No profiles yet — Create Profile…"
 
 palette_launch_profile = "New window with profile: {name}"
@@ -1000,6 +1003,7 @@ notify_profiles_failed_body = "Check that the config directory is available and 
 
 notify_profile_launch_failed = "Profile not opened"
 
+notify_profile_launch_busy = "Another profile launch is still being checked. Try again shortly."
 notify_profile_launch_failed_body = "The profile may have been removed, or Kettle could not start another process."
 
 notify_ssh_host_not_saved = "Host not saved"

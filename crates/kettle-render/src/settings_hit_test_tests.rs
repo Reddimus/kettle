@@ -322,6 +322,7 @@ fn resize_chip_is_hidden_while_settings_or_a_picker_is_open() {
     overlay.theme_picker_query = None;
     assert_eq!(overlay.visible_resize_overlay(), Some((100, 37)));
     overlay.context_menu = Some(super::ContextMenu {
+        status: None,
         picker_header_height: 30.0,
         picker_footer: None,
         anchor: (176.0, 78.0),

@@ -184,6 +184,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
         context_menu: Some(kettle_render::ContextMenu {
             anchor: (0.0, 0.0),
             a11y_label: None,
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
             rows: [
@@ -1246,6 +1247,7 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         ),
         (640.0, 820.0),
         (8.0, 16.0),
+        (8.0, 16.0),
         46.0,
     )
     .unwrap();
@@ -1776,6 +1778,162 @@ fn accessibility_pane_lifetime_prunes_churn_and_moves_without_an_adapter() {
     assert!(ws.accessibility_text_rows.borrow().is_empty());
 }
 
+#[test]
+fn pending_profile_palette_accessibility_explains_reopening_without_visual_hints() {
+    use kettle_i18n::{Language, Text, Translator};
+
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let snapshots: [Option<Vec<String>>; 3] =
+            [None, Some(Vec::new()), Some(vec!["work".into()])];
+        for snapshot in snapshots {
+            let mut ws = WindowState::new(1, Mux::new());
+            super::profiles::open_profile_palette(&mut ws, snapshot.as_deref());
+            for query in [String::new(), "query".repeat(40)] {
+                ws.palette_input = Some((query.as_str().into(), 0));
+                let commands = super::palette_entries(
+                    None,
+                    &tr,
+                    ws.palette_profiles.as_deref(),
+                    kettle_config::BroadcastDefault::default(),
+                );
+                if snapshot.is_none() {
+                    assert!(!commands.iter().any(|(_, action)| matches!(
+                        action,
+                        Action::LaunchProfile(_) | Action::OpenProfilesDirectory
+                    )));
+                }
+                let overlay = kettle_render::Overlay {
+                    tr,
+                    palette_query: Some(query.clone()),
+                    context_menu: super::picker_context_menu(
+                        super::open_picker_list(
+                            &ws,
+                            &kettle_config::Config::default(),
+                            "dark-theme",
+                            &tr,
+                            None,
+                        )
+                        .unwrap(),
+                        (360.0, 240.0),
+                        (8.0, 16.0),
+                        (8.0, 16.0),
+                        0.0,
+                    ),
+                    text_field: Some(kettle_render::TextFieldOverlay {
+                        picker_header: true,
+                        placeholder: String::new(),
+                        text: query.clone(),
+                        cursor_byte: query.len(),
+                        selection: None,
+                        horizontal_scroll: 0,
+                        rect: (16.0, 24.0, 328.0, 32.0),
+                        prefix: String::new(),
+                        hint: String::new(),
+                        accent_palette: 5,
+                    }),
+                    ..Default::default()
+                };
+                let base = super::modal_accessibility_projection(
+                    &overlay,
+                    (360.0, 240.0),
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                let projected = super::modal_accessibility_projection_for_window(
+                    &overlay,
+                    &ws,
+                    (360.0, 240.0),
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                assert_eq!(projected.roots, base.roots);
+                assert_eq!(projected.focus, base.focus);
+                if snapshot.is_some() {
+                    assert_eq!(
+                        projected.nodes, base.nodes,
+                        "ready-empty and ready-nonempty keep the original projection unchanged"
+                    );
+                    continue;
+                }
+                let full = tr.text(Text::MenuProfilesPending);
+                assert_ne!(full, tr.text(Text::PickerProfilesPending));
+                let input = projected
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+                    .unwrap();
+                assert_eq!(input.1.description(), Some(full));
+                assert_eq!(input.1.value(), Some(query.as_str()));
+                let status = projected
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.role() == accesskit::Role::Status)
+                    .unwrap();
+                assert_eq!(status.1.label(), Some(full));
+                assert_eq!(status.1.live(), Some(accesskit::Live::Polite));
+                assert!(!status.1.supports_action(accesskit::Action::Click));
+                assert!(!status.1.supports_action(accesskit::Action::Focus));
+                let dialog = projected
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+                    .unwrap();
+                assert!(dialog.1.children().contains(&status.0));
+                let list = projected
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.role() == accesskit::Role::ListBox)
+                    .unwrap();
+                let old_list = base
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.role() == accesskit::Role::ListBox)
+                    .unwrap();
+                assert_eq!(
+                    list.1.children(),
+                    old_list.1.children(),
+                    "status is outside ranked result indexes"
+                );
+                assert!(!list.1.children().contains(&status.0));
+                assert_eq!(projected.nodes.len(), base.nodes.len() + 1);
+                let ids: HashSet<_> = projected.nodes.iter().map(|(id, _)| *id).collect();
+                assert_eq!(ids.len(), projected.nodes.len());
+            }
+            // A captured pending snapshot must not leak a status after the
+            // palette closes or into another modal's projection.
+            for overlay in [
+                kettle_render::Overlay::default(),
+                kettle_render::Overlay {
+                    ssh_query: Some("host".into()),
+                    ..Default::default()
+                },
+            ] {
+                let base = super::modal_accessibility_projection(
+                    &overlay,
+                    (360.0, 240.0),
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                let projected = super::modal_accessibility_projection_for_window(
+                    &overlay,
+                    &ws,
+                    (360.0, 240.0),
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                assert_eq!(projected.nodes, base.nodes);
+                assert_eq!(projected.roots, base.roots);
+                assert_eq!(projected.focus, base.focus);
+            }
+        }
+    }
+}
+
 /// A screen reader hears a picker's placeholder as the field's placeholder,
 /// not as its value: the keyboard-shortcut list says what it searches.
 #[test]
@@ -1868,7 +2026,7 @@ fn theme_picker_readout_is_spoken_on_every_platform() {
             slot: None,
         });
         let list = super::open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap();
-        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), 32.0).unwrap();
+        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), (8.4, 17.0), 32.0).unwrap();
         let footer = menu.picker_footer.as_ref().expect("the footer fits");
         let readout = kettle_render::theme_footer_description(footer, &tr);
         for part in [

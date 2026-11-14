@@ -367,6 +367,8 @@ class StableProcessHandle:
                 signal.pidfd_send_signal(self.pidfd, signal_number)
                 return True
             if self.audit_token is not None:
+                if signal_number == 0:
+                    return self.matches_current()
                 import ctypes
 
                 library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
@@ -19592,7 +19594,7 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
-                "tab-bar = never",
+                "tab-bar = off",
                 "status-bar = off",
                 "scrollbar = never",
                 "restore-session = false",

@@ -336,6 +336,7 @@ fn picker_with_footer(f: ThemePickerFooter, (width, row_h): (f32, f32)) -> Conte
         .collect();
     let rows_h = rows.len() as f32 * row_h;
     ContextMenu {
+        status: None,
         picker_header_height: 30.0,
         picker_footer: Some(f),
         anchor: (40.0, 50.0),

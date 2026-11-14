@@ -41,6 +41,8 @@
 # was revised too and stays draft, not rendered.
 
 [status]
+menu_profiles_pending = "draft"
+picker_profiles_pending = "draft"
 a11y_window_minimize = "accepted"
 a11y_window_maximize = "accepted"
 a11y_window_restore = "accepted"
@@ -48,6 +50,7 @@ a11y_window_close = "accepted"
 
 tab_new_options = "accepted"
 
+notify_profile_launch_busy = "draft"
 notify_profile_launch_failed_body = "accepted"
 notify_profile_launch_failed = "accepted"
 notify_profiles_failed_body = "accepted"

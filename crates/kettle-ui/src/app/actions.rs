@@ -1028,9 +1028,8 @@ impl App {
             }
             Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);
-                ws.palette_profiles = kettle_config::Config::list_profiles();
                 ws.palette_bound_only = matches!(action, Action::ShowKeybinds);
-                ws.palette_input = Some((Default::default(), 0));
+                profiles::open_profile_palette(ws, self.profile_inventory.snapshot());
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
@@ -1063,41 +1062,7 @@ impl App {
                 ws.pending_resize = true;
             }
             Action::LaunchProfile(name) => {
-                let tr = self.ui_text;
-                // Config and renderer state are application-wide. Isolate profile launches.
-                if kettle_config::Config::list_profiles().contains(&name) {
-                    let exe = std::env::current_exe().unwrap_or_else(|_| "kettle".into());
-                    if let Err(error) = std::thread::Builder::new()
-                        .name("kettle-profile".into())
-                        .spawn(move || {
-                            if let Err(error) = std::process::Command::new(exe)
-                                .arg(format!("--profile={name}"))
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                                .and_then(|mut child| child.wait())
-                            {
-                                log::warn!("profile launch failed: {error}");
-                                fire_notify(
-                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                                );
-                            }
-                        })
-                    {
-                        log::warn!("profile reaper failed to start: {error}");
-                        fire_notify(
-                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                        );
-                    }
-                } else {
-                    fire_notify(
-                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                    );
-                }
+                super::profiles::launch_profile(&self.profile_launch_gate, name, self.ui_text);
             }
             Action::OpenProfilesDirectory => {
                 let path = kettle_config::Config::default_path()
@@ -1621,38 +1586,38 @@ impl App {
             // key_next_profile + key_previous_profile): runtime cycle
             // through profile files at <config-dir>/profiles/.
             //
-            // Enumerates the profiles directory each dispatch (cheap;
-            // typically <10 entries), sorts deterministically, finds
+            // Uses the worker's sorted profile cache, finds
             // the current entry by basename match against the loaded
             // config-path, and loads the next/prev. Falls back to
             // log::info when no profiles directory or no entries.
             Action::NextProfile | Action::PrevProfile => {
-                // Delegate listing + name extraction to
-                // kettle-config so the same path math has a single
-                // home (and drift guards on it). Empty list → no-op
-                // with a one-line info nudge.
-                let names = kettle_config::Config::list_profiles();
-                if names.is_empty() {
-                    log::info!(
-                        "{action:?}: no profiles in <config-dir>/profiles/ — \
-                         create one with `kettle --print-default-config > \
-                         ~/.config/kettle/profiles/dev.config`"
-                    );
-                } else {
-                    let current = self
-                        .config_path
-                        .as_deref()
-                        .and_then(kettle_config::Config::profile_name_from_path);
-                    let next = pick_next_profile(
-                        current.as_deref(),
-                        &names,
-                        matches!(action, Action::NextProfile),
-                    );
-                    if let Some(p) = kettle_config::Config::path_for_profile(&next) {
-                        self.switch_profile(ws, p);
+                let current = self
+                    .config_path
+                    .as_deref()
+                    .and_then(kettle_config::Config::profile_name_from_path);
+                match profiles::profile_cycle(
+                    self.profile_inventory.snapshot(),
+                    current.as_deref(),
+                    matches!(action, Action::NextProfile),
+                ) {
+                    profiles::ProfileCycle::Unavailable => {
+                        log::info!("{action:?}: profile discovery is not ready");
+                    }
+                    profiles::ProfileCycle::Empty => {
+                        log::info!(
+                            "{action:?}: no profiles in <config-dir>/profiles/ — \
+                             create one with `kettle --print-default-config > \
+                             ~/.config/kettle/profiles/dev.config`"
+                        );
+                    }
+                    profiles::ProfileCycle::Next(next) => {
+                        if let Some(p) = kettle_config::Config::path_for_profile(&next) {
+                            self.switch_profile(ws, p);
+                        }
                     }
                 }
             }
+
             // Split-tree rotation (Terminator `rotate_cw` / `rotate_ccw`):
             // turn the active tab's whole layout a quarter turn. No-op on a
             // single-pane tab. Rotating changes every pane's rect, so the PTYs

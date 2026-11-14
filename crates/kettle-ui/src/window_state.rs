@@ -1130,8 +1130,9 @@ pub(crate) struct WindowState {
     /// When `cfg.ssh_hosts` no longer equals it, `sync_ssh_hosts` moves the
     /// selection back to row 0.
     pub(crate) ssh_hosts_shown: Vec<(String, String)>,
-    /// Profile names captured when opening the palette; all projections use this list.
-    pub(crate) palette_profiles: Vec<String>,
+    /// Opening snapshot shared by every palette projection; None means discovery
+    /// had not completed when it opened. Completion never changes this snapshot.
+    pub(crate) palette_profiles: Option<Vec<String>>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// The open palette lists only commands with a keyboard shortcut
@@ -1777,7 +1778,7 @@ impl WindowState {
             ssh_status: None,
             ssh_hosts_shown: Vec::new(),
             palette_input: None,
-            palette_profiles: Vec::new(),
+            palette_profiles: None,
             palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,

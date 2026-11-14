@@ -9,15 +9,41 @@ runtime hosts. Windows CI retains compile and regression coverage, but does not
 produce a supported package. Record every skipped check and its reason.
 
 Profile/layout UI regression coverage lives in kettle-ui's `menu_text_tests`,
-`macos_menu::tests` and `picker_text_tests`: English/Spanish menu routes,
-profile lists including empty, native submenu dispatch order, and the shared
+`macos_menu::tests`, `app::profiles::tests` and `picker_text_tests`:
+English/Spanish menu routes, profile lists including empty, native submenu
+dispatch order, and the shared
 Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
 saves and reloads a split layout, checks picker discovery and validates the
 palette's profile discovery without changing the real config directory.
 The portable profile inventory regression blocks an injected enumerator while
 menu dispatch uses the empty startup cache and then the last completed cache.
 It checks coalesced refreshes and eventual latest results without reading owner
-profiles. Existing menu-model tests pass an explicit empty profile list.
+profiles. The shared blocked-enumerator fixture also exercises the production
+new-tab row snapshot and submenu activation, terminal profile rows and palette
+entries against the last completed cache. Refresh tests retain selected profile
+actions and parent navigation when profiles change. Launch-worker tests block
+validation before a stub process launcher, reject unlisted names, and check
+failure reporting without starting a profile process. Existing menu-model tests
+pass explicit profile slices, including empty lists. Run these portable cases
+with `cargo test -p kettle-ui app::profiles` and
+`cargo test -p kettle-ui profile_inventory_dispatch`.
+Profile-cache regressions cover one admitted launch
+validation under 64 repeated requests against a blocked injected enumerator,
+admission returning while the first injected child is still being reaped,
+exact-name/scan/spawn failures, first scan error versus successful empty,
+last-good cache retention (including unconsumed results), and pending/empty
+profile cycling. Palette tests use production list projection and geometry at
+328/358/720-pixel widths in EN/ES with long queries, pinned non-action status,
+Esc guidance, result scrolling, and ranked pointer/keyboard action identity.
+Renderer tests cover shared status/card surface bounds and text damage keys.
+Config tests use a private directory-path seam with real temporary directories
+for missing/empty/unavailable scans, validation/order, existing caps and Unix
+symlink/metadata failure behavior without changing process environment.
+
+Run the focused crate tests, Clippy and required repository gates on the changed
+source. Record physical regression controls and platform-specific results
+separately from portable tests. Catalogue parity, source checks and formatting
+do not establish compiled or live behavior.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
@@ -258,6 +284,16 @@ its row into view on short surfaces. Underline probes exclude the surface's
 one-pixel focus outline while retaining interior underline and leak detection.
 The Git streaming helper checks that both output pipes close after success and
 consumer failure.
+
+`video_preview::tests::a_parent_timeout_does_not_wait_for_inherited_pipes`
+exercises physical timeout pipe cleanup after a retained direct child is stopped
+and reaped. Two sibling fixture children inherit one anonymous stdout pipe;
+the controlled holder acknowledges successful stdout writes before collection
+and after collection returns or its three-second observation window expires.
+Parent control EOF then releases the holder for stdout EOF and reader closure.
+This covers post-reap descriptor lifetime, not shell ancestry or total launch
+time. The existing stalled-helper, absolute-cutoff and retry tests retain
+real-launch and request-deadline coverage.
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
 one artifact per hook, deduplication after primary display, stable replacement
@@ -654,7 +690,10 @@ PTY probe checks the captured environment and original invocation in both a
 split and an empty mux, without a window or GPU.
 `remote_reconnect_replays_preserve_environment_and_invocation` repeats the
 probe after duplicate pane/tab, split, undo-close, and a live tab move, then
-checks another replay from each result. Session round-trip tests
+checks another replay from each result. The probe starts its success marker on a
+new PTY line so serial test-runner progress labels cannot split it across rows.
+Failure diagnostics retain at most 4096 viewport characters, PTY read progress,
+and the unreaped owned-child exit status before teardown. Session round-trip tests
 `remote_reconnect_session_restore_falls_back_to_configured_shell` and
 `remote_reconnect_environment_session_restore_omits_private_values` verify
 shell fallback for invocation-only and environment-only settings and ensure
@@ -1021,16 +1060,17 @@ be disjoint. When `tests/ui-states/linux` exists, CI compares against it;
 otherwise it explicitly reports capture-only operation. Do not mix baselines
 from different compositors/font environments.
 
-The initial Linux pixel gate remains pending until the final merged build,
-after the font and C08 changes land. Capture its full matrix in the final CI
-environment, retain the build/commit and font/environment identity, and review
-all 80 PNGs before adding them under `tests/ui-states/linux` in an explained PR
-with before/after artifacts. Re-run CI with those baselines to establish the
-pixel gate. This environment preparation has not run Weston or captured pixels
-on native Linux; the first hosted Linux execution, artifact inspection and
-baseline promotion remain pending. No baseline is generated or accepted by
-headless fixture tests; capture-only CI does not prove pixel equality. Native
-geometry evidence must also identify the exact capture script/build used.
+The initial 80 Linux baselines are checked in under `tests/ui-states/linux`.
+[Their provenance](../tests/ui-states/README.md) records hosted CI run
+42383598778, its exact source and binary, bundled fonts, headless Weston GL and
+llvmpipe environment, and completed owned-process cleanup. That run's Linux
+capture passed; its unrelated Windows failures remain documented. CI now
+compares captures with these baselines. Review any baseline update in an
+explained PR with before/after artifacts, and re-run the comparison gate.
+Portable fixture tests do not establish pixel equality. This headless Linux
+gate also does not establish native GNOME/KDE behavior, macOS pixel parity,
+IME or accessibility acceptance. Native geometry and pixel evidence must
+identify the exact capture script, build and environment used.
 
 ## Diagram gate
 
@@ -1857,6 +1897,25 @@ after combining marks, ZWJ and VS15, and Prepend plus VS15 after width saturatio
 They exercise mode 2027, UTF-8 splits, cursor and spacer state, screen and DECSLRM
 edges, autowrap, insertion, ignored-control interruptions and discarded scalars.
 Core cases also check edge wrapping and selection, search and reflow columns.
+The final-width regressions retain all 32 Javanese/Grantha trailing-virama
+sequences and 17 singleton mismatches from the full mode-on measurement of
+candidate `35048`. They check the generated six-scalar Mc/virama exception,
+the non-excluded U+1B43 neighbor, Grantha's unchanged cluster boundaries, every
+UTF-8 split, mode-off compatibility, edge/margin/insert behavior, and A8FA's
+shaping-base eligibility. Saturated positive and zero-width prefixes must
+retain the first spacing base through later selectors and ZWJ tails, including
+attributes, hyperlinks, semantic navigation, search, selection and reflow.
+The `35048` measurements precede these fixes; source regressions do not replace
+a fresh full on/off native measurement of the rebuilt candidate. Unsupported
+tofu capability does not establish font coverage, and matching the reference
+on these cases does not establish universal Unicode column conformance.
+Portable renderer regressions derive scalar-mode snapshots and same-style row
+groups for A8FA before a selector plus Thai SARA AM, and before an unattached
+modifier. They check the original emoji classification, cover fresh-cursor
+overwrite, and keep A8FA as the shaping anchor of a stored cluster after mode
+2027 is disabled. These classification checks do not establish column or
+host-font raster coverage; the vendor and core width controls above check
+columns separately.
 Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
@@ -1871,7 +1930,9 @@ and caret above the card. `submenu_covers_its_parents_selection_labels_and_shado
 checks that a submenu's panel and shadow cover its parent's selection and
 labels, `submenu_edge_hides_its_parents_selection_and_labels` that its bordered
 edge is opaque where it crosses them, and `an_open_menu_covers_a_toast_beneath_it`
-that menus cover toasts.
+that menus cover toasts. `picker_status_band_text_draws_inside_its_card` checks
+that a picker's pinned status lines show in the secondary text colour inside its
+card, where the shared menu text pass is cut out.
 `menu_visual` checks that the corners of everything the menu changed stay
 untouched. `kettle-ui`'s `painted_menu_rows_match_hit_testing_and_accessibility_bounds`
 holds pointer hit testing and screen-reader bounds to the renderer's painted
@@ -2701,7 +2762,12 @@ compare caret and selection placement with the shaped pointer stops, including
 long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
 all shaped clusters visible and retain its full selection width at every caret
 boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
-tests cover English and Spanish at narrow widths. Settings value-slot tests compare
+tests cover English and Spanish at narrow widths. Picker-header tests check the
+full, shortened and Esc-only hint at exact and fractional width boundaries,
+using the complete projected query even when it is scrolled. No picker fallback
+ellipsizes the final action. UI tests pass the actual localized palette, theme,
+layout and SSH hint strings through the renderer, preserving theme's Esc restore
+action. Unsupported hint shapes retain whole-or-drop behavior. Settings value-slot tests compare
 the editor's start with the fitted label and gap at terminal cell-width scales
 0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
@@ -3383,9 +3449,12 @@ view. The old window-sized event leaves the surface suspended; the live-view
 completion commits one layout and releases suspension. A source guard connects
 the replay to the completion producer and its platform fallbacks. Native
 fullscreen exit without a later resize remains a required live acceptance check.
-The live macOS check is
-`launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
-it requires an unlocked desktop and cannot run in the sandbox.
+For live caption and fullscreen coverage, run `just native-titlebar-smoke`
+from an unlocked macOS desktop session with the smoke's required permissions.
+Automatic AppKit-tab and DPI transitions, and fullscreen exit without a later
+resize event, still require separate live checks. `just conformance-esctest`
+checks terminal escape sequences; it does not verify native fullscreen
+restoration.
 
 ## Cursor and selection regression checks
 
@@ -3528,3 +3597,35 @@ transitions, inactive colors, localized tooltips, AT-SPI button activation,
 IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless
 fallbacks. Portable checks do not establish compositor or rendering acceptance.
+
+Profile-cache regressions include a cached cycle target deleted before selection,
+a failed read that preserves the active path and trust, and deletion after a
+successful read while the exact prepared snapshot is consumed. Blocked-worker
+coverage distinguishes pending from the first ready-empty completion, requires
+that first completion to publish readiness, and retains the last completed cache
+during later scans. Actual worker completions exercise additions, removals and
+empty results while an open deep menu keeps its rows, actions, saved parent
+anchors/highlights/scroll offsets, offscreen highlight, manual viewport and
+typeahead. The palette keeps its opening profiles and exact query/caret/selection;
+reopening takes the completed inventory. English and Spanish pending status is
+non-action menu information or a persistent palette band outside ranked results.
+Status wrapping uses the renderer's measured overlay advance and line height,
+independent of terminal cell-width and cell-height scaling. Portable font-shaping
+checks require each status line to fit its natural-font bounds; picker projections
+also cover narrowed and shortened physical cells, narrow widths and long queries.
+At short restored heights, the palette first drops supplementary key guidance,
+then uses the compact pending translation if the full explanation cannot fit.
+If even that band cannot fit beside the physical input header and one result,
+it omits the visual band and replaces the decorative input prefix with Esc.
+The full reopening explanation remains an accessible input description and polite
+status. This constrained-height fallback preserves the query, caret, selection,
+composition and ranked action indices; it does not insert ranked status rows.
+Short-window cases include pending discovery at 360x120 with 0-, 24- and 46-pixel
+top chrome and separate natural/scaled cell metrics. Standard-height pending
+palettes retain the full status and Run/Select/Cancel guidance; ready-state
+geometry is unchanged.
+Portable checks cover native menu pending-to-empty modeling and captured-name
+actions, plus palette keyboard/pointer index agreement; they do not prove AppKit
+tracking or physical UI behavior. Ordinary resize/navigation coverage remains
+separate. Required compilation, tests, source controls and native acceptance must
+run on the changed source before it is accepted.

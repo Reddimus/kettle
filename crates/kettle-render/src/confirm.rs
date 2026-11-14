@@ -253,7 +253,7 @@ impl ConfirmDialogLayout {
     }
 }
 
-fn wrap(text: &str, columns: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
     let mut result = Vec::new();
     for paragraph in text.split('\n') {
         let mut rest = paragraph.trim();

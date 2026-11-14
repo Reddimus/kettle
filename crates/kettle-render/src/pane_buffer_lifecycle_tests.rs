@@ -205,6 +205,7 @@ fn context_menu_hover_preserves_text_damage_key() {
         panel_w_clamped: 240.0,
         panel_h_clamped: 120.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };

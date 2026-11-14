@@ -57,7 +57,7 @@ fn the_reconnect_row_names_every_session_shape() {
 fn the_new_tab_dropdown_follows_the_ui_language() {
     let shells = vec![("zsh".to_string(), vec!["zsh".to_string()])];
     let labels = |tr: &Translator| {
-        App::new_tab_menu_items(&shells, tr)
+        App::new_tab_menu_items(&shells, Some(&[]), tr)
             .into_iter()
             .filter_map(|item| match item {
                 ContextMenuItem::Item { label, .. } => Some(label.to_string()),
@@ -102,11 +102,11 @@ fn session_routes_follow_profiles_in_both_languages() {
     use super::{Action, profile_launch_entries};
     for tr in [EN, ES] {
         for names in [vec![], vec!["home".into(), "Work".into()]] {
-            let menu = App::new_tab_menu_with_profiles(&[], &names, &tr);
+            let menu = App::new_tab_menu_items(&[], Some(&names), &tr);
             let commands = super::palette_entries(
                 None,
                 &tr,
-                &names,
+                Some(&names),
                 kettle_config::BroadcastDefault::default(),
             );
             for action in [
@@ -124,7 +124,7 @@ fn session_routes_follow_profiles_in_both_languages() {
                     _ => None,
                 })
                 .unwrap();
-            let palette = profile_launch_entries(&names, &tr);
+            let palette = profile_launch_entries(Some(&names), &tr);
             for entry in &palette {
                 assert!(
                     commands
@@ -226,7 +226,7 @@ fn saved_layout_is_listed_by_picker_in_an_isolated_config_directory() {
         let entries = palette_entries(
             None,
             &ES,
-            &kettle_config::Config::list_profiles(),
+            Some(&kettle_config::Config::list_profiles()),
             kettle_config::BroadcastDefault::default(),
         );
         let launches: Vec<_> = entries
@@ -272,6 +272,7 @@ fn menu_panel(items: &[ContextMenuItem], hint: &str) -> kettle_render::ContextMe
         panel_w_clamped: 400.0,
         panel_h_clamped: 600.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     }
@@ -662,8 +663,12 @@ fn palette_offers_renaming_and_moving_the_tab() {
     use super::Action;
     use kettle_i18n::Text;
     for tr in [EN, ES] {
-        let entries =
-            super::palette_entries(None, &tr, &[], kettle_config::BroadcastDefault::default());
+        let entries = super::palette_entries(
+            None,
+            &tr,
+            Some(&[]),
+            kettle_config::BroadcastDefault::default(),
+        );
         for (text, action) in [
             (Text::PaletteRenameTab, Action::EditTabTitle),
             (Text::PaletteMoveTabToNewWindow, Action::MoveTabToNewWindow),

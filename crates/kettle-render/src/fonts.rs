@@ -22,6 +22,98 @@ pub(crate) fn emoji_text(text: &str) -> bool {
         .is_some_and(|base| emoji_presentation(base, &chars.collect::<Vec<_>>()))
 }
 
+#[cfg(test)]
+mod scalar_grapheme_classification_tests {
+    use super::emoji_text;
+    use crate::headless_tests::snapshot_of;
+    use crate::{PaneSnapshot, Rgb, ShapedRow};
+    use alacritty_terminal::term::cell::Flags;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    fn scalar_row(input: &str) -> (PaneSnapshot, String) {
+        let snap = snapshot_of(8, 1, input.as_bytes());
+        assert!(!snap.has_graphemes());
+        assert!(!snap.has_rtl());
+        let mut text = String::new();
+        // These default-style cells share the run that build_pane concatenates.
+        for cell in snap.cells.iter().filter(|cell| cell.line == 0) {
+            assert_eq!(cell.fg, snap.cells[0].fg);
+            assert!(!cell.flags.intersects(Flags::BOLD | Flags::ITALIC));
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                text.push(cell.c);
+                text.extend(cell.zerowidth());
+            }
+        }
+        let runs = [(text, Rgb::new(255, 255, 255), false, false)];
+        let shaped = ShapedRow::of(&runs);
+        assert_eq!(shaped.runs, 1);
+        let text = shaped.text(0, &runs[0].0).to_owned();
+        (snap, text)
+    }
+
+    #[test]
+    fn scalar_snapshot_caret_selector_before_thai_keeps_text_classification() {
+        let input = "A\u{600}\u{a8fa}\u{fe0f}\u{e33}";
+        let (snap, text) = scalar_row(input);
+        assert!(snap.has_emoji(), "the row reaches the custom glyph emitter");
+        assert_eq!(text, input);
+        let groups: Vec<_> = text.graphemes(true).collect();
+        assert_eq!(groups, ["A", "\u{600}\u{a8fa}\u{fe0f}\u{e33}"]);
+        assert!(
+            !emoji_text(groups[1]),
+            "the scalar Thai group must not request emoji fitting"
+        );
+        assert_eq!(alacritty_terminal::term::grapheme_base_offset(groups[1]), 8);
+    }
+
+    #[test]
+    fn scalar_snapshot_retained_caret_before_modifier_keeps_emoji_classification() {
+        let input = "A\u{a8fa}\u{1f3fb}";
+        let (snap, text) = scalar_row(input);
+        assert!(snap.has_emoji());
+        assert_eq!(text, input);
+        let groups: Vec<_> = text.graphemes(true).collect();
+        assert_eq!(groups, ["A", "\u{a8fa}\u{1f3fb}"]);
+        assert!(
+            emoji_text(groups[1]),
+            "the scalar modifier group must retain emoji fitting"
+        );
+        assert_eq!(alacritty_terminal::term::grapheme_base_offset(groups[1]), 3);
+    }
+
+    #[test]
+    fn scalar_snapshot_fresh_cursor_modifier_overwrites_unattached_caret() {
+        let (snap, text) = scalar_row("\u{a8fa}\u{1f3fb}");
+        assert_eq!(snap.cursor.point.column.0, 2);
+        assert_eq!(snap.cells[0].c, '\u{1f3fb}');
+        assert!(snap.cells[0].zerowidth().is_empty());
+        assert_eq!(text, "\u{1f3fb}");
+        assert!(emoji_text(&text));
+    }
+
+    #[test]
+    fn owned_snapshot_caret_stays_the_shaping_anchor_after_mode_is_disabled() {
+        let snap = snapshot_of(
+            8,
+            1,
+            "\x1b[?2027h\u{600}\u{a8fa}\u{fe0f}\u{e33}\x1b[?2027lX".as_bytes(),
+        );
+        let cell = &snap.cells[0];
+        assert!(cell.flags.contains(Flags::GRAPHEME));
+        assert!(cell.flags.contains(Flags::WIDE_CHAR));
+        assert_eq!(snap.cells[2].c, 'X');
+        let text: String = std::iter::once(cell.c)
+            .chain(cell.zerowidth().iter().copied())
+            .collect();
+        assert_eq!(text, "\u{600}\u{a8fa}\u{fe0f}\u{e33}");
+        assert_eq!(
+            alacritty_terminal::term::grapheme_shaping_base_offset(&text),
+            2
+        );
+        assert_eq!(alacritty_terminal::term::grapheme_base_offset(&text), 8);
+    }
+}
+
 /// Preserve aspect ratio and center ink inside the grid-owned rectangle.
 pub(crate) fn fit_emoji((x, y, w, h): super::Rect4, ink: (f32, f32)) -> super::Rect4 {
     let scale = (w / ink.0).min(h / ink.1);

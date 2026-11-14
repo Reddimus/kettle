@@ -48,6 +48,7 @@ fn app_clamped_width_is_authoritative_for_every_render_pass() {
         panel_w_clamped: 237.5,
         panel_h_clamped: 0.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -113,6 +114,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
         panel_w_clamped: 1.0,
         panel_h_clamped: 1.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -205,6 +207,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
         panel_w_clamped: 200.0,
         panel_h_clamped: 200.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -254,6 +257,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
             panel_w_clamped: 200.0,
             panel_h_clamped: panel_h,
             a11y_label: None,
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
         };
@@ -357,6 +361,7 @@ fn menu_and_picker_panels_are_rounded_and_keep_the_selection_inside() {
         scroll_offset: 0,
         panel_w_clamped: w,
         panel_h_clamped: h,
+        status: None,
         picker_header_height: header,
         picker_footer: None,
         a11y_label: None,
@@ -468,6 +473,132 @@ fn submenu_surfaces_clip_ancestor_labels_into_disjoint_rectangles() {
     );
 }
 
+/// The rounded panel a picker's level draws covers its pinned status band:
+/// it fails when `menu_level_surfaces` sizes the card from the header and
+/// rows alone, as it did before the band joined the card.
+#[test]
+fn pinned_status_shares_card_surface_bounds_but_has_no_action_index() {
+    let mut menu = ContextMenu {
+        picker_footer: None,
+        anchor: (16.0, 180.0),
+        rows: (0..10)
+            .map(|index| ContextMenuRow {
+                toggle: None,
+                swatches: None,
+                matched_chars: None,
+                label: format!("action {index}"),
+                enabled: true,
+                separator: false,
+                hint: String::new(),
+            })
+            .collect(),
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 296.0,
+        panel_h_clamped: 112.0,
+        a11y_label: None,
+        picker_header_height: 30.0,
+        status: Some(super::MenuStatus::new(
+            "Profiles weren't ready. Reopen to refresh.\nEnter run / Tab select / Esc cancel",
+            296.0,
+            (8.0, 16.0),
+        )),
+    };
+    let band = menu.status_rect().unwrap();
+    let card = menu.card_rect();
+    let theme = kettle_config::Theme::default();
+    let surfaces = super::overlays::menu_level_surfaces(
+        &menu,
+        &theme,
+        theme.accent,
+        (8.0, 16.0),
+        1.0,
+        &mut super::chrome::Colors::default(),
+        true,
+    );
+    let panel = surfaces[super::overlays::MENU_SHADOW_LAYERS.len()];
+    assert_eq!(panel.pos, [card.0, card.1]);
+    assert_eq!(panel.size, [card.2, card.3]);
+    assert_eq!(
+        menu.text_buffer_count(),
+        menu.rows.len() + menu.status.as_ref().unwrap().lines.len()
+    );
+    assert!(menu.visible_row_rect(menu.rows.len()).is_none());
+    for offset in [0, 4, 8] {
+        menu.scroll_offset = offset;
+        assert_eq!(menu.status_rect(), Some(band));
+        for index in 0..menu.rows.len() {
+            if let Some(row) = menu.visible_row_rect(index) {
+                assert!(row.1 >= band.1 + band.3);
+            }
+        }
+    }
+    let fg = kettle_config::Rgb::new(200, 200, 200);
+    let bg = kettle_config::Rgb::new(20, 20, 20);
+    let key = super::context_menu_text_damage_key(Some(&menu), fg, bg);
+    menu.status.as_mut().unwrap().lines[0].push('!');
+    assert_ne!(
+        key,
+        super::context_menu_text_damage_key(Some(&menu), fg, bg)
+    );
+}
+
+#[test]
+fn pinned_status_lines_fit_natural_overlay_font_bounds() {
+    use super::{Attrs, Family, FontSystem, Shaping, TextBuffer, Wrap};
+    use kettle_i18n::{Language, Text, Translator};
+
+    let mut fonts = FontSystem::new();
+    super::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    let family = kettle_config::font::FAMILY;
+    for scale in [1.0, 1.25, 2.0] {
+        let metrics = super::metrics_for(13.0, scale);
+        let mut buffer = TextBuffer::new(&mut fonts, metrics);
+        let text_cell = super::measure_cell(&mut fonts, &mut buffer, family, metrics);
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let text = format!(
+                "{}\nEnter {} / Tab/\u{2191}\u{2193} {} / Esc {}",
+                tr.text(Text::MenuProfilesPending),
+                tr.text(Text::PickerHintRun),
+                tr.text(Text::PickerHintSelect),
+                tr.text(Text::PickerHintCancel),
+            );
+            for width in [296.0, 328.0, 720.0] {
+                let width = width * scale;
+                let status = super::MenuStatus::new(&text, width, text_cell);
+                let band = (16.0, 30.0, width, status.height());
+                for (index, line) in status.lines.iter().enumerate() {
+                    let slot = status.line_rect(band, index);
+                    buffer.set_metrics(metrics);
+                    buffer.set_size(Some(slot.2), Some(slot.3));
+                    buffer.set_wrap(Wrap::None);
+                    buffer.set_text(
+                        line,
+                        &Attrs::new().family(Family::Name(family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buffer.shape_until_scroll(&mut fonts, false);
+                    let runs: Vec<_> = buffer.layout_runs().collect();
+                    assert_eq!(
+                        runs.len(),
+                        1,
+                        "each projected line stays on one shaped line"
+                    );
+                    let run = &runs[0];
+                    assert!(
+                        run.line_w <= slot.2 + 0.01,
+                        "status text fits without clipping"
+                    );
+                    assert!(run.line_height <= slot.3);
+                    assert!(slot.1 + run.line_top >= band.1);
+                    assert!(slot.1 + run.line_top + run.line_height <= band.1 + band.3 + 0.01);
+                }
+            }
+        }
+    }
+}
 fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
     ContextMenuRow {
         toggle: None,
@@ -484,6 +615,7 @@ fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
 
 fn natural_menu(rows: Vec<ContextMenuRow>) -> ContextMenu {
     ContextMenu {
+        status: None,
         anchor: (50.0, 40.0),
         rows,
         highlight: 0,
@@ -648,6 +780,7 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         panel_w_clamped: 360.0,
         panel_h_clamped: 56.0,
         picker_header_height: 30.0,
+        status: None,
         picker_footer: None,
         a11y_label: None,
     };

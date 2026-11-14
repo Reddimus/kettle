@@ -44,9 +44,11 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         &kettle_config::keybinds::defaults(),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
         None,
-        &[], false, kettle_config::BroadcastDefault::default(),
+        Some(&[]),
+        false,
+        kettle_config::BroadcastDefault::default(),
     );
-    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0)
+    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), (8.0, 16.0), 0.0)
         .expect("a 320x160 surface fits a picker card");
 
     assert!(
@@ -166,6 +168,7 @@ fn review_activating_the_selected_layout_requests_a_frame() {
         layout_picker_list("", 0, &ws.layout_picker_entries, &EN_TEXT),
         (800.0, 600.0),
         (8.0, 16.0),
+        (8.0, 16.0),
         0.0,
     )
     .unwrap();
@@ -212,6 +215,7 @@ fn picker_card_geometry_is_centered_below_chrome() {
             layout_picker_list("", 0, &["one".into(), "two".into()], &EN_TEXT),
             surface,
             (8.0, 16.0),
+            (8.0, 16.0),
             0.0,
         )
         .unwrap();
@@ -255,6 +259,7 @@ fn picker_press_and_diagnostics_use_the_card_rows() {
     let menu = picker_context_menu(
         layout_picker_list("", 0, &["alpha".into(), "beta".into()], &EN_TEXT),
         (800.0, 600.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         46.0,
     )
@@ -308,9 +313,11 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[], false, kettle_config::BroadcastDefault::default(),
+        Some(&[]),
+        false,
+        kettle_config::BroadcastDefault::default(),
     );
-    let entries = super::palette_entries(None, &es, &[], kettle_config::BroadcastDefault::default());
+    let entries = super::palette_entries(None, &es, Some(&[]), kettle_config::BroadcastDefault::default());
     let ranked = kettle_config::palette::rank_matches("ct", &entries, &es);
     assert_eq!(list.rows.len(), ranked.len());
     for (row, entry) in list.rows.iter().zip(ranked) {
@@ -343,7 +350,9 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         &kettle_config::keybinds::defaults(),
         &es,
         None,
-        &[], false, kettle_config::BroadcastDefault::default(),
+        Some(&[]),
+        false,
+        kettle_config::BroadcastDefault::default(),
     );
     assert_eq!(empty.rows.len(), 1);
     assert!(!empty.rows[0].enabled);
@@ -360,9 +369,11 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 &kettle_config::keybinds::defaults(),
                 &EN_TEXT,
                 None,
-                &[], false, kettle_config::BroadcastDefault::default(),
+                Some(&[]),
+                false,
+                kettle_config::BroadcastDefault::default(),
             );
-            let menu = picker_context_menu(list, surface, (8.0, 16.0), top)
+            let menu = picker_context_menu(list, surface, (8.0, 16.0), (8.0, 16.0), top)
                 .expect("a restored 120px window must retain its picker");
             let card = menu.card_rect();
             assert!(card.1 >= top);
@@ -389,6 +400,190 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
     }
 }
 
+#[test]
+fn short_pending_palette_preserves_input_action_and_accessibility_with_scaled_cells() {
+    use kettle_i18n::{Language, Text, Translator};
+    use unicode_width::UnicodeWidthStr as _;
+
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let cfg = kettle_config::Config::default();
+        for (cell, text_cell) in [
+            ((8.0, 16.0), (8.0, 16.0)),
+            ((4.0, 16.0), (8.0, 16.0)),
+            ((8.0, 8.0), (8.0, 16.0)),
+            ((4.5, 9.0), (9.0, 18.0)),
+            ((8.0, 16.0), (16.0, 32.0)),
+        ] {
+            for top in [0.0, 24.0, 46.0] {
+                for surface in [(360.0, 120.0), (800.0, 120.0), (800.0, 200.0)] {
+                    for query in [String::new(), "split".into(), "query".repeat(40)] {
+                        let commands = super::palette_entries(None, &tr, None, kettle_config::BroadcastDefault::default());
+                        let ranked = kettle_config::palette::rank_entries(&query, &commands, &tr);
+                        let selected = 20.min(ranked.len().saturating_sub(1));
+                        let mut ws = WindowState::new(1, Mux::new());
+                        super::profiles::open_profile_palette(&mut ws, None);
+                        let mut editor = crate::text_editor::TextEditor::from(query.as_str());
+                        editor.move_left(true, false);
+                        ws.palette_input = Some((editor, selected));
+                        ws.ime_preedit = Some(("composing".into(), Some((2, 5))));
+                        let before = ws.palette_input.clone();
+                        let preedit = ws.ime_preedit.clone();
+                        let (text, cursor_byte, selection) = super::project_modal_editor(
+                            &ws.palette_input.as_ref().unwrap().0,
+                            ws.ime_preedit.as_ref(),
+                        );
+                        let menu = picker_context_menu(
+                            super::open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
+                            surface,
+                            cell,
+                            text_cell,
+                            top,
+                        )
+                        .expect("pending status cannot hide the input and selected action");
+                        let card = menu.card_rect();
+                        assert!(card.1 >= top && card.1 + card.3 <= surface.1 + 0.01);
+                        assert_eq!(menu.picker_header_height, cell.1 + 14.0);
+                        assert_eq!(menu.rows.len(), ranked.len().max(1));
+                        assert_eq!(menu.highlight, selected);
+                        let row = menu
+                            .visible_row_rect(selected)
+                            .expect("selected row is visible");
+                        assert!(row.1 + row.3 <= surface.1 + 0.01);
+                        if let Some(status) = &menu.status {
+                            let band = menu.status_rect().unwrap();
+                            for (index, line) in status.lines.iter().enumerate() {
+                                let slot = status.line_rect(band, index);
+                                assert!(line.width() as f32 * text_cell.0 <= slot.2);
+                                assert!(slot.3 >= text_cell.1);
+                                assert!(slot.1 + slot.3 <= band.1 + band.3 + 0.01);
+                            }
+                            ws.cursor.x = (band.0 + 1.0) as f64;
+                            ws.cursor.y = (band.1 + 1.0) as f64;
+                            assert!(!super::apply_picker_pointer(
+                                &mut ws,
+                                &cfg,
+                                &menu,
+                                cell.1,
+                                super::PickerPointer::Press,
+                            ));
+                        }
+                        let mut field = kettle_render::TextFieldOverlay {
+                            placeholder: String::new(),
+                            picker_header: true,
+                            text,
+                            cursor_byte,
+                            selection,
+                            horizontal_scroll: 3,
+                            rect: (0.0, 0.0, 0.0, 0.0),
+                            prefix: "  \u{2318} ".into(),
+                            hint: super::picker_hint(&tr, &[("Esc", Text::PickerHintCancel)]),
+                            accent_palette: 5,
+                        };
+                        let original = field.clone();
+                        super::place_picker_header(&mut field, &menu, true);
+                        assert_eq!(field.rect, menu.header_rect());
+                        assert_eq!(field.text, original.text);
+                        assert_eq!(field.cursor_byte, original.cursor_byte);
+                        assert_eq!(field.selection, original.selection);
+                        assert_eq!(field.horizontal_scroll, original.horizontal_scroll);
+                        let cw = kettle_render::text_field_cell_width(
+                            &field, text_cell.0, text_cell.1,
+                        );
+                        let slots = kettle_render::text_field_rects(&field, cw);
+                        assert!(
+                            slots[1].2 > cw,
+                            "query and caret retain a visible input slot"
+                        );
+                        if menu.status.is_none() {
+                            assert!(
+                                kettle_render::text_field_labels(&field, cw)
+                                    .0
+                                    .contains("Esc")
+                            );
+                        }
+                        assert_eq!(ws.palette_input, before);
+                        assert_eq!(ws.ime_preedit, preedit);
+                        if let Some(&entry) = ranked.get(selected) {
+                            ws.cursor.x = (row.0 + 1.0) as f64;
+                            ws.cursor.y = (row.1 + 1.0) as f64;
+                            assert!(super::apply_picker_pointer(
+                                &mut ws,
+                                &cfg,
+                                &menu,
+                                cell.1,
+                                super::PickerPointer::Press,
+                            ));
+                            assert_eq!(ws.palette_input, before);
+                            assert_eq!(
+                                super::palette_enter_action(&query, selected, &commands, &tr),
+                                Some(commands[entry].1.clone())
+                            );
+                        } else {
+                            assert!(!menu.rows[0].enabled);
+                        }
+                        let overlay = kettle_render::Overlay {
+                            tr,
+                            palette_query: Some(query.clone()),
+                            context_menu: Some(menu),
+                            text_field: Some(field),
+                            ..Default::default()
+                        };
+                        let a11y = super::modal_accessibility_projection_for_window(
+                            &overlay, &ws, surface, text_cell, 1.0, &tr,
+                        );
+                        let input = a11y
+                            .nodes
+                            .iter()
+                            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+                            .unwrap();
+                        assert_eq!(
+                            input.1.description(),
+                            Some(tr.text(Text::MenuProfilesPending))
+                        );
+                        let status = a11y
+                            .nodes
+                            .iter()
+                            .find(|(_, node)| node.role() == accesskit::Role::Status)
+                            .unwrap();
+                        assert_eq!(
+                            status.1.label(),
+                            Some(tr.text(Text::MenuProfilesPending))
+                        );
+                        assert_eq!(status.1.live(), Some(accesskit::Live::Polite));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn short_pending_palette_degrades_guidance_then_explanation_before_omitting_the_band() {
+    use kettle_i18n::{Language, Text, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for top in [0.0, 24.0, 46.0] {
+            let menu = picker_context_menu(
+                command_picker_list("", 20, &kettle_config::keybinds::defaults(), &tr, None, None, false, kettle_config::BroadcastDefault::default()),
+                (360.0, 120.0),
+                (8.0, 16.0),
+                (8.0, 16.0),
+                top,
+            )
+            .unwrap();
+            let shown = menu.status.as_ref().map(|status| status.lines.join(" "));
+            let expected = match top {
+                0.0 => Some(tr.text(Text::MenuProfilesPending)),
+                24.0 => Some(tr.text(Text::PickerProfilesPending)),
+                _ => None,
+            };
+            assert_eq!(shown.as_deref(), expected);
+            assert!(menu.visible_row_rect(20).is_some());
+        }
+    }
+}
+
 /// A scrolling picker paints whole rows down to its bottom edge: it has no
 /// arrow strips, and its height is whole rows, so no blank part-row is left
 /// under the selection, and a long list paints all eight rows. The last
@@ -399,12 +594,7 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
     for surface in [(1280.0, 820.0), (800.0, 600.0), (640.0, 360.0), (800.0, 200.0)] {
         for cell in [(8.0, 16.0), (16.0, 34.0)] {
             for total in [3, 8, 9, 30] {
-                let menu = picker_context_menu(
-                    layout_picker_list("", 0, &names[..total], &EN_TEXT),
-                    surface,
-                    cell,
-                    32.0,
-                )
+                let menu = picker_context_menu(layout_picker_list("", 0, &names[..total], &EN_TEXT), surface, cell, cell, 32.0)
                 .unwrap();
                 let row_h = kettle_render::menu::row_height(cell.1);
                 let (_, content_h) =
@@ -447,11 +637,11 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
     use super::{PickerPointer, apply_picker_pointer};
     let bindings = kettle_config::keybinds::defaults();
     let profiles: Vec<String> = (0..20).map(|i| format!("profile-{i}")).collect();
-    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles, false, kettle_config::BroadcastDefault::default());
+    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, Some(&profiles), false, kettle_config::BroadcastDefault::default());
     assert!(list.rows.len() >= 150, "{} rows", list.rows.len());
     let cell = (8.0, 16.0);
     let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len()).unwrap();
-    let menu = picker_context_menu(list, (800.0, 600.0), cell, 0.0).unwrap();
+    let menu = picker_context_menu(list, (800.0, 600.0), cell, cell, 0.0).unwrap();
     let header_bottom = geometry.header.1 + geometry.header.3;
     let painted = kettle_render::context_menu_row_rects(&menu, cell);
     assert_eq!(painted.len(), 8, "eight full rows");
@@ -473,8 +663,8 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
     assert_eq!(menu.visible_row_rect(8), None);
     // A window with room for one or two rows still paints and hits them.
     for height in [120.0, 150.0] {
-        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
-        let menu = picker_context_menu(list, (800.0, height), cell, 0.0).unwrap();
+        let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, Some(&[]), false, kettle_config::BroadcastDefault::default());
+        let menu = picker_context_menu(list, (800.0, height), cell, cell, 0.0).unwrap();
         let painted = kettle_render::context_menu_row_rects(&menu, cell);
         assert!(!painted.is_empty(), "height {height}");
         assert_eq!(painted[0].1.1, menu.anchor.1);
@@ -492,7 +682,7 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
 fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
     let bindings = kettle_config::keybinds::defaults();
     for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
-        let list = command_picker_list("", 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+        let list = command_picker_list("", 0, &bindings, &tr, None, Some(&[]), true, kettle_config::BroadcastDefault::default());
         let bound = kettle_config::palette::commands_for(kettle_config::BroadcastDefault::default())
             .into_iter()
             .filter(|(_, action)| {
@@ -503,13 +693,13 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
         assert!(bound >= 10, "{bound} bound commands");
         assert_eq!(list.rows.len(), bound);
         assert!(list.rows.iter().all(|row| row.enabled && !row.hint.is_empty()));
-        let full = command_picker_list("", 0, &bindings, &tr, None, &[], false, kettle_config::BroadcastDefault::default());
+        let full = command_picker_list("", 0, &bindings, &tr, None, Some(&[]), false, kettle_config::BroadcastDefault::default());
         assert!(full.rows.len() > list.rows.len());
         assert!(full.rows.iter().any(|row| row.hint.is_empty()));
         for query in ["", "tab", "split", "font"] {
-            let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
+            let entries = super::palette_view_entries(None, &tr, Some(&[]), kettle_config::BroadcastDefault::default(), &bindings, true);
             let ranked = kettle_config::palette::rank_entries(query, &entries, &tr);
-            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+            let list = command_picker_list(query, 0, &bindings, &tr, None, Some(&[]), true, kettle_config::BroadcastDefault::default());
             assert_eq!(list.rows.len(), ranked.len().max(1), "{query:?}");
             for (row, index) in list.rows.iter().zip(&ranked) {
                 assert_eq!(row.label, entries[*index].0.shown(&tr), "{query:?}");
@@ -538,7 +728,18 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
         .unwrap()
         .to_string();
     assert!(arm.contains("ws.palette_bound_only = matches!(action, Action::ShowKeybinds);"));
-    assert!(arm.contains("ws.palette_input = Some("));
+    // The arm opens the palette through the profile snapshot helper, which
+    // leaves the mode alone and sets the input.
+    assert!(arm.contains("profiles::open_profile_palette("));
+    let open_palette = include_str!("profiles.rs")
+        .split("pub(super) fn open_profile_palette(")
+        .nth(1)
+        .unwrap()
+        .split("\n}")
+        .next()
+        .unwrap();
+    assert!(open_palette.contains("ws.palette_input = Some("));
+    assert!(!open_palette.contains("palette_bound_only"));
 }
 
 /// Enter in the keyboard-shortcut list runs the row painted at the selection,
@@ -548,10 +749,10 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
 fn enter_in_the_shortcut_list_runs_the_selected_bound_row() {
     let bindings = kettle_config::keybinds::defaults();
     for tr in [EN_TEXT, kettle_i18n::Translator::new(kettle_i18n::Language::Es)] {
-        let entries = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, true);
-        let full = super::palette_view_entries(None, &tr, &[], kettle_config::BroadcastDefault::default(), &bindings, false);
+        let entries = super::palette_view_entries(None, &tr, Some(&[]), kettle_config::BroadcastDefault::default(), &bindings, true);
+        let full = super::palette_view_entries(None, &tr, Some(&[]), kettle_config::BroadcastDefault::default(), &bindings, false);
         for query in ["", "tab", "split", "font", "pane"] {
-            let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
+            let list = command_picker_list(query, 0, &bindings, &tr, None, Some(&[]), true, kettle_config::BroadcastDefault::default());
             let matched = kettle_config::palette::rank_entries(query, &entries, &tr).len();
             assert!(matched > 1, "{query:?} needs several rows");
             for (selected, row) in list.rows.iter().enumerate() {
@@ -810,6 +1011,7 @@ fn ssh_wheel_reaches_the_last_host_row_but_never_save() {
         open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
         surface,
         cell,
+        cell,
         0.0,
     )
     .unwrap();
@@ -846,11 +1048,12 @@ fn picker_wheel_never_selects_a_disabled_row() {
     let mut rows: Vec<ContextMenuRow> = (0..40).map(|i| row(format!("row-{i}"), true)).collect();
     rows.push(row("disabled".into(), false));
     let list = PickerList {
+        status: None,
         rows,
         selected: 0,
         footer: None,
     };
-    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0).unwrap();
+    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), (8.0, 16.0), 0.0).unwrap();
     let mut ws = ssh_launcher_with("");
     ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
     ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
@@ -870,6 +1073,7 @@ fn ssh_pointer_press_on_the_connect_row_matches_enter() {
     let menu = picker_context_menu(
         open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
         (800.0, 600.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -1044,6 +1248,7 @@ fn ssh_action_rows_take_a_click_on_the_row_itself() {
     let menu = picker_context_menu(
         open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
         (800.0, 600.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -1272,6 +1477,7 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
         context_menu: super::picker_context_menu(
             super::ssh_picker_list_for(&ws, &cfg, &tr).unwrap(),
             (800.0, 600.0),
+            (8.0, 16.0),
             (8.0, 16.0),
             0.0,
         ),

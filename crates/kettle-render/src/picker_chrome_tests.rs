@@ -31,6 +31,7 @@ fn row(index: usize) -> ContextMenuRow {
 fn picker(rows: usize, scroll_offset: usize) -> ContextMenu {
     let row_h = menu::row_height(CELL.1);
     ContextMenu {
+        status: None,
         picker_header_height: CELL.1 + menu::PICKER_HEADER_PAD,
         anchor: (176.0, 108.0),
         rows: (0..rows).map(row).collect(),

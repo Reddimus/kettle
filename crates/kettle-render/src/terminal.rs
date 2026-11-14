@@ -1571,7 +1571,7 @@ impl Renderer {
                 .round()
                 .min(cursor.clip.0 + cursor.clip.2);
             cursor.clip = (left, cursor.clip.1, (right - left).max(0.0), cursor.clip.3);
-            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            let offset = alacritty_terminal::term::grapheme_shaping_base_offset(text);
             if offset > 0
                 && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)
             {
