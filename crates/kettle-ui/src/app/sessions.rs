@@ -193,7 +193,7 @@ impl App {
                 && !should_restore_session(self.startup.restore, self.cfg.restore_session, false));
         if disabled {
             // Whatever is written next is a fresh snapshot, never a keep.
-            self.content_submitted.borrow_mut().take();
+            self.content_throttle.borrow_mut().reset();
             self.session_writer
                 .remove_content(self.startup.layout.clone());
         }
@@ -237,6 +237,8 @@ impl App {
         }
         let target = self.autosave_target();
         if target == SessionWriteTarget::Skip {
+            // Nothing is owed while nothing can be written.
+            self.content_throttle.borrow_mut().pending = false;
             return;
         }
         let Some(s) = Self::snapshot_session(
@@ -290,8 +292,13 @@ impl App {
                     .map(|w| (w.seq, w.mux.content_key_panes()))
                     .collect(),
             );
-            let mut submitted = self.content_submitted.borrow_mut();
-            if content_unchanged(kind, stale, submitted.as_ref(), &key) {
+            let write = self.content_throttle.borrow_mut().decide(
+                &key,
+                std::time::Instant::now(),
+                kind,
+                stale,
+            );
+            if !write {
                 crate::session::ContentJob::Keep
             } else {
                 let mut budget = crate::session_content::TEXT_BUDGET;
@@ -302,11 +309,10 @@ impl App {
                         .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
                         .collect(),
                 );
-                *submitted = Some(key);
                 crate::session::ContentJob::Write(snapshot)
             }
         } else {
-            self.content_submitted.borrow_mut().take();
+            self.content_throttle.borrow_mut().reset();
             crate::session::ContentJob::Remove
         };
         self.session_writer.submit_job(crate::session::SaveJob {
@@ -740,17 +746,85 @@ pub(super) enum SaveKind {
     Exit,
 }
 
-/// Whether a save can keep the output file instead of walking every grid:
-/// nothing the snapshot depends on changed since the last snapshot submitted
-/// (`submitted`), and the writer has not since found that file gone or
-/// replaced (`stale`). The exit save never keeps.
-pub(super) fn content_unchanged(
-    kind: SaveKind,
-    stale: bool,
-    submitted: Option<&crate::session_content::ContentKey>,
-    key: &crate::session_content::ContentKey,
-) -> bool {
-    kind != SaveKind::Exit && !stale && submitted == Some(key)
+/// While output keeps changing, how often its saved snapshot is replaced.
+///
+/// An agent pane whose spinner redraws all day, or a long build, changes the
+/// output on every sweep. Replacing an up-to-8 MiB file and syncing it twice
+/// every 2 seconds for that is about 1,800 writes an hour; every 30 seconds it
+/// is 120. A change that went quiet is still written within two sweeps (see
+/// [`ContentThrottle::decide`]), and the exit save writes whatever is owed.
+pub(super) const CONTENT_STREAM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// When a save takes a fresh output snapshot, given the last one submitted.
+#[derive(Debug, Default)]
+pub(super) struct ContentThrottle {
+    /// The key and time of the last snapshot handed to the writer. `None`
+    /// before the first one, so the first output after launch is written at
+    /// the first save rather than 30 seconds in.
+    written: Option<(crate::session_content::ContentKey, std::time::Instant)>,
+    /// The key the previous sweep saw.
+    swept: Option<crate::session_content::ContentKey>,
+    /// A snapshot is owed but was put off. Like a change, it asks for the
+    /// sweep's wake, so the write it is waiting for happens without another
+    /// event.
+    pub(super) pending: bool,
+}
+
+impl ContentThrottle {
+    /// Whether this save writes a fresh snapshot (`true`) or keeps the file.
+    ///
+    /// In order:
+    ///
+    /// 1. The exit save writes, and so does a save after the writer found
+    ///    the file was not the one it wrote (`stale`).
+    /// 2. So does the first save, and one whose [`ContentBinding`] changed:
+    ///    the layout the file is bound to, or what the settings let it hold.
+    ///    The pair has to stay matched, and a privacy change has to reach the
+    ///    disk at once.
+    /// 3. A key equal to the one written keeps the file.
+    /// 4. A sweep whose key equals the previous sweep's writes: the output
+    ///    has gone quiet for a whole interval.
+    /// 5. A save 30 seconds or more after the last write writes.
+    /// 6. Anything else is put off, and asks for one more sweep.
+    ///
+    /// A gesture (copy, a font size change) follows the same rules, apart
+    /// from rule 4, which only a sweep's fixed interval can judge: a burst of
+    /// gestures while output streams cannot bypass the interval.
+    ///
+    /// [`ContentBinding`]: crate::session_content::ContentBinding
+    pub(super) fn decide(
+        &mut self,
+        key: &crate::session_content::ContentKey,
+        now: std::time::Instant,
+        kind: SaveKind,
+        stale: bool,
+    ) -> bool {
+        let quiet = kind == SaveKind::Sweep && self.swept.as_ref() == Some(key);
+        if kind == SaveKind::Sweep {
+            self.swept = Some(key.clone());
+        }
+        let write = match &self.written {
+            _ if kind == SaveKind::Exit || stale => true,
+            None => true,
+            Some((written, _)) if written.binding() != key.binding() => true,
+            Some((written, _)) if written == key => false,
+            Some((_, at)) => quiet || now.saturating_duration_since(*at) >= CONTENT_STREAM_INTERVAL,
+        };
+        if write {
+            self.written = Some((key.clone(), now));
+        }
+        self.pending = !write
+            && self
+                .written
+                .as_ref()
+                .is_some_and(|(written, _)| written != key);
+        write
+    }
+
+    /// Forget what was written: the next save takes a fresh snapshot.
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Where a session snapshot should be written, if anywhere.

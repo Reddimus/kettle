@@ -783,7 +783,7 @@ impl App {
             restore_identity: None,
             session_load_failed: false,
             session_writer,
-            content_submitted: Default::default(),
+            content_throttle: Default::default(),
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.

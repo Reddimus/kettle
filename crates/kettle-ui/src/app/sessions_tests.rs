@@ -561,16 +561,208 @@ fn content_key_tracks_every_input() {
 /// always takes a fresh one.
 #[test]
 fn only_an_unchanged_key_keeps_the_output_file() {
-    use super::sessions::{SaveKind, content_unchanged};
-    let key = crate::session_content::ContentKey::new([0; 32], 1000, false, vec![]);
-    let other = crate::session_content::ContentKey::new([1; 32], 1000, false, vec![]);
+    use super::sessions::{ContentThrottle, SaveKind};
+    let t0 = std::time::Instant::now();
+    let key = content_key(0, 1);
     for kind in [SaveKind::Gesture, SaveKind::Sweep] {
-        assert!(content_unchanged(kind, false, Some(&key), &key));
-        assert!(!content_unchanged(kind, false, Some(&other), &key));
-        assert!(!content_unchanged(kind, false, None, &key), "nothing submitted yet");
-        assert!(!content_unchanged(kind, true, Some(&key), &key), "the file went stale");
+        let mut throttle = ContentThrottle::default();
+        assert!(throttle.decide(&key, t0, kind, false), "nothing submitted yet");
+        assert!(!throttle.decide(&key, t0, kind, false), "unchanged");
+        assert!(throttle.decide(&key, t0, kind, true), "the file went stale");
+        assert!(!throttle.pending);
     }
-    assert!(!content_unchanged(SaveKind::Exit, false, Some(&key), &key));
+    let mut throttle = ContentThrottle::default();
+    assert!(throttle.decide(&key, t0, SaveKind::Gesture, false));
+    assert!(throttle.decide(&key, t0, SaveKind::Exit, false));
+}
+
+/// A key for one pane in one window, with layout `layout` and output
+/// generation `output`.
+fn content_key(layout: u8, output: u64) -> crate::session_content::ContentKey {
+    content_key_with(layout, 1000, false, output)
+}
+
+fn content_key_with(
+    layout: u8,
+    lines: usize,
+    remote: bool,
+    output: u64,
+) -> crate::session_content::ContentKey {
+    crate::session_content::ContentKey::new(
+        [layout; 32],
+        lines,
+        remote,
+        vec![(
+            1,
+            vec![crate::session_content::PaneContentKey {
+                id: 1,
+                output,
+                geometry: 0,
+                remote: false,
+            }],
+        )],
+    )
+}
+
+/// While output keeps changing, a sweep replaces its snapshot at most every
+/// 30 seconds. Once it stops, the next two sweeps write it: the first sees
+/// it changed since the sweep before, the second sees it still.
+#[test]
+fn streaming_content_waits_30_s_and_writes_once_quiet() {
+    use super::sessions::{CONTENT_STREAM_INTERVAL, ContentThrottle, SaveKind};
+    assert_eq!(CONTENT_STREAM_INTERVAL, std::time::Duration::from_secs(30));
+    let t0 = std::time::Instant::now();
+    let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+    let sweep = SaveKind::Sweep;
+
+    // Truth table, from a write at 0 with output generation 1.
+    let fresh = || {
+        let mut throttle = ContentThrottle::default();
+        assert!(throttle.decide(&content_key(0, 1), at(0), sweep, false));
+        throttle
+    };
+    let mut throttle = fresh();
+    assert!(!throttle.decide(&content_key(0, 2), at(2), sweep, false), "streaming");
+    assert!(throttle.pending, "a write put off asks for the next sweep");
+    assert!(throttle.decide(&content_key(0, 2), at(4), sweep, false), "quiet");
+    assert!(!throttle.pending);
+    let mut throttle = fresh();
+    for (secs, output) in [(2, 2), (4, 3), (28, 4)] {
+        assert!(!throttle.decide(&content_key(0, output), at(secs), sweep, false));
+    }
+    assert!(throttle.decide(&content_key(0, 5), at(30), sweep, false), "30 s since");
+    let mut throttle = fresh();
+    assert!(!throttle.decide(&content_key(0, 1), at(40), sweep, false), "unchanged");
+    assert!(!throttle.pending, "nothing is owed");
+
+    // 70 s of output that changes before every 2 s sweep, then none.
+    let mut throttle = ContentThrottle::default();
+    let mut writes = Vec::new();
+    for secs in (0..=70).step_by(2) {
+        if throttle.decide(&content_key(0, secs), at(secs), sweep, false) {
+            writes.push(secs);
+        }
+    }
+    assert_eq!(writes, [0, 30, 60], "at most three writes while it streams");
+    let mut settled = Vec::new();
+    for secs in (72..=110).step_by(2) {
+        if throttle.decide(&content_key(0, 70), at(secs), sweep, false) {
+            settled.push(secs);
+        }
+    }
+    assert_eq!(settled, [72], "one write within two sweeps of the last output");
+    assert!(!throttle.pending);
+}
+
+/// The interval is for output only. A layout change, or a change to what
+/// the settings let the file hold, writes at once: the file must stay bound
+/// to the layout, and a privacy change must reach the disk.
+#[test]
+fn layout_and_privacy_changes_bypass_the_content_throttle() {
+    use super::sessions::{ContentThrottle, SaveKind};
+    let t0 = std::time::Instant::now();
+    let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+    for kind in [SaveKind::Sweep, SaveKind::Gesture] {
+        for (name, changed) in [
+            ("layout", content_key_with(1, 1000, false, 2)),
+            ("restore-scrollback-lines", content_key_with(0, 10, false, 2)),
+            ("restore-scrollback-remote", content_key_with(0, 1000, true, 2)),
+        ] {
+            let mut throttle = ContentThrottle::default();
+            assert!(throttle.decide(&content_key(0, 1), at(0), kind, false));
+            assert!(!throttle.decide(&content_key(0, 2), at(1), kind, false));
+            assert!(throttle.decide(&changed, at(2), kind, false), "{name} waited");
+        }
+    }
+}
+
+/// The exit save writes what the interval put off.
+#[test]
+fn the_exit_save_writes_pending_content() {
+    use super::sessions::{ContentThrottle, SaveKind};
+    let t0 = std::time::Instant::now();
+    let at = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+    let mut throttle = ContentThrottle::default();
+    assert!(throttle.decide(&content_key(0, 1), at(0), SaveKind::Sweep, false));
+    assert!(!throttle.decide(&content_key(0, 2), at(5), SaveKind::Sweep, false));
+    assert!(throttle.pending);
+    assert!(throttle.decide(&content_key(0, 2), at(6), SaveKind::Exit, false));
+    assert!(!throttle.pending);
+}
+
+/// A gesture while output streams (a copy, a font size change, a held key
+/// repeating one) follows the interval too. Two of them with no output
+/// between are not "quiet": only the sweep's fixed interval can say that.
+#[test]
+fn gestures_do_not_bypass_the_content_throttle() {
+    use super::sessions::{ContentThrottle, SaveKind};
+    let t0 = std::time::Instant::now();
+    let at = |millis: u64| t0 + std::time::Duration::from_millis(millis);
+    let mut throttle = ContentThrottle::default();
+    assert!(throttle.decide(&content_key(0, 1), at(0), SaveKind::Sweep, false));
+    let mut writes = 0;
+    for step in 1..290u64 {
+        let output = step / 3 + 2;
+        writes += usize::from(throttle.decide(
+            &content_key(0, output),
+            at(step * 100),
+            SaveKind::Gesture,
+            false,
+        ));
+    }
+    assert_eq!(writes, 0, "gestures wrote inside the interval");
+    assert!(throttle.pending);
+    assert!(throttle.decide(&content_key(0, 99), at(30_000), SaveKind::Gesture, false));
+}
+
+/// The sweep, its wake and the throttle together, on a fake clock: output
+/// every 200 ms for 70 s, then none. The saved output is never more than one
+/// interval plus one sweep behind while it streams, it settles within two
+/// sweeps, and no wake is left once it has.
+#[test]
+fn streaming_output_is_written_every_30_s_and_settles_within_two_sweeps() {
+    use super::sessions::{ContentThrottle, SaveKind, SessionSweep};
+    let t0 = std::time::Instant::now();
+    let at = |millis: u64| t0 + std::time::Duration::from_millis(millis);
+    let millis = |instant: std::time::Instant| instant.duration_since(t0).as_millis() as u64;
+    let mut sweep = SessionSweep::default();
+    let mut throttle = ContentThrottle::default();
+    let mut output = 0;
+    let mut writes = Vec::new();
+    let mut deadline = None;
+    let mut next_event = Some(0u64);
+    loop {
+        let now = match (next_event, deadline) {
+            (Some(event), Some(wake)) if wake < event => wake,
+            (Some(event), _) => event,
+            (None, Some(wake)) => wake,
+            (None, None) => break,
+        };
+        assert!(now < 200_000, "the wake never settled");
+        if next_event == Some(now) {
+            output += 1;
+            sweep.touch();
+            next_event = (now < 70_000).then_some(now + 200);
+        }
+        if sweep.take_due(at(now), true)
+            && throttle.decide(&content_key(0, output), at(now), SaveKind::Sweep, false)
+        {
+            writes.push((now, output));
+        }
+        deadline = sweep
+            .deadline(at(now), throttle.pending, || true)
+            .map(millis);
+    }
+    let streaming: Vec<_> = writes.iter().filter(|(time, _)| *time <= 70_000).collect();
+    assert!(streaming.len() <= 3, "{writes:?}");
+    for pair in streaming.windows(2) {
+        assert!(pair[1].0 - pair[0].0 >= 30_000, "{writes:?}");
+        assert!(pair[1].0 - pair[0].0 <= 32_000, "{writes:?}");
+    }
+    let last = *writes.last().unwrap();
+    assert_eq!(last.1, output, "the last output was never written: {writes:?}");
+    assert!(last.0 <= 70_000 + 4_000, "settled only at {} ms", last.0);
+    assert_eq!(writes.len(), streaming.len() + 1, "{writes:?}");
 }
 
 /// Source guards for the save: the key is read before any grid is walked,
@@ -586,7 +778,7 @@ fn the_content_key_is_read_before_the_grids_and_decides_the_walk() {
         .expect("save_session_as body");
     let key = save.find("w.mux.content_key_panes()").unwrap();
     let decision = save
-        .find("if content_unchanged(kind, stale, submitted.as_ref(), &key) {")
+        .find("let write = self.content_throttle.borrow_mut().decide(")
         .unwrap();
     let walk = save.find("w.mux.snapshot_content(&self.cfg, &mut budget)").unwrap();
     assert!(key < decision && decision < walk, "the key must decide the walk");
@@ -607,4 +799,20 @@ fn the_content_key_is_read_before_the_grids_and_decides_the_walk() {
         .and_then(|body| body.split("\n    }\n").next())
         .unwrap();
     assert!(exit.contains("self.save_session_as(&ws, SaveKind::Exit);"));
+}
+
+/// A write the throttle put off asks for the sweep's wake, as a change does:
+/// otherwise output that stops streaming would wait for the next event.
+#[test]
+fn a_put_off_content_write_asks_for_the_sweeps_wake() {
+    let src = production_source();
+    let app = src
+        .split("fn about_to_wait(&mut self")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("about_to_wait body");
+    let flat: String = app.split_whitespace().collect();
+    assert!(flat.contains(
+        "letpending=self.content_throttle.borrow().pending;letsession_wake=sweep.deadline(std::time::Instant::now(),pending,"
+    ));
 }

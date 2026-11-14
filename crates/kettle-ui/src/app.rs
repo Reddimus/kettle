@@ -376,9 +376,8 @@ pub struct App {
     /// An unread restore snapshot must survive automatic saves for this launch.
     session_load_failed: bool,
     session_writer: crate::session::SessionWriter,
-    /// The content key of the last output snapshot handed to the writer, or
-    /// `None` when the next save must take a fresh one.
-    content_submitted: std::cell::RefCell<Option<crate::session_content::ContentKey>>,
+    /// When the next save takes a fresh output snapshot.
+    content_throttle: std::cell::RefCell<ContentThrottle>,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -1162,7 +1161,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Once per app, after every window's turn: a second window must not
         // re-arm the wake the first one's sweep just consumed.
         let mut sweep = std::mem::take(&mut self.session_sweep);
-        let session_wake = sweep.deadline(std::time::Instant::now(), false, || {
+        let pending = self.content_throttle.borrow().pending;
+        let session_wake = sweep.deadline(std::time::Instant::now(), pending, || {
             self.session_autosave_eligible()
         });
         self.session_sweep = sweep;

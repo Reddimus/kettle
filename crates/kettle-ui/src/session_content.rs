@@ -80,6 +80,10 @@ impl ContentKey {
             windows,
         }
     }
+
+    pub(crate) fn binding(&self) -> ContentBinding {
+        self.binding
+    }
 }
 
 pub(crate) fn session_hash(session: &Session) -> [u8; 32] {
