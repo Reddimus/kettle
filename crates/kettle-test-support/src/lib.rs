@@ -1048,19 +1048,34 @@ mod sweep_tests {
 pub const OS_CTL_DIR_ENV: &str = "KETTLE_TEST_OS_CTL_DIR";
 
 /// Keep a `kettle` a test starts away from this account's own control
-/// registry (`~/.local/state/kettle/ctl`, or `/run/user/<uid>/kettle/ctl`)
-/// and from any Kettle the test runs inside. Whatever it runs as (`kettle
-/// mcp`, `kettle ctl`, `kettle show`, the GUI), it registers, publishes its
-/// alias, prunes and looks for servers only under `root`, a private
-/// directory that must outlive the child. Its registry is `root/run/kettle/
-/// ctl` through `XDG_RUNTIME_DIR` on Unix (set that after this call to move
-/// it), and `root/os-ctl` stands in for the directory the OS names. Call it
-/// after any `env_clear`, which would undo it. On Windows the registry
-/// follows `LOCALAPPDATA`, which this leaves alone.
+/// registry (`~/.local/state/kettle/ctl`, `/run/user/<uid>/kettle/ctl`, or
+/// `%LOCALAPPDATA%\kettle\ctl`) and from any Kettle the test runs inside.
+/// Whatever it runs as (`kettle mcp`, `kettle ctl`, `kettle show`, the GUI),
+/// it registers, publishes its alias, prunes and looks for servers only
+/// under `root`, an absolute private directory that must outlive the child.
+///
+/// `root/os-ctl` stands in for the directory the OS names
+/// ([`OS_CTL_DIR_ENV`]). On Unix the registry is `root/run/kettle/ctl`,
+/// through `XDG_RUNTIME_DIR`; set that after this call to move it. On
+/// Windows Kettle takes its registry from the variable too, so the registry
+/// is `root/os-ctl` itself. `LOCALAPPDATA` stays the account's there, and
+/// with it everything else Kettle keeps in it, presence claims included.
+/// Call this after any `env_clear`, which would undo it.
+///
+/// # Panics
+///
+/// When `root` is not absolute: Kettle reads any other value of the variable
+/// as "no such directory", which on Windows would leave the registry where
+/// it was.
 pub fn isolate_ctl_registry<'a>(
     command: &'a mut std::process::Command,
     root: &Path,
 ) -> &'a mut std::process::Command {
+    assert!(
+        root.is_absolute(),
+        "the isolation root must be absolute: {}",
+        root.display()
+    );
     command.env(OS_CTL_DIR_ENV, root.join("os-ctl"));
     #[cfg(unix)]
     command.env("XDG_RUNTIME_DIR", root.join("run"));
@@ -1130,22 +1145,33 @@ mod tests {
         super::run_alone_in_child("tests::no_such_test", || {});
     }
 
-    /// An isolated `kettle` gets its OS-named registry directory, and on Unix
-    /// its whole registry, under the test's own root.
+    /// An isolated `kettle` gets the stand-in for its OS-named registry
+    /// directory under the test's own root: on Unix its registry too, through
+    /// `XDG_RUNTIME_DIR`, and on Windows nothing else, since Kettle takes the
+    /// registry from that one variable there and `LOCALAPPDATA` must stay.
     #[test]
     fn an_isolated_kettle_registers_under_the_tests_root() {
-        let root = std::path::Path::new("/private/root");
+        let root = std::env::temp_dir().join("kettle-isolated-root");
         let mut command = std::process::Command::new("kettle");
-        super::isolate_ctl_registry(&mut command, root);
+        super::isolate_ctl_registry(&mut command, &root);
         let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
         let set = |name: &str| envs.get(std::ffi::OsStr::new(name)).copied().flatten();
-        assert_eq!(
-            set(super::OS_CTL_DIR_ENV),
-            Some(root.join("os-ctl").as_os_str())
-        );
+        let stand_in = root.join("os-ctl");
+        assert!(stand_in.is_absolute());
+        assert_eq!(set(super::OS_CTL_DIR_ENV), Some(stand_in.as_os_str()));
         if cfg!(unix) {
             assert_eq!(set("XDG_RUNTIME_DIR"), Some(root.join("run").as_os_str()));
         }
+        assert_eq!(envs.len(), if cfg!(unix) { 2 } else { 1 });
+    }
+
+    /// A relative root would name no directory at all to Kettle, and on
+    /// Windows leave its registry in place, so it is refused.
+    #[test]
+    #[should_panic(expected = "must be absolute")]
+    fn a_relative_isolation_root_is_refused() {
+        let mut command = std::process::Command::new("kettle");
+        super::isolate_ctl_registry(&mut command, std::path::Path::new("relative/root"));
     }
 
     #[test]

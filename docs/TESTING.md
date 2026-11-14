@@ -575,7 +575,9 @@ smokes, and every build reads it, since smokes drive release builds.
 
 - Integration tests start `kettle` through
   `kettle_test_support::isolate_ctl_registry(&mut command, root)`, which sets
-  it to `root/os-ctl` and `XDG_RUNTIME_DIR` to `root/run`. Call it after any
+  it to `root/os-ctl` and, on Unix, `XDG_RUNTIME_DIR` to `root/run`. On
+  Windows the registry is then `root/os-ctl` itself; `LOCALAPPDATA` stays the
+  account's, and with it Kettle's presence claims. Call it after any
   `env_clear`. `tests_isolate_every_kettle_that_reaches_the_control_registry`
   refuses a test file that runs `kettle mcp`, `ctl`, `show` or `agent-setup`
   and starts a `kettle` it does not isolate.
