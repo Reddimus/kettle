@@ -3076,3 +3076,6 @@ plural = "count"
 
 [messages.a11y_main_menu]
 context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the ≡ button in Kettle's GNOME header bar, the window's primary menu (new tabs, profiles, layouts, Settings, About)."
+
+[messages.a11y_header_find]
+context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the magnifier button in Kettle's GNOME header bar, beside the ≡ main menu. It opens Find (search in the terminal's output and history) and closes it again; screen readers also report it pressed while Find is open. The tooltip adds the bound shortcut after it. Needs screen-reader second pass."

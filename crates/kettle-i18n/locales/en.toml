@@ -1042,6 +1042,7 @@ a11y_window_close = "Close window"
 
 
 scrollback_a11y_position = "Scrollback"
+a11y_header_find = "Find"
 
 [completion_matches]
 one = "{count} match"
