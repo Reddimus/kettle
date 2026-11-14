@@ -24,6 +24,8 @@ pub(super) fn tab_bar_geometry_json(
         "insert_marker": bar.insert_marker,
         "dock_highlighted": bar.insert_marker.is_some(),
         "band": rect_json(bar.band),
+        // The GNOME header draws its only tab as the window title.
+        "lone_title": bar.lone_title,
         // The overflow arrows, back then forward (`‹ ›` across,
         // `⌃ ⌄` down a side bar); zero-sized while it all fits.
         "scroll_left": rect_json(bar.scroll_left),
@@ -2495,7 +2497,9 @@ impl App {
             ws.pressed_window_control = (bcode == 0).then_some(action);
             return true;
         }
-        if ws.linux_titlebar && empty_titlebar_space(&bar, px, py) {
+        // Empty header space and a lone title move the window natively;
+        // an agent's press there does nothing else.
+        if ws.linux_titlebar && linux_title_space(&bar, px, py) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {

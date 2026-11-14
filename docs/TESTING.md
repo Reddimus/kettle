@@ -3457,7 +3457,15 @@ winit feature drift. The existing portal fixture also covers GNOME button-layout
 snapshots, live changes and owner replacement on Linux. Renderer tests cover
 28-point button geometry, rounded hover/pressed fills and
 4.5:1 focused / 3:1 unfocused glyph contrast across bundled themes. Header tests
-also cover narrow control lanes, localized tooltips and ctl geometry parity.
+also cover narrow control lanes, localized tooltips and ctl geometry parity,
+when the lone tab is drawn as the title, presses on that title (drag, 400 ms
+double-click, window menu, ignored middle press) beside two-tab presses left to
+the tab strip, and the leading `+` agreeing across hit tests, AccessKit and ctl
+at 1x and 2x with left-side buttons. Renderer tests check that a lone title
+paints no tab surface, accent or hover fill and keeps 4.5:1 focused and 3:1
+unfocused against the header in TokyoNight Night and Kettle Day, the header
+hairline's 1.5:1 floor and its break under an active tab, the `+` tooltip
+anchor, and that `≡` is drawn as a 14 by 12 point icon at every font size.
 Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
 host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
 and runs the same suites on Linux, where the header code is built. Cross-clippy with
@@ -3466,7 +3474,8 @@ std and a Linux C compiler/sysroot for native dependencies.
 
 Live acceptance still requires GNOME/Mutter and KDE/KWin Wayland sessions:
 check actual decoration negotiation, fractional scale, minimize/restore/close,
-window menus, drag/double-click, all resize edges, maximize/tile/fullscreen
+window menus, drag/double-click on empty space and on a lone title, one tab to
+two and back, all resize edges, maximize/tile/fullscreen
 transitions, inactive colors, localized tooltips, AT-SPI button activation,
 IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless

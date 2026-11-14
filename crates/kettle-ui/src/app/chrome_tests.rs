@@ -8,7 +8,7 @@ fn horizontal_single_tab_controls_use_count_and_physical_hover() {
         .split_once("pub(super) fn title_edit_rect(")
         .unwrap()
         .0;
-    assert!(horizontal.contains("let show_controls = n > 1 || hovered;"));
+    assert!(horizontal.contains("let show_controls = n > 1 || (hovered && !lone_title);"));
     assert!(horizontal.contains("rect,\n                    show_controls,"));
     assert!(horizontal.contains("rect_contains(rect, p.x as f32, p.y as f32)"));
 }

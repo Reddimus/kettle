@@ -132,9 +132,9 @@ pub use overlays::{
     toast_text_rows, update_toast_geometry,
 };
 use overlays::{
-    MAIN_MENU_GLYPH, MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH,
-    context_menu_panel_width, media_paste_receipt_text, menu_chrome_quads, push_input_bar,
-    scroll_arrow_glyphs, toast_buffer_text,
+    MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
+    media_paste_receipt_text, menu_chrome_quads, push_input_bar, scroll_arrow_glyphs,
+    toast_buffer_text,
 };
 #[cfg(test)]
 use overlays::{
@@ -1550,15 +1550,14 @@ impl Renderer {
             // strip-bottom row for vertical layouts).
             // Paint the union of [▾ | +] when the dropdown arrow is
             // present so there's no unpainted gap behind it; otherwise just the
-            // `+` button.
+            // `+` button. The GNOME header's `+` and `≡` sit at opposite ends.
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
-            let (bx, bw) = if mw > 0.0 {
-                (mx, nx + nw - mx)
-            } else {
-                (nx, nw)
-            };
-            quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
+            for (x, y, w, h) in
+                tab_strip::new_tab_control_fills(tabbar.new_tab, tabbar.new_tab_menu)
+            {
+                quads.push(rect(x, y, w, h, chrome_strip_bg, 1.0));
+            }
             let accent = if tabbar.broadcast {
                 theme.palette[3]
             } else {
@@ -1636,6 +1635,31 @@ impl Renderer {
                         self.scale,
                         &mut self.settings_gear_mask,
                     );
+                }
+                // The GNOME header's `≡` is drawn too, as GNOME's 16 px
+                // symbolic icon, in the ink its glyph had: the accent while
+                // hovered, at 4.5:1 focused and 3:1 unfocused.
+                if tab_strip::main_menu_icon(tabbar) {
+                    let (ink, background) = if tabbar.hovered_new_tab_menu {
+                        (
+                            accent,
+                            chrome::strip_hover(
+                                chrome_strip_bg,
+                                theme.foreground,
+                                tabbar.pressed_new_tab_menu,
+                            ),
+                        )
+                    } else {
+                        (theme.foreground, chrome_strip_bg)
+                    };
+                    let ink = self
+                        .chrome_colors
+                        .tab_text(ink, background, overlay.window_focused);
+                    for (x, y, w, h) in
+                        tab_strip::main_menu_icon_bars(tabbar.new_tab_menu, self.scale)
+                    {
+                        quads.push(rect(x, y, w, h, ink, 1.0));
+                    }
                 }
             }
             // Drag-in-progress ghost. While the user holds a
@@ -2709,18 +2733,14 @@ impl Renderer {
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // The `▾` dropdown arrow, shaped in its own buffer so it
-            // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
-            if tabbar.new_tab_menu.2 > 0.0 {
+            // lands inside `new_tab_menu` (left of `+`). Skipped when disabled,
+            // and in the GNOME header, whose `≡` is drawn, not shaped.
+            if tabbar.new_tab_menu.2 > 0.0 && !tab_strip::main_menu_icon(tabbar) {
                 self.new_tab_arrow_buffer.set_metrics(control_metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
-                // Constant glyph, shaped once per font family: GNOME's
-                // primary-menu sign where Kettle draws the header bar.
-                let glyph = if tabbar.window_controls.is_empty() {
-                    NEW_TAB_MENU_GLYPH
-                } else {
-                    MAIN_MENU_GLYPH
-                };
+                // Constant glyph, shaped once per font family.
+                let glyph = NEW_TAB_MENU_GLYPH;
                 if self.new_tab_arrow_text != glyph {
                     self.new_tab_arrow_buffer.set_text(
                         glyph,
@@ -4343,15 +4363,17 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
+                // A lone GNOME-header title sits on the header, not a tab.
+                let (painted_active, painted_hover) = tab_strip::tab_paint_state(tabbar, s);
                 let tab_background = tab_strip::tab_title_background(
-                    s.active,
-                    tabbar.hovered_tab_idx == Some(s.idx),
+                    painted_active,
+                    painted_hover,
                     cfg.tab_bar_pos.is_vertical(),
                     default_bg,
                     chrome_strip_bg,
                     theme.foreground,
                 );
-                let tab_backing = if s.active && !cfg.tab_bar_pos.is_vertical() {
+                let tab_backing = if painted_active && !cfg.tab_bar_pos.is_vertical() {
                     active_tab_backing
                 } else {
                     color::Backing::opaque(tab_background)
@@ -4573,8 +4595,9 @@ impl Renderer {
                 custom_glyphs: &[],
             });
             // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
-            // of `+`). Only present when the dropdown is enabled.
-            if tabbar.new_tab_menu.2 > 0.0 {
+            // of `+`). Only present when the dropdown is enabled; the GNOME
+            // header's `≡` is drawn with the strip's quads instead.
+            if tabbar.new_tab_menu.2 > 0.0 && !tab_strip::main_menu_icon(tabbar) {
                 let (ax, ay, aw, ah) = tabbar.new_tab_menu;
                 let arrow_fg = if tabbar.hovered_new_tab_menu {
                     toolbar_accent
