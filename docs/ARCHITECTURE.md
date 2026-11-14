@@ -5467,9 +5467,31 @@ warning colour's (a window's accent can be the theme's red); then they take
 the first palette colour of another hue, so the recommended and the
 destructive choice never look alike. The summary's counts share a line while
 they fit, and like the policy line drop their separator where a line breaks.
-The dialog adds no IME caret. Activating the link runs the same modal reset as
-opening Settings, which drops the pending paste, then focuses the
-`paste-protection` row. Access keys compare the logical key only.
+The dialog adds no IME caret.
+
+Keys are decided by one function, `confirm_key_outcome`, over the dialog, the
+logical key, the modifiers and three flags (`vim-menu-nav`, stacked, macOS);
+`confirm_dialog_key` only carries the outcome out. Access keys need Alt and
+compare the logical key only. A bare letter never sends the text as it is:
+`y` activates only a sanitising recommended button. What a stop does is
+`confirm_stop_action`: Cancel, the Settings link, or the dialog's action for
+that button. The link calls the Cancel routine itself and then opens Settings
+on the `paste-protection` row. Cancel is `cancel_confirm_dialog_in`: it drops
+the dialog, and with it the pending text, target and broadcast consent. It
+does not touch the paste queue. Queued input that comes ready while any
+confirmation is open is discarded by `drain_queued_pastes`
+(`confirmation_refuses_queued_input`); what is still waiting afterwards is
+judged on its own. `close_all_modals` calls the same Cancel routine, so the
+link behaved this way before it was made explicit.
+
+Findings are mode-aware through the encoder's own predicate,
+`input::bracketed_paste_drops`: a row is marked removed when the encoder
+strips that kind for every recipient (the markers always; ESC and the signal
+bytes when no recipient is unbracketed), and the raw Paste is destructive
+when a control survives it or the text carries an end marker. Bidirectional
+formatting characters are a finding, counted with the controls and removed
+by `without_controls`; `PasteProtection::confirms` does not ask for them
+alone. `ui_geometry`'s confirmation object is built by `confirmation_json`.
 Path pastes retain their stricter rejection of control characters in filenames.
 
 OSC 52 operations remain ordered in the terminal clipboard journal. The UI
@@ -5477,7 +5499,11 @@ records successful platform clipboard writes in per-pane notice state, with a
 five-second successful-copy interval and separate lifetime read/write denial
 latches. A notice names the pane's foreground program through the close
 question's label (`argv[0]`'s base name, sanitised, at most 32 columns, `None`
-for an interactive shell), looked up only when a notice is about to show. The pane's dismissible notice uses the persistent notice painter and
+for an interactive shell), looked up only when a notice is about to show,
+after the throttle. The foreground program is not necessarily the sender (a
+background job in the pane can write OSC 52), so the text says "while NAME
+was in the foreground". A refusal names the Settings row by its translated
+label and category. The pane's dismissible notice uses the persistent notice painter and
 its shared word wrapper, geometry, hit tests and polite AccessKit status. Held
 process banners take precedence. Notice content contains counts and policy text,
 never clipboard contents, and never moves terminal or IME geometry.

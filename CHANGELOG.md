@@ -240,9 +240,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   policy is Always. The preview spells each control character in ASCII inside
   an outlined chip (`ESC`, `^C`, `CSI`) instead of a one-cell control picture,
   shows a tab as plain space, and moves to the most serious control when that
-  lies beyond the first lines, so a harmless first line cannot hide an end
-  code below it. Up to four findings say what each kind of control does, with
-  backspace and delete on separate rows, and counts of zero are gone. The
+  lies beyond the first lines, so nothing before it (a harmless line, a run
+  of tabs or of direction overrides) can hide an end code below it. Up to
+  four findings say what each kind of control does in the current mode, with
+  backspace and delete on separate rows: one that Kettle removes whichever
+  button is chosen says so (the end code always; ESC and the signal keys
+  inside a bracketed paste). Text-direction formatting characters such as
+  U+202E are listed and counted, and Paste without controls removes them.
+  Counts of zero are gone. The
   four choices share one row when the window is wide enough and stack edge to
   edge otherwise; only the recommended one keeps the accent color. A policy
   line shows the setting in force with a "Paste settings…" link, which pastes
@@ -256,9 +261,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   read).
 
 - OSC 52 notices name the program in the pane's foreground when Kettle can
-  tell which it is, on macOS and Linux: "vim copied 42 characters to the
-  clipboard". Only the program's name is shown, sanitised and at most 32
-  columns wide; a shell at its prompt is not named.
+  tell which it is, on macOS and Linux: "A program copied 42 characters to
+  the clipboard while vim was in the foreground". Kettle sees the pane, not
+  the sender, so the notice does not claim the foreground program sent the
+  request. Only the program's name is shown, sanitised and at most 32 columns
+  wide; a shell at its prompt is not named. A refused read or copy now points
+  at Settings > Behavior > Clipboard access by programs instead of listing
+  config values.
 
 - Links now highlight under the pointer and show their destination and opening
   gesture in a status pill. Quick-select hints include on-screen help, shorter
@@ -715,20 +724,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   even where bracketed paste is on, as such text was made to escape it. Kettle
   still removes the marker whichever choice is made.
 
-- The one-character form of the bracketed-paste end marker (U+009B followed
-  by `201~`) opened the Confirm paste dialog and was then sent on by Paste
-  and by Paste as one line. Both markers are now removed in that form too, in
-  every mode.
-
-- Inside a bracketed paste Kettle now drops the bytes a terminal turns into a
-  signal before the program reads them: 0x03 (interrupt), 0x1A (suspend) and
-  0x1C (quit), and 0x19 (delayed suspend) on macOS. A shell interrupted in the
-  middle of a paste left bracketed mode and ran the rest as typed input.
-  Alacritty, Ghostty and VTE neutralize the interrupt byte in pasted text too.
-
-- With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
-  when it held control characters. It now takes the recommended choice, Paste
-  without controls, whenever the text has controls.
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
@@ -744,6 +739,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- The one-character form of the bracketed-paste end marker (U+009B followed
+  by `201~`) opened the Confirm paste dialog and was then sent on by Paste
+  and by Paste as one line. Both markers are now removed in that form too, in
+  every mode.
+
+- Inside a bracketed paste Kettle now drops the bytes a terminal turns into a
+  signal before the program reads them: 0x03 (interrupt), 0x1A (suspend) and
+  0x1C (quit), and 0x19 (delayed suspend) on macOS. A shell interrupted in the
+  middle of a paste left bracketed mode and ran the rest as typed input.
+  Alacritty, Ghostty and VTE neutralize the interrupt byte in pasted text too.
+
+- With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
+  when it held control characters. A bare letter can be typed ahead of the
+  dialog, so `y` now only ever takes the sanitising choice, Paste without
+  controls. When the recommended choice is the plain Paste (multi-line text
+  with no control characters), `y` does nothing: press Enter on the focused
+  button, or use its access key.
 
 - Up and Down in a confirmation whose buttons are stacked move focus from one
   button to the next. They only scrolled the text, which did nothing visible

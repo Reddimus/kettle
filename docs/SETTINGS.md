@@ -48,8 +48,9 @@ With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
-answer confirm dialogs; in the Confirm paste dialog `y` takes the recommended
-choice, which is Paste without controls whenever the text has controls. Text-input overlays with a selection (palette, search,
+answer confirm dialogs. In the Confirm paste dialog `y` only ever takes Paste
+without controls; when the recommended choice is the plain Paste it does
+nothing, so a letter typed ahead cannot send the text as it is. Text-input overlays with a selection (palette, search,
 layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
 letters keep typing. Turn it off with `vim-menu-nav = false`.
 

@@ -1080,8 +1080,9 @@ allows both. A successful write shows a character-count notice at most once
 every five seconds per pane. Set
 .B osc52\-notify = false
 to silence successful-copy notices. Blocked reads and writes each explain the
-policy once per pane. A notice names the program in the pane's foreground when
-it is known. Notices expose a polite screen-reader status and a
+policy once per pane and point at the Settings row. A notice names the program
+in the pane's foreground when it is known; that program is not necessarily the
+one that sent the request. Notices expose a polite screen-reader status and a
 Dismiss action.
 .
 .SH ENVIRONMENT

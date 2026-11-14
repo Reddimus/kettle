@@ -3235,7 +3235,14 @@ flattening and ESC neutralization, the C1 markers and each signal byte the
 encoder drops, the dialog's reason sentences, findings rows, preview anchoring
 on a late end marker, access keys (the typed letter only; none on macOS),
 focus order with the Settings link, `y` under `vim-menu-nav`, and the AccessKit
-tree against the layout. `cargo test -p kettle-render confirm` covers the row
+tree against the layout. Keys are tested through `confirm_key_outcome` with
+real `Key` values, and what a key sends through a pane with captured input;
+`ui_geometry` privacy is tested by serialising a dialog whose every text
+field holds a canary. Two source-order guards remain where no seam reaches
+`App`: the three calls the Settings link makes, and the paste entry points.
+`every_paste_button_projects_its_own_flag_and_sends_its_own_text` is the
+detector for an AArch64 code-generation fault at `opt-level = 1` (see
+`ConfirmButton::destructive`); it only detects on arm64 hosts. `cargo test -p kettle-render confirm` covers the row
 and stack arrangements at several widths and scales, the pinned policy line,
 the height cap, chips, access-key underlines and token contrast in every
 theme; one of its tests shapes text with the system fonts. `cargo test -p

@@ -150,15 +150,21 @@ policy is Always. Below that it shows:
   is spelled in ASCII inside an outlined chip: `ESC`, `BEL`, `DEL`, `^C`,
   `CSI`, `U+202E`. A tab is shown as spaces and is not flagged. When the most
   serious control lies further down than the preview reaches, the preview
-  moves to it and starts with `…`, so a harmless first line cannot hide an end
-  code below it.
+  moves to it and starts with `…`, with at most 40 columns of the control's
+  own line before it. Nothing ahead of an end code can hide it: not a
+  harmless first line, and not a run of tabs or of characters drawn wide.
 - One line of counts: lines, escape sequences and other control characters.
   Zero counts are left out.
 - Up to four findings, most serious first, each with what the control does and
   how often it occurs: `ESC[201~` ends bracketed paste, then `^C` interrupt,
-  `^Z` suspend, `^\` quit, `^D` end of input, `ESC`, 8-bit control codes, `^H`
-  backspace, `DEL` delete, `BEL` bell and any other control character. A last
-  row counts the kinds left out.
+  `^Z` suspend, `^\` quit, `^D` end of input, `ESC`, text-direction
+  formatting such as `U+202E`, 8-bit control codes, `^H` backspace, `DEL`
+  delete, `BEL` bell and any other control character. A last row counts the
+  kinds left out. A row describes the current mode: a control that Kettle
+  removes whichever button you choose reads "…; Kettle removes it" and is not
+  drawn in the warning color. That is the end code in every mode, and `ESC`
+  and the signal keys when every program receiving the paste has bracketed
+  paste on.
 - The policy in force and a **Paste settings…** link. The link pastes nothing,
   closes the dialog and opens Settings on the Paste protection row. There is
   no "don't ask again" box: the policy changes only in Settings or the config.
@@ -168,14 +174,20 @@ from 480 to at most 800 units for it) and stack at full width otherwise:
 
 - **Cancel** sends nothing and has focus initially.
 - **Paste without controls**, offered when controls are present, removes C0
-  controls other than TAB/LF/CR, DEL and C1 controls, plus whole ESC, CSI and
-  OSC sequences (including control strings). It preserves tabs and line breaks.
+  controls other than TAB/LF/CR, DEL and C1 controls, text-direction
+  formatting characters (overrides, embeddings, isolates and marks, which can
+  make text read differently from what runs), plus whole ESC, CSI and OSC
+  sequences (including control strings). It preserves tabs and line breaks.
   An unterminated sequence is removed through the end of the paste. It is the
   recommended choice then, and the only one in the accent color.
 - **Paste as one line** replaces CRLF, CR, LF and ASCII controls other than
   TAB with spaces. It keeps tabs; escape-sequence payload text can remain.
 - **Paste** sends the original text through the normal paste rules. It is red
-  when the text has controls, and the recommended choice when it has none.
+  when it would hand the program a control that the current mode does not
+  remove, and whenever the text carries an end code, since such text was
+  written to break out of a paste. It is the recommended choice when the text
+  has no controls. Direction formatting alone does not make Kettle ask; it is
+  reported when something else did.
 
 Bracketed paste wraps the text so a supporting program can treat it as data.
 Whichever choice is made, Kettle removes both bracketed-paste markers from the
@@ -224,12 +236,15 @@ key. Successful writes show "A program copied N characters to the
 clipboard" at most once every five seconds per pane, counting Unicode code
 points after the size limit and internal-marker removal. Set
 `osc52-notify = false` to silence successful-write notices. Blocked reads and
-writes each show one notice per pane explaining the `osc52` policy key.
+writes each show one notice per pane that points at that Settings row and
+names the `osc52` config key.
 On macOS and Linux a notice names the program in the pane's foreground when
-Kettle can tell which it is ("vim copied 42 characters to the clipboard"):
-its name only, never its arguments, with invisible and control characters
-removed and at most 32 columns. A shell at its prompt is not named, since the
-request may have come from a command that has already exited.
+Kettle can tell which it is ("A program copied 42 characters to the clipboard
+while vim was in the foreground"): its name only, never its arguments, with
+invisible and control characters removed and at most 32 columns. Kettle sees
+the pane, not the sender: a background job in the same pane can send OSC 52
+too, so the notice says who was in the foreground and does not claim that
+program sent the request. A shell at its prompt is not named.
 Notices are dismissible and contain no clipboard text.
 
 **Accessibility:** the paste confirmation exposes an alert dialog, the Paste
@@ -245,9 +260,12 @@ link and buttons stay in place. On Linux and Windows each control has an
 access key, underlined: Alt+C, Alt+W, Alt+O, Alt+P and, for the link, Alt+S
 (C, S, U, P and G in Spanish). Kettle matches the letter your keyboard layout
 types, never a key's position, and a bare letter does nothing. macOS has no
-access keys. With `vim-menu-nav`, Y chooses the recommended paste (Paste
-without controls when the text has controls, never the raw Paste then), N
-cancels, and H/L move focus. The confirmation has no editable field or IME
+access keys. With `vim-menu-nav`, N cancels and H/L move focus. Y chooses
+Paste without controls when that is the recommended choice, and does nothing
+when the recommended choice is the plain Paste: a bare letter can be typed
+ahead of the dialog and never sends the text as it is. The focus ring, like
+the recommended button, avoids the warning color when the window's accent is
+the theme's red. The confirmation has no editable field or IME
 caret. OSC 52 notices are polite screen-reader status announcements with a
 Dismiss action.
 
