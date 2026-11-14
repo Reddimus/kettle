@@ -111,18 +111,10 @@ fn is_private_use_char(c: char) -> bool {
     )
 }
 
-/// Unicode bidirectional formatting / override code points. These are NOT
-/// `char::is_control()` (they are general category Cf) but enable right-to-left
-/// titlebar / Alt-Tab spoofing, so a sanitized title must neutralize them too.
-pub(crate) fn is_bidi_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{202A}'..='\u{202E}'      // LRE RLE PDF LRO RLO
-            | '\u{2066}'..='\u{2069}' // LRI RLI FSI PDI
-            | '\u{200E}' | '\u{200F}' // LRM RLM
-            | '\u{061C}' // ALM
-    )
-}
+// Bidi formatting and override code points enable right-to-left titlebar and
+// Alt-Tab spoofing, so a sanitized title neutralizes them. One list, shared
+// with the SSH target validator in kettle-config.
+pub(crate) use kettle_config::ssh_config::is_bidi_format_char;
 
 /// Render the OS window title from the user's `window-title-format`
 /// template with the active pane's title / cwd / 1-based tab index. While

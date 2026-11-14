@@ -839,6 +839,19 @@ impl Drop for PtyInputQueue {
     }
 }
 
+/// The SSH launcher's argv for `target`: `ssh -t -- <target>`, or `None` when
+/// the target fails `is_valid_ssh_target`. The `--` ends ssh's options, so even
+/// a target that slipped past validation could not be read as one (`-oX`).
+/// Pure, so the exact argv is tested.
+pub(crate) fn ssh_tab_argv(target: &str) -> Option<Vec<String>> {
+    kettle_config::ssh_config::is_valid_ssh_target(target).then(|| {
+        ["ssh", "-t", "--", target]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells get the placeholder "kettle", and the
 /// cwd-basename fallback fills in for them once OSC 7 arrives. SSH panes have
@@ -3152,7 +3165,9 @@ impl Mux {
         waker: Waker,
         target: &str,
     ) -> Result<()> {
-        let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
+        // The error names no target: the launcher logs it, and a target can
+        // be private.
+        let argv = ssh_tab_argv(target).ok_or_else(|| anyhow::anyhow!("invalid ssh target"))?;
         // `spawn_pane` sees argv[0] == "ssh" and seeds the pane title to
         // `ssh <target>` so the tab is distinguishable from a regular
         // shell tab while the connection is establishing. The OSC 2
@@ -9004,6 +9019,49 @@ mod node_tests {
                 "title must name the destination"
             );
         }
+    }
+
+    #[test]
+    fn ssh_tab_argv_ends_options_before_the_target_and_refuses_invalid_ones() {
+        assert_eq!(
+            ssh_tab_argv("box").unwrap(),
+            ["ssh", "-t", "--", "box"],
+            "the target must follow `--` so ssh never reads it as an option"
+        );
+        assert_eq!(
+            ssh_tab_argv("me@box.example").unwrap(),
+            ["ssh", "-t", "--", "me@box.example"]
+        );
+        for invalid in [
+            "-oProxyCommand=x",
+            "-oX",
+            "a b",
+            "",
+            "x\u{7}",
+            "me@\u{202E}x",
+        ] {
+            assert_eq!(ssh_tab_argv(invalid), None, "{invalid:?}");
+        }
+        // The title still shows the destination, not the `--`.
+        assert_eq!(
+            initial_pane_title(&ssh_tab_argv("me@box").unwrap()),
+            "ssh me@box"
+        );
+        let mut mux = Mux::new();
+        let error = mux
+            .new_ssh_tab_geometry(
+                &kettle_config::Config::default(),
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                std::sync::Arc::new(|| {}),
+                "-oProxyCommand=touch-secret",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("secret"),
+            "the error must not echo the target: {error}"
+        );
+        assert!(mux.tabs.is_empty(), "an invalid target must not spawn");
     }
 
     #[test]

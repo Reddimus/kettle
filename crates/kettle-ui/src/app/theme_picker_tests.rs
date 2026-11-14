@@ -408,7 +408,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
-            .map(|i| (format!("host-{i}"), format!("ssh host-{i}")))
+            .map(|i| (format!("host-{i}"), format!("me@host-{i}")))
             .collect(),
         ..Default::default()
     };
@@ -556,8 +556,8 @@ fn picker_result_presses_select_the_visible_row() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: vec![
-            ("alpha".into(), "ssh alpha".into()),
-            ("beta".into(), "ssh beta".into()),
+            ("alpha".into(), "me@alpha".into()),
+            ("beta".into(), "me@beta".into()),
         ],
         ..Default::default()
     };
