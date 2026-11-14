@@ -50,11 +50,15 @@ pub struct SshAliases {
 /// phrase: no path, alias or `io::Error` text, so it is safe to log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SshImportSkip {
-    /// The path names a directory, FIFO, device or other non-regular file.
+    /// The trusted reader answered `InvalidInput`: the path could not be
+    /// resolved to a regular file. That covers a directory, FIFO or device,
+    /// and also a link chain over its limits or with an unusable target.
     NotRegular,
-    /// The file, a link to it, or a folder above it can be changed by
-    /// someone other than the user or an administrator, or the file has
-    /// more than one hard link.
+    /// The trusted reader answered `PermissionDenied`: the file or a folder
+    /// above it was refused. That covers a file, link or folder that someone
+    /// other than the user, root or an administrator can change, a file with
+    /// more than one hard link, a path swapped while it was opened, and a
+    /// file the user may not read at all.
     InsecurePermissions,
     /// Any other failure, by kind only.
     Io(std::io::ErrorKind),
@@ -63,10 +67,8 @@ pub enum SshImportSkip {
 impl std::fmt::Display for SshImportSkip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotRegular => f.write_str("not a regular file"),
-            Self::InsecurePermissions => {
-                f.write_str("the file or a folder above it is not private")
-            }
+            Self::NotRegular => f.write_str("the path could not be resolved to a regular file"),
+            Self::InsecurePermissions => f.write_str("the file or a folder above it was refused"),
             Self::Io(kind) => write!(f, "read failed ({kind:?})"),
         }
     }
