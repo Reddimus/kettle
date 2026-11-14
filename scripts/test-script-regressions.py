@@ -5,8 +5,10 @@ import ast
 import contextlib
 import importlib.util
 import io
+import inspect
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -853,6 +855,86 @@ elif 'list_tabs' in args:
             self.assertTrue(all(p.parent.name.startswith('kettle-bench.') for p in captures), captures)
             self.assertEqual(len({p.parent for p in captures}), 1)
             self.assertFalse(captures[0].parent.exists(), 'private directory survived exit')
+
+
+class ControlRegistryIsolationTests(unittest.TestCase):
+    """Smokes keep the Kettles they start out of the account's own control
+    registry directory (docs/TESTING.md)."""
+
+    # Shared harnesses whose Kettle launches isolate the registry.
+    HARNESSES = ('check-live-ui-smoke.py', 'check-modal-shortcuts.py')
+    # `agent-server = full` in a config, quoted or not, and `--agent-server`
+    # however its value is attached: the next argument, `=`, or the next item
+    # of a list.
+    CONTROL_SERVER = re.compile(r'''agent-server[\s"',=\\]+(full|read-only)''')
+
+    def test_the_control_server_pattern_knows_every_spelling(self):
+        on = ['agent-server = full', 'agent-server=read-only', 'agent-server = "full"',
+              "agent-server = 'read-only'", 'agent-server = \\"full\\"',
+              '--agent-server full', '--agent-server=full', '--agent-server=read-only',
+              '--agent-server="full"', '"--agent-server", "full"',
+              '"--agent-server",\n        "read-only"']
+        off = ['agent-server = off', 'agent-server = "off"', '--agent-server off',
+               '--agent-server=off', '"--agent-server", "off"', 'agent-server',
+               'agent-server-full']
+        for text in on:
+            self.assertRegex(text, self.CONTROL_SERVER)
+        for text in off:
+            self.assertNotRegex(text, self.CONTROL_SERVER)
+
+    def test_scripts_that_start_a_control_server_isolate_its_registry(self):
+        checked = []
+        for path in sorted(SCRIPTS.rglob('*')):
+            if path.suffix not in ('.py', '.sh') or path.name.startswith('test-'):
+                continue
+            source = path.read_text(encoding='utf-8')
+            if not self.CONTROL_SERVER.search(source):
+                continue
+            checked.append(path.name)
+            harnessed = (path.name != self.HARNESSES[0]
+                         and any(harness in source for harness in self.HARNESSES)
+                         and ('LiveKettle' in source or 'RecordedLive' in source))
+            self.assertTrue('KETTLE_TEST_OS_CTL_DIR' in source or harnessed,
+                            f'{path.relative_to(SCRIPTS)} starts a control server '
+                            'without KETTLE_TEST_OS_CTL_DIR or a harness that sets it')
+        self.assertIn('check-live-ui-smoke.py', checked)
+        self.assertGreaterEqual(len(checked), 15, checked)
+
+    def test_the_live_harness_isolates_the_registry_before_it_launches(self):
+        live = load('check-live-ui-smoke')
+        enter = inspect.getsource(live.LiveKettle.__enter__)
+        body = [line.strip() for line in enter.splitlines()[1:]
+                if line.strip() and not line.strip().startswith('#')]
+        self.assertEqual(body[0], 'isolate_ctl_registry()')
+        name = live.CTL_OS_DIR_ENV
+        self.assertEqual(name, 'KETTLE_TEST_OS_CTL_DIR')
+        prefix = 'kettle-smoke-os-ctl-'
+        with patch.dict(os.environ, {name: ''}), \
+             patch.object(live.atexit, 'register') as at_exit:
+            live.isolate_ctl_registry()
+            # Clean up only a directory the harness made and named, never one
+            # derived from the variable: a broken harness could name the
+            # working directory.
+            made = [Path(call.args[1]) for call in at_exit.call_args_list
+                    if call.args[:1] == (shutil.rmtree,)]
+            made = [path for path in made
+                    if path.is_absolute() and path.name.startswith(prefix)]
+            try:
+                self.assertEqual(len(made), 1, at_exit.call_args_list)
+                at_exit.assert_called_once_with(shutil.rmtree, made[0], True)
+                self.assertEqual(os.environ[name], str(made[0] / 'ctl'))
+                self.assertTrue(made[0].is_dir())
+                if os.name != 'nt':
+                    self.assertEqual(made[0].stat().st_mode & 0o777, 0o700)
+                live.isolate_ctl_registry()
+                self.assertEqual(os.environ[name], str(made[0] / 'ctl'),
+                                 'a second call moved it')
+            finally:
+                for path in made:
+                    shutil.rmtree(path, ignore_errors=True)
+        with patch.dict(os.environ, {name: 'none'}):
+            live.isolate_ctl_registry()
+            self.assertEqual(os.environ[name], 'none', 'a value already set must win')
 
 
 if __name__ == '__main__':

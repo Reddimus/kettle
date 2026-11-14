@@ -769,6 +769,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   one written by an earlier release goes once the entry it names is gone or
   belongs to a process that is gone. A running server's pointer stays.
 
+- On macOS, quitting Kettle with ⌘Q, Quit in the app or Dock menu, or by
+  logging out no longer leaves its control server's files behind. These
+  quits end in AppKit's `exit()`, which ran none of the server's shutdown,
+  so each left `<pid>.json` and `ctl-<pid>.sock` in the registry, and a
+  `<pid>.alias.json` pointer for a Kettle whose registry is elsewhere, until
+  a later Kettle's cleanup found them. Quitting, on every platform, now
+  removes them first, before Kettle waits for the session write, so a client
+  no longer finds a Kettle that is quitting. A Kettle stopped by a signal, or
+  ended by Windows at logoff or shutdown, still leaves them to that cleanup.
+
+- Kettle's own tests and smokes no longer read, prune or add to the control
+  registry directory the OS names for the account that runs them. A Kettle
+  under test with a private `XDG_RUNTIME_DIR` still published its pointer
+  in, and pruned, `~/.local/state/kettle/ctl`, and `kettle mcp` and the
+  `kettle` crate's unit tests looked for servers there, so a suite run inside
+  Kettle could reach the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for
+  tests and smokes only, names the directory to use instead of every one the
+  OS names; a value that is not an absolute path names none. On Windows,
+  where the registry is that directory, it moves the registry too. The test
+  suites and smokes set it, and the `kettle` crate's unit tests no longer
+  look for a running Kettle at all.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the

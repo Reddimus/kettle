@@ -10,6 +10,10 @@ set -euo pipefail
 # region instead of a cursor-sized box.
 
 KETTLE="${KETTLE_BIN:-kettle}"
+# Kettle and every `kettle ctl` here share one environment, so they meet in
+# its registry and need no alias: keep the run out of the control registry
+# directory the OS names for this account (docs/TESTING.md).
+export KETTLE_TEST_OS_CTL_DIR="${KETTLE_TEST_OS_CTL_DIR:-none}"
 FRAMES="${KETTLE_LIVE_RENDER_FRAMES:-6}"
 SLEEP_SECS="${KETTLE_LIVE_RENDER_SLEEP:-0.20}"
 TIMEOUT="${KETTLE_LIVE_RENDER_TIMEOUT:-20}"

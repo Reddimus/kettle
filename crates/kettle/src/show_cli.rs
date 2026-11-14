@@ -8,10 +8,10 @@
 use std::io::{IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 
+use kettle_ctl::CtlError;
 use kettle_ctl::show::{
     FileKind, InlineRefusal, InlineTarget, SHOW_CALL_TIMEOUT, ShowRequest, ShowResult, ShowSource,
 };
-use kettle_ctl::{Client, CtlError};
 use kettle_media::{ExternalAttested, FailureCode, MAX_MERMAID_BYTES, NativePath};
 
 use crate::ShowArgs;
@@ -171,7 +171,8 @@ fn show(args: ShowArgs, stdout_is_terminal: bool) -> Result<Shown, Refusal> {
         pane: None,
         inline,
     };
-    let mut client = Client::discover_display(None).map_err(|error| refusal(&error))?;
+    let mut client =
+        crate::ctl_discovery::discover_display(None).map_err(|error| refusal(&error))?;
     let mut call = |request: ShowRequest| -> Result<ShowResult, Refusal> {
         let result = client
             .call_with_timeout("show", request_params(request)?, SHOW_CALL_TIMEOUT)

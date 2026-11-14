@@ -8,7 +8,22 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 use std::time::Instant;
 
+/// The `kettle` at `executable`, kept to a control registry under `root`, so
+/// it can neither find the Kettle this test may run inside nor read or prune
+/// the account's own registry.
+fn kettle(executable: &std::path::Path, root: &std::path::Path) -> Command {
+    let mut command = Command::new(executable);
+    kettle_test_support::isolate_ctl_registry(&mut command, root);
+    command
+}
+
+/// The `kettle` this test builds, isolated as [`kettle`] does.
+fn this_kettle(root: &std::path::Path) -> Command {
+    kettle(std::path::Path::new(env!("CARGO_BIN_EXE_kettle")), root)
+}
+
 struct Peer {
+    _registry: kettle_test_support::PrivateTempDir,
     child: Child,
     input: ChildStdin,
     replies: Receiver<Value>,
@@ -21,7 +36,8 @@ impl Peer {
     }
 
     fn with_executable(executable: &std::path::Path) -> Self {
-        let mut child = Command::new(executable)
+        let registry = kettle_test_support::private_tempdir("kettle-mcp-peer-");
+        let mut child = kettle(executable, registry.path())
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -41,6 +57,7 @@ impl Peer {
             }
         });
         let mut peer = Self {
+            _registry: registry,
             child,
             input,
             replies,
@@ -98,7 +115,8 @@ fn mcp_capture_matches_internal_in_process_capture() {
         ),
     ] {
         for strip in [false, true] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_kettle"));
+            let registry = kettle_test_support::private_tempdir("kettle-mcp-supervisor-");
+            let mut command = this_kettle(registry.path());
             command
                 .args([
                     "exec",
@@ -298,7 +316,8 @@ mod linux {
         for mode in ["cancel", "timeout", "broken-pipe"] {
             let directory = tempfile::tempdir().unwrap();
             let pid = directory.path().join("pid");
-            let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+            let registry = kettle_test_support::private_tempdir("kettle-mcp-supervisor-");
+            let mut child = this_kettle(registry.path())
                 .args([
                     "exec", "--internal-capture-tail", "--timeout",
                     if mode == "timeout" { "4" } else { "20" },
@@ -573,7 +592,8 @@ mod linux {
         let directory = tempfile::tempdir().unwrap();
         let pid = directory.path().join("pid");
         let release = directory.path().join("release");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        let registry = kettle_test_support::private_tempdir("kettle-mcp-supervisor-");
+        let mut child = this_kettle(registry.path())
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -630,7 +650,8 @@ mod linux {
         let directory = tempfile::tempdir().unwrap();
         let pid = directory.path().join("pid");
         let release = directory.path().join("release");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        let registry = kettle_test_support::private_tempdir("kettle-mcp-supervisor-");
+        let mut child = this_kettle(registry.path())
             .args([
                 "exec",
                 "--timeout",
@@ -671,7 +692,8 @@ mod linux {
         let directory = tempfile::tempdir().unwrap();
         let pid = directory.path().join("pid");
         let release = directory.path().join("release");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        let registry = kettle_test_support::private_tempdir("kettle-mcp-supervisor-");
+        let mut child = this_kettle(registry.path())
             .args([
                 "exec",
                 "--timeout",

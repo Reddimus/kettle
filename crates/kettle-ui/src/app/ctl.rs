@@ -196,26 +196,25 @@ impl App {
     /// exists, and no start has been tried. A failed start is logged and not
     /// retried by unrelated reloads.
     pub(super) fn ensure_ctl_started(&mut self) {
-        if self.ctl_start != CtlStart::Ready || self.ctl.is_some() || !self.ctl_policy.runs_server()
-        {
-            return;
-        }
-        self.ctl_start = CtlStart::Attempted;
-        let proxy = self.proxy.clone();
-        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-            let _ = proxy.send_event(UserEvent::Ctl);
+        let policy = self.ctl_policy;
+        let proxy = &self.proxy;
+        start_ctl_once(&mut self.ctl_start, &mut self.ctl, policy, || {
+            let proxy = proxy.clone();
+            let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::Ctl);
+            });
+            let started_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            crate::ctl_server::CtlServer::start(
+                policy,
+                std::process::id(),
+                env!("CARGO_PKG_VERSION"),
+                started_unix,
+                wake,
+            )
         });
-        let started_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.ctl = crate::ctl_server::CtlServer::start(
-            self.ctl_policy,
-            std::process::id(),
-            env!("CARGO_PKG_VERSION"),
-            started_unix,
-            wake,
-        );
     }
 
     /// Scan every pane's recent output for configured
@@ -3790,6 +3789,44 @@ pub(super) enum CtlStart {
     NotReady,
     Ready,
     Attempted,
+    /// The app is quitting: the server was withdrawn, or never started, and
+    /// never starts now.
+    Closed,
+}
+
+impl CtlStart {
+    /// The first pane exists, so a start that was waiting for it is ready.
+    /// One already tried, or closed by a quit, stays as it is.
+    pub(super) fn first_pane_exists(&mut self) {
+        if *self == Self::NotReady {
+            *self = Self::Ready;
+        }
+    }
+
+    /// Display was newly granted, which earns a start that was tried and
+    /// failed one more attempt. One closed by a quit stays closed.
+    pub(super) fn display_granted(&mut self) {
+        if *self == Self::Attempted {
+            *self = Self::Ready;
+        }
+    }
+}
+
+/// Start the control server through `start`, at most once: only while
+/// `state` is ready, no server runs and `policy` runs one. The attempt is
+/// recorded before `start` runs, so a failed start is not retried by
+/// unrelated reloads, and nothing starts once a quit has closed `state`.
+pub(super) fn start_ctl_once(
+    state: &mut CtlStart,
+    ctl: &mut Option<crate::ctl_server::CtlServer>,
+    policy: kettle_ctl::CtlPolicy,
+    start: impl FnOnce() -> Option<crate::ctl_server::CtlServer>,
+) {
+    if *state != CtlStart::Ready || ctl.is_some() || !policy.runs_server() {
+        return;
+    }
+    *state = CtlStart::Attempted;
+    *ctl = start();
 }
 
 pub(super) fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {

@@ -14,7 +14,7 @@ pub(crate) fn enabled() -> bool {
 pub(crate) fn client(
     cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<kettle_ctl::Client, crate::show_cli::Refusal> {
-    let mut client = kettle_ctl::Client::discover_display(None)
+    let mut client = crate::ctl_discovery::discover_display(None)
         .map_err(|error| crate::show_cli::refusal(&error))?;
     let timeout = std::time::Duration::from_secs(1);
     let status = match cancelled {

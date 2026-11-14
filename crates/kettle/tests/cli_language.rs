@@ -52,6 +52,7 @@ fn run(
         .env("LC_ALL", locale)
         .env("LC_MESSAGES", locale)
         .env("LANGUAGE", locale.split('_').next().unwrap_or(locale));
+    kettle_test_support::isolate_ctl_registry(&mut command, home);
     // Windows starts no process without its system root.
     for kept in ["SystemRoot", "windir"] {
         if let Some(value) = std::env::var_os(kept) {

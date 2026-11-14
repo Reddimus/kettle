@@ -38,7 +38,7 @@ impl PreparedLaunch {
             LaunchRegistration::new(target, version, &self.native, self.launcher.as_ref())
                 .ok_or(NoCard::NotNative)?;
         let params = serde_json::to_value(registration).map_err(|_| NoCard::NotNative)?;
-        let Ok(mut client) = kettle_ctl::Client::discover_display(None) else {
+        let Ok(mut client) = crate::ctl_discovery::discover_display(None) else {
             log::debug!("agent cards: launch server unavailable");
             return Err(NoCard::ServerUnavailable);
         };

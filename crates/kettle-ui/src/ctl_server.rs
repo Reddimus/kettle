@@ -894,17 +894,37 @@ fn prepare_agent(
     }
 }
 
+/// What a running server leaves on disk for clients to find it: its registry
+/// entry, its socket (Unix; a Windows pipe has no file) and, when its
+/// registry is not where the OS puts it, an alias there.
+struct Publication {
+    registry_dir: PathBuf,
+    /// Where this server left an alias to its entry, if anywhere.
+    alias_dir: Option<PathBuf>,
+    pid: u32,
+    endpoint: String,
+}
+
+impl Publication {
+    /// Remove all of it. Each step is one unlink of a file only this
+    /// process names, so it takes no lock and cannot wait.
+    fn withdraw(&self) {
+        discovery::unregister(&self.registry_dir, self.pid);
+        if let Some(alias) = &self.alias_dir {
+            discovery::withdraw_alias(alias, self.pid);
+        }
+        discovery::remove_own_endpoint(&self.endpoint);
+    }
+}
+
 /// The control server: owns the connection table + the inbound channel; the
 /// accept + per-connection threads run in the background.
 pub struct CtlServer {
     policy: SharedCtlPolicy,
     rx: InboxReceiver,
     conns: HashMap<u64, ConnState>,
-    registry_dir: PathBuf,
-    /// Where this server left an alias to its entry, if anywhere.
-    alias_dir: Option<PathBuf>,
-    pid: u32,
-    endpoint: String,
+    /// `None` once [`CtlServer::shutdown`] has withdrawn it.
+    published: Option<Publication>,
     _accept: std::thread::JoinHandle<()>,
 }
 
@@ -924,7 +944,49 @@ impl CtlServer {
         if !policy.runs_server() {
             return None;
         }
-        let registry_dir = discovery::registry_dir();
+        // Where the OS puts the registry, independent of this environment, so
+        // a client started with a stripped environment still finds us.
+        let server = Self::start_in(
+            policy,
+            pid,
+            version,
+            started_unix,
+            wake,
+            discovery::registry_dir(),
+            discovery::canonical_registry_dir(),
+        )?;
+        // Servers that crashed, were killed or quit without running their
+        // shutdown left their aliases where the OS puts the registry.
+        // Clear a bounded batch off the startup path; this server's own
+        // alias stays, its owner being alive.
+        if let Err(e) = std::thread::Builder::new()
+            .name("kettle-ctl-prune".into())
+            .spawn(|| {
+                let removed = discovery::prune_stale_aliases();
+                if removed > 0 {
+                    log::debug!("agent-server: removed {removed} stale discovery aliases");
+                }
+            })
+        {
+            log::debug!("agent-server: cannot start alias cleanup: {e}");
+        }
+        Some(server)
+    }
+
+    /// [`CtlServer::start`] with the registry and the OS's registry directory
+    /// given, and without the prune of other servers' aliases.
+    fn start_in(
+        policy: CtlPolicy,
+        pid: u32,
+        version: &str,
+        started_unix: u64,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        registry_dir: PathBuf,
+        canonical_dir: Option<PathBuf>,
+    ) -> Option<CtlServer> {
+        if !policy.runs_server() {
+            return None;
+        }
         // Held until the entry is written, so no other process removes this
         // socket between its bind and its registration.
         let registration = discovery::begin_registration(&registry_dir);
@@ -942,9 +1004,7 @@ impl CtlServer {
             return None;
         }
         drop(registration);
-        // Where the OS puts the registry, independent of this environment, so
-        // a client started with a stripped environment still finds us.
-        let alias_dir = discovery::canonical_registry_dir()
+        let alias_dir = canonical_dir
             .filter(|alias| *alias != registry_dir)
             .filter(
                 |alias| match discovery::publish_alias(alias, &registry_dir, pid) {
@@ -955,23 +1015,15 @@ impl CtlServer {
                     }
                 },
             );
-        // Servers that crashed, were killed or quit without running their
-        // destructors left their aliases where the OS puts the registry.
-        // Clear a bounded batch off the startup path; this server's own
-        // alias stays, its owner being alive.
-        if let Err(e) = std::thread::Builder::new()
-            .name("kettle-ctl-prune".into())
-            .spawn(|| {
-                let removed = discovery::prune_stale_aliases();
-                if removed > 0 {
-                    log::debug!("agent-server: removed {removed} stale discovery aliases");
-                }
-            })
-        {
-            log::debug!("agent-server: cannot start alias cleanup: {e}");
-        }
+        let published = Publication {
+            registry_dir,
+            alias_dir,
+            pid,
+            endpoint,
+        };
         log::info!(
-            "agent-server: listening on {endpoint} (mode {:?}, display {})",
+            "agent-server: listening on {} (mode {:?}, display {})",
+            published.endpoint,
             policy.server(),
             policy.display()
         );
@@ -985,10 +1037,7 @@ impl CtlServer {
         {
             Ok(accept) => accept,
             Err(error) => {
-                discovery::unregister(&registry_dir, pid);
-                if let Some(alias) = &alias_dir {
-                    discovery::withdraw_alias(alias, pid);
-                }
+                published.withdraw();
                 log::warn!("agent-server: cannot spawn accept thread: {error}");
                 return None;
             }
@@ -998,12 +1047,20 @@ impl CtlServer {
             policy,
             rx,
             conns: HashMap::new(),
-            registry_dir,
-            alias_dir,
-            pid,
-            endpoint,
+            published: Some(published),
             _accept: accept,
         })
+    }
+
+    /// Withdraw the registry entry, the socket and the alias now, so clients
+    /// stop finding this server before the process goes. The App calls this
+    /// as it quits: a quit through AppKit's `terminate:` ends in `exit()`,
+    /// which runs no destructor. Later calls, and the drop, do nothing more.
+    /// Connections already open stay open until the process exits.
+    pub fn shutdown(&mut self) {
+        if let Some(published) = self.published.take() {
+            published.withdraw();
+        }
     }
 
     /// What clients may do right now.
@@ -1136,12 +1193,41 @@ impl CtlServer {
 
 impl Drop for CtlServer {
     fn drop(&mut self) {
-        discovery::unregister(&self.registry_dir, self.pid);
-        if let Some(alias) = &self.alias_dir {
-            discovery::withdraw_alias(alias, self.pid);
-        }
-        discovery::remove_own_endpoint(&self.endpoint);
+        self.shutdown();
     }
+}
+
+/// A server started as this process in a registry under `root`, aliased from
+/// a stand-in for the OS's registry directory there, and the files a client
+/// would find it by: its entry, its alias and, on Unix, its socket. Each is
+/// checked to exist.
+#[cfg(test)]
+pub(crate) fn start_private_for_tests(root: &std::path::Path) -> (CtlServer, Vec<PathBuf>) {
+    let registry = root.join("registry");
+    let canonical = root.join("os-ctl");
+    let pid = std::process::id();
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+    let server = CtlServer::start_in(
+        CtlPolicy::new(kettle_config::AgentServer::ReadOnly, false),
+        pid,
+        "test",
+        0,
+        wake,
+        registry.clone(),
+        Some(canonical.clone()),
+    )
+    .expect("start a server in a private registry");
+    let mut files = vec![
+        registry.join(format!("{pid}.json")),
+        canonical.join(format!("{pid}.alias.json")),
+    ];
+    if cfg!(unix) {
+        files.push(PathBuf::from(discovery::default_endpoint(&registry, pid)));
+    }
+    for file in &files {
+        assert!(file.exists(), "{} was not published", file.display());
+    }
+    (server, files)
 }
 
 /// The accept loop: assign a connection id, create its event channel, and spawn
@@ -2262,8 +2348,9 @@ mod tests {
 
     /// Only a starting server's prune clears an alias into a registry that
     /// was deleted, so `start` must run it, off its startup path. Pinned at
-    /// the source: starting a real server here would write into this
-    /// account's own registry, which no environment variable redirects.
+    /// the source: `start` takes its directories from the environment, and
+    /// this test process's is the account's own, which a test cannot change
+    /// safely.
     #[test]
     fn a_starting_server_prunes_stale_aliases_off_the_startup_path() {
         let production = production_source();
@@ -2952,10 +3039,7 @@ mod tests {
             policy: full_access(),
             rx,
             conns: HashMap::new(),
-            registry_dir: std::env::temp_dir(),
-            alias_dir: None,
-            pid: 0,
-            endpoint: String::new(),
+            published: None,
             _accept: accept,
         };
         (server, tx)
@@ -2973,10 +3057,34 @@ mod tests {
         // Still listening, as the accept thread's listener is at exit.
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind test socket");
         let (mut server, _tx) = test_server();
-        server.endpoint = path.to_string_lossy().into_owned();
+        server.published = Some(Publication {
+            registry_dir: std::env::temp_dir(),
+            alias_dir: None,
+            pid: 0,
+            endpoint: path.to_string_lossy().into_owned(),
+        });
         drop(server);
         assert!(!path.exists(), "the server's socket must not outlive it");
         drop(listener);
+    }
+
+    /// A quit through AppKit's `terminate:` ends in `exit()`, which runs no
+    /// destructor, so the App shuts the server down itself: everything a
+    /// client finds a server by goes while the server still exists. A second
+    /// shutdown and the drop remove nothing more.
+    #[test]
+    fn shutting_down_withdraws_the_entry_the_socket_and_the_alias() {
+        let root = kettle_test_support::private_tempdir("kettle-ctl-shutdown-");
+        let (mut server, files) = super::start_private_for_tests(root.path());
+        server.shutdown();
+        for file in &files {
+            assert!(!file.exists(), "{} outlived the shutdown", file.display());
+        }
+        let entry = &files[0];
+        std::fs::write(entry, b"{}").unwrap();
+        server.shutdown();
+        drop(server);
+        assert!(entry.exists(), "a second withdrawal removed a newer file");
     }
 
     fn dummy_event_tx() -> Sender<Event> {

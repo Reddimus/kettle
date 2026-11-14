@@ -464,3 +464,46 @@ fn pane_close_lifecycle_removes_control_attachments() {
         "pane teardown must remove historical control attachments"
     );
 }
+
+/// A start is attempted once: when the first pane has made it ready, no
+/// server runs and the policy runs one. The attempt is recorded before the
+/// server is built, so one that fails is not tried again by the next resume
+/// or reload, until a new display grant earns one more. A running server is
+/// never replaced.
+#[test]
+fn the_control_server_start_is_attempted_once() {
+    let serve = kettle_ctl::CtlPolicy::new(kettle_config::AgentServer::Full, false);
+    let nothing = kettle_ctl::CtlPolicy::new(kettle_config::AgentServer::Off, false);
+    let attempts = |state: &mut super::CtlStart, policy| {
+        let mut made = 0;
+        super::start_ctl_once(state, &mut None, policy, || {
+            made += 1;
+            None
+        });
+        made
+    };
+    let mut state = super::CtlStart::NotReady;
+    assert_eq!(attempts(&mut state, serve), 0, "before the first pane");
+    state.display_granted();
+    assert_eq!(state, super::CtlStart::NotReady, "a grant does not stand in for it");
+    state.first_pane_exists();
+    assert_eq!(attempts(&mut state, nothing), 0, "a policy that serves nothing");
+    assert_eq!(state, super::CtlStart::Ready);
+    assert_eq!(attempts(&mut state, serve), 1);
+    assert_eq!(state, super::CtlStart::Attempted, "recorded though the start failed");
+    assert_eq!(attempts(&mut state, serve), 0, "a failed start is not retried");
+    state.first_pane_exists();
+    assert_eq!(attempts(&mut state, serve), 0, "nor by a later resume");
+    state.display_granted();
+    assert_eq!(attempts(&mut state, serve), 1, "a display grant earns one more");
+
+    let root = kettle_test_support::private_tempdir("kettle-ctl-start-once-");
+    let (server, files) = crate::ctl_server::start_private_for_tests(root.path());
+    let mut ctl = Some(server);
+    let mut ready = super::CtlStart::Ready;
+    super::start_ctl_once(&mut ready, &mut ctl, serve, || {
+        panic!("a running server was replaced")
+    });
+    assert_eq!(ready, super::CtlStart::Ready);
+    assert!(files.iter().all(|file| file.exists()));
+}

@@ -558,6 +558,71 @@ tests report a skip when Windows does not grant the required privilege; the
 junction test still runs without that privilege. The supplementary-group query
 test simulates 257 groups without changing the process credentials.
 
+### The account's control registry
+
+A Kettle with its control server on registers in the directory its
+environment names (`$XDG_RUNTIME_DIR/kettle/ctl` first on Unix). It also
+publishes a `<pid>.alias.json` pointer, prunes dead ones, and lets clients
+look for servers in the directory the OS names for the account: the user
+database's home `~/.local/state/kettle/ctl`, `/run/user/<uid>/kettle/ctl` on
+Linux, the Local AppData known folder on Windows. A private `XDG_RUNTIME_DIR`
+moves only the first. `KETTLE_TEST_OS_CTL_DIR` moves the second: an absolute
+path stands in for every directory the OS names, and any other value (empty,
+relative, `none`) leaves none. On Windows the two are one directory, and the
+only variable that moves it, `LOCALAPPDATA`, moves everything else kept there,
+so an absolute value moves the registry as well. It exists for tests and
+smokes, and every build reads it, since smokes drive release builds.
+
+- Integration tests start `kettle` through
+  `kettle_test_support::isolate_ctl_registry(&mut command, root)`, which sets
+  it to `root/os-ctl` and, on Unix, `XDG_RUNTIME_DIR` to `root/run`. On
+  Windows the registry is then `root/os-ctl` itself; `LOCALAPPDATA` stays the
+  account's, and with it Kettle's presence claims. Call it after any
+  `env_clear`. `tests_isolate_every_kettle_that_reaches_the_control_registry`
+  refuses a test file that runs `kettle mcp`, `ctl`, `show` or `agent-setup`
+  and starts a `kettle` without isolating that launch; each launch in a
+  function needs its own call.
+- The `kettle` crate's unit tests run in the developer's environment, so the
+  crate looks for a running Kettle only through `ctl_discovery`, which finds
+  none under `cfg(test)`. `only_this_module_looks_for_a_running_kettle`
+  refuses a direct lookup anywhere else. `kettle-ui` tests start a control
+  server through `ctl_server::start_private_for_tests`, which passes both
+  directories in.
+- Smokes that start Kettle with its control server on set it too. The live
+  harness (`LiveKettle` in `check-live-ui-smoke.py`) points it at one private
+  directory per run, removed at exit: its `kettle ctl` calls run in the
+  harness's own environment and reach a Kettle given private XDG directories
+  through the alias there. Scripts whose Kettle and `kettle ctl` share one
+  environment set it to `none`. `test-script-regressions.py` refuses a script
+  that starts a control server without the variable or the harness. A smoke
+  that keeps the developer's `HOME` and XDG directories still registers in
+  the account's registry, as before; the variable moves only the directory
+  the OS names.
+
+To confirm on macOS that no test reaches the account's registry, run the
+suites under a sandbox that kills any process touching it and denies the rest
+of Kettle's state directory. `ps` is set-user-id, which a sandboxed process
+may not run, so it runs outside the sandbox:
+
+```sh
+profile="$TMPDIR/kettle-ctl-tripwire.sb"
+cat > "$profile" <<EOF
+(version 1)
+(allow default)
+(allow process-exec (literal "/bin/ps") (with no-sandbox))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle"))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle/ctl")
+  (with send-signal SIGKILL))
+EOF
+sandbox-exec -f "$profile" cargo test --no-fail-fast \
+  -p kettle-ctl -p kettle-ui -p kettle -p kettle-test-support
+```
+
+A test binary that ends with `SIGKILL`, or a test whose `kettle` child died
+that way, reached the registry. The sandbox also refuses set-user-id bits, so
+`media_platform::tests::files::unsafe_worker_files_are_refused` fails there,
+and only there.
+
 Report the exact command, revision, host, and skipped coverage in a PR.
 Distinguish an offscreen render from a native window, and a fixture from an
 installed-package check. Do not claim another platform passed from compilation.
