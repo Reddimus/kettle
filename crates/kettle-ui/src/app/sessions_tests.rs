@@ -864,8 +864,8 @@ fn default_session_claim_truth_table() {
     let mut waiting = claim(false, true);
     assert!(matches!(waiting, DefaultSessionClaim::Waiting(_)), "{waiting:?}");
     assert!(!waiting.owns(true), "the other build still runs");
-    assert!(!waiting.owns(false), "the lock is still held");
 
+    // The other build (standing in: `owner`) exits, releasing its lock.
     drop(owner);
     assert!(!secondary.owns(false), "a secondary never takes over");
     assert!(!waiting.owns(true));
@@ -1372,4 +1372,31 @@ fn a_wake_is_kept_when_the_clock_passes_it_between_the_sweep_and_the_deadline() 
     assert_eq!(sweep.deadline(t0 + interval / 2, false, || true), Some(end));
     assert!(!sweep.take_due(end + ms(1), false));
     assert_eq!(sweep.deadline(end + ms(2), false, || true), None);
+}
+
+/// A build waiting for another build to exit (#575) takes the session over
+/// only if the lock is free when it looks. If a launch of its own build took
+/// the lock first, that one owns the session, and the waiting one is a
+/// secondary: it does not take over when that owner exits either.
+#[test]
+fn a_waiting_build_that_loses_the_lock_to_its_own_build_never_takes_over() {
+    use super::sessions::DefaultSessionClaim;
+    let dir = kettle_test_support::private_tempdir("kettle-session-waiting-");
+    let lock = dir.path().join("config").join("session.owner.lock");
+    let claim = |another_build| {
+        DefaultSessionClaim::claim(false, another_build, true, Some(lock.as_path()))
+    };
+    // Stands in for the other build's primary, which holds the lock.
+    let other_build = claim(false);
+    assert!(matches!(other_build, DefaultSessionClaim::Owner { _lock: Some(_) }));
+    let mut waiting = claim(true);
+    assert!(matches!(waiting, DefaultSessionClaim::Waiting(_)), "{waiting:?}");
+    // The other build exits, and a launch of this build takes the lock first.
+    drop(other_build);
+    let newcomer = claim(false);
+    assert!(matches!(newcomer, DefaultSessionClaim::Owner { _lock: Some(_) }));
+    assert!(!waiting.owns(false));
+    assert!(matches!(waiting, DefaultSessionClaim::Secondary), "{waiting:?}");
+    drop(newcomer);
+    assert!(!waiting.owns(false), "took the session over when its owner exited");
 }

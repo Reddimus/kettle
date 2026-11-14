@@ -1029,18 +1029,22 @@ impl DefaultSessionClaim {
     /// Whether this process owns the default session now. Ask only while
     /// restore mode is on: an unclaimed launch claims it here, as it would
     /// have at startup, and a waiting one takes the lock over once no other
-    /// build runs and the lock is free.
+    /// build runs and the lock is free, or becomes a secondary if a process
+    /// of this build took it first.
     pub(super) fn owns(&mut self, another_build_running: bool) -> bool {
         match self {
             Self::Unclaimed(path) => {
                 let path = std::mem::take(path);
                 *self = Self::take(&path, another_build_running);
             }
-            Self::Waiting(path) if !another_build_running => {
-                if let Ok(Some(lock)) = take_owner_lock(path) {
-                    *self = Self::Owner { _lock: Some(lock) };
-                }
-            }
+            // The other build has gone. If a process of this build claimed
+            // the lock first, it owns the session now, and this one, like any
+            // secondary, never takes it over.
+            Self::Waiting(path) if !another_build_running => match take_owner_lock(path) {
+                Ok(Some(lock)) => *self = Self::Owner { _lock: Some(lock) },
+                Ok(None) => *self = Self::Secondary,
+                Err(_) => {}
+            },
             _ => {}
         }
         matches!(self, Self::Owner { .. })
