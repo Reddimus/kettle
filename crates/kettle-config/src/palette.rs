@@ -121,6 +121,7 @@ pub fn commands() -> Vec<(Text, Action)> {
         (T::PaletteScrollToBottom, ScrollToBottom),
         (T::PaletteJumpPrevPrompt, JumpPrevPrompt),
         (T::PaletteJumpNextPrompt, JumpNextPrompt),
+        (T::PaletteSelectCommandOutput, SelectCommandOutput),
         (T::PaletteToggleViMode, ToggleViMode),
         // Terminator-parity entries.
         (T::PaletteRotateCw, RotateCw),
@@ -345,6 +346,42 @@ mod tests {
         }
     }
 
+    /// Select Command Output is a palette command under every broadcast
+    /// default, labelled in both languages, and a query for its words finds
+    /// it first, in English from a Spanish palette as well.
+    #[test]
+    fn select_command_output_is_a_palette_command() {
+        for default in [
+            BroadcastDefault::Group,
+            BroadcastDefault::All,
+            BroadcastDefault::Off,
+        ] {
+            assert!(commands_for(default).contains(&(
+                Text::PaletteSelectCommandOutput,
+                Action::SelectCommandOutput
+            )));
+        }
+        let en = Translator::new(Language::En);
+        let es = Translator::new(Language::Es);
+        assert_eq!(
+            en.text(Text::PaletteSelectCommandOutput),
+            "Select output of last command"
+        );
+        assert_eq!(
+            es.text(Text::PaletteSelectCommandOutput),
+            "Seleccionar la salida del último comando"
+        );
+        let cmds = commands();
+        for (query, tr) in [
+            ("select output", &en),
+            ("salida del último", &es),
+            ("select output", &es),
+        ] {
+            let first = rank(query, &cmds, tr)[0];
+            assert_eq!(cmds[first].1, Action::SelectCommandOutput, "{query:?}");
+        }
+    }
+
     #[test]
     fn palette_includes_every_user_facing_action() {
         // Drift guard: a new Action variant must not reach only the keymap
@@ -513,6 +550,7 @@ mod tests {
             ScrollToBottom,
             JumpPrevPrompt,
             JumpNextPrompt,
+            SelectCommandOutput,
             ToggleViMode,
             OpenSsh,
             ReloadConfig,
@@ -681,6 +719,7 @@ mod tests {
                 | ScrollToBottom
                 | JumpPrevPrompt
                 | JumpNextPrompt
+                | SelectCommandOutput
                 | OpenSsh
                 | ReloadConfig
                 | CommandPalette

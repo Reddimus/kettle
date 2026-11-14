@@ -1393,6 +1393,7 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             Action::ToggleBroadcastGroup,
             Action::OpenSettings,
             Action::OpenThemePicker,
+            Action::SelectCommandOutput,
             Action::StartSearch,
             Action::JumpPrevPrompt,
             Action::JumpNextPrompt,
@@ -1449,9 +1450,16 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             count_rows_fitting(&grouped, 0, 592.0, 28.0, 8.0),
             grouped.len()
         );
+        assert!(matches!(
+            grouped[5],
+            ContextMenuItem::Item {
+                action: Action::SelectCommandOutput,
+                ..
+            }
+        ));
         // Find, the prompt jumps and Clear Scrollback end the top block.
-        assert!(matches!(grouped[9], ContextMenuItem::Separator));
-        for item in grouped.iter().skip(10) {
+        assert!(matches!(grouped[10], ContextMenuItem::Separator));
+        for item in grouped.iter().skip(11) {
             assert!(matches!(item, ContextMenuItem::Submenu { .. }));
         }
     }
@@ -1604,6 +1612,7 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
         Action::SelectAll,
         Action::Paste,
         Action::JumpPrevPrompt,
+        Action::SelectCommandOutput,
         Action::Copy,
     ]
     .into_iter()
@@ -1628,6 +1637,7 @@ fn terminal_menu_keeps_find_and_clear_scrollback_at_the_top_level() {
             Action::Copy,
             Action::Paste,
             Action::SelectAll,
+            Action::SelectCommandOutput,
             Action::HintMode,
             Action::StartSearch,
             Action::JumpPrevPrompt,
@@ -1905,7 +1915,7 @@ fn prompt_above_only() -> kettle_core::KeyboardClaims {
     }
 }
 
-fn menu_rows(items: &[ContextMenuItem]) -> Vec<(&str, Action, bool)> {
+fn menu_rows(items: &[ContextMenuItem]) -> Vec<(&'static str, Action, bool)> {
     items
         .iter()
         .map(|item| match item {
@@ -2063,4 +2073,138 @@ fn a_pane_offers_prompt_rows_only_once_it_has_a_prompt_mark() {
             ("Next Prompt", Action::JumpNextPrompt, false),
         ]
     );
+}
+
+/// `A … C \\r\\n out1 \\r\\n out2 \\r\\n D;0 A …` as a `printf` format: a
+/// command line, two output rows and the next prompt, on rows 0 to 3.
+#[cfg(unix)]
+const OUTPUT_WIRE: &str =
+    "\\033]133;A\\007$ cmd\\033]133;C\\007\\r\\nout1\\r\\nout2\\r\\n\\033]133;D;0\\007\\033]133;A\\007$ ";
+
+/// The pane's selected text and the text of the top row of its view.
+#[cfg(unix)]
+fn selected_and_top_row(term: &kettle_core::Terminal) -> (Option<String>, String) {
+    use kettle_core::Dimensions as _;
+    let t = term.term.lock().unwrap();
+    let top = kettle_core::Line(-(t.grid().display_offset() as i32));
+    let row: String = (0..t.grid().columns())
+        .map(|col| t.grid()[top][kettle_core::Column(col)].c)
+        .collect();
+    (
+        kettle_core::term::selection_text_bounded(&t, 1 << 16).unwrap(),
+        row.trim_end().to_string(),
+    )
+}
+
+/// The action selects a command's output as whole rows, exactly the rows
+/// between its command line and the next prompt, copying as `out1\nout2`,
+/// and leaves a view that already shows them where it is.
+#[cfg(unix)]
+#[test]
+fn select_command_output_selects_exactly_the_output_lines() {
+    let (ws, pane) = shell_window(&format!("printf '{OUTPUT_WIRE}'; sleep 10"), |term| {
+        term.command_output_rows(None).is_some()
+    });
+    let term = &ws.mux.panes[&pane].term;
+    assert!(super::select_command_output(term, None));
+    assert_eq!(selected_and_top_row(term), (Some("out1\nout2".into()), "$ cmd".into()));
+    // Whole rows: every column of the two output rows and nothing else.
+    let t = term.term.lock().unwrap();
+    let range = t.selection.as_ref().and_then(|s| s.to_range(&t)).unwrap();
+    assert_eq!(
+        (range.start, range.end),
+        (
+            kettle_core::Point::new(kettle_core::Line(1), kettle_core::Column(0)),
+            kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(79)),
+        )
+    );
+    assert_eq!(t.grid().display_offset(), 0);
+}
+
+/// From a chord or the palette the newest command's output is selected; the
+/// menu's row selects the command it was opened over. Either way a first row
+/// off screen is scrolled to the top of the view, and one on screen is not.
+#[cfg(unix)]
+#[test]
+fn select_command_output_scrolls_its_first_row_into_view() {
+    let lines: String = (0..40).map(|n| format!("line{n}\\r\\n")).collect();
+    let script = format!(
+        "printf '{OUTPUT_WIRE}big\\033]133;C\\007\\r\\n{lines}\\033]133;D;0\\007\\033]133;A\\007$ '; sleep 10"
+    );
+    let (ws, pane) = shell_window(&script, |term| term.command_marks().len() == 2);
+    let term = &ws.mux.panes[&pane].term;
+    let expected: Vec<String> = (0..40).map(|n| format!("line{n}")).collect();
+    assert!(super::select_command_output(term, None));
+    assert_eq!(
+        selected_and_top_row(term),
+        (Some(expected.join("\n")), "line0".into())
+    );
+
+    let out1 = term.command_marks()[0].row + 1;
+    assert!(super::select_command_output(term, Some(out1)));
+    assert_eq!(
+        selected_and_top_row(term),
+        (Some("out1\nout2".into()), "out1".into())
+    );
+    term.term
+        .lock()
+        .unwrap()
+        .scroll_display(kettle_core::Scroll::Delta(1));
+    assert!(super::select_command_output(term, Some(out1)));
+    assert_eq!(selected_and_top_row(term).1, "$ cmd", "already on screen");
+    // The command line and the prompt rows hold no output.
+    assert!(!super::select_command_output(term, Some(out1 - 1)));
+    assert!(!super::select_command_output(term, Some(out1 + 2)));
+}
+
+/// The terminal menu's Select Command Output row is enabled only for a
+/// right-click on a row of a command's output, and reads in the UI language.
+#[cfg(unix)]
+#[test]
+fn the_select_output_row_is_enabled_only_inside_a_commands_output() {
+    let (ws, pane) = shell_window(&format!("printf '{OUTPUT_WIRE}'; sleep 10"), |term| {
+        term.command_output_rows(None).is_some()
+    });
+    let term = &ws.mux.panes[&pane].term;
+    let row = |clicked, tr| menu_rows(&[super::command_output_menu_row(term, clicked, tr)])[0].clone();
+    let enabled: Vec<bool> = (0..6)
+        .map(|r| row(super::viewport_row_id(term, r), &EN_TEXT).2)
+        .collect();
+    assert_eq!(enabled, [false, true, true, false, false, false]);
+    assert_eq!(
+        row(None, &EN_TEXT),
+        ("Select Command Output", Action::SelectCommandOutput, false)
+    );
+    assert_eq!(super::viewport_row_id(term, 24), None, "below the view");
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    assert_eq!(
+        row(super::viewport_row_id(term, 1), &es),
+        ("Seleccionar la salida del comando", Action::SelectCommandOutput, true)
+    );
+}
+
+/// The menu row acts on the row the menu was opened over, captured as a
+/// stable id when it opened, and a chord or the palette on the newest
+/// command. A real menu needs a live App, so the wiring is pinned at the
+/// source.
+#[test]
+fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
+    let src = production_source();
+    let body = |name| {
+        finding_body(&src, name)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let open = body("open_context_menu");
+    assert!(open.contains("ws.context_menu_output_row = ws.mux.active_focus().zip(clicked_row);"));
+    assert!(open.contains("items.extend(self.context_menu_items(ws, clicked_row));"));
+    let dispatch = body("dispatch_context_menu_click");
+    assert!(dispatch.contains(
+        "match (action, ws.context_menu_output_row.take()) { (Action::SelectCommandOutput, Some((pane, row))) => { if let Some(pane) = ws.mux.panes.get(&pane) { select_command_output(&pane.term, Some(row)); } }"
+    ));
+    let actions = body("handle_action");
+    assert!(actions.contains(
+        "Action::SelectCommandOutput => { if let Some(p) = ws.mux.focused() { select_command_output(&p.term, None); } }"
+    ));
 }

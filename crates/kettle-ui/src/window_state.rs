@@ -1312,6 +1312,9 @@ pub(crate) struct WindowState {
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
     pub(crate) context_menu_a11y_label: Option<String>,
+    /// The pane and stable row id the terminal menu was opened over, for its
+    /// Select Command Output row. Taken by the menu's next action.
+    pub(crate) context_menu_output_row: Option<(u64, u64)>,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1809,6 +1812,7 @@ impl WindowState {
             hovered_settings: false,
             pressed_settings: false,
             context_menu_a11y_label: None,
+            context_menu_output_row: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,

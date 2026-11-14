@@ -11,6 +11,28 @@ pub struct CommandMark {
     pub exit_code: i32,
 }
 
+/// One entry of the ring: a completed command's mark, and its output rows
+/// `output..end` as stable row ids. `output` is the first row written after
+/// OSC 133 C and `end` the first row after the output at D; a cursor past
+/// column 0 at either mark sits on a row holding the command line or the
+/// output's last line, so that row falls before or inside the span. Empty,
+/// as `row..row`, when the command printed on no row of its own or a scroll
+/// split the span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Completed {
+    mark: CommandMark,
+    output: u64,
+    end: u64,
+}
+
+/// A command between C and D: its prompt row, and where its output began
+/// unless a scroll took that row away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Started {
+    row: u64,
+    output: Option<u64>,
+}
+
 pub(super) enum Boundary {
     PromptStart,
     Begin,
@@ -25,8 +47,8 @@ pub(super) struct CommandMarks {
     prompt: Option<u64>,
     // A running command can lose its row. Keep that state until D so a
     // duplicate bash C cannot resurrect the discarded anchor.
-    pending: Option<Option<u64>>,
-    marks: VecDeque<CommandMark>,
+    pending: Option<Option<Started>>,
+    marks: VecDeque<Completed>,
     alternate: bool,
 }
 
@@ -53,9 +75,12 @@ impl CommandMarks {
                 ));
             }
             Boundary::Begin => {
-                self.begin(self.prompt.filter(|row| *row >= grid.history_origin()));
+                self.begin(
+                    self.prompt.filter(|row| *row >= grid.history_origin()),
+                    row_after_cursor_text(grid),
+                );
             }
-            Boundary::End(code) => self.end(code),
+            Boundary::End(code) => self.end(code, row_after_cursor_text(grid)),
             Boundary::Cancel => self.cancel_pending(),
         }
     }
@@ -65,30 +90,76 @@ impl CommandMarks {
         self.pending = Some(None);
     }
 
-    pub(super) fn begin(&mut self, row: Option<u64>) {
+    /// OSC 133 C: the first since the last D or prompt starts the command,
+    /// with its output at row `output`.
+    pub(super) fn begin(&mut self, row: Option<u64>, output: u64) {
         if self.pending.is_none() {
-            self.pending = Some(row);
+            self.pending = Some(row.map(|row| Started {
+                row,
+                output: Some(output),
+            }));
         }
     }
 
-    pub(super) fn end(&mut self, code: Option<i32>) {
-        if let Some(Some(row)) = self.pending.take()
+    /// OSC 133 D with the row after the output, `end`.
+    pub(super) fn end(&mut self, code: Option<i32>, end: u64) {
+        if let Some(Some(Started { row, output })) = self.pending.take()
             && let Some(exit_code) = code
         {
             if self.marks.len() == 2048 {
                 self.marks.pop_front();
             }
-            self.marks.push_back(CommandMark { row, exit_code });
+            let (output, end) = match output {
+                Some(output) if output < end => (output, end),
+                _ => (row, row),
+            };
+            self.marks.push_back(Completed {
+                mark: CommandMark { row, exit_code },
+                output,
+                end,
+            });
         }
     }
 
-    pub(super) fn retained(&mut self, origin: u64, end: u64) -> Vec<CommandMark> {
+    fn prune(&mut self, origin: u64, end: u64) {
         self.prompt = self.prompt.filter(|row| (origin..end).contains(row));
-        if let Some(row) = self.pending.as_mut() {
-            *row = row.filter(|row| (origin..end).contains(row));
+        if let Some(started) = self.pending.as_mut() {
+            *started = started.filter(|started| (origin..end).contains(&started.row));
         }
-        self.marks.retain(|mark| (origin..end).contains(&mark.row));
-        self.marks.iter().copied().collect()
+        self.marks
+            .retain(|completed| (origin..end).contains(&completed.mark.row));
+    }
+
+    pub(super) fn retained(&mut self, origin: u64, end: u64) -> Vec<CommandMark> {
+        self.prune(origin, end);
+        self.marks.iter().map(|completed| completed.mark).collect()
+    }
+
+    /// The output rows `start..end` of the newest retained command whose
+    /// output holds row `at`, or with no row, of the newest command. The
+    /// span is cut to the retained rows `origin..retained_end`; `None` when
+    /// nothing of it is left or the command printed nothing.
+    pub(super) fn output_rows(
+        &mut self,
+        at: Option<u64>,
+        origin: u64,
+        retained_end: u64,
+    ) -> Option<(u64, u64)> {
+        self.prune(origin, retained_end);
+        let span = |completed: &Completed| {
+            let start = completed.output.max(origin);
+            let end = completed.end.min(retained_end);
+            (start < end).then_some((start, end))
+        };
+        match at {
+            Some(at) => self
+                .marks
+                .iter()
+                .rev()
+                .filter_map(span)
+                .find(|(start, end)| (*start..*end).contains(&at)),
+            None => self.marks.back().and_then(span),
+        }
     }
 
     pub(super) fn apply_batch(&mut self, batch: &GraphicsEventBatch) {
@@ -205,17 +276,55 @@ impl CommandMarks {
             };
             moved.and_then(|row| new_screen_top.checked_add(row as u64))
         };
-        self.prompt = self.prompt.and_then(shift);
-        if let Some(row) = self.pending.as_mut() {
-            *row = row.and_then(shift);
-        }
-        self.marks.retain_mut(|mark| {
-            if let Some(row) = shift(mark.row) {
-                mark.row = row;
-                true
-            } else {
-                false
+        // A span survives only when every row in it moves by the same amount:
+        // the map is one translation on each side of the screen and region
+        // edges and inside the region, so testing the rows next to those
+        // edges, and the span's own ends, covers every row between.
+        let edges = [
+            Some(old_screen_top),
+            old_screen_top.checked_add(top as u64),
+            old_screen_top.checked_add(bottom as u64),
+            old_screen_top.checked_add(screen_lines as u64),
+        ];
+        let shift_span = |start: u64, end: u64| -> Option<(u64, u64)> {
+            let last = end.checked_sub(1).filter(|&last| last >= start)?;
+            let delta = |row: u64| Some(i128::from(shift(row)?) - i128::from(row));
+            let moved = delta(start)?;
+            let inside = |row: &u64| (start..=last).contains(row);
+            let probes = edges
+                .into_iter()
+                .flatten()
+                .flat_map(|edge| [edge.checked_sub(1), Some(edge)])
+                .flatten()
+                .filter(inside)
+                .chain([last]);
+            for row in probes {
+                if delta(row)? != moved {
+                    return None;
+                }
             }
+            Some((shift(start)?, shift(last)?.checked_add(1)?))
+        };
+        self.prompt = self.prompt.and_then(shift);
+        if let Some(started) = self.pending.as_mut() {
+            *started = started.and_then(|Started { row, output }| {
+                Some(Started {
+                    row: shift(row)?,
+                    output: output.and_then(shift),
+                })
+            });
+        }
+        self.marks.retain_mut(|completed| {
+            let Some(row) = shift(completed.mark.row) else {
+                return false;
+            };
+            (completed.output, completed.end) = if completed.output < completed.end {
+                shift_span(completed.output, completed.end).unwrap_or((row, row))
+            } else {
+                (row, row)
+            };
+            completed.mark.row = row;
+            true
         });
     }
 
@@ -236,42 +345,53 @@ impl CommandMarks {
     }
 }
 
+/// The first row at or below the writing cursor with nothing written before
+/// the cursor: its own row at column 0, else the row below.
+fn row_after_cursor_text(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+) -> u64 {
+    let row = super::stable_grid_line_id(
+        grid.history_origin(),
+        grid.history_size(),
+        grid.cursor.point.line.0,
+    );
+    if grid.cursor.point.column.0 == 0 {
+        row
+    } else {
+        row.saturating_add(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn quiet(row: u64, exit_code: i32) -> CommandMark {
+        CommandMark { row, exit_code }
+    }
+
+    fn spans(marks: &CommandMarks) -> Vec<(u64, u64, u64)> {
+        marks
+            .marks
+            .iter()
+            .map(|completed| (completed.mark.row, completed.output, completed.end))
+            .collect()
+    }
+
     #[test]
     fn completed_status_requires_a_command_and_known_exit_code() {
         let mut marks = CommandMarks::default();
-        marks.end(Some(1));
-        marks.begin(Some(10));
-        marks.begin(Some(11)); // duplicate C from a compound bash command
-        marks.end(Some(0));
-        marks.end(Some(9)); // duplicate D cannot change a completed command
-        marks.begin(Some(12));
-        marks.end(Some(-1));
-        marks.begin(Some(13));
-        marks.end(None);
-        assert_eq!(
-            marks.retained(0, 20),
-            vec![
-                CommandMark {
-                    row: 10,
-                    exit_code: 0
-                },
-                CommandMark {
-                    row: 12,
-                    exit_code: -1
-                },
-            ]
-        );
-        assert_eq!(
-            marks.retained(11, 20),
-            vec![CommandMark {
-                row: 12,
-                exit_code: -1
-            }]
-        );
+        marks.end(Some(1), 1);
+        marks.begin(Some(10), 11);
+        marks.begin(Some(11), 12); // duplicate C from a compound bash command
+        marks.end(Some(0), 11);
+        marks.end(Some(9), 11); // duplicate D cannot change a completed command
+        marks.begin(Some(12), 13);
+        marks.end(Some(-1), 13);
+        marks.begin(Some(13), 14);
+        marks.end(None, 14);
+        assert_eq!(marks.retained(0, 20), vec![quiet(10, 0), quiet(12, -1)]);
+        assert_eq!(marks.retained(11, 20), vec![quiet(12, -1)]);
         marks.clear();
         assert!(marks.retained(0, 20).is_empty());
     }
@@ -280,16 +400,57 @@ mod tests {
     fn outcomes_are_bounded_and_reflow_cancels_pending_commands() {
         let mut marks = CommandMarks::default();
         for row in 0..3000 {
-            marks.begin(Some(row));
-            marks.end(Some(2));
+            marks.begin(Some(row), row + 1);
+            marks.end(Some(2), row + 3);
         }
         let retained = marks.retained(0, 4000);
         assert_eq!(retained.len(), 2048);
         assert_eq!(retained[0].row, 952);
-        marks.begin(Some(3001));
+        assert_eq!(spans(&marks).len(), 2048, "spans live in the same ring");
+        assert_eq!(spans(&marks)[0], (952, 953, 955));
+        marks.begin(Some(3001), 3002);
         marks.clear();
-        marks.end(Some(0));
+        marks.end(Some(0), 3003);
         assert!(marks.retained(0, 4000).is_empty());
+    }
+
+    /// The first C starts the output, D ends it, and a lookup by row finds
+    /// the newest span holding that row. The span is cut to the retained
+    /// rows; a command with an empty or inverted span has none.
+    #[test]
+    fn output_rows_come_from_the_first_c_and_the_d() {
+        let mut marks = CommandMarks::default();
+        marks.begin(Some(10), 11);
+        marks.begin(Some(10), 13); // bash's C before PROMPT_COMMAND
+        marks.end(Some(0), 14);
+        marks.begin(Some(14), 15);
+        marks.end(Some(0), 15); // `cd`: nothing printed
+        marks.begin(Some(15), 18);
+        marks.end(Some(1), 16); // the program moved the cursor up
+        assert_eq!(
+            marks.retained(0, 30),
+            vec![quiet(10, 0), quiet(14, 0), quiet(15, 1)]
+        );
+        assert_eq!(
+            spans(&marks),
+            vec![(10, 11, 14), (14, 14, 14), (15, 15, 15)],
+            "an empty or inverted span is kept as the prompt row"
+        );
+        assert_eq!(marks.output_rows(None, 0, 30), None, "newest is empty");
+        assert_eq!(marks.output_rows(Some(11), 0, 30), Some((11, 14)));
+        assert_eq!(marks.output_rows(Some(13), 0, 30), Some((11, 14)));
+        assert_eq!(marks.output_rows(Some(10), 0, 30), None, "prompt row");
+        assert_eq!(marks.output_rows(Some(14), 0, 30), None, "next prompt");
+        marks.begin(Some(16), 17);
+        marks.end(Some(0), 19);
+        assert_eq!(marks.output_rows(None, 0, 30), Some((17, 19)));
+        assert_eq!(marks.output_rows(Some(18), 0, 30), Some((17, 19)));
+        // Rows past the retained grid are cut off, and marks there dropped.
+        assert_eq!(marks.output_rows(Some(11), 0, 13), Some((11, 13)));
+        assert_eq!(marks.retained(0, 30).len(), 1);
+        // The prompt row left history: the mark and its span go with it.
+        assert_eq!(marks.output_rows(Some(11), 11, 30), None);
+        assert!(marks.retained(0, 30).is_empty());
     }
 
     const FIXTURE_ENV: &str = "KETTLE_TEST_COMMAND_MARK_WIRE";
@@ -512,6 +673,119 @@ mod tests {
         let pane = native_pane(&command(3, "TARGET", 7), 4);
         assert_text(&pane, 2, "TARGET");
         assert_rows(&pane, &[(2, 7)]);
+    }
+
+    /// The output rows of the command holding relative row `at`, or of the
+    /// newest command, relative to the active screen's top.
+    fn relative_output(pane: &super::super::Terminal, at: Option<i64>) -> Option<(i128, i128)> {
+        use alacritty_terminal::grid::Dimensions;
+        let screen_top = {
+            let term = pane.term.lock().unwrap();
+            term.grid().history_origin() + term.grid().history_size() as u64
+        };
+        let at = at.map(|row| screen_top.checked_add_signed(row).unwrap());
+        let (start, end) = pane.command_output_rows(at)?;
+        Some((
+            i128::from(start) - i128::from(screen_top),
+            i128::from(end) - i128::from(screen_top),
+        ))
+    }
+
+    const PROMPT: &str = "\x1b]133;A\x07$ ";
+
+    /// `A … C \r\n out1 \r\n out2 \r\n D;0 A …`: the output is exactly the
+    /// two rows between the command line and the next prompt, wherever the
+    /// shell puts C and D on the row it is writing, and only rows inside
+    /// those find it.
+    #[test]
+    fn command_output_rows_are_the_rows_between_the_command_line_and_the_next_prompt() {
+        for wire in [
+            // C right after the command line, D at the start of the next row.
+            format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}"),
+            // C at the start of the first output row, as bash, zsh and fish do.
+            format!("{PROMPT}cmd\r\n\x1b]133;C\x07out1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}"),
+            // Output without a final newline: D on its last row.
+            format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\x1b]133;D;0\x07\r\n{PROMPT}"),
+        ] {
+            let pane = pane(&wire, 4);
+            assert_text(&pane, 0, "$ cmd");
+            assert_text(&pane, 1, "out1");
+            assert_text(&pane, 2, "out2");
+            assert_text(&pane, 3, "$ ");
+            assert_rows(&pane, &[(0, 0)]);
+            assert_eq!(relative_output(&pane, None), Some((1, 3)), "{wire:?}");
+            assert_eq!(relative_output(&pane, Some(1)), Some((1, 3)));
+            assert_eq!(relative_output(&pane, Some(2)), Some((1, 3)));
+            assert_eq!(relative_output(&pane, Some(0)), None, "the command line");
+            assert_eq!(relative_output(&pane, Some(3)), None, "the next prompt");
+        }
+    }
+
+    /// No C, no command: nothing to select, though the rows hold text. A
+    /// command that printed nothing has no output either.
+    #[test]
+    fn a_command_without_c_or_output_has_no_output_rows() {
+        let no_c = pane(
+            &format!("{PROMPT}cmd\r\nout1\r\n\x1b]133;D;0\x07{PROMPT}"),
+            4,
+        );
+        assert_text(&no_c, 1, "out1");
+        assert_rows(&no_c, &[]);
+        assert_eq!(relative_output(&no_c, None), None);
+        assert_eq!(relative_output(&no_c, Some(1)), None);
+
+        let quiet = pane(
+            &format!("{PROMPT}cd\r\n\x1b]133;C\x07\x1b]133;D;0\x07{PROMPT}"),
+            4,
+        );
+        assert_rows(&quiet, &[(0, 0)]);
+        assert_eq!(relative_output(&quiet, None), None);
+    }
+
+    fn two_line_command() -> String {
+        format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\n\x1b]133;D;0\x07{PROMPT}")
+    }
+
+    /// The alternate screen hides the output as it hides the marks, and
+    /// leaving it shows them again; a column reflow drops them for good.
+    #[test]
+    fn output_rows_are_hidden_on_the_alternate_screen_and_dropped_by_reflow() {
+        let alternate = pane(&format!("{}\x1b[?1049h", two_line_command()), 4);
+        assert_eq!(alternate.command_output_rows(None), None);
+        let mut back = pane(&format!("{}\x1b[?1049h\x1b[?1049l", two_line_command()), 4);
+        assert_eq!(relative_output(&back, None), Some((1, 3)));
+
+        // The grid reflows before the native resize, which may refuse the
+        // pseudoterminal of a child that has exited.
+        let _ = back.try_resize_geometry(super::super::PtyGeometry::from_cell_size(60, 6, 8, 16));
+        assert_eq!(back.cols, 60, "the grid reflowed");
+        assert_eq!(back.command_output_rows(None), None);
+        assert_eq!(relative_rows(&back), vec![]);
+    }
+
+    /// The span follows scrolls that move all of it together, into history
+    /// as well, and is dropped, leaving the tick, by one that moves part of
+    /// it or scrolls a row of it away.
+    #[test]
+    fn output_rows_follow_whole_scrolls_and_drop_split_ones() {
+        for (scroll, span, prompt) in [
+            // The whole screen moves down a row.
+            ("\x1b[T", Some((2, 4)), 1),
+            // A region holding the span moves it up a row; row 0 is outside.
+            ("\x1b[2;5r\x1b[2;1H\x1b[M", None, 0),
+            ("\x1b[3;6r\x1b[S", None, 0),
+            ("\x1b[2;6r\x1b[T", Some((2, 4)), 0),
+            // A region edge splits the span.
+            ("\x1b[3;6r\x1b[T", None, 0),
+            // Text pushed up into history keeps its ids.
+            ("\x1b[6;1H\n\n", Some((-1, 1)), -2),
+            // Narrow margins cannot move whole rows.
+            ("\x1b[?69h\x1b[2;5s\x1b[2;5r\x1b[S", None, 0),
+        ] {
+            let scrolled = pane(&format!("{}{scroll}", two_line_command()), 4);
+            assert_eq!(relative_output(&scrolled, None), span, "{scroll:?}");
+            assert_rows(&scrolled, &[(prompt, 0)]);
+        }
     }
 
     #[test]
