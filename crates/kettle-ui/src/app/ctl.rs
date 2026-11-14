@@ -1053,6 +1053,8 @@ impl App {
                     "fitted_title": fitted_title,
                     "label": label,
                     "active": seg.active,
+                    // The marker the strip draws: normal, output, silent or bell.
+                    "activity": format!("{:?}", seg.activity).to_ascii_lowercase(),
                     "hovered": bar.hovered_tab_idx == Some(seg.idx),
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
@@ -1689,6 +1691,20 @@ impl App {
         });
         geometry["tab_bar"]["window_controls"] = window_control_geometry(&bar);
         geometry["notices"] = notices.into();
+        // Where the notification toast is, without its text.
+        geometry["notification_toast"] = self
+            .notification_toast_projection(target)
+            .map(|view| {
+                let controls = view.overlay.control_geometry();
+                serde_json::json!({
+                    "rect": rect_json(controls.rect),
+                    "message": rect_json(controls.message),
+                    "show": view.show.then(|| rect_json(controls.details)),
+                    "close": rect_json(controls.close),
+                    "opacity": view.overlay.opacity,
+                })
+            })
+            .into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
             .text_field
