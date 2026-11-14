@@ -176,19 +176,19 @@ fn osc52_notice_throttle_is_per_pane_and_counts_unicode_characters() {
         let mut first = crate::mux::Osc52NoticeState::default();
         let mut second = crate::mux::Osc52NoticeState::default();
         let prepared = super::prepare_osc52_copy("é界".into(), 100).unwrap();
-        first.copied(now, true, prepared.chars().count(), &tr);
+        first.copied(now, true, prepared.chars().count(), || None, &tr);
         assert_eq!(first.message, Some(tr.osc52_copied(2)));
         first.message = None;
-        first.copied(now + Duration::from_secs(4), true, 7, &tr);
+        first.copied(now + Duration::from_secs(4), true, 7, || None, &tr);
         assert_eq!(first.message, None);
-        second.copied(now + Duration::from_secs(4), true, 7, &tr);
+        second.copied(now + Duration::from_secs(4), true, 7, || None, &tr);
         assert_eq!(second.message, Some(tr.osc52_copied(7)));
-        first.copied(now + Duration::from_secs(5), true, 1, &tr);
+        first.copied(now + Duration::from_secs(5), true, 1, || None, &tr);
         assert_eq!(first.message, Some(tr.osc52_copied(1)));
         first.message = None;
-        first.copied(now + Duration::from_secs(10), false, 5, &tr);
+        first.copied(now + Duration::from_secs(10), false, 5, || None, &tr);
         assert_eq!(first.message, None);
-        first.copied(now + Duration::from_secs(10), true, 5, &tr);
+        first.copied(now + Duration::from_secs(10), true, 5, || None, &tr);
         assert_eq!(first.message, Some(tr.osc52_copied(5)));
     }
 }
@@ -199,7 +199,7 @@ fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
         let tr = kettle_i18n::Translator::new(language);
         let mut state = crate::mux::Osc52NoticeState::default();
         for read in [true, false] {
-            state.denied(read, &tr);
+            state.denied(read, || None, &tr);
             let message = state.message.take().unwrap();
             assert!(message.contains(if read {
                 "osc52 = paste"
@@ -207,7 +207,7 @@ fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
                 "osc52 = copy"
             }));
             assert!(!message.contains("secret"));
-            state.denied(read, &tr);
+            state.denied(read, || None, &tr);
             assert_eq!(state.message, None);
             let toast = kettle_render::UpdateToastOverlay {
                 geometry: kettle_render::persistent_notice_geometry(
@@ -241,7 +241,7 @@ fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
             );
         }
         let mut other_pane = crate::mux::Osc52NoticeState::default();
-        other_pane.denied(true, &tr);
+        other_pane.denied(true, || None, &tr);
         assert!(other_pane.message.is_some());
     }
 }
@@ -286,6 +286,7 @@ fn osc52_policy_gates_backend_effects_and_only_successful_writes_notify() {
                 notify: true,
                 notices: &mut notices,
                 tr: &tr,
+                program: &|| None,
             };
             let reply = super::apply_osc52_event(
                 &mut clipboard,
@@ -330,6 +331,7 @@ fn osc52_policy_gates_backend_effects_and_only_successful_writes_notify() {
             notify,
             notices: &mut notices,
             tr: &tr,
+            program: &|| None,
         };
         clipboard.store(ClipboardType::Clipboard, "test".into());
         assert_eq!(notices.message, None);
@@ -346,6 +348,10 @@ fn osc52_policy_notice_geometry_has_room_for_the_shared_word_wrapping() {
             tr.text(kettle_i18n::Text::Osc52DeniedRead).to_string(),
             tr.text(kettle_i18n::Text::Osc52DeniedWrite).to_string(),
             tr.osc52_copied(123456),
+            // The longest program label a notice can carry: 32 columns.
+            tr.osc52_denied_read_by(&"W".repeat(32)),
+            tr.osc52_denied_write_by(&"W".repeat(32)),
+            tr.osc52_copied_by(&"W".repeat(32), 123456),
         ] {
             for width in [240.0, 400.0, 800.0] {
                 let cell = (8.0, 16.0);
@@ -370,4 +376,183 @@ fn osc52_policy_notice_geometry_has_room_for_the_shared_word_wrapping() {
             }
         }
     }
+}
+
+#[test]
+fn osc52_notices_name_the_program_when_it_is_known() {
+    use std::time::{Duration, Instant};
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let now = Instant::now();
+        let mut state = crate::mux::Osc52NoticeState::default();
+        state.copied(now, true, 42, || Some("vim".into()), &tr);
+        assert_eq!(state.message, Some(tr.osc52_copied_by("vim", 42)));
+        // Unknown keeps the wording that names nobody.
+        state.copied(now + Duration::from_secs(5), true, 1, || None, &tr);
+        assert_eq!(state.message, Some(tr.osc52_copied(1)));
+        for read in [true, false] {
+            let mut named = crate::mux::Osc52NoticeState::default();
+            named.denied(read, || Some("ssh".into()), &tr);
+            let message = named.message.take().unwrap();
+            assert_eq!(
+                message,
+                if read {
+                    tr.osc52_denied_read_by("ssh")
+                } else {
+                    tr.osc52_denied_write_by("ssh")
+                }
+            );
+            assert!(message.contains("ssh"));
+            // The value to set is still named.
+            assert!(message.contains(if read {
+                "osc52 = paste"
+            } else {
+                "osc52 = copy"
+            }));
+            let mut unnamed = crate::mux::Osc52NoticeState::default();
+            unnamed.denied(read, || None, &tr);
+            assert_eq!(
+                unnamed.message.as_deref(),
+                Some(tr.text(if read {
+                    kettle_i18n::Text::Osc52DeniedRead
+                } else {
+                    kettle_i18n::Text::Osc52DeniedWrite
+                }))
+            );
+        }
+    }
+    let en = kettle_i18n::Translator::default();
+    assert_eq!(
+        en.osc52_copied_by("vim", 42),
+        "vim copied 42 characters to the clipboard"
+    );
+}
+
+#[test]
+fn osc52_notices_look_the_program_up_only_when_one_is_shown() {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    let tr = kettle_i18n::Translator::default();
+    let lookups = Cell::new(0);
+    let program = || {
+        lookups.set(lookups.get() + 1);
+        Some("vim".to_string())
+    };
+    let now = Instant::now();
+    let mut state = crate::mux::Osc52NoticeState::default();
+    // Notices off, then a burst inside the 5 s window: one lookup in all.
+    state.copied(now, false, 1, program, &tr);
+    assert_eq!(lookups.get(), 0);
+    for step in 0..100 {
+        state.copied(
+            now + Duration::from_millis(step * 10),
+            true,
+            1,
+            program,
+            &tr,
+        );
+    }
+    assert_eq!(lookups.get(), 1);
+    // A denial shows once per direction per pane, so it looks up once.
+    for _ in 0..100 {
+        state.denied(true, program, &tr);
+        state.denied(false, program, &tr);
+    }
+    assert_eq!(lookups.get(), 3);
+}
+
+#[test]
+fn osc52_notices_show_a_sanitised_bounded_name_and_never_the_arguments() {
+    use super::{Osc52Backend, Osc52Clipboard, PaneClipboard};
+    use kettle_config::Osc52;
+    struct Backend;
+    impl Osc52Backend for Backend {
+        fn set(&mut self, _: ClipboardType, _: String) -> Result<(), arboard::Error> {
+            Ok(())
+        }
+        fn get(&mut self, _: ClipboardType) -> Result<String, arboard::Error> {
+            Ok(String::new())
+        }
+    }
+    let tr = kettle_i18n::Translator::default();
+    // What a hostile program can put in argv[0], and arguments that may hold
+    // a secret: the label is the close question's, name only.
+    let long = format!("/tmp/{}", "B".repeat(500));
+    for (argv, expected) in [
+        (vec!["/usr/bin/vim", "--cmd", "secret-token"], Some("vim")),
+        (vec!["ssh: user@host [mux]", "-p", "2222"], Some("ssh")),
+        // Invisible characters go; a control or direction override ends it.
+        (
+            vec![
+                "/tmp/ev\u{200b}il\u{202e}gpj\x1b[31m\x07",
+                "--password=hunter2",
+            ],
+            Some("evil"),
+        ),
+        (vec!["-zsh"], None),
+        (vec!["\u{200b}\u{202e}"], None),
+        (vec![long.as_str(), "--password=hunter2"], None),
+    ] {
+        let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+        let label = super::busy_program_label(7, |_| Some(argv.clone()), "/bin/zsh\n", None);
+        if argv[0] == long {
+            // Bounded: 32 columns at most, ending in an ellipsis.
+            let label = label.clone().expect("a visible name");
+            assert!(crate::text_editor::display_width(&label) <= 32, "{label:?}");
+            assert!(label.starts_with("BBBB") && label.ends_with('…'));
+        } else {
+            assert_eq!(label.as_deref(), expected, "{argv:?}");
+        }
+        let mut notices = crate::mux::Osc52NoticeState::default();
+        let program = || label.clone();
+        let mut clipboard = PaneClipboard {
+            clipboard: Some(&mut Backend),
+            policy: Osc52::Copy,
+            notify: true,
+            notices: &mut notices,
+            tr: &tr,
+            program: &program,
+        };
+        clipboard.store(ClipboardType::Clipboard, "copied text".into());
+        let copied = notices.message.take().expect("a copy notice");
+        let _ = clipboard_load_denied(&mut notices, &tr, &program);
+        let denied = notices.message.take().expect("a denial notice");
+        for message in [copied, denied] {
+            assert!(!message.contains("secret") && !message.contains("hunter2"));
+            assert!(!message.contains("copied text"));
+            assert!(!message.chars().any(|c| c.is_control()), "{message:?}");
+            assert!(message.chars().count() < 200, "{message:?}");
+            match &label {
+                Some(label) => assert!(message.starts_with(label.as_str()), "{message}"),
+                None => assert!(message.starts_with("A program "), "{message}"),
+            }
+        }
+    }
+}
+
+/// A denied OSC 52 read through the pane clipboard, as the output path makes it.
+fn clipboard_load_denied(
+    notices: &mut crate::mux::Osc52NoticeState,
+    tr: &kettle_i18n::Translator,
+    program: &dyn Fn() -> Option<String>,
+) -> String {
+    use super::{Osc52Backend, Osc52Clipboard, PaneClipboard};
+    struct Never;
+    impl Osc52Backend for Never {
+        fn set(&mut self, _: ClipboardType, _: String) -> Result<(), arboard::Error> {
+            unreachable!("a denied read never writes")
+        }
+        fn get(&mut self, _: ClipboardType) -> Result<String, arboard::Error> {
+            unreachable!("a denied read never reaches the clipboard")
+        }
+    }
+    PaneClipboard {
+        clipboard: Some(&mut Never),
+        policy: kettle_config::Osc52::Copy,
+        notify: true,
+        notices,
+        tr,
+        program,
+    }
+    .load(ClipboardType::Clipboard)
 }
