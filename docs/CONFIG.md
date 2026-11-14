@@ -85,7 +85,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `selection-background` / `selection-foreground` | color | from theme | Active fills meet 3:1 against the terminal background: a theme colour short of that becomes a stronger tint of the same hue. A selected cell with a program-set background keeps that fill where it also meets 3:1 there, and gets one worked out against its own background where it does not. Unfocused windows use a neutral grey fill at least 2:1 against the background and at least 1.3:1 quieter than the focused fill. Text and decorations meet 4.5:1 against the fill. In a translucent window, the macOS and Windows default, the ratios are measured against the background as it shows over a light or dark desktop (see [Selection and history controls](#selection-and-history-controls)). A readable user `selection-foreground` takes precedence, then readable cell ink; otherwise Kettle chooses the highest-contrast theme selection foreground, theme foreground, theme background, white or black |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Current search-match + quick-select highlight. The background defaults to the theme's yellow `palette[3]`. Search text follows the selection contrast rule: a readable explicit foreground has priority, then readable cell ink, then the strongest fallback. Quick-select labels default to the theme background |
-| `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
+| `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied. Once older lines have been dropped, the top of the history is labelled **Start of kept history** with the number of lines the pane holds |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `64000000` | Per-pane scrollback memory budget (64 MB by default; the 10,000-line cap still applies). Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
 | `window-padding-x` / `window-padding-y` | float | `12` | Inner padding (px), `0` or more |
 | `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 164 columns at the default font and padding) fitted to 90 % × 85 % of the monitor. On a 1366 px wide laptop that fit leaves about 154 columns at macOS's 13 px font, past the 144 Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)); at the 14 px default elsewhere it leaves 143, and the panel opens once the window is maximized (159 columns). A 1280×720 or 1280×800 logical display gets 134 columns fresh and 149 maximized. If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. The font is measured before the window opens, so a set dimension opens at exactly that many cells. An unset dimension keeps the `160x45` baseline's pixel size, converted in logical pixels with an 8×16 px cell at macOS's 13 px font, scaled to about 8.6×17.2 px for the 14 px default elsewhere, so a HiDPI display gets the same grid and the default window (1304×744 px on macOS and 1403×800 px elsewhere, plus any titlebar band) holds about 164x44 cells at the default font and padding. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` on macOS, or `92` / `33` at the 14 px default elsewhere (798×602 px before any titlebar band) |
@@ -699,9 +699,26 @@ leaves the clipboard unchanged.
 See [Selecting text](../README.md#selecting-text) for mouse modifiers and copy
 rules, and [Settings](SETTINGS.md) for live cursor and copy controls.
 
-A pane scrolled into history shows a bottom-right **↓ 1,234 lines** pill. Click it
-to return that pane to live output. It disappears at the bottom and when a pane
-is too small to fit its label. It remains available with `scrollbar = never`.
+A pane scrolled into history shows a bottom-right **↓ 1,234 lines** button.
+Click it to return that pane to live output. After the count it shows the key
+bound to `scroll_to_bottom` (**Ctrl+End** by default, **⌃End** on macOS). The
+key follows a rebind, and is left out when the action is unbound or the pane
+is too narrow for both: the count always shows. The button has an outline at
+least 3:1 against the terminal, a hover and a pressed state, and acts when the
+press is released over it, so moving off it cancels. It disappears at the
+bottom and when a pane is too small to fit its count. It remains available
+with `scrollbar = never`. Screen readers get it as a button with that key as
+its shortcut, and hear **Viewing history** once when the focused pane leaves
+live output.
+
+Scrolled to the very top of a history that has lost its oldest lines, a pane
+shows **Start of kept history · 10,000 lines** at its top right: where the
+history Kettle still holds begins, and how many lines that is. The lines are
+gone because `scrollback` or `scrollback-bytes` dropped them, or because the
+history was cleared; the count is what the pane holds now, which is the
+`scrollback` limit once that limit is what drops lines. A pane too narrow for
+the count shows the label alone, and a pane with nothing dropped, or back at
+its live output, shows none.
 The scrollbar keeps its configured width at rest and grows to at least 10
 logical pixels while the pane is scrolled back or the pointer hovers or drags
 it, in a channel as wide as the thumb; with `scrollbar = always` it keeps that

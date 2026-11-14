@@ -8,6 +8,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Scrolled to the very top of a history that has lost its oldest lines, a
+  pane shows **Start of kept history · 10,000 lines** at its top right: where
+  the history Kettle still holds begins and how many lines that is, so the
+  `scrollback` limit is visible where you run into it. It shows only there,
+  never at a live prompt after Clear Scrollback, and without the count in a
+  pane too narrow for it. Screen readers read it as text. No default changes:
+  `scrollback` stays 10,000 lines.
+
+- Screen readers hear **Viewing history** once when the focused pane is
+  scrolled back from its live output. The status carries no line count, so
+  scrolling further does not repeat it; the jump button beside it still says
+  how far back the view is.
+
 - A bell in the pane you are looking at now marks the active tab with the
   same bell a background tab gets, until you answer it: the next key, IME
   commit or paste in that pane, a click in it, or moving to another pane or
@@ -317,6 +330,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   within the same 2048 retained commands.
 
 ### Changed
+
+- The **↓ N lines** pill of a scrolled-back pane now reads as the button it
+  is. It has an outline that is at least 3:1 against the terminal on every
+  bundled theme, a hover and a pressed state, and after the count it shows
+  the key bound to `scroll_to_bottom` (Ctrl+End by default). The key follows
+  a rebind and is left out when the action is unbound or the pane is too
+  narrow; the count always shows. Like a native button it now acts when the
+  press is released over it, so moving off it before letting go cancels.
+  Screen readers get the key as the button's shortcut, and `kettle ctl
+  ui_geometry` reports the button's state and key hint.
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's

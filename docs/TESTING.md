@@ -139,6 +139,24 @@ and independent panes and windows. Run
 `cargo test --locked --offline -j 2 -p kettle-ui --lib scrollback_receipt_hit`.
 These fixtures create no App, native window, renderer, clipboard or global UI
 services. Native and control event dispatch still require a live integration pass.
+The button acts on release: the same fixtures check that a press only arms it
+and that a release elsewhere, over another pane's button or under a receipt
+does nothing.
+
+`kettle-render`'s `scrollback_pill_tests` pin the button and the "Start of kept
+history" label as resolved geometry and colours, never glyph pixels: the key
+hint shown, dropped and rebound; each state's fill, edge and label floors on
+every bundled theme; the quads the painter emits at 1x and 2x; the label's
+condition, including a live prompt after Clear Scrollback and one line below
+the top, from a real terminal as well; its English and Spanish text; and its
+clearance of the scrollbar, the button and the search bar. The search bar is a
+lane reserved under the panes, so that last check holds by layout and guards
+it. `headless_tests::a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label`
+samples the fill, edge and rule in rendered frames, away from any glyph.
+`kettle-ui`'s `scrollback_indicator_tests` check that the pointer, AccessKit
+and `ui_geometry` read those rects, and that the "Viewing history" status is
+one node that does not change between offsets. Hover and press feedback under
+a real pointer, and what a screen reader speaks, need a desktop.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
