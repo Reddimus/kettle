@@ -711,7 +711,8 @@ edge. All sizes scale with display DPI. The bar is painted solid only when, at
 its widest and with its 2-pixel edge, it fits in `window-padding-x` and the
 window is opaque (`background-opacity = 1`). Otherwise it is translucent, at
 most 90% cover, so text under it stays visible; it still shows in the same
-colours over the background.
+colours over the background. Command ticks on the bar are painted the same
+way. In a pane narrower than the bar, the bar narrows to fit.
 
 
 ## Editing the config from inside kettle (Preferences submenu)
