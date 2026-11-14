@@ -62,6 +62,9 @@ pub(crate) struct PaneContentKey {
     /// Whether the pane saves as remote, which with remote saving off
     /// empties its rows.
     pub remote: bool,
+    /// `Pane::remote_output_end`: where a remote session that has ended left
+    /// off, which keeps its rows out.
+    pub remote_end: Option<u64>,
 }
 
 impl ContentKey {

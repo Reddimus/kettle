@@ -515,6 +515,7 @@ fn content_key_tracks_every_input() {
         output,
         geometry,
         remote,
+        remote_end: None,
     };
     let key = |hash: u8, lines, remote, windows: Vec<(u64, Vec<PaneContentKey>)>| {
         ContentKey::new([hash; 32], lines, remote, windows)
@@ -551,6 +552,24 @@ fn content_key_tracks_every_input() {
             key(0, 1000, false, vec![(1, vec![change, pane(8, 4, 1, false)])]),
         ));
     }
+    variants.push((
+        "where a remote session ended",
+        key(
+            0,
+            1000,
+            false,
+            vec![(
+                1,
+                vec![
+                    PaneContentKey {
+                        remote_end: Some(40),
+                        ..pane(7, 10, 2, false)
+                    },
+                    pane(8, 4, 1, false),
+                ],
+            )],
+        ),
+    ));
     for (name, variant) in variants {
         assert_ne!(variant, reference, "the key ignores {name}");
     }
@@ -599,6 +618,7 @@ fn content_key_with(
                 output,
                 geometry: 0,
                 remote: false,
+                remote_end: None,
             }],
         )],
     )
@@ -993,4 +1013,57 @@ fn a_refused_restore_is_explained_in_english_and_spanish() {
     assert!(shown.contains(
         "fire_notify(self.ui_text.text(kettle_i18n::Text::NotifySessionNotRestored),self.ui_text.text(body),"
     ));
+}
+
+/// Q4: a pane stays remote for its saved output after `ssh` exits. Its
+/// remote session's rows stay out while any of them is still in the grid,
+/// and the rows after them save like any local pane's. With remote saving on,
+/// everything saves, marked remote so turning it off later drops it.
+#[test]
+fn remote_output_stays_out_of_the_saved_content_after_ssh_exits() {
+    use crate::mux::{RemoteRows, remote_rows};
+    // Never remote: everything, local.
+    assert_eq!(remote_rows(false, None, 0, false), RemoteRows::All { remote: false });
+    // Remote session ended at document row 40, rows from 10 still there.
+    assert_eq!(remote_rows(false, Some(40), 10, false), RemoteRows::From(40));
+    assert_eq!(remote_rows(false, Some(40), 10, true), RemoteRows::All { remote: true });
+    // Every row from before 40 has left the grid (scrollback clear, reset,
+    // eviction): the pane is local again.
+    assert_eq!(remote_rows(false, Some(40), 40, false), RemoteRows::All { remote: false });
+    assert_eq!(remote_rows(false, Some(40), 90, true), RemoteRows::All { remote: false });
+    // Remote now, with remote saving on.
+    assert_eq!(remote_rows(true, None, 0, true), RemoteRows::All { remote: true });
+
+    // Where the boundary is set: when a pane stops counting as remote, and
+    // when restore replays output saved as remote; and the snapshot uses it.
+    let remote = include_str!("remote.rs");
+    let update = remote
+        .split("fn update_window_remote_contexts(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .unwrap();
+    let was = update.find("let was_remote = crate::mux::pane_saves_as_remote(pane);").unwrap();
+    let probe = update.find("pane.remote_context = probe.remote.clone();").unwrap();
+    let noted = update
+        .find("if was_remote && !crate::mux::pane_saves_as_remote(pane) {\n            pane.note_remote_output_ended();")
+        .unwrap();
+    assert!(was < probe && probe < noted);
+    let mux = include_str!("../mux.rs");
+    let build = mux.split("fn build_node(").nth(1).unwrap();
+    assert!(build.contains("replayed_remote = pane.remote;"));
+    assert!(build.contains("if replayed_remote {\n                        p.note_remote_output_ended();"));
+    let snapshot = mux
+        .split("pub(crate) fn snapshot_content(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(snapshot.contains("match remote_rows("));
+    assert!(snapshot.contains("kettle_core::restore::snapshot_from("));
+    // A boundary that moves changes what is saved, so the key must see it.
+    let key = mux
+        .split("pub(crate) fn content_key_panes(&self)")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(key.contains("remote_end: pane.remote_output_end,"));
 }
