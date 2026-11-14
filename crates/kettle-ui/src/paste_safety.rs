@@ -32,6 +32,11 @@ pub(crate) enum Kind {
     /// 0x04, which a shell reads as the end of its input.
     EndOfInput,
     Escape,
+    /// A bidirectional formatting character (an override, embedding, isolate
+    /// or mark). It is not a control character to Unicode, but it changes the
+    /// order text is drawn in, so a command can read differently from what
+    /// it runs.
+    Bidi(char),
     /// A C1 control, U+0080 to U+009F.
     C1(char),
     Backspace,
@@ -39,6 +44,27 @@ pub(crate) enum Kind {
     Bell,
     /// Any other C0 control. TAB and the line breaks are never findings.
     Control(char),
+}
+
+impl Kind {
+    /// The single byte this kind is on the wire, for the kinds that are one
+    /// C0 or DEL byte. The encoder's own rule (`input::bracketed_paste_drops`)
+    /// is asked about this byte, so the dialog never keeps a second list of
+    /// what a bracketed paste removes.
+    pub(crate) fn byte(self) -> Option<u8> {
+        match self {
+            Self::Interrupt => Some(0x03),
+            Self::Suspend => Some(0x1a),
+            Self::Quit => Some(0x1c),
+            Self::EndOfInput => Some(0x04),
+            Self::Escape => Some(0x1b),
+            Self::Backspace => Some(0x08),
+            Self::Delete => Some(0x7f),
+            Self::Bell => Some(0x07),
+            Self::Control(c) => u8::try_from(u32::from(c)).ok(),
+            Self::EndMarker | Self::EndMarkerC1 | Self::Bidi(_) | Self::C1(_) => None,
+        }
+    }
 }
 
 /// One row of the findings: how often a kind occurs, and where it first does.
@@ -77,6 +103,7 @@ pub(crate) fn findings(text: &str) -> Vec<Finding> {
                 '\x07' => Some(Kind::Bell),
                 '\0'..='\x1f' => Some(Kind::Control(c)),
                 '\u{80}'..='\u{9f}' => Some(Kind::C1(c)),
+                c if kettle_config::ssh_config::is_bidi_format_char(c) => Some(Kind::Bidi(c)),
                 _ => None,
             };
             (kind, c.len_utf8())
@@ -135,7 +162,12 @@ fn scan(text: &str, mut emit: impl FnMut(char)) -> Analysis {
                 found.escapes += 1;
                 if c == '\u{9d}' { ']' } else { 'P' }
             }
-            c if c.is_control() && !matches!(c, '\t' | '\n' | '\r') => {
+            // A bidirectional formatting character is counted and removed
+            // with the controls: it is what lets pasted text show one command
+            // and run another.
+            c if (c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+                || kettle_config::ssh_config::is_bidi_format_char(c) =>
+            {
                 found.controls += 1;
                 continue;
             }
@@ -238,7 +270,7 @@ mod tests {
     fn tab_and_line_breaks_are_never_findings() {
         assert!(findings("plain\ttext\r\nnext\nlast\r").is_empty());
         assert!(findings("").is_empty());
-        assert!(findings("café 界 \u{202e}").is_empty());
+        assert!(findings("café 界 ñ").is_empty());
         for c in (0..=0x9fu32).filter_map(char::from_u32) {
             let found = findings(&c.to_string());
             let expected = c.is_control() && !matches!(c, '\t' | '\n' | '\r');
@@ -265,6 +297,65 @@ mod tests {
         // A marker cut short is an ESC, or a C1 control, like any other.
         assert_eq!(kinds("\x1b[201"), [Kind::Escape]);
         assert_eq!(kinds("\u{9b}20"), [Kind::C1('\u{9b}')]);
+    }
+
+    #[test]
+    fn bidi_formatting_is_found_counted_and_removed_with_the_controls() {
+        // Every character `is_bidi_format_char` names: overrides, embeddings,
+        // isolates and the three marks.
+        let all: Vec<char> = ('\u{202a}'..='\u{202e}')
+            .chain('\u{2066}'..='\u{2069}')
+            .chain(['\u{200e}', '\u{200f}', '\u{61c}'])
+            .collect();
+        for &c in &all {
+            let text = format!("rm{c}-rf");
+            assert_eq!(
+                findings(&text)
+                    .iter()
+                    .map(|f| (f.kind, f.count))
+                    .collect::<Vec<_>>(),
+                [(Kind::Bidi(c), 1)],
+                "{c:?}"
+            );
+            assert_eq!(analyse(&text).controls, 1, "{c:?}");
+            assert_eq!(without_controls(&text), "rm-rf", "{c:?}");
+            assert_eq!(Kind::Bidi(c).byte(), None);
+        }
+        // An override ranks below ESC and above the other 8-bit controls.
+        let kinds: Vec<_> = findings("\u{85}\u{202e}\x1b")
+            .into_iter()
+            .map(|f| f.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [Kind::Escape, Kind::Bidi('\u{202e}'), Kind::C1('\u{85}')]
+        );
+        // Ordinary right-to-left text has no formatting character in it.
+        assert!(findings("שלום مرحبا").is_empty());
+        assert_eq!(without_controls("שלום مرحبا"), "שלום مرحبا");
+    }
+
+    #[test]
+    fn a_kind_names_its_byte_when_it_is_one() {
+        for (kind, byte) in [
+            (Kind::Interrupt, 0x03),
+            (Kind::Suspend, 0x1a),
+            (Kind::Quit, 0x1c),
+            (Kind::EndOfInput, 0x04),
+            (Kind::Escape, 0x1b),
+            (Kind::Backspace, 0x08),
+            (Kind::Delete, 0x7f),
+            (Kind::Bell, 0x07),
+            (Kind::Control('\x19'), 0x19),
+        ] {
+            assert_eq!(kind.byte(), Some(byte));
+            // The byte is the one `findings` files under that kind.
+            let text = char::from(byte).to_string();
+            assert_eq!(findings(&text)[0].kind, kind);
+        }
+        for kind in [Kind::EndMarker, Kind::EndMarkerC1, Kind::C1('\u{9b}')] {
+            assert_eq!(kind.byte(), None);
+        }
     }
 
     #[test]

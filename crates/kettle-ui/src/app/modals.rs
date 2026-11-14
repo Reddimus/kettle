@@ -3686,12 +3686,24 @@ pub enum ConfirmButton {
 impl ConfirmButton {
     /// Whether the button carries the warning colour.
     ///
-    /// Every variant has its own arm on purpose. Written as
-    /// `matches!(button, Self::Confirm { destructive: true, .. })`, rustc
-    /// 1.99.1 at `opt-level = 1` read the flag's byte without checking the
-    /// variant once the projection built a larger struct, and a paste
-    /// button's flag came back as the low byte of its label's length. The
-    /// paste dialog tests compare the projected flags and catch it.
+    /// This is a method with an arm per variant because of a code-generation
+    /// fault in the toolchain, not in Kettle: no `unsafe` is involved, Miri
+    /// runs the code clean, and the MIR and LLVM IR are right. rustc 1.99 to
+    /// 1.102 (LLVM 23) on AArch64, at `opt-level = 1` or `s`, lower
+    /// `select(variant is Confirm, flag, false)` to a one-bit mask when the
+    /// read sits in the projecting closure, as
+    /// `matches!(button, Self::Confirm { destructive: true, .. })` or as a
+    /// `match` with a wildcard arm did. `ConfirmButton` keeps its tag in the
+    /// label's capacity word, so for the other variants that byte is the low
+    /// byte of their label's length, and it came back with bit 0 cleared.
+    /// Dev and test builds use `opt-level = 1`. x86_64 and opt-levels 0, 2
+    /// and 3 are not affected by the reduced case. This shape compiles to a
+    /// compare and an `and`, which is right for every input, but it is right
+    /// by what the compiler emits today, not by construction:
+    /// `every_paste_button_projects_its_own_flag_and_sends_its_own_text`
+    /// checks the flags and what each button sends, at the level tests build
+    /// at. The reduced case is `rustc-repro/repro.rs` in the C14 audit
+    /// evidence.
     pub(super) fn destructive(&self) -> bool {
         match self {
             Self::Confirm { destructive, .. } => *destructive,

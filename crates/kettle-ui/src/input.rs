@@ -1254,6 +1254,16 @@ fn push_without_paste_markers(safe: &mut Vec<u8>, byte: u8) {
     }
 }
 
+/// Whether the encoder drops `byte` from the body of a bracketed paste: ESC,
+/// and the bytes the kernel's terminal layer turns into a signal before the
+/// program reads them. 0x03 (interrupt), 0x1A (suspend) and 0x1C (quit)
+/// everywhere, and 0x19 where the platform has a delayed suspend (macOS).
+/// The Confirm paste dialog asks this same function which findings a
+/// bracketed paste removes.
+pub(crate) fn bracketed_paste_drops(byte: u8, delayed_suspend: bool) -> bool {
+    matches!(byte, 0x1b | 0x03 | 0x1a | 0x1c) || (delayed_suspend && byte == 0x19)
+}
+
 /// [`paste_payload`] with the platform's delayed-suspend byte made explicit,
 /// so every platform's encoding is tested on every platform.
 pub(crate) fn paste_payload_for(text: &str, bracketed: bool, delayed_suspend: bool) -> Vec<u8> {
@@ -1295,15 +1305,15 @@ pub(crate) fn paste_payload_for(text: &str, bracketed: bool, delayed_suspend: bo
         // characters with spaces in every mode, and VTE replaces every C0
         // control but NUL, HT, CR and LF with a control picture. All four are
         // single bytes below 0x80, so no UTF-8 sequence is split.
-        let dropped = |byte: u8| {
-            matches!(byte, 0x1b | 0x03 | 0x1a | 0x1c) || (delayed_suspend && byte == 0x19)
-        };
         // Dropping a byte can join the halves of a C1 marker (an ESC marker
         // cannot survive: every ESC is gone), so strip markers once more.
         // Preserve `\n` line endings; only CRLF was normalized, to LF.
         let mut body = Vec::with_capacity(safe.len() + 12);
         body.extend_from_slice(b"\x1b[200~");
-        for byte in safe.into_iter().filter(|byte| !dropped(*byte)) {
+        for byte in safe
+            .into_iter()
+            .filter(|byte| !bracketed_paste_drops(*byte, delayed_suspend))
+        {
             push_without_paste_markers(&mut body, byte);
         }
         body.extend_from_slice(b"\x1b[201~");

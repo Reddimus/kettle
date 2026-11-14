@@ -881,6 +881,7 @@ impl App {
                 policy: self.cfg.paste_protection,
                 unbracketed: modes.values().any(|bracketed| !bracketed),
                 access_keys: confirm_access_keys(cfg!(target_os = "macos")),
+                delayed_suspend: cfg!(target_os = "macos"),
             },
             self.ui_text,
         );
@@ -1742,43 +1743,106 @@ pub(super) struct PastePreview {
     pub spoken: String,
 }
 
-/// Most characters, and most lines, of pasted text a preview shows.
+/// Most columns, and most lines, of pasted text a preview shows. A column is
+/// one character of what is drawn: a tab is four, `ESC` three, `U+202E` six.
 const PREVIEW_CHARS: usize = 160;
 const PREVIEW_LINES: usize = 3;
-/// Most characters shown before the control a moved preview window is for.
+/// Most columns shown before the control a moved preview window is for.
 const PREVIEW_LEAD: usize = 40;
+
+/// How one character of pasted text is drawn in the preview.
+enum Shown {
+    /// CR or LF.
+    Break,
+    /// Text as it is; a tab as spaces.
+    Plain(String),
+    /// A control, spelled in ASCII and drawn as a chip.
+    Token(String),
+}
+
+impl Shown {
+    fn of(c: char) -> Self {
+        match c {
+            '\r' | '\n' => Self::Break,
+            // A tab is ordinary whitespace: no chip and no caret alarm.
+            '\t' => Self::Plain("    ".to_string()),
+            '\x1b' => Self::Token("ESC".to_string()),
+            '\x07' => Self::Token("BEL".to_string()),
+            '\x7f' => Self::Token("DEL".to_string()),
+            c if c <= '\x1f' => Self::Token(format!("^{}", char::from(c as u8 + 64))),
+            c if c.is_control() || super::title::is_bidi_format_char(c) => {
+                Self::Token(control_code_name(c))
+            }
+            c => Self::Plain(c.to_string()),
+        }
+    }
+
+    /// Columns the character takes in the window's budget.
+    fn width(&self) -> usize {
+        match self {
+            Self::Break => 0,
+            Self::Plain(text) | Self::Token(text) => text.chars().count(),
+        }
+    }
+}
+
+/// What a screen reader says for control `c`, drawn as `token`.
+fn spoken_control(c: char, token: &str, tr: &kettle_i18n::Translator) -> String {
+    use kettle_i18n::Text as T;
+    match c {
+        '\x1b' => tr.text(T::ConfirmPasteA11yEscape).to_string(),
+        '\x07' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBell)),
+        '\x7f' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingDelete)),
+        '\x08' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBackspace)),
+        c if c <= '\x1f' => {
+            tr.confirm_paste_a11y_control(&format!("Ctrl+{}", char::from(c as u8 + 64)))
+        }
+        _ => tr.confirm_paste_a11y_control(token),
+    }
+}
 
 /// Keep preview work and dialog size independent of clipboard size.
 ///
 /// The window opens at the start of the text. `anchor` is the byte range of
 /// the most serious control in it; when the opening window ends before that
-/// control does, the window moves to it instead, so a harmless line break
-/// near the top never hides an end marker further down.
+/// control does, the window moves to it instead, so nothing that comes first
+/// can hide an end marker further down: not a harmless line break, and not a
+/// run of tabs or of characters that are drawn wide.
 pub(super) fn paste_preview(
     text: &str,
     anchor: Option<(usize, usize)>,
     tr: &kettle_i18n::Translator,
 ) -> PastePreview {
     let (head, shown) = preview_window(text, 0, tr);
-    let Some((start, _)) = anchor.filter(|&(start, end)| {
+    let Some((start, end)) = anchor.filter(|&(start, end)| {
         start <= end && end <= text.len() && text.is_char_boundary(start) && shown < end
     }) else {
         return head;
     };
-    // Lead in with the rest of the control's line, a bounded way back.
+    // Lead in with the rest of the control's line, a bounded way back. The
+    // bound is in drawn columns, the unit the window is cut in: a lead
+    // counted in characters could fill the window with tabs or `U+202E`s and
+    // push the control out of it again.
     let mut from = start;
-    for (index, c) in text[..start].char_indices().rev().take(PREVIEW_LEAD) {
-        if matches!(c, '\n' | '\r') {
+    let mut lead = 0;
+    for (index, c) in text[..start].char_indices().rev() {
+        let shown = Shown::of(c);
+        lead += shown.width();
+        if matches!(shown, Shown::Break) || lead > PREVIEW_LEAD {
             break;
         }
         from = index;
     }
-    preview_window(text, from, tr).0
+    let (moved, shown) = preview_window(text, from, tr);
+    if shown >= end {
+        return moved;
+    }
+    // Whatever the lead was, the control itself is shown: it opens the window.
+    preview_window(text, start, tr).0
 }
 
 /// The preview of `text` from byte `from`, and the byte it reached.
 fn preview_window(text: &str, from: usize, tr: &kettle_i18n::Translator) -> (PastePreview, usize) {
-    use kettle_i18n::Text as T;
     let mut preview = PastePreview::default();
     if from > 0 {
         preview.text.push('…');
@@ -1790,75 +1854,45 @@ fn preview_window(text: &str, from: usize, tr: &kettle_i18n::Translator) -> (Pas
     let mut chars = text[from..].char_indices().peekable();
     while let Some((offset, c)) = chars.next() {
         let mut end = from + offset + c.len_utf8();
-        // What is shown, and for a control what is said.
-        let (visible, spoken): (String, Option<String>) = match c {
-            '\r' | '\n' => {
-                if c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n') {
-                    chars.next();
-                    end += 1;
-                }
-                // A line break that ends the text ends its last line. It
-                // draws no empty line and is no fourth line to cut at; the
-                // summary says the text ends with one.
-                if end == text.len() {
-                    shown = end;
-                    break;
-                }
-                lines += 1;
-                ("\n".to_string(), None)
+        let piece = Shown::of(c);
+        if matches!(piece, Shown::Break) {
+            if c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n') {
+                chars.next();
+                end += 1;
             }
-            // A tab is ordinary whitespace: no chip and no caret alarm.
-            '\t' => ("    ".to_string(), None),
-            '\x1b' => (
-                "ESC".to_string(),
-                Some(tr.text(T::ConfirmPasteA11yEscape).to_string()),
-            ),
-            '\x07' => (
-                "BEL".to_string(),
-                Some(tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBell))),
-            ),
-            '\x7f' => (
-                "DEL".to_string(),
-                Some(tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingDelete))),
-            ),
-            '\x08' => (
-                "^H".to_string(),
-                Some(tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBackspace))),
-            ),
-            c if c <= '\x1f' => {
-                let letter = char::from(c as u8 + 64);
-                (
-                    format!("^{letter}"),
-                    Some(tr.confirm_paste_a11y_control(&format!("Ctrl+{letter}"))),
-                )
+            // A line break that ends the text ends its last line. It draws
+            // no empty line and is no fourth line to cut at; the summary says
+            // the text ends with one.
+            if end == text.len() {
+                shown = end;
+                break;
             }
-            c if c.is_control() || super::title::is_bidi_format_char(c) => {
-                let name = control_code_name(c);
-                let spoken = tr.confirm_paste_a11y_control(&name);
-                (name, Some(spoken))
-            }
-            c => (c.to_string(), None),
-        };
-        let width = visible.chars().count();
+            lines += 1;
+        }
+        let width = piece.width();
         if used + width > PREVIEW_CHARS || lines > PREVIEW_LINES {
             preview.text.push('…');
             preview.spoken.push('…');
             break;
         }
-        match spoken {
-            Some(spoken) => {
-                let start = preview.text.len();
+        match piece {
+            Shown::Break => {
+                preview.text.push('\n');
+                preview.spoken.push('\n');
+            }
+            Shown::Plain(visible) => {
                 preview.text.push_str(&visible);
+                preview.spoken.push_str(&visible);
+            }
+            Shown::Token(token) => {
+                let start = preview.text.len();
+                preview.text.push_str(&token);
                 preview.tokens.push(start..preview.text.len());
                 if !preview.spoken.is_empty() && !preview.spoken.ends_with([' ', '\n']) {
                     preview.spoken.push(' ');
                 }
-                preview.spoken.push_str(&spoken);
+                preview.spoken.push_str(&spoken_control(c, &token, tr));
                 preview.spoken.push(' ');
-            }
-            None => {
-                preview.text.push_str(&visible);
-                preview.spoken.push_str(&visible);
             }
         }
         used += width;
@@ -1900,6 +1934,7 @@ fn finding_text(
         Kind::Quit => ("^\\".to_string(), T::ConfirmPasteFindingQuit),
         Kind::EndOfInput => ("^D".to_string(), T::ConfirmPasteFindingEndOfInput),
         Kind::Escape => ("ESC".to_string(), T::ConfirmPasteFindingEscape),
+        Kind::Bidi(c) => (control_code_name(c), T::ConfirmPasteFindingBidi),
         Kind::C1(c) => (control_code_name(c), T::ConfirmPasteFindingC1),
         Kind::Backspace => ("^H".to_string(), T::ConfirmPasteFindingBackspace),
         Kind::Delete => ("DEL".to_string(), T::ConfirmPasteFindingDelete),
@@ -1910,6 +1945,27 @@ fn finding_text(
         ),
     };
     (token, tr.text(meaning))
+}
+
+/// Whether the paste encoder removes this kind of control whichever button
+/// is chosen, so it never reaches a program.
+///
+/// The end marker goes in every mode. ESC and the signal bytes go only
+/// inside a bracketed paste, and the dialog may say so only when every
+/// recipient is bracketed: under broadcast, one program without bracketed
+/// paste still receives them. Which bytes those are is the encoder's own
+/// rule, not a second list here.
+fn encoder_removes(kind: crate::paste_safety::Kind, ask: PasteAsk) -> bool {
+    use crate::paste_safety::Kind;
+    match kind {
+        Kind::EndMarker | Kind::EndMarkerC1 => true,
+        kind => {
+            !ask.unbracketed
+                && kind
+                    .byte()
+                    .is_some_and(|byte| input::bracketed_paste_drops(byte, ask.delayed_suspend))
+        }
+    }
 }
 
 /// The end marker as the dialog names it, in its 7-bit and its C1 form. The
@@ -1941,6 +1997,9 @@ pub(super) struct PasteAsk {
     pub unbracketed: bool,
     /// Show and answer access keys. Never on macOS.
     pub access_keys: bool,
+    /// The platform has a delayed-suspend byte (0x19) that a bracketed paste
+    /// drops: macOS.
+    pub delayed_suspend: bool,
 }
 
 pub(super) fn text_paste_confirmation(
@@ -1956,8 +2015,20 @@ pub(super) fn text_paste_confirmation(
     let found = crate::paste_safety::analyse(text);
     let kinds = crate::paste_safety::findings(text);
     // With controls in the text, the sanitised paste is the recommended
-    // choice after Cancel, and a raw paste carries the warning colour.
+    // choice after Cancel.
     let controls = !kinds.is_empty();
+    // The raw paste carries the warning colour when it would hand the
+    // program a control: one the encoder does not remove in this mode. Text
+    // with an end marker keeps it too. Kettle removes the marker, but such
+    // text was written to break out of a paste, and the raw choice is the
+    // one that sends everything else in it untouched.
+    let marked = kinds
+        .iter()
+        .any(|finding| matches!(finding.kind, Kind::EndMarker | Kind::EndMarkerC1));
+    let raw_is_risky = marked
+        || kinds
+            .iter()
+            .any(|finding| !encoder_removes(finding.kind, ask));
     let mut buttons = vec![ConfirmButton::Cancel];
     if controls {
         buttons.push(ConfirmButton::PasteWithoutControls {
@@ -1966,7 +2037,7 @@ pub(super) fn text_paste_confirmation(
     }
     let paste = ConfirmButton::Confirm {
         label: tr.text(T::MenuPaste).to_string(),
-        destructive: controls,
+        destructive: raw_is_risky,
     };
     let one_line = ConfirmButton::PasteOneLine {
         label: tr.text(T::ConfirmPasteOneLine).to_string(),
@@ -2046,12 +2117,20 @@ pub(super) fn text_paste_confirmation(
         .take(FINDING_ROWS)
         .map(|finding| {
             let (token, meaning) = finding_text(finding.kind, &tr);
-            description.push(tr.confirm_paste_a11y_finding(&token, meaning, finding.count));
+            // A row says what happens to the control in this mode: one the
+            // encoder removes is not presented as a live risk.
+            let removed = encoder_removes(finding.kind, ask);
+            let meaning = if removed {
+                tr.confirm_paste_finding_removed(meaning)
+            } else {
+                meaning.to_string()
+            };
+            description.push(tr.confirm_paste_a11y_finding(&token, &meaning, finding.count));
             kettle_render::ConfirmDialogFinding {
                 token,
-                meaning: meaning.to_string(),
+                meaning,
                 count: format!("\u{d7}{}", finding.count),
-                removed: false,
+                removed,
             }
         })
         .collect();
