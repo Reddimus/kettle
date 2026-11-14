@@ -1,7 +1,7 @@
 //! Linux client decorations, shared control geometry and compositor gestures.
 use super::*;
 
-pub(super) const LINUX_HEADER_HEIGHT: f32 = 46.0;
+pub(super) const LINUX_HEADER_HEIGHT: f32 = crate::window_buttons::HEADER_HEIGHT;
 const LINUX_RESIZE_GRIP: f32 = 6.0;
 
 #[cfg(any(test, target_os = "linux"))]
@@ -320,6 +320,12 @@ pub(super) fn window_control_tooltip_label(
         .map(|b| b.label.as_str())
 }
 
+/// The window buttons in the header `band`, laid out as libadwaita does:
+/// 34-point targets (a 24-point disc and its padding) 3 points apart, the
+/// outermost 7 points from the header's end, centred on its height. A header
+/// too narrow for them all shrinks every button evenly
+/// ([`ButtonLayout::fit`](crate::window_buttons::ButtonLayout::fit)), so the
+/// targets never overlap.
 pub(super) fn linux_window_control_layout_with_preferences(
     band: Rect,
     maximized: bool,
@@ -328,19 +334,22 @@ pub(super) fn linux_window_control_layout_with_preferences(
     tr: &kettle_i18n::Translator,
     preferences: &crate::window_buttons::ButtonLayout,
 ) -> Vec<kettle_render::WindowControlButton> {
+    use crate::window_buttons::{HEADER_EDGE, WINDOW_BUTTON, WINDOW_BUTTON_SPACING};
     use kettle_render::{WindowControl as C, WindowControlButton};
     let h = band.3;
-    let scale = h / LINUX_HEADER_HEIGHT;
-    let count = preferences.left.len() + preferences.right.len();
-    let slot = h.min(band.2 / count.max(1) as f32);
+    let (unit, _) = preferences.fit(band.2, h);
+    let size = (WINDOW_BUTTON * unit).min(h).max(0.0);
+    let pitch = (WINDOW_BUTTON + WINDOW_BUTTON_SPACING) * unit;
+    let edge = HEADER_EDGE * unit;
+    let right = preferences.right.len();
     preferences
         .left
         .iter()
         .enumerate()
-        .map(|(i, c)| (band.0 + i as f32 * slot, *c))
+        .map(|(i, c)| (band.0 + edge + i as f32 * pitch, *c))
         .chain(preferences.right.iter().enumerate().map(|(i, c)| {
             (
-                band.0 + band.2 - (preferences.right.len() - i) as f32 * slot,
+                band.0 + band.2 - edge - size - (right - 1 - i) as f32 * pitch,
                 *c,
             )
         }))
@@ -350,13 +359,7 @@ pub(super) fn linux_window_control_layout_with_preferences(
             } else {
                 action
             };
-            let size = (28.0 * scale).min(slot).max(0.0);
-            let rect = (
-                left + (slot - size) * 0.5,
-                band.1 + (h - size) * 0.5,
-                size,
-                size.min(h),
-            );
+            let rect = (left, band.1 + (h - size) * 0.5, size, size);
             let hovered = pointer.is_some_and(|(x, y)| rect_contains(rect, x, y));
             WindowControlButton {
                 action,
@@ -420,31 +423,48 @@ impl App {
     }
 }
 
-/// The GNOME header's new-tab `+` and main menu `≡` in its tab lane.
+/// The GNOME header's new-tab `+`, Find button and main menu `≡` in its
+/// tab lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct LinuxHeaderControls {
     pub(super) menu: Rect,
     pub(super) plus: Rect,
+    /// Find, just before `≡`; a zero rect when the lane has no room for it.
+    pub(super) search: Rect,
     /// Room the tabs leave before them, for `+`.
     pub(super) lead: f32,
-    /// Room the tabs leave after them, for `≡`.
+    /// Room the tabs leave after them, for Find and `≡`.
     pub(super) trail: f32,
 }
 
-/// Lay out the GNOME header's `+` and `≡` in `band`, the header less its
-/// window buttons: 28-point buttons centred on the header's height, `+`
-/// leading the lane, as GNOME Terminal and Ghostty place it, and `≡` ending
-/// it. Each keeps 8 points from the lane's edge and 4 from the tabs. In a
-/// lane too narrow for both, `≡` gives way first, as it did when it sat
-/// beside `+`; whatever is left is clipped to the lane.
+/// A GNOME header's flat icon button at 1x: libadwaita's 16-point icon
+/// and its padding.
+pub(super) const LINUX_HEADER_BUTTON: f32 = 34.0;
+
+/// Between the header's buttons, and between them and the tabs:
+/// libadwaita's `border-spacing` in a header's start and end boxes.
+pub(super) const LINUX_HEADER_SPACING: f32 = 6.0;
+
+/// Lay out the GNOME header's `+`, Find and `≡` in `band`, the header less
+/// its window buttons: 34-point flat buttons centred on the header's
+/// height, `+` leading the lane, as GNOME Terminal and Ghostty place it,
+/// and `≡` ending it, each 7 points from the lane's edge (libadwaita's
+/// header padding), with Find 6 points before `≡`, as GNOME Terminal puts
+/// its search button, and the tabs 6 points from the buttons. In a lane too
+/// narrow for them all, Find gives way first, since its shortcut still
+/// opens Find, then `≡`, as it did when it sat beside `+`; whatever is left
+/// is clipped to the lane.
 pub(super) fn linux_header_tab_controls(
     band: Rect,
     scale: f32,
     dropdown: bool,
 ) -> LinuxHeaderControls {
-    let side = (28.0 * scale).min(band.3).max(0.0);
+    let side = (LINUX_HEADER_BUTTON * scale).min(band.3).max(0.0);
     let y = band.1 + (band.3 - side) * 0.5;
-    let (edge, gap) = (8.0 * scale, 4.0 * scale);
+    let (edge, gap) = (
+        crate::window_buttons::HEADER_EDGE * scale,
+        LINUX_HEADER_SPACING * scale,
+    );
     let end = band.0 + band.2;
     let clip = |r: Rect| {
         let left = r.0.clamp(band.0, end);
@@ -459,10 +479,18 @@ pub(super) fn linux_header_tab_controls(
     } else {
         (0.0, 0.0, 0.0, 0.0)
     };
-    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 };
+    let search = (menu.0 - gap - side, y, side, side);
+    let search = if menu.2 > 0.0 && search.0 >= plus.0 + plus.2 + gap {
+        search
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 }
+        + if search.2 > 0.0 { side + gap } else { 0.0 };
     LinuxHeaderControls {
         menu,
         plus,
+        search,
         lead,
         trail: trail.min(band.2 - lead),
     }

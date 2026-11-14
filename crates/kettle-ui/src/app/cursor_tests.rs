@@ -263,7 +263,7 @@ fn the_scheduler_hands_off_only_at_an_edge_that_hides_the_cursor() {
         "|| pending_video_receipt_wait.is_some()",
         "quiet: blink_quiet,",
         "ime_preedit: ws.ime_preedit.is_some(),",
-        "modal_steady: modal_holds_cursor_steady(ws),",
+        "modal_steady: cursor_held_steady(ws),",
         "|| ws.accessibility_pending",
         "is_some_and(Renderer::has_pending_screenshot)",
     ] {
@@ -479,3 +479,93 @@ fn background_frames_do_not_delay_cursor_blink() {
     assert_eq!(super::animation_wait(false, None, None), None);
 }
 
+
+/// A selection drag holds the cursor solid, as a modal's input bar does,
+/// and nothing else about the pointer does: the frame's cursor and the
+/// window server's hand-off both ask `cursor_held_steady`.
+#[test]
+fn a_selection_drag_holds_the_cursor_solid() {
+    let mut ws = WindowState::new(1, Mux::new());
+    assert!(!super::cursor_held_steady(&ws));
+    super::pointer::arm_selection_gesture(&mut ws, 7, 0);
+    assert!(super::cursor_held_steady(&ws), "a drag in progress");
+    super::pointer::clear_selection_gesture(&mut ws);
+    assert!(!super::cursor_held_steady(&ws), "the drag ended");
+    // Hovering, scrolling or a link under the pointer holds nothing.
+    ws.scrollbar_hover = Some(7);
+    ws.selection_dragged = true;
+    assert!(!super::cursor_held_steady(&ws));
+    // A modal still holds it, with or without a drag.
+    ws.search.open = true;
+    assert!(super::cursor_held_steady(&ws));
+    let src = super::production_source();
+    let redraw = src
+        .split_once("let cursor_visible = if")
+        .expect("the frame's cursor")
+        .1
+        .split_once('{')
+        .expect("end of the condition")
+        .0;
+    assert!(redraw.contains("|| cursor_held_steady(ws)"), "{redraw}");
+}
+
+/// A pointer press in the terminal restarts the cursor blink from its
+/// visible phase, natively and over ctl, whoever takes the press (a program
+/// reporting the mouse, a selection, the context menu), and the release
+/// that ends a selection drag restarts it again. Pointer motion and the
+/// wheel never touch the blink; only a focus change they cause does.
+#[test]
+fn a_terminal_press_restarts_the_blink_and_hover_and_the_wheel_do_not() {
+    let src = super::production_source();
+    let press = |body: &str, label: &str| {
+        let after_focus = body
+            .split_once(".focus_at(area,")
+            .unwrap_or_else(|| panic!("{label}: the terminal press"))
+            .1;
+        let (before_report, _) = after_focus
+            .split_once("if self.send_mouse(ws, bcode, true, false)")
+            .unwrap_or_else(|| panic!("{label}: the mouse report"));
+        assert!(
+            before_report.contains("self.reset_blink_phase(ws);"),
+            "{label}: a terminal press must restart the blink"
+        );
+    };
+    let native = src
+        .split_once("state: ElementState::Pressed,")
+        .expect("the native press")
+        .1
+        .split_once("state: ElementState::Released,")
+        .expect("end of the native press")
+        .0;
+    press(native, "native");
+    press(finding_body(&src, "ctl_mouse_press"), "ctl");
+    let finish = finding_body(&src, "finish_selection_gesture");
+    let reset = finish
+        .find("self.reset_blink_phase(ws);")
+        .expect("the end of a drag restarts the blink");
+    assert!(finish[..reset].contains("if ws.selecting {"));
+    assert!(reset < finish.find("clear_selection_gesture(ws);").unwrap());
+    let moved = src
+        .split_once("WindowEvent::CursorMoved { position, .. } => {")
+        .expect("pointer motion")
+        .1
+        .split_once("WindowEvent::MouseInput {")
+        .expect("end of pointer motion")
+        .0;
+    let wheel = src
+        .split_once("WindowEvent::MouseWheel { delta, phase, .. } => {")
+        .expect("the wheel")
+        .1;
+    let wheel = &wheel[..wheel.find("\n            WindowEvent::").unwrap_or(wheel.len())];
+    for (label, body) in [
+        ("motion", moved),
+        ("the wheel", wheel),
+        ("dispatch_wheel", finding_body(&src, "dispatch_wheel")),
+        ("ctl_mouse_move", finding_body(&src, "ctl_mouse_move")),
+    ] {
+        assert!(
+            !body.contains("reset_blink_phase"),
+            "{label} must leave the blink alone"
+        );
+    }
+}

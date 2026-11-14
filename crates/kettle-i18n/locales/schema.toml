@@ -3077,6 +3077,9 @@ plural = "count"
 [messages.a11y_main_menu]
 context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the ≡ button in Kettle's GNOME header bar, the window's primary menu (new tabs, profiles, layouts, Settings, About)."
 
+[messages.a11y_header_find]
+context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the magnifier button in Kettle's GNOME header bar, beside the ≡ main menu. It opens Find (search in the terminal's output and history) and closes it again; screen readers also report it pressed while Find is open. The tooltip adds the bound shortcut after it. Needs screen-reader second pass."
+
 [messages.notification_toast_sourced]
 context = "crates/kettle-ui/src/app/notification_toast.rs: the first line of the in-window notification toast a program raised (OSC 9, OSC 777 or kettle.notify). source is the title of the tab it came from, message the program's own text, both shown verbatim. Keep the punctuation that separates them."
 args = [{ name = "source", type = "str" }, { name = "message", type = "str" }]

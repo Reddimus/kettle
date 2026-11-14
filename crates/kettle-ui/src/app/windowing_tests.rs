@@ -1049,11 +1049,11 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
     let buttons = crate::window_buttons::ButtonLayout::default();
     for scale in [1.0, 1.5, 2.0] {
         // A narrow window's lone tab starts past the header's leading `+`
-        // (8 + 28 + 4 points); a wide one stays centred as before.
+        // (7 + 34 + 6 points); a wide one stays centred as before.
         for (width, minimum, expected_x) in [
-            (400.0, 80.0, 40.0),
-            (1000.0, 80.0, 168.14286),
-            (1000.0, 700.0, 81.0),
+            (400.0, 80.0, 47.0),
+            (1000.0, 80.0, 179.64286),
+            (1000.0, 700.0, 92.5),
         ] {
             // Padding belongs to terminal content, never the titlebar grip.
             let cfg = Config {
@@ -1086,7 +1086,7 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
             scale,
             &buttons,
         );
-        assert!((destination.0 - 191.14286 * scale).abs() < 0.001);
+        assert!((destination.0 - 198.14286 * scale).abs() < 0.001);
         assert!(
             (wayland_tab_anchor_x(TabBarPos::Top, destination, 21.0)
                 - f64::from(destination.0)

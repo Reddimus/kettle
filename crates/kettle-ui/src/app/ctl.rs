@@ -13,6 +13,10 @@ pub(super) fn tab_bar_geometry_json(
         "new_tab_menu": rect_json(bar.new_tab_menu),
         // The macOS title bar's Settings gear; zero-sized elsewhere.
         "settings": rect_json(bar.settings),
+        // The GNOME header's Find button, zero-sized elsewhere, and
+        // whether it shows toggled on (Find is open).
+        "search_button": rect_json(bar.search),
+        "search_open": bar.search_open,
         "drag_cursor_x": bar.drag_cursor_x,
         // A vertical strip reports the drag on its own axis;
         // additive, so a reader that only knows the x key still
@@ -2533,6 +2537,9 @@ impl App {
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if press_settings_gear(ws, &bar, (px, py), bcode) {
                 // Armed on a primary press; opens on release.
+            } else if bcode == 0 && search_button_at(&bar, px, py) {
+                ws.pressed_search = true;
+                self.toggle_header_find(ws);
             } else if bcode == 0
                 && bar.new_tab_menu.2 > 0.0
                 && rect_contains(bar.new_tab_menu, px, py)
@@ -2631,6 +2638,8 @@ impl App {
             ws.mux.answer_bell_by_press(pressed);
         }
         self.note_focus_change(ws, pre);
+        // As natively, a press in the terminal restarts the cursor blink.
+        self.reset_blink_phase(ws);
         if self.send_mouse(ws, bcode, true, false) {
             return true;
         }
@@ -2652,9 +2661,10 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search) {
             ws.pressed_new_tab = false;
             ws.pressed_new_tab_menu = false;
+            ws.pressed_search = false;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }

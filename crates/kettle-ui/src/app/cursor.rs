@@ -21,6 +21,14 @@ pub(super) fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
         || ws.settings_nav.is_some()
 }
 
+/// Whether the terminal cursor draws solid this frame whatever its blink
+/// phase: a modal's input bar holds it (`modal_holds_cursor_steady`), and so
+/// does a selection drag, whose press showed the cursor and whose end
+/// restarts the blink visible (`finish_selection_gesture`).
+pub(super) fn cursor_held_steady(ws: &WindowState) -> bool {
+    modal_holds_cursor_steady(ws) || ws.selecting
+}
+
 pub(super) fn cursor_blink_active(
     configured: bool,
     pane_requests_blink: bool,
@@ -69,6 +77,8 @@ impl App {
 
     /// Force the next redraw to render the cursor visible. Shared by:
     /// - the focus-change path (`note_focus_change`)
+    /// - a pointer press in the terminal area, and the release that ends a
+    ///   selection drag, as a click does in GTK and Cocoa text views
     /// - `Action::Reset` so a "fresh start" cursor is visible
     /// - `CursorBlinkingChange` events (DEC ?12 program-driven toggle)
     /// - the four modal Escape handlers so closing the
