@@ -988,7 +988,7 @@ notify_session_not_restored = "Session not restored"
 
 notify_session_not_restored_owned_body = "Another Kettle process already has the saved session open, so this window opens without it."
 
-notify_session_not_restored_separate_body = "Windows opened with --profile, --config, --new-process, -e or -d never restore the saved session."
+notify_session_not_restored_separate_body = "Windows opened with --profile, --new-process, -e or -d never restore the saved session."
 
 notify_profiles_failed = "Profiles directory not opened"
 

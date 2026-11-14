@@ -989,7 +989,7 @@ notify_session_not_restored = "No se restauró la sesión"
 
 notify_session_not_restored_owned_body = "Otro proceso de Kettle ya tiene abierta la sesión guardada, así que esta ventana se abre sin ella."
 
-notify_session_not_restored_separate_body = "Las ventanas abiertas con --profile, --config, --new-process, -e o -d nunca restauran la sesión guardada."
+notify_session_not_restored_separate_body = "Las ventanas abiertas con --profile, --new-process, -e o -d nunca restauran la sesión guardada."
 
 notify_profiles_failed = "No se abrió el directorio de perfiles"
 

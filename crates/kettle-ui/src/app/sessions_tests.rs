@@ -992,7 +992,7 @@ fn a_refused_restore_is_explained_in_english_and_spanish() {
     );
     assert_eq!(
         en.text(separate),
-        "Windows opened with --profile, --config, --new-process, -e or -d never restore the saved session."
+        "Windows opened with --profile, --new-process, -e or -d never restore the saved session."
     );
     let es = Translator::new(Language::Es);
     assert_eq!(es.text(Text::NotifySessionNotRestored), "No se restauró la sesión");
@@ -1002,7 +1002,7 @@ fn a_refused_restore_is_explained_in_english_and_spanish() {
     );
     assert_eq!(
         es.text(separate),
-        "Las ventanas abiertas con --profile, --config, --new-process, -e o -d nunca restauran la sesión guardada."
+        "Las ventanas abiertas con --profile, --new-process, -e o -d nunca restauran la sesión guardada."
     );
     // Shown from the first window's startup, before anything is restored.
     let src = production_source();
@@ -1133,4 +1133,190 @@ fn a_restore_off_launch_removes_leftover_output_only_while_unowned() {
         .and_then(|body| body.split("\n    }\n").next())
         .unwrap();
     assert!(clear.contains("None if !restoring => {\n                self.remove_disabled_default_content();"));
+}
+
+/// A temporary config directory with `session.json`'s place, the default
+/// config file, and two other config files.
+struct ConfigSessions {
+    _dir: kettle_test_support::PrivateTempDir,
+    default_session: std::path::PathBuf,
+    default_config: std::path::PathBuf,
+    a: std::path::PathBuf,
+    b: std::path::PathBuf,
+}
+
+fn config_sessions(prefix: &str) -> ConfigSessions {
+    let dir = kettle_test_support::private_tempdir(prefix);
+    let config_dir = dir.path().join("kettle");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let sessions = ConfigSessions {
+        default_session: config_dir.join("session.json"),
+        default_config: config_dir.join("config"),
+        a: dir.path().join("a.conf"),
+        b: dir.path().join("b.conf"),
+        _dir: dir,
+    };
+    for file in [&sessions.default_config, &sessions.a, &sessions.b] {
+        std::fs::write(file, "").unwrap();
+    }
+    sessions
+}
+
+fn config_launch(config: &std::path::Path) -> crate::Options {
+    crate::Options {
+        config: Some(config.to_path_buf()),
+        explicit_config: true,
+        ..Default::default()
+    }
+}
+
+fn titled_session(title: &str) -> crate::session::Session {
+    serde_json::from_value(serde_json::json!({
+        "tabs": [{"root": {"Leaf": {"cwd": null}}, "title_override": title}],
+        "active": 0,
+    }))
+    .unwrap()
+}
+
+/// `kettle --config A` restores A's own session, not the default one.
+#[test]
+fn a_config_launch_restores_its_own_session() {
+    use super::sessions::launch_session_path_with;
+    let t = config_sessions("kettle-config-restore-");
+    let launch = |options: &crate::Options| {
+        launch_session_path_with(options, Some(&t.default_session), Some(&t.default_config))
+            .unwrap()
+    };
+    let own = launch(&config_launch(&t.a));
+    assert_eq!(
+        own,
+        crate::session::config_session_path(&t.default_session, Some(&t.default_config), &t.a)
+    );
+    assert_ne!(own, t.default_session);
+    // Without `--config` (a default launch, or a profile's config file) the
+    // launch's file is the default session.
+    assert_eq!(launch(&crate::Options::default()), t.default_session);
+    let profile = crate::Options {
+        config: Some(t.a.clone()),
+        separate_process: true,
+        ..Default::default()
+    };
+    assert_eq!(launch(&profile), t.default_session);
+    assert!(super::sessions::separate_launch(&profile));
+    assert!(!super::sessions::separate_launch(&config_launch(&t.a)));
+
+    crate::session::save_to_path(&titled_session("A"), &own).unwrap();
+    crate::session::save_to_path(&titled_session("default"), &t.default_session).unwrap();
+    let (restored, _) = crate::session::load_snapshot_result(&own).unwrap().unwrap();
+    assert_eq!(restored.tabs[0].title_override.as_deref(), Some("A"));
+
+    // And startup loads from the launch's file.
+    let src = production_source();
+    let load = src
+        .split("fn load_startup_session(&mut self)")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    let flat: String = load.split_whitespace().collect();
+    assert!(flat.contains(
+        "self.restore_source=self.session_path.clone();let(session,identity)=loaded_startup_snapshot(matchself.session_path.as_deref(){Some(path)=>crate::session::load_snapshot_result(path),"
+    ));
+}
+
+/// A `--config` launch writes its own files and never reads, writes or
+/// locks the default session's.
+#[test]
+fn a_config_launch_never_reads_or_writes_the_default_files() {
+    use super::sessions::{DefaultSessionClaim, launch_session_path_with};
+    let t = config_sessions("kettle-config-files-");
+    let own = launch_session_path_with(
+        &config_launch(&t.a),
+        Some(&t.default_session),
+        Some(&t.default_config),
+    )
+    .unwrap();
+    // The writer and the claim, built as startup builds them.
+    let mut writer = crate::session::SessionWriter::new(Some(own.clone()), || {}).unwrap();
+    let session = titled_session("A");
+    let content = crate::session_content::ContentSnapshot::new(
+        &session,
+        vec![vec![vec![crate::session_content::PaneContent {
+            remote: false,
+            lines: vec![("MARK-A".into(), false, vec![])],
+        }]]],
+    );
+    writer.submit_job(crate::session::SaveJob {
+        session: Some(session.clone()),
+        layout: None,
+        content: crate::session::ContentJob::Write(content),
+    });
+    writer.finish();
+    let claim = DefaultSessionClaim::claim(
+        false,
+        false,
+        true,
+        Some(&crate::session::owner_lock_path(&own)),
+    );
+    assert!(matches!(claim, DefaultSessionClaim::Owner { _lock: Some(_) }), "{claim:?}");
+    assert!(crate::session_content::load(&own, &session).is_some());
+    for name in ["session.json", "session.content", "session.json.lock", "session.owner.lock"] {
+        assert!(
+            !t.default_session.with_file_name(name).exists(),
+            "a --config launch touched {name}"
+        );
+    }
+
+    // Every default-session path comes from the launch's one file.
+    let src = production_source();
+    assert_eq!(
+        src.matches("Session::path()").count(),
+        1,
+        "only launch_session_path may name the default session file"
+    );
+    let run = src
+        .split("pub fn run_with(mut startup: crate::Options)")
+        .nth(1)
+        .unwrap();
+    let flat: String = run.split_whitespace().collect();
+    assert!(flat.contains("letsession_path=launch_session_path(&startup);"));
+    assert!(flat.contains(".map(crate::session::owner_lock_path)"));
+    assert!(flat.contains("crate::session::SessionWriter::new(session_path.clone(),"));
+    assert!(flat.contains("session_path,"));
+}
+
+/// Two `--config A` processes follow the default session's owner rules on
+/// A's own lock, and other config files and the default session are not in
+/// the way.
+#[test]
+fn a_same_config_secondary_leaves_it_alone() {
+    use super::sessions::{DefaultSessionClaim, restore_refusal};
+    let t = config_sessions("kettle-config-owner-");
+    let lock = |config: Option<&std::path::Path>| {
+        let session = match config {
+            Some(config) => crate::session::config_session_path(
+                &t.default_session,
+                Some(&t.default_config),
+                config,
+            ),
+            None => t.default_session.clone(),
+        };
+        crate::session::owner_lock_path(&session)
+    };
+    let claim =
+        |lock: &std::path::Path| DefaultSessionClaim::claim(false, false, true, Some(lock));
+    let first = claim(&lock(Some(&t.a)));
+    assert!(matches!(first, DefaultSessionClaim::Owner { _lock: Some(_) }), "{first:?}");
+    let mut second = claim(&lock(Some(&t.a)));
+    assert!(matches!(second, DefaultSessionClaim::Secondary), "{second:?}");
+    assert!(!second.owns(false));
+    assert_eq!(
+        restore_refusal(true, &second, true),
+        Some(kettle_i18n::Text::NotifySessionNotRestoredOwnedBody)
+    );
+    for other in [lock(Some(&t.b)), lock(None)] {
+        let owner = claim(&other);
+        assert!(matches!(owner, DefaultSessionClaim::Owner { _lock: Some(_) }), "{other:?}");
+    }
+    drop(first);
+    assert!(!second.owns(false), "a secondary never takes over");
 }

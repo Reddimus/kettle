@@ -1383,6 +1383,7 @@ fn main() -> anyhow::Result<()> {
         })
     };
     let separate_process = separate_process(&cli);
+    let explicit_config = cli.config.is_some();
     kettle_ui::run_with(kettle_ui::Options {
         activation,
         quick_terminal,
@@ -1398,6 +1399,7 @@ fn main() -> anyhow::Result<()> {
         layout: cli.layout,
         restore: cli.restore,
         separate_process,
+        explicit_config,
         agent_server: cli.agent_server.map(|m| match m {
             AgentServerArg::Off => kettle_config::AgentServer::Off,
             AgentServerArg::ReadOnly => kettle_config::AgentServer::ReadOnly,
@@ -1589,11 +1591,11 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
         .or_else(kettle_config::Config::default_path)
 }
 
-/// Whether this launch runs beside the main Kettle process with settings of
-/// its own: a profile, an explicit config file, or `--new-process`. Such a
-/// process leaves the default session to the main one.
+/// Whether this launch runs beside the main Kettle process: a profile or
+/// `--new-process`. Such a process leaves the default session to the main
+/// one. A `--config FILE` launch has a session of that file's own instead.
 fn separate_process(cli: &Cli) -> bool {
-    cli.profile.is_some() || cli.config.is_some() || cli.new_process
+    cli.profile.is_some() || cli.new_process
 }
 
 fn resolved_config_trust(cli: &Cli) -> kettle_config::ConfigTrust {
@@ -2044,18 +2046,25 @@ mod activation_cli_tests {
     };
     use clap::Parser as _;
 
-    /// A profile, an explicit config file or `--new-process` runs beside the
-    /// main process and leaves the default session alone. Other options, and
-    /// `-e`/`-d` (which the UI recognizes itself), do not make a launch
-    /// separate here.
+    /// A profile or `--new-process` runs beside the main process and leaves
+    /// the default session alone. `--config FILE` is not separate: it has a
+    /// session of its own. Other options, and `-e`/`-d` (which the UI
+    /// recognizes itself), do not make a launch separate here.
     #[test]
-    fn profile_config_and_new_process_launches_are_separate() {
+    fn profile_and_new_process_launches_are_separate() {
         for argv in [
             &["kettle", "--profile", "work"][..],
             &["kettle", "--profile=work"],
-            &["kettle", "--config", "/tmp/kettle.conf"],
             &["kettle", "--new-process"],
             &["kettle", "--new-process", "--restore"],
+            &[
+                "kettle",
+                "--config",
+                "/tmp/kettle.conf",
+                "--profile",
+                "work",
+            ],
+            &["kettle", "--config", "/tmp/kettle.conf", "--new-process"],
         ] {
             assert!(
                 separate_process(&Cli::try_parse_from(argv).unwrap()),
@@ -2067,12 +2076,16 @@ mod activation_cli_tests {
             &["kettle", "--restore"],
             &["kettle", "--maximise"],
             &["kettle", "-d", "/tmp"],
+            &["kettle", "--config", "/tmp/kettle.conf"],
+            &["kettle", "--config", "/tmp/kettle.conf", "--restore"],
         ] {
             assert!(
                 !separate_process(&Cli::try_parse_from(argv).unwrap()),
                 "{argv:?}"
             );
         }
+        let source = include_str!("main.rs");
+        assert!(source.contains("let explicit_config = cli.config.is_some();"));
     }
 
     #[test]

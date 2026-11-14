@@ -236,8 +236,8 @@ impl App {
                 self.session_writer.remove_content(None);
             }
             DefaultSessionClaim::Unclaimed(lock) => {
-                if let Some(path) = crate::session::Session::path() {
-                    remove_unclaimed_content(lock, &path);
+                if let Some(path) = self.session_path.as_deref() {
+                    remove_unclaimed_content(lock, path);
                 }
             }
             DefaultSessionClaim::Waiting(_)
@@ -427,9 +427,12 @@ impl App {
             self.restore_identity = Some(identity);
             Some(session)
         } else if self.default_session_restoring() {
-            self.restore_source = crate::session::Session::path();
+            self.restore_source = self.session_path.clone();
             let (session, identity) = loaded_startup_snapshot(
-                crate::session::Session::load_with_identity(),
+                match self.session_path.as_deref() {
+                    Some(path) => crate::session::load_snapshot_result(path),
+                    None => Ok(None),
+                },
                 &mut self.session_load_failed,
             )?;
             self.restore_identity = Some(identity);
@@ -967,8 +970,9 @@ pub(crate) enum DefaultSessionClaim {
     /// Another process of this build owns the default session. This one
     /// neither restores nor writes it, and never takes it over.
     Secondary,
-    /// A launch that never touches the default session: a profile, `--config`
-    /// or `--new-process` (see [`separate_launch`]).
+    /// A launch that never touches the default session: a profile or
+    /// `--new-process`, `-e`, `-d`, the quick terminal or `--layout` (see
+    /// [`separate_launch`]).
     Separate,
 }
 
@@ -1056,9 +1060,42 @@ fn take_owner_lock(
     kettle_state::ExclusiveFileLock::try_acquire(path)
 }
 
-/// Whether a launch never touches the default session: `--profile`,
-/// `--config` or `--new-process` (`separate_process`), `-e` or `-d`, a
-/// quick-terminal launch, or `--layout NAME`, which saves to its own file.
+/// The default-session file this launch restores and saves: `session.json`,
+/// or with `--config FILE` that file's own (see
+/// `crate::session::config_session_path`). `None` without a config directory.
+pub(super) fn launch_session_path(options: &crate::Options) -> Option<std::path::PathBuf> {
+    launch_session_path_with(
+        options,
+        crate::session::Session::path().as_deref(),
+        kettle_config::Config::default_path().as_deref(),
+    )
+}
+
+/// [`launch_session_path`] with the default session and config files given.
+pub(super) fn launch_session_path_with(
+    options: &crate::Options,
+    default_session: Option<&std::path::Path>,
+    default_config: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let default_session = default_session?;
+    Some(
+        match options
+            .config
+            .as_deref()
+            .filter(|_| options.explicit_config)
+        {
+            Some(config) => {
+                crate::session::config_session_path(default_session, default_config, config)
+            }
+            None => default_session.to_path_buf(),
+        },
+    )
+}
+
+/// Whether a launch never touches the default session: `--profile` or
+/// `--new-process` (`separate_process`), `-e` or `-d`, a quick-terminal
+/// launch, or `--layout NAME`, which saves to its own file. `--config FILE`
+/// is not one: its default session is that file's own.
 pub(super) fn separate_launch(options: &crate::Options) -> bool {
     options.separate_process
         || options.command.is_some()

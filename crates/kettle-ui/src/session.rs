@@ -260,6 +260,63 @@ pub(crate) fn validated_restore_surface_geometries(
     Ok(geometries)
 }
 
+/// The lock the process that owns a session holds for as long as it runs,
+/// beside its file: `session.owner.lock` for `session.json`.
+pub(crate) fn owner_lock_path(session: &std::path::Path) -> PathBuf {
+    session.with_extension("owner.lock")
+}
+
+/// The session file a `--config config` launch restores and saves:
+/// `session-<digest>.json` beside `default_session`, so its `.content`,
+/// `.json.lock` and `.owner.lock` siblings sit there too, under the same
+/// private directory, permissions and bounds. The digest is of the config
+/// file's canonical path, so the same file reached through a link or a
+/// relative path gets the same session, and the name holds no path text. A
+/// `--config` naming the default config file (`default_config`) gets the
+/// default session.
+pub(crate) fn config_session_path(
+    default_session: &std::path::Path,
+    default_config: Option<&std::path::Path>,
+    config: &std::path::Path,
+) -> PathBuf {
+    let canonical = canonical_config_path(config);
+    if default_config.map(canonical_config_path).as_ref() == Some(&canonical) {
+        return default_session.to_path_buf();
+    }
+    default_session.with_file_name(format!("session-{}.json", config_digest(&canonical)))
+}
+
+fn canonical_config_path(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 32 lowercase hex digits of SHA-256 over a canonical path's native bytes.
+fn config_digest(canonical: &std::path::Path) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"kettle config session v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        hasher.update(canonical.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        for unit in canonical.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.finalize()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Sanitize a user-supplied layout name (from
 /// `kettle --layout <NAME>`) to `[A-Za-z0-9._-]`, replacing every other byte —
 /// crucially path separators `/` and `\`, plus the Windows drive `:` — with
@@ -290,12 +347,6 @@ impl Session {
             .and_then(|p| p.parent().map(|d| d.join("session.json")))
     }
 
-    /// The lock the process that owns the default session holds for as long
-    /// as it runs, beside `session.json`.
-    pub(crate) fn owner_lock_path() -> Option<PathBuf> {
-        Self::path().map(|path| path.with_file_name("session.owner.lock"))
-    }
-
     /// The named-layout path: returns
     /// `<config-dir>/layouts/<sanitized>.json`. The name is sanitized
     /// to `[A-Za-z0-9._-]` so a user can't traverse out of the
@@ -307,13 +358,6 @@ impl Session {
             p.parent()
                 .map(|d| d.join("layouts").join(format!("{safe}.json")))
         })
-    }
-
-    pub(crate) fn load_with_identity() -> std::io::Result<Option<(Session, SnapshotIdentity)>> {
-        let Some(p) = Self::path() else {
-            return Ok(None);
-        };
-        load_snapshot_result(&p)
     }
 
     /// Load from the named-layout path instead of the default
@@ -729,13 +773,18 @@ struct WriterFeedback {
 }
 
 impl SessionWriter {
-    /// The writer for this process's session files. `wake` reaches the UI
-    /// thread when a save needs to be taken again; it must not block.
-    pub(crate) fn new(wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
+    /// The writer for this process's session files: `default` is the
+    /// launch's own default-session file (see `launch_session_path`), and a
+    /// named layout goes to its layouts file. `wake` reaches the UI thread
+    /// when a save needs to be taken again; it must not block.
+    pub(crate) fn new(
+        default: Option<PathBuf>,
+        wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Self> {
         Self::with_paths(
-            |layout| match layout {
+            move |layout| match layout {
                 Some(name) => Session::path_for_layout(name),
-                None => Session::path(),
+                None => default.clone(),
             },
             wake,
         )
@@ -2874,6 +2923,73 @@ mod tests {
 #[cfg(test)]
 mod content_writer_tests {
     use super::*;
+
+    /// A `--config` file's session sits beside `session.json` under a name
+    /// that is a digest only. Two config files never share one, the same file
+    /// reached another way always does, and the default config file named
+    /// with `--config` keeps the default session.
+    #[test]
+    fn config_sessions_are_keyed_by_the_config_file_and_never_collide() {
+        let dir = kettle_test_support::private_tempdir("kettle-config-session-");
+        let config_dir = dir.path().join("kettle");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let default_session = config_dir.join("session.json");
+        let default_config = config_dir.join("config");
+        let a = dir.path().join("work.conf");
+        let b = dir.path().join("play.conf");
+        for file in [&default_config, &a, &b] {
+            std::fs::write(file, "").unwrap();
+        }
+        let path = |config: &std::path::Path| {
+            config_session_path(&default_session, Some(&default_config), config)
+        };
+        let (pa, pb) = (path(&a), path(&b));
+        assert_ne!(pa, pb, "two config files share a session");
+        assert_ne!(pa, default_session);
+        assert_eq!(pa.parent(), default_session.parent());
+        for session in [&pa, &pb] {
+            let name = session.file_name().unwrap().to_str().unwrap();
+            let digest = name
+                .strip_prefix("session-")
+                .and_then(|rest| rest.strip_suffix(".json"))
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(digest.len(), 32, "{name}");
+            assert!(
+                digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+        }
+        assert_eq!(path(&a), pa, "the digest is stable");
+        assert_eq!(
+            path(&dir.path().join("kettle").join("..").join("work.conf")),
+            pa
+        );
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.conf");
+            std::os::unix::fs::symlink(&a, &link).unwrap();
+            assert_eq!(
+                path(&link),
+                pa,
+                "a link to the file gets the file's session"
+            );
+        }
+        assert_eq!(path(&default_config), default_session);
+        // Its siblings follow its name.
+        assert_eq!(
+            crate::session_content::path(&pa),
+            pa.with_extension("content")
+        );
+        assert_eq!(
+            owner_lock_path(&pa).file_name().unwrap().to_str().unwrap(),
+            format!("{}.owner.lock", pa.file_stem().unwrap().to_str().unwrap())
+        );
+        assert_eq!(
+            owner_lock_path(&default_session).file_name().unwrap(),
+            "session.owner.lock"
+        );
+    }
 
     fn one_pane_session(marker: &str) -> (Session, crate::session_content::ContentSnapshot) {
         let session: Session = serde_json::from_value(serde_json::json!({

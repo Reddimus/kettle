@@ -765,18 +765,22 @@ impl App {
         // Before the plan: a launch that does not own the default session
         // neither restores it nor waits for one before its first pane.
         let restoring = should_restore_session(startup.restore, initial_cfg.restore_session, false);
+        let session_path = launch_session_path(&startup);
         let mut default_session = DefaultSessionClaim::claim(
             separate_launch(&startup),
             another_build_running,
             restoring,
-            crate::session::Session::owner_lock_path().as_deref(),
+            session_path
+                .as_deref()
+                .map(crate::session::owner_lock_path)
+                .as_deref(),
         );
         let session_elsewhere =
             another_build_running || !restoring || !default_session.owns(another_build_running);
         let plan = startup_plan(&startup, &initial_cfg, session_elsewhere);
         let session_writer = {
             let proxy = proxy.clone();
-            crate::session::SessionWriter::new(move || {
+            crate::session::SessionWriter::new(session_path.clone(), move || {
                 let _ = proxy.send_event(UserEvent::SessionResave);
             })?
         };
@@ -796,6 +800,7 @@ impl App {
             session_writer,
             content_throttle: Default::default(),
             default_session: std::cell::RefCell::new(default_session),
+            session_path,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
