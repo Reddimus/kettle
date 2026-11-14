@@ -1642,29 +1642,31 @@ impl Renderer {
                         &mut self.settings_gear_mask,
                     );
                 }
-                // The GNOME header's `≡` is drawn too, as GNOME's 16 px
-                // symbolic icon, in the ink its glyph had: the accent while
-                // hovered, at 4.5:1 focused and 3:1 unfocused.
-                if tab_strip::main_menu_icon(tabbar) {
-                    let (ink, background) = if tabbar.hovered_new_tab_menu {
-                        (
-                            accent,
-                            chrome::strip_hover(
-                                chrome_strip_bg,
-                                theme.foreground,
-                                tabbar.pressed_new_tab_menu,
-                            ),
-                        )
-                    } else {
-                        (theme.foreground, chrome_strip_bg)
-                    };
-                    let ink = self
-                        .chrome_colors
-                        .tab_text(ink, background, overlay.window_focused);
-                    for (x, y, w, h) in
-                        tab_strip::main_menu_icon_bars(tabbar.new_tab_menu, self.scale)
-                    {
-                        quads.push(rect(x, y, w, h, ink, 1.0));
+                // The GNOME header's `+` and `≡` are GNOME's 16 px symbolic
+                // icons, drawn rather than shaped, in the ink the strip's
+                // glyphs have: the accent while hovered, at 4.5:1 focused and
+                // 3:1 unfocused.
+                if tabbar.linux_header {
+                    for (icon, bounds, hovered, pressed) in tab_strip::header_icon_buttons(tabbar) {
+                        let (ink, background) = if hovered {
+                            (
+                                accent,
+                                chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed),
+                            )
+                        } else {
+                            (theme.foreground, chrome_strip_bg)
+                        };
+                        let ink =
+                            self.chrome_colors
+                                .tab_text(ink, background, overlay.window_focused);
+                        header_icons::push_header_icon(
+                            &mut quads,
+                            icon,
+                            bounds,
+                            ink,
+                            self.scale,
+                            &mut self.header_icon_masks,
+                        );
                     }
                 }
             }
@@ -4611,15 +4613,18 @@ impl Renderer {
                 )
             };
             let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, control_ch));
-            areas.push(TextArea {
-                buffer: &self.tabbar_buffer,
-                left: plus_left,
-                top: plus_top,
-                scale: 1.0,
-                bounds: text_bounds_for_rect(tabbar.new_tab),
-                default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
-                custom_glyphs: &[],
-            });
+            // The GNOME header's `+` is drawn with the strip's quads instead.
+            if !tabbar.linux_header {
+                areas.push(TextArea {
+                    buffer: &self.tabbar_buffer,
+                    left: plus_left,
+                    top: plus_top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(tabbar.new_tab),
+                    default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
+                    custom_glyphs: &[],
+                });
+            }
             // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
             // of `+`). Only present when the dropdown is enabled; the GNOME
             // header's `≡` is drawn with the strip's quads instead.

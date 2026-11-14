@@ -1,6 +1,6 @@
-//! The GNOME header's window-button glyphs and the discs behind them, drawn
-//! as coverage masks rather than shaped from a font, so their size and weight
-//! never depend on the installed fonts.
+//! The GNOME header's symbolic icons and the discs behind its window buttons,
+//! drawn as coverage masks rather than shaped from a font, so their size and
+//! weight never depend on the installed fonts.
 //!
 //! The icons follow Adwaita's symbolic set: a 16-unit grid, strokes 2 units
 //! wide (1.5 for the window outlines), drawn at one unit per logical pixel.
@@ -19,6 +19,10 @@ const SAMPLES: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HeaderIcon {
+    /// `tab-new-symbolic`: a rounded square outline holding a plus.
+    TabNew,
+    /// `open-menu-symbolic`: three bars with round ends.
+    MainMenu,
     /// `window-minimize-symbolic`: a bar low in the square.
     Minimize,
     /// `window-maximize-symbolic`: a square outline.
@@ -85,6 +89,14 @@ fn icon_ink(icon: HeaderIcon, x: f32, y: f32) -> bool {
     let capsule = |a, b| segment_distance(p, a, b) <= 1.0;
     let thin = 1.5;
     match icon {
+        HeaderIcon::TabNew => {
+            in_outline(p, (1.0, 1.0, 15.0, 15.0), 3.0, 2.0)
+                || ((4.0..=12.0).contains(&x) && (7.0..=9.0).contains(&y))
+                || ((7.0..=9.0).contains(&x) && (4.0..=12.0).contains(&y))
+        }
+        HeaderIcon::MainMenu => [3.0, 8.0, 13.0]
+            .into_iter()
+            .any(|row| capsule((2.0, row), (14.0, row))),
         HeaderIcon::Minimize => capsule((5.0, 11.0), (11.0, 11.0)),
         HeaderIcon::Maximize => in_outline(p, (4.0, 4.0, 12.0, 12.0), 2.0, thin),
         HeaderIcon::Restore => {
@@ -270,6 +282,56 @@ mod tests {
         runs
     }
 
+    /// `tab-new` is a 14-point rounded square with a 2-point stroke holding
+    /// an 8-point plus 2 points thick, and `≡` is three 14-point bars 2
+    /// thick and 5 apart: Adwaita's symbolic weight, at 1x and 2x.
+    #[test]
+    fn tab_new_and_menu_icons_have_adwaita_geometry_and_weight() {
+        for scale in [1_u32, 2] {
+            let side = 16 * scale;
+            let tab_new = header_icon_mask(HeaderIcon::TabNew, side);
+            assert_eq!(
+                ink_box(&tab_new, side),
+                (scale, scale, 14 * scale, 14 * scale),
+                "{scale}x tab-new"
+            );
+            // Down the plus's arm: the outline's two strokes and the arm.
+            let centre = column_runs(&tab_new, side, 8 * scale);
+            assert_eq!(
+                centre,
+                vec![
+                    (scale, 2 * scale),
+                    (4 * scale, 8 * scale),
+                    (13 * scale, 2 * scale)
+                ],
+                "{scale}x tab-new centre column"
+            );
+            // Beside the plus: only the outline, 2 points each side.
+            assert_eq!(
+                column_runs(&tab_new, side, 5 * scale),
+                vec![
+                    (scale, 2 * scale),
+                    (7 * scale, 2 * scale),
+                    (13 * scale, 2 * scale)
+                ],
+                "{scale}x tab-new plus arm"
+            );
+            let menu = header_icon_mask(HeaderIcon::MainMenu, side);
+            assert_eq!(
+                ink_box(&menu, side),
+                (scale, 2 * scale, 14 * scale, 12 * scale),
+                "{scale}x menu"
+            );
+            assert_eq!(
+                column_runs(&menu, side, 8 * scale),
+                [2, 7, 12].map(|y| (y * scale, 2 * scale)).to_vec(),
+                "{scale}x menu bars"
+            );
+            // Round ends: the corner pixel of a bar is only partly covered.
+            assert!(menu[(2 * scale * side + scale) as usize] < 255);
+        }
+    }
+
     /// The window glyphs keep Adwaita's 1.5 to 2-point strokes: the
     /// minimize bar is 2 points thick, the close cross's arms 2 points
     /// across, the outlines 1.5, and every glyph sits inside the disc with
@@ -348,9 +410,9 @@ mod tests {
     #[test]
     fn icon_masks_are_kept_per_icon_and_side() {
         let mut masks = IconMasks::default();
-        let first = masks.get(HeaderIcon::Minimize, 16).as_ptr();
-        assert_eq!(masks.get(HeaderIcon::Minimize, 16).as_ptr(), first);
-        assert_eq!(masks.get(HeaderIcon::Minimize, 32).len(), 32 * 32);
+        let first = masks.get(HeaderIcon::TabNew, 16).as_ptr();
+        assert_eq!(masks.get(HeaderIcon::TabNew, 16).as_ptr(), first);
+        assert_eq!(masks.get(HeaderIcon::TabNew, 32).len(), 32 * 32);
         assert_eq!(
             masks.get(HeaderIcon::Close, 16),
             header_icon_mask(HeaderIcon::Close, 16).as_slice()

@@ -542,38 +542,36 @@ pub(crate) fn push_settings_gear(
     }
 }
 
-/// Side of the GNOME header's main-menu icon at 1x, as GNOME's symbolic
-/// icons are drawn.
-const MENU_ICON_SIDE: f32 = 16.0;
-
 /// Whether the strip's menu button is the GNOME header's main menu, which
-/// is drawn as an icon rather than shaped as the `▾` glyph. Its tooltip
-/// and screen-reader name follow the same test.
+/// is drawn as GNOME's `open-menu` icon rather than shaped as the `▾` glyph.
+/// Its tooltip and screen-reader name follow the same test.
 pub(crate) fn main_menu_icon(bar: &TabBar) -> bool {
-    !bar.window_controls.is_empty() && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
+    bar.linux_header && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
 }
 
-/// GNOME's `open-menu-symbolic` in `button`: three bars in a
-/// `MENU_ICON_SIDE`-point square, each 14 points wide and 2 thick, 5 apart,
-/// so its ink is 14 by 12 points. Drawn, not shaped: a font's `≡` changes
-/// size and weight with the installed fonts. Bars snap to whole device
-/// pixels and the square to the button's centre. The icon shrinks with a
-/// button too small for it and is left out below half its size.
-pub(crate) fn main_menu_icon_bars(button: Rect4, scale: f32) -> Vec<Rect4> {
-    let (x, y, w, h) = button;
-    let unit = scale.max(0.5).min((w.min(h) - 4.0) / MENU_ICON_SIDE);
-    if unit < 0.5 {
-        return Vec::new();
-    }
-    let thickness = (2.0 * unit).round().max(1.0);
-    let pitch = (5.0 * unit).round().max(thickness + 1.0);
-    let width = (14.0 * unit).round();
-    let ink_h = 2.0 * pitch + thickness;
-    let left = (x + (w - width) * 0.5).round();
-    let top = (y + (h - ink_h) * 0.5).round();
-    (0..3)
-        .map(|i| (left, top + i as f32 * pitch, width, thickness))
-        .collect()
+/// The GNOME header's flat buttons that show a symbolic icon, with the icon
+/// and each one's hover and press: `+` as `tab-new` and the main menu as
+/// `open-menu`. Buttons the header left out have a zero rect.
+pub(crate) fn header_icon_buttons(
+    bar: &TabBar,
+) -> impl Iterator<Item = (crate::header_icons::HeaderIcon, Rect4, bool, bool)> {
+    use crate::header_icons::HeaderIcon;
+    [
+        (
+            HeaderIcon::TabNew,
+            bar.new_tab,
+            bar.hovered_new_tab,
+            bar.pressed_new_tab,
+        ),
+        (
+            HeaderIcon::MainMenu,
+            bar.new_tab_menu,
+            bar.hovered_new_tab_menu,
+            bar.pressed_new_tab_menu,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, rect, ..)| rect.2 > 0.0 && rect.3 > 0.0)
 }
 
 #[cfg(test)]
@@ -1683,48 +1681,64 @@ mod tests {
         }
     }
 
-    /// The GNOME header's `≡` is GNOME's 16-point symbolic icon drawn as
-    /// three bars: 14 by 12 points of ink, 2 thick and 5 apart, centred in
-    /// its 28-point button, at 1x and 2x, in whole device pixels. The
-    /// painter draws it from these bars and never shapes a `≡` glyph.
+    /// The GNOME header's `+` and `≡` are GNOME's `tab-new` and `open-menu`
+    /// symbolic icons, drawn as coverage masks 16 points square, centred on
+    /// whole pixels in their 34-point flat buttons at 1x and 2x, in the ink
+    /// the painter resolved. No other strip draws them, and the painter never
+    /// shapes a `+` or `≡` glyph in the header.
     #[test]
-    fn gnome_header_menu_icon_is_three_drawn_bars() {
+    fn gnome_header_plus_and_menu_are_symbolic_masks() {
+        use crate::header_icons::{HeaderIcon, IconMasks, header_icon_mask, push_header_icon};
+        let ink = Rgb::new(0xc0, 0xca, 0xf5);
+        let painted = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
         for scale in [1.0_f32, 2.0] {
-            let button = (620.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
-            let bars = main_menu_icon_bars(button, scale);
-            assert_eq!(bars.len(), 3, "{scale}x");
-            let left = bars.iter().map(|b| b.0).fold(f32::MAX, f32::min);
-            let top = bars.iter().map(|b| b.1).fold(f32::MAX, f32::min);
-            let right = bars.iter().map(|b| b.0 + b.2).fold(f32::MIN, f32::max);
-            let bottom = bars.iter().map(|b| b.1 + b.3).fold(f32::MIN, f32::max);
-            assert_eq!((right - left, bottom - top), (14.0 * scale, 12.0 * scale));
-            for (i, bar) in bars.iter().enumerate() {
-                assert_eq!(bar.3, 2.0 * scale);
-                assert_eq!(bar.1, top + i as f32 * 5.0 * scale);
-                assert_eq!((bar.0.fract(), bar.1.fract()), (0.0, 0.0));
+            let mut bar = gnome_header(1, scale);
+            bar.new_tab = (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.new_tab_menu = (700.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            let buttons: Vec<_> = header_icon_buttons(&bar).collect();
+            assert_eq!(
+                buttons.iter().map(|b| (b.0, b.1)).collect::<Vec<_>>(),
+                vec![
+                    (HeaderIcon::TabNew, bar.new_tab),
+                    (HeaderIcon::MainMenu, bar.new_tab_menu)
+                ]
+            );
+            assert!(main_menu_icon(&bar));
+            let mut masks = IconMasks::default();
+            for (icon, button, ..) in buttons {
+                let mut quads = Vec::new();
+                push_header_icon(&mut quads, icon, button, ink, scale, &mut masks);
+                let side = 16.0 * scale;
+                let left = (button.0 + (button.2 - side) * 0.5).round();
+                let top = (button.1 + (button.3 - side) * 0.5).round();
+                // Exactly the mask, one quad per run, from its corner.
+                let mask = header_icon_mask(icon, side as u32);
+                let covered: f32 = quads.iter().map(|q| q.size[0] * q.color[3]).sum();
+                let expected: f32 = mask.iter().map(|&c| f32::from(c) / 255.0).sum();
+                assert!((covered - expected).abs() < 0.5, "{icon:?} at {scale}x");
+                for q in &quads {
+                    assert_eq!(q.color[..3], painted[..3]);
+                    assert!(q.pos[0] >= left && q.pos[0] + q.size[0] <= left + side);
+                    assert!(q.pos[1] >= top && q.pos[1] + q.size[1] <= top + side);
+                    assert_eq!((q.pos[0].fract(), q.pos[1].fract()), (0.0, 0.0));
+                }
+                let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
+                assert!((left + side * 0.5 - centre.0).abs() <= 0.5);
+                assert!((top + side * 0.5 - centre.1).abs() <= 0.5);
             }
-            let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
-            assert!(((left + right) * 0.5 - centre.0).abs() <= 0.5);
-            assert!(((top + bottom) * 0.5 - centre.1).abs() <= 0.5);
+            bar.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(header_icon_buttons(&bar).count(), 1);
+            assert!(!main_menu_icon(&bar), "no menu button, no icon");
         }
-        assert!(main_menu_icon_bars((0.0, 0.0, 8.0, 8.0), 1.0).is_empty());
-        let mut bar = gnome_header(1, 1.0);
-        assert!(!main_menu_icon(&bar), "no menu button, no icon");
-        bar.new_tab_menu = (620.0, 9.0, 28.0, 28.0);
-        bar.window_controls = vec![crate::WindowControlButton {
-            action: crate::WindowControl::Close,
-            rect: (763.0, 9.0, 28.0, 28.0),
-            label: String::new(),
-            hovered: false,
-            pressed: false,
-        }];
-        assert!(main_menu_icon(&bar));
-        bar.window_controls.clear();
-        assert!(!main_menu_icon(&bar), "a plain strip keeps its ▾");
+        let mut plain = gnome_header(2, 1.0);
+        plain.linux_header = false;
+        plain.new_tab_menu = (620.0, 0.0, 28.0, 28.0);
+        assert!(!main_menu_icon(&plain), "a plain strip keeps its ▾");
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
-        assert!(source.contains("tab_strip::main_menu_icon_bars(tabbar.new_tab_menu,self.scale)"));
+        assert!(source.contains("iftabbar.linux_header{for(icon,bounds,hovered,pressed)intab_strip::header_icon_buttons(tabbar)"));
+        assert!(source.contains("//TheGNOMEheader's`+`isdrawnwiththestrip'squadsinstead.if!tabbar.linux_header{areas.push(TextArea{buffer:&self.tabbar_buffer,"));
         assert!(!source.contains("\"≡\""), "a shaped ≡ glyph");
     }
 

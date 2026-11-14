@@ -5525,6 +5525,7 @@ fn tab_strip_legibility_at(font_size: f32) {
             (renderer.cell_h + 12.0).max(28.0).round()
         };
         tabs.in_titlebar = gnome_header;
+        tabs.linux_header = gnome_header;
         tabs.band = (0.0, 0.0, 480.0, tabs.height);
         // GNOME's header centres 28 px buttons, the window's close last.
         let (button_y, side) = if gnome_header {
@@ -5567,8 +5568,12 @@ fn tab_strip_legibility_at(font_size: f32) {
                 activity: TabActivity::Normal,
             });
         }
-        let (inactive_title, inactive_close) =
+        let (inactive_title, mut inactive_close) =
             (tabs.segments[1].title_rect, tabs.segments[1].close);
+        if gnome_header {
+            // Above the header's 1-pixel hairline, which runs under the tab.
+            inactive_close.3 -= 1.0;
+        }
         let fg = theme.foreground;
         // The renderer's roles: inactive titles and resting close glyphs are
         // secondary text, the strip's controls primary. An unfocused window
@@ -5642,18 +5647,14 @@ fn tab_strip_legibility_at(font_size: f32) {
             // Smallest ink side, with a pixel to spare for rasterizer edges.
             // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
             // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
+            // The GNOME header's `+` and `≡` are 16-point icons at any font
+            // size, 14x14 and 14x12 points of ink.
+            let icon = if gnome_header { 12.0 } else { 0.66 * line };
             let mut controls = vec![
                 ("×", inactive_close, 0.42 * line, strip, secondary, floors.0),
-                ("+", tabs.new_tab, 0.66 * line, strip, control, floors.1),
+                ("+", tabs.new_tab, icon, strip, control, floors.1),
                 if gnome_header {
-                    (
-                        "≡",
-                        tabs.new_tab_menu,
-                        0.66 * line,
-                        strip,
-                        control,
-                        floors.1,
-                    )
+                    ("≡", tabs.new_tab_menu, icon, strip, control, floors.1)
                 } else {
                     (
                         "▾",
