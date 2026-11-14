@@ -2018,6 +2018,7 @@ impl App {
                 self.overlay_text_line_height(ws),
             ),
             self.cfg.scrollbar_width,
+            kettle_render::scrollback_pill_hint(&self.cfg.keybinds).as_deref(),
             &self.ui_text,
         )
     }

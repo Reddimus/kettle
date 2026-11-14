@@ -10,7 +10,7 @@ pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 
 /// The jump button's colours, keyed by the theme colours and blend mode
 /// they came from.
-type PillColors = (([u32; 3], bool), (Rgb, Rgb));
+type PillColors = (([u32; 3], bool), crate::scrollback::ScrollbackPillColors);
 
 /// The scrollbar's colours, keyed the same way.
 type ScrollbarColorKey = ([u32; 4], bool);
@@ -53,14 +53,14 @@ impl Colors {
         palette
     }
 
-    /// The jump-to-bottom button's fill and label
-    /// ([`crate::scrollback::scrollback_pill_colors`]), resolved once per
+    /// The jump-to-bottom button's colours in each of its states
+    /// ([`crate::scrollback::scrollback_button_colors`]), resolved once per
     /// theme rather than every frame.
     pub(crate) fn scrollback_pill(
         &mut self,
         theme: &kettle_config::Theme,
         linear: bool,
-    ) -> (Rgb, Rgb) {
+    ) -> crate::scrollback::ScrollbackPillColors {
         let key = (
             [theme.palette[0], theme.background, theme.foreground]
                 .map(MinimumContrastCache::color_key),
@@ -71,7 +71,7 @@ impl Colors {
         {
             return colors;
         }
-        let colors = crate::scrollback::scrollback_pill_colors(theme, linear);
+        let colors = crate::scrollback::scrollback_button_colors(theme, linear);
         self.pill = Some((key, colors));
         colors
     }

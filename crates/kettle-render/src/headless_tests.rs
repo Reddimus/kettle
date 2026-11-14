@@ -7995,6 +7995,130 @@ fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSn
     snap
 }
 
+/// A scrolled-back pane paints its jump button where the pointer hits it,
+/// in the resolved colours of its state: the edge around it, the fill
+/// inside, the rule before its key. At the top of a history that has lost
+/// lines it also paints the kept-history label in the button's rest fill.
+/// On TokyoNight Night and Kettle Day, at 1x and 2x, at rest, hovered and
+/// pressed. The colours are sampled in the button's padding and on its
+/// edge, where no glyph is, so the fonts on the host do not matter.
+#[test]
+fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    // The top of history, with older lines gone.
+    let mut snap = history_snapshot(20, 10, 300, i32::MAX);
+    snap.command_marks.clear();
+    snap.history_origin = 500;
+    assert!(snap.display_offset > 0 && snap.display_offset == snap.history_size);
+    let linear = renderer.config.format.is_srgb();
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    for name in ["TokyoNight Night", "Kettle Day"] {
+        for scale in [1.0_f32, 2.0] {
+            renderer.set_scale(scale);
+            let cfg = Config {
+                theme: kettle_config::Theme::by_name(name),
+                background_opacity: 1.0,
+                ..base.clone()
+            };
+            let panes = [pane(&snap, width, height)];
+            let text_cell = (
+                renderer.overlay_text_cell_width(),
+                renderer.overlay_text_line_height(),
+            );
+            let hint = scrollback_pill_hint(&cfg.keybinds);
+            let pill = scrollback_pill(
+                panes[0].terminal,
+                snap.display_offset,
+                scale,
+                text_cell,
+                cfg.scrollbar_width,
+                hint.as_deref(),
+                &panes[0].tr,
+            )
+            .expect("a button");
+            let rule = pill.hint.as_ref().expect("room for the key").divider;
+            let label = kept_history_label(
+                panes[0].terminal,
+                snap.history_view(),
+                scale,
+                text_cell,
+                cfg.scrollbar_width,
+                &panes[0].tr,
+            )
+            .expect("a label");
+            let colors = crate::scrollback::scrollback_button_colors(&cfg.theme, linear);
+            let (x, y, w, h) = pill.rect;
+            for (hovered, pressed, state) in [
+                (None, None, ScrollbackPillState::Rest),
+                (Some(1), None, ScrollbackPillState::Hovered),
+                (Some(1), Some(1), ScrollbackPillState::Pressed),
+                (None, Some(1), ScrollbackPillState::Rest),
+            ] {
+                let overlay = Overlay {
+                    scrollback_pill_hovered: hovered,
+                    scrollback_pill_pressed: pressed,
+                    ..focused(false)
+                };
+                let frame = capture(&mut renderer, &cfg, &panes, &overlay);
+                let surface = colors.surface(state);
+                let context = format!("{name} scale {scale} {state:?}");
+                let at = |px: f32, py: f32| frame.get_pixel(px as u32, py as u32);
+                let middle = y + h / 2.0;
+                // In the left padding, inside the edge.
+                let fill = at(x + 3.0 * scale, middle);
+                assert!(near(fill, surface.fill), "{context}: fill {fill:?}");
+                // On the top edge, clear of the rounded corners.
+                let edge = at(x + w / 2.0, y + scale / 2.0);
+                assert!(near(edge, surface.edge), "{context}: edge {edge:?}");
+                let ruled = at(rule.0 + rule.2 / 2.0, rule.1 + rule.3 / 2.0);
+                assert!(near(ruled, surface.edge), "{context}: rule {ruled:?}");
+                // Just outside the button the terminal shows.
+                let outside = at(x - 3.0 * scale, middle);
+                assert!(
+                    near(outside, cfg.theme.background),
+                    "{context}: outside {outside:?}"
+                );
+                // The label keeps the rest fill whatever the button's state.
+                let (lx, ly, _, lh) = label.rect;
+                let kept = at(lx + 3.0 * scale, ly + lh / 2.0);
+                assert!(near(kept, colors.rest.fill), "{context}: label {kept:?}");
+            }
+            // At the live bottom neither is painted.
+            let live = history_snapshot(20, 10, 300, 0);
+            let frame = capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&live, width, height)],
+                &focused(false),
+            );
+            for (px, py) in [
+                (x + 3.0 * scale, y + h / 2.0),
+                (
+                    label.rect.0 + 3.0 * scale,
+                    label.rect.1 + label.rect.3 / 2.0,
+                ),
+            ] {
+                let got = frame.get_pixel(px as u32, py as u32);
+                assert!(
+                    near(got, cfg.theme.background),
+                    "{name} scale {scale}: live output shows {got:?}"
+                );
+            }
+        }
+    }
+    eprintln!("SCROLLBACK_BUTTON_GPU_PASS");
+}
+
 /// A pane with history paints its thumb in a full-height channel as wide as
 /// it, in the resolved colours, and command ticks across the whole bar in
 /// the colour for what they lie on, channel or thumb: at its resting width

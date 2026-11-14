@@ -90,6 +90,7 @@ impl Fixture {
                     1.0,
                     (8.0, 16.0),
                     4.0,
+                    Some("Ctrl+End"),
                     &Translator::new(Language::En),
                 )?;
                 Some((*pane, pill))

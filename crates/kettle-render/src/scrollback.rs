@@ -1,60 +1,272 @@
 use super::{Rect4, Translator, display_width};
 use kettle_config::Rgb;
 
+/// The key a jump button shows after its count, and where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollbackPillHint {
+    /// The chord bound to "scroll to bottom", spelled as menus spell it.
+    pub text: String,
+    pub text_origin: (f32, f32),
+    /// The rule between the count and the chord.
+    pub divider: Rect4,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScrollbackPill {
     pub rect: Rect4,
     pub label: String,
     pub accessible_label: String,
     pub text_origin: (f32, f32),
+    /// The key that does what the button does, when one is bound and the
+    /// pane has room for it after the count.
+    pub hint: Option<ScrollbackPillHint>,
 }
 
-/// Shared paint, pointer and accessibility geometry. Keep clear of the scrollbar.
-pub fn scrollback_pill(
-    terminal: Rect4,
-    offset: usize,
-    scale: f32,
-    text_cell: (f32, f32),
-    scrollbar_width: f32,
-    tr: &Translator,
-) -> Option<ScrollbackPill> {
-    let (x, y, width, height) = terminal;
-    let (cell_width, line_height) = text_cell;
-    if offset == 0
-        || ![x, y, width, height, scale, cell_width, line_height]
-            .into_iter()
-            .all(f32::is_finite)
-        || scale <= 0.0
-        || cell_width <= 0.0
-        || line_height <= 0.0
-    {
-        return None;
+/// How a jump button is drawn: at rest, under the pointer, or held down
+/// under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ScrollbackPillState {
+    #[default]
+    Rest,
+    Hovered,
+    Pressed,
+}
+
+impl ScrollbackPillState {
+    /// `pane`'s button, given the pane whose button the pointer is over and
+    /// the pane whose button took a press that has not been released. A
+    /// press shows only while the pointer stays on the button, as a release
+    /// anywhere else does nothing.
+    pub fn of(pane: u64, hovered: Option<u64>, pressed: Option<u64>) -> Self {
+        match (hovered == Some(pane), pressed == Some(pane)) {
+            (true, true) => Self::Pressed,
+            (true, false) => Self::Hovered,
+            (false, _) => Self::Rest,
+        }
     }
-    let digits = offset.to_string();
-    let mut grouped = String::new();
+
+    /// The name `kettle ctl ui_geometry` reports.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rest => "rest",
+            Self::Hovered => "hovered",
+            Self::Pressed => "pressed",
+        }
+    }
+}
+
+/// The chord the jump button shows: the one bound to `scroll_to_bottom`, as
+/// menus spell it. `None` when the action is unbound.
+pub fn scrollback_pill_hint(bindings: &kettle_config::keybinds::Bindings) -> Option<String> {
+    kettle_config::keybinds::ui_hint_label(
+        bindings,
+        &kettle_config::keybinds::Action::ScrollToBottom,
+    )
+}
+
+/// A chord longer than this is not shown: it would crowd the count out.
+const MAX_HINT_COLUMNS: usize = 32;
+
+/// A line count as the button and the label show it: `1,234`.
+fn grouped_count(count: usize) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
     }
-    let label = tr.scrollback_return(&grouped, offset as u64);
-    let pad = 6.0 * scale;
-    let gutter = (scrollbar_hit_width(scrollbar_width, scale) + 2.0 * scale).max(14.0 * scale);
-    let w = display_width(&label) as f32 * cell_width + 2.0 * pad;
-    let h = line_height + pad;
-    // Tiny panes cannot display the button without hiding its label.
-    if width < w + gutter + pad || height < h + 2.0 * pad {
+    grouped
+}
+
+/// The room the button and the label leave on the pane's right for its
+/// scrollbar: the bar's hit strip and 2 logical px, at least 14.
+fn scrollback_gutter(scrollbar_width: f32, scale: f32) -> f32 {
+    (scrollbar_hit_width(scrollbar_width, scale) + 2.0 * scale).max(14.0 * scale)
+}
+
+fn pane_text_fits(terminal: Rect4, scale: f32, (cell_width, line_height): (f32, f32)) -> bool {
+    let (x, y, width, height) = terminal;
+    [x, y, width, height, scale, cell_width, line_height]
+        .into_iter()
+        .all(f32::is_finite)
+        && scale > 0.0
+        && cell_width > 0.0
+        && line_height > 0.0
+}
+
+/// Shared paint, pointer and accessibility geometry. Keep clear of the scrollbar.
+///
+/// `hint` is the chord bound to "scroll to bottom"
+/// ([`scrollback_pill_hint`]). It follows the count behind a rule where the
+/// pane has room for both; in a narrower pane the count shows alone.
+pub fn scrollback_pill(
+    terminal: Rect4,
+    offset: usize,
+    scale: f32,
+    text_cell: (f32, f32),
+    scrollbar_width: f32,
+    hint: Option<&str>,
+    tr: &Translator,
+) -> Option<ScrollbackPill> {
+    let (x, y, width, height) = terminal;
+    let (cell_width, line_height) = text_cell;
+    if offset == 0 || !pane_text_fits(terminal, scale, text_cell) {
         return None;
     }
-    let left = x + width - gutter - w;
+    let grouped = grouped_count(offset);
+    let label = tr.scrollback_return(&grouped, offset as u64);
+    let pad = 6.0 * scale;
+    let gutter = scrollback_gutter(scrollbar_width, scale);
+    let label_w = display_width(&label) as f32 * cell_width;
+    let h = line_height + pad;
+    let fits = |w: f32| width >= w + gutter + pad;
+    let w = label_w + 2.0 * pad;
+    // Tiny panes cannot display the button without hiding its label.
+    if !fits(w) || height < h + 2.0 * pad {
+        return None;
+    }
     let top = y + height - pad - h;
+    let rule = scale.round().max(1.0);
+    let hint = hint
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && display_width(text) <= MAX_HINT_COLUMNS)
+        .map(|text| (text, display_width(text) as f32 * cell_width))
+        // The count always wins: the chord shows only where both fit.
+        .filter(|(_, hint_w)| fits(w + rule + hint_w + 2.0 * pad));
+    let w = hint.map_or(w, |(_, hint_w)| w + rule + hint_w + 2.0 * pad);
+    let left = x + width - gutter - w;
+    let hint = hint.map(|(text, _)| {
+        let rule_x = (left + 2.0 * pad + label_w).round();
+        ScrollbackPillHint {
+            text: text.to_owned(),
+            text_origin: (rule_x + rule + pad, top + pad / 2.0),
+            divider: (rule_x, top + pad / 2.0, rule, h - pad),
+        }
+    });
     Some(ScrollbackPill {
         rect: (left, top, w, h),
         label,
         accessible_label: tr.scrollback_a11y(&grouped, offset as u64),
         text_origin: (left + pad, top + pad / 2.0),
+        hint,
     })
+}
+
+/// Where a pane's view sits in its history: lines scrolled back, lines of
+/// history the pane holds, and how many of its oldest lines are gone for
+/// good (`Grid::history_origin`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct HistoryView {
+    pub offset: usize,
+    pub size: usize,
+    pub origin: u64,
+}
+
+impl HistoryView {
+    /// The view `term` shows, read under its lock.
+    pub fn of<L: alacritty_terminal::event::EventListener>(
+        term: &alacritty_terminal::Term<L>,
+    ) -> Self {
+        use alacritty_terminal::grid::Dimensions as _;
+        let grid = term.grid();
+        Self {
+            offset: grid.display_offset(),
+            size: grid.history_size(),
+            origin: grid.history_origin(),
+        }
+    }
+
+    /// Whether the view shows the oldest line the pane still holds and older
+    /// lines are gone: dropped at the scrollback limit, or cleared. A pane
+    /// with no history is at its live prompt, so it never is, whatever was
+    /// cleared before.
+    pub fn at_start_of_kept_history(self) -> bool {
+        self.size > 0 && self.offset == self.size && self.origin > 0
+    }
+}
+
+/// The label at the top of a pane's history when older lines are gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptHistoryLabel {
+    pub rect: Rect4,
+    pub label: String,
+    pub text_origin: (f32, f32),
+    /// Whether the label had room to say how many lines the pane holds.
+    pub counted: bool,
+}
+
+/// The "Start of kept history" label for a pane viewing `view`: top right,
+/// sized and kept clear of the scrollbar as the jump button is. It says how
+/// many lines the pane holds where there is room, and stands alone in a
+/// narrower pane. A pane too small for it and the jump button below it shows
+/// only the button.
+pub fn kept_history_label(
+    terminal: Rect4,
+    view: HistoryView,
+    scale: f32,
+    text_cell: (f32, f32),
+    scrollbar_width: f32,
+    tr: &Translator,
+) -> Option<KeptHistoryLabel> {
+    let (x, y, width, height) = terminal;
+    let (cell_width, line_height) = text_cell;
+    if !view.at_start_of_kept_history() || !pane_text_fits(terminal, scale, text_cell) {
+        return None;
+    }
+    let pad = 6.0 * scale;
+    let gutter = scrollback_gutter(scrollbar_width, scale);
+    let h = line_height + pad;
+    // The jump button keeps the bottom; the label needs its own row above
+    // it, a pad apart.
+    if height < 2.0 * h + 3.0 * pad {
+        return None;
+    }
+    let width_of = |label: &str| display_width(label) as f32 * cell_width + 2.0 * pad;
+    let fits = |label: &String| width >= width_of(label) + gutter + pad;
+    let (counted, label) = [
+        (
+            true,
+            tr.scrollback_kept_lines(&grouped_count(view.size), view.size as u64),
+        ),
+        (false, tr.text(kettle_i18n::Text::ScrollbackKept).to_owned()),
+    ]
+    .into_iter()
+    .find(|(_, label)| fits(label))?;
+    let w = width_of(&label);
+    let left = x + width - gutter - w;
+    let top = y + pad;
+    Some(KeptHistoryLabel {
+        rect: (left, top, w, h),
+        label,
+        text_origin: (left + pad, top + pad / 2.0),
+        counted,
+    })
+}
+
+/// The jump button's label ink on `fill`: the theme foreground, moved until
+/// its painted stem pixel clears `TEXT_CONTRAST`.
+fn pill_ink(theme: &kettle_config::Theme, fill: Rgb, linear: bool) -> Rgb {
+    crate::color::with_min_contrast_at_coverage(
+        theme.foreground,
+        fill,
+        crate::chrome::TEXT_CONTRAST,
+        crate::color::STEM_COVERAGE,
+        linear,
+    )
+}
+
+/// Whether some ink clears the text floor on `fill` at its stem pixel.
+fn pill_ink_clears(theme: &kettle_config::Theme, fill: Rgb, linear: bool) -> bool {
+    use crate::color;
+    let stem = color::over(
+        fill,
+        pill_ink(theme, fill, linear),
+        color::STEM_COVERAGE,
+        linear,
+    );
+    color::contrast_ratio(stem, fill) >= crate::chrome::TEXT_CONTRAST
 }
 
 /// The pill's fill, 3:1 off the terminal, and its label's ink. The label is
@@ -66,20 +278,8 @@ pub(crate) fn scrollback_pill_colors(
     theme: &kettle_config::Theme,
     linear: bool,
 ) -> (kettle_config::Rgb, kettle_config::Rgb) {
-    use crate::{chrome, color};
-    let ink_on = |fill: kettle_config::Rgb| {
-        color::with_min_contrast_at_coverage(
-            theme.foreground,
-            fill,
-            chrome::TEXT_CONTRAST,
-            color::STEM_COVERAGE,
-            linear,
-        )
-    };
-    let clears = |fill: kettle_config::Rgb| {
-        let stem = color::over(fill, ink_on(fill), color::STEM_COVERAGE, linear);
-        color::contrast_ratio(stem, fill) >= chrome::TEXT_CONTRAST
-    };
+    use crate::color;
+    let clears = |fill: kettle_config::Rgb| pill_ink_clears(theme, fill, linear);
     let raised = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
     let toward_terminal = |t: f64| color::over(raised, theme.background, t, false);
     let mut fill = raised;
@@ -95,7 +295,207 @@ pub(crate) fn scrollback_pill_colors(
         }
         fill = toward_terminal(hi);
     }
-    (fill, ink_on(fill))
+    (fill, pill_ink(theme, fill, linear))
+}
+
+/// One state of the jump button: its fill, the edge drawn around it and
+/// between its count and its key, and the ink of its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PillSurface {
+    pub(crate) fill: Rgb,
+    pub(crate) edge: Rgb,
+    pub(crate) ink: Rgb,
+}
+
+/// The jump button at rest, under the pointer and held down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollbackPillColors {
+    pub(crate) rest: PillSurface,
+    pub(crate) hover: PillSurface,
+    pub(crate) pressed: PillSurface,
+}
+
+impl ScrollbackPillColors {
+    pub(crate) fn surface(&self, state: ScrollbackPillState) -> PillSurface {
+        match state {
+            ScrollbackPillState::Rest => self.rest,
+            ScrollbackPillState::Hovered => self.hover,
+            ScrollbackPillState::Pressed => self.pressed,
+        }
+    }
+}
+
+/// The edge of the button in every state, against the terminal around it:
+/// the WCAG 2.2 1.4.11 floor for a control's boundary.
+pub(crate) const PILL_EDGE_CONTRAST: f64 = crate::chrome::ICON_CONTRAST;
+/// The edge against the button's own fill, so the outline shows.
+pub(crate) const PILL_EDGE_ON_FILL: f64 = 1.3;
+/// A hovered or pressed fill differs from the one before it by at least
+/// this, so the change of state shows.
+pub(crate) const PILL_STATE_STEP: f64 = 1.15;
+
+/// The jump button's colours. At rest it keeps the pill's fill and ink
+/// ([`scrollback_pill_colors`]) and gains an edge: the fill moved a third of
+/// the way to the ink, then as far as it takes to be 3:1 against the
+/// terminal and 1.3:1 against the fill. On a theme where the fill had to
+/// step back for its label, the edge still bounds the button.
+///
+/// Under the pointer the fill takes one step away from the terminal's
+/// colour and the edge takes the ink's; held down, the fill takes a second
+/// step. A step is 1.15:1, and is taken only where the label still clears
+/// the text floor on the new fill without changing from light to dark.
+/// Where the label leaves no room that way, the step goes toward the
+/// terminal instead: on TokyoNight Night the fill lifts under the pointer
+/// and sinks when pressed. In every state the label clears `TEXT_CONTRAST`
+/// at its stem pixel and the edge is 3:1 against the terminal, whatever the
+/// fill.
+pub(crate) fn scrollback_button_colors(
+    theme: &kettle_config::Theme,
+    linear: bool,
+) -> ScrollbackPillColors {
+    use crate::color::{self, contrast_ratio, relative_luminance};
+    let bg = theme.background;
+    let (fill, _) = scrollback_pill_colors(theme, linear);
+    let far = if relative_luminance(fill) >= relative_luminance(bg) {
+        Rgb::new(255, 255, 255)
+    } else {
+        Rgb::new(0, 0, 0)
+    };
+    let lighter_ink =
+        |fill: Rgb| relative_luminance(pill_ink(theme, fill, linear)) > relative_luminance(fill);
+    // One visible step from `from` toward `end`, if the label clears it.
+    let step = |from: Rgb, end: Rgb| {
+        let shade = |t: f64| color::over(from, end, t, false);
+        let shows = |c: Rgb| contrast_ratio(c, from) >= PILL_STATE_STEP;
+        if !shows(end) {
+            return None;
+        }
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if shows(shade(mid)) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        // The label keeps its floor and its side of the fill: light text
+        // does not turn dark as the button is pressed.
+        Some(shade(hi))
+            .filter(|c| pill_ink_clears(theme, *c, linear) && lighter_ink(*c) == lighter_ink(fill))
+    };
+    let (hover_fill, pressed_fill) = match step(fill, far) {
+        Some(hover) => (
+            hover,
+            step(hover, far).or_else(|| step(fill, bg)).unwrap_or(hover),
+        ),
+        None => match step(fill, bg) {
+            Some(hover) => (hover, step(hover, bg).unwrap_or(hover)),
+            None => (fill, fill),
+        },
+    };
+    let surface = |fill: Rgb, strong: bool| {
+        let ink = pill_ink(theme, fill, linear);
+        let start = if strong {
+            ink
+        } else {
+            color::over(fill, ink, 0.35, false)
+        };
+        PillSurface {
+            fill,
+            edge: pill_edge(start, bg, fill),
+            ink,
+        }
+    };
+    ScrollbackPillColors {
+        rest: surface(fill, false),
+        hover: surface(hover_fill, true),
+        pressed: surface(pressed_fill, true),
+    }
+}
+
+/// `start` moved toward white or black, whichever is nearer, until it is
+/// [`PILL_EDGE_CONTRAST`] against the terminal and [`PILL_EDGE_ON_FILL`]
+/// against the button's fill. Where no grey of it is both, the terminal's
+/// floor is the one kept.
+fn pill_edge(start: Rgb, bg: Rgb, fill: Rgb) -> Rgb {
+    use crate::color::{self, contrast_ratio};
+    let passes = |c: Rgb| {
+        contrast_ratio(c, bg) >= PILL_EDGE_CONTRAST && contrast_ratio(c, fill) >= PILL_EDGE_ON_FILL
+    };
+    const STEPS: u32 = 64;
+    let toward = |end: Rgb| {
+        (0..=STEPS)
+            .map(|step| {
+                (
+                    step,
+                    color::over(start, end, f64::from(step) / f64::from(STEPS), false),
+                )
+            })
+            .find(|(_, c)| passes(*c))
+    };
+    [toward(Rgb::new(255, 255, 255)), toward(Rgb::new(0, 0, 0))]
+        .into_iter()
+        .flatten()
+        .min_by_key(|(step, _)| *step)
+        .map_or_else(
+            || color::with_min_contrast(start, bg, PILL_EDGE_CONTRAST),
+            |(_, c)| c,
+        )
+}
+
+/// The corner radius of the jump button, in logical px: a button's, where
+/// the kept-history label keeps the pill's round ends.
+const PILL_BUTTON_RADIUS: f32 = 6.0;
+
+/// The jump button's quads: its edge, its fill inside it, and the rule
+/// before its key hint.
+pub(crate) fn scrollback_pill_quads(
+    quads: &mut Vec<crate::QuadInstance>,
+    pill: &ScrollbackPill,
+    surface: PillSurface,
+    scale: f32,
+) {
+    let (x, y, w, h) = pill.rect;
+    let border = scale.round().max(1.0);
+    let radius = PILL_BUTTON_RADIUS * scale;
+    crate::tab_strip::rounded_fill(
+        quads,
+        (x, y, w, h),
+        radius,
+        (true, true),
+        (surface.edge, 1.0),
+        None,
+    );
+    crate::tab_strip::rounded_fill(
+        quads,
+        (x + border, y + border, w - 2.0 * border, h - 2.0 * border),
+        (radius - border).max(0.0),
+        (true, true),
+        (surface.fill, 1.0),
+        None,
+    );
+    if let Some(hint) = &pill.hint {
+        let (dx, dy, dw, dh) = hint.divider;
+        quads.push(crate::rect(dx, dy, dw, dh, surface.edge, 1.0));
+    }
+}
+
+/// The kept-history label's quads: the pill's fill with round ends and no
+/// edge, as it is a label and not a control.
+pub(crate) fn kept_history_label_quads(
+    quads: &mut Vec<crate::QuadInstance>,
+    label: &KeptHistoryLabel,
+    fill: Rgb,
+) {
+    crate::tab_strip::rounded_fill(
+        quads,
+        label.rect,
+        label.rect.3 / 2.0,
+        (true, true),
+        (fill, 1.0),
+        None,
+    );
 }
 
 pub fn scrollbar_draw_width(configured: f32, scale: f32, hovered: bool) -> f32 {
@@ -603,7 +1003,16 @@ mod tests {
     fn pill_follows_pane_and_disappears_at_bottom() {
         let tr = Translator::default();
         assert!(
-            scrollback_pill((50.0, 80.0, 800.0, 600.0), 0, 2.0, (16.0, 32.0), 4.0, &tr).is_none()
+            scrollback_pill(
+                (50.0, 80.0, 800.0, 600.0),
+                0,
+                2.0,
+                (16.0, 32.0),
+                4.0,
+                None,
+                &tr
+            )
+            .is_none()
         );
         let pill = scrollback_pill(
             (50.0, 80.0, 800.0, 600.0),
@@ -611,6 +1020,7 @@ mod tests {
             2.0,
             (16.0, 32.0),
             4.0,
+            None,
             &tr,
         )
         .unwrap();
@@ -619,12 +1029,22 @@ mod tests {
         assert_eq!(pill.rect.1 + pill.rect.3, 668.0);
         let es = Translator::new(kettle_i18n::Language::Es);
         assert!(
-            scrollback_pill((0.0, 0.0, 800.0, 600.0), 1, 1.0, (8.0, 16.0), 4.0, &es)
-                .unwrap()
-                .label
-                .ends_with("l\u{ed}nea")
+            scrollback_pill(
+                (0.0, 0.0, 800.0, 600.0),
+                1,
+                1.0,
+                (8.0, 16.0),
+                4.0,
+                None,
+                &es
+            )
+            .unwrap()
+            .label
+            .ends_with("l\u{ed}nea")
         );
-        assert!(scrollback_pill((0.0, 0.0, 1.0, 1.0), 10, 1.0, (8.0, 16.0), 4.0, &tr).is_none());
+        assert!(
+            scrollback_pill((0.0, 0.0, 1.0, 1.0), 10, 1.0, (8.0, 16.0), 4.0, None, &tr).is_none()
+        );
     }
 
     #[test]
@@ -635,6 +1055,7 @@ mod tests {
             2.0,
             (16.0, 32.0),
             40.0,
+            None,
             &Translator::default(),
         )
         .unwrap();

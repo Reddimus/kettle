@@ -27,8 +27,10 @@ mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
 pub use scrollback::{
-    PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
-    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
+    HistoryView, KeptHistoryLabel, PaneScrollbar, ScrollbackPill, ScrollbackPillHint,
+    ScrollbackPillState, ScrollbarState, kept_history_label, pane_scrollbar_geometry,
+    scrollback_pill, scrollback_pill_hint, scrollbar_draw_width, scrollbar_hit_rect,
+    scrollbar_hit_width,
 };
 mod text_field;
 pub use text_field::{
@@ -2886,32 +2888,73 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        let scrollback_pills: Vec<_> = panes
+        // Each scrolled-back pane's jump button, and the label at the top
+        // of a history that has lost its oldest lines. The pointer,
+        // AccessKit and `ui_geometry` lay both out with the same calls.
+        let scrollback_text_cell = (
+            self.overlay_text_cell_width(),
+            self.overlay_text_line_height(),
+        );
+        let scrollback_hint = panes
+            .iter()
+            .any(|pane| pane.snap.display_offset > 0)
+            .then(|| scrollback_pill_hint(&cfg.keybinds))
+            .flatten();
+        let scrollback_pills: Vec<(u64, ScrollbackPill)> = panes
             .iter()
             .filter_map(|pane| {
-                scrollback_pill(
+                let pill = scrollback_pill(
                     pane.terminal,
                     pane.snap.display_offset,
                     self.scale,
-                    (
-                        self.overlay_text_cell_width(),
-                        self.overlay_text_line_height(),
-                    ),
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    scrollback_hint.as_deref(),
+                    &pane.tr,
+                )?;
+                Some((pane.id, pill))
+            })
+            .collect();
+        let kept_history_labels: Vec<KeptHistoryLabel> = panes
+            .iter()
+            .filter_map(|pane| {
+                kept_history_label(
+                    pane.terminal,
+                    pane.snap.history_view(),
+                    self.scale,
+                    scrollback_text_cell,
                     cfg.scrollbar_width,
                     &pane.tr,
                 )
             })
             .collect();
-        while self.scrollback_buffers.len() < scrollback_pills.len() {
+        // One buffer per text, in paint order: each button's count and then
+        // its key, then each label.
+        let scrollback_texts: Vec<(&str, f32)> = scrollback_pills
+            .iter()
+            .flat_map(|(_, pill)| {
+                std::iter::once((pill.label.as_str(), pill.rect.3)).chain(
+                    pill.hint
+                        .as_ref()
+                        .map(|hint| (hint.text.as_str(), pill.rect.3)),
+                )
+            })
+            .chain(
+                kept_history_labels
+                    .iter()
+                    .map(|label| (label.label.as_str(), label.rect.3)),
+            )
+            .collect();
+        while self.scrollback_buffers.len() < scrollback_texts.len() {
             self.scrollback_buffers
                 .push(TextBuffer::new(&mut self.font_system, metrics));
         }
-        self.scrollback_buffers.truncate(scrollback_pills.len());
-        for (buffer, pill) in self.scrollback_buffers.iter_mut().zip(&scrollback_pills) {
+        self.scrollback_buffers.truncate(scrollback_texts.len());
+        for (buffer, (text, height)) in self.scrollback_buffers.iter_mut().zip(&scrollback_texts) {
             buffer.set_metrics(metrics);
-            buffer.set_size(None, Some(pill.rect.3));
+            buffer.set_size(None, Some(*height));
             buffer.set_text(
-                &pill.label,
+                text,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
@@ -3709,33 +3752,46 @@ impl Renderer {
                 });
             }
         }
-        for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
-            let (x, y, w, h) = pill.rect;
-            let (fill, ink) = self
+        if !scrollback_texts.is_empty() {
+            let pill_colors = self
                 .chrome_colors
                 .scrollback_pill(theme, self.config.format.is_srgb());
-            tab_strip::rounded_fill(
-                &mut menu_q,
-                (x, y, w, h),
-                h / 2.0,
-                (true, true),
-                (fill, 1.0),
-                None,
-            );
-            menu_areas.push(TextArea {
-                buffer,
-                left: pill.text_origin.0,
-                top: pill.text_origin.1,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: x as i32,
-                    top: y as i32,
-                    right: (x + w) as i32,
-                    bottom: (y + h) as i32,
-                },
-                default_color: GColor::rgb(ink.r, ink.g, ink.b),
-                custom_glyphs: &[],
-            });
+            let mut buffers = self.scrollback_buffers.iter();
+            let mut text = |origin: (f32, f32), (x, y, w, h): Rect4, ink: Rgb| {
+                if let Some(buffer) = buffers.next() {
+                    menu_areas.push(TextArea {
+                        buffer,
+                        left: origin.0,
+                        top: origin.1,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            };
+            for (pane, pill) in &scrollback_pills {
+                let surface = pill_colors.surface(ScrollbackPillState::of(
+                    *pane,
+                    overlay.scrollback_pill_hovered,
+                    overlay.scrollback_pill_pressed,
+                ));
+                scrollback::scrollback_pill_quads(&mut menu_q, pill, surface, self.scale);
+                text(pill.text_origin, pill.rect, surface.ink);
+                if let Some(hint) = &pill.hint {
+                    text(hint.text_origin, pill.rect, surface.ink);
+                }
+            }
+            for label in &kept_history_labels {
+                let rest = pill_colors.rest;
+                scrollback::kept_history_label_quads(&mut menu_q, label, rest.fill);
+                text(label.text_origin, label.rect, rest.ink);
+            }
         }
         if let Some(bounds) = tab_tooltip {
             let fill = theme.background;
@@ -5480,8 +5536,9 @@ impl Renderer {
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
-            for pill in &scrollback_pills {
-                pill.label.hash(&mut h);
+            // Retained buffers keep their addresses: hash what they show.
+            for (text, _) in &scrollback_texts {
+                text.hash(&mut h);
             }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
@@ -6485,3 +6542,6 @@ mod emoji_shaping_tests;
 mod theme_picker_tests;
 #[cfg(test)]
 mod update_toast_tests;
+
+#[cfg(test)]
+mod scrollback_pill_tests;
