@@ -135,14 +135,7 @@ impl Bridge {
             }
         }
         if self.queue.dispatch_pending(&mut self.state).is_err() {
-            self.state.drag.close();
-            self.state.primary_selection.close();
-            for (_, request) in std::mem::take(&mut self.state.pending) {
-                request.token.destroy();
-            }
-            if let Some(manager) = self.state.activation.take() {
-                manager.destroy();
-            }
+            self.state.disconnect(selection::shared());
             return;
         }
         self.state
@@ -328,6 +321,22 @@ fn read_events(connection: Connection, stopped: UnixStream, wake: kettle_core::W
 }
 
 impl State {
+    /// The connection failed: let go of every protocol object, the
+    /// selections' with the rest. A bridge that outlives its connection must
+    /// not go on reporting a clipboard, a PRIMARY or a stale offer it can no
+    /// longer read, or callers would not fall back.
+    fn disconnect(&mut self, selection: &selection::Selection) {
+        selection.close();
+        self.drag.close();
+        self.primary_selection.close();
+        for (_, request) in std::mem::take(&mut self.pending) {
+            request.token.destroy();
+        }
+        if let Some(manager) = self.activation.take() {
+            manager.destroy();
+        }
+    }
+
     fn window(&self, surface: &wl_surface::WlSurface) -> Option<u64> {
         self.windows.iter().find_map(|(&seq, entry)| {
             (entry.surface.protocol_id() == surface.id().protocol_id()
@@ -608,5 +617,44 @@ impl Drop for Bridge {
             manager.destroy();
         }
         let _ = self.connection.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_connection_closes_the_selections_with_the_devices() {
+        // A socket no compositor answers is enough to hold protocol objects.
+        let (client, _compositor) = UnixStream::pair().unwrap();
+        let Ok(connection) = Connection::from_socket(client) else {
+            eprintln!("libwayland-client is not installed; skipped");
+            return;
+        };
+        let queue = connection.new_event_queue::<State>();
+        let qh = queue.handle();
+        let registry = connection.display().get_registry(&qh, ());
+        let data: wl_data_device_manager::WlDataDeviceManager = registry.bind(1, 3, &qh, ());
+        let primary: primary::Manager = registry.bind(2, 1, &qh, ());
+        let selection = selection::Selection::detached();
+        selection.attach(connection.clone(), qh);
+        selection.set_manager(data.clone());
+        selection.set_primary_manager(primary.clone());
+        let mut state = State::default();
+        state.drag.data_manager = Some(data);
+        state.primary_selection.manager = Some(primary);
+        assert!(selection.available() && selection.primary_available());
+
+        state.disconnect(&selection);
+        assert!(
+            !selection.primary_available(),
+            "PRIMARY must fall back once the bridge cannot serve it"
+        );
+        assert!(!selection.available(), "and so must CLIPBOARD writes");
+        assert!(state.primary_selection.manager.is_none());
+        // A second failed dispatch finds nothing left to close.
+        state.disconnect(&selection);
+        assert!(!selection.primary_available());
     }
 }

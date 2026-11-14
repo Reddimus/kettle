@@ -107,6 +107,12 @@ fn flush(connection: &Connection) -> Result<()> {
 }
 
 impl Selection {
+    /// A selection state of a test's own, apart from the process's.
+    #[cfg(test)]
+    pub(super) fn detached() -> Self {
+        Self(Mutex::new(Inner::default()))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.0
             .lock()
