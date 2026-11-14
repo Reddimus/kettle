@@ -173,6 +173,8 @@ pub fn description(field: &Field) -> Text {
             Text::SettingsDescriptionFieldCursorUnfocusedStyle
         }
         Text::SettingsFieldCopyOnSelect => Text::SettingsDescriptionFieldCopyOnSelect,
+        Text::SettingsFieldPasteProtection => Text::SettingsDescriptionFieldPasteProtection,
+        Text::SettingsFieldOsc52 => Text::SettingsDescriptionFieldOsc52,
         Text::SettingsFieldCursorBlink => Text::SettingsDescriptionFieldCursorBlink,
         Text::SettingsFieldCursorBlinkTimeout => Text::SettingsDescriptionFieldCursorBlinkTimeout,
         Text::SettingsFieldCursorShape => Text::SettingsDescriptionFieldCursorShape,
@@ -816,6 +818,30 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
                 toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
                 toggle(T::SettingsFieldCopyTrimWhitespace, "copy-trim-whitespace"),
+                // When a text paste asks first. The Confirm paste dialog
+                // links here.
+                choice(
+                    T::SettingsFieldPasteProtection,
+                    "paste-protection",
+                    &["auto", "always", "off"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueAlways),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
+                // What OSC 52 lets a program in a pane do with the clipboard.
+                choice(
+                    T::SettingsFieldOsc52,
+                    "osc52",
+                    &["off", "copy", "paste", "both"],
+                    &[
+                        Label::Text(T::SettingsValueOff),
+                        Label::Text(T::SettingsValueCopyOnly),
+                        Label::Text(T::SettingsValueReadOnly),
+                        Label::Text(T::SettingsValueCopyAndRead),
+                    ],
+                ),
                 toggle(
                     T::SettingsFieldMouseHideWhileTyping,
                     "mouse-hide-while-typing",
@@ -1429,6 +1455,19 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         }
         .to_string(),
         "restore-session" => cfg.restore_session.token().to_string(),
+        "paste-protection" => match cfg.paste_protection {
+            kettle_config::PasteProtection::Auto => "auto",
+            kettle_config::PasteProtection::Always => "always",
+            kettle_config::PasteProtection::Off => "off",
+        }
+        .to_string(),
+        "osc52" => match cfg.osc52 {
+            kettle_config::Osc52::Off => "off",
+            kettle_config::Osc52::Copy => "copy",
+            kettle_config::Osc52::Paste => "paste",
+            kettle_config::Osc52::Both => "both",
+        }
+        .to_string(),
         "update-policy" => match cfg.update_policy {
             UpdatePolicy::Off => "off",
             UpdatePolicy::Notify => "notify",
@@ -1663,6 +1702,96 @@ mod tests {
             let help = tr.text(description(field));
             assert!(help.contains("Option/Alt") && help.contains("Shift"));
         }
+    }
+
+    #[test]
+    fn paste_protection_and_clipboard_access_are_settings_rows() {
+        let cats = categories(&[]);
+        let behavior = cats
+            .iter()
+            .find(|cat| cat.name == Text::SettingsCategoryBehavior)
+            .expect("a Behavior category");
+        let row = |key: &str| {
+            behavior
+                .fields
+                .iter()
+                .position(|field| field.key == key)
+                .unwrap_or_else(|| panic!("{key} is not a Behavior row"))
+        };
+        // Beside the copy rows, in the order a paste meets them.
+        assert_eq!(row("paste-protection"), row("copy-trim-whitespace") + 1);
+        assert_eq!(row("osc52"), row("paste-protection") + 1);
+        for (key, label, values, shown) in [
+            (
+                "paste-protection",
+                "Paste protection",
+                &["auto", "always", "off"][..],
+                &["Automatic", "Always", "Off"][..],
+            ),
+            (
+                "osc52",
+                "Clipboard access by programs",
+                &["off", "copy", "paste", "both"][..],
+                &["Off", "Copy only", "Read only", "Copy and read"][..],
+            ),
+        ] {
+            let field = &behavior.fields[row(key)];
+            assert_eq!(EN.text(field.label), label);
+            let FieldKind::Choice {
+                values: tokens,
+                labels: Some(labels),
+            } = &field.kind
+            else {
+                panic!("{key} is a labelled choice")
+            };
+            assert_eq!(*tokens, values);
+            assert_eq!(
+                labels.iter().map(|l| l.show(&EN)).collect::<Vec<_>>(),
+                shown
+            );
+            // Every value is one the config accepts and reads back, and the
+            // row cycles through all of them and round again.
+            let mut cfg = Config::default();
+            let start = read_choice(&cfg, key);
+            assert_eq!(start, if key == "osc52" { "copy" } else { "auto" });
+            let mut seen = vec![start.clone()];
+            for _ in 0..values.len() {
+                let next = next_value(&cfg, field, 1);
+                let line = format!("{key} = {next}");
+                assert!(Config::detect_malformed_values(&line).is_empty(), "{line}");
+                cfg = Config::parse_text(&line);
+                assert_eq!(read_choice(&cfg, key), next);
+                assert_eq!(read(&cfg, field, &EN), {
+                    let at = values.iter().position(|v| *v == next).unwrap();
+                    shown[at]
+                });
+                seen.push(next);
+            }
+            assert_eq!(seen.first(), seen.last());
+            seen.sort();
+            seen.dedup();
+            assert_eq!(seen.len(), values.len());
+            // A description in each language, and Spanish labels of its own.
+            for tr in [EN, ES] {
+                assert!(!tr.text(description(field)).is_empty());
+            }
+            assert_ne!(EN.text(field.label), ES.text(field.label));
+            assert_ne!(EN.text(description(field)), ES.text(description(field)));
+        }
+        assert_eq!(
+            ES.text(Text::SettingsFieldPasteProtection),
+            "Protección al pegar"
+        );
+        assert!(
+            ES.text(Text::SettingsFieldOsc52)
+                .ends_with(" al portapapeles")
+        );
+        // The config values mean what the labels say.
+        let osc52 = |value: &str| Config::parse_text(&format!("osc52 = {value}")).osc52;
+        assert!(osc52("copy").can_copy() && !osc52("copy").can_paste());
+        assert!(!osc52("paste").can_copy() && osc52("paste").can_paste());
+        assert!(osc52("both").can_copy() && osc52("both").can_paste());
+        assert!(!osc52("off").can_copy() && !osc52("off").can_paste());
     }
 
     #[test]
@@ -2886,6 +3015,25 @@ mod search_tests {
             matches("taman\u{303}o de la fuente", &ES)
         );
         assert!(matches("no-setting-could-match-this", &EN).is_empty());
+    }
+
+    /// Search finds the paste and clipboard rows by what a user would type,
+    /// in both languages, and by their config keys.
+    #[test]
+    fn settings_search_finds_paste_protection_and_clipboard_access() {
+        for (tr, query, key) in [
+            (EN, "paste", "paste-protection"),
+            (ES, "pegar", "paste-protection"),
+            (EN, "clipboard", "osc52"),
+            (ES, "portapapeles", "osc52"),
+            (EN, "osc 52", "osc52"),
+            (EN, "paste-protection", "paste-protection"),
+        ] {
+            assert!(
+                matches(query, &tr).iter().any(|(_, found)| *found == key),
+                "searching {query:?} does not find {key}"
+            );
+        }
     }
 
     #[test]
