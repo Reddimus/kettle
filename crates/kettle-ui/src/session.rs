@@ -627,9 +627,29 @@ pub(crate) struct JobReport {
     /// replaced, or never written), so the next save must take a fresh
     /// snapshot rather than keep it.
     pub(crate) content_stale: bool,
+    /// The job was not written: the lock timed out, or a write failed.
+    pub(crate) failed: bool,
 }
 
+/// How many failed saves in a row wake the UI thread to try again. A lock
+/// another process holds for longer, or a disk that stays full, then waits
+/// for the next change or the exit save instead of waking an idle Kettle
+/// every two seconds.
+const MAX_RETRY_WAKES: u32 = 3;
+
 /// Write `job` to the session at `path` and its output file.
+///
+/// Both files are written under one hold of `session.json.lock`, so no other
+/// writer can put its session beside this content, or this session beside
+/// its content, between the two. Each file is still an atomic replace, so a
+/// crash between them leaves the new session beside the old content, which
+/// restore then ignores because the digest no longer matches.
+///
+/// A failure leaves the output file alone unless this job's own write of it
+/// failed after `session.json` was replaced: the old one no longer matches
+/// then, so it is removed rather than kept as private text nothing can
+/// restore. A lock that times out, or a `session.json` that could not be
+/// written, changes neither file.
 ///
 /// `written` is what this writer last wrote to the output file; a `Write` of
 /// the same bytes to the same file is skipped, and a `Keep` checks it.
@@ -638,30 +658,50 @@ pub(crate) fn save_job(
     path: &std::path::Path,
     written: &mut Option<crate::session_content::WrittenContent>,
 ) -> std::io::Result<JobReport> {
-    let mut report = JobReport::default();
-    let result = (|| {
-        if let Some(session) = &job.session {
-            save_to_path(session, path)?;
-        }
-        match job.content {
-            ContentJob::Write(content) => {
-                content.save_if_changed(path, written)?;
-            }
-            ContentJob::Keep => {
-                report.content_stale = !crate::session_content::kept(path, written.as_ref());
-            }
-            ContentJob::Remove => {
-                *written = None;
-                crate::session_content::remove(path);
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        *written = None;
-        crate::session_content::remove(path);
+    save_job_with(job, path, written, || {})
+}
+
+/// [`save_job`], calling `between` once `session.json` is done and before
+/// the output file is touched.
+fn save_job_with(
+    job: SaveJob,
+    path: &std::path::Path,
+    written: &mut Option<crate::session_content::WrittenContent>,
+    between: impl FnOnce(),
+) -> std::io::Result<JobReport> {
+    if let Some(session) = &job.session {
+        session
+            .validated_restore_windows()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     }
-    result.map(|()| report)
+    if let Some(dir) = path.parent() {
+        kettle_state::create_private_dirs(dir)?;
+    }
+    let _lock = session_lock(path)?;
+    let replaced = match &job.session {
+        Some(session) => save_to_path_locked(session, path)?,
+        None => false,
+    };
+    between();
+    let mut report = JobReport::default();
+    match job.content {
+        ContentJob::Write(content) => {
+            if let Err(error) = content.save_if_changed(path, written) {
+                if replaced {
+                    crate::session_content::remove(path);
+                }
+                return Err(error);
+            }
+        }
+        ContentJob::Keep => {
+            report.content_stale = !crate::session_content::kept(path, written.as_ref());
+        }
+        ContentJob::Remove => {
+            *written = None;
+            crate::session_content::remove(path);
+        }
+    }
+    Ok(report)
 }
 
 #[derive(Default)]
@@ -711,7 +751,10 @@ impl SessionWriter {
                     Ok(report) => report,
                     Err(error) => {
                         log::warn!("could not save session snapshot ({:?})", error.kind());
-                        JobReport::default()
+                        JobReport {
+                            failed: true,
+                            ..JobReport::default()
+                        }
                     }
                 }
             },
@@ -749,6 +792,7 @@ impl SessionWriter {
             .name("kettle-session-save".into())
             .spawn(move || {
                 let (lock, ready) = &*shared;
+                let mut failures = 0u32;
                 loop {
                     let next = {
                         let mut state = lock.lock().expect("session save lock");
@@ -761,10 +805,17 @@ impl SessionWriter {
                         }
                     };
                     let report = write(next);
-                    if report.content_stale {
+                    failures = if report.failed { failures + 1 } else { 0 };
+                    // The UI thread cleared its touched flag when it handed
+                    // this job over, so nothing else would save it again.
+                    // A failure also leaves the output file unknown: the
+                    // next save takes a fresh snapshot.
+                    if report.content_stale || report.failed {
                         reports
                             .content_stale
                             .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    if report.content_stale || (report.failed && failures <= MAX_RETRY_WAKES) {
                         wake();
                     }
                 }
@@ -808,8 +859,9 @@ impl SessionWriter {
         });
     }
 
-    /// Whether a save found the output file was not the one it last wrote,
-    /// since the last call. The UI thread then takes a fresh snapshot.
+    /// Whether, since the last call, a save found the output file was not
+    /// the one it last wrote or failed altogether. The UI thread then takes a
+    /// fresh snapshot.
     pub(crate) fn take_content_stale(&self) -> bool {
         self.feedback
             .content_stale
@@ -934,6 +986,12 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
         kettle_state::create_private_dirs(dir)?;
     }
     let _lock = session_lock(p)?;
+    save_to_path_locked(s, p).map(|_| ())
+}
+
+/// [`save_to_path`] for a caller that holds the session lock and validated
+/// `s`. Returns whether it replaced the file.
+fn save_to_path_locked(s: &Session, p: &std::path::Path) -> std::io::Result<bool> {
     struct SessionBytes(Vec<u8>);
     impl std::io::Write for SessionBytes {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -979,7 +1037,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
                     && on_disk == text.as_slice()
                     && kettle_state::restrict_private_file(&file).is_ok()
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -991,7 +1049,7 @@ pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<
         text.as_slice(),
         kettle_state::AtomicWriteOptions::PRIVATE,
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// Read and parse a one-shot handoff or test snapshot at `path`. Read errors
@@ -3060,5 +3118,198 @@ mod content_writer_tests {
             .expect("a stale keep wakes the UI");
         assert!(writer.take_content_stale());
         assert!(!writer.take_content_stale(), "the flag is taken once");
+    }
+
+    fn lock_path(path: &std::path::Path) -> PathBuf {
+        path.with_file_name("session.json.lock")
+    }
+
+    /// Both files are written under one hold of the session lock, so another
+    /// writer cannot pair its session with this content, or the other way
+    /// round, in between.
+    #[test]
+    fn session_and_content_are_written_under_one_lock() {
+        let dir = kettle_test_support::private_tempdir("kettle-content-one-lock-");
+        let path = dir.path().join("session.json");
+        let (session, content) = one_pane_session("MARK-1");
+        let mut held_between = None;
+        save_job_with(
+            job(Some(session.clone()), ContentJob::Write(content)),
+            &path,
+            &mut None,
+            || {
+                held_between = Some(
+                    kettle_state::ExclusiveFileLock::try_acquire(&lock_path(&path))
+                        .unwrap()
+                        .is_none(),
+                );
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            held_between,
+            Some(true),
+            "the lock was free between session.json and session.content"
+        );
+        assert!(
+            kettle_state::ExclusiveFileLock::try_acquire(&lock_path(&path))
+                .unwrap()
+                .is_some()
+        );
+        assert!(crate::session_content::load(&path, &load_from_path(&path).unwrap()).is_some());
+    }
+
+    /// A save that cannot take the lock in time writes neither file, deletes
+    /// neither, and wakes the UI thread so the next sweep tries again: the
+    /// UI already cleared its touched flag when it handed the job over.
+    #[test]
+    fn a_save_that_times_out_on_the_lock_retries_and_keeps_both_files() {
+        let dir = kettle_test_support::private_tempdir("kettle-content-lock-timeout-");
+        let path = dir.path().join("session.json");
+        let (old_session, old_content) = one_pane_session("OLD");
+        save_job(
+            job(Some(old_session.clone()), ContentJob::Write(old_content)),
+            &path,
+            &mut None,
+        )
+        .unwrap();
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let resolved = path.clone();
+        let mut writer = SessionWriter::with_paths(
+            move |_| Some(resolved.clone()),
+            move || {
+                let _ = woke_tx.send(());
+            },
+        )
+        .unwrap();
+        let new_session = Session {
+            active: 0,
+            theme: Some("new".into()),
+            ..one_pane_session("").0
+        };
+        let new_content = || {
+            ContentJob::Write(crate::session_content::ContentSnapshot::new(
+                &new_session,
+                one_pane_session("NEW").1.windows,
+            ))
+        };
+        let held = kettle_state::ExclusiveFileLock::acquire(&lock_path(&path)).unwrap();
+        writer.submit_job(job(Some(new_session.clone()), new_content()));
+        woke_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a timed-out save wakes the UI to retry");
+        assert!(
+            writer.take_content_stale(),
+            "the retry takes a fresh snapshot"
+        );
+        drop(held);
+        assert_eq!(
+            load_from_path(&path).unwrap().theme,
+            None,
+            "session.json changed"
+        );
+        let kept = crate::session_content::load(&path, &old_session)
+            .expect("the old pair was deleted on a lock timeout");
+        assert_eq!(kept.windows[0][0][0].lines[0].0, "OLD");
+
+        writer.submit_job(job(Some(new_session.clone()), new_content()));
+        writer.finish();
+        assert_eq!(load_from_path(&path).unwrap().theme.as_deref(), Some("new"));
+        assert!(crate::session_content::load(&path, &new_session).is_some());
+    }
+
+    /// A content write that fails leaves the old file if it still pairs with
+    /// `session.json`, and removes it only when `session.json` was just
+    /// replaced and the old file can no longer be restored.
+    #[test]
+    fn a_failed_content_write_keeps_a_pair_that_still_matches() {
+        let dir = kettle_test_support::private_tempdir("kettle-content-failed-write-");
+        let path = dir.path().join("session.json");
+        let (session, content) = one_pane_session("OLD");
+        let mut written = None;
+        save_job(
+            job(Some(session.clone()), ContentJob::Write(content)),
+            &path,
+            &mut written,
+        )
+        .unwrap();
+        let oversized = |session: &Session| {
+            ContentJob::Write(crate::session_content::ContentSnapshot::new(
+                session,
+                vec![vec![vec![crate::session_content::PaneContent {
+                    remote: false,
+                    lines: vec![("x".repeat(crate::session_content::MAX_BYTES), false, vec![])],
+                }]]],
+            ))
+        };
+        assert!(
+            save_job(
+                job(Some(session.clone()), oversized(&session)),
+                &path,
+                &mut written
+            )
+            .is_err()
+        );
+        let kept =
+            crate::session_content::load(&path, &session).expect("a matching pair was deleted");
+        assert_eq!(kept.windows[0][0][0].lines[0].0, "OLD");
+
+        let changed = Session {
+            theme: Some("changed".into()),
+            ..session.clone()
+        };
+        assert!(
+            save_job(
+                job(Some(changed.clone()), oversized(&changed)),
+                &path,
+                &mut written
+            )
+            .is_err()
+        );
+        assert_eq!(
+            load_from_path(&path).unwrap().theme.as_deref(),
+            Some("changed")
+        );
+        assert!(
+            !crate::session_content::path(&path).exists(),
+            "the old file no longer matches and holds private text"
+        );
+    }
+
+    /// Failed saves wake the UI to retry, but only a few in a row: a lock held
+    /// for good or a full disk must not wake an idle Kettle every interval.
+    /// A save that succeeds starts the count again.
+    #[test]
+    fn failed_saves_wake_the_ui_a_bounded_number_of_times() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (outcome_tx, outcome_rx) = mpsc::channel::<bool>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let (woke_tx, woke_rx) = mpsc::channel();
+        let outcomes = std::sync::Mutex::new(outcome_rx);
+        let writer = SessionWriter::with_job_sink(
+            move |_| {
+                let failed = outcomes.lock().unwrap().recv().unwrap();
+                done_tx.send(()).unwrap();
+                JobReport {
+                    failed,
+                    ..JobReport::default()
+                }
+            },
+            move || {
+                let _ = woke_tx.send(());
+            },
+        )
+        .unwrap();
+        // Five failures in a row wake three times; after a success, the next
+        // failure wakes again. One job at a time, so none fold together.
+        for failed in [true, true, true, true, true, false, true] {
+            outcome_tx.send(failed).unwrap();
+            writer.submit_job(job(Some(Session::default()), ContentJob::Keep));
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        // Joining the worker means every wake it was going to send is sent.
+        drop(writer);
+        assert_eq!(woke_rx.try_iter().count(), 4);
     }
 }

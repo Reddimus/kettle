@@ -267,8 +267,9 @@ pub enum UserEvent {
         request: ActionRequest,
     },
     /// The session writer found the output file was not the one it wrote,
-    /// so the next sweep must save again. Every user event marks the session
-    /// touched, which arms that sweep.
+    /// or could not save (a lock held too long, a failed write), so the next
+    /// sweep must save again. Every user event marks the session touched,
+    /// which arms that sweep.
     SessionResave,
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
