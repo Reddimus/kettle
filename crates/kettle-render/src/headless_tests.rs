@@ -5643,26 +5643,50 @@ fn tab_strip_legibility_at(font_size: f32) {
             // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
             // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
             let mut controls = vec![
-                ("×", inactive_close, 0.42 * line, secondary, floors.0),
-                ("+", tabs.new_tab, 0.66 * line, control, floors.1),
+                ("×", inactive_close, 0.42 * line, strip, secondary, floors.0),
+                ("+", tabs.new_tab, 0.66 * line, strip, control, floors.1),
                 if gnome_header {
-                    ("≡", tabs.new_tab_menu, 0.66 * line, control, floors.1)
+                    (
+                        "≡",
+                        tabs.new_tab_menu,
+                        0.66 * line,
+                        strip,
+                        control,
+                        floors.1,
+                    )
                 } else {
-                    ("▾", tabs.new_tab_menu, 0.42 * line, control, floors.1)
+                    (
+                        "▾",
+                        tabs.new_tab_menu,
+                        0.42 * line,
+                        strip,
+                        control,
+                        floors.1,
+                    )
                 },
             ];
             if gnome_header {
+                // Adwaita's 8-point cross on its disc, judged on the disc.
+                let (disc, glyph) = crate::tab_strip::window_control_colors(
+                    fg,
+                    strip,
+                    false,
+                    false,
+                    window_focused,
+                    &mut colors,
+                );
                 controls.push((
                     "window close",
-                    tabs.window_controls[0].rect,
-                    13.0,
-                    control,
+                    crate::header_icons::window_button_disc(tabs.window_controls[0].rect, 1.0),
+                    8.0,
+                    disc,
+                    glyph,
                     floors.1,
                 ));
             }
-            for (glyph, button, min_side, ink, floor) in controls {
-                let (x, y, w, h) =
-                    glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
+            for (glyph, button, min_side, background, ink, floor) in controls {
+                let (x, y, w, h) = glyph_ink(&frame, button, background)
+                    .unwrap_or_else(|| panic!("{case}: {glyph}"));
                 assert!(
                     w >= min_side && h >= min_side,
                     "{case}: {glyph} ink {w}x{h} < {min_side}"
@@ -5670,7 +5694,7 @@ fn tab_strip_legibility_at(font_size: f32) {
                 assert_glyph_painted(
                     &frame,
                     button,
-                    (strip, ink),
+                    (background, ink),
                     floor,
                     &format!("{case}: {glyph}"),
                 );

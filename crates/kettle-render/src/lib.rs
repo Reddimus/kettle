@@ -35,6 +35,7 @@ pub use text_field::{
     TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
     text_field_placeholder, text_field_rects,
 };
+mod header_icons;
 mod settings;
 mod tab_strip;
 mod terminal;
@@ -661,6 +662,8 @@ pub struct Renderer {
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
+    /// The GNOME header's icons and window-button discs, by icon and side.
+    header_icon_masks: header_icons::IconMasks,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -4743,6 +4746,7 @@ impl Renderer {
             self.scale,
             overlay.window_focused,
             &mut self.chrome_colors,
+            &mut self.header_icon_masks,
         );
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
