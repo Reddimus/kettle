@@ -26,6 +26,40 @@ fn into_unknown<E: std::fmt::Display>(error: E) -> Error {
 	Error::Unknown { description: error.to_string() }
 }
 
+/// Decode a PNG another program put on the clipboard, for a paste.
+///
+/// The bytes are untrusted, so the decoder gets Kettle's pasted-image limits
+/// before it reads the header: 16,384 pixels a side and 256 MiB of
+/// allocation, which the decoded buffer is charged against before it exists.
+/// The RGBA8 copy the caller gets is held to the same 256 MiB.
+#[cfg(feature = "image-data")]
+fn decode_pasted_png(bytes: &[u8]) -> Result<image::RgbaImage, Error> {
+	use image::ImageDecoder as _;
+
+	const MAX_SIDE: u32 = 16_384;
+	const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+	let mut limits = image::Limits::default();
+	limits.max_image_width = Some(MAX_SIDE);
+	limits.max_image_height = Some(MAX_SIDE);
+	limits.max_alloc = Some(MAX_BYTES);
+	let refuse = |error: image::ImageError| match error {
+		image::ImageError::Limits(_) => Error::LimitExceeded,
+		_ => Error::ConversionFailure,
+	};
+
+	let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+	reader.set_format(image::ImageFormat::Png);
+	reader.limits(limits.clone());
+	let decoder = reader.into_decoder().map_err(refuse)?;
+	let (width, height) = decoder.dimensions();
+	if u64::from(width) * u64::from(height) * 4 > MAX_BYTES {
+		return Err(Error::LimitExceeded);
+	}
+	limits.reserve(decoder.total_bytes()).map_err(refuse)?;
+	image::DynamicImage::from_decoder(decoder).map(|image| image.into_rgba8()).map_err(refuse)
+}
+
 #[cfg(feature = "image-data")]
 fn encode_as_png(image: &ImageData) -> Result<Vec<u8>, Error> {
 	use image::ImageEncoder as _;
@@ -487,5 +521,75 @@ mod uri_list_tests {
 			paths_from_uri_list(b"file:///tmp/a.png\nfile:///tmp/b.png".to_vec()),
 			[PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
 		);
+	}
+}
+
+#[cfg(all(test, feature = "image-data"))]
+mod pasted_png_tests {
+	use super::*;
+
+	fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+		let mut crc = !0u32;
+		for byte in kind.iter().chain(data) {
+			crc ^= u32::from(*byte);
+			for _ in 0..8 {
+				crc = (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1));
+			}
+		}
+		let mut out = (data.len() as u32).to_be_bytes().to_vec();
+		out.extend_from_slice(kind);
+		out.extend_from_slice(data);
+		out.extend_from_slice(&(!crc).to_be_bytes());
+		out
+	}
+
+	/// A PNG that declares `width`x`height` at `depth` bits a channel of
+	/// colour type `colour`, with the start of an image stream and no pixels.
+	fn declares(width: u32, height: u32, depth: u8, colour: u8) -> Vec<u8> {
+		let mut header = [width.to_be_bytes(), height.to_be_bytes()].concat();
+		header.extend_from_slice(&[depth, colour, 0, 0, 0]);
+		let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+		png.extend(chunk(b"IHDR", &header));
+		png.extend(chunk(b"IDAT", &[0x78, 0x01]));
+		png
+	}
+
+	#[test]
+	fn a_pasted_png_decodes_to_its_pixels() {
+		let pixels = [1u8, 2, 3, 255, 4, 5, 6, 128];
+		let png =
+			encode_as_png(&ImageData { width: 2, height: 1, bytes: pixels[..].into() }).unwrap();
+		let image = decode_pasted_png(&png).unwrap();
+		assert_eq!(image.dimensions(), (2, 1));
+		assert_eq!(image.into_raw(), pixels);
+		assert!(matches!(decode_pasted_png(b"not a png"), Err(Error::ConversionFailure)));
+	}
+
+	#[test]
+	fn a_pasted_png_is_refused_by_its_header_before_any_pixel_is_allocated() {
+		// A side over 16,384 px.
+		assert!(matches!(decode_pasted_png(&declares(20_000, 1, 8, 6)), Err(Error::LimitExceeded)));
+		assert!(matches!(decode_pasted_png(&declares(1, 16_385, 8, 6)), Err(Error::LimitExceeded)));
+		// 8000x8000 at 16 bits a channel is 512 MB decoded, over the 256 MiB
+		// the decoder may allocate, though its RGBA8 copy would fit.
+		assert!(matches!(
+			decode_pasted_png(&declares(8000, 8000, 16, 6)),
+			Err(Error::LimitExceeded)
+		));
+		// 16,000x16,000 greyscale decodes into 256 MB and would then grow
+		// to 1 GB as RGBA8.
+		assert!(matches!(
+			decode_pasted_png(&declares(16_000, 16_000, 8, 0)),
+			Err(Error::LimitExceeded)
+		));
+		// The same truncated stream within the limits is only a bad PNG.
+		assert!(matches!(decode_pasted_png(&declares(8, 8, 8, 6)), Err(Error::ConversionFailure)));
+	}
+
+	#[test]
+	fn an_image_paste_reads_at_most_64_mib_and_a_sentinel_byte() {
+		use crate::platform::x11_incr::{read_paste, PasteFormat};
+		let bound = read_paste(PasteFormat::Image, |bounds| Ok(bounds.map(|b| b.max_bytes)));
+		assert_eq!(bound.unwrap(), Some(64 * 1024 * 1024 + 1));
 	}
 }
