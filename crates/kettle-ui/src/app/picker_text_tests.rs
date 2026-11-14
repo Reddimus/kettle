@@ -288,8 +288,14 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
         "Conectar a \"zzz\""
     );
     for (tr, refusal) in [
-        (&EN, "Targets can't start with - or contain spaces"),
-        (&ES, "El destino no puede empezar con - ni tener espacios"),
+        (
+            &EN,
+            "Targets can't start with - or contain spaces or control characters",
+        ),
+        (
+            &ES,
+            "El destino no puede empezar con - ni tener espacios ni caracteres de control",
+        ),
     ] {
         let row = &ssh_picker_list("-oProxyCommand=x", 0, &hosts, &[], tr).rows[0];
         assert_eq!(row.label, refusal);
@@ -345,10 +351,12 @@ fn palette_placeholder_is_translated_and_only_in_the_palette() {
 #[test]
 fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
     use super::picker_context_menu;
-    let option = |query: &str, imported: &[String], label: &str| {
+    // Row 0's option, found by the label the row paints (fitted to the card).
+    let option = |query: &str, imported: &[String]| {
         let list = ssh_picker_list(query, 0, &[], imported, &EN);
         let menu = picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), 0.0).unwrap();
         let painted = menu.rows[0].hint.trim().to_string();
+        let label = menu.rows[0].label.clone();
         let overlay = kettle_render::Overlay {
             ssh_query: Some(query.to_string()),
             context_menu: Some(menu),
@@ -361,16 +369,25 @@ fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
             .into_iter()
             .map(|(_, node)| node)
             .find(|node| {
-                node.role() == accesskit::Role::ListBoxOption && node.label() == Some(label)
+                node.role() == accesskit::Role::ListBoxOption
+                    && node.label() == Some(label.as_str())
             })
             .unwrap_or_else(|| panic!("no option {label:?}"));
         (node, painted)
     };
-    let (imported, painted) = option("", &["web".to_string()], "web");
+    let (imported, painted) = option("", &["web".to_string()]);
+    assert_eq!(imported.label(), Some("web"));
     assert!(!painted.is_empty());
     assert_eq!(imported.description(), Some(painted.as_str()));
     assert_eq!(imported.is_selected(), Some(true));
-    let (placeholder, _) = option("-x", &[], "Targets can't start with - or contain spaces");
+    let (placeholder, _) = option("-x", &[]);
+    assert!(
+        placeholder
+            .label()
+            .is_some_and(|label| label.starts_with("Targets can't start with -")),
+        "{:?}",
+        placeholder.label()
+    );
     assert!(placeholder.is_disabled());
     assert_ne!(
         placeholder.is_selected(),

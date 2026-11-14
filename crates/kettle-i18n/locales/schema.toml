@@ -1145,7 +1145,7 @@ context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: SSH launcher row
 args = [{ name = "target", type = "str" }]
 
 [messages.picker_ssh_invalid_target]
-context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: disabled SSH launcher row when the typed target cannot be passed to ssh: it starts with a hyphen or contains a space. Keep the hyphen."
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: disabled SSH launcher row when the typed target cannot be passed to ssh: it starts with a hyphen, or contains a space or a control character. Keep the hyphen."
 
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
