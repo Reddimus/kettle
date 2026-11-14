@@ -318,7 +318,7 @@ fn structured_confirmation_copy_is_localized_and_pluralized() {
     );
     assert_eq!(
         es.confirm_rebind_body("Copiar", "Pegar"),
-        "Asignar este atajo a \"Pegar\". \"Copiar\" perderá este atajo."
+        "Asignar este atajo de teclado a \"Pegar\". \"Copiar\" perderá este atajo."
     );
 }
 
