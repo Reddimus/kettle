@@ -442,3 +442,228 @@ fn only_desktops_without_server_decorations_get_the_kettle_header() {
     }
     assert!(!desktop_lacks_server_decorations(None));
 }
+
+/// The header `App::tab_bar_at_height` builds for a window `width` points
+/// wide at `scale`, with GNOME's `layout` of window buttons and `tabs` tabs,
+/// from the same geometry functions it calls.
+fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar {
+    let cfg = Config::default();
+    let preferences = crate::window_buttons::ButtonLayout::parse(layout).unwrap();
+    let height = LINUX_HEADER_HEIGHT * scale;
+    let band = (0.0, 0.0, width * scale, height);
+    let lane = horizontal_tab_lane(band, preferences.reservations(band.2, height));
+    let geometry = horizontal_tab_geometry(lane, scale, (true, true), (tabs, 0), &cfg);
+    let mut bar = TabBar::hidden();
+    bar.height = height;
+    bar.band = band;
+    bar.in_titlebar = true;
+    bar.linux_header = true;
+    bar.lone_title = lone_header_title(true, tabs, (false, false), cfg.tab_bar, cfg.tab_bar_pos);
+    bar.new_tab = geometry.plus_rect;
+    bar.new_tab_menu = geometry.arrow_rect;
+    bar.window_controls = linux_window_control_layout_with_preferences(
+        band,
+        false,
+        None,
+        None,
+        &Default::default(),
+        &preferences,
+    );
+    for (idx, x) in geometry.layout.xs.iter().enumerate() {
+        let w = if idx + 1 == tabs {
+            geometry.layout.last_width
+        } else {
+            geometry.layout.width
+        };
+        let rect = (lane.0 + x.unwrap(), 0.0, w, height);
+        let content = kettle_render::horizontal_tab_content_layout(
+            rect,
+            tabs > 1,
+            true,
+            0.0,
+            "fixture",
+            None,
+            8.0 * scale,
+        );
+        bar.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: content.title,
+            close: content.close,
+            hint: None,
+            title: "fixture".into(),
+            path: None,
+            active: idx == 0,
+            activity: RenderTabActivity::Normal,
+        });
+    }
+    bar
+}
+
+fn centre(r: kettle_render::Rect4) -> (f32, f32) {
+    (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5)
+}
+
+/// Only Kettle's Linux header with a single tab draws it as the window
+/// title. Two tabs, a title being edited, a tab being docked in,
+/// `tab-bar = always`, any position but the top, a macOS title bar and a
+/// plain strip all keep the tab. `tab_bar_at_height` asks with the
+/// window's own state and hands the answer to the painter.
+#[test]
+fn lone_header_title_only_for_one_tab_in_the_linux_header() {
+    use TabBarMode as M;
+    assert!(lone_header_title(
+        true,
+        1,
+        (false, false),
+        M::Auto,
+        TabBarPos::Top
+    ));
+    for (linux, tabs, busy, mode, pos, why) in [
+        (true, 2, (false, false), M::Auto, TabBarPos::Top, "two tabs"),
+        (true, 1, (true, false), M::Auto, TabBarPos::Top, "editing"),
+        (true, 1, (false, true), M::Auto, TabBarPos::Top, "docking"),
+        (true, 1, (false, false), M::Always, TabBarPos::Top, "always"),
+        (
+            true,
+            1,
+            (false, false),
+            M::Auto,
+            TabBarPos::Bottom,
+            "bottom",
+        ),
+        (true, 1, (false, false), M::Auto, TabBarPos::Left, "left"),
+        (true, 1, (false, false), M::Auto, TabBarPos::Right, "right"),
+        // A macOS title bar and a plain strip have no Linux header.
+        (false, 1, (false, false), M::Auto, TabBarPos::Top, "macOS"),
+        (false, 1, (false, false), M::Always, TabBarPos::Top, "plain"),
+    ] {
+        assert!(!lone_header_title(linux, tabs, busy, mode, pos), "{why}");
+    }
+    let source: String = include_str!("chrome.rs").split_whitespace().collect();
+    for wiring in [
+        "letlone_title=lone_header_title(ws.linux_titlebar,labels.len(),(ws.editing_title.is_some(),ws.dock_preview.is_some()),self.cfg.tab_bar,self.cfg.tab_bar_pos,);",
+        "linux_header:ws.linux_titlebar,lone_title,",
+        "hovered_tab_idx:segments_hovered.filter(|_|!lone_title),",
+    ] {
+        assert!(source.contains(wiring), "missing {wiring}");
+    }
+}
+
+/// A press on the lone title does what one on empty header space does:
+/// a primary press drags the window, a second within 400 ms and 4 points
+/// maximizes it, a secondary press opens the window menu and a middle one
+/// does nothing. With two tabs a press on a tab is left to the tab strip,
+/// as are presses on `+` and `≡`. The title keeps its AccessKit tab.
+#[test]
+fn lone_header_title_presses_like_empty_header_space() {
+    use LinuxHeaderPress::{Control, Title};
+    use LinuxTitlebarGesture as G;
+    use std::time::{Duration, Instant};
+    for scale in [1.0, 2.0] {
+        let bar = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 1);
+        assert!(bar.lone_title);
+        let title = bar.segments[0].rect;
+        assert_eq!(
+            bar.segments[0].close.2, 0.0,
+            "the title has no close button"
+        );
+        let (x, y) = centre(title);
+        assert!(linux_title_space(&bar, x, y));
+        for (button, double, gesture) in [
+            (0, false, G::Drag),
+            (0, true, G::ToggleMaximize),
+            (1, false, G::Ignore),
+            (2, false, G::WindowMenu),
+        ] {
+            for point in [(x, y), (title.0 + 1.0, 1.0), (title.0 + title.2 - 1.0, y)] {
+                assert_eq!(
+                    linux_header_press(&bar, point, button, double),
+                    Some(Title(gesture)),
+                    "{scale}x button {button} double={double} at {point:?}"
+                );
+            }
+        }
+        let tolerance = 4.0 * scale;
+        let first = Instant::now();
+        assert!(!linux_title_double_click(None, first, (x, y), tolerance));
+        let previous = Some((first, x, y));
+        let near = (x + 3.0 * scale, y - 3.0 * scale);
+        assert!(linux_title_double_click(
+            previous,
+            first + Duration::from_millis(200),
+            near,
+            tolerance
+        ));
+        assert!(!linux_title_double_click(
+            previous,
+            first + Duration::from_millis(450),
+            near,
+            tolerance
+        ));
+        assert!(!linux_title_double_click(
+            previous,
+            first + Duration::from_millis(200),
+            (x + 5.0 * scale, y),
+            tolerance
+        ));
+        // The strip's own buttons and the window's stay buttons.
+        for button in [bar.new_tab, bar.new_tab_menu] {
+            let (bx, by) = centre(button);
+            assert!(!linux_title_space(&bar, bx, by));
+            assert_eq!(linux_header_press(&bar, (bx, by), 0, false), None);
+        }
+        let close = bar.window_controls[2].rect;
+        assert_eq!(
+            linux_header_press(&bar, centre(close), 0, false),
+            Some(Control(kettle_render::WindowControl::Close))
+        );
+        // tab-bar = always keeps the tab look, and its presses.
+        let mut always = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 1);
+        always.lone_title = false;
+        assert_eq!(linux_header_press(&always, (x, y), 0, false), None);
+        // Screen readers still find the tab, selected, under the title.
+        let nodes = tab_accessibility_projection(&bar, &[7], false, &Default::default());
+        let (_, tab) = nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Tab)
+            .expect("a tab node");
+        assert_eq!(tab.label(), Some("fixture"));
+        assert_eq!(tab.is_selected(), Some(true));
+        assert!(tab.children().is_empty());
+        assert_eq!(
+            tab.bounds().unwrap(),
+            accesskit::Rect::new(
+                title.0 as f64,
+                title.1 as f64,
+                (title.0 + title.2) as f64,
+                (title.1 + title.3) as f64
+            )
+        );
+        // Two tabs: each is a tab again, and empty space is still space.
+        let two = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 2);
+        assert!(!two.lone_title);
+        for tab in &two.segments {
+            let (tx, ty) = centre(tab.rect);
+            assert!(!linux_title_space(&two, tx, ty));
+            for button in [0, 1, 2] {
+                assert_eq!(linux_header_press(&two, (tx, ty), button, false), None);
+            }
+        }
+        let last = two.segments[1].rect;
+        let space = ((last.0 + last.2 + two.new_tab_menu.0) * 0.5, y);
+        assert_eq!(
+            linux_header_press(&two, space, 0, false),
+            Some(Title(G::Drag))
+        );
+    }
+    // The window and an agent route header presses through these.
+    let source: String = include_str!("linux_titlebar.rs")
+        .split_whitespace()
+        .collect();
+    assert!(source.contains(
+        "letgesture=matchlinux_header_press(bar,(x,y),button,double){None=>returnfalse,"
+    ));
+    let ctl: String = include_str!("ctl.rs").split_whitespace().collect();
+    assert!(ctl.contains("ifws.linux_titlebar&&linux_title_space(&bar,px,py){returntrue;}"));
+}

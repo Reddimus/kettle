@@ -206,6 +206,13 @@ impl App {
             String::new()
         };
         let n = labels.len().max(1);
+        let lone_title = lone_header_title(
+            ws.linux_titlebar,
+            labels.len(),
+            (ws.editing_title.is_some(), ws.dock_preview.is_some()),
+            self.cfg.tab_bar,
+            self.cfg.tab_bar_pos,
+        );
         let scale = ws
             .window
             .as_ref()
@@ -292,7 +299,8 @@ impl App {
                 } else {
                     cell_w
                 };
-                let show_controls = n > 1 || hovered;
+                // A lone header title is no tab: no close button or hint.
+                let show_controls = n > 1 || (hovered && !lone_title);
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     show_controls,
@@ -347,7 +355,7 @@ impl App {
             tooltip,
             in_titlebar: ws.macos_titlebar_tabs,
             linux_header: ws.linux_titlebar,
-            lone_title: false,
+            lone_title,
             recording_notice,
             height,
             y,
@@ -363,7 +371,8 @@ impl App {
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
             hovered_close_idx: ws.hovered_close_idx,
-            hovered_tab_idx: segments_hovered,
+            // The lone title has no hover state of its own to paint.
+            hovered_tab_idx: segments_hovered.filter(|_| !lone_title),
             // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
@@ -1426,6 +1435,26 @@ pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
     } else {
         lane
     }
+}
+
+/// Whether Kettle's Linux header draws its only tab as the window's title,
+/// the way GNOME apps title their header bars. Never while a title is being
+/// edited or another window's tab is being docked into this one, both of
+/// which show the tab; never off the top, where there is no header; and
+/// never with `tab-bar = always`, which asks for the tab look.
+pub(super) fn lone_header_title(
+    linux_header: bool,
+    tabs: usize,
+    (editing, docking): (bool, bool),
+    mode: TabBarMode,
+    pos: TabBarPos,
+) -> bool {
+    linux_header
+        && tabs == 1
+        && !editing
+        && !docking
+        && mode != TabBarMode::Always
+        && pos == TabBarPos::Top
 }
 
 pub(super) fn tab_strip_visible(

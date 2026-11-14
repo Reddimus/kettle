@@ -57,9 +57,15 @@ pub(super) fn inset_titlebar_band(band: Rect, titlebar: Option<TitlebarBand>) ->
 
 pub(super) fn empty_titlebar_space(bar: &TabBar, x: f32, y: f32) -> bool {
     rect_contains(bar.band, x, y)
-        && window_control_at(bar, x, y).is_none()
+        && !titlebar_button_at(bar, x, y)
         && !bar.segments.iter().any(|s| rect_contains(s.rect, x, y))
-        && ![
+}
+
+/// Whether `(x, y)` is on one of the strip's buttons: a window button, the
+/// gear, `▾` or `≡`, `+`, or an overflow arrow.
+pub(super) fn titlebar_button_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    window_control_at(bar, x, y).is_some()
+        || [
             bar.new_tab,
             bar.new_tab_menu,
             bar.settings,
