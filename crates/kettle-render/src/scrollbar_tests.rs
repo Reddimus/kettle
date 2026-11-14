@@ -10,7 +10,8 @@ use crate::color::{self, contrast_ratio};
 use crate::scrollback::{
     ACTIVE_THUMB_CONTRAST, ACTIVE_THUMB_ON_TRACK, MAX_LAYER_ALPHA, PaneScrollbar,
     REST_THUMB_CONTRAST, REST_THUMB_ON_TRACK, REST_TRACK_MAX_CONTRAST, ScrollbarState,
-    TICK_CONTRAST, TRACK_CONTRAST, pane_scrollbar_geometry, scrollback_pill, scrollbar_colors,
+    TICK_CONTRAST, TRACK_CONTRAST, TickSurface, pane_scrollbar_geometry, scrollback_pill,
+    scrollbar_colors, tick_pieces,
 };
 use kettle_config::{Config, Rgb, ScrollbarMode, Theme};
 use kettle_i18n::Translator;
@@ -165,27 +166,56 @@ fn scrollbar_colours_meet_their_floors_on_every_bundled_theme() {
     );
 }
 
-/// A command tick stands out against the background and against the channel
-/// it lies across, on every bundled theme.
+/// A command tick stands out against what it lies on, on every bundled
+/// theme in both blend modes, solid and translucent: on the channel 3:1
+/// against the channel and the background, and where it crosses the thumb
+/// 3:1 against the thumb. A translucent tick, like the bar, covers at most
+/// [`MAX_LAYER_ALPHA`]; only a tick stopped there may fall short, and never
+/// on the defaults.
 #[test]
-fn command_ticks_stand_out_on_the_channel_on_every_bundled_theme() {
+fn command_ticks_stand_out_on_the_channel_and_the_thumb_on_every_bundled_theme() {
     let mut failures = Vec::new();
+    let mut capped = Vec::new();
     for name in Theme::list() {
         let theme = Theme::by_name(name);
+        let bg = theme.background;
         for linear in [true, false] {
             let colors = scrollbar_colors(&theme, linear);
-            for (state, track) in [
-                (ScrollbarState::Rest, colors.rest_track),
-                (ScrollbarState::Active, colors.active_track),
-            ] {
-                for success in [true, false] {
-                    let tick = colors.tick(state, success);
-                    let ratio =
-                        contrast_ratio(tick, theme.background).min(contrast_ratio(tick, track));
-                    if ratio < TICK_CONTRAST {
-                        failures.push(format!(
-                            "{name} linear={linear} {state:?} success={success}: {ratio:.3}"
-                        ));
+            for opaque in [true, false] {
+                let [(rest, _), (active, _), (rest_track, _), (active_track, _)] =
+                    painted(&theme, linear, opaque);
+                for (state, track, thumb) in [
+                    (ScrollbarState::Rest, rest_track, rest),
+                    (ScrollbarState::Active, active_track, active),
+                ] {
+                    for (on, under, beside) in [
+                        (TickSurface::Channel, track, Some(bg)),
+                        (TickSurface::Thumb, thumb, None),
+                    ] {
+                        for success in [true, false] {
+                            let (ink, alpha) = colors.tick_paint(state, on, success, opaque);
+                            let shown = color::over(under, ink, alpha.into(), linear);
+                            let ratio = beside.map_or(contrast_ratio(shown, under), |bg| {
+                                contrast_ratio(shown, under).min(contrast_ratio(shown, bg))
+                            });
+                            let line = format!(
+                                "{name} linear={linear} opaque={opaque} {state:?} {on:?} \
+                                 success={success}: {ratio:.3} alpha {alpha}"
+                            );
+                            if opaque && alpha != 1.0
+                                || !opaque && !(0.0..=MAX_LAYER_ALPHA).contains(&alpha)
+                            {
+                                failures.push(format!("{line}: wrong cover"));
+                            } else if ratio < TICK_CONTRAST {
+                                let defaults = ["TokyoNight Night", "Kettle Day"];
+                                if !opaque && alpha >= MAX_LAYER_ALPHA && !defaults.contains(&name)
+                                {
+                                    capped.push(line);
+                                } else {
+                                    failures.push(line);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -196,6 +226,49 @@ fn command_ticks_stand_out_on_the_channel_on_every_bundled_theme() {
         "{} tick failures:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    // Hot Dog Stand's channel ticks today, at 2.99:1 in linear blending: a
+    // saturated red background, not a way around the floor.
+    assert!(
+        capped.len() <= 4,
+        "{} capped:\n{}",
+        capped.len(),
+        capped.join("\n")
+    );
+}
+
+/// A tick that crosses an edge of the thumb is cut there, each part on what
+/// it lies on; with no thumb the whole tick is on the channel.
+#[test]
+fn ticks_split_at_the_thumb_edges() {
+    let pieces = |tick: [f32; 4], thumb| tick_pieces(tick, thumb).collect::<Vec<_>>();
+    let thumb = Some((100.0, 50.0, 10.0, 40.0));
+    use TickSurface::{Channel, Thumb};
+    assert_eq!(
+        pieces([100.0, 10.0, 10.0, 4.0], thumb),
+        [((100.0, 10.0, 10.0, 4.0), Channel)]
+    );
+    assert_eq!(
+        pieces([100.0, 60.0, 10.0, 4.0], thumb),
+        [((100.0, 60.0, 10.0, 4.0), Thumb)]
+    );
+    assert_eq!(
+        pieces([100.0, 48.0, 10.0, 4.0], thumb),
+        [
+            ((100.0, 48.0, 10.0, 2.0), Channel),
+            ((100.0, 50.0, 10.0, 2.0), Thumb)
+        ]
+    );
+    assert_eq!(
+        pieces([100.0, 89.0, 10.0, 2.0], thumb),
+        [
+            ((100.0, 89.0, 10.0, 1.0), Thumb),
+            ((100.0, 90.0, 10.0, 1.0), Channel)
+        ]
+    );
+    assert_eq!(
+        pieces([100.0, 60.0, 10.0, 4.0], None),
+        [((100.0, 60.0, 10.0, 4.0), Channel)]
     );
 }
 

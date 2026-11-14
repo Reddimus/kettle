@@ -258,7 +258,8 @@ pub(crate) const REST_TRACK_MAX_CONTRAST: f64 = 1.6;
 pub(crate) const REST_THUMB_ON_TRACK: f64 = 2.0;
 /// The active thumb against its channel.
 pub(crate) const ACTIVE_THUMB_ON_TRACK: f64 = crate::chrome::ICON_CONTRAST;
-/// A command tick against the background and the channel it lies across.
+/// A command tick against what it lies on: the background and the channel,
+/// or the thumb.
 pub(crate) const TICK_CONTRAST: f64 = crate::chrome::ICON_CONTRAST;
 /// Each colour is resolved this much past its floors, so the 8-bit
 /// rounding of a translucent layer cannot take it under one.
@@ -274,9 +275,44 @@ pub(crate) struct ScrollbarColors {
     pub(crate) active_track: Rgb,
     /// `[rest, active, rest_track, active_track]` as translucent layers.
     pub(crate) layers: [(Rgb, f32); 4],
-    /// The success and failure ticks on the rest channel, then on the
-    /// active one.
-    pub(crate) ticks: [(Rgb, Rgb); 2],
+    /// Command ticks as they show, by the bar's state and by what they lie
+    /// on: `ticks[state][surface] = (success, failure)`.
+    pub(crate) ticks: [[(Rgb, Rgb); 2]; 2],
+    /// The same as translucent layers over what each lies on:
+    /// `tick_layers[state][surface] = [success, failure]`.
+    pub(crate) tick_layers: [[[(Rgb, f32); 2]; 2]; 2],
+}
+
+/// What part of a drawn bar a command tick lies on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TickSurface {
+    Channel,
+    Thumb,
+}
+
+/// The parts of the tick at `rect` that lie on the channel and on `thumb`,
+/// top to bottom: a tick that crosses an edge of the thumb is cut there, so
+/// each part takes the colour that stands out against what it lies on.
+pub(crate) fn tick_pieces(
+    rect: [f32; 4],
+    thumb: Option<Rect4>,
+) -> impl Iterator<Item = (Rect4, TickSurface)> {
+    let [x, y, w, h] = rect;
+    let bottom = y + h;
+    let (top_of_thumb, end_of_thumb) =
+        thumb.map_or((bottom, bottom), |(_, ty, _, th)| (ty, ty + th));
+    [
+        (y, bottom.min(top_of_thumb), TickSurface::Channel),
+        (
+            y.max(top_of_thumb),
+            bottom.min(end_of_thumb),
+            TickSurface::Thumb,
+        ),
+        (y.max(end_of_thumb), bottom, TickSurface::Channel),
+    ]
+    .into_iter()
+    .filter(|(from, to, _)| to > from)
+    .map(move |(from, to, surface)| ((x, from, w, to - from), surface))
 }
 
 impl ScrollbarColors {
@@ -304,14 +340,29 @@ impl ScrollbarColors {
         }
     }
 
-    /// A command tick's colour: success or failure, on the channel the bar
-    /// paints in `state`.
-    pub(crate) fn tick(&self, state: ScrollbarState, success: bool) -> Rgb {
-        let (ok, failed) = self.ticks[match state {
-            ScrollbarState::Rest => 0,
-            ScrollbarState::Active => 1,
-        }];
+    /// A command tick's colour as it shows: success or failure, on the
+    /// channel or the thumb of a bar in `state`.
+    pub(crate) fn tick(&self, state: ScrollbarState, on: TickSurface, success: bool) -> Rgb {
+        let (ok, failed) = self.ticks[state as usize][on as usize];
         if success { ok } else { failed }
+    }
+
+    /// A command tick's ink and alpha: painted like the bar it crosses,
+    /// solid where the bar is solid, and otherwise a layer of at most
+    /// [`MAX_LAYER_ALPHA`] that shows as [`Self::tick`] over what it lies
+    /// on, so a glyph under the bar still shows through the tick.
+    pub(crate) fn tick_paint(
+        &self,
+        state: ScrollbarState,
+        on: TickSurface,
+        success: bool,
+        opaque: bool,
+    ) -> (Rgb, f32) {
+        if opaque {
+            (self.tick(state, on, success), 1.0)
+        } else {
+            self.tick_layers[state as usize][on as usize][usize::from(!success)]
+        }
     }
 }
 
@@ -349,10 +400,28 @@ pub(crate) fn scrollbar_colors(theme: &kettle_config::Theme, linear: bool) -> Sc
         active_track,
         ACTIVE_THUMB_ON_TRACK,
     );
-    let tick = |ink: Rgb, track: Rgb| {
-        color::with_min_contrast_on_both(ink, bg, track, floor(TICK_CONTRAST), true)
-    };
-    let ticks = |track: Rgb| (tick(theme.palette[2], track), tick(theme.palette[1], track));
+    // A tick keeps its green or red: on the channel it stands out against
+    // both the channel and the background beside it; on the thumb, against
+    // the thumb alone, since a light thumb on a dark background can leave no
+    // colour 3:1 from both.
+    let on_channel = |ink: Rgb, track: Rgb| tick_shade(ink, track, Some(bg), linear);
+    let on_thumb = |ink: Rgb, thumb: Rgb| tick_shade(ink, thumb, None, linear);
+    let pair =
+        |resolve: &dyn Fn(Rgb) -> Rgb| (resolve(theme.palette[2]), resolve(theme.palette[1]));
+    let ticks = [(rest_track, rest), (active_track, active)].map(|(track, thumb)| {
+        [
+            pair(&|ink| on_channel(ink, track)),
+            pair(&|ink| on_thumb(ink, thumb)),
+        ]
+    });
+    let surfaces = [[rest_track, rest], [active_track, active]];
+    let tick_layers: [[[(Rgb, f32); 2]; 2]; 2] = std::array::from_fn(|state| {
+        std::array::from_fn(|on| {
+            let (ok, failed) = ticks[state][on];
+            let under = surfaces[state][on];
+            [ok, failed].map(|shown| translucent_layer(under, shown, linear))
+        })
+    });
     let layer = |shown: Rgb| translucent_layer(bg, shown, linear);
     ScrollbarColors {
         rest,
@@ -365,8 +434,54 @@ pub(crate) fn scrollbar_colors(theme: &kettle_config::Theme, linear: bool) -> Sc
             layer(rest_track),
             layer(active_track),
         ],
-        ticks: [ticks(rest_track), ticks(active_track)],
+        ticks,
+        tick_layers,
     }
+}
+
+/// A tick's colour on `under`, the channel or the thumb: `ink` in the same
+/// hue, lighter or darker until it stands out against `under` and, on the
+/// channel, against the background `beside` it too. Of the shades that do,
+/// the one a translucent layer reaches over `under` with the least cover, so
+/// a glyph under the bar shows through the tick as well as it can. Where
+/// neither shade does, the best the hue can do.
+fn tick_shade(ink: Rgb, under: Rgb, beside: Option<Rgb>, linear: bool) -> Rgb {
+    use crate::color::{self, contrast_ratio};
+    let floor = TICK_CONTRAST * ROUNDING_MARGIN;
+    let ratio = |c: Rgb| {
+        beside.map_or(contrast_ratio(c, under), |bg| {
+            contrast_ratio(c, under).min(contrast_ratio(c, bg))
+        })
+    };
+    let (hue, saturation, lightness) = color::hsl(ink);
+    let shade =
+        |end: f64, t: f64| color::from_hsl(hue, saturation, lightness + (end - lightness) * t);
+    let reach = |end: f64| {
+        if ratio(ink) >= floor {
+            return Some(ink);
+        }
+        if ratio(shade(end, 1.0)) < floor {
+            return None;
+        }
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            if ratio(shade(end, mid)) >= floor {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Some(shade(end, hi))
+    };
+    let cover = |shown: Rgb| translucent_layer(under, shown, linear).1;
+    [reach(1.0), reach(0.0)]
+        .into_iter()
+        .flatten()
+        .min_by(|a, b| cover(*a).total_cmp(&cover(*b)))
+        .unwrap_or_else(|| {
+            color::with_min_contrast_on_both(ink, under, beside.unwrap_or(under), floor, true)
+        })
 }
 
 /// The rest channel: the faint 0.07 mix raised to [`TRACK_CONTRAST`], or, on

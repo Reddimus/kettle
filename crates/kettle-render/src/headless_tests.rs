@@ -7748,8 +7748,9 @@ fn background_tab_markers_have_distinct_shapes() {
 }
 
 /// A pane `back` lines up from the bottom of `lines` short lines, so the
-/// right side of every row is blank, with a completed command near the top
-/// of its history.
+/// right side of every row is blank, with a command that succeeded near the
+/// top of its history and one that failed further down, where the thumb is
+/// when 100 of 300 lines back.
 fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSnapshot {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let proxy = EventProxy::new(tx, std::sync::Arc::new(|| {}));
@@ -7761,16 +7762,19 @@ fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSn
     term.scroll_display(alacritty_terminal::grid::Scroll::Delta(back));
     let mut snap = PaneSnapshot::default();
     snap.capture(&term);
-    snap.command_marks.push(kettle_core::term::CommandMark {
-        row: snap.history_origin + 10,
-        exit_code: 0,
-    });
+    for (row, exit_code) in [(10, 0), (178, 1)] {
+        snap.command_marks.push(kettle_core::term::CommandMark {
+            row: snap.history_origin + row,
+            exit_code,
+        });
+    }
     snap
 }
 
 /// A pane with history paints its thumb in a full-height channel as wide as
-/// it, in the resolved colours, and the command tick across the whole bar:
-/// at its resting width at the bottom, and wide once scrolled back. On
+/// it, in the resolved colours, and command ticks across the whole bar in
+/// the colour for what they lie on, channel or thumb: at its resting width
+/// at the bottom, and wide once scrolled back. On
 /// TokyoNight Night and Kettle Day, at 1x and 2x, painted solid inside a
 /// wide padding and as translucent layers over a narrow one. The colours are
 /// sampled where no glyph is, so the fonts on the host do not matter.
@@ -7844,7 +7848,8 @@ fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
                     near(&thumb_px, thumb),
                     "{context}: thumb {thumb_px:?} != {thumb:?}"
                 );
-                let above = ty + (thumb_y - ty) * 0.75;
+                // Halfway down to the thumb: clear of both ticks.
+                let above = ty + (thumb_y - ty) * 0.5;
                 for x in [tx + 0.5, mid_x, tx + tw - 0.5] {
                     let channel_px = pixel(x, above);
                     assert!(
@@ -7854,24 +7859,39 @@ fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
                 }
                 let outside = pixel(tx - 1.0, above);
                 assert!(near(&outside, bg), "{context}: beside the bar {outside:?}");
-                let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
-                    panes[0].terminal,
-                    (tx, tw),
-                    scale,
-                    snap.history_origin,
-                    snap.history_size + snap.screen_lines,
-                    snap.command_marks[0],
-                )
-                .expect("a tick");
-                assert_eq!((x, w), (tx, tw), "{context}");
-                let tick = colors.tick(bar.state, true);
-                for x in [x + 0.5, x + w - 0.5] {
-                    let tick_px = pixel(x, y + h / 2.0);
-                    assert!(
-                        near(&tick_px, tick),
-                        "{context}: tick {tick_px:?} != {tick:?}"
-                    );
+                let mut on_thumb = false;
+                for mark in &snap.command_marks {
+                    let tick = kettle_core::scrollbar::command_tick_rect(
+                        panes[0].terminal,
+                        (tx, tw),
+                        scale,
+                        snap.history_origin,
+                        snap.history_size + snap.screen_lines,
+                        *mark,
+                    )
+                    .expect("a tick");
+                    let [x, y, w, h] = tick;
+                    assert_eq!((x, w), (tx, tw), "{context}");
+                    let mut pieces = crate::scrollback::tick_pieces(tick, bar.thumb_rect);
+                    let (_, on) = pieces.next().expect("a tick piece");
+                    assert!(pieces.next().is_none(), "{context}: off the thumb's edges");
+                    on_thumb |= on == crate::scrollback::TickSurface::Thumb;
+                    let under = match on {
+                        crate::scrollback::TickSurface::Channel => channel,
+                        crate::scrollback::TickSurface::Thumb => thumb,
+                    };
+                    let success = mark.exit_code == 0;
+                    let (ink, alpha) = colors.tick_paint(bar.state, on, success, bar.opaque);
+                    let want = crate::color::over(under, ink, alpha.into(), linear);
+                    for x in [x + 0.5, x + w - 0.5] {
+                        let got = pixel(x, y + h / 2.0);
+                        assert!(
+                            near(&got, want),
+                            "{context}: {on:?} tick {got:?} != {want:?}"
+                        );
+                    }
                 }
+                assert_eq!(on_thumb, back > 0, "{context}: a tick crosses the thumb");
             }
         }
     }

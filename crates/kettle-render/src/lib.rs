@@ -2170,28 +2170,37 @@ impl Renderer {
         }
 
         // Result ticks remain visible even when the scrollbar thumb is hidden.
-        // They lie across the bar as it is drawn, widening with it, and on a
-        // drawn channel take colours that stand out against it as well as
-        // against the background.
+        // They lie across the bar as it is drawn, widening with it. On a drawn
+        // bar each part of a tick takes the colour that stands out against
+        // what it lies on, the channel or the thumb, and is painted as the bar
+        // is: solid, or a layer a glyph under it still shows through. With no
+        // bar (`never`, or `auto` before any history) a tick lies on the
+        // background alone and keeps its palette colour, solid, as before.
         for pv in panes {
             let bar = pane_bar(pv);
             let column = (bar.track_rect.0, bar.track_rect.2);
             for mark in &pv.snap.command_marks {
-                if let Some([x, y, w, h]) = kettle_core::scrollbar::command_tick_rect(
+                let Some(tick) = kettle_core::scrollbar::command_tick_rect(
                     pv.terminal,
                     column,
                     self.scale,
                     pv.snap.history_origin,
                     pv.snap.history_size + pv.snap.screen_lines,
                     *mark,
-                ) {
-                    let success = mark.exit_code == 0;
-                    let color = if bar.channel {
-                        scrollbar_colors.tick(bar.state, success)
-                    } else {
-                        theme.palette[if success { 2 } else { 1 }]
-                    };
+                ) else {
+                    continue;
+                };
+                let success = mark.exit_code == 0;
+                if !bar.channel {
+                    let [x, y, w, h] = tick;
+                    let color = theme.palette[if success { 2 } else { 1 }];
                     over.push(rect(x, y, w, h, color, 1.0));
+                    continue;
+                }
+                for ((x, y, w, h), on) in scrollback::tick_pieces(tick, bar.thumb_rect) {
+                    let (ink, alpha) =
+                        scrollbar_colors.tick_paint(bar.state, on, success, bar.opaque);
+                    over.push(rect(x, y, w, h, ink, alpha));
                 }
             }
         }
