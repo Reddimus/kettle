@@ -757,6 +757,15 @@ impl MediaPasteReceiptState {
     }
 }
 
+/// The SSH launcher's status line after a save or removal, and the query it
+/// was set for. It shows while the query is unchanged, so the next edit
+/// brings the key hint back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SshStatus {
+    pub(crate) text: String,
+    pub(crate) query: String,
+}
+
 /// The theme picker's query and selected row, and the theme it opened on. That
 /// theme fixes the list's order while the preview changes the live theme and
 /// is ticked; the window's theme before the picker is what Esc restores.
@@ -1108,10 +1117,19 @@ pub(crate) struct WindowState {
     /// suppress the first same-coordinate report in another.
     pub(crate) last_mouse_cell: Option<(u64, usize, usize)>,
     pub(crate) links: Vec<kettle_core::Link>,
-    /// `Some((query, selected))` while the SSH launcher is open. Selection is
-    /// over the fuzzy-ranked configured-host list; a query with no match still
-    /// connects to the typed target on Enter.
+    /// `Some((query, selected))` while the SSH launcher is open. Selection
+    /// indexes the rows `ssh_rows` builds: configured hosts, imported aliases,
+    /// then Connect to the typed target.
     pub(crate) ssh_input: Option<(crate::text_editor::TextEditor, usize)>,
+    /// `Host` aliases read from `~/.ssh/config` when the launcher last opened
+    /// (`ssh-config-hosts`). Replaced on every open; never persisted.
+    pub(crate) ssh_imported: Vec<String>,
+    /// The launcher's status line; see [`SshStatus`]. Cleared on every open.
+    pub(crate) ssh_status: Option<SshStatus>,
+    /// The configured hosts the open launcher's selection was made against.
+    /// When `cfg.ssh_hosts` no longer equals it, `sync_ssh_hosts` moves the
+    /// selection back to row 0.
+    pub(crate) ssh_hosts_shown: Vec<(String, String)>,
     /// Opening snapshot shared by every palette projection; None means discovery
     /// had not completed when it opened. Completion never changes this snapshot.
     pub(crate) palette_profiles: Option<Vec<String>>,
@@ -1181,6 +1199,12 @@ pub(crate) struct WindowState {
     pub(crate) card_focus: Option<u64>,
     /// A tab focused by assistive technology, until ordinary input resumes.
     pub(crate) tab_focus: Option<accesskit::NodeId>,
+    /// Program notifications shown in this window: one on screen, a few
+    /// waiting (see `crate::notification_toast`).
+    pub(crate) notification_toasts: crate::notification_toast::ToastQueue,
+    /// The notification toast control assistive technology focused; only
+    /// then do Enter, Space, Tab and Escape belong to the toast.
+    pub(crate) notification_toast_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1291,10 +1315,17 @@ pub(crate) struct WindowState {
     /// A press opens Settings on a release over the gear.
     pub(crate) hovered_settings: bool,
     pub(crate) pressed_settings: bool,
+    /// The pointer is over, or pressed, the GNOME header's Find button. A
+    /// press opens or closes Find; the press only shows until its release.
+    pub(crate) hovered_search: bool,
+    pub(crate) pressed_search: bool,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
     pub(crate) context_menu_a11y_label: Option<String>,
+    /// The pane and stable row id the terminal menu was opened over, for its
+    /// Select Command Output row. Taken by the menu's next action.
+    pub(crate) context_menu_output_row: Option<(u64, u64)>,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1321,6 +1352,9 @@ pub(crate) struct WindowState {
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
     pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
+    /// The pane whose unanswered focused bell the last repaint was asked to
+    /// mark (`Mux::focused_bell_pane`), so a change repaints once.
+    pub(crate) focused_bell_drawn: Option<u64>,
     /// Coalesce output-driven repaints. `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
@@ -1523,6 +1557,8 @@ impl WindowState {
         self.pressed_new_tab_menu = false;
         self.hovered_settings = false;
         self.pressed_settings = false;
+        self.hovered_search = false;
+        self.pressed_search = false;
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
@@ -1738,6 +1774,9 @@ impl WindowState {
             last_mouse_cell: None,
             links: Vec::new(),
             ssh_input: None,
+            ssh_imported: Vec::new(),
+            ssh_status: None,
+            ssh_hosts_shown: Vec::new(),
             palette_input: None,
             palette_profiles: None,
             palette_bound_only: false,
@@ -1758,6 +1797,8 @@ impl WindowState {
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
             tab_focus: None,
+            notification_toasts: Default::default(),
+            notification_toast_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,
@@ -1788,7 +1829,10 @@ impl WindowState {
             hovered_new_tab_menu: false,
             hovered_settings: false,
             pressed_settings: false,
+            hovered_search: false,
+            pressed_search: false,
             context_menu_a11y_label: None,
+            context_menu_output_row: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,
@@ -1801,6 +1845,7 @@ impl WindowState {
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
             bell_flashes: std::collections::HashMap::new(),
+            focused_bell_drawn: None,
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,

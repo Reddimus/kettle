@@ -10,6 +10,56 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- A bell in the pane you are looking at now marks the active tab with the
+  same bell a background tab gets, until you answer it: the next key, IME
+  commit or paste in that pane, a click in it, or moving to another pane or
+  tab. There is no timer, and switching to another app and back keeps it,
+  so a bell that rang while you looked away is still there. Without a tab
+  strip the window title starts with `[!] ` (the bell emoji on macOS).
+  `bell = attention` and `bell = off` do not mark it; `force-no-bell`
+  silences it with everything else.
+
+- Program notifications (OSC 9, OSC 777, `kettle.notify`) show as a toast in
+  the window while Kettle has focus, labelled with the tab they came from,
+  with Show (go to that tab, pane or window) and ×. Escape dismisses the
+  toast and still reaches the program. Screen readers announce it. While a
+  Kettle window has focus nothing is sent to the desktop, on any platform;
+  with none focused the desktop notification is sent as before, and one the
+  desktop refuses or fails to deliver is shown in its window when you come
+  back. A pane's notifications less than two seconds apart fold into one,
+  and a repeat within five seconds is counted (`×3`) instead of shown again,
+  for the toast and the desktop alike. See
+  [Notifications](docs/CONFIG.md#notifications).
+
+- The SSH launcher (Ctrl+Shift+S) also lists the `Host` aliases in
+  `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows), marked "from
+  ~/.ssh/config", after the configured `ssh-host` entries. The file is read
+  each time the launcher opens and never written. Only literal aliases are
+  kept: patterns, `Match` blocks and aliases with `@` or non-ASCII text are
+  skipped, and `Include` is not followed. At most 256 KiB and 256 aliases are
+  read, and a file anyone else can change is skipped. The aliases are not
+  saved anywhere; one you connect to is, like a typed target, part of the
+  tab's saved command and its title. Set `ssh-config-hosts = false` to turn
+  this off. When a row's name or alias equals the typed text (ignoring case),
+  that host is the first row. Otherwise a **Connect to "…"** row comes first
+  and is selected, with the fuzzy matches below it, so typing `prod` connects
+  to `prod` even when `~/.ssh/config` has `prod-db`.
+
+- The SSH launcher saves and removes hosts. For a typed target that is not
+  saved yet, a last row **Save "…" as a host…** asks for a name (starting
+  from the target's host) and adds an `ssh-host` line to the active config
+  file; a name that already has another target asks before it replaces it,
+  and other lines with that name are removed. Typing a saved name exactly
+  offers **Remove "…" from Kettle…**, which asks first and never touches
+  `~/.ssh/config`. Neither row is reached by the mouse wheel, an Up press
+  from the top or a hover: press Down to it or click it, and an open launcher
+  whose host list changes goes back to its first row. If that host's own
+  entry changed by hand since Kettle read the file, nothing is written, a
+  notification says so, and the launcher or name editor keeps what you typed
+  with a "not saved" or "not removed" line. After a write, the launcher
+  reopens with "Saved" or "Removed" in its hint line, announced politely to
+  screen readers.
+
 - Settings › Appearance has a Minimum contrast row after Theme, for
   `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
   config, such as 2.5, shows as it is until you step it.
@@ -50,8 +100,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   menu on every platform gains Keyboard shortcuts and Help rows.
 
 - The command palette's empty search field says "Type a command…" in grey
-  until you type, in the UI language. In a window too narrow for it beside the
-  key hint, it is left out rather than cut off.
+  until you type, in the UI language. When it does not fit beside the key
+  hint, the hint is left out until you type; in a window too narrow for it
+  alone, it is left out rather than cut off.
 
 - Broadcast input has its own menu. The macOS Shell menu and the
   right-click menu have a Broadcast Input submenu (Enviar la entrada a varios
@@ -153,9 +204,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - GNOME/Wayland windows now show their title in a Kettle header, even with one
   tab, with minimize/maximize/close buttons, tooltips and screen-reader actions.
-  Drag empty header space to move, double-click to maximize, right-click for
-  the window menu, or drag an edge to resize. KDE server frames and X11 frames
-  stay native; `linux-titlebar-style = native` restores the previous header.
+  It is laid out and drawn as GNOME's own header bars are: round window
+  buttons, and New Tab (+), Find and the main menu (≡) as GNOME's symbolic
+  icons in flat buttons. A single tab is drawn as the window title, in
+  GNOME's bold title face at its size (the bundled Fira Sans Bold, 11 pt) and
+  shortened with an ellipsis when it does not fit, as other GNOME apps title
+  their header bars; screen readers still find it as the selected tab, a
+  second tab brings the tabs back, and `tab-bar = always` keeps the tab look.
+  New Tab (+) leads the header, the main menu (≡) ends it, and a faint
+  hairline separates the header from the terminal. The Find button (a
+  magnifier) before the menu opens Find and closes it again, shows pressed
+  while Find is open, and its tooltip names your Find shortcut. Drag empty header space or the title to move,
+  double-click to maximize, right-click for the window menu, or drag an edge to
+  resize. KDE server frames and X11 frames stay native;
+  `linux-titlebar-style = native` restores the previous header.
 
 - Quieter tab strips follow the terminal background, with readable separators
   and visibly dimmed inactive windows. Larger, separated New Tab and options
@@ -242,8 +304,61 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   backspaces sent to a pane with nothing left unpainted, and only that pane's
   output: Enter, Tab, arrows, control keys, pastes, other panes' output and
   type-ahead while a pane prints are left out. Counts only, never text.
+- The right-click menu has **Previous Prompt** and **Next Prompt** rows after
+  **Find…** once shell integration has marked a prompt in the pane. Each
+  shows when a jump that way would move the view, with the chord it is bound
+  to beside it (Ctrl+Up and Ctrl+Down by default, also Cmd+Up and Cmd+Down
+  on macOS), and no chord once it is unbound.
+- **Select Command Output** selects one finished command's output as whole
+  rows, from the row after its command line to the next prompt, using the
+  OSC 133 C and D marks shell integration sends. Right-click a row of the
+  output to find it after **Select All**; the command palette's **Select
+  output of last command** and the new `select_command_output` action take
+  the newest command and scroll its first row into view. The action has no
+  default chord on any platform. The rows are kept with each command's mark,
+  within the same 2048 retained commands.
 
 ### Changed
+
+- The bell marker is a drawn bell instead of a triangle, which read as a
+  warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
+  yellow lifted to 3:1 against its tab, with the lip, the gap under it and
+  the clapper on whole pixels so it stays crisp at 1x.
+
+- The visual-bell flash follows `reduce-motion`: with motion held back (by
+  the setting or the system's Reduce Motion under `auto`) the pane no longer
+  flashes, and the bell mark on the tab shows the bell instead.
+
+- The scrollbar is easier to find. A pane with history shows a faint channel
+  the height of the terminal under its thumb, and scrolled back the bar
+  widens to at least 10 px, its channel as wide as the thumb. The thumb is
+  at least 40 px long, so it stays findable with 10,000 lines of history.
+  Its colours are worked out per theme: at rest the thumb is at least 3:1
+  against the background on every bundled theme (it was 1.55:1 on Kettle
+  Day), and at least 4.5:1 while scrolled back or under the pointer. The
+  one exception is Hot Dog Stand's active thumb, at 3.57:1 when the bar is
+  translucent and blends in linear light, where reaching 4.5:1 would cover
+  the text under it. Command ticks widen with the bar and stand out from
+  the channel and from the thumb where they cross it. With
+  `scrollbar = always` the bar no longer changes width when hovered, and an
+  empty channel never widens. The bar is solid only where it fits in
+  `window-padding-x` in an opaque window; elsewhere it and its ticks stay
+  translucent so text under them shows. The bar stays inside a pane
+  narrower than it. Screen readers get the bar's painted bounds. A fresh
+  pane with no history still shows no scrollbar in `auto` mode, and
+  `scrollbar = never` is unchanged.
+
+- `ssh-host` entries whose target starts with `-` or contains whitespace,
+  control or bidi characters, or whose name is longer than 128 bytes or holds
+  control or bidi characters, are now ignored, and `--check-config` reports
+  them. None of those targets could connect, but some of those names worked
+  before and are now dropped: a name containing a tab, another control
+  character or a bidi mark, and a name over 128 bytes. In the SSH launcher, a
+  typed target that starts with `-` or contains whitespace or control
+  characters shows only a row saying why it cannot be used; the hosts it would
+  fuzzy-match are hidden, and Enter leaves the launcher open instead of
+  starting `ssh`. The "No configured host matches" row is gone: the Connect row
+  takes its place.
 
 - The macOS menu bar reads like a Mac app's. View has one Enter Full Screen
   item, on Control-Command-F, that reads Exit Full Screen while the window
@@ -337,7 +452,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
-  has stopped, and a triangle when the bell rang. The marks are larger,
+  has stopped, and a drawn bell when the bell rang. The marks are larger,
   scale with the display instead of shrinking on Retina screens, and keep at
   least 3:1 contrast against the tab behind them, hovered or not. Vertical
   tabs keep the old dots until 6.1. Screen readers read the state after the
@@ -430,8 +545,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Window blur and Background opacity rows drops its hint about what blur
   needs.
 
-- In Kettle's GNOME header bar the new-tab options button is drawn and named as
-  the window's primary menu (≡, "Main menu"), as GNOME apps place it.
+- In Kettle's GNOME header bar the new-tab options button is the window's
+  primary menu, named "Main menu" and placed at the end of the header as GNOME
+  apps place it. It is drawn as GNOME's 16 px symbolic ≡ icon rather than a
+  font glyph, so it looks the same whatever fonts are installed.
+
+- A click in the terminal shows the cursor at once and restarts its blink,
+  as a click does in GTK and macOS text views, whether the click selects,
+  goes to a program that reads the mouse or opens the context menu. While
+  you drag a selection the cursor stays solid, and it starts blinking again,
+  visible, when you let go. Moving the pointer and scrolling leave the blink
+  alone, and its timing is unchanged.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
@@ -552,6 +676,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- Notification text from programs and scripts is stripped of Unicode bidi
+  formatting characters, which could reorder what a notification says, as
+  well as control characters, before it reaches the desktop, the toast or
+  `protocol_notification` subscribers. On Linux, a body sent to a
+  notification server that renders markup is escaped, so a program's text
+  cannot become bold, a link or a local image there.
+
+- The SSH launcher passes its target to `ssh` after `--`, as
+  `ssh -t -- <target>`, so a target can never be read as an ssh option such
+  as `-oProxyCommand=…`. Sessions saved earlier replay their stored command
+  unchanged.
+
 - A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
   even where bracketed paste is on, as such text was made to escape it. Kettle
   still removes the marker whichever choice is made.
@@ -570,6 +706,72 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- A crash, `kill -9`, power loss or a logout that hangs no longer loses the
+  last changes to a saved session. Kettle saved every tab, split and window
+  change at once, and every 2 seconds while busy, but the last `cd`, window
+  move or output before Kettle went quiet reached disk only when something
+  else happened; on macOS that was often not until you quit. It is now
+  written within 2 seconds, and an idle Kettle still writes nothing and does
+  not wake up. The saved output (`session.content`, up to 8 MiB) is no longer
+  rewritten when nothing in it changed, and while output keeps arriving it is
+  replaced at most every 30 seconds instead of every 2, and within about 4
+  seconds after it stops. SESSION-RESTORE.md states the tested bounds.
+
+- `kettle -e` and `kettle -d` launches, profile windows, `--new-process`
+  launches, and a second Kettle process no longer reopen a copy of the saved
+  session or replace it with their own windows. One process owns the
+  session, the first started in restore mode without those options; the
+  others open fresh, and `kettle --restore` there says why in a
+  notification. `restore-scrollback-lines = 0` in a profile no longer
+  deletes the main process's saved output.
+
+- `kettle --config FILE` restores and saves a session of that file's own
+  instead of sharing `session.json` with every other launch: two config
+  files no longer overwrite each other's windows. Its files sit beside
+  `session.json`, named by a digest of the config file's path. Its saved
+  session used to be `session.json`, so the first `--config` launch after
+  updating opens fresh; a `--config` naming the default config file keeps
+  `session.json`.
+
+- `session.json` and `session.content` are written under one lock, so another
+  process can no longer pair its layout with this one's output. A save that
+  timed out on the lock deleted `session.content`; it now changes neither file
+  and is tried again at the next sweep.
+
+- With `restore-scrollback-remote = false`, output from an `ssh` session that
+  has ended was saved as local output once the pane counted as local again.
+  It now stays out of the saved output until it has left the scrollback, and
+  output after it is saved as usual.
+
+- Screen readers on Linux and Windows heard nothing for the theme picker's
+  footer: its contrast readout, with the least readable palette colour's
+  number and a warning below 3:1, the theme mode and both sides' themes.
+  Settings' "No settings match" was silent there too. Both were text labels
+  that AT-SPI and UI Automation name from a value Kettle left empty; they now
+  read the same text as VoiceOver on macOS, in the UI language.
+
+- In Spanish, the keyboard-shortcut list opened with an empty field instead
+  of "Buscar un atajo de teclado…": beside the Spanish key hint it did not
+  fit even the widest picker, so it was left out at every window size. An
+  empty picker field's placeholder now comes before the key hint: when both
+  do not fit, the hint is left out until you type. The command palette's
+  "Type a command…" follows the same rule, so it also shows in windows that
+  used to keep only the hint.
+
+- Control-server pointer files (`<pid>.alias.json`) no longer pile up in
+  `~/.local/state/kettle/ctl` (`/run/user/<uid>/kettle/ctl` on Linux when it
+  exists, `%LOCALAPPDATA%\kettle\ctl` on Windows). A Kettle whose
+  environment puts its registry somewhere else, such as a test instance with
+  a private `XDG_RUNTIME_DIR`, leaves one there so clients with a stripped
+  environment still find it. One that crashed, was killed or quit with ⌘Q
+  left it behind, and once the directory it pointed at was deleted nothing
+  removed it, so thousands collected and every `kettle ctl` read them all. A
+  starting control server now removes up to 256 per location whose server is
+  gone, on a background thread. Pointers now record their server's start
+  time, so a process that later gets the same pid does not keep one alive;
+  one written by an earlier release goes once the entry it names is gone or
+  belongs to a process that is gone. A running server's pointer stays.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
@@ -652,6 +854,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   such as by the picker's Contrast button or an edit in another app, the
   reload puts the preview back at once, so the window no longer briefly
   shows the saved theme under the picker.
+
+- When `theme-schedule` switches sides while the theme picker is open, Esc
+  now puts back the side the schedule switched to, as a system appearance
+  change already did, and so does Enter for the side the window no longer
+  wears. Before, Esc put back the theme from before the switch, and the
+  window stayed on the old side until the next boundary.
 
 - A scrolling picker (the command palette, theme, layout and SSH pickers) no
   longer leaves a blank part-row under its last result. It used to paint six

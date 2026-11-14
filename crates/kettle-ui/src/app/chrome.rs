@@ -56,6 +56,12 @@ impl App {
                     .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
                     .is_some()
             })
+            || self.notification_toast_projection(ws).is_some_and(|view| {
+                view.overlay
+                    .geometry
+                    .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                    .is_some()
+            })
     }
 
     pub(super) fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
@@ -107,6 +113,7 @@ impl App {
             || ws.pressed_new_tab
             || ws.pressed_new_tab_menu
             || ws.pressed_settings
+            || ws.pressed_search
             || ws.pressed_window_control.is_some()
         {
             return None;
@@ -114,11 +121,13 @@ impl App {
         if let Some(label) = window_control_tooltip_label(controls) {
             return Some(label.to_owned());
         }
-        if ws.hovered_new_tab_menu && !controls.is_empty() {
+        if ws.hovered_new_tab_menu && ws.linux_titlebar {
             return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
         }
         let target = if ws.hovered_settings {
             Some(NewTabHoverTarget::Settings)
+        } else if ws.hovered_search {
+            Some(NewTabHoverTarget::Search)
         } else if ws.hovered_new_tab_menu {
             Some(NewTabHoverTarget::Menu)
         } else {
@@ -170,6 +179,8 @@ impl App {
                 pressed_new_tab_menu: false,
                 tooltip: None,
                 in_titlebar: ws.macos_titlebar_tabs,
+                linux_header: ws.linux_titlebar,
+                lone_title: false,
                 recording_notice: String::new(),
                 height,
                 y,
@@ -181,6 +192,10 @@ impl App {
                 settings: (0.0, 0.0, 0.0, 0.0),
                 hovered_settings: false,
                 pressed_settings: false,
+                search: (0.0, 0.0, 0.0, 0.0),
+                hovered_search: false,
+                pressed_search: false,
+                search_open: false,
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 hovered_tab_idx: None,
@@ -204,6 +219,13 @@ impl App {
             String::new()
         };
         let n = labels.len().max(1);
+        let lone_title = lone_header_title(
+            ws.linux_titlebar,
+            labels.len(),
+            (ws.editing_title.is_some(), ws.dock_preview.is_some()),
+            self.cfg.tab_bar,
+            self.cfg.tab_bar_pos,
+        );
         let scale = ws
             .window
             .as_ref()
@@ -212,7 +234,9 @@ impl App {
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
+            search_rect,
             settings_rect,
+            lead,
             strip,
             layout,
         } = horizontal_tab_geometry(
@@ -222,6 +246,8 @@ impl App {
             (n, active),
             &self.cfg,
         );
+        // Tab positions count from past the GNOME header's leading `+`.
+        let x0 = x0 + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -236,8 +262,10 @@ impl App {
                     .copied()
                     .flatten()
                     .map_or(PARKED_TAB, |x| x0 + x);
-                // Per-tab activity dot. Active tabs short-circuit to
-                // Normal (the focused-tab accent already signals "you are here").
+                // Per-tab activity marker. Active tabs short-circuit to
+                // Normal (the focused-tab accent already signals "you are
+                // here") unless the bell rang in the focused pane and the user
+                // has not answered it.
                 let activity = ws
                     .mux
                     .tabs
@@ -246,6 +274,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,
@@ -290,16 +319,13 @@ impl App {
                 } else {
                     cell_w
                 };
-                let show_controls = n > 1 || hovered;
+                // A lone header title is no tab: no close button or hint.
+                let show_controls = n > 1 || (hovered && !lone_title);
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     show_controls,
                     self.cfg.close_button_on_tab,
-                    if activity == RenderTabActivity::Normal {
-                        0.0
-                    } else {
-                        kettle_render::activity_lane(scale)
-                    },
+                    kettle_render::activity_lane(activity, scale),
                     &full_label,
                     hint.as_deref(),
                     cell_w,
@@ -344,6 +370,8 @@ impl App {
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
             tooltip,
             in_titlebar: ws.macos_titlebar_tabs,
+            linux_header: ws.linux_titlebar,
+            lone_title,
             recording_notice,
             height,
             y,
@@ -355,11 +383,16 @@ impl App {
             settings: settings_rect,
             hovered_settings: ws.hovered_settings,
             pressed_settings: ws.pressed_settings,
+            search: search_rect,
+            hovered_search: ws.hovered_search,
+            pressed_search: ws.pressed_search,
+            search_open: ws.search.open,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
             hovered_close_idx: ws.hovered_close_idx,
-            hovered_tab_idx: segments_hovered,
+            // The lone title has no hover state of its own to paint.
+            hovered_tab_idx: segments_hovered.filter(|_| !lone_title),
             // While a tab-bar drag is in progress, hand
             // the renderer the cursor x so it paints a translucent
             // ghost of the dragged segment under the cursor.
@@ -460,6 +493,7 @@ impl App {
                         match crate::mux::classify_tab_activity(
                             i == active,
                             tab.bell,
+                            ws.mux.tab_focused_bell(i),
                             tab.last_output_at,
                             tab.last_seen_at,
                             now,
@@ -513,6 +547,8 @@ impl App {
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
             tooltip: self.new_tab_tooltip(ws, &[]),
             in_titlebar: false,
+            linux_header: false,
+            lone_title: false,
             recording_notice: String::new(),
             height,
             y: strip_y,
@@ -524,6 +560,10 @@ impl App {
             settings: (0.0, 0.0, 0.0, 0.0),
             hovered_settings: false,
             pressed_settings: false,
+            search: (0.0, 0.0, 0.0, 0.0),
+            hovered_search: false,
+            pressed_search: false,
+            search_open: false,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
             hovered_tab_idx: None,
@@ -989,6 +1029,7 @@ pub(super) fn chrome_button_shortcut(
 ) -> Option<String> {
     let action = match target {
         NewTabHoverTarget::Settings => Action::OpenSettings,
+        NewTabHoverTarget::Search => Action::StartSearch,
         NewTabHoverTarget::Menu | NewTabHoverTarget::Plus => Action::NewTab,
     };
     kettle_config::keybinds::ui_hint_label(bindings, &action)
@@ -1003,6 +1044,7 @@ pub(super) fn new_tab_tooltip(
         NewTabHoverTarget::Menu => return Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
         NewTabHoverTarget::Plus => tr.text(kettle_i18n::Text::MenuNewTab),
         NewTabHoverTarget::Settings => tr.text(kettle_i18n::Text::SettingsA11yTitle),
+        NewTabHoverTarget::Search => tr.text(kettle_i18n::Text::A11yHeaderFind),
     };
     Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
 }
@@ -1027,6 +1069,13 @@ pub(super) enum NewTabHoverTarget {
     Plus,
     /// The Settings gear that leads the pair in a macOS title bar.
     Settings,
+    /// The GNOME header's Find button.
+    Search,
+}
+
+/// Whether `(x, y)` is on the GNOME header's Find button, when it has one.
+pub(super) fn search_button_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.search.2 > 0.0 && bar.search.3 > 0.0 && rect_contains(bar.search, x, y)
 }
 
 /// Whether `(x, y)` is on the title bar's Settings gear, when it has one.
@@ -1122,7 +1171,7 @@ pub(super) fn release_settings_gear(
 
 /// What in the tab bar is under the pointer. A change between two pointer
 /// moves calls for a redraw.
-pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool);
+pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool, bool);
 
 pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
     (
@@ -1131,6 +1180,7 @@ pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
         ws.hovered_new_tab,
         ws.hovered_new_tab_menu,
         ws.hovered_settings,
+        ws.hovered_search,
     )
 }
 
@@ -1149,12 +1199,15 @@ pub(super) fn hover_tab_bar(
     ws.hovered_new_tab = target == Some(NewTabHoverTarget::Plus);
     ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
     ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
+    ws.hovered_search = target == Some(NewTabHoverTarget::Search);
     (target, tab_bar_hover(ws) != before)
 }
 
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
     if settings_button_at(bar, x, y) {
         Some(NewTabHoverTarget::Settings)
+    } else if search_button_at(bar, x, y) {
+        Some(NewTabHoverTarget::Search)
     } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
@@ -1422,6 +1475,26 @@ pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
     }
 }
 
+/// Whether Kettle's Linux header draws its only tab as the window's title,
+/// the way GNOME apps title their header bars. Never while a title is being
+/// edited or another window's tab is being docked into this one, both of
+/// which show the tab; never off the top, where there is no header; and
+/// never with `tab-bar = always`, which asks for the tab look.
+pub(super) fn lone_header_title(
+    linux_header: bool,
+    tabs: usize,
+    (editing, docking): (bool, bool),
+    mode: TabBarMode,
+    pos: TabBarPos,
+) -> bool {
+    linux_header
+        && tabs == 1
+        && !editing
+        && !docking
+        && mode != TabBarMode::Always
+        && pos == TabBarPos::Top
+}
+
 pub(super) fn tab_strip_visible(
     mode: TabBarMode,
     tabs: usize,
@@ -1450,8 +1523,14 @@ pub(super) fn horizontal_tab_lane(band: Rect, reservations: (f32, f32)) -> Rect 
 pub(super) struct HorizontalTabGeometry {
     pub arrow_rect: Rect,
     pub plus_rect: Rect,
+    /// The GNOME header's Find button, zero elsewhere.
+    pub search_rect: Rect,
     /// The macOS title bar's Settings gear, zero elsewhere.
     pub settings_rect: Rect,
+    /// How far into the lane the tabs start: past the GNOME header's
+    /// leading `+`, and zero on every other strip. `layout` positions count
+    /// from there.
+    pub lead: f32,
     pub strip: f32,
     pub layout: TabStripLayout,
 }
@@ -1466,10 +1545,19 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, mut button_w) = if linux {
-        linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
+    let (arrow_rect, plus_rect, search_rect, lead, mut button_w) = if linux {
+        let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (
+            controls.menu,
+            controls.plus,
+            controls.search,
+            controls.lead,
+            controls.trail,
+        )
     } else {
-        horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
+        let (menu, plus, reserve) =
+            horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible());
+        (menu, plus, (0.0, 0.0, 0.0, 0.0), 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
     // keep Settings in their `≡` / `▾` menus.
@@ -1480,9 +1568,9 @@ pub(super) fn horizontal_tab_geometry(
         settings_rect = rect;
         button_w += extra;
     }
-    let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+    let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
-        let space = (strip, button_w, lane.0);
+        let space = (strip, button_w, lane.0 + lead);
         let mut layout = titlebar_tab_layout(
             n,
             active,
@@ -1512,7 +1600,9 @@ pub(super) fn horizontal_tab_geometry(
     HorizontalTabGeometry {
         arrow_rect,
         plus_rect,
+        search_rect,
         settings_rect,
+        lead,
         strip,
         layout,
     }
@@ -1538,7 +1628,7 @@ pub(super) fn tear_off_destination_tab(
     let lane = horizontal_tab_lane(band, reservations);
     let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
     (
-        lane.0 + geometry.layout.xs[0].unwrap_or(0.0),
+        lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
         geometry.layout.last_width,
         band.3,
@@ -1547,7 +1637,7 @@ pub(super) fn tear_off_destination_tab(
 
 /// How far along a torn window's title bar its pointer holds it: `in_tab`
 /// into the lone tab the destination paints, which leaves room for the
-/// macOS Settings gear and the Linux header's window buttons.
+/// macOS Settings gear and the Linux header's leading `+` and window buttons.
 pub(super) fn titlebar_tear_off_grab_x(
     cfg: &Config,
     band: Rect,

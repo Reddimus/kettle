@@ -12,6 +12,9 @@ pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 /// they came from.
 type PillColors = (([u32; 3], bool), (Rgb, Rgb));
 
+/// The scrollbar's colours, keyed the same way.
+type ScrollbarColorKey = ([u32; 4], bool);
+
 #[derive(Default)]
 pub(crate) struct Colors {
     cache: MinimumContrastCache,
@@ -23,6 +26,7 @@ pub(crate) struct Colors {
     markers: std::collections::HashMap<([u32; 2], bool), Rgb>,
     backed: std::collections::HashMap<([u32; 3], u64, bool), Rgb>,
     pub(crate) pill: Option<PillColors>,
+    pub(crate) scrollbar: Option<(ScrollbarColorKey, crate::scrollback::ScrollbarColors)>,
 }
 
 impl Colors {
@@ -69,6 +73,34 @@ impl Colors {
         }
         let colors = crate::scrollback::scrollback_pill_colors(theme, linear);
         self.pill = Some((key, colors));
+        colors
+    }
+
+    /// The scrollbar's colours
+    /// ([`crate::scrollback::scrollbar_colors`]), resolved once per theme
+    /// rather than every frame.
+    pub(crate) fn scrollbar(
+        &mut self,
+        theme: &kettle_config::Theme,
+        linear: bool,
+    ) -> crate::scrollback::ScrollbarColors {
+        let key = (
+            [
+                theme.foreground,
+                theme.background,
+                theme.palette[1],
+                theme.palette[2],
+            ]
+            .map(MinimumContrastCache::color_key),
+            linear,
+        );
+        if let Some((saved, colors)) = self.scrollbar
+            && saved == key
+        {
+            return colors;
+        }
+        let colors = crate::scrollback::scrollbar_colors(theme, linear);
+        self.scrollbar = Some((key, colors));
         colors
     }
 
@@ -1114,7 +1146,9 @@ mod tab_chrome_tests {
     /// Every activity marker reaches 3:1 on the tab behind it, hovered or
     /// not and in a focused or unfocused window, and a focused window's
     /// marker keeps the theme colour's hue and saturation. TokyoNight Night's Silent grey
-    /// was 2.04:1 on its strip, Catppuccin Latte's bell yellow 2.04:1.
+    /// was 2.04:1 on its strip, Catppuccin Latte's bell yellow 2.04:1. The
+    /// active tab, which shows the bell for its focused pane, is the
+    /// terminal's own background.
     #[test]
     fn tab_activity_markers_keep_3_to_1_and_their_hue() {
         use crate::TabActivity;
@@ -1131,6 +1165,7 @@ mod tab_chrome_tests {
             for (surface, bg) in [
                 ("strip", strip),
                 ("hovered tab", strip_hover(strip, theme.foreground, false)),
+                ("active tab", theme.background),
             ] {
                 for kind in [TabActivity::Output, TabActivity::Silent, TabActivity::Bell] {
                     let raw = activity_ink(&theme, kind).expect("a marked state has ink");

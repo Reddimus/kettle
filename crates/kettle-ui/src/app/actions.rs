@@ -1011,9 +1011,20 @@ impl App {
                     p.term.jump_to_prompt(prev);
                 }
             }
+            // From a chord or the palette: the newest command's output. The
+            // terminal menu's row picks its own (`dispatch_context_menu_click`).
+            Action::SelectCommandOutput => {
+                if let Some(p) = ws.mux.focused() {
+                    select_command_output(&p.term, None);
+                }
+            }
             Action::OpenSsh => {
                 self.close_all_modals(ws);
-                ws.ssh_input = Some((Default::default(), 0));
+                open_ssh_launcher(
+                    ws,
+                    &self.cfg,
+                    kettle_config::ssh_config::user_ssh_config_path,
+                );
             }
             Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);
@@ -1880,4 +1891,65 @@ impl App {
             w.request_redraw();
         }
     }
+}
+
+/// Select one completed command's output as whole lines, the command whose
+/// output holds stable row `at` or with `None` the newest, and scroll its
+/// first row into view when it is off screen. `false`, changing nothing, when
+/// there is no such output (see
+/// [`kettle_core::Terminal::command_output_rows`]).
+pub(super) fn select_command_output(term: &kettle_core::Terminal, at: Option<u64>) -> bool {
+    term.command_output_rows(at)
+        .is_some_and(|rows| select_output_rows(&term.term, rows))
+}
+
+/// Select stable row ids `start..end` of `term` as whole rows, and scroll the
+/// first into view when it is off screen. `false`, changing nothing, when
+/// none of the rows is retained.
+pub(super) fn select_output_rows(
+    term: &kettle_core::term::SharedTerm,
+    (start, end): (u64, u64),
+) -> bool {
+    use kettle_core::Dimensions as _;
+    let Ok(mut t) = term.lock() else {
+        return false;
+    };
+    // The reader may have scrolled since the rows were looked up. Row ids hold
+    // still while text moves, so convert under this lock and keep what is
+    // retained.
+    let grid = t.grid();
+    let history = grid.history_size();
+    let screen_lines = grid.screen_lines();
+    let columns = grid.columns();
+    let screen_top = grid.history_origin().saturating_add(history as u64);
+    let line = |id: u64| i32::try_from(i128::from(id) - i128::from(screen_top)).ok();
+    let (Some(first), Some(last)) = (line(start), line(end.saturating_sub(1))) else {
+        return false;
+    };
+    let first = first.max(-(history as i32));
+    let last = last.min(screen_lines as i32 - 1);
+    if first > last || columns == 0 {
+        return false;
+    }
+    // Whole rows, from the first cell of the first to the last of the last.
+    // Not `SelectionType::Lines`: the engine ends a copied line selection
+    // with a newline, and widens it over a row the next prompt wrapped onto.
+    let mut selection = kettle_core::Selection::new(
+        kettle_core::SelectionType::Simple,
+        kettle_core::Point::new(kettle_core::Line(first), kettle_core::Column(0)),
+        kettle_core::Side::Left,
+    );
+    selection.update(
+        kettle_core::Point::new(kettle_core::Line(last), kettle_core::Column(columns - 1)),
+        kettle_core::Side::Right,
+    );
+    t.selection = Some(selection);
+    // Visible lines run from `-offset` down `screen_lines` rows. Off screen,
+    // put the first output row at the top of the view.
+    let offset = t.grid().display_offset() as i32;
+    if first < -offset || first >= screen_lines as i32 - offset {
+        let target = (-first).clamp(0, history as i32);
+        t.scroll_display(kettle_core::Scroll::Delta(target - offset));
+    }
+    true
 }

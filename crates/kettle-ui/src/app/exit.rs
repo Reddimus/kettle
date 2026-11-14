@@ -119,7 +119,8 @@ impl App {
     /// window other than the quick terminal that still has tabs: closing the
     /// last window has already saved, and an empty snapshot written now
     /// would replace the one the user means to restore. A startup that failed
-    /// saves nothing.
+    /// saves nothing. The output file is always snapshotted afresh, so a quit
+    /// also rewrites one that was deleted or replaced.
     pub(super) fn save_session_on_exit(&mut self) {
         let Some(seq) = exit_save_window(
             self.exit_teardown_done,
@@ -136,7 +137,7 @@ impl App {
         let Some(ws) = self.windows.remove(&seq) else {
             return;
         };
-        self.save_session(&ws);
+        self.save_session_as(&ws, SaveKind::Exit);
         self.windows.insert(seq, ws);
     }
 

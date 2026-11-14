@@ -26,6 +26,9 @@ fn update_window_remote_contexts(
         let Some(probe) = snapshot.probes.get(&pid) else {
             continue;
         };
+        // A pane that stops counting as remote keeps its remote rows out of
+        // the saved output from here on.
+        let was_remote = crate::mux::pane_saves_as_remote(pane);
         let context_changed = applied.get(&(pane_id, pid)).is_none_or(|previous| {
             previous.remote != probe.remote
                 || previous.native_cwd != probe.native_cwd
@@ -48,6 +51,9 @@ fn update_window_remote_contexts(
         }
         if probe.foreground_process != pane.foreground_process {
             pane.foreground_process = probe.foreground_process.clone();
+        }
+        if was_remote && !crate::mux::pane_saves_as_remote(pane) {
+            pane.note_remote_output_ended();
         }
         // Foreground argv drives input policy but has no visual representation;
         // changing commands must not schedule a title sync and redraw at 5 Hz.

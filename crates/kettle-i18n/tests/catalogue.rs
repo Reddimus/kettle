@@ -193,6 +193,17 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_write"
                         | "mouse_override_hint"
                         | "font_size_chip"
+                        // The notification toast's Show button is named by
+                        // it when the tab has no title, and its overflow line
+                        // describes the live status.
+                        | "notification_toast_show"
+                        | "notification_toast_more"
+                        // The SSH launcher's status line is also a polite
+                        // live region.
+                        | "ssh_status_saved"
+                        | "ssh_status_removed"
+                        | "ssh_status_not_saved"
+                        | "ssh_status_not_removed"
                 )
         })
         .cloned()
@@ -242,6 +253,9 @@ fn no_spanish_message_is_left_in_english() {
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
         "media_viewer_kind_video",
+        // Punctuation and a counter, no words.
+        "notification_toast_sourced",
+        "notification_toast_repeats",
     ];
     for (key, text) in &english {
         if !cognates.contains(&key.as_str()) {
@@ -312,7 +326,7 @@ fn structured_confirmation_copy_is_localized_and_pluralized() {
     );
     assert_eq!(
         es.confirm_rebind_body("Copiar", "Pegar"),
-        "Asignar este atajo a \"Pegar\". \"Copiar\" perderá este atajo."
+        "Asignar este atajo de teclado a \"Pegar\". \"Copiar\" perderá este atajo."
     );
 }
 
@@ -342,17 +356,15 @@ fn builtin_theme_names_are_display_only_translations() {
 }
 
 #[test]
-fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
+fn settings_descriptions_are_short_and_translated() {
     let en: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let es: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
-    let review: toml::Table = include_str!("../locales/es.review.toml").parse().unwrap();
     let mut descriptions = 0;
     for (key, value) in &en {
         if key.starts_with("settings_description_") {
             descriptions += 1;
             assert!(value.as_str().unwrap().chars().count() <= 70, "{key}");
             assert_ne!(value, &es[key], "{key}");
-            assert_eq!(review["status"][key].as_str(), Some("draft"), "{key}");
         }
     }
     assert_eq!(

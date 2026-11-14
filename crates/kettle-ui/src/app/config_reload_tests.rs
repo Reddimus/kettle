@@ -919,3 +919,82 @@ fn a_system_switch_while_editing_the_other_side_keeps_that_side() {
     let restored = super::theme_preview_change(&mut ws, &wearing, &tr).unwrap();
     assert_eq!(restored.0, cfg.light_theme);
 }
+
+/// The schedule turns dark while the theme picker is open on the light side.
+/// Like a system switch, it rebases the picker's baseline on the dark theme,
+/// keeping the colour overrides: Esc, and Enter for the light side chosen
+/// before the switch, put back the side the window wears now, while Enter
+/// for that side saves and keeps the pick. Both followers switch through
+/// `wear_followed_theme`; the schedule used to switch without rebasing, so
+/// Esc put the light theme back and the window stayed on the old side until
+/// the next boundary or reload.
+#[test]
+fn a_side_switch_under_the_picker_rebases_what_it_puts_back() {
+    use super::{ThemeCommitPlan, theme_commit_plan, theme_preview_change};
+    use kettle_render::ThemeSlot;
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config::parse_text(
+        "theme-schedule = 19:00 dark, 07:00 light\nbackground = #010203\n",
+    );
+    assert!(cfg.theme_schedule.is_some());
+    let wearing = |name: &str| kettle_config::Config {
+        theme_name: name.to_string(),
+        ..cfg.clone()
+    };
+    let mut ws = WindowState::new(1, Mux::new());
+    super::begin_theme_picker(
+        &mut ws,
+        (cfg.light_theme.clone(), cfg.theme_by_name(&cfg.light_theme)),
+    );
+    ws.theme_picker_input.as_mut().unwrap().selected += 1;
+    let (previewed, _) = theme_preview_change(&mut ws, &wearing(&cfg.light_theme), &tr).unwrap();
+    // 19:00: what `wear_followed_theme` does for every window.
+    let dark = (cfg.dark_theme.clone(), cfg.theme_by_name(&cfg.dark_theme));
+    super::rebase_theme_preview(&mut ws, &dark);
+    let picker = ws.theme_picker_input.clone().unwrap();
+    assert_eq!(
+        theme_commit_plan(&picker, &cfg, Some(true)),
+        ThemeCommitPlan {
+            key: "dark-theme",
+            restore_active: false
+        }
+    );
+    let light_side = crate::window_state::ThemePickerState {
+        slot: Some(ThemeSlot::Light),
+        ..picker
+    };
+    assert!(theme_commit_plan(&light_side, &cfg, Some(true)).restore_active);
+    ws.theme_picker_input = None;
+    let (back, theme) = theme_preview_change(&mut ws, &wearing(&previewed), &tr).unwrap();
+    assert_eq!(back, cfg.dark_theme);
+    assert_eq!(theme.background, kettle_config::Rgb::parse("#010203").unwrap());
+
+    let src = production_source();
+    let body = |name: &str| {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap_or_else(|| panic!("{name}"))
+            .to_string()
+    };
+    for follower in ["poll_theme_schedule", "apply_initial_os_theme_preference"] {
+        let follower_body = body(follower);
+        assert!(
+            follower_body.contains("self.wear_followed_theme(ws, &next);"),
+            "{follower} must wear the side through wear_followed_theme"
+        );
+        for direct in ["set_runtime_theme", "apply_theme_name(", "theme_name ="] {
+            assert!(
+                !follower_body.contains(direct),
+                "{follower} switches the theme past an open picker's baseline: {direct}"
+            );
+        }
+    }
+    let wear = body("wear_followed_theme");
+    let rebase = wear
+        .find("std::iter::once(&mut *ws).chain(self.windows.values_mut())")
+        .expect("every window's picker is rebased");
+    assert!(wear[rebase..].contains("rebase_theme_preview(state, &baseline);"));
+    let worn = wear.find("self.set_runtime_theme_state(").expect("the side is worn");
+    assert!(rebase < worn, "the baseline moves before the window switches");
+}

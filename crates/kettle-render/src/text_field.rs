@@ -34,7 +34,10 @@ pub struct TextFieldLayout {
 
 /// Prefixes fit at most 30% of the field. Picker headers never abbreviate the
 /// final action or displace the full query; other fields may ellipsize hints.
-/// Measuring and painting share these strings and their clipped slots.
+/// An empty picker query's placeholder comes before the hint: the hint gives
+/// way when only that lets the placeholder show, and is back once a query
+/// replaces it. Measuring and painting share these strings and their clipped
+/// slots.
 pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) {
     let budget = if cw > 0.0 {
         (field.rect.2.max(0.0) * 0.3 / cw).floor() as usize
@@ -43,7 +46,19 @@ pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) 
     };
     let prefix = super::fit_single_line_label(&field.prefix, budget);
     let hint = if field.picker_header {
-        picker_header_hint(field, &prefix, cw)
+        let hint = picker_header_hint(field, &prefix, cw);
+        // The editor slot's width with and without the hint, as
+        // `text_field_rects` lays it out.
+        let prefix_w = super::display_width(&prefix) as f32 * cw;
+        let hint_w = super::display_width(&hint) as f32 * cw;
+        let crowds_placeholder = wants_placeholder(field, cw)
+            && !placeholder_fits(&field.placeholder, field.rect.2 - prefix_w - hint_w, cw)
+            && placeholder_fits(&field.placeholder, field.rect.2 - prefix_w, cw);
+        if crowds_placeholder {
+            String::new()
+        } else {
+            hint
+        }
     } else {
         super::fit_key_hint(&field.hint, budget)
     };
@@ -90,18 +105,31 @@ fn picker_header_hint(field: &TextFieldOverlay, prefix: &str, cw: f32) -> String
     format!("{hint}  ")
 }
 
+/// Whether `field` would show a placeholder in a slot wide enough: a picker
+/// header's empty query (an IME preedit counts as text) with one to show.
+fn wants_placeholder(field: &TextFieldOverlay, cw: f32) -> bool {
+    field.picker_header && field.text.is_empty() && !field.placeholder.is_empty() && cw > 0.0
+}
+
+/// Whether `placeholder` fits whole in an editor slot `width` wide, less its
+/// 2 px inset and a two-column gap before the hint.
+fn placeholder_fits(placeholder: &str, width: f32, cw: f32) -> bool {
+    let columns = ((width.max(0.0) - 2.0) / cw).floor() - 2.0;
+    columns >= super::display_width(placeholder) as f32
+}
+
 /// The placeholder a picker header paints in its empty editor slot: the
 /// whole string when it fits the slot less a two-column gap before the hint,
 /// otherwise nothing, since a cut-off "Type a c…" reads worse than an empty
-/// field. Hidden too while the field holds text (an IME preedit included)
-/// and outside picker headers. Paint measures and draws this same string.
+/// field. The hint gives way to it first (see [`text_field_labels`]). Hidden
+/// too while the field holds text (an IME preedit included) and outside
+/// picker headers. Paint measures and draws this same string.
 pub fn text_field_placeholder(field: &TextFieldOverlay, cw: f32) -> String {
-    if !field.picker_header || !field.text.is_empty() || field.placeholder.is_empty() || cw <= 0.0 {
+    if !wants_placeholder(field, cw) {
         return String::new();
     }
     let editor = text_field_rects(field, cw)[1];
-    let columns = ((editor.2 - 2.0) / cw).floor() - 2.0;
-    if columns >= super::display_width(&field.placeholder) as f32 {
+    if placeholder_fits(&field.placeholder, editor.2, cw) {
         field.placeholder.clone()
     } else {
         String::new()
@@ -501,6 +529,34 @@ mod picker_header_tests {
         }
     }
 
+    /// The command palette's key hint, as the UI builds it, in `tr`.
+    fn palette_hint(tr: &kettle_i18n::Translator) -> String {
+        use kettle_i18n::Text;
+        format!(
+            "(Enter {} · Tab/↑↓ {} · Esc {})",
+            tr.text(Text::PickerHintRun),
+            tr.text(Text::PickerHintSelect),
+            tr.text(Text::PickerHintCancel)
+        )
+    }
+
+    /// A palette header `width` px wide holding `text`, with `placeholder`,
+    /// `hint` and the palette's `⌘` prefix.
+    fn palette_field(placeholder: &str, hint: &str, text: &str, width: f32) -> TextFieldOverlay {
+        TextFieldOverlay {
+            picker_header: true,
+            placeholder: placeholder.into(),
+            text: text.into(),
+            cursor_byte: text.len(),
+            selection: None,
+            horizontal_scroll: 0,
+            rect: (10.0, 10.0, width, 30.0),
+            prefix: "  \u{2318} ".into(),
+            hint: hint.into(),
+            accent_palette: 5,
+        }
+    }
+
     #[test]
     fn picker_hint_fallback_preserves_complete_actions_at_exact_boundaries() {
         for (full, middle, last, columns) in [
@@ -603,56 +659,103 @@ mod picker_header_tests {
         }
     }
 
-    /// The palette's placeholder, in either language, shows whole in the
-    /// editor slot with a two-column gap before the hint, or not at all; a
-    /// typed query, an IME preedit or a non-picker field shows none.
+    /// The palette's placeholders (the command palette's and the keyboard
+    /// shortcut list's), in either language, show whole in the editor slot
+    /// with a two-column gap before the hint, or not at all; a typed query,
+    /// an IME preedit or a non-picker field shows none.
     #[test]
     fn picker_placeholder_fits_its_slot_and_never_reaches_the_hint() {
         use kettle_i18n::{Language, Text, Translator};
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
-            let placeholder = tr.text(Text::PickerPlaceholderCommand);
-            let hint = format!(
-                "(Enter {} · Tab/↑↓ {} · Esc {})",
-                tr.text(Text::PickerHintRun),
-                tr.text(Text::PickerHintSelect),
-                tr.text(Text::PickerHintCancel)
-            );
-            for cw in [7.0_f32, 8.0, 9.6, 16.0] {
-                for width in [120.0_f32, 200.0, 300.0, 360.0, 448.0, 560.0, 720.0, 1440.0] {
-                    let mut field = TextFieldOverlay {
-                        picker_header: true,
-                        placeholder: placeholder.into(),
-                        text: String::new(),
-                        cursor_byte: 0,
-                        selection: None,
-                        horizontal_scroll: 0,
-                        rect: (10.0, 10.0, width, 30.0),
-                        prefix: "  \u{2318} ".into(),
-                        hint: hint.clone(),
-                        accent_palette: 5,
-                    };
-                    let shown = text_field_placeholder(&field, cw);
-                    let [_, editor, hint_slot] = text_field_rects(&field, cw);
-                    let right = editor.0 + 2.0 + crate::display_width(&shown) as f32 * cw;
-                    assert!(
-                        right + 2.0 * cw <= hint_slot.0 + 0.001,
-                        "{language:?} {cw}/{width}: {shown:?} reaches the hint"
-                    );
-                    // Whole or not at all, never cut off.
-                    assert!(shown.is_empty() || shown == placeholder, "{shown:?}");
-                    let room = ((editor.2 - 2.0) / cw).floor() - 2.0;
-                    let fits = room >= crate::display_width(placeholder) as f32;
-                    assert_eq!(!shown.is_empty(), fits, "{language:?} {cw}/{width}");
-                    if width >= 1440.0 && cw <= 9.6 {
-                        assert_eq!(shown, placeholder, "{language:?} {cw}");
+            let hint = palette_hint(&tr);
+            for placeholder in [
+                Text::PickerPlaceholderCommand,
+                Text::PickerPlaceholderShortcuts,
+            ]
+            .map(|text| tr.text(text))
+            {
+                for cw in [7.0_f32, 8.0, 9.6, 16.0] {
+                    for width in [120.0_f32, 200.0, 300.0, 360.0, 448.0, 560.0, 720.0, 1440.0] {
+                        let mut field = palette_field(placeholder, &hint, "", width);
+                        let shown = text_field_placeholder(&field, cw);
+                        let [_, editor, hint_slot] = text_field_rects(&field, cw);
+                        let right = editor.0 + 2.0 + crate::display_width(&shown) as f32 * cw;
+                        assert!(
+                            right + 2.0 * cw <= hint_slot.0 + 0.001,
+                            "{language:?} {cw}/{width}: {shown:?} reaches the hint"
+                        );
+                        // Whole or not at all, never cut off.
+                        assert!(shown.is_empty() || shown == placeholder, "{shown:?}");
+                        let room = ((editor.2 - 2.0) / cw).floor() - 2.0;
+                        let fits = room >= crate::display_width(placeholder) as f32;
+                        assert_eq!(!shown.is_empty(), fits, "{language:?} {cw}/{width}");
+                        if width >= 1440.0 && cw <= 9.6 {
+                            assert_eq!(shown, placeholder, "{language:?} {cw}");
+                        }
+                        field.text = "x".into();
+                        assert_eq!(text_field_placeholder(&field, cw), "");
+                        field.text = String::new();
+                        field.picker_header = false;
+                        assert_eq!(text_field_placeholder(&field, cw), "");
                     }
-                    field.text = "x".into();
-                    assert_eq!(text_field_placeholder(&field, cw), "");
-                    field.text = String::new();
-                    field.picker_header = false;
-                    assert_eq!(text_field_placeholder(&field, cw), "");
                 }
+            }
+        }
+    }
+
+    /// An empty picker query's placeholder comes before the key hint. For
+    /// both palette placeholders in either language, the placeholder shows
+    /// whenever the header has room for it without the hint. The hint gives
+    /// way only to a placeholder that would not fit beside it, and is back
+    /// once a query is typed. At the widest picker card (720 px) and the
+    /// default 14 pt cell (8.4 px), each placeholder shows whole: the
+    /// Spanish keyboard-shortcut list's once lost to the hint at every width.
+    #[test]
+    fn an_empty_picker_header_gives_its_hint_up_before_its_placeholder() {
+        use kettle_i18n::{Language, Text, Translator};
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let hint = palette_hint(&tr);
+            for placeholder in [
+                Text::PickerPlaceholderCommand,
+                Text::PickerPlaceholderShortcuts,
+            ]
+            .map(|text| tr.text(text))
+            {
+                let width_of = |text: &str| crate::display_width(text) as f32;
+                for cw in [7.0_f32, 8.0, 8.4, 9.6, 16.0] {
+                    for width in [
+                        120.0_f32, 200.0, 300.0, 360.0, 448.0, 560.0, 640.0, 720.0, 1440.0,
+                    ] {
+                        let empty = palette_field(placeholder, &hint, "", width);
+                        let typed = palette_field(placeholder, &hint, "x", width);
+                        let alone = palette_field(placeholder, "", "", width);
+                        let shown = text_field_placeholder(&empty, cw);
+                        assert_eq!(
+                            shown,
+                            text_field_placeholder(&alone, cw),
+                            "{language:?} {placeholder:?} {cw}/{width}: the hint crowds it out"
+                        );
+                        let empty_hint = text_field_labels(&empty, cw).1;
+                        let typed_hint = text_field_labels(&typed, cw).1;
+                        if empty_hint != typed_hint {
+                            // The hint gave way: the placeholder shows, and
+                            // would not have fitted beside it.
+                            assert!(empty_hint.is_empty(), "{language:?} {cw}/{width}");
+                            assert_eq!(shown, placeholder, "{language:?} {cw}/{width}");
+                            let beside = text_field_rects(&typed, cw)[1].2;
+                            let room = ((beside - 2.0) / cw).floor() - 2.0;
+                            assert!(room < width_of(placeholder), "{language:?} {cw}/{width}");
+                        }
+                    }
+                }
+                let widest = palette_field(placeholder, &hint, "", 720.0);
+                assert_eq!(
+                    text_field_placeholder(&widest, 8.4),
+                    placeholder,
+                    "{language:?}"
+                );
             }
         }
     }

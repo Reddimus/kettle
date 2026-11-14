@@ -2510,26 +2510,42 @@ fn parse_protocol_notification(seq: &[u8]) -> Option<(String, String)> {
     Some((title, body))
 }
 
+/// A notification field as text a notifier can show: C0/C1 controls, DEL
+/// and the Unicode bidi formatting characters (which reorder text and can
+/// spoof what a notification says) become whitespace, and every run of
+/// whitespace one space, or one newline in a body run that held one.
 fn clean_notify_field(bytes: &[u8], allow_newline: bool) -> Option<String> {
     if bytes.is_empty() || bytes.len() > MAX_NOTIFY_FIELD_BYTES {
         return None;
     }
     let mut out = String::with_capacity(bytes.len().min(MAX_NOTIFY_FIELD_BYTES));
+    // The whitespace run being collapsed: `Some(true)` once it held a newline.
+    let mut run: Option<bool> = None;
     for ch in String::from_utf8_lossy(bytes).chars() {
-        if ch == '\n' && allow_newline {
-            out.push('\n');
-        } else if ch == '\t' || ch == '\r' || ch == '\n' || ch.is_control() {
-            out.push(' ');
-        } else {
-            out.push(ch);
+        if ch.is_whitespace() || ch.is_control() || is_bidi_format(ch) {
+            let newline = allow_newline && ch == '\n';
+            run = Some(run.unwrap_or(false) || newline);
+            continue;
         }
+        if let Some(newline) = run.take()
+            && !out.is_empty()
+        {
+            out.push(if newline { '\n' } else { ' ' });
+        }
+        out.push(ch);
     }
-    let trimmed = out.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The Unicode bidi formatting and override characters. They are general
+/// category Cf, not `char::is_control`. kettle-config's
+/// `ssh_config::is_bidi_format_char` is the same list (a kettle-ui test
+/// keeps them equal).
+fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+    )
 }
 
 fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {

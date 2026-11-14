@@ -928,7 +928,7 @@ scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scro
 scrollback-memory scrollbar scrollbar-width search-background search-case-sensitive
 search-foreground search-wrap selection-background selection-foreground selection-word-chars
 semantic-escape-chars shell shell-integration show-titlebar smart-copy split-divider-color
-split-divider-color-focused split-to-group ssh-host status-bar statusbar sticky tab-bar
+split-divider-color-focused split-to-group ssh-config-hosts ssh-host status-bar statusbar sticky tab-bar
 tab-bar-position tab-bar-width tab-format tab-min-width tab-position tab-silence-threshold
 tab-silence-threshold-ms tab-title-format term text-renderer theme theme-mode theme-schedule
 theme-schedule-lat theme-schedule-lon theme-schedule-long theme-schedule-longitude title-at-bottom

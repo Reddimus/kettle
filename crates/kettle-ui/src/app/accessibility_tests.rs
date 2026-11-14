@@ -1410,7 +1410,9 @@ fn completed_command_ticks_describe_status_and_exit_code_in_both_languages() {
         let tr = kettle_i18n::Translator::new(language);
         for code in [0, 7, -1] {
             let mark = kettle_core::term::CommandMark { row: 10, exit_code: code };
-            let rect = kettle_core::scrollbar::command_tick_rect((0.0, 0.0, 300.0, 200.0), 2.0, 6.0, 0, 100, mark).unwrap();
+            let terminal = (0.0, 0.0, 300.0, 200.0);
+            let column = (300.0 - 16.0, 12.0);
+            let rect = kettle_core::scrollbar::command_tick_rect(terminal, column, 2.0, 0, 100, mark).unwrap();
             let node = command_mark_accessibility_node(mark, rect, &tr);
             assert!(node.description().unwrap().contains(&code.to_string()));
             let expected = if code == 0 { tr.command_mark_a11y_success(&code.to_string()) }
@@ -1487,7 +1489,12 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
                     && node.supports_action(accesskit::Action::Click)));
             }
             // In a Kettle-drawn GNOME header bar the same button is the
-            // window's primary menu.
+            // window's primary menu, with window buttons or without.
+            bar.linux_header = true;
+            let header = super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr);
+            assert!(header.iter().any(|(_, node)| {
+                node.label() == Some(tr.text(kettle_i18n::Text::A11yMainMenu))
+            }));
             bar.window_controls.push(kettle_render::WindowControlButton {
                 action: kettle_render::WindowControl::Close,
                 rect: (300.0, 0.0, 28.0, 28.0),
@@ -1504,6 +1511,7 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
                     .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::A11yNewTabMenu)))
             );
             bar.window_controls.clear();
+            bar.linux_header = false;
             bar.height = 0.0;
             assert!(super::tab_accessibility_projection(&bar, &[10, 20], vertical, &tr).is_empty());
             bar.height = 28.0;
@@ -1961,6 +1969,121 @@ fn picker_placeholder_is_the_inputs_placeholder_not_its_value() {
         assert_eq!(
             input.placeholder(),
             (!placeholder.is_empty()).then_some(placeholder)
+        );
+    }
+}
+
+/// What Orca and Narrator hear as each projected node's name, by role, once
+/// the projection is the tree handed to the platform. The AT-SPI and UI
+/// Automation adapters both run AccessKit's consumer and name a node from
+/// its value when the consumer says a label's comes from there (a
+/// `Role::Label`), else from its label.
+fn spoken_names(
+    projection: super::accessibility::ModalAccessibilityProjection,
+) -> Vec<(accesskit::NodeId, accesskit::Role, Option<String>)> {
+    let ids: Vec<_> = projection.nodes.iter().map(|(id, _)| *id).collect();
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    ids.into_iter()
+        .filter_map(|id| {
+            let node = tree
+                .state()
+                .node_by_tree_local_id(id, accesskit::TreeId::ROOT)?;
+            let name = if node.label_comes_from_value() {
+                node.value()
+            } else {
+                node.label()
+            };
+            Some((id, node.role(), name))
+        })
+        .collect()
+}
+
+/// The theme picker's readout under its sample reaches Orca and Narrator,
+/// not only VoiceOver: the footer's text is its spoken name, with the lowest
+/// colour's palette number and, for a theme with a colour below 3:1, that it
+/// is hard to read, in the window's language. Both read a label's name from
+/// its value, which the footer once left empty.
+#[test]
+fn theme_picker_readout_is_spoken_on_every_platform() {
+    use kettle_config::Theme;
+    use kettle_i18n::{Language, Text, Translator};
+    let (name, low) = Theme::list()
+        .into_iter()
+        .map(|name| (name, kettle_render::theme_readability(&Theme::by_name(name), 0.0)))
+        .find(|(_, readability)| readability.lowest < 3.0)
+        .expect("a bundled theme with a colour below 3:1");
+    let cfg = kettle_config::Config::default();
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.theme_picker_input = Some(crate::window_state::ThemePickerState {
+            query: "".into(),
+            selected: super::theme_picker_start(name),
+            opened_on: name.to_string(),
+            slot: None,
+        });
+        let list = super::open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap();
+        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), (8.4, 17.0), 32.0).unwrap();
+        let footer = menu.picker_footer.as_ref().expect("the footer fits");
+        let readout = kettle_render::theme_footer_description(footer, &tr);
+        for part in [
+            tr.picker_theme_a11y_lowest_slot(low.lowest_slot as u64),
+            tr.text(Text::PickerThemeA11yLowContrast).to_string(),
+        ] {
+            assert!(readout.contains(&part), "{language:?}: {part:?} not in {readout:?}");
+        }
+        let overlay = kettle_render::Overlay {
+            theme_picker_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.0), 1.0, &tr);
+        let footer_id =
+            super::accessibility_modal_id(super::MODAL_KIND_THEMES, super::PICKER_FOOTER_A11Y_INDEX);
+        let spoken = spoken_names(projection);
+        let (_, role, heard) = spoken
+            .iter()
+            .find(|(id, ..)| *id == footer_id)
+            .expect("the footer's text is in the tree");
+        assert_eq!(*role, accesskit::Role::Label);
+        assert_eq!(heard.as_deref(), Some(readout.as_str()), "{language:?}");
+    }
+}
+
+/// A Settings search that matches nothing says so to Orca and Narrator too,
+/// in the window's language: the line the panel paints is a label they name
+/// from its value.
+#[test]
+fn settings_no_matches_is_spoken_on_every_platform() {
+    use kettle_i18n::{Language, Text, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let settings = kettle_render::SettingsOverlay {
+            categories: vec![tr.text(Text::SettingsCategoryAppearance).into()],
+            search_query: "zzzz".into(),
+            search_focused: true,
+            no_matches: tr.text(Text::SettingsNoMatches).into(),
+            ..Default::default()
+        };
+        let overlay = kettle_render::Overlay {
+            settings: Some(settings),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.0, 16.0), 1.0, &tr);
+        let labels: Vec<_> = spoken_names(projection)
+            .into_iter()
+            .filter(|(_, role, _)| *role == accesskit::Role::Label)
+            .map(|(_, _, name)| name)
+            .collect();
+        assert_eq!(
+            labels,
+            [Some(tr.text(Text::SettingsNoMatches).to_string())],
+            "{language:?}"
         );
     }
 }

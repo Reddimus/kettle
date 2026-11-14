@@ -304,6 +304,46 @@ fn native_window_title_strips_private_use_glyphs_only() {
     assert_eq!(sanitize_native_window_title("\u{f015}\u{e0b0}"), "kettle");
 }
 
+/// A bell the user has not answered marks the native title while no tab
+/// strip shows it (one tab under `tab-bar = auto` off GNOME's header, or
+/// `tab-bar = off`): ASCII off macOS, under the ASCII title rule, and the
+/// bell emoji on macOS, whose title font carries it.
+#[test]
+fn an_unanswered_bell_marks_the_native_title_only_without_a_tab_strip() {
+    assert_eq!(super::bell_title_mark(false), "[!] ");
+    assert!(super::bell_title_mark(false).is_ascii());
+    assert_eq!(super::bell_title_mark(true), "\u{1F514} ");
+    for macos in [false, true] {
+        let mark = super::bell_title_mark(macos);
+        assert_eq!(super::bell_window_title("fixture".into(), false, mark), "fixture");
+        let marked = super::bell_window_title("fixture".into(), true, mark);
+        assert_eq!(marked, format!("{mark}fixture"));
+        assert_eq!(sanitize_native_window_title(&marked), marked.trim_end());
+    }
+    // One tab under the default `tab-bar = auto` hides the strip off the
+    // macOS and GNOME titlebars; that is the window the title must mark.
+    assert!(!super::chrome::tab_strip_visible(
+        kettle_config::TabBarMode::Auto,
+        1,
+        false,
+        false,
+        false
+    ));
+    let src = production_source();
+    let desired = src
+        .split("fn desired_window_title(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("desired_window_title");
+    assert!(desired.contains(
+        "ws.mux.focused_bell_pane().is_some() && self.tab_bar_h(ws) <= 0.0,"
+    ));
+    assert!(desired.contains("bell_title_mark(cfg!(target_os = \"macos\")),"));
+    let mark = desired.find("bell_window_title(").unwrap();
+    let sanitize = desired.find("sanitize_native_window_title(").unwrap();
+    assert!(mark < sanitize, "the mark goes through the native-title filter");
+}
+
 #[test]
 fn the_shelf_badge_counts_unseen_items_only() {
     assert_eq!(super::media_shelf_badge(0), "");
@@ -1026,4 +1066,64 @@ fn a_zoomed_pane_says_how_many_panes_it_hides_and_how_to_restore_them() {
         super::pane_zoom_badge(&es, 2, Some("Ctrl+Shift+X")),
         "⤢ Ampliado · 2 paneles ocultos · Ctrl+Shift+X restaura  "
     );
+}
+
+/// The SSH launcher's name editor carries its target, starts from the host
+/// part, and is never swept as stale: it names no pane or tab, so a pane
+/// exiting cannot close it.
+#[test]
+fn the_ssh_host_name_editor_survives_the_stale_edit_sweep() {
+    let mut editing = super::begin_ssh_host_name_edit("me@db.example.com:2222");
+    let state = editing.as_ref().expect("a valid target opens the editor");
+    assert_eq!(state.scope, TitleEditScope::SaveSshHost);
+    assert_eq!(
+        state.target,
+        super::TitleEditTarget::SshHost("me@db.example.com:2222".into())
+    );
+    assert_eq!(state.input.text(), "db.example.com");
+    // A window whose pane has exited, as the redraw and the scheduler sweep
+    // it: a pane-title edit goes, the SSH host editor stays.
+    let (mut mux, panes) = title_test_tab_mux(1);
+    let mut pane_edit =
+        begin_title_edit(&mux, TitleEditScope::Pane, GroupBulkScope::Single, "window");
+    mux.panes.remove(&panes[0]);
+    assert!(clear_stale_title_edit(&mux, &mut pane_edit));
+    assert!(pane_edit.is_none());
+    for _ in 0..2 {
+        assert!(!clear_stale_title_edit(&mux, &mut editing));
+        assert!(!clear_stale_title_edit(&Mux::new(), &mut editing));
+    }
+    assert_eq!(
+        editing.map(|state| state.target),
+        Some(super::TitleEditTarget::SshHost("me@db.example.com:2222".into()))
+    );
+    // It opens only through the launcher, which has the target.
+    assert!(
+        begin_title_edit(
+            &Mux::new(),
+            TitleEditScope::SaveSshHost,
+            GroupBulkScope::Single,
+            ""
+        )
+        .is_none()
+    );
+    assert!(super::begin_ssh_host_name_edit("-oProxyCommand=x").is_none());
+    // Control clients see the scope by name.
+    assert!(production_source().contains("TitleEditScope::SaveSshHost => \"save_ssh_host\","));
+}
+
+#[test]
+fn the_ssh_host_name_starts_from_the_host_part_of_the_target() {
+    for (target, name) in [
+        ("box", "box"),
+        ("me@db.example.com:2222", "db.example.com"),
+        ("ssh://me@db.example.com:22/", "db.example.com"),
+        ("SSH://db", "db"),
+        ("me@[2001:db8::1]:22", "2001:db8::1"),
+        ("fe80::1", "fe80::1"),
+        ("a@b@host", "host"),
+        ("me@ho=st", ""),
+    ] {
+        assert_eq!(super::ssh_host_name_prefill(target), name, "{target}");
+    }
 }

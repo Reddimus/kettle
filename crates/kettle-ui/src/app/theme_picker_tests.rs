@@ -410,7 +410,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
-            .map(|i| (format!("host-{i}"), format!("ssh host-{i}")))
+            .map(|i| (format!("host-{i}"), format!("me@host-{i}")))
             .collect(),
         ..Default::default()
     };
@@ -449,6 +449,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped - 0.25);
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Press
@@ -464,6 +465,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
             ws.cursor.y = f64::from(y);
             assert!(!apply_picker_pointer(
                 &mut ws,
+                &cfg,
                 &menu,
                 cell.1,
                 PickerPointer::Hover
@@ -472,6 +474,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         }
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Wheel(3)
@@ -480,6 +483,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         assert_eq!(menu.scroll_offset, 3, "picker {kind}: wheel down");
         assert!(apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Wheel(-100)
@@ -489,6 +493,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
         ws.cursor.x = f64::from(menu.anchor.0 - 1.0);
         assert!(!apply_picker_pointer(
             &mut ws,
+            &cfg,
             &menu,
             cell.1,
             PickerPointer::Press
@@ -559,8 +564,8 @@ fn picker_result_presses_select_the_visible_row() {
     use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: vec![
-            ("alpha".into(), "ssh alpha".into()),
-            ("beta".into(), "ssh beta".into()),
+            ("alpha".into(), "me@alpha".into()),
+            ("beta".into(), "me@beta".into()),
         ],
         ..Default::default()
     };
@@ -593,7 +598,7 @@ fn picker_result_presses_select_the_visible_row() {
         ws.cursor.x = f64::from(menu.anchor.0 + 10.0);
         ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * 1.5);
         assert!(
-            apply_picker_pointer(&mut ws, &menu, 16.0, PickerPointer::Press),
+            apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Press),
             "picker result rows must accept primary presses"
         );
         assert_eq!(
@@ -898,8 +903,8 @@ fn rows_other_than_themes_carry_no_swatches() {
         ),
         super::layout_picker_list("", 0, &layouts, &EN),
         super::layout_picker_list("zzqqxxjj", 0, &layouts, &EN),
-        super::ssh_picker_list("", 0, &hosts, &EN),
-        super::ssh_picker_list("", 0, &[], &EN),
+        super::ssh_picker_list("", 0, &hosts, &[], &EN),
+        super::ssh_picker_list("", 0, &[], &[], &EN),
         theme_picker_list("zzqqxxjj", 0, "TokyoNight Night", &EN),
     ];
     for list in lists {
@@ -1976,4 +1981,235 @@ fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
         .and_then(|body| body.split("\n    }\n").next())
         .unwrap();
     assert!(switch.contains("self.sync_theme_preview(ws);"));
+}
+
+/// What a step does to the window's theme: `set_runtime_theme_state`.
+fn wear(cfg: &mut kettle_config::Config, (name, theme): (String, Theme)) {
+    cfg.theme_name = name;
+    cfg.theme = theme;
+}
+
+/// `sync_theme_preview`, which runs after every window event.
+fn sync_preview(ws: &mut WindowState, cfg: &mut kettle_config::Config) {
+    if let Some(next) = theme_preview_change(ws, cfg, &EN) {
+        wear(cfg, next);
+    }
+}
+
+/// Read the `--config` file as the config watcher's reload does, and put on
+/// the side the window wears: the mode's for the system's side `system`, or
+/// with a schedule, the side `active_dark` it calls for
+/// (`poll_theme_schedule`'s first decision after a reload).
+fn load_worn(
+    path: &std::path::Path,
+    system: Option<bool>,
+    active_dark: Option<bool>,
+) -> kettle_config::Config {
+    use kettle_config::ThemeMode;
+    let mut cfg = super::read_config_for_reload(path, kettle_config::ConfigTrust::ExplicitPath)
+        .unwrap()
+        .unwrap()
+        .config;
+    cfg.resolve_theme_mode(system);
+    if cfg.theme_schedule.is_some() {
+        let mode = if active_dark == Some(true) {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        if let Some(next) = kettle_config::resolve_theme_for_mode(
+            mode,
+            &cfg.theme_name,
+            &cfg.light_theme,
+            &cfg.dark_theme,
+            None,
+        ) {
+            let theme = cfg.theme_by_name(&next);
+            wear(&mut cfg, (next, theme));
+        }
+    }
+    cfg
+}
+
+/// The panel's C07 on Linux (r15, GNOME on Wayland, a private session): a
+/// `--config` file with no `theme` or `theme-mode` line follows the system,
+/// and GNOME's `color-scheme = default` reaches Kettle as the portal's 0, no
+/// preference, which wears the dark side. The picker opens on TokyoNight
+/// Night, ↓↓ previews Ayu Mirage, and Enter saves `dark-theme = Ayu Mirage`
+/// and keeps it on, as does the reload the save starts. A fixed theme, a
+/// forced side, a schedule against the system and the other side (Tab)
+/// take the same steps through the saved file and its reload: Enter saves
+/// only the edited side's key, and the window wears the pick only when that
+/// side is the one it wears. A system that reports no appearance (winit on
+/// Windows can) wears the dark side the same way.
+#[test]
+fn enter_keeps_the_pick_through_the_save_and_its_reload() {
+    let linux_default = Some(crate::appearance::portal_dark(Some(0)));
+    assert_eq!(
+        linux_default,
+        Some(true),
+        "no preference wears the dark side"
+    );
+    let panel = "command = /tmp/panel-fixture/bin/fixture-shell\n\
+                 window-title-format = {title}\nrecord = false\n";
+    let schedule = "theme-schedule = 19:00 dark, 07:00 light\n";
+    // (extra config, the side the schedule calls for, Tab first, key, worn)
+    let cases = [
+        ("", None, false, "dark-theme", true),
+        ("", None, true, "light-theme", false),
+        ("theme = TokyoNight Night\n", None, false, "theme", true),
+        ("theme-mode = dark\n", None, false, "dark-theme", true),
+        ("theme-mode = light\n", None, true, "dark-theme", false),
+        (schedule, Some(false), false, "light-theme", true),
+        (schedule, Some(false), true, "dark-theme", false),
+    ];
+    for system in [linux_default, None] {
+        for (extra, scheduled, tab, key, wears_pick) in cases {
+            enter_keeps_the_pick_case(system, panel, extra, scheduled, tab, key, wears_pick);
+        }
+    }
+    // The steps above are the App's: Enter saves to the file the reload
+    // reads, and the reload wears the side that file names for the system,
+    // never a theme from before it.
+    let src = production_source();
+    let body = |name: &str| {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap_or_else(|| panic!("{name}"))
+            .to_string()
+    };
+    let squash = |text: &str| {
+        text.split_whitespace()
+            .collect::<String>()
+            .replace("kettle_config::", "")
+    };
+    for name in ["persist_pref", "load_reloaded_config"] {
+        assert!(
+            squash(&body(name)).contains("self.config_path.clone().or_else(Config::default_path)"),
+            "{name} resolves another config file"
+        );
+    }
+    let reload = body("load_reloaded_config");
+    let resolve = reload
+        .find("new.resolve_theme_mode(self.os_theme_dark);")
+        .expect("the reload wears the saved side");
+    assert!(resolve < reload.find("self.cfg = new;").unwrap());
+    for stale in [
+        "new.theme =",
+        "new.theme_name =",
+        "new.dark_theme =",
+        "new.light_theme =",
+    ] {
+        assert!(
+            !reload.contains(stale),
+            "the reload keeps a theme from before it: {stale}"
+        );
+    }
+}
+
+/// One case of `enter_keeps_the_pick_through_the_save_and_its_reload`: open,
+/// Tab when `tab`, ↓↓, Enter, then the save and its reload.
+fn enter_keeps_the_pick_case(
+    system: Option<bool>,
+    panel: &str,
+    extra: &str,
+    scheduled: Option<bool>,
+    tab: bool,
+    key: &str,
+    wears_pick: bool,
+) {
+    let defaults = kettle_config::Config::default();
+    let case = format!("{system:?} {extra:?} tab={tab}");
+    let active_dark = scheduled.or(system);
+    let dir = crate::test_tempdir();
+    let path = dir.path().join("term.cfg");
+    std::fs::write(&path, format!("{panel}{extra}")).unwrap();
+    let mut cfg = load_worn(&path, system, active_dark);
+    assert_eq!(cfg.theme_schedule.is_some(), scheduled.is_some(), "{case}");
+    let before = cfg.theme_name.clone();
+    let mut ws = WindowState::new(0, Mux::new());
+    // `open_theme_picker`.
+    assert!(begin_theme_picker(&mut ws, (cfg.theme_name.clone(), cfg.theme.clone())).is_none());
+    let active = super::theme_pick_key(&cfg, active_dark);
+    if tab {
+        // `theme_picker_key`'s Tab arm, then `switch_theme_slot`.
+        let state = ws.theme_picker_input.as_mut().unwrap();
+        let save = super::theme_picker_save_key(Some(state), active);
+        let super::ThemePickerTab::Side(slot) = super::theme_picker_tab(save, false) else {
+            panic!("{case}: the picker has no sides");
+        };
+        assert!(
+            super::switch_theme_picker_slot(state, &cfg, active, slot, &EN),
+            "{case}"
+        );
+        sync_preview(&mut ws, &mut cfg);
+    }
+    for _ in 0..2 {
+        let state = ws.theme_picker_input.as_mut().unwrap();
+        let rows = theme_picker_matches(&state.query, &state.opened_on, &EN).len();
+        state.selected = (state.selected + 1) % rows;
+        sync_preview(&mut ws, &mut cfg);
+    }
+    let pick = cfg.theme_name.clone();
+    assert_ne!(pick, before, "{case}: the arrows preview another theme");
+    // `theme_picker_key`'s Enter arm, then `commit_theme`.
+    let state = ws.theme_picker_input.take().unwrap();
+    assert_eq!(
+        theme_picker_selection(&state, &EN),
+        Some(pick.as_str()),
+        "{case}"
+    );
+    let plan = super::theme_commit_plan(&state, &cfg, active_dark);
+    assert_eq!(
+        (plan.key, plan.restore_active),
+        (key, !wears_pick),
+        "{case}"
+    );
+    match plan.key {
+        "light-theme" => cfg.light_theme = pick.clone(),
+        "dark-theme" => cfg.dark_theme = pick.clone(),
+        _ => {}
+    }
+    if plan.restore_active {
+        sync_preview(&mut ws, &mut cfg);
+    } else {
+        ws.theme_preview = None;
+        let theme = cfg.theme_by_name(&pick);
+        wear(&mut cfg, (pick.clone(), theme));
+    }
+    kettle_config::persist_config_toggle(&path, plan.key, &pick).unwrap();
+    // `window_event`'s sync after the key.
+    sync_preview(&mut ws, &mut cfg);
+    let worn = if wears_pick { &pick } else { &before };
+    assert_eq!(&cfg.theme_name, worn, "{case}: after Enter");
+    // The save wakes the config watcher; its reload syncs the preview too.
+    cfg = load_worn(&path, system, active_dark);
+    sync_preview(&mut ws, &mut cfg);
+    assert_eq!(&cfg.theme_name, worn, "{case}: after the reload");
+    assert_eq!(
+        cfg.theme.background,
+        Theme::by_name(worn).background,
+        "{case}"
+    );
+    let (dark, light) = match key {
+        "dark-theme" => (pick.as_str(), defaults.light_theme.as_str()),
+        "light-theme" => (defaults.dark_theme.as_str(), pick.as_str()),
+        _ => (defaults.dark_theme.as_str(), defaults.light_theme.as_str()),
+    };
+    assert_eq!(
+        (cfg.dark_theme.as_str(), cfg.light_theme.as_str()),
+        (dark, light),
+        "{case}: only the edited side's key is saved"
+    );
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains(&format!("{key} = {pick}\n")), "{case}");
+    if extra.is_empty() && !tab {
+        // r15's C07-theme-applied.png wears background #1f2430.
+        assert_eq!(pick, "Ayu Mirage");
+        assert_eq!(
+            cfg.theme.background,
+            kettle_config::Rgb::parse("#1f2430").unwrap()
+        );
+    }
 }

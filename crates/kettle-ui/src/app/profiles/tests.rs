@@ -467,6 +467,7 @@ fn pending_palette_header_does_not_shift_ranked_keyboard_or_pointer_actions() {
                     ws.cursor.y = (row.1 + 1.0) as f64;
                     assert!(apply_picker_pointer(
                         &mut ws,
+                        &cfg,
                         &menu,
                         16.0,
                         PickerPointer::Press
@@ -798,6 +799,7 @@ fn pending_palette_status_survives_long_queries_narrow_widths_and_result_scroll(
                     assert!(!dispatch_modal_press(&mut ws, ModalKind::Palette, true, 1));
                     assert!(!apply_picker_pointer(
                         &mut ws,
+                        &cfg,
                         &menu,
                         cell.1,
                         PickerPointer::Press
@@ -832,6 +834,7 @@ fn pending_palette_status_survives_long_queries_narrow_widths_and_result_scroll(
                         ws.cursor.y = (row.1 + 1.0) as f64;
                         assert!(apply_picker_pointer(
                             &mut ws,
+                            &cfg,
                             &menu,
                             cell.1,
                             PickerPointer::Press

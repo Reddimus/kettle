@@ -292,10 +292,7 @@ impl App {
                 }
                 if Some(pane_id) == focused && !alt && !state.text.is_empty() {
                     let id = accessibility_output_id(pane_id, state.serial);
-                    let mut announcement = Node::new(Role::Label);
-                    // A label's text is its value on AT-SPI; macOS reads the label.
-                    announcement.set_label(state.text.clone());
-                    announcement.set_value(state.text.clone());
+                    let mut announcement = static_text_node(state.text.clone());
                     announcement.set_live(accesskit::Live::Polite);
                     announcement.set_bounds(accesskit::Rect::new(
                         f64::from(text_rect.0),
@@ -310,22 +307,32 @@ impl App {
                 drop(term);
                 let id = accessibility_scrollbar_id(pane_id);
                 pane_children.push(id);
-                let bar_width = (self.cfg.scrollbar_width * scale).max(1.0);
+                // The bar as it is painted: its full-height channel, and
+                // the ticks across it.
+                let bar = pane_scrollbar(
+                    &self.cfg,
+                    ws,
+                    pane_id,
+                    partition.terminal,
+                    scale,
+                    (screen, history, offset),
+                );
                 nodes.push((
                     id,
                     scrollback_bar_accessibility_node(
                         history,
                         offset,
                         screen,
-                        (x + width - bar_width, y, bar_width, height),
+                        bar.track_rect,
                         &self.ui_text,
                     ),
                 ));
+                let column = (bar.track_rect.0, bar.track_rect.2);
                 for mark in pane.term.command_marks() {
                     if let Some(rect) = kettle_core::scrollbar::command_tick_rect(
                         partition.terminal,
+                        column,
                         scale,
-                        self.cfg.scrollbar_width,
                         origin,
                         total,
                         mark,
@@ -747,6 +754,13 @@ impl App {
             children.extend(projected.iter().map(|(id, _)| *id));
             nodes.extend(projected);
         }
+        // A program's notification: a polite status, announced on every
+        // platform through AccessKit, with its Show and Dismiss buttons.
+        if let Some(view) = self.notification_toast_projection(ws) {
+            let projected = notification_toast_nodes(&view, &self.ui_text);
+            children.extend(projected.iter().map(|(id, _)| *id));
+            nodes.extend(projected);
+        }
         let surface = ws
             .window
             .as_ref()
@@ -806,6 +820,9 @@ impl App {
             .or(self
                 .update_toast_focus
                 .filter(|_| overlay.update_toast.is_some()))
+            .or(ws
+                .notification_toast_focus
+                .filter(|target| nodes.iter().any(|(id, _)| id == target)))
             .unwrap_or_else(|| {
                 if ws.search.open {
                     accessibility_search_control_id(ws.search.focused_control)
@@ -846,6 +863,9 @@ impl App {
             .hash(&mut hasher);
         ws.card_focus.hash(&mut hasher);
         ws.tab_focus.hash(&mut hasher);
+        // Hovering or dragging a scrollbar widens it, and its node with it.
+        ws.scrollbar_hover.hash(&mut hasher);
+        ws.scrollbar_drag_offset.is_some().hash(&mut hasher);
         for (instance, card, item) in self.accessible_cards(ws) {
             instance.hash(&mut hasher);
             card.rect.map(f32::to_bits).hash(&mut hasher);
@@ -1056,6 +1076,18 @@ impl App {
                 }
             }
         }
+        if let Some(view) = self.notification_toast_projection(ws) {
+            view.label.hash(&mut hasher);
+            view.description.hash(&mut hasher);
+            view.show.hash(&mut hasher);
+            let geometry = view.overlay.control_geometry();
+            for rect in [geometry.rect, geometry.details, geometry.close] {
+                for value in [rect.0, rect.1, rect.2, rect.3] {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        ws.notification_toast_focus.hash(&mut hasher);
         overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
@@ -1334,6 +1366,8 @@ impl App {
                     self.activate_window_control(ws, control.action, event_loop);
                 } else if let Some(action) = tab_button_action(request.target_node) {
                     self.handle_action(ws, action, event_loop);
+                } else if request.target_node == ACCESSIBILITY_HEADER_FIND_ID {
+                    self.toggle_header_find(ws);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -1437,6 +1471,10 @@ impl App {
             }
             return;
         }
+        if self.notification_toast_action(ws, &request) {
+            return;
+        }
+        ws.notification_toast_focus = None;
         if matches!(
             request.target_node,
             ACCESSIBILITY_UPDATE_DETAILS_ID | ACCESSIBILITY_UPDATE_DISMISS_ID
@@ -1768,6 +1806,18 @@ pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
     status.set_label(label.to_owned());
     status.set_live(accesskit::Live::Polite);
     (ACCESSIBILITY_FONT_SIZE_ID, status)
+}
+
+/// A line of static text that every screen reader reads as `text`. AccessKit
+/// names a `Role::Label` from its value on AT-SPI and UI Automation, and macOS
+/// shows its label as the text's value, so it carries both: with the label
+/// alone, Orca and Narrator hear an empty name.
+pub(super) fn static_text_node(text: impl Into<String>) -> Node {
+    let text = text.into();
+    let mut node = Node::new(Role::Label);
+    node.set_label(text.clone());
+    node.set_value(text);
+    node
 }
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
@@ -2260,9 +2310,12 @@ const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
 ];
 /// The radio group that holds the two sides, below them.
 const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
-/// The footer's Contrast button, below the group. It is the lowest footer
-/// index, so the rows below it never reach the footer's nodes.
+/// The footer's Contrast button, below the group.
 pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
+/// The SSH launcher's polite status line, after a save, a removal or a failed
+/// write. It is the lowest of these fixed indices, so the rows below it never
+/// reach them.
+pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
 /// Whether `node` is the theme picker's Contrast button.
 pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
@@ -2335,8 +2388,11 @@ fn push_picker_accessibility(
             if !row.enabled {
                 option.set_disabled();
             }
-            option.set_selected(index == menu.highlight);
-            if index == menu.highlight {
+            // A disabled placeholder is never the selected option: Enter does
+            // not act on it, so announcing it as selected would mislead.
+            let is_selected = index == menu.highlight && row.enabled;
+            option.set_selected(is_selected);
+            if is_selected {
                 selected = Some(id);
             }
             list_children.push(id);
@@ -2358,8 +2414,7 @@ fn push_picker_accessibility(
         && let Some(footer) = menu.picker_footer.as_ref()
     {
         let footer_id = accessibility_modal_id(kind, PICKER_FOOTER_A11Y_INDEX);
-        let mut text = Node::new(Role::Label);
-        text.set_label(kettle_render::theme_footer_description(footer, tr));
+        let mut text = static_text_node(kettle_render::theme_footer_description(footer, tr));
         let (x, y, w, h) = menu.rows_rect();
         text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
         projection.nodes.push((footer_id, text));
@@ -2474,6 +2529,39 @@ pub(super) fn modal_accessibility_projection_for_window(
     node.set_live(accesskit::Live::Polite);
     projection.nodes.push((status_id, node));
     projection
+}
+
+/// The SSH launcher's status line, announced politely as search announces
+/// its count, over the hint lane that paints it (the field when a narrow
+/// header leaves the lane empty). A child of the launcher's dialog.
+fn push_ssh_status_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    overlay: &Overlay,
+    metrics: (f32, f32),
+) {
+    let Some(status) = overlay.ssh_status.as_deref() else {
+        return;
+    };
+    let status_id = accessibility_modal_id(MODAL_KIND_SSH, PICKER_STATUS_A11Y_INDEX);
+    let mut node = Node::new(Role::Status);
+    node.set_label(status);
+    node.set_live(accesskit::Live::Polite);
+    if let Some(field) = overlay.text_field.as_ref() {
+        let cw = kettle_render::text_field_cell_width(field, metrics.0, metrics.1);
+        let lane = kettle_render::text_field_rects(field, cw)[2];
+        let (x, y, w, h) = if lane.2 > 0.0 { lane } else { field.rect };
+        node.set_bounds(accesskit::Rect::new(
+            x as f64,
+            y as f64,
+            (x + w) as f64,
+            (y + h) as f64,
+        ));
+    }
+    projection.nodes.push((status_id, node));
+    let dialog_id = accessibility_modal_id(MODAL_KIND_SSH, 0);
+    if let Some((_, dialog)) = projection.nodes.iter_mut().find(|(id, _)| *id == dialog_id) {
+        dialog.push_child(status_id);
+    }
 }
 
 pub(super) fn modal_accessibility_projection(
@@ -2783,8 +2871,7 @@ pub(super) fn modal_accessibility_projection(
             list.set_children(children.clone());
         } else if settings.rows.is_empty() {
             let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
-            let mut empty = Node::new(Role::Label);
-            empty.set_label(tr.text(kettle_i18n::Text::SettingsNoMatches));
+            let mut empty = static_text_node(tr.text(kettle_i18n::Text::SettingsNoMatches));
             empty.set_bounds(bounds(layout.empty_rect));
             projection.nodes.push((id, empty));
             list.set_children([id]);
@@ -2852,6 +2939,7 @@ pub(super) fn modal_accessibility_projection(
             full_bounds,
             tr,
         );
+        push_ssh_status_accessibility(&mut projection, overlay, metrics);
     }
 
     if let Some(edit) = overlay.edit_title.as_ref() {
@@ -3494,6 +3582,8 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
     )
 }
 
+/// The GNOME header's Find button, beside its window buttons' ids.
+pub(super) const ACCESSIBILITY_HEADER_FIND_ID: NodeId = NodeId((1 << 51) | 3);
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
@@ -3580,10 +3670,10 @@ pub(super) fn tab_accessibility_projection(
             bar.new_tab_menu,
             // In a Kettle-drawn GNOME header bar the menu is the window's
             // primary menu, drawn as one.
-            tr.text(if bar.window_controls.is_empty() {
-                kettle_i18n::Text::A11yNewTabMenu
-            } else {
+            tr.text(if bar.linux_header {
                 kettle_i18n::Text::A11yMainMenu
+            } else {
+                kettle_i18n::Text::A11yNewTabMenu
             }),
         ),
         (
@@ -3600,6 +3690,16 @@ pub(super) fn tab_accessibility_projection(
             nodes.push((id, button));
             children.push(id);
         }
+    }
+    // GNOME's Find button: a toggle, pressed while Find is open.
+    if bar.search.2 > 0.0 && bar.search.3 > 0.0 {
+        let mut button = Node::new(Role::Button);
+        button.set_label(tr.text(kettle_i18n::Text::A11yHeaderFind));
+        button.add_action(AccessibilityAction::Click);
+        button.set_bounds(accessibility_rect(bar.search));
+        button.set_toggled(accesskit::Toggled::from(bar.search_open));
+        nodes.push((ACCESSIBILITY_HEADER_FIND_ID, button));
+        children.push(ACCESSIBILITY_HEADER_FIND_ID);
     }
     for control in &bar.window_controls {
         let id = window_control_accessibility_id(control.action);

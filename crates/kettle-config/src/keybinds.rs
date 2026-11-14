@@ -531,6 +531,10 @@ pub enum Action {
     ScrollToBottom,
     JumpPrevPrompt,
     JumpNextPrompt,
+    /// Select the output of one completed shell command, as whole lines: the
+    /// command whose output holds the right-clicked row, or else the newest
+    /// one. Needs OSC 133 C and D marks; no default chord on any platform.
+    SelectCommandOutput,
     /// Toggle vi-mode for the focused pane's scrollback (Alacritty
     /// parity). When on, kettle intercepts keyboard input for
     /// vi-style navigation (h/j/k/l + 0/$ + g/G + visual + yank).
@@ -926,6 +930,7 @@ pub fn action_names() -> Vec<&'static str> {
         "prev_prompt",
         "jump_to_prompt_next",
         "next_prompt",
+        "select_command_output",
         "new_ssh",
         "ssh",
         "toggle_vi_mode",
@@ -1290,6 +1295,7 @@ impl Action {
             "scroll_to_bottom" => ScrollToBottom,
             "jump_to_prompt_prev" | "prev_prompt" => JumpPrevPrompt,
             "jump_to_prompt_next" | "next_prompt" => JumpNextPrompt,
+            "select_command_output" => SelectCommandOutput,
             "toggle_vi_mode" | "vi_mode" | "vi" | "scrollback_vi" => ToggleViMode,
             // Terminator-parity actions. Names match
             // terminatorlib/terminal.py:key_<name> + the kebab-case
@@ -2680,6 +2686,45 @@ mod tests {
             !defaults()
                 .values()
                 .any(|action| *action == Action::ToggleBroadcastPanesInTab)
+        );
+    }
+
+    /// `select_command_output` survives a round trip through the config in
+    /// either spelling: the line Settings saves binds it again on reading,
+    /// and `--list-actions` lists it. No platform binds it by default, so
+    /// programs keep every chord; none of the default builder's platform
+    /// branches names it.
+    #[test]
+    fn select_command_output_round_trips_through_config_without_a_default_chord() {
+        let trigger = parse_trigger("ctrl+alt+o").unwrap();
+        for name in ["select_command_output", "select-command-output"] {
+            let saved = crate::with_keybinds("", &[("ctrl+alt+o", name)]).unwrap();
+            let cfg = crate::Config::parse_text(&saved);
+            assert_eq!(
+                cfg.keybinds.get(&trigger),
+                Some(&Action::SelectCommandOutput),
+                "{saved}"
+            );
+        }
+        assert!(action_names().contains(&"select_command_output"));
+        assert!(
+            !defaults()
+                .values()
+                .any(|action| *action == Action::SelectCommandOutput)
+        );
+        let src = production_source();
+        let builder = src
+            .split("pub fn defaults_audit()")
+            .nth(1)
+            .expect("default builder");
+        let builder = &builder[..builder.find("\n}\n").expect("default builder end")];
+        assert!(
+            builder.contains("JumpPrevPrompt"),
+            "sliced the wrong builder"
+        );
+        assert!(
+            !builder.contains("SelectCommandOutput"),
+            "a platform binds select_command_output by default"
         );
     }
 

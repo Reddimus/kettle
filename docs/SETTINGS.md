@@ -115,7 +115,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Scrollbar | `scrollbar` | Hidden · Automatic · Always |
 | Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
-| Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention |
+| Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention. Visual also marks the active tab while a bell in the pane you are looking at is unanswered |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
 | Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |
@@ -226,9 +226,10 @@ these config-only options; edits still reload immediately for every open pane.
 The theme picker lists every bundled theme. Type part of a name to filter them,
 or move with ↑/↓; the window wears the selected theme while you browse. Enter
 keeps it and writes it to your config file, and Esc puts back the theme you
-started with. The prompt names the side a pick saves to: **light theme:** or
-**dark theme:**. Following the system saves a pick to the active side and
-keeps following. Forced Light/Dark modes also update their own side; Fixed
+started with, or, if the system or the schedule switched sides while the
+picker was open, that side's theme. The prompt names the side a pick saves
+to: **light theme:** or **dark theme:**. Following the system saves a pick
+to the active side and keeps following. Forced Light/Dark modes also update their own side; Fixed
 theme writes `theme`, and there Tab and Shift+Tab move down and up a row. With
 `theme-schedule` set, the schedule picks the side, so a pick saves to the side
 it wears now, whatever the mode. To change the other side's theme, press Tab

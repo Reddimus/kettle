@@ -35,18 +35,38 @@ pub struct HorizontalTabContent {
     pub hint: Option<Rect4>,
 }
 
-/// Room an activity marker takes before a tab's title: an
-/// `ACTIVITY_MARKER`-sized box and a gap, in device pixels at `scale`.
-pub fn activity_lane(scale: f32) -> f32 {
-    (12.0 * scale).round()
+/// Room a `kind` marker takes before a tab's title: its box and a gap, in
+/// device pixels at `scale`; nothing for a tab without one. The bell's box
+/// is wider than the disc's and the ring's, so its lane is too.
+pub fn activity_lane(kind: crate::TabActivity, scale: f32) -> f32 {
+    use crate::TabActivity;
+    match kind {
+        TabActivity::Normal => 0.0,
+        TabActivity::Bell => (15.0 * scale).round(),
+        TabActivity::Output | TabActivity::Silent => (12.0 * scale).round(),
+    }
 }
 
-/// Side of the square box an activity marker is drawn in, at 1x.
+/// Side of the square box the disc and the ring are drawn in, at 1x.
 const ACTIVITY_MARKER: f32 = 8.0;
 
+/// Side of the bell's box at 1x, about the tab title's cap height: an 8 px
+/// box is too small for a bell to read as one.
+const BELL_MARKER: f32 = 11.0;
+
+/// Side of a `kind` marker's box in device pixels at `scale`.
+fn marker_side(kind: crate::TabActivity, scale: f32) -> f32 {
+    let side = if kind == crate::TabActivity::Bell {
+        BELL_MARKER
+    } else {
+        ACTIVITY_MARKER
+    };
+    (side * scale).round().max(1.0)
+}
+
 /// Hidden controls reserve no hint or close space; title and activity take
-/// priority. `activity_lane` is [`activity_lane`] for a tab with a marker
-/// and `0.0` for one without.
+/// priority. `activity_lane` is [`activity_lane`] for the tab's marker, which
+/// is `0.0` for a tab without one.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
     show_controls: bool,
@@ -94,35 +114,153 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
-/// Where a background tab's activity marker draws: a box of
-/// `ACTIVITY_MARKER * scale` device pixels whose right edge leaves the lane's
-/// gap before the title text at `label_left`, centred on the title line.
-/// `None` when the box would not lie wholly inside the tab, so the painter
-/// never needs to work the condition out again from title geometry.
+/// Where a tab's `kind` activity marker draws: a box of [`marker_side`]
+/// device pixels whose right edge leaves the lane's gap before the title text
+/// at `label_left`, centred on the title line. `None` when the box would not
+/// lie wholly inside the tab, so the painter never needs to work the
+/// condition out again from title geometry.
 pub(crate) fn activity_marker_rect(
     segment: Rect4,
     title: Rect4,
     label_left: f32,
+    kind: crate::TabActivity,
     scale: f32,
 ) -> Option<Rect4> {
-    let size = (ACTIVITY_MARKER * scale).round().max(1.0);
-    let x = (label_left - activity_lane(scale)).round();
+    let size = marker_side(kind, scale);
+    let x = (label_left - activity_lane(kind, scale)).round();
     let y = (title.1 + title.3 * 0.5 - size * 0.5).round();
     let inside = x >= segment.0 - 0.5 && x + size <= segment.0 + segment.2 + 0.5;
     inside.then_some((x, y, size, size))
 }
 
-/// A background tab's activity marker, told apart by shape as well as
-/// colour: a filled disc for new output, a ring once the output stopped and
-/// a triangle pointing up when the bell rang. The ring's hole is filled with
-/// `tab_bg`, the flat full-height fill behind the marker, so it is exact.
+/// Coverage of a bell `side` pixels square, row by row, 0..=255: a round
+/// dome whose sides flare out to a lip wider than the dome, one empty row,
+/// and a clapper centred under the lip. Drawn rather than shaped, for the
+/// gear's reasons. The dome is supersampled 4x4; the lip, the gap and the
+/// clapper are whole device rows and the clapper whole columns, so at 1x
+/// (11 px) the gap stays empty and the clapper solid instead of blurring
+/// into the lip below the marker's contrast floor.
+pub(crate) fn bell_mask(side: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let s = side as f32;
+    let unit = s / BELL_MARKER;
+    let clapper_h = ((1.5 * unit).round() as u32).max(1);
+    let gap = (unit.floor() as u32).max(1);
+    let lip_h = (unit.round() as u32).max(1);
+    let body_h = side.saturating_sub(clapper_h + gap + lip_h);
+    // The clapper keeps the box's parity, so it is centred on whole pixels.
+    let mut clapper_w = ((2.0 * unit).round() as u32).clamp(1, side);
+    if (side - clapper_w) % 2 == 1 {
+        clapper_w += 1;
+    }
+    let clapper_left = (side - clapper_w) / 2;
+    let centre = s * 0.5;
+    // From 2x the clapper's foot is round; below that it stays whole pixels.
+    let clapper_radius = clapper_w as f32 * 0.5;
+    let foot = (side >= 20).then_some(s - clapper_radius);
+    let in_clapper = |x: f32, y: f32| {
+        (x - centre).abs() <= clapper_radius
+            && foot.is_none_or(|foot| y <= foot || (x - centre).hypot(y - foot) <= clapper_radius)
+    };
+    let (dome, flare, body) = (0.3 * s, 0.45 * s, body_h as f32);
+    let half_width = |y: f32| {
+        if y <= dome {
+            (dome * dome - (dome - y) * (dome - y)).max(0.0).sqrt()
+        } else {
+            let t = ((y - dome) / (body - dome).max(1e-3)).clamp(0.0, 1.0);
+            dome + (flare - dome) * t * t
+        }
+    };
+    let coverage = |px: u32, py: u32, inside: &dyn Fn(f32, f32) -> bool| {
+        let mut hits = 0;
+        for sy in 0..SAMPLES {
+            for sx in 0..SAMPLES {
+                let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                hits += u32::from(inside(x, y));
+            }
+        }
+        (hits * 255 / (SAMPLES * SAMPLES)) as u8
+    };
+    let mut mask = Vec::with_capacity((side * side) as usize);
+    for py in 0..side {
+        for px in 0..side {
+            mask.push(if py < body_h {
+                coverage(px, py, &|x, y| (x - centre).abs() <= half_width(y))
+            } else if py < body_h + lip_h {
+                255
+            } else if py < body_h + lip_h + gap
+                || !(clapper_left..clapper_left + clapper_w).contains(&px)
+            {
+                0
+            } else {
+                coverage(px, py, &in_clapper)
+            });
+        }
+    }
+    mask
+}
+
+/// A bell's coverage for one side length, kept between frames.
+#[derive(Default)]
+pub(crate) struct BellMask {
+    side: u32,
+    mask: Vec<u8>,
+}
+
+impl BellMask {
+    fn get(&mut self, side: u32) -> &[u8] {
+        if self.side != side || self.mask.is_empty() {
+            self.mask = bell_mask(side);
+            self.side = side;
+        }
+        &self.mask
+    }
+}
+
+/// `mask`, `side` pixels square, in `ink` with its top-left at `(left,
+/// top)`, as one quad per run of equal coverage.
+fn push_coverage(
+    quads: &mut Vec<QuadInstance>,
+    (left, top): (f32, f32),
+    side: u32,
+    mask: &[u8],
+    ink: Rgb,
+) {
+    for (row, line) in mask.chunks(side.max(1) as usize).enumerate() {
+        let mut start = 0;
+        while start < line.len() {
+            let coverage = line[start];
+            let mut end = start + 1;
+            while end < line.len() && line[end] == coverage {
+                end += 1;
+            }
+            if coverage > 0 {
+                quads.push(rect(
+                    left + start as f32,
+                    top + row as f32,
+                    (end - start) as f32,
+                    1.0,
+                    ink,
+                    f32::from(coverage) / 255.0,
+                ));
+            }
+            start = end;
+        }
+    }
+}
+
+/// A tab's activity marker, told apart by shape as well as colour: a filled
+/// disc for new output, a ring once the output stopped and a bell when the
+/// bell rang. The ring's hole is filled with `tab_bg`, the flat full-height
+/// fill behind the marker, so it is exact.
 pub(crate) fn activity_marker_quads(
     quads: &mut Vec<QuadInstance>,
     kind: crate::TabActivity,
     marker: Rect4,
     scale: f32,
-    ink: Rgb,
-    tab_bg: Rgb,
+    (ink, tab_bg): (Rgb, Rgb),
+    bell: &mut BellMask,
 ) {
     use crate::TabActivity;
     let (x, y, w, h) = marker;
@@ -141,29 +279,24 @@ pub(crate) fn activity_marker_quads(
             rounded_fill(quads, hole, hole.2 * 0.5, (true, true), (tab_bg, 1.0), None);
         }
         TabActivity::Bell => {
-            // One quad per device-pixel row, widening downward. Whole-pixel
-            // insets on both sides keep every row centred on the box.
-            let rows = h.round().max(1.0) as usize;
-            for i in 0..rows {
-                let raw = w * (i + 1) as f32 / rows as f32;
-                let inset = ((w - raw) * 0.5).floor().max(0.0);
-                quads.push(rect(
-                    x + inset,
-                    y + i as f32,
-                    w - inset * 2.0,
-                    1.0,
-                    ink,
-                    1.0,
-                ));
-            }
+            let side = w.min(h).round().max(1.0) as u32;
+            push_coverage(quads, (x.round(), y.round()), side, bell.get(side), ink);
         }
     }
 }
 
 /// Anchor to the actual control while keeping tooltips outside the header.
+/// The GNOME header's `+` leads the strip, so its tooltip hangs under it
+/// rather than at the far end where every other strip keeps `+`.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
     if bar.hovered_settings && !bar.pressed_settings && bar.settings.2 > 0.0 {
         return (bar.settings.0, bar.band.1, bar.settings.2, bar.band.3);
+    }
+    if bar.linux_header && bar.hovered_new_tab && !bar.pressed_new_tab && bar.new_tab.2 > 0.0 {
+        return (bar.new_tab.0, bar.band.1, bar.new_tab.2, bar.band.3);
+    }
+    if bar.hovered_search && !bar.pressed_search && bar.search.2 > 0.0 {
+        return (bar.search.0, bar.band.1, bar.search.2, bar.band.3);
     }
     bar.window_controls
         .iter()
@@ -286,6 +419,72 @@ pub(crate) fn tab_title_background(
     }
 }
 
+/// Whether a horizontal tab paints as the active tab and as the hovered
+/// one. The GNOME header's lone title is neither: it sits on the header.
+pub(crate) fn tab_paint_state(bar: &TabBar, tab: &crate::TabSeg) -> (bool, bool) {
+    if bar.lone_title {
+        (false, false)
+    } else {
+        (tab.active, bar.hovered_tab_idx == Some(tab.idx))
+    }
+}
+
+/// The least contrast the GNOME header's bottom hairline keeps against the
+/// header above it and the terminal below it: the tab dividers' 1.5:1, so it
+/// reads as an edge without competing with the tabs.
+pub(crate) const HEADER_HAIRLINE_CONTRAST: f64 = 1.5;
+
+/// The hairline under the GNOME header: the foreground faintly over the
+/// header, resolved to [`HEADER_HAIRLINE_CONTRAST`] against both the header
+/// and `canvas`, the terminal's own colour. Without it a dark header and a
+/// dark terminal read as one band, and the top padding as a cramped gap.
+pub(crate) fn header_hairline(strip: Rgb, canvas: Rgb, foreground: Rgb) -> Rgb {
+    crate::color::with_min_contrast_on_both(
+        crate::color::over(strip, foreground, 0.10, false),
+        strip,
+        canvas,
+        HEADER_HAIRLINE_CONTRAST,
+        false,
+    )
+}
+
+/// The hairline's spans along the bottom of the header `band`, one device
+/// pixel per point thick: the full width, less the active tab, which joins
+/// the terminal below it. A lone title is no tab, so the line runs under it.
+pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Vec<Rect4> {
+    let (x, y, w, h) = band;
+    let thickness = scale.round().max(1.0).min(h);
+    let top = y + h - thickness;
+    let gap = bar
+        .segments
+        .iter()
+        .find(|tab| tab_paint_state(bar, tab).0)
+        .map(|tab| (tab.rect.0.max(x), (tab.rect.0 + tab.rect.2).min(x + w)))
+        .filter(|(start, end)| end > start);
+    match gap {
+        Some((start, end)) => [(x, start), (end, x + w)]
+            .into_iter()
+            .filter(|(left, right)| right > left)
+            .map(|(left, right)| (left, top, right - left, thickness))
+            .collect(),
+        None => vec![(x, top, w, thickness)],
+    }
+}
+
+/// The fills behind the new-tab controls at rest. A plain strip's `▾` sits
+/// just left of `+`, and one fill spans the pair so no strip shows between
+/// them. The GNOME header's `+` leads the strip with `≡` at its far end, so
+/// each gets its own fill rather than a span across the tabs between them.
+pub(crate) fn new_tab_control_fills(plus: Rect4, menu: Rect4) -> Vec<Rect4> {
+    if menu.2 <= 0.0 {
+        return vec![plus];
+    }
+    if menu.0 <= plus.0 {
+        return vec![(menu.0, plus.1, plus.0 + plus.2 - menu.0, plus.3)];
+    }
+    vec![plus, menu]
+}
+
 pub(crate) struct HorizontalTabQuads {
     pub chrome: Vec<QuadInstance>,
     /// Translucent tab backgrounds, including their opaque accent line.
@@ -305,25 +504,25 @@ pub(crate) fn horizontal_tab_quads(
     scale: f32,
 ) -> HorizontalTabQuads {
     let mut quads = Vec::new();
+    let bounds = band;
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
     let hover = tab_title_background(false, true, false, background.0, chrome, theme.foreground);
     let divider = crate::chrome::tab_detail(chrome, theme.foreground, false);
     for (i, tab) in bar.segments.iter().enumerate() {
-        let hovered = bar.hovered_tab_idx == Some(tab.idx);
-        if tab.active || hovered {
+        let (active, hovered) = tab_paint_state(bar, tab);
+        if active || hovered {
             let start = quads.len();
             rounded_fill(
                 &mut quads,
                 tab.rect,
                 6.0 * scale,
                 (!bottom, bottom),
-                if tab.active { background } else { (hover, 1.0) },
-                tab.active
-                    .then_some((accent, (3.0 * scale).round(), bottom)),
+                if active { background } else { (hover, 1.0) },
+                active.then_some((accent, (3.0 * scale).round(), bottom)),
             );
-            if tab.active && background.1 < 1.0 {
+            if active && background.1 < 1.0 {
                 // Cut with the actual surface slices so the rounded corners'
                 // outside stays chrome without painting beneath the tab.
                 for quad in quads.drain(start..) {
@@ -335,11 +534,10 @@ pub(crate) fn horizontal_tab_quads(
                 }
             }
         }
-        if !tab.active
+        if !active
             && !hovered
             && let Some(next) = bar.segments.get(i + 1)
-            && !next.active
-            && bar.hovered_tab_idx != Some(next.idx)
+            && tab_paint_state(bar, next) == (false, false)
             && (tab.rect.0 + tab.rect.2 - next.rect.0).abs() < 1.0
         {
             let (x, y, w, h) = tab.rect;
@@ -354,6 +552,12 @@ pub(crate) fn horizontal_tab_quads(
         }
     }
     band.extend(quads);
+    if bar.linux_header {
+        let line = header_hairline(chrome, background.0, theme.foreground);
+        for (x, y, w, h) in header_hairline_rects(bar, bounds, scale) {
+            band.push(rect(x, y, w, h, line, 1.0));
+        }
+    }
     HorizontalTabQuads {
         chrome: band,
         surface,
@@ -443,26 +647,82 @@ pub(crate) fn push_settings_gear(
     let left = (x + (w - side) * 0.5).round();
     let top = (y + (h - side) * 0.5).round();
     let n = side as u32;
-    for (row, line) in cache.get(n).chunks(n as usize).enumerate() {
-        let mut start = 0;
-        while start < line.len() {
-            let coverage = line[start];
-            let mut end = start + 1;
-            while end < line.len() && line[end] == coverage {
-                end += 1;
-            }
-            if coverage > 0 {
-                quads.push(rect(
-                    left + start as f32,
-                    top + row as f32,
-                    (end - start) as f32,
-                    1.0,
-                    ink,
-                    f32::from(coverage) / 255.0,
-                ));
-            }
-            start = end;
-        }
+    push_coverage(quads, (left, top), n, cache.get(n), ink);
+}
+
+/// Whether the strip's menu button is the GNOME header's main menu, which
+/// is drawn as GNOME's `open-menu` icon rather than shaped as the `▾` glyph.
+/// Its tooltip and screen-reader name follow the same test.
+pub(crate) fn main_menu_icon(bar: &TabBar) -> bool {
+    bar.linux_header && bar.new_tab_menu.2 > 0.0 && bar.new_tab_menu.3 > 0.0
+}
+
+/// One of the GNOME header's flat icon buttons as the painter draws it.
+pub(crate) struct HeaderIconButton {
+    pub icon: crate::header_icons::HeaderIcon,
+    pub rect: Rect4,
+    pub hovered: bool,
+    pub pressed: bool,
+    /// Shown toggled on: Find while it is open.
+    pub toggled: bool,
+}
+
+/// The GNOME header's flat buttons that show a symbolic icon: `+` as
+/// `tab-new`, Find as `edit-find` and the main menu as `open-menu`, with
+/// each one's state. Buttons the header left out have a zero rect and are
+/// skipped.
+pub(crate) fn header_icon_buttons(bar: &TabBar) -> impl Iterator<Item = HeaderIconButton> {
+    use crate::header_icons::HeaderIcon;
+    let button = |icon, rect, hovered, pressed, toggled| HeaderIconButton {
+        icon,
+        rect,
+        hovered,
+        pressed,
+        toggled,
+    };
+    [
+        button(
+            HeaderIcon::TabNew,
+            bar.new_tab,
+            bar.hovered_new_tab,
+            bar.pressed_new_tab,
+            false,
+        ),
+        button(
+            HeaderIcon::Find,
+            bar.search,
+            bar.hovered_search,
+            bar.pressed_search,
+            bar.search_open,
+        ),
+        button(
+            HeaderIcon::MainMenu,
+            bar.new_tab_menu,
+            bar.hovered_new_tab_menu,
+            bar.pressed_new_tab_menu,
+            false,
+        ),
+    ]
+    .into_iter()
+    .filter(|b| b.rect.2 > 0.0 && b.rect.3 > 0.0)
+}
+
+/// The fill behind one of the strip's flat buttons, or `None` at rest: the
+/// strip's hover fill under the pointer and a deeper one pressed. A button
+/// toggled on (Find while it is open) keeps a fill at rest, `tab_detail`'s
+/// 1.5:1, deepening to 1.8:1 under the pointer, as GNOME fills a checked
+/// flat button.
+pub(crate) fn flat_button_fill(
+    strip: Rgb,
+    fg: Rgb,
+    hovered: bool,
+    pressed: bool,
+    toggled: bool,
+) -> Option<Rgb> {
+    match (toggled, hovered) {
+        (false, false) => None,
+        (false, true) => Some(crate::chrome::strip_hover(strip, fg, pressed)),
+        (true, hovered) => Some(crate::chrome::tab_detail(strip, fg, hovered || pressed)),
     }
 }
 
@@ -624,8 +884,16 @@ mod tests {
 
     #[test]
     fn horizontal_content_prioritizes_title_and_activity_over_hint() {
-        // The marker lane scales with the display: 12 px at 1x, 24 at 2x.
-        for (scale, lane) in [(1.0_f32, 12.0_f32), (1.5, 18.0), (2.0, 24.0)] {
+        // The marker lane scales with the display: 12 px at 1x, 24 at 2x for
+        // the disc and the ring, 15 and 30 for the wider bell.
+        assert_eq!(activity_lane(TabActivity::Normal, 2.0), 0.0);
+        for (scale, lane, bell) in [
+            (1.0_f32, 12.0_f32, 15.0_f32),
+            (1.5, 18.0, 23.0),
+            (2.0, 24.0, 30.0),
+        ] {
+            assert_eq!(activity_lane(TabActivity::Silent, scale), lane);
+            assert_eq!(activity_lane(TabActivity::Bell, scale), bell);
             for width in [80.0, 160.0, 320.0] {
                 let (width, height) = (width * scale, 28.0 * scale);
                 let full = horizontal_tab_content_layout(
@@ -641,7 +909,7 @@ mod tests {
                     (0.0, 0.0, width, height),
                     true,
                     true,
-                    activity_lane(scale),
+                    activity_lane(TabActivity::Output, scale),
                     "a very long title that needs an ellipsis",
                     Some("Cmd+1"),
                     8.0 * scale,
@@ -659,9 +927,16 @@ mod tests {
     /// geometry once hid every marker at 2x.
     #[test]
     fn activity_marker_rect_paints_beside_the_title_at_every_scale() {
-        for scale in [1.0_f32, 1.5, 2.0] {
+        for (kind, scale) in [TabActivity::Output, TabActivity::Bell]
+            .into_iter()
+            .flat_map(|kind| [1.0_f32, 1.5, 2.0].map(|scale| (kind, scale)))
+        {
             let cell = (8.0 * scale, 16.0 * scale);
-            let size = (8.0 * scale).round();
+            let size = marker_side(kind, scale);
+            assert_eq!(
+                size,
+                (if kind == TabActivity::Bell { 11.0 } else { 8.0 } * scale).round()
+            );
             let height = 28.0 * scale;
             // (segment, centre of a lone titlebar tab's title lane)
             let cases = [
@@ -679,7 +954,7 @@ mod tests {
                         segment,
                         true,
                         true,
-                        activity_lane(scale),
+                        activity_lane(kind, scale),
                         label,
                         Some("Cmd+1"),
                         cell.0,
@@ -692,11 +967,12 @@ mod tests {
                         content.title = (centre - half, lane.1, half * 2.0, lane.3);
                     }
                     let (label_left, _) = tab_label_origin(content.title, label, cell);
-                    let marker = activity_marker_rect(segment, content.title, label_left, scale)
-                        .unwrap_or_else(|| {
-                            panic!("no marker at {scale}x for {label:?} in {segment:?}")
-                        });
-                    let case = format!("{scale}x, {label:?}, {segment:?}: {marker:?}");
+                    let marker =
+                        activity_marker_rect(segment, content.title, label_left, kind, scale)
+                            .unwrap_or_else(|| {
+                                panic!("no {kind:?} at {scale}x for {label:?} in {segment:?}")
+                            });
+                    let case = format!("{kind:?} {scale}x, {label:?}, {segment:?}: {marker:?}");
                     assert_eq!((marker.2, marker.3), (size, size), "{case}");
                     assert!(marker.0 >= segment.0 - 0.5, "{case}");
                     assert!(marker.0 + marker.2 <= segment.0 + segment.2 + 0.5, "{case}");
@@ -708,21 +984,21 @@ mod tests {
                 }
             }
             // A tab too narrow for the lane draws no marker outside itself.
-            let narrow = (40.0, 0.0, 12.0 * scale - 1.0, height);
+            let narrow = (40.0, 0.0, activity_lane(kind, scale) - 1.0, height);
             let content = horizontal_tab_content_layout(
                 narrow,
                 true,
                 true,
-                activity_lane(scale),
+                activity_lane(kind, scale),
                 "shell",
                 None,
                 cell.0,
             );
             let (label_left, _) = tab_label_origin(content.title, "shell", cell);
             assert_eq!(
-                activity_marker_rect(narrow, content.title, label_left, scale),
+                activity_marker_rect(narrow, content.title, label_left, kind, scale),
                 None,
-                "{scale}x"
+                "{kind:?} {scale}x"
             );
         }
     }
@@ -732,17 +1008,25 @@ mod tests {
         let marker = activity_marker_rect(
             (0.0, 0.0, 200.0 * scale, 28.0 * scale),
             (
-                8.0 * scale + activity_lane(scale),
+                8.0 * scale + activity_lane(kind, scale),
                 0.0,
                 100.0 * scale,
                 28.0 * scale,
             ),
             40.0 * scale,
+            kind,
             scale,
         )
         .expect("room for a marker");
         let mut quads = vec![rect(0.0, 0.0, 200.0 * scale, 28.0 * scale, tab_bg, 1.0)];
-        activity_marker_quads(&mut quads, kind, marker, scale, ink, tab_bg);
+        activity_marker_quads(
+            &mut quads,
+            kind,
+            marker,
+            scale,
+            (ink, tab_bg),
+            &mut BellMask::default(),
+        );
         let ink = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
         (0..marker.3 as usize)
             .map(|row| {
@@ -790,11 +1074,23 @@ mod tests {
             assert!(output[c][c], "{scale}x: Output's centre is filled");
             assert!(!silent[c][c], "{scale}x: Silent's centre is the tab");
             assert!(silent[0][c] && silent[c][0], "{scale}x: Silent has a rim");
+            // The bell's box is its own size; its lip spans it and an empty
+            // row parts the clapper from the lip.
+            let bell_side = bell.len();
+            assert_eq!(bell_side, (11.0 * scale).round() as usize);
             let width = |row: &Vec<bool>| row.iter().filter(|&&p| p).count();
-            assert!(width(&bell[0]) > 0);
+            let widths: Vec<usize> = bell.iter().map(width).collect();
+            // `max_by_key` keeps the last of equals: the lip's bottom row.
+            let lip = (0..bell_side).max_by_key(|&r| widths[r]).unwrap();
+            assert_eq!(widths[lip], bell_side, "{scale}x: the lip spans the box");
+            assert_eq!(
+                widths[lip + 1],
+                0,
+                "{scale}x: a gap under the lip: {bell:?}"
+            );
             assert!(
-                width(&bell[side - 1]) >= 3 * width(&bell[0]),
-                "{scale}x: Bell widens downward: {bell:?}"
+                widths[lip + 1..].iter().any(|&w| w > 0),
+                "{scale}x: a clapper: {bell:?}"
             );
             assert_ne!(output, silent);
             assert_ne!(output, bell);
@@ -805,15 +1101,99 @@ mod tests {
             if scale == 1.0 {
                 bounds_1x = bounds;
             } else {
-                for (two, one) in bounds.iter().zip(&bounds_1x) {
+                // The disc and the ring: the bell's antialiased dome has
+                // whole pixels of its own at each size.
+                for (two, one) in bounds.iter().zip(&bounds_1x).take(2) {
                     assert_eq!(
                         (two.2, two.3),
                         (one.2 * 2, one.3 * 2),
                         "the 2x marker is twice the 1x one"
                     );
                 }
+                assert_eq!(bounds[2].2, bounds_1x[2].2 * 2, "the bell's lip doubles");
             }
         }
+    }
+
+    /// The bell at the sizes it is drawn at (1x, between 1x and 2x, and
+    /// 2x): a round dome, its widest row (the lip) low in the box and wider
+    /// than anything above it, an empty gap, then a clapper centred under
+    /// the lip, all mirror-symmetric. At 1x the lip, the gap and the clapper
+    /// are whole pixels, so antialiasing cannot blur the clapper into the
+    /// lip. The triangle it replaces fails the dome test, and a filled box
+    /// the gap test.
+    #[test]
+    fn the_bell_mask_has_a_dome_a_lip_a_gap_and_a_clapper_at_every_size() {
+        for side in [11_u32, 15, 16, 17, 22] {
+            let n = side as usize;
+            let mask = bell_mask(side);
+            assert_eq!(mask.len(), n * n);
+            let rows: Vec<&[u8]> = mask.chunks(n).collect();
+            let widths: Vec<f32> = rows
+                .iter()
+                .map(|row| row.iter().map(|&c| f32::from(c) / 255.0).sum())
+                .collect();
+            // The last of the widest rows, so a two-row lip counts once.
+            let lip = (0..n)
+                .max_by(|&a, &b| widths[a].total_cmp(&widths[b]))
+                .unwrap();
+            let lip_width = widths[lip];
+            let case = format!("{side} px: {widths:?}");
+            assert!(
+                widths[n / 4] >= 0.45 * lip_width,
+                "{case}: a round dome is wide a quarter of the way down"
+            );
+            assert!(
+                (lip as f32 + 0.5) / side as f32 >= 2.0 / 3.0,
+                "{case}: the lip is in the lower third"
+            );
+            let first_lip = (0..=lip)
+                .rev()
+                .take_while(|&r| widths[r] == lip_width)
+                .last();
+            assert!(
+                widths[..first_lip.unwrap()].iter().all(|&w| w < lip_width),
+                "{case}: the lip is wider than the dome"
+            );
+            let gap: Vec<usize> = (lip + 1..n).take_while(|&r| widths[r] == 0.0).collect();
+            assert!(!gap.is_empty(), "{case}: an empty row under the lip");
+            let clapper: Vec<usize> = (lip + 1 + gap.len()..n).collect();
+            assert!(!clapper.is_empty(), "{case}: a clapper under the gap");
+            for &r in &clapper {
+                let cols: Vec<usize> = (0..n).filter(|&c| rows[r][c] > 0).collect();
+                assert!(!cols.is_empty(), "{case}: clapper row {r} is painted");
+                let (left, right) = (cols[0], *cols.last().unwrap());
+                assert_eq!(left, n - 1 - right, "{case}: the clapper is centred");
+                assert!(widths[r] <= 0.5 * lip_width, "{case}: a clapper, not a lip");
+            }
+            for (r, row) in rows.iter().enumerate() {
+                let half = |cells: &[u8]| cells.iter().map(|&c| u32::from(c)).sum::<u32>();
+                let (left, right) = (half(&row[..n / 2]), half(&row[n - n / 2..]));
+                assert!(
+                    left.abs_diff(right) <= 255,
+                    "{case}: row {r} is symmetric within a pixel"
+                );
+            }
+            if side == 11 {
+                assert!(rows[lip].iter().all(|&c| c == 255), "1x: a solid lip");
+                for &r in gap.iter().chain(&clapper) {
+                    assert!(
+                        rows[r].iter().all(|&c| c == 0 || c == 255),
+                        "1x: row {r} is whole pixels: {:?}",
+                        rows[r]
+                    );
+                }
+                assert_eq!(gap.len(), 1, "1x: one full gap row");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bell_mask_is_kept_per_side_length() {
+        let mut cache = BellMask::default();
+        assert_eq!(cache.get(11), bell_mask(11).as_slice());
+        assert_eq!(cache.get(22), bell_mask(22).as_slice());
+        assert_eq!(cache.get(11).len(), 121);
     }
 
     /// The horizontal painter places and draws markers through the tested
@@ -848,7 +1228,7 @@ mod tests {
                 (0.0, 0.0, width, 28.0),
                 true,
                 true,
-                activity_lane(1.0),
+                activity_lane(TabActivity::Bell, 1.0),
                 "shell",
                 Some("Cmd+1"),
                 8.0,
@@ -1111,7 +1491,7 @@ mod tests {
                 (0.0, 0.0, 320.0, 32.0),
                 true,
                 true,
-                activity_lane(1.0),
+                activity_lane(TabActivity::Bell, 1.0),
                 "shell",
                 Some(&hint),
                 text_advance,
@@ -1259,6 +1639,455 @@ mod tests {
                     "{scale}x, {pos:?}: the hovered tab has no bar"
                 );
             }
+        }
+    }
+
+    fn header_tab(idx: usize, rect: Rect4, active: bool) -> crate::TabSeg {
+        crate::TabSeg {
+            idx,
+            rect,
+            title_rect: rect,
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: "fixture".into(),
+            path: None,
+            active,
+            activity: TabActivity::Normal,
+        }
+    }
+
+    /// A GNOME header 800 points wide at `scale` with `tabs` tabs, the first
+    /// active: one is a 400-point window title, more are 240-point tabs.
+    fn gnome_header(tabs: usize, scale: f32) -> TabBar {
+        let h = 46.0 * scale;
+        let mut bar = TabBar::hidden();
+        bar.linux_header = true;
+        bar.lone_title = tabs == 1;
+        bar.height = h;
+        bar.band = (0.0, 0.0, 800.0 * scale, h);
+        for i in 0..tabs {
+            let x = if tabs == 1 {
+                200.0
+            } else {
+                40.0 + i as f32 * 240.0
+            };
+            let w = if tabs == 1 { 400.0 } else { 240.0 };
+            bar.segments
+                .push(header_tab(i, (x * scale, 0.0, w * scale, h), i == 0));
+        }
+        bar
+    }
+
+    /// A lone GNOME-header title is the header itself: inside its rect there
+    /// is no tab surface, accent line or hover fill, opaque or over a
+    /// translucent window, and its top edge samples as the header. A second
+    /// tab brings the active tab's fill and 3-pixel accent back.
+    #[test]
+    fn lone_header_title_paints_no_surface_accent_or_hover() {
+        let cfg = kettle_config::Config::default();
+        let accent = Rgb::new(0xff, 0x00, 0xff);
+        let accent_color = rect(0.0, 0.0, 1.0, 1.0, accent, 1.0).color;
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let header = rect(0.0, 0.0, 1.0, 1.0, strip, 1.0).color;
+            for scale in [1.0_f32, 2.0] {
+                for alpha in [1.0_f32, 0.86] {
+                    for hovered in [false, true] {
+                        let mut bar = gnome_header(1, scale);
+                        bar.hovered_tab_idx = hovered.then_some(0);
+                        let band = bar.band;
+                        let quads = horizontal_tab_quads(
+                            &bar,
+                            band,
+                            &theme,
+                            (theme.background, alpha),
+                            strip,
+                            accent,
+                            TabBarPos::Top,
+                            scale,
+                        );
+                        let case = format!("{name} {scale}x alpha={alpha} hovered={hovered}");
+                        assert!(quads.surface.is_empty(), "{case}: a tab surface");
+                        assert!(
+                            !quads.chrome.iter().any(|q| q.color == accent_color),
+                            "{case}: an accent line"
+                        );
+                        let (x, _, w, h) = bar.segments[0].rect;
+                        for px in [x + 0.5, x + w * 0.5, x + w - 0.5] {
+                            // Above the header's bottom hairline.
+                            for py in [0.5, 3.0 * scale - 0.5, h * 0.5, h - 2.0 * scale] {
+                                assert_eq!(
+                                    sample(&quads.chrome, px, py),
+                                    Some(header),
+                                    "{case}: ({px}, {py}) is not the header"
+                                );
+                            }
+                        }
+                    }
+                }
+                let bar = gnome_header(2, scale);
+                let quads = horizontal_tab_quads(
+                    &bar,
+                    bar.band,
+                    &theme,
+                    (theme.background, 1.0),
+                    strip,
+                    accent,
+                    TabBarPos::Top,
+                    scale,
+                );
+                let active = bar.segments[0].rect;
+                let rows = (0..active.3 as u32)
+                    .filter(|&y| {
+                        sample(&quads.chrome, active.0 + active.2 * 0.5, y as f32 + 0.5)
+                            == Some(accent_color)
+                    })
+                    .count();
+                assert_eq!(rows, (3.0 * scale).round() as usize, "{name} {scale}x");
+            }
+        }
+    }
+
+    /// The lone title's text is resolved against the header it sits on, as
+    /// the painter resolves it: the header's text colour at 4.5:1 or better
+    /// in a focused window, and faded halfway, as GNOME fades an unfocused
+    /// header, to no less than 3:1, in both default themes. Resolved colours,
+    /// not glyph pixels: local fonts would hide a CI difference.
+    #[test]
+    fn lone_header_title_ink_reads_against_the_header() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            assert_ne!(
+                strip, theme.background,
+                "{name}: header and terminal differ"
+            );
+            let bar = gnome_header(1, 1.0);
+            let tab = &bar.segments[0];
+            assert_eq!(tab_paint_state(&bar, tab), (false, false));
+            let mut colors = crate::chrome::Colors::default();
+            let focused = colors.tab_text(theme.foreground, strip, true);
+            let unfocused = colors.tab_text(theme.foreground, strip, false);
+            let (lit, dim) = (
+                crate::color::contrast_ratio(focused, strip),
+                crate::color::contrast_ratio(unfocused, strip),
+            );
+            assert!(lit >= 4.5 - 1e-9, "{name}: focused {lit:.2}:1");
+            assert!(dim >= 3.0 - 1e-9, "{name}: unfocused {dim:.2}:1");
+            assert!(dim < lit, "{name}: an unfocused title is dimmer");
+        }
+        // The painter draws the lone title from its own buffer in this ink.
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "iftabbar.lone_title{letink=self.chrome_colors.tab_text(fg,chrome_strip_bg,overlay.window_focused);\
+             let(left,top)=header_title::header_title_origin(s.title_rect,self.header_title_width,"
+        ));
+        assert!(source.contains("buffer:&self.header_title_buffer,"));
+    }
+
+    /// The hairline under the GNOME header keeps 1.5:1 against the header
+    /// and the terminal, one device pixel per point thick on the header's
+    /// last row. It runs the full width under a lone title, stops at the
+    /// active tab, which joins the terminal, and no other strip has one.
+    #[test]
+    fn gnome_header_hairline_separates_it_from_the_terminal() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let line = header_hairline(strip, theme.background, theme.foreground);
+            for against in [strip, theme.background] {
+                let ratio = crate::color::contrast_ratio(line, against);
+                assert!(
+                    ratio >= HEADER_HAIRLINE_CONTRAST - 1e-9,
+                    "{name}: {ratio:.2}:1"
+                );
+            }
+            let line_color = rect(0.0, 0.0, 1.0, 1.0, line, 1.0).color;
+            let header = rect(0.0, 0.0, 1.0, 1.0, strip, 1.0).color;
+            for scale in [1.0_f32, 1.5, 2.0] {
+                for tabs in [1, 2] {
+                    let bar = gnome_header(tabs, scale);
+                    let (_, _, w, h) = bar.band;
+                    let quads = horizontal_tab_quads(
+                        &bar,
+                        bar.band,
+                        &theme,
+                        (theme.background, 1.0),
+                        strip,
+                        theme.accent,
+                        TabBarPos::Top,
+                        scale,
+                    );
+                    let thickness = scale.round();
+                    let case = format!("{name} {scale}x {tabs} tabs");
+                    let column = |x: f32| {
+                        (0..h as u32)
+                            .filter(|&y| {
+                                sample(&quads.chrome, x, y as f32 + 0.5) == Some(line_color)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let bottom: Vec<u32> = (h as u32 - thickness as u32..h as u32).collect();
+                    let active = bar.segments[0].rect;
+                    for x in [0.5, w * 0.5, w - 0.5, active.0 + active.2 * 0.5] {
+                        let under_tab = tabs > 1 && x >= active.0 && x < active.0 + active.2;
+                        if under_tab {
+                            assert!(column(x).is_empty(), "{case}: a line under the tab");
+                        } else {
+                            assert_eq!(column(x), bottom, "{case}: x={x}");
+                            assert_eq!(
+                                sample(&quads.chrome, x, h - thickness - 0.5),
+                                Some(header),
+                                "{case}: x={x}"
+                            );
+                        }
+                    }
+                    let mut plain = bar;
+                    plain.linux_header = false;
+                    let quads = horizontal_tab_quads(
+                        &plain,
+                        plain.band,
+                        &theme,
+                        (theme.background, 1.0),
+                        strip,
+                        theme.accent,
+                        TabBarPos::Top,
+                        scale,
+                    );
+                    assert!(
+                        !quads.chrome.iter().any(|q| q.color == line_color),
+                        "{case}: a plain strip has no hairline"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The GNOME header's `+` leads the strip, so its tooltip hangs under
+    /// it, inside the window, at 1x and 2x. Every other strip keeps `+` at
+    /// its end and its tooltip where it was.
+    #[test]
+    fn gnome_header_plus_tooltip_hangs_under_the_leading_plus() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 800.0 * scale;
+            let mut bar = gnome_header(2, scale);
+            bar.new_tab = (8.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+            bar.new_tab_menu = (
+                width - 180.0 * scale,
+                9.0 * scale,
+                28.0 * scale,
+                28.0 * scale,
+            );
+            bar.hovered_new_tab = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (bar.new_tab.0, 0.0, bar.new_tab.2, bar.band.3));
+            let tip = tooltip_rect(
+                anchor,
+                (width, 600.0 * scale),
+                (160.0 * scale, 20.0 * scale),
+                scale,
+            );
+            assert!(
+                tip.0 >= 0.0 && tip.0 <= bar.new_tab.0 + bar.new_tab.2,
+                "{tip:?}"
+            );
+            assert_eq!(tip.1, 50.0 * scale);
+            bar.pressed_new_tab = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_new_tab = false;
+            bar.linux_header = false;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+        }
+    }
+
+    /// The resting fill behind the new-tab controls covers the `▾ +` pair on
+    /// a plain strip, but the GNOME header's `+` and `≡` each get their own:
+    /// a span between them would paint the header over the tabs.
+    #[test]
+    fn new_tab_control_fills_never_span_the_tabs() {
+        for scale in [1.0_f32, 2.0] {
+            let side = 28.0 * scale;
+            let plus = (752.0 * scale, 0.0, side, side);
+            let arrow = (720.0 * scale, 0.0, side, side);
+            assert_eq!(
+                new_tab_control_fills(plus, arrow),
+                vec![(arrow.0, 0.0, plus.0 + side - arrow.0, side)]
+            );
+            assert_eq!(
+                new_tab_control_fills(plus, (0.0, 0.0, 0.0, 0.0)),
+                vec![plus]
+            );
+            let plus = (8.0 * scale, 9.0 * scale, side, side);
+            let menu = (620.0 * scale, 9.0 * scale, side, side);
+            let fills = new_tab_control_fills(plus, menu);
+            assert_eq!(fills, vec![plus, menu]);
+            assert!(fills.iter().all(|r| r.2 > 0.0 && r.3 > 0.0));
+            let between = (plus.0 + plus.2 + menu.0) * 0.5;
+            assert!(
+                !fills
+                    .iter()
+                    .any(|r| between >= r.0.min(r.0 + r.2) && between < r.0.max(r.0 + r.2)),
+                "{fills:?} covers the tabs at {between}"
+            );
+        }
+    }
+
+    /// The GNOME header's `+`, Find and `≡` are GNOME's `tab-new`,
+    /// `edit-find` and `open-menu` symbolic icons, drawn as coverage masks 16
+    /// points square, centred on whole pixels in their 34-point flat buttons
+    /// at 1x and 2x, in the ink the painter resolved. No other strip draws
+    /// them, and the painter never shapes a `+` or `≡` glyph in the header.
+    #[test]
+    fn gnome_header_plus_find_and_menu_are_symbolic_masks() {
+        use crate::header_icons::{HeaderIcon, IconMasks, header_icon_mask, push_header_icon};
+        let ink = Rgb::new(0xc0, 0xca, 0xf5);
+        let painted = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
+        for scale in [1.0_f32, 2.0] {
+            let mut bar = gnome_header(1, scale);
+            bar.new_tab = (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.new_tab_menu = (700.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search = (660.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
+            bar.search_open = true;
+            let buttons: Vec<_> = header_icon_buttons(&bar).collect();
+            assert_eq!(
+                buttons
+                    .iter()
+                    .map(|b| (b.icon, b.rect, b.toggled))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (HeaderIcon::TabNew, bar.new_tab, false),
+                    (HeaderIcon::Find, bar.search, true),
+                    (HeaderIcon::MainMenu, bar.new_tab_menu, false)
+                ]
+            );
+            assert!(main_menu_icon(&bar));
+            let mut masks = IconMasks::default();
+            for HeaderIconButton {
+                icon, rect: button, ..
+            } in buttons
+            {
+                let mut quads = Vec::new();
+                push_header_icon(&mut quads, icon, button, ink, scale, &mut masks);
+                let side = 16.0 * scale;
+                let left = (button.0 + (button.2 - side) * 0.5).round();
+                let top = (button.1 + (button.3 - side) * 0.5).round();
+                // Exactly the mask, one quad per run, from its corner.
+                let mask = header_icon_mask(icon, side as u32);
+                let covered: f32 = quads.iter().map(|q| q.size[0] * q.color[3]).sum();
+                let expected: f32 = mask.iter().map(|&c| f32::from(c) / 255.0).sum();
+                assert!((covered - expected).abs() < 0.5, "{icon:?} at {scale}x");
+                for q in &quads {
+                    assert_eq!(q.color[..3], painted[..3]);
+                    assert!(q.pos[0] >= left && q.pos[0] + q.size[0] <= left + side);
+                    assert!(q.pos[1] >= top && q.pos[1] + q.size[1] <= top + side);
+                    assert_eq!((q.pos[0].fract(), q.pos[1].fract()), (0.0, 0.0));
+                }
+                let centre = (button.0 + button.2 * 0.5, button.1 + button.3 * 0.5);
+                assert!((left + side * 0.5 - centre.0).abs() <= 0.5);
+                assert!((top + side * 0.5 - centre.1).abs() <= 0.5);
+            }
+            bar.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+            bar.search = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(header_icon_buttons(&bar).count(), 1);
+            assert!(!main_menu_icon(&bar), "no menu button, no icon");
+        }
+        let mut plain = gnome_header(2, 1.0);
+        plain.linux_header = false;
+        plain.new_tab_menu = (620.0, 0.0, 28.0, 28.0);
+        assert!(!main_menu_icon(&plain), "a plain strip keeps its ▾");
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "iftabbar.linux_header{forbuttonintab_strip::header_icon_buttons(tabbar){letbackground=tab_strip::flat_button_fill("
+        ));
+        assert!(source.contains("//TheGNOMEheader's`+`isdrawnwiththestrip'squadsinstead.if!tabbar.linux_header{areas.push(TextArea{buffer:&self.tabbar_buffer,"));
+        assert!(!source.contains("\"≡\""), "a shaped ≡ glyph");
+    }
+
+    /// A flat button has no fill at rest, the strip's hover fill under the
+    /// pointer and a deeper one pressed. Find, toggled on while Find is
+    /// open, keeps a fill at rest that shows (1.5:1 against the header) and
+    /// deepens under the pointer, and its icon's ink keeps 4.5:1 against
+    /// every one of those fills, focused, in both default themes. The
+    /// painter fills every strip button, Find included, from this one rule.
+    #[test]
+    fn a_toggled_find_button_keeps_a_fill_its_icon_reads_on() {
+        let cfg = kettle_config::Config::default();
+        for name in ["TokyoNight Night", "Kettle Day"] {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let fg = theme.foreground;
+            assert_eq!(flat_button_fill(strip, fg, false, false, false), None);
+            assert_eq!(
+                flat_button_fill(strip, fg, true, false, false),
+                Some(crate::chrome::strip_hover(strip, fg, false))
+            );
+            let toggled = flat_button_fill(strip, fg, false, false, true).unwrap();
+            let hovered = flat_button_fill(strip, fg, true, false, true).unwrap();
+            let pressed = flat_button_fill(strip, fg, true, true, true).unwrap();
+            let ratio = |c| crate::color::contrast_ratio(c, strip);
+            assert!(
+                ratio(toggled) >= 1.5 - 1e-9,
+                "{name}: {:.2}:1",
+                ratio(toggled)
+            );
+            assert!(ratio(hovered) > ratio(toggled), "{name}");
+            assert!(ratio(pressed) >= ratio(hovered), "{name}");
+            let mut colors = crate::chrome::Colors::default();
+            for fill in [toggled, hovered, pressed] {
+                for (ink, focused, floor) in
+                    [(fg, true, 4.5), (theme.accent, true, 4.5), (fg, false, 3.0)]
+                {
+                    let ink = colors.tab_text(ink, fill, focused);
+                    let r = crate::color::contrast_ratio(ink, fill);
+                    assert!(r >= floor - 0.01, "{name}: {r:.2}:1 on {fill:?}");
+                }
+            }
+        }
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains(
+            "(tabbar.search,tabbar.hovered_search,tabbar.pressed_search,tabbar.search_open,),]{ifbounds.2>0.0&&letSome(fill)=tab_strip::flat_button_fill("
+        ));
+    }
+
+    /// Find's tooltip hangs under Find, inside the window, at 1x and 2x,
+    /// and none shows while it is pressed or absent.
+    #[test]
+    fn find_tooltip_hangs_under_the_find_button() {
+        for scale in [1.0_f32, 2.0] {
+            let width = 800.0 * scale;
+            let mut bar = gnome_header(1, scale);
+            bar.search = (
+                width - 128.0 * scale,
+                6.0 * scale,
+                34.0 * scale,
+                34.0 * scale,
+            );
+            bar.hovered_search = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (bar.search.0, 0.0, bar.search.2, bar.band.3));
+            let tip = tooltip_rect(
+                anchor,
+                (width, 600.0 * scale),
+                (120.0 * scale, 20.0 * scale),
+                scale,
+            );
+            assert!(tip.0 >= 0.0 && tip.0 + tip.2 <= width, "{tip:?}");
+            assert!(tip.0 + tip.2 <= bar.search.0 + bar.search.2, "{tip:?}");
+            assert_eq!(tip.1, 50.0 * scale);
+            bar.pressed_search = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_search = false;
+            bar.search = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(tooltip_anchor(&bar), bar.band);
         }
     }
 
@@ -1447,9 +2276,9 @@ mod tooltip_tests {
     }
 }
 
-/// Logical side of a GNOME header button's minimize/maximize/close glyph.
-pub(crate) const WINDOW_CONTROL_GLYPH: f32 = 12.0;
-
+/// The GNOME header's window buttons as libadwaita draws them: a disc
+/// [`WINDOW_BUTTON_DISC`](crate::header_icons::WINDOW_BUTTON_DISC) points
+/// across centred in each target, and the window's symbolic glyph on it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn window_control_quads(
     quads: &mut Vec<QuadInstance>,
@@ -1459,73 +2288,54 @@ pub(crate) fn window_control_quads(
     scale: f32,
     focused: bool,
     colors: &mut crate::chrome::Colors,
+    masks: &mut crate::header_icons::IconMasks,
 ) {
-    use crate::WindowControl as C;
+    use crate::header_icons::{HeaderIcon, push_header_icon, push_mask, window_button_disc};
     for button in &bar.window_controls {
-        let (x, y, w, h) = button.rect;
+        let (_, _, w, h) = button.rect;
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
-        let diameter = (28.0 * scale).min(w).min(h);
         let (fill, glyph) =
             window_control_colors(fg, bg, button.hovered, button.pressed, focused, colors);
-        if button.hovered {
-            rounded_fill(
-                quads,
-                button.rect,
-                6.0 * scale,
-                (true, true),
-                (fill, 1.0),
-                None,
-            );
-        }
-        if diameter < 12.0 * scale {
+        let disc = window_button_disc(button.rect, scale);
+        if disc.2 < 12.0 * scale {
             continue;
         }
-        let cx = x + w * 0.5;
-        let cy = y + h * 0.5;
-        let size = (WINDOW_CONTROL_GLYPH * scale).min(diameter * 0.5);
-        let stroke = (1.5 * scale).max(1.0);
-        let left = cx - size * 0.5;
-        let top = cy - size * 0.5;
-        let mut outline = |left: f32, top: f32, size: f32| {
-            for r in [
-                (left, top, size, stroke),
-                (left, top + size - stroke, size, stroke),
-                (left, top, stroke, size),
-                (left + size - stroke, top, stroke, size),
-            ] {
-                quads.push(rect(r.0, r.1, r.2, r.3, glyph, 1.0));
-            }
-        };
-        match button.action {
-            C::Minimize => quads.push(rect(left, cy, size, stroke, glyph, 1.0)),
-            C::Maximize => outline(left, top, size),
-            C::Restore => {
-                outline(left + 2.0 * scale, top, size - 2.0 * scale);
-                outline(left, top + 2.0 * scale, size - 2.0 * scale);
-            }
-            C::Close => {
-                let steps = size.ceil().max(1.0) as usize;
-                for i in 0..=steps {
-                    let offset = size * i as f32 / steps as f32;
-                    for y in [top + offset, top + size - offset] {
-                        quads.push(rect(
-                            left + offset - stroke * 0.5,
-                            y - stroke * 0.5,
-                            stroke,
-                            stroke,
-                            glyph,
-                            1.0,
-                        ));
-                    }
-                }
-            }
-        }
+        let side = disc.2 as u32;
+        push_mask(
+            quads,
+            masks.get(HeaderIcon::Disc, side),
+            side,
+            (disc.0, disc.1),
+            fill,
+        );
+        push_header_icon(
+            quads,
+            HeaderIcon::for_window_control(button.action),
+            disc,
+            glyph,
+            scale,
+            masks,
+        );
     }
 }
 
-fn window_control_colors(
+/// How strongly a window button's disc shows the header's foreground, as
+/// libadwaita's `alpha(currentColor, …)`: at rest, hovered and pressed.
+const WINDOW_BUTTON_FILL: [f64; 3] = [0.10, 0.15, 0.30];
+
+/// The least contrast the disc keeps against the header in the same three
+/// states, so it shows on a pale header too and each state reads stronger
+/// than the one before.
+const WINDOW_BUTTON_FILL_FLOOR: [f64; 3] = [1.15, 1.4, 2.0];
+
+/// A window button's disc and glyph colours. The disc is the foreground
+/// over the header, deeper hovered and deeper still pressed; the glyph is
+/// the foreground at 4.5:1 against the disc. An unfocused window shows both
+/// at about half strength, as libadwaita fades its header controls, with the
+/// glyph still at 3:1.
+pub(crate) fn window_control_colors(
     fg: Rgb,
     bg: Rgb,
     hovered: bool,
@@ -1533,10 +2343,16 @@ fn window_control_colors(
     focused: bool,
     colors: &mut crate::chrome::Colors,
 ) -> (Rgb, Rgb) {
-    let fill = if hovered {
-        crate::chrome::strip_hover(bg, fg, pressed)
+    let state = if pressed { 2 } else { usize::from(hovered) };
+    let fill = crate::color::with_min_contrast(
+        crate::color::over(bg, fg, WINDOW_BUTTON_FILL[state], false),
+        bg,
+        WINDOW_BUTTON_FILL_FLOOR[state],
+    );
+    let fill = if focused {
+        fill
     } else {
-        bg
+        crate::color::over(fill, bg, 0.5, false)
     };
     (fill, colors.tab_text(fg, fill, focused))
 }
@@ -1627,36 +2443,51 @@ mod window_control_tests {
         }
     }
 
+    /// The disc behind a window button is the header's foreground faintly
+    /// over the header, deeper hovered and deeper still pressed, and its
+    /// glyph keeps 4.5:1 against the disc in a focused window and 3:1 in an
+    /// unfocused one, where disc and glyph both fade toward the header. Both
+    /// default themes, and every bundled one for the glyph's floor.
     #[test]
-    fn linux_header_buttons_use_current_chrome_contrast_hover_and_dimming() {
+    fn window_button_discs_and_glyphs_keep_their_contrast() {
+        use crate::color::contrast_ratio;
         for name in kettle_config::Theme::list() {
             let theme = kettle_config::Theme::by_name(name);
             let mut colors = crate::chrome::Colors::default();
             let bg = crate::resolve_chrome_bg(&Default::default(), &theme, None);
-            for focused in [false, true] {
-                for hovered in [false, true] {
-                    for pressed in [false, true] {
-                        let (fill, glyph) = window_control_colors(
-                            theme.foreground,
-                            bg,
-                            hovered,
-                            pressed,
-                            focused,
-                            &mut colors,
-                        );
-                        assert_eq!(
-                            fill,
-                            if hovered {
-                                crate::chrome::strip_hover(bg, theme.foreground, pressed)
-                            } else {
-                                bg
-                            }
-                        );
-                        assert_eq!(glyph, colors.tab_text(theme.foreground, fill, focused));
-                        let floor = if focused { 4.5 } else { 3.0 };
+            let fg = theme.foreground;
+            let default_theme = ["TokyoNight Night", "Kettle Day"].contains(&name);
+            for focused in [true, false] {
+                let mut previous = 1.0;
+                for (hovered, pressed) in [(false, false), (true, false), (true, true)] {
+                    let (fill, glyph) =
+                        window_control_colors(fg, bg, hovered, pressed, focused, &mut colors);
+                    let case =
+                        format!("{name} focused={focused} hovered={hovered} pressed={pressed}");
+                    let floor = if focused { 4.5 } else { 3.0 };
+                    let ratio = contrast_ratio(glyph, fill);
+                    assert!(ratio >= floor - 0.01, "{case}: glyph {ratio:.2}:1");
+                    assert_eq!(glyph, colors.tab_text(fg, fill, focused), "{case}");
+                    let disc = contrast_ratio(fill, bg);
+                    assert!(
+                        disc > previous,
+                        "{case}: disc {disc:.2}:1 after {previous:.2}:1"
+                    );
+                    previous = disc;
+                    if default_theme && focused {
+                        let at_least =
+                            [1.15, 1.4, 2.0][usize::from(hovered) + usize::from(pressed)];
+                        assert!(disc >= at_least - 0.01, "{case}: disc {disc:.2}:1");
+                    }
+                    if !focused {
+                        // Dimmed: the disc is quieter, the glyph no louder,
+                        // than in a focused window.
+                        let (lit, lit_glyph) =
+                            window_control_colors(fg, bg, hovered, pressed, true, &mut colors);
+                        assert!(disc < contrast_ratio(lit, bg), "{case}");
                         assert!(
-                            crate::color::contrast_ratio(glyph, fill) >= floor - 0.01,
-                            "{name}"
+                            ratio <= contrast_ratio(lit_glyph, lit) + 0.01,
+                            "{case}: dimmed glyph {ratio:.2}:1"
                         );
                     }
                 }
@@ -1664,13 +2495,17 @@ mod window_control_tests {
         }
     }
 
+    /// Each window button paints a 24-point disc centred in its target and
+    /// its glyph centred on the disc, everything inside the target, at 1x,
+    /// 1.5x and 2x, hovered or not, for every action.
     #[test]
-    fn linux_header_button_shapes_follow_shared_bounds_at_fractional_scales() {
-        for scale in [1.0, 1.5, 2.0] {
+    fn window_buttons_paint_a_disc_and_glyph_inside_their_targets() {
+        use crate::header_icons::window_button_disc;
+        for scale in [1.0_f32, 1.5, 2.0] {
             for action in [C::Minimize, C::Maximize, C::Restore, C::Close] {
                 for hovered in [false, true] {
                     let mut bar = TabBar::hidden();
-                    let target = (756.0 * scale, 9.0 * scale, 28.0 * scale, 28.0 * scale);
+                    let target = (750.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale);
                     bar.window_controls = vec![WindowControlButton {
                         action,
                         rect: target,
@@ -1678,39 +2513,70 @@ mod window_control_tests {
                         hovered,
                         pressed: hovered,
                     }];
+                    let (fg, bg) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+                    let mut colors = Default::default();
+                    let (fill, glyph) =
+                        window_control_colors(fg, bg, hovered, hovered, true, &mut colors);
                     let mut quads = Vec::new();
                     window_control_quads(
                         &mut quads,
                         &bar,
-                        Rgb::new(255, 255, 255),
-                        Rgb::new(0, 0, 0),
+                        fg,
+                        bg,
                         scale,
                         true,
+                        &mut colors,
                         &mut Default::default(),
                     );
-                    assert!(!quads.is_empty());
-                    if !hovered {
-                        // Every quad is glyph ink: it spans at least 12
-                        // logical pixels (10 read as tiny in the header).
-                        let left = quads.iter().map(|q| q.pos[0]).fold(f32::MAX, f32::min);
-                        let right = quads
+                    let disc = window_button_disc(target, scale);
+                    let bounds = |color: Rgb| {
+                        let painted = rect(0.0, 0.0, 1.0, 1.0, color, 1.0).color;
+                        let mine: Vec<_> = quads
+                            .iter()
+                            .filter(|q| q.color[..3] == painted[..3])
+                            .collect();
+                        assert!(!mine.is_empty(), "{action:?} at {scale}x paints {color:?}");
+                        let l = mine.iter().map(|q| q.pos[0]).fold(f32::MAX, f32::min);
+                        let t = mine.iter().map(|q| q.pos[1]).fold(f32::MAX, f32::min);
+                        let r = mine
                             .iter()
                             .map(|q| q.pos[0] + q.size[0])
                             .fold(f32::MIN, f32::max);
-                        assert!(
-                            right - left >= 12.0 * scale - 0.01,
-                            "{action:?} at {scale}x spans {}",
-                            right - left
-                        );
+                        let b = mine
+                            .iter()
+                            .map(|q| q.pos[1] + q.size[1])
+                            .fold(f32::MIN, f32::max);
+                        (l, t, r - l, b - t)
+                    };
+                    let case = format!("{action:?} at {scale}x hovered={hovered}");
+                    assert_eq!(bounds(fill), disc, "{case}: the disc");
+                    assert_eq!(disc.2, (24.0 * scale).round(), "{case}");
+                    let ink = bounds(glyph);
+                    let centre = |r: Rect4| (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+                    let (gx, gy) = centre(ink);
+                    let (dx, dy) = centre(disc);
+                    // Centred across; minimize's bar sits low, as GNOME's does.
+                    assert!((gx - dx).abs() <= 1.0, "{case}: {ink:?}");
+                    if action != C::Minimize {
+                        assert!((gy - dy).abs() <= 1.0, "{case}: {ink:?}");
                     }
-                    for q in quads {
+                    assert!(
+                        ink.0 >= disc.0
+                            && ink.1 >= disc.1
+                            && ink.0 + ink.2 <= disc.0 + disc.2
+                            && ink.1 + ink.3 <= disc.1 + disc.3,
+                        "{case}: {ink:?} outside {disc:?}"
+                    );
+                    // Glyph ink 6 to 10 points across, inside the disc.
+                    assert!(ink.2.max(ink.3) >= 6.0 * scale - 0.01, "{case}: {ink:?}");
+                    assert!(ink.2.max(ink.3) <= 10.0 * scale + 0.01, "{case}: {ink:?}");
+                    for q in &quads {
                         assert!(
                             q.pos[0] >= target.0
                                 && q.pos[0] + q.size[0] <= target.0 + target.2 + 0.01
-                        );
-                        assert!(
-                            q.pos[1] >= target.1
-                                && q.pos[1] + q.size[1] <= target.1 + target.3 + 0.01
+                                && q.pos[1] >= target.1
+                                && q.pos[1] + q.size[1] <= target.1 + target.3 + 0.01,
+                            "{case}"
                         );
                     }
                 }

@@ -543,7 +543,7 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
 /// The tree `accessibility_tree` hands the platform for `projection` alone:
 /// a window holding the modal's roots, focused where the modal's focus can
 /// be named, with the tree info the first update carries.
-fn finished_tree(
+pub(super) fn finished_tree(
     projection: super::accessibility::ModalAccessibilityProjection,
 ) -> accesskit::TreeUpdate {
     let mut root = accesskit::Node::new(accesskit::Role::Window);

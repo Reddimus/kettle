@@ -671,7 +671,7 @@ fn the_painter_uses_the_swept_helpers() {
         "ifoverlay.window_focused&&letSome((hint_rect,_))=&s.hint",
         "(default_bg,active_tab_alpha asf32),",
         "lettranslucent_window=composed_bg_alpha(cfg)<1.0;",
-        "lettab_backing=ifs.active&&!cfg.tab_bar_pos.is_vertical(){active_tab_backing}else{color::Backing::opaque(tab_background)};",
+        "lettab_backing=ifpainted_active&&!cfg.tab_bar_pos.is_vertical(){active_tab_backing}else{color::Backing::opaque(tab_background)};",
         "lettitle_fg=self.chrome_colors.tab_title(",
         "let(bar_fill,bar_alpha)=search::search_bar_layer(theme,translucent_window,self.config.format.is_srgb(),&mutself.chrome_colors,);",
         "geometry.rect.3,bar_fill,bar_alpha asf32,",

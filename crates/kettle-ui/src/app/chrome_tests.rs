@@ -8,7 +8,7 @@ fn horizontal_single_tab_controls_use_count_and_physical_hover() {
         .split_once("pub(super) fn title_edit_rect(")
         .unwrap()
         .0;
-    assert!(horizontal.contains("let show_controls = n > 1 || hovered;"));
+    assert!(horizontal.contains("let show_controls = n > 1 || (hovered && !lone_title);"));
     assert!(horizontal.contains("rect,\n                    show_controls,"));
     assert!(horizontal.contains("rect_contains(rect, p.x as f32, p.y as f32)"));
 }
@@ -1372,6 +1372,8 @@ fn leaving_the_window_or_losing_focus_forgets_the_settings_gear() {
         ws.pressed_new_tab = true;
         ws.hovered_new_tab_menu = true;
         ws.pressed_new_tab_menu = true;
+        ws.hovered_search = true;
+        ws.pressed_search = true;
         ws.hovered_close_idx = Some(0);
         ws.hovered_tab_idx = Some(0);
         ws
@@ -1380,9 +1382,11 @@ fn leaving_the_window_or_losing_focus_forgets_the_settings_gear() {
     focus_lost.release_titlebar_buttons();
     assert!(!focus_lost.hovered_settings && !focus_lost.pressed_settings);
     assert!(!focus_lost.pressed_new_tab && !focus_lost.pressed_new_tab_menu);
+    assert!(!focus_lost.hovered_search && !focus_lost.pressed_search);
     let mut left = lit();
     left.leave_tab_bar();
     assert!(!left.hovered_settings && !left.pressed_settings);
+    assert!(!left.hovered_search && !left.pressed_search);
     assert!(!left.hovered_new_tab && !left.pressed_new_tab);
     assert!(!left.hovered_new_tab_menu && !left.pressed_new_tab_menu);
     assert_eq!((left.hovered_close_idx, left.hovered_tab_idx), (None, None));

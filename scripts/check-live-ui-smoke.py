@@ -15890,6 +15890,9 @@ def run_bell_flash(kettle: str, root: Path) -> Path:
                 "cursor-blink = false",
                 "bell = visual",
                 "bell-flash-intensity = 0.5",
+                # The flash is motion Kettle starts on its own; measure it
+                # whatever the host's Reduce Motion says.
+                "reduce-motion = off",
                 "window-padding-x = 8",
                 "window-padding-y = 8",
                 "window-width = 110",

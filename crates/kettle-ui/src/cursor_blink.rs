@@ -246,7 +246,7 @@ pub(crate) struct HandoffInputs {
     pub(crate) other_animation: bool,
     /// An input method is composing text at the cursor.
     pub(crate) ime_preedit: bool,
-    /// A modal holds the cursor steady.
+    /// A modal or a selection drag holds the cursor steady.
     pub(crate) modal_steady: bool,
     /// Deferred output, a screenshot, a resize, frame recovery or an
     /// accessibility update is waiting for a frame.

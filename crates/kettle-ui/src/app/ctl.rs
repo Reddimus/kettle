@@ -13,6 +13,10 @@ pub(super) fn tab_bar_geometry_json(
         "new_tab_menu": rect_json(bar.new_tab_menu),
         // The macOS title bar's Settings gear; zero-sized elsewhere.
         "settings": rect_json(bar.settings),
+        // The GNOME header's Find button, zero-sized elsewhere, and
+        // whether it shows toggled on (Find is open).
+        "search_button": rect_json(bar.search),
+        "search_open": bar.search_open,
         "drag_cursor_x": bar.drag_cursor_x,
         // A vertical strip reports the drag on its own axis;
         // additive, so a reader that only knows the x key still
@@ -24,6 +28,8 @@ pub(super) fn tab_bar_geometry_json(
         "insert_marker": bar.insert_marker,
         "dock_highlighted": bar.insert_marker.is_some(),
         "band": rect_json(bar.band),
+        // The GNOME header draws its only tab as the window title.
+        "lone_title": bar.lone_title,
         // The overflow arrows, back then forward (`‹ ›` across,
         // `⌃ ⌄` down a side bar); zero-sized while it all fits.
         "scroll_left": rect_json(bar.scroll_left),
@@ -1051,6 +1057,8 @@ impl App {
                     "fitted_title": fitted_title,
                     "label": label,
                     "active": seg.active,
+                    // The marker the strip draws: normal, output, silent or bell.
+                    "activity": format!("{:?}", seg.activity).to_ascii_lowercase(),
                     "hovered": bar.hovered_tab_idx == Some(seg.idx),
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
@@ -1156,7 +1164,10 @@ impl App {
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
-                    let bell = diagnostic_titlebar_bell(self.cfg.icon_bell, pane.bell);
+                    let bell = diagnostic_titlebar_bell(
+                        self.cfg.icon_bell,
+                        pane.bell || pane.focused_bell(),
+                    );
                     let budget = (rect.2 / cell_w.max(1.0)).floor().max(1.0) as usize;
                     let group = pane.group_name.as_deref().filter(|g| !g.is_empty());
                     let fitted_title = kettle_render::fit_pane_titlebar_title(
@@ -1263,6 +1274,7 @@ impl App {
                 TitleEditScope::Pane => "pane",
                 TitleEditScope::Group => "group",
                 TitleEditScope::SaveLayout => "save_layout",
+                TitleEditScope::SaveSshHost => "save_ssh_host",
             };
             serde_json::json!({
                 "scope": scope,
@@ -1570,9 +1582,18 @@ impl App {
                             let origin = term.grid().history_origin();
                             let total = term.grid().history_size() + term.grid().screen_lines();
                             let scale = target.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+                            let lines = (
+                                term.grid().screen_lines(),
+                                term.grid().history_size(),
+                                term.grid().display_offset(),
+                            );
+                            let bar = super::pointer::pane_scrollbar(
+                                &self.cfg, target, *id, partition.terminal, scale, lines,
+                            );
+                            let column = (bar.track_rect.0, bar.track_rect.2);
                             marks.into_iter().filter_map(|mark| {
                                 let [x, y, w, h] = kettle_core::scrollbar::command_tick_rect(
-                                    partition.terminal, scale, self.cfg.scrollbar_width, origin, total, mark,
+                                    partition.terminal, column, scale, origin, total, mark,
                                 )?;
                                 Some(serde_json::json!({"row": mark.row, "exit_code": mark.exit_code,
                                     "rect": rect_json((x, y, w, h))}))
@@ -1675,6 +1696,20 @@ impl App {
         });
         geometry["tab_bar"]["window_controls"] = window_control_geometry(&bar);
         geometry["notices"] = notices.into();
+        // Where the notification toast is, without its text.
+        geometry["notification_toast"] = self
+            .notification_toast_projection(target)
+            .map(|view| {
+                let controls = view.overlay.control_geometry();
+                serde_json::json!({
+                    "rect": rect_json(controls.rect),
+                    "message": rect_json(controls.message),
+                    "show": view.show.then(|| rect_json(controls.details)),
+                    "close": rect_json(controls.close),
+                    "opacity": view.overlay.opacity,
+                })
+            })
+            .into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
             .text_field
@@ -1701,7 +1736,7 @@ impl App {
                 "unavailable": self.update_toast_unavailable,
                 "retry_in_ms": self.update_toast_retry.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
                 "receipt_pending": self.update_toast_receipts.as_ref().map_or(0, crate::update_toast::ReceiptWriter::pending_count),
-                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.presented,"remaining_ms":t.remaining().as_millis()})),
+                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.clock.presented,"remaining_ms":t.remaining().as_millis()})),
             }));
             fields.insert(
                 "fullscreen".into(),
@@ -2495,12 +2530,17 @@ impl App {
             ws.pressed_window_control = (bcode == 0).then_some(action);
             return true;
         }
-        if ws.linux_titlebar && empty_titlebar_space(&bar, px, py) {
+        // Empty header space and a lone title move the window natively;
+        // an agent's press there does nothing else.
+        if ws.linux_titlebar && linux_title_space(&bar, px, py) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if press_settings_gear(ws, &bar, (px, py), bcode) {
                 // Armed on a primary press; opens on release.
+            } else if bcode == 0 && search_button_at(&bar, px, py) {
+                ws.pressed_search = true;
+                self.toggle_header_find(ws);
             } else if bcode == 0
                 && bar.new_tab_menu.2 > 0.0
                 && rect_contains(bar.new_tab_menu, px, py)
@@ -2595,8 +2635,12 @@ impl App {
             return true;
         }
         let pre = self.focus_key(ws);
-        ws.mux.focus_at(area, px, py);
+        if let Some(pressed) = ws.mux.focus_at(area, px, py) {
+            ws.mux.answer_bell_by_press(pressed);
+        }
         self.note_focus_change(ws, pre);
+        // As natively, a press in the terminal restarts the cursor blink.
+        self.reset_blink_phase(ws);
         if self.send_mouse(ws, bcode, true, false) {
             return true;
         }
@@ -2618,9 +2662,10 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
+        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search) {
             ws.pressed_new_tab = false;
             ws.pressed_new_tab_menu = false;
+            ws.pressed_search = false;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }

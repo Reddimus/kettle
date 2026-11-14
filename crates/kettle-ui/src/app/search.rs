@@ -871,6 +871,16 @@ impl App {
         }
     }
 
+    /// The GNOME header's Find button: open Find as its shortcut does, or
+    /// close it when it is open, as GNOME's toggled search buttons do.
+    pub(super) fn toggle_header_find(&mut self, ws: &mut WindowState) {
+        if ws.search.open {
+            self.close_search(ws);
+        } else {
+            self.open_search(ws);
+        }
+    }
+
     pub(super) fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
         self.release_held_buttons(ws, |_| true);

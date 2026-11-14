@@ -159,6 +159,8 @@ by trigger.
 Print every
 .BR ssh-host
 declaration in the resolved config, sorted by name.
+It does not read
+.IR ~/.ssh/config .
 .TP
 .B \-\-list-layouts
 Print every saved layout name
@@ -342,6 +344,12 @@ in the config. The default
 .B restore-session = auto
 follows the macOS keep-windows setting, restores the previous session on Linux,
 and opens fresh on Windows.
+One Kettle process owns the saved session. While another one has it open, and
+with
+.BR \-\-profile ", " \-\-new\-process ", " \-e " or " \-d ,
+this flag opens a fresh window and a notification says why. With
+.BI \-\-config \ FILE
+it restores that file's own session.
 .TP
 .BI \-\-agent\-server \ MODE
 Enable kettle's agent control server for this launch, overriding the
@@ -888,7 +896,9 @@ verification; retry Previous/Next after interrupted navigation.
 URL / path quick-select hints
 .TP
 .B Ctrl+Shift+S
-SSH-host launcher
+SSH-host launcher; it can also save a typed target as an
+.B ssh-host
+entry and remove one, after confirmation
 .SS Scrollback / clipboard
 .TP
 .B Ctrl+Shift+C
@@ -1102,6 +1112,17 @@ reports whether the caller really runs in a pane from the process tree.
 Linux/Unix config root (default
 .IR ~/.config ).
 .TP
+.BR HOME " / " USERPROFILE
+Locate
+.I ~/.ssh/config
+for the SSH launcher:
+.B HOME
+on Linux and macOS,
+.B USERPROFILE
+on Windows, where a
+.B HOME
+exported by Git Bash is ignored.
+.TP
 .B KETTLE_VERSION " / " KETTLE_PREFIX
 Used by
 .B scripts/install-online.sh
@@ -1116,12 +1137,36 @@ overrides the install root.
 .SH FILES
 .TP
 .I ~/.config/kettle/config
-User config file (Linux). See CONFIGURATION above.
+User config file (Linux). See CONFIGURATION above. Theme picks, Settings and
+the SSH launcher's Save and Remove rows edit it in place and keep a
+.I .bak
+of it from before the first edit.
 .TP
-.I ~/.local/share/kettle/sessions/
+.I ~/.ssh/config
+OpenSSH client config. Read, never written, each time the SSH launcher opens,
+for its literal
+.B Host
+aliases only; at most 256 KiB and 256 aliases. Skipped when anyone other than
+the user, root or an administrator can change the file or a folder above it.
+Set
+.B ssh-config-hosts = false
+to stop kettle reading it.
+.TP
+.I ~/.config/kettle/session.json
 Session JSON (atomic write-then-rename) capturing every window:
-tabs, splits, working directories + window geometry. Saved in restore mode
-and replayed on the next launch when restoration is enabled. The default
+tabs, splits, working directories + window geometry, with recent output in
+.I session.content
+beside it (under
+.B $XDG_CONFIG_HOME
+when set). Saved in restore mode, within 2 seconds of a change, and
+replayed on the next launch when restoration is enabled. Only the Kettle
+process holding
+.I session.owner.lock
+beside it restores and saves the session. A
+.BI \-\-config \ FILE
+launch has a session of that file's own,
+.IR session\-<digest>.json ,
+named by a digest of the file's path. The default
 .B restore-session = auto
 restores on Linux, follows the keep-windows setting on macOS and opens fresh
 on Windows. Use

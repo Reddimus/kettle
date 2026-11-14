@@ -113,19 +113,12 @@ impl App {
 
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
+        let ssh_status = ssh_status_line(ws).map(str::to_string);
         let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
-            Some((query, selected)) => (
+            Some((query, _)) => (
                 Some(with_preedit(query)),
-                picker_hint(
-                    tr,
-                    &[
-                        ("Enter", T::PickerHintConnect),
-                        ("Tab", T::PickerHintComplete),
-                        ("↑↓", T::PickerHintSelect),
-                        ("Esc", T::PickerHintCancel),
-                    ],
-                ),
-                Some(ssh_picker_list(query, *selected, &self.cfg.ssh_hosts, tr)),
+                ssh_picker_hint(ssh_status.as_deref(), tr),
+                ssh_picker_list_for(ws, &self.cfg, tr),
             ),
             None => (None, String::new(), None),
         };
@@ -321,7 +314,7 @@ impl App {
         // pure `&self` reader.)
         let pane_blink = self.pane_cursor_blinking(ws, reuse_pane_snapshots);
         let blink_enabled = self.cfg.cursor_blink && pane_blink;
-        let cursor_visible = if !blink_enabled || !window_focused || modal_holds_cursor_steady(ws) {
+        let cursor_visible = if !blink_enabled || !window_focused || cursor_held_steady(ws) {
             true
         } else {
             ws.blink_on
@@ -414,6 +407,7 @@ impl App {
                 links,
                 ssh_query,
                 ssh_hint,
+                ssh_status,
                 palette_query,
                 palette_hint,
                 layout_picker_query,
@@ -447,6 +441,10 @@ impl App {
                     .persistent_notices(ws)
                     .into_iter()
                     .map(|(_, toast)| toast)
+                    .chain(
+                        self.notification_toast_projection(ws)
+                            .map(|view| view.overlay),
+                    )
                     .collect(),
                 context_menu,
                 context_menu_parents: self.context_menu_parent_overlays(ws),
@@ -569,6 +567,7 @@ impl App {
             links,
             ssh_query,
             ssh_hint,
+            ssh_status,
             palette_query,
             palette_hint,
             layout_picker_query,
@@ -599,6 +598,10 @@ impl App {
                 .persistent_notices(ws)
                 .into_iter()
                 .map(|(_, toast)| toast)
+                .chain(
+                    self.notification_toast_projection(ws)
+                        .map(|view| view.overlay),
+                )
                 .collect(),
             context_menu,
             context_menu_parents: self.context_menu_parent_overlays(ws),
@@ -979,8 +982,9 @@ impl App {
                         snaps[si].columns as u16,
                         snaps[si].screen_lines as u16,
                         // Terminator parity (`icon_bell`): the pane's own bell
-                        // latch drives its titlebar bell indicator.
-                        p.bell,
+                        // latch drives its titlebar bell indicator, and so does
+                        // an unanswered bell in the focused pane.
+                        p.bell || p.focused_bell(),
                         ws.bell_flashes
                             .get(id)
                             .map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),
@@ -1042,6 +1046,9 @@ impl App {
         // Whether anything covers the cards, for the tip: no dialog, menu or
         // viewer over them.
         let cards_uncovered = !self.pointer_modal_open(ws);
+        // Whether this frame's overlay carries the notification toast, read
+        // before the renderer borrow.
+        let notification_toast_shown = self.notification_toast_projection(ws).is_some();
         // Status bar state is built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -1113,6 +1120,13 @@ impl App {
         }
         if presented && overlay.update_toast.is_some() {
             self.update_toast_presented(ws.seq);
+        }
+        // The toast's time starts once a frame showing it reached the screen.
+        if presented
+            && notification_toast_shown
+            && let Some(toast) = ws.notification_toasts.visible_mut()
+        {
+            toast.clock.presented = true;
         }
         // The first card a user ever sees says a click opens it, once its
         // image is on screen with nothing over it: a card that loads in

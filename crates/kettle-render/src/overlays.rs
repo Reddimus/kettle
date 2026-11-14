@@ -547,6 +547,10 @@ pub struct Overlay {
     /// Keyboard help for the SSH input lane. Ranked hosts are projected through
     /// `context_menu` so each match gets its own row.
     pub ssh_hint: String,
+    /// The SSH launcher's status line after a host was saved or removed. The
+    /// input lane paints it in place of the key hint, and accessibility
+    /// announces it through a polite status node.
+    pub ssh_status: Option<String>,
     /// `Some(typed)` while the command palette is open.
     pub palette_query: Option<String>,
     /// Keyboard help for the palette input lane. Ranked commands are projected
@@ -823,6 +827,18 @@ pub fn update_toast_geometry(
         radius,
         unit: scale,
     })
+}
+
+/// Text columns of [`update_toast_geometry`]'s widest, stacked layout on a
+/// surface `surface_width` wide: a caller that fits text to a number of rows
+/// wraps it at this many columns. Text of up to six rows there has a toast.
+pub fn update_toast_columns(surface_width: f32, scale: f32, cell_width: f32) -> usize {
+    let max_width = (surface_width - 32.0 * scale).min(480.0 * scale);
+    let text_width = max_width - 32.0 * scale;
+    if !text_width.is_finite() || cell_width <= 0.0 {
+        return 0;
+    }
+    ((text_width / cell_width).floor().max(0.0) as usize).saturating_sub(1)
 }
 
 /// Number of lines painted by the shared notice/toast word wrapper.
@@ -1324,7 +1340,7 @@ pub fn format_media_size(bytes: u64) -> String {
 }
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
-/// draws a filled cyan disc, `Bell` a yellow triangle on a top or bottom
+/// draws a filled cyan disc, `Bell` a drawn yellow bell on a top or bottom
 /// tab bar; vertical tabs keep a square dot in each colour until 6.1.
 /// Terminator-parity affordance ("you've got new output in an inactive tab").
 /// Renderer-side enum so the UI doesn't need to leak its
@@ -1341,7 +1357,7 @@ pub enum TabActivity {
     /// (`tail -f`, build watchers) where the *absence* of output is
     /// the signal the user wants. Drawn on a top or bottom tab bar as a
     /// dim chrome-gray ring, distinct from `Output` (a cyan disc) and
-    /// `Bell` (a yellow triangle) by shape as well as colour; vertical
+    /// `Bell` (a yellow bell) by shape as well as colour; vertical
     /// tabs keep a gray dot until 6.1.
     Silent,
 }
@@ -1435,6 +1451,13 @@ pub struct TabBar {
     pub tooltip: Option<String>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
+    /// Kettle draws this strip as the Linux (GNOME) header bar: `+` leads
+    /// it, and a hairline separates it from the terminal below.
+    pub linux_header: bool,
+    /// The header's only tab, drawn as the window title: no tab surface,
+    /// accent line, hover fill or close button, and its title is resolved
+    /// against the header. A second tab brings back the tab look.
+    pub lone_title: bool,
     /// Recording warning, independent of the configurable tab format.
     pub recording_notice: String,
     /// Bar height in px (0 = hidden).
@@ -1463,6 +1486,15 @@ pub struct TabBar {
     pub settings: Rect4,
     pub hovered_settings: bool,
     pub pressed_settings: bool,
+    /// The GNOME header's Find button, left of its main menu: GNOME's
+    /// `edit-find` magnifier, which opens Find and closes it again.
+    /// Zero-area `(0,0,0,0)` on every other strip and in a header too narrow
+    /// to keep it; the renderer then draws nothing.
+    pub search: Rect4,
+    pub hovered_search: bool,
+    pub pressed_search: bool,
+    /// Find is open in this window, so the Find button shows as toggled on.
+    pub search_open: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1530,6 +1562,8 @@ impl TabBar {
             pressed_new_tab_menu: false,
             tooltip: None,
             in_titlebar: false,
+            linux_header: false,
+            lone_title: false,
             recording_notice: String::new(),
             height: 0.0,
             y: 0.0,
@@ -1541,6 +1575,10 @@ impl TabBar {
             settings: (0.0, 0.0, 0.0, 0.0),
             hovered_settings: false,
             pressed_settings: false,
+            search: (0.0, 0.0, 0.0, 0.0),
+            hovered_search: false,
+            pressed_search: false,
+            search_open: false,
             broadcast: false,
             hovered_close_idx: None,
             hovered_tab_idx: None,
@@ -1556,8 +1594,6 @@ impl TabBar {
 }
 
 pub(crate) const NEW_TAB_MENU_GLYPH: &str = "▾";
-/// The same menu in a GNOME header bar, drawn as GNOME's primary menu.
-pub(crate) const MAIN_MENU_GLYPH: &str = "≡";
 
 pub(crate) const NEW_TAB_PLUS_GLYPH: &str = "+";
 

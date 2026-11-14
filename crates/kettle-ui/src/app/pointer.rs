@@ -139,17 +139,18 @@ impl App {
         if self.cfg.scrollbar == kettle_config::ScrollbarMode::Never {
             return None;
         }
-        let (rx, ry, rw, rh) = self.focused_terminal(ws, area)?;
+        let terminal = self.focused_terminal(ws, area)?;
         let scale = ws
             .window
             .as_ref()
             .map(|window| window.scale_factor() as f32)
             .unwrap_or(1.0);
-        let zone = kettle_render::scrollbar_hit_width(self.cfg.scrollbar_width, scale);
-        if require_zone && (px < rx + rw - zone || px > rx + rw || py < ry || py > ry + rh) {
+        let hit = kettle_render::scrollbar_hit_rect(terminal, scale, self.cfg.scrollbar_width);
+        if require_zone && !scrollbar_hit_contains(hit, px, py) {
             return None;
         }
-        let p = ws.mux.focused()?;
+        let pane = ws.mux.active_focus()?;
+        let p = ws.mux.panes.get(&pane)?;
         let Ok(mut t) = p.term.term.lock() else {
             return None;
         };
@@ -159,22 +160,11 @@ impl App {
         // Interactable whenever there is something to scroll. `Auto` paints the
         // bar whenever history is present (not only while scrolled back), so a
         // click anywhere on the gutter jumps the viewport.
-        if rows + hist <= rows {
+        if hist == 0 {
             return None;
         }
-        let (thumb_y, thumb_h) =
-            kettle_core::scrollbar::thumb_with_min(rows, hist, off, rh, 24.0 * scale)?;
-        let pointer_y = py - ry;
-        let grab = grab_offset.unwrap_or_else(|| {
-            if (thumb_y..=thumb_y + thumb_h).contains(&pointer_y) {
-                pointer_y - thumb_y
-            } else {
-                thumb_h / 2.0
-            }
-        });
-        let grab = grab.clamp(0.0, thumb_h);
-        let target =
-            kettle_core::scrollbar::target_offset_for_drag(pointer_y, grab, rh, thumb_h, hist);
+        let bar = pane_scrollbar(&self.cfg, ws, pane, terminal, scale, (rows, hist, off));
+        let (grab, target) = scrollbar_drag_target(&bar, terminal, py, hist, grab_offset)?;
         let delta = target as i32 - off as i32;
         if delta != 0 {
             t.scroll_display(kettle_core::Scroll::Delta(delta));
@@ -198,12 +188,15 @@ impl App {
             .window
             .as_ref()
             .map_or(1.0, |window| window.scale_factor() as f32);
-        let zone = kettle_render::scrollbar_hit_width(self.cfg.scrollbar_width, scale);
         self.pane_layout(ws, area)
             .into_iter()
             .find_map(|(pane, partition)| {
-                let (rx, ry, rw, rh) = partition.terminal;
-                (px >= rx + rw - zone && px <= rx + rw && py >= ry && py <= ry + rh).then_some(pane)
+                let hit = kettle_render::scrollbar_hit_rect(
+                    partition.terminal,
+                    scale,
+                    self.cfg.scrollbar_width,
+                );
+                scrollbar_hit_contains(hit, px, py).then_some(pane)
             })
     }
 
@@ -418,6 +411,12 @@ impl App {
             && selection_copy_owner(ws.selecting, ws.selecting_pane).is_some()
         {
             self.copy_selection(ws);
+        }
+        // The drag held the cursor solid (`cursor_held_steady`); its blink
+        // starts again from the visible phase rather than wherever the timer
+        // had run to underneath.
+        if ws.selecting {
+            self.reset_blink_phase(ws);
         }
         clear_selection_gesture(ws);
     }
@@ -1113,6 +1112,53 @@ pub(crate) fn pane_titlebar_hit(
     None
 }
 
+/// `pane`'s scrollbar as the renderer paints it this frame: wide while the
+/// pointer hovers it, or drags it in the focused pane.
+pub(super) fn pane_scrollbar(
+    cfg: &kettle_config::Config,
+    ws: &WindowState,
+    pane: u64,
+    terminal: Rect,
+    scale: f32,
+    (rows, hist, off): (usize, usize, usize),
+) -> kettle_render::PaneScrollbar {
+    let interacting = ws.scrollbar_hover == Some(pane)
+        || (ws.mux.active_focus() == Some(pane) && ws.scrollbar_drag_offset.is_some());
+    kettle_render::pane_scrollbar_geometry(terminal, scale, cfg, rows, hist, off, interacting)
+}
+
+/// Whether the pointer is on a scrollbar's hit strip, edges included.
+pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bool {
+    px >= x && px <= x + w && py >= y && py <= y + h
+}
+
+/// A press or drag at `py` on `bar`: where the pointer holds the thumb and
+/// the display offset that puts the thumb there. A press on the thumb keeps
+/// the pointer where it took hold; one beside it centres the thumb on the
+/// pointer. A drag passes the hold it started with.
+pub(super) fn scrollbar_drag_target(
+    bar: &kettle_render::PaneScrollbar,
+    terminal: Rect,
+    py: f32,
+    hist: usize,
+    grab_offset: Option<f32>,
+) -> Option<(f32, usize)> {
+    let (_, ry, _, rh) = terminal;
+    let (_, thumb_top, _, thumb_h) = bar.thumb_rect?;
+    let thumb_y = thumb_top - ry;
+    let pointer_y = py - ry;
+    let grab = grab_offset.unwrap_or_else(|| {
+        if (thumb_y..=thumb_y + thumb_h).contains(&pointer_y) {
+            pointer_y - thumb_y
+        } else {
+            thumb_h / 2.0
+        }
+    });
+    let grab = grab.clamp(0.0, thumb_h);
+    let target = kettle_core::scrollbar::target_offset_for_drag(pointer_y, grab, rh, thumb_h, hist);
+    Some((grab, target))
+}
+
 /// SGR mouse base code for the extra "side" mouse buttons, or `None` for any
 /// button kettle handles locally (left/middle/right) or doesn't forward.
 ///
@@ -1805,6 +1851,10 @@ impl App {
             .into_iter()
             .rev()
             .map(|(_, toast)| toast)
+            .chain(
+                self.notification_toast_projection(ws)
+                    .map(|view| view.overlay),
+            )
             .chain(self.update_toast_projection(ws))
             .find_map(|toast| {
                 let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);

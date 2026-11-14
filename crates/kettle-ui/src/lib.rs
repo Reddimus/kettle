@@ -82,6 +82,8 @@ mod mux;
 mod native_drag;
 mod native_fullscreen;
 mod native_material;
+mod notification_router;
+mod notification_toast;
 mod notifications;
 mod owned_dir;
 mod pane_partition;
@@ -123,7 +125,10 @@ mod dev_record;
 
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
-pub use notifications::{flush_desktop_notifications, queue_desktop_notification};
+pub use notifications::{
+    flush_desktop_notifications, on_desktop_notification_failure, queue_desktop_notification,
+    queue_tracked_desktop_notification, take_failed_desktop_notifications,
+};
 
 #[doc(hidden)]
 pub fn run_media_preview_worker() -> i32 {
@@ -449,6 +454,14 @@ pub struct Options {
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,
+    /// `--profile` or `--new-process`: this process runs beside the main one,
+    /// so it neither restores nor writes the default session
+    /// (`session.json` and `session.content`).
+    pub separate_process: bool,
+    /// `config` came from `--config FILE`: this launch restores and saves a
+    /// session of that file's own, never the default one (see
+    /// `session::config_session_path`).
+    pub explicit_config: bool,
     /// `--agent-server MODE` overrides the `agent-server` config for THIS launch
     /// (`off`|`read-only`|`full`). `None` = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,

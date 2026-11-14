@@ -241,14 +241,14 @@ pub(super) struct StartupPlan {
 pub(super) fn startup_plan(
     options: &crate::Options,
     cfg: &Config,
-    another_build_running: bool,
+    session_elsewhere: bool,
 ) -> StartupPlan {
     let launch_override = options.command.is_some() || options.cwd.is_some();
     let may_restore = !launch_override
         && (options.tab_handoff_fd.is_some()
             || options.tab_handoff.is_some()
             || options.layout.is_some()
-            || should_restore_session(options.restore, cfg.restore_session, another_build_running));
+            || should_restore_session(options.restore, cfg.restore_session, session_elsewhere));
     StartupPlan {
         launch_override,
         may_restore,
@@ -762,7 +762,28 @@ impl App {
             };
         let video_previewer =
             crate::video_preview::VideoPreviewer::new(proxy.clone(), startup.media.clone());
-        let plan = startup_plan(&startup, &initial_cfg, another_build_running);
+        // Before the plan: a launch that does not own the default session
+        // neither restores it nor waits for one before its first pane.
+        let restoring = should_restore_session(startup.restore, initial_cfg.restore_session, false);
+        let session_path = launch_session_path(&startup);
+        let mut default_session = DefaultSessionClaim::claim(
+            separate_launch(&startup),
+            another_build_running,
+            restoring,
+            session_path
+                .as_deref()
+                .map(crate::session::owner_lock_path)
+                .as_deref(),
+        );
+        let session_elsewhere =
+            another_build_running || !restoring || !default_session.owns(another_build_running);
+        let plan = startup_plan(&startup, &initial_cfg, session_elsewhere);
+        let session_writer = {
+            let proxy = proxy.clone();
+            crate::session::SessionWriter::new(session_path.clone(), move || {
+                let _ = proxy.send_event(UserEvent::SessionResave);
+            })?
+        };
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
             pending_shell_action: PendingShellAction::default(),
@@ -776,7 +797,10 @@ impl App {
             restore_content: Default::default(),
             restore_identity: None,
             session_load_failed: false,
-            session_writer: crate::session::SessionWriter::new()?,
+            session_writer,
+            content_throttle: Default::default(),
+            default_session: std::cell::RefCell::new(default_session),
+            session_path,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
@@ -908,6 +932,8 @@ impl App {
             update_toast_unavailable: None,
             update_toast_retry: None,
             update_toast_focus: None,
+            notification_router: Default::default(),
+            notification_pending: Default::default(),
             config_notice_focus: false,
             update_facts_requested: None,
             update_facts_refresh: Default::default(),
@@ -916,12 +942,17 @@ impl App {
             executable: std::env::current_exe().and_then(std::fs::canonicalize).ok(),
             version_line: startup_version,
             torn_drag: None,
-            last_session_sweep: None,
+            session_sweep: SessionSweep::default(),
             exit_teardown_done: false,
         };
         if let Some((path, diagnostics)) = config_diagnostics {
             app.set_config_notice(&path, &diagnostics);
         }
+        // A failed desktop notification is shown in its window instead.
+        let failure_proxy = app.proxy.clone();
+        crate::on_desktop_notification_failure(move || {
+            let _ = failure_proxy.send_event(UserEvent::DesktopNotificationFailed);
+        });
         app.runtime_tracker.set_window_count(app.windows.len());
         // Before the first pane, which may start Claude Code or Codex.
         app.reconcile_claude_plugin();
@@ -1078,6 +1109,24 @@ impl App {
         // is the same flag that destroys it.
         self.named_layout_writable = !has_launch_override;
         self.clear_disabled_content();
+        // `--restore` asked for the default session explicitly, and is told
+        // when this launch cannot have it.
+        let explicit_restore = self.startup.restore
+            && self.startup.layout.is_none()
+            && self.startup.tab_handoff.is_none()
+            && self.startup.tab_handoff_fd.is_none();
+        // Asked only for `--restore`, so a launch with restore mode off never
+        // claims the session here.
+        let elsewhere = explicit_restore && self.default_session_elsewhere();
+        if let Some(body) =
+            restore_refusal(explicit_restore, &self.default_session.borrow(), elsewhere)
+        {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifySessionNotRestored),
+                self.ui_text.text(body),
+            );
+        }
         let loaded_session = if ws.pre_launch.is_some() || has_launch_override {
             None
         } else {

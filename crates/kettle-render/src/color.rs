@@ -255,7 +255,7 @@ pub(crate) fn special_attributes(
 // background reaches a target ratio. Used by the renderer to keep text
 // readable on low-contrast themes; off (ratio ≤ 1.0) preserves colors.
 
-fn srgb_to_linear(c: u8) -> f64 {
+pub(crate) fn srgb_to_linear(c: u8) -> f64 {
     let c = c as f64 / 255.0;
     if c <= 0.03928 {
         c / 12.92
@@ -265,13 +265,19 @@ fn srgb_to_linear(c: u8) -> f64 {
 }
 
 fn linear_to_srgb(value: f64) -> u8 {
+    encode_srgb(value).round() as u8
+}
+
+/// The sRGB encoding of linear light `value`, on the 0-255 scale and not yet
+/// rounded to a level.
+pub(crate) fn encode_srgb(value: f64) -> f64 {
     let value = value.clamp(0.0, 1.0);
     let c = if value <= 0.0031308 {
         value * 12.92
     } else {
         1.055 * value.powf(1.0 / 2.4) - 0.055
     };
-    (c * 255.0).round() as u8
+    c * 255.0
 }
 
 /// `top` painted over `base` at opacity `alpha`. A GPU blending into an sRGB

@@ -529,6 +529,14 @@ without treating that stream as a byte-preserving scroll oracle. Native Windows
 CI is required to accept this fixture change; portable passes alone do not prove
 ConPTY behavior.
 
+The command-output tests parse their wires into a bare engine through the same
+extractor and VT parser, applying each scroll journal before the next mark, so
+they need no pseudoterminal; only the reflow test opens one, because reflow is
+the `Terminal`'s work. The fixtures open one terminal at a time and retry a
+failed open a few times: on macOS, opening `/dev/ptmx` fails now and then with
+errno -6 while other threads or processes open pseudoterminals at the same
+moment, with far fewer in use than `kern.tty.ptmx_max` allows.
+
 Native PTY tests need permission to create Unix PTYs or Windows ConPTYs.
 Restricted sandboxes can skip those tests.
 
@@ -1390,7 +1398,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Raw paste | `just raw-paste-smoke` | Multiline paste into an unbracketed shell proceeds; macOS restores its clipboard, other hosts need isolation | Linux/macOS |
 | Program keys | `just program-keys-smoke` | Client-owned Shift+Left reaches Kitty client, then returns to split resize | Linux/macOS |
 | Search selection | `just search-selection-smoke --isolated-clipboard` | Open search bar preserves grid selection, copy, menus, focus, shortcuts, and Esc | Linux/macOS |
-| Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline | Linux/macOS |
+| Bell flash | `just bell-flash-smoke` | Only ringing pane brightens, then pixels return to baseline. Needs motion allowed: `reduce-motion = off`, or the system's Reduce Motion off under `auto` | Linux/macOS |
 | Default window size | `just default-window-size-smoke` | Monitor-fitted defaults and explicit sizing; needs a sufficiently wide monitor | Linux/macOS |
 | Line edit chords | `just line-edit-chords-smoke` | Text-action backspace, macOS default chord, and search word deletion | Linux/macOS |
 | Dock menu | `just dock-menu-smoke` | Real Dock rows, window list, minimized New Tab restoration and New Window effect; accessibility, plus an isolated bundle or no other Kettle instance | macOS |
@@ -2179,6 +2187,23 @@ failure. Unix job control has no equivalent Windows acceptance leg.
   A passing MCP self-test does not prove the host client's configuration.
 - [ ] Check real SSH/tmux nesting and local versus remote path opening in a
   disposable session. The fixture cannot model every remote desktop policy.
+- [ ] Check the SSH launcher's `~/.ssh/config` import with a scratch `HOME`
+  only, never your own: create `$HOME/.ssh` at `0700` and a `0600` `config`
+  with two `Host` lines, then start Kettle with that `HOME` and press
+  `Ctrl+Shift+S`. Both aliases show `from ~/.ssh/config`; typing a third name
+  offers **Connect to "…"**; `-oX` shows the refusal row. Repeat with
+  `ssh-config-hosts = false` (no aliases) and on Windows with `USERPROFILE`.
+  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep the
+  owner's real aliases out of screenshots and audit artifacts.
+- [ ] Check Save and Remove with the same scratch `HOME` and a scratch
+  `--config` file. Type `me@db.example.com`, press Down to the Save row and
+  Enter: the name editor suggests `db.example.com`; Enter adds the
+  `ssh-host` line and reopens the launcher on it with `Saved "…"` announced.
+  Save a new target under the same name and confirm the Replace question
+  starts on Cancel. Type the name exactly, press Down to Remove and confirm:
+  the line goes and `~/.ssh/config` is unchanged. Check that the wheel, Up
+  from the first row and a hover never select either action row, and that a
+  host added to the file by hand before the reload makes Save refuse.
 
 See [AGENT.md](AGENT.md) for the control and agent surfaces.
 Keep large request/response examples there rather than duplicating them here.
@@ -2990,6 +3015,16 @@ check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
 field name alone, including on macOS.
 
+## Static text names on every platform
+
+`theme_picker_readout_is_spoken_on_every_platform` and
+`settings_no_matches_is_spoken_on_every_platform` hand the modal projection to
+AccessKit's consumer, as the platform adapters do, and read each node's name as
+AT-SPI and UI Automation do: a label's from its value, any other node's from its
+label. They check the theme picker's footer text (with the lowest colour's
+number and the below-3:1 warning) and Settings' no-match line in English and
+Spanish. They do not run Orca or Narrator.
+
 ## Configured-session and desktop acceptance, 2026-11-01
 
 On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,
@@ -3243,7 +3278,11 @@ hit testing and accessibility to one layout, and `kettle-render`'s
 `picker_scroll_thumb_is_drawn_last_at_three_to_one` pin the scrollbar thumb.
 `bound_only_palette_lists_every_bound_command_with_its_shortcut` and
 `enter_in_the_shortcut_list_runs_the_selected_bound_row` cover the Keyboard
-Shortcuts list. `picker_key_hint_slot_is_secondary_text` pins the header key
+Shortcuts list, and `the_shortcut_list_shows_its_placeholder_in_a_standard_window`
+its placeholder in a standard window's header in both languages; `kettle-render`'s
+`an_empty_picker_header_gives_its_hint_up_before_its_placeholder` holds the rule
+that the key hint gives way to an empty query's placeholder.
+`picker_key_hint_slot_is_secondary_text` pins the header key
 hint's colour without a GPU; `a_picker_header_paints_its_key_hint_as_secondary_text`
 and `an_empty_picker_query_paints_its_placeholder` check the frame and print
 `PICKER_HEADER_GPU_SKIP` when no GPU adapter exists.
@@ -3296,6 +3335,32 @@ unknown statuses, bounded retention and shared DPI-aware scrollbar rectangles;
 Accessibility tests check English/Spanish exit-code descriptions against that
 geometry. Native UI/GPU acceptance still requires rendered ticks on each OS;
 headless source and geometry checks do not establish visual acceptance.
+
+`kettle-render`'s `scrollbar_tests` pin the pane scrollbar.
+`scrollbar_colours_meet_their_floors_on_every_bundled_theme` sweeps every
+bundled theme in both blend modes, solid and translucent: the rest thumb 3:1
+against the background and 2:1 against its channel, the active thumb 4.5:1
+and 3:1 against its channel, the channel 1.5:1 and at rest at most 1.6:1, and
+no translucent layer over 90% cover.
+`command_ticks_stand_out_on_the_channel_and_the_thumb_on_every_bundled_theme`
+holds ticks, solid and translucent, to 3:1 against the channel and the
+background, or against the thumb where they cross it, and
+`ticks_split_at_the_thumb_edges` cuts a tick at the thumb's edges. The
+geometry tests cover the scrolled-back width and full-height channel, the
+rest channel only with history, `always`'s steady width, the 40 logical px
+thumb at 1x and 2x, the edge-touching hit strip, the jump button's clearance
+at widths 2-40, when the bar paints solid, and, in
+`narrow_and_short_panes_keep_the_bar_inside` and `an_empty_pane_draws_no_bar`,
+panes narrower or shorter than the bar at 1x and 2x.
+`headless_tests::a_pane_with_history_paints_its_thumb_channel_and_ticks`
+samples the thumb, channel and ticks on the channel and on the thumb in
+rendered frames, at rest and scrolled back, on TokyoNight Night and Kettle
+Day at 1x and 2x, solid and translucent, away from any glyph. Linux UI state
+captures whose panes have history, such as the narrow `search-matches`,
+`search-nomatch` and `splits` states, show the rest channel.
+`kettle-ui`'s `scrollbar_tests` check that the pointer grabs the thumb the
+renderer draws and that the AccessKit ScrollBar bounds are its painted
+channel.
 
 Chrome state regression coverage includes the auto tab default, exit-policy
 status matrix, replay of original launch environment and cwd in the same pane,
@@ -3509,7 +3574,15 @@ winit feature drift. The existing portal fixture also covers GNOME button-layout
 snapshots, live changes and owner replacement on Linux. Renderer tests cover
 28-point button geometry, rounded hover/pressed fills and
 4.5:1 focused / 3:1 unfocused glyph contrast across bundled themes. Header tests
-also cover narrow control lanes, localized tooltips and ctl geometry parity.
+also cover narrow control lanes, localized tooltips and ctl geometry parity,
+when the lone tab is drawn as the title, presses on that title (drag, 400 ms
+double-click, window menu, ignored middle press) beside two-tab presses left to
+the tab strip, and the leading `+` agreeing across hit tests, AccessKit and ctl
+at 1x and 2x with left-side buttons. Renderer tests check that a lone title
+paints no tab surface, accent or hover fill and keeps 4.5:1 focused and 3:1
+unfocused against the header in TokyoNight Night and Kettle Day, the header
+hairline's 1.5:1 floor and its break under an active tab, the `+` tooltip
+anchor, and that `≡` is drawn as a 14 by 12 point icon at every font size.
 Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
 host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
 and runs the same suites on Linux, where the header code is built. Cross-clippy with
@@ -3518,7 +3591,8 @@ std and a Linux C compiler/sysroot for native dependencies.
 
 Live acceptance still requires GNOME/Mutter and KDE/KWin Wayland sessions:
 check actual decoration negotiation, fractional scale, minimize/restore/close,
-window menus, drag/double-click, all resize edges, maximize/tile/fullscreen
+window menus, drag/double-click on empty space and on a lone title, one tab to
+two and back, all resize edges, maximize/tile/fullscreen
 transitions, inactive colors, localized tooltips, AT-SPI button activation,
 IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless

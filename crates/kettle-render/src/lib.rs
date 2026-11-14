@@ -26,12 +26,17 @@ mod scrollback;
 mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
-pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
+pub use scrollback::{
+    PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
+    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
+};
 mod text_field;
 pub use text_field::{
     TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
     text_field_placeholder, text_field_rects,
 };
+mod header_icons;
+mod header_title;
 mod settings;
 mod tab_strip;
 mod terminal;
@@ -129,12 +134,12 @@ pub use overlays::{
     format_media_size, hint_label_rect, media_paste_receipt_geometry, menu, menu_row_chars,
     notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
     persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_geometry,
+    toast_text_rows, update_toast_columns, update_toast_geometry,
 };
 use overlays::{
-    MAIN_MENU_GLYPH, MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH,
-    context_menu_panel_width, media_paste_receipt_text, menu_chrome_quads, push_input_bar,
-    push_resize_overlay_chrome, scroll_arrow_glyphs, toast_buffer_text,
+    MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
+    media_paste_receipt_text, menu_chrome_quads, push_input_bar, push_resize_overlay_chrome,
+    scroll_arrow_glyphs, toast_buffer_text,
 };
 #[cfg(test)]
 use overlays::{
@@ -658,6 +663,18 @@ pub struct Renderer {
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
+    /// The GNOME header's icons and window-button discs, by icon and side.
+    header_icon_masks: header_icons::IconMasks,
+    /// Whether the bundled title face is in `font_system`; `None` until the
+    /// first lone GNOME-header title asks for it.
+    header_title_face: Option<bool>,
+    /// The lone GNOME-header title as shaped, what it was fitted from, and
+    /// its width; `header_title_scratch` measures the candidates.
+    header_title_buffer: TextBuffer,
+    header_title_scratch: TextBuffer,
+    header_title_key: Option<header_title::HeaderTitleKey>,
+    header_title_width: f32,
+    tab_bell_mask: tab_strip::BellMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -1550,15 +1567,14 @@ impl Renderer {
             // strip-bottom row for vertical layouts).
             // Paint the union of [▾ | +] when the dropdown arrow is
             // present so there's no unpainted gap behind it; otherwise just the
-            // `+` button.
+            // `+` button. The GNOME header's `+` and `≡` sit at opposite ends.
             let (nx, ny, nw, nh) = tabbar.new_tab;
             let (mx, _, mw, _) = tabbar.new_tab_menu;
-            let (bx, bw) = if mw > 0.0 {
-                (mx, nx + nw - mx)
-            } else {
-                (nx, nw)
-            };
-            quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
+            for (x, y, w, h) in
+                tab_strip::new_tab_control_fills(tabbar.new_tab, tabbar.new_tab_menu)
+            {
+                quads.push(rect(x, y, w, h, chrome_strip_bg, 1.0));
+            }
             let accent = if tabbar.broadcast {
                 theme.palette[3]
             } else {
@@ -1581,31 +1597,47 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
-                for (bounds, hovered, pressed) in [
+                for (bounds, hovered, pressed, toggled) in [
                     (
                         tabbar.new_tab_menu,
                         tabbar.hovered_new_tab_menu,
                         tabbar.pressed_new_tab_menu,
+                        false,
                     ),
                     (
                         tabbar.new_tab,
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
+                        false,
                     ),
                     (
                         tabbar.settings,
                         tabbar.hovered_settings,
                         tabbar.pressed_settings,
+                        false,
+                    ),
+                    (
+                        tabbar.search,
+                        tabbar.hovered_search,
+                        tabbar.pressed_search,
+                        tabbar.search_open,
                     ),
                 ] {
-                    if hovered && bounds.2 > 0.0 {
-                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
+                    if bounds.2 > 0.0
+                        && let Some(fill) = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            hovered,
+                            pressed,
+                            toggled,
+                        )
+                    {
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
                             6.0 * self.scale,
                             (true, true),
-                            (hover, 1.0),
+                            (fill, 1.0),
                             None,
                         );
                     }
@@ -1636,6 +1668,38 @@ impl Renderer {
                         self.scale,
                         &mut self.settings_gear_mask,
                     );
+                }
+                // The GNOME header's `+`, Find and `≡` are GNOME's 16 px
+                // symbolic icons, drawn rather than shaped, in the ink the
+                // strip's glyphs have: the accent while hovered, at 4.5:1
+                // focused and 3:1 unfocused, against the fill they sit on.
+                if tabbar.linux_header {
+                    for button in tab_strip::header_icon_buttons(tabbar) {
+                        let background = tab_strip::flat_button_fill(
+                            chrome_strip_bg,
+                            theme.foreground,
+                            button.hovered,
+                            button.pressed,
+                            button.toggled,
+                        )
+                        .unwrap_or(chrome_strip_bg);
+                        let ink = if button.hovered {
+                            accent
+                        } else {
+                            theme.foreground
+                        };
+                        let ink =
+                            self.chrome_colors
+                                .tab_text(ink, background, overlay.window_focused);
+                        header_icons::push_header_icon(
+                            &mut quads,
+                            button.icon,
+                            button.rect,
+                            ink,
+                            self.scale,
+                            &mut self.header_icon_masks,
+                        );
+                    }
                 }
             }
             // Drag-in-progress ghost. While the user holds a
@@ -1838,6 +1902,23 @@ impl Renderer {
         let mut drawn_cards = std::mem::take(&mut self.drawn_cards);
         drawn_cards.clear();
         self.drawn_bidi.clear();
+        let scrollbar_colors = self
+            .chrome_colors
+            .scrollbar(theme, self.config.format.is_srgb());
+        let scale = self.scale;
+        let pane_bar = |pv: &PaneView<'_>| {
+            let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
+                || (pv.focused && overlay.scrollbar_active);
+            pane_scrollbar_geometry(
+                pv.terminal,
+                scale,
+                cfg,
+                pv.snap.screen_lines,
+                pv.snap.history_size,
+                pv.snap.display_offset,
+                interacting,
+            )
+        };
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
@@ -2122,62 +2203,65 @@ impl Renderer {
             }
             if cfg.scrollbar != ScrollbarMode::Never {
                 // The scrollbar runs the height of the terminal it scrolls,
-                // clear of the titlebar and lane.
-                let (rx, ry, rw, rh) = pv.terminal;
-                let s = pv.snap;
-                let (rows, hist, off) = (s.screen_lines, s.history_size, s.display_offset);
-                let has_scroll = hist > 0 && rows + hist > rows;
-                // Compact overlay scrollbar. Width and minimum thumb are logical
-                // pixels scaled to the surface DPI; input uses the same scale but
-                // a larger invisible hit strip. Foreground-derived chrome keeps
-                // reliable contrast across light and dark themes. The two-state
-                // opacity still needs no fade timer or idle redraws.
-                if has_scroll || cfg.scrollbar == ScrollbarMode::Always {
-                    let interacting = overlay.scrollbar_hovered_pane == Some(pv.id)
-                        || (pv.focused && overlay.scrollbar_active);
-                    let bar_w = scrollbar_draw_width(cfg.scrollbar_width, self.scale, interacting);
-                    let edge = 2.0 * self.scale;
-                    let bx = rx + rw - bar_w - edge;
-                    let active = off > 0 || interacting;
-                    let (track_a, thumb_a) = if active { (0.14, 0.82) } else { (0.07, 0.42) };
-                    let track_w = (1.5 * self.scale).clamp(1.0, bar_w);
-                    if active || cfg.scrollbar == ScrollbarMode::Always {
-                        over.push(rect(
-                            bx + (bar_w - track_w) / 2.0,
-                            ry,
-                            track_w,
-                            rh,
-                            theme.foreground,
-                            track_a,
-                        ));
+                // clear of the titlebar and lane. Width and minimum thumb are
+                // logical pixels scaled to the surface DPI; input reads the
+                // same geometry and a larger invisible hit strip. The
+                // two-state look needs no fade timer or idle redraws.
+                let bar = pane_bar(pv);
+                if bar.channel {
+                    // The channel runs above and below the thumb, not under
+                    // it, so a translucent thumb shows over the background
+                    // alone, as its colour was resolved.
+                    let (x, top, w, h) = bar.track_rect;
+                    let (ink, alpha) = scrollbar_colors.track(bar.state, bar.opaque);
+                    let (gap_top, gap_bottom) = bar
+                        .thumb_rect
+                        .map_or((top + h, top + h), |(_, y, _, th)| (y, y + th));
+                    for (from, to) in [(top, gap_top), (gap_bottom, top + h)] {
+                        if to > from {
+                            over.push(rect(x, from, w, to - from, ink, alpha));
+                        }
                     }
-                    // Thumb — only when there is actually something to scroll.
-                    if let Some((ty, th)) = kettle_core::scrollbar::thumb_with_min(
-                        rows,
-                        hist,
-                        off,
-                        rh,
-                        24.0 * self.scale,
-                    ) {
-                        over.push(rect(bx, ry + ty, bar_w, th, theme.foreground, thumb_a));
-                    }
+                }
+                if let Some((x, y, w, h)) = bar.thumb_rect {
+                    let (ink, alpha) = scrollbar_colors.thumb(bar.state, bar.opaque);
+                    over.push(rect(x, y, w, h, ink, alpha));
                 }
             }
         }
 
         // Result ticks remain visible even when the scrollbar thumb is hidden.
+        // They lie across the bar as it is drawn, widening with it. On a drawn
+        // bar each part of a tick takes the colour that stands out against
+        // what it lies on, the channel or the thumb, and is painted as the bar
+        // is: solid, or a layer a glyph under it still shows through. With no
+        // bar (`never`, or `auto` before any history) a tick lies on the
+        // background alone and keeps its palette colour, solid, as before.
         for pv in panes {
+            let bar = pane_bar(pv);
+            let column = (bar.track_rect.0, bar.track_rect.2);
             for mark in &pv.snap.command_marks {
-                if let Some([x, y, w, h]) = kettle_core::scrollbar::command_tick_rect(
+                let Some(tick) = kettle_core::scrollbar::command_tick_rect(
                     pv.terminal,
+                    column,
                     self.scale,
-                    cfg.scrollbar_width,
                     pv.snap.history_origin,
                     pv.snap.history_size + pv.snap.screen_lines,
                     *mark,
-                ) {
-                    let color = theme.palette[if mark.exit_code == 0 { 2 } else { 1 }];
+                ) else {
+                    continue;
+                };
+                let success = mark.exit_code == 0;
+                if !bar.channel {
+                    let [x, y, w, h] = tick;
+                    let color = theme.palette[if success { 2 } else { 1 }];
                     over.push(rect(x, y, w, h, color, 1.0));
+                    continue;
+                }
+                for ((x, y, w, h), on) in scrollback::tick_pieces(tick, bar.thumb_rect) {
+                    let (ink, alpha) =
+                        scrollbar_colors.tick_paint(bar.state, on, success, bar.opaque);
+                    over.push(rect(x, y, w, h, ink, alpha));
                 }
             }
         }
@@ -2633,6 +2717,17 @@ impl Renderer {
             self.tab_hint_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, title_w, title_h) = s.title_rect;
+                // The GNOME header's lone title is the window's title, in
+                // GNOME's bold sans at its title size, not a tab label.
+                if tabbar.lone_title {
+                    self.prepare_header_title(
+                        s,
+                        &cfg.tab_format,
+                        &tabbar.recording_notice,
+                        &family,
+                    );
+                    continue;
+                }
                 if let Some((hint_rect, hint)) = &s.hint {
                     let buf = &mut self.tab_hint_buffers[bi];
                     buf.set_metrics(tab_metrics);
@@ -2709,18 +2804,14 @@ impl Renderer {
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             // The `▾` dropdown arrow, shaped in its own buffer so it
-            // lands inside `new_tab_menu` (left of `+`). Skipped when disabled.
-            if tabbar.new_tab_menu.2 > 0.0 {
+            // lands inside `new_tab_menu` (left of `+`). Skipped when disabled,
+            // and in the GNOME header, whose `≡` is drawn, not shaped.
+            if tabbar.new_tab_menu.2 > 0.0 && !tab_strip::main_menu_icon(tabbar) {
                 self.new_tab_arrow_buffer.set_metrics(control_metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
-                // Constant glyph, shaped once per font family: GNOME's
-                // primary-menu sign where Kettle draws the header bar.
-                let glyph = if tabbar.window_controls.is_empty() {
-                    NEW_TAB_MENU_GLYPH
-                } else {
-                    MAIN_MENU_GLYPH
-                };
+                // Constant glyph, shaped once per font family.
+                let glyph = NEW_TAB_MENU_GLYPH;
                 if self.new_tab_arrow_text != glyph {
                     self.new_tab_arrow_buffer.set_text(
                         glyph,
@@ -4365,15 +4456,40 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
+                // A lone GNOME-header title sits on the header, centred on
+                // it, in the header's text colour: 4.5:1, and in an
+                // unfocused window faded halfway as GNOME fades its header,
+                // at no less than 3:1.
+                if tabbar.lone_title {
+                    let ink =
+                        self.chrome_colors
+                            .tab_text(fg, chrome_strip_bg, overlay.window_focused);
+                    let (left, top) = header_title::header_title_origin(
+                        s.title_rect,
+                        self.header_title_width,
+                        header_title::header_title_metrics(self.scale).line_height,
+                    );
+                    areas.push(TextArea {
+                        buffer: &self.header_title_buffer,
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect(s.title_rect),
+                        default_color: gc(ink),
+                        custom_glyphs: &[],
+                    });
+                    continue;
+                }
+                let (painted_active, painted_hover) = tab_strip::tab_paint_state(tabbar, s);
                 let tab_background = tab_strip::tab_title_background(
-                    s.active,
-                    tabbar.hovered_tab_idx == Some(s.idx),
+                    painted_active,
+                    painted_hover,
                     cfg.tab_bar_pos.is_vertical(),
                     default_bg,
                     chrome_strip_bg,
                     theme.foreground,
                 );
-                let tab_backing = if s.active && !cfg.tab_bar_pos.is_vertical() {
+                let tab_backing = if painted_active && !cfg.tab_bar_pos.is_vertical() {
                     active_tab_backing
                 } else {
                     color::Backing::opaque(tab_background)
@@ -4426,6 +4542,7 @@ impl Renderer {
                         s.rect,
                         s.title_rect,
                         centered_left,
+                        s.activity,
                         self.scale,
                     )
                     && let Some(ink) = chrome::activity_ink(theme, s.activity)
@@ -4438,8 +4555,8 @@ impl Renderer {
                         s.activity,
                         marker,
                         self.scale,
-                        ink,
-                        tab_background,
+                        (ink, tab_background),
+                        &mut self.tab_bell_mask,
                     );
                 }
                 // `✕` close glyph — separate text area so we can color
@@ -4585,18 +4702,22 @@ impl Renderer {
                 )
             };
             let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, control_ch));
-            areas.push(TextArea {
-                buffer: &self.tabbar_buffer,
-                left: plus_left,
-                top: plus_top,
-                scale: 1.0,
-                bounds: text_bounds_for_rect(tabbar.new_tab),
-                default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
-                custom_glyphs: &[],
-            });
+            // The GNOME header's `+` is drawn with the strip's quads instead.
+            if !tabbar.linux_header {
+                areas.push(TextArea {
+                    buffer: &self.tabbar_buffer,
+                    left: plus_left,
+                    top: plus_top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(tabbar.new_tab),
+                    default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
+                    custom_glyphs: &[],
+                });
+            }
             // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
-            // of `+`). Only present when the dropdown is enabled.
-            if tabbar.new_tab_menu.2 > 0.0 {
+            // of `+`). Only present when the dropdown is enabled; the GNOME
+            // header's `≡` is drawn with the strip's quads instead.
+            if tabbar.new_tab_menu.2 > 0.0 && !tab_strip::main_menu_icon(tabbar) {
                 let (ax, ay, aw, ah) = tabbar.new_tab_menu;
                 let arrow_fg = if tabbar.hovered_new_tab_menu {
                     toolbar_accent
@@ -4719,6 +4840,7 @@ impl Renderer {
             self.scale,
             overlay.window_focused,
             &mut self.chrome_colors,
+            &mut self.header_icon_masks,
         );
         // Hint labels over the focused pane, drawn with the menus, above
         // their chips and every card.
@@ -6351,6 +6473,9 @@ mod search_bar_tests;
 
 #[cfg(test)]
 mod chrome_contrast_sweep_tests;
+
+#[cfg(test)]
+mod scrollbar_tests;
 
 #[cfg(test)]
 mod completion_panel_tests;

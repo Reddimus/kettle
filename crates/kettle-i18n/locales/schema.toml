@@ -90,6 +90,22 @@ args = [{ name = "chord", type = "str" }]
 context = "crates/kettle-ui/src/app.rs: Rebind body. taken and action are safe localized action labels, never raw config/debug names or SendText payloads."
 args = [{ name = "taken", type = "str" }, { name = "action", type = "str" }]
 
+[messages.confirm_title_remove_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: heading of the question before a saved SSH host is removed from Kettle's config. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.confirm_body_remove_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: body of the SSH host removal question. name and target are the host's name and ssh target, verbatim. path is the fixed display path of the OpenSSH config, ~/.ssh/config or ~\\.ssh\\config on Windows, verbatim; it is not edited. Read aloud by screen readers: use words, no arrows."
+args = [{ name = "name", type = "str" }, { name = "target", type = "str" }, { name = "path", type = "str" }]
+
+[messages.confirm_title_replace_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: heading of the question before a saved SSH host's target is replaced, when a Save reuses an existing name. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.confirm_body_replace_ssh_host]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: body of the SSH host replace question. name is the host's name; old_target is the target it has now and new_target the one being saved; all verbatim. A statement of what happens, not an instruction."
+args = [{ name = "name", type = "str" }, { name = "old_target", type = "str" }, { name = "new_target", type = "str" }]
+
 [messages.confirm_close_scope]
 context = "crates/kettle-ui/src/app.rs: Scope summary for a tab or window close; count is the number of panes. The caller uses a separate message for exactly two panes."
 args = [{ name = "count", type = "u64" }]
@@ -103,6 +119,12 @@ context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for clos
 
 [messages.confirm_button_reassign]
 context = "crates/kettle-ui/src/app.rs: Confirmation button for moving a key combination to another action."
+
+[messages.confirm_button_remove]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_remove_dialog: destructive confirmation button that removes a saved SSH host from Kettle's config. Cancel is the default."
+
+[messages.confirm_button_replace]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_replace_dialog: confirmation button that saves a new target under an existing SSH host name. Cancel is the default."
 
 [messages.confirm_close_pane]
 context = "crates/kettle-ui/src/app.rs: confirmation before closing the focused pane."
@@ -460,6 +482,15 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 [messages.menu_find]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row that opens search in the pane's history."
 
+[messages.menu_prev_prompt]
+context = "crates/kettle-ui/src/app/menus.rs prompt_menu_rows: right-click menu row that scrolls the view to the shell prompt above it, using the prompt marks shell integration leaves. Same wording as the palette_jump_prev_prompt entry."
+
+[messages.menu_next_prompt]
+context = "crates/kettle-ui/src/app/menus.rs prompt_menu_rows: right-click menu row that scrolls the view to the shell prompt below it, using the prompt marks shell integration leaves. Same wording as the palette_jump_next_prompt entry."
+
+[messages.menu_select_command_output]
+context = "crates/kettle-ui/src/app/menus.rs command_output_menu_row: right-click menu row that selects, as whole lines, the output of the shell command under the pointer, as the shell integration's marks delimit it. Shown only over such output."
+
 [messages.menu_reset_terminal]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
@@ -809,6 +840,9 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 [messages.palette_jump_prev_prompt]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the JumpPrevPrompt action."
 
+[messages.palette_select_command_output]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SelectCommandOutput action. Selects, as whole lines, the output of the newest shell command the shell integration marked."
+
 [messages.palette_move_pane_down]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MovePaneDown action."
 
@@ -1120,9 +1154,6 @@ context = "crates/kettle-ui/src/app.rs: SSH launcher row when no host is configu
 [messages.picker_no_matching_command]
 context = "crates/kettle-ui/src/app.rs: Command palette row when nothing matches the query."
 
-[messages.picker_no_matching_host]
-context = "crates/kettle-ui/src/app.rs: SSH launcher row when no configured host matches the query."
-
 [messages.picker_no_matching_layout]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when nothing matches the query."
 
@@ -1138,6 +1169,25 @@ context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the command p
 
 [messages.picker_placeholder_shortcuts]
 context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the empty search field of the keyboard-shortcuts list (the command palette showing only commands with a shortcut). Replaced by the query once anything is typed; left out in a window too narrow for all of it."
+
+[messages.picker_ssh_config_source]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: hint beside an SSH launcher row imported from the user's OpenSSH config. path is the fixed display path ~/.ssh/config (~\\.ssh\\config on Windows), verbatim; never the expanded home folder. Lowercase."
+args = [{ name = "path", type = "str" }]
+
+[messages.picker_ssh_connect_typed]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: SSH launcher row that connects to exactly what the user typed, shown below the matching hosts. target is the typed text, verbatim. Keep the straight quotes around it."
+args = [{ name = "target", type = "str" }]
+
+[messages.picker_ssh_invalid_target]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: disabled SSH launcher row when the typed target cannot be passed to ssh: it starts with a hyphen, or contains a space or a control character. Keep the hyphen."
+
+[messages.picker_ssh_remove]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: last SSH launcher row, shown when the typed text is exactly a host saved in Kettle's config. It opens a confirmation that removes the host from Kettle's config only. name is the host's name, verbatim. Keep the straight quotes and the trailing ellipsis (it opens a question)."
+args = [{ name = "name", type = "str" }]
+
+[messages.picker_ssh_save_typed]
+context = "crates/kettle-ui/src/app/pickers.rs ssh_picker_list: last SSH launcher row, shown when the typed text is a valid ssh target that is not saved yet. It opens a prompt for a name and saves the pair in Kettle's config. target is the typed text, verbatim. Keep the straight quotes and the trailing ellipsis (it opens a prompt)."
+args = [{ name = "target", type = "str" }]
 
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
@@ -2615,7 +2665,7 @@ context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of 
 args = [{ name = "title", type = "str" }]
 
 [messages.a11y_tab_bell]
-context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows the terminal bell rang (a triangle). The argument is the tab title."
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a tab whose activity marker shows the terminal bell rang (a drawn bell): a background tab, or the active tab while the bell that rang in its focused pane is unanswered. The argument is the tab title."
 args = [{ name = "title", type = "str" }]
 
 [messages.a11y_tab_output_stopped]
@@ -2725,11 +2775,23 @@ context = "crates/kettle-ui/src/app/menus.rs, macos_menu.rs and kettle-config/sr
 [messages.edit_layout_name]
 context = "crates/kettle-ui/src/app/title.rs: Single-line layout save prompt label."
 
+[messages.edit_ssh_host_name]
+context = "crates/kettle-ui/src/app/title.rs: Single-line prompt label for the name a typed SSH target is saved under in the launcher."
+
 [messages.notify_layout_failed]
 context = "crates/kettle-ui/src/app/title.rs: Layout save failure notification title."
 
 [messages.notify_layout_failed_body]
 context = "crates/kettle-ui/src/app/title.rs: Layout save failure: invalid ASCII filename or write error."
+
+[messages.notify_session_not_restored]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: notification title when `kettle --restore` cannot reopen the saved session (windows, tabs, splits) in this launch. The window opens with a fresh shell instead."
+
+[messages.notify_session_not_restored_owned_body]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: body under notify_session_not_restored. A Kettle process that was already running owns the saved session; restoring it here as well would open a second copy of its tabs."
+
+[messages.notify_session_not_restored_separate_body]
+context = "crates/kettle-ui/src/app/startup.rs resumed_inner: body under notify_session_not_restored. Launches with these command-line options run as separate processes that never restore or save the session. The options are literal command-line flags; keep them verbatim."
 
 [messages.notify_profiles_failed]
 context = "crates/kettle-ui/src/app/actions.rs: Failure opening or creating the profiles directory."
@@ -2742,6 +2804,34 @@ context = "crates/kettle-ui/src/app/actions.rs: Profile process launch failure n
 
 [messages.notify_profile_launch_failed_body]
 context = "crates/kettle-ui/src/app/actions.rs: The selected profile disappeared or process/reaper creation failed."
+
+[messages.notify_ssh_host_not_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: Notification title when the SSH launcher's Save did not write the host."
+
+[messages.notify_ssh_host_not_saved_body]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH host save failure: the name has = or a control character, the config file changed since the launcher read it, or it could not be written. Infinitive instruction style."
+
+[messages.notify_ssh_host_not_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: Notification title when the SSH launcher's Remove did not change the config."
+
+[messages.notify_ssh_host_not_removed_body]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH host removal failure: the host changed in the config file since the launcher showed it, or the file could not be written."
+
+[messages.ssh_status_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a host was saved, painted in place of the key hint and announced politely to screen readers. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.ssh_status_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a host was removed, painted in place of the key hint and announced politely to screen readers. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.ssh_status_not_saved]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a confirmed Replace was refused or failed, painted in place of the key hint and announced politely to screen readers. The launcher reopens on the typed target. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
+
+[messages.ssh_status_not_removed]
+context = "crates/kettle-ui/src/app/pickers.rs: SSH launcher status line after a confirmed Remove was refused or failed, painted in place of the key hint and announced politely to screen readers. The launcher reopens on the host's name. name is the host's name, verbatim. Keep the straight quotes."
+args = [{ name = "name", type = "str" }]
 
 [messages.settings_field_cursor_unfocused_style]
 context = "crates/kettle-ui/src/settings.rs: Settings row: cursor appearance in inactive windows and split panes."
@@ -2995,3 +3085,39 @@ context = "crates/kettle-ui/src/app/profiles.rs: Compact past-tense command-pale
 
 [messages.notify_profile_launch_busy]
 context = "crates/kettle-ui/src/app/profiles.rs: Notification body when another launch validation already holds this App's admission permit. The user can retry once the scan/spawn completes; an already running child does not occupy admission."
+
+[messages.a11y_header_find]
+context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the magnifier button in Kettle's GNOME header bar, beside the ≡ main menu. It opens Find (search in the terminal's output and history) and closes it again; screen readers also report it pressed while Find is open. The tooltip adds the bound shortcut after it. Needs screen-reader second pass."
+
+[messages.notification_toast_sourced]
+context = "crates/kettle-ui/src/app/notification_toast.rs: the first line of the in-window notification toast a program raised (OSC 9, OSC 777 or kettle.notify). source is the title of the tab it came from, message the program's own text, both shown verbatim. Keep the punctuation that separates them."
+args = [{ name = "source", type = "str" }, { name = "message", type = "str" }]
+
+[messages.notification_toast_repeats]
+context = "crates/kettle-ui/src/app/notification_toast.rs: placed after a notification's text when the program sent the same notification count times in a few seconds (count is at least 2). A compact repeat counter, not a sentence; it is never shortened with the text."
+args = [{ name = "count", type = "u64" }]
+
+[messages.notification_toast_show]
+context = "crates/kettle-ui/src/app/notification_toast.rs: button on the notification toast that switches to the tab and pane the notification came from. Also its screen-reader name when the tab has no title. Infinitive."
+
+[messages.notification_toast_show_a11y]
+context = "crates/kettle-ui/src/app/notification_toast.rs: screen-reader name of the toast's Show button; source is the title of the tab the notification came from."
+args = [{ name = "source", type = "str" }]
+
+[messages.notification_toast_a11y]
+context = "crates/kettle-ui/src/app/notification_toast.rs: what a screen reader announces for a notification toast (a polite status). source is the title of the tab it came from, message the program's text. Notification is feminine in Spanish."
+args = [{ name = "source", type = "str" }, { name = "message", type = "str" }]
+
+[messages.notification_toast_a11y_unsourced]
+context = "crates/kettle-ui/src/app/notification_toast.rs: the same announcement for a notification with no tab to name, such as one a Lua script sent."
+args = [{ name = "message", type = "str" }]
+
+[messages.notification_toast_more]
+context = "crates/kettle-ui/src/app/notification_toast.rs: last line of the notification toast: how many more notifications arrived that it does not show (a burst folded into it, or ones the queue had no room for)."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.notification_toast_a11y_repeats]
+context = "crates/kettle-ui/src/app/notification_toast.rs: screen-reader description of a notification toast whose program sent the same notification count times; read instead of the visible repeat counter. The subject is the notification (feminine in Spanish)."
+args = [{ name = "count", type = "u64" }]
+plural = "count"

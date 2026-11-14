@@ -130,18 +130,26 @@ impl App {
             &self.cfg.dark_theme,
             None,
         ) {
-            if was_first {
-                self.set_runtime_theme_name(ws, &next);
-            } else {
-                self.apply_theme_name(ws, "theme-schedule", next);
+            if !was_first {
+                log::info!("theme-schedule: switching to {next}");
+            }
+            self.wear_followed_theme(ws, &next);
+            if !was_first {
+                self.save_session(ws);
             }
         }
     }
 
-    pub(super) fn apply_theme_name(&mut self, ws: &mut WindowState, source: &str, next: String) {
-        log::info!("{source}: switching to {next}");
-        self.set_runtime_theme_name(ws, &next);
-        self.save_session(ws);
+    /// Wear `next`, the theme the system or the schedule now calls for. An
+    /// open theme picker keeps its query and selection, but what it puts
+    /// back (Esc, or Enter for the side the window does not wear) becomes
+    /// `next` instead of the theme from before the switch.
+    pub(super) fn wear_followed_theme(&mut self, ws: &mut WindowState, next: &str) {
+        let baseline = (next.to_string(), self.cfg.theme_by_name(next));
+        for state in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            rebase_theme_preview(state, &baseline);
+        }
+        self.set_runtime_theme_state(ws, baseline.0, baseline.1);
     }
 
     /// Update the rendered palette and Lua's read-only view as one state
@@ -228,11 +236,7 @@ impl App {
                 .os_theme_choice(theme)
                 .unwrap_or_else(|| self.cfg.theme_name.clone());
             log::info!("theme-mode=auto: OS theme selects {next}");
-            let baseline = (next.clone(), self.cfg.theme_by_name(&next));
-            for state in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
-                rebase_theme_preview(state, &baseline);
-            }
-            self.set_runtime_theme_name(ws, &next);
+            self.wear_followed_theme(ws, &next);
         }
     }
 
@@ -490,6 +494,9 @@ impl App {
         // A config change, including a Settings edit or a menu toggle, is
         // activity: a new blink or timeout value takes effect visibly now.
         self.reset_blink_phase(ws);
+        // An open SSH launcher whose hosts changed starts again from row 0,
+        // so its selection cannot slide onto the Save or Remove row.
+        sync_ssh_hosts(ws, &self.cfg.ssh_hosts);
         // A changed schedule applies the theme it picks now, not at its next
         // boundary.
         self.poll_theme_schedule(ws);

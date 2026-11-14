@@ -839,6 +839,19 @@ impl Drop for PtyInputQueue {
     }
 }
 
+/// The SSH launcher's argv for `target`: `ssh -t -- <target>`, or `None` when
+/// the target fails `is_valid_ssh_target`. The `--` ends ssh's options, so even
+/// a target that slipped past validation could not be read as one (`-oX`).
+/// Pure, so the exact argv is tested.
+pub(crate) fn ssh_tab_argv(target: &str) -> Option<Vec<String>> {
+    kettle_config::ssh_config::is_valid_ssh_target(target).then(|| {
+        ["ssh", "-t", "--", target]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
 /// Initial pane title seeded from the launching argv before the program's
 /// first OSC 2. Plain shells get the placeholder "kettle", and the
 /// cwd-basename fallback fills in for them once OSC 7 arrives. SSH panes have
@@ -1015,6 +1028,14 @@ pub struct Pane {
     /// window reads it when it records a keystroke; only typed text is
     /// followed by the typed-echo counts and settle (see `crate::typed_echo`).
     last_input_typed_text: AtomicBool,
+    /// The bell rang while this pane was its window's focused pane and the
+    /// user has not answered it: drives the bell mark on the active tab and
+    /// on this pane's titlebar. The next key, IME commit or paste written to
+    /// the pane answers it, as do a pointer press in the pane and focus
+    /// moving to another pane or tab. OS window focus does not: a bell that
+    /// rang while the user was in another app is still marked when they come
+    /// back. Atomic because the input path writes through `&self`.
+    focused_bell: AtomicBool,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
     /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
@@ -1087,6 +1108,14 @@ pub struct Pane {
     /// to the PTY. Unix input policy accepts it only when its pid still matches
     /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
     pub foreground_process: Option<kettle_remote::ForegroundProcess>,
+    /// Document row (see `kettle_core::restore::primary_end_row`) before which
+    /// this pane's primary grid may still hold a remote session's output,
+    /// recorded when the pane stops counting as remote, or when restore
+    /// replays output saved as remote. It never moves back, so with
+    /// `restore-scrollback-remote` off those rows stay out of the saved output
+    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
+    /// taken every one of them out of the grid.
+    pub remote_output_end: Option<u64>,
     /// Media shown in this pane with `show`. It moves with the pane, into
     /// another window too.
     pub media_shelf: crate::media::Shelf,
@@ -1107,6 +1136,19 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Everything now in the primary grid may be a remote session's output:
+    /// keep it out of the saved output (see [`Pane::remote_output_end`]).
+    pub(crate) fn note_remote_output_ended(&mut self) {
+        let end = kettle_core::restore::primary_end_row(
+            &self
+                .term
+                .term
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.remote_output_end = Some(self.remote_output_end.map_or(end, |known| known.max(end)));
+    }
+
     #[cfg(test)]
     pub(crate) fn capture_input_for_test(&mut self) -> impl Fn() -> Vec<Vec<u8>> + use<> {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
@@ -1121,6 +1163,16 @@ impl Pane {
 
     pub(crate) fn input_generation(&self) -> u64 {
         self.user_input_generation.load(Ordering::Relaxed)
+    }
+
+    /// See `focused_bell`.
+    pub(crate) fn focused_bell(&self) -> bool {
+        self.focused_bell.load(Ordering::Relaxed)
+    }
+
+    /// The user answered this pane's focused bell (see `focused_bell`).
+    pub(crate) fn answer_focused_bell(&self) {
+        self.focused_bell.store(false, Ordering::Relaxed);
     }
 
     /// Live terminal mode adjusted by Kettle's pre-negotiation modified-Enter
@@ -1277,6 +1329,7 @@ impl Pane {
                         .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
                 self.record_typed_text(result, typed_text);
+                self.record_bell_answer(result, !bytes.is_empty());
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1318,6 +1371,7 @@ impl Pane {
                     .enqueue_user_with_echo(reporting_mode, joined, echo);
                 self.record_user_input(result, nonempty);
                 self.record_typed_text(result, nonempty && typed_text);
+                self.record_bell_answer(result, nonempty);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1348,6 +1402,16 @@ impl Pane {
         if result.is_queued() {
             self.last_input_typed_text
                 .store(typed_text, Ordering::Relaxed);
+        }
+    }
+
+    /// Keys, IME commits and pastes the pane accepted answer its focused
+    /// bell. Pointer reports do not (motion would clear it on hover; a press
+    /// answers it in the window's own press path), and neither do key
+    /// releases, which can belong to the key that made the bell ring.
+    fn record_bell_answer(&self, result: PaneInputResult, nonempty: bool) {
+        if result.is_queued() && nonempty {
+            self.answer_focused_bell();
         }
     }
 
@@ -2031,20 +2095,22 @@ pub struct Tab {
     pub(crate) scaled_zoom_owner: bool,
 }
 
-/// Activity state of an *inactive* tab, used by the renderer to pick
-/// the tab-bar indicator-dot color. Active tabs are always `Normal`
-/// (the focused tab's "you are here" accent already says enough).
+/// Activity state of a tab, used by the renderer to pick the tab-bar
+/// marker. An active tab is `Normal` unless the bell rang in its focused
+/// pane and the user has not answered it (`Pane::focused_bell`); output
+/// there needs no marker, since the user is looking at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabActivity {
-    /// Nothing to surface — active tab OR inactive tab with no output
-    /// since the user last saw it.
+    /// Nothing to surface — an active tab with no unanswered bell, or an
+    /// inactive tab with no output since the user last saw it.
     Normal,
     /// Output arrived since the user last looked at this tab. Drawn
     /// as a filled cyan disc on a top or bottom tab bar (a cyan dot on
     /// vertical tabs until 6.1) — the standard "something happened" cue.
     Output,
-    /// A `TermEvent::Bell` fired since the user last looked. Drawn as
-    /// a yellow triangle on a top or bottom tab bar (a yellow dot on
+    /// A `TermEvent::Bell` fired since the user last looked, or, on the
+    /// active tab, in its focused pane since the user last answered it. Drawn as
+    /// a yellow bell on a top or bottom tab bar (a yellow dot on
     /// vertical tabs until 6.1), overrides `Output` because a bell is a stronger
     /// signal (the focused program explicitly asked for attention).
     Bell,
@@ -2055,14 +2121,14 @@ pub enum TabActivity {
     /// *absence* of recent output is the signal the user wants.
     /// Drawn on a top or bottom tab bar as a dim chrome-gray ring to
     /// read as a state distinct from `Output` (a cyan disc) and `Bell`
-    /// (a yellow triangle); vertical tabs keep a gray dot until 6.1.
+    /// (a yellow bell); vertical tabs keep a gray dot until 6.1.
     Silent,
 }
 
-/// Pure: classify an inactive tab's activity from its state. Active
-/// tabs short-circuit to `Normal` because the focused-pane border and
-/// the tab-bar accent already convey focus — adding a dot there would
-/// be redundant.
+/// Pure: classify a tab's activity from its state. An active tab is `Bell`
+/// while its focused pane has an unanswered bell (`focused_bell`) and
+/// `Normal` otherwise: the focused-pane border and the tab-bar accent
+/// already convey focus, so output there needs no dot.
 ///
 /// `now` and `silence_threshold` drive the `TabActivity::Silent` variant
 /// — when an inactive tab had unseen output that's been quiet for at
@@ -2072,13 +2138,18 @@ pub enum TabActivity {
 pub fn classify_tab_activity(
     is_active: bool,
     bell: bool,
+    focused_bell: bool,
     last_output_at: Option<std::time::Instant>,
     last_seen_at: Option<std::time::Instant>,
     now: std::time::Instant,
     silence_threshold: std::time::Duration,
 ) -> TabActivity {
     if is_active {
-        return TabActivity::Normal;
+        return if focused_bell {
+            TabActivity::Bell
+        } else {
+            TabActivity::Normal
+        };
     }
     if bell {
         return TabActivity::Bell;
@@ -2289,11 +2360,81 @@ pub struct RestoreOutcome {
     pub skipped: usize,
 }
 
+/// Which of a pane's rows its saved output may hold.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemoteRows {
+    /// Every row; `remote` marks the saved output as remote, so a restore with
+    /// `restore-scrollback-remote` off drops it.
+    All { remote: bool },
+    /// Only rows from this document row on: a remote session wrote the ones
+    /// before it.
+    From(u64),
+}
+
+/// Which rows of a local pane are saved. `remote_now` is whether it counts
+/// as remote now (a pane that does, with remote saving off, saves no rows at
+/// all), `remote_end` its [`Pane::remote_output_end`], and `first_row` the
+/// oldest document row its grid still holds. A remote session's rows that
+/// are still there stay out unless `remote_allowed`, and saved with them the
+/// output is marked remote.
+pub(crate) fn remote_rows(
+    remote_now: bool,
+    remote_end: Option<u64>,
+    first_row: u64,
+    remote_allowed: bool,
+) -> RemoteRows {
+    let residue = remote_end.filter(|&end| end > first_row);
+    match residue {
+        Some(end) if !remote_allowed => RemoteRows::From(end),
+        _ => RemoteRows::All {
+            remote: remote_now || residue.is_some(),
+        },
+    }
+}
+
 fn remote_launch(argv: &[String]) -> bool {
     kettle_remote::detect_ssh(argv).is_some() || kettle_remote::detect_container(argv).is_some()
 }
 
+/// Whether a pane counts as remote now: a detected remote context, a remote
+/// launch, or a remote program in the foreground.
+pub(crate) fn pane_saves_as_remote(pane: &Pane) -> bool {
+    pane.remote_context.is_some()
+        || remote_launch(&pane.argv)
+        || pane
+            .foreground_process
+            .as_ref()
+            .is_some_and(|p| remote_launch(&p.argv))
+}
+
 impl Mux {
+    /// What each pane's saved rows depend on, in [`Mux::snapshot_content`]'s
+    /// order, read without locking any grid. Each generation is read before
+    /// the snapshot that follows it, so output racing the save makes the next
+    /// key differ rather than going unseen.
+    pub(crate) fn content_key_panes(&self) -> Vec<crate::session_content::PaneContentKey> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.root.leaf_ids())
+            .map(|id| match self.panes.get(&id) {
+                Some(pane) => crate::session_content::PaneContentKey {
+                    id,
+                    output: pane.term.output_generation(),
+                    geometry: pane.term.geometry_generation(),
+                    remote: pane_saves_as_remote(pane),
+                    remote_end: pane.remote_output_end,
+                },
+                None => crate::session_content::PaneContentKey {
+                    id,
+                    output: 0,
+                    geometry: 0,
+                    remote: false,
+                    remote_end: None,
+                },
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot_content(
         &self,
         cfg: &Config,
@@ -2309,22 +2450,41 @@ impl Mux {
                         let Some(pane) = self.panes.get(id) else {
                             return Default::default();
                         };
-                        let remote = pane.remote_context.is_some()
-                            || remote_launch(&pane.argv)
-                            || pane
-                                .foreground_process
-                                .as_ref()
-                                .is_some_and(|p| remote_launch(&p.argv));
-                        let lines = if remote && !cfg.restore_scrollback_remote {
-                            Vec::new()
-                        } else {
-                            kettle_core::restore::snapshot(
-                                &pane.term.term.lock().unwrap(),
-                                cfg.restore_scrollback_lines,
-                                budget,
-                            )
-                        };
-                        crate::session_content::PaneContent { remote, lines }
+                        let remote_now = pane_saves_as_remote(pane);
+                        if remote_now && !cfg.restore_scrollback_remote {
+                            return crate::session_content::PaneContent {
+                                remote: true,
+                                lines: Vec::new(),
+                            };
+                        }
+                        let term = pane.term.term.lock().unwrap();
+                        let first = kettle_core::restore::primary_first_row(&term);
+                        match remote_rows(
+                            remote_now,
+                            pane.remote_output_end,
+                            first,
+                            cfg.restore_scrollback_remote,
+                        ) {
+                            RemoteRows::All { remote } => crate::session_content::PaneContent {
+                                remote,
+                                lines: kettle_core::restore::snapshot(
+                                    &term,
+                                    cfg.restore_scrollback_lines,
+                                    budget,
+                                ),
+                            },
+                            // The rows left hold no remote output, so they
+                            // restore like any local pane's.
+                            RemoteRows::From(row) => crate::session_content::PaneContent {
+                                remote: false,
+                                lines: kettle_core::restore::snapshot_from(
+                                    &term,
+                                    cfg.restore_scrollback_lines,
+                                    row,
+                                    budget,
+                                ),
+                            },
+                        }
                     })
                     .collect()
             })
@@ -2472,6 +2632,45 @@ impl Mux {
         {
             pane.bell = false;
         }
+    }
+
+    /// Mark the bell that rang in `pane_id` if it is the pane the user is
+    /// looking at: the focused pane of the active tab, whatever the OS
+    /// window focus. The mark stays until the user answers it (see
+    /// `Pane::focused_bell`). A bell anywhere else has the tab and titlebar
+    /// latches of [`Mux::touch_tab_bell`].
+    pub fn ring_focused_bell(&self, pane_id: u64) {
+        if Some(pane_id) == self.active_focus()
+            && let Some(pane) = self.panes.get(&pane_id)
+        {
+            pane.focused_bell.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Answer the focused bell of every pane that is no longer the focused
+    /// pane of the active tab: focus leaving a pane or tab answers it, by
+    /// whatever route focus moved. Only the mux focus counts, never the OS
+    /// window focus.
+    pub fn settle_focused_bells(&self) {
+        let focus = self.active_focus();
+        for (id, pane) in &self.panes {
+            if Some(*id) != focus {
+                pane.answer_focused_bell();
+            }
+        }
+    }
+
+    /// The pane whose focused bell is unanswered, if any: only ever the
+    /// focused pane of the active tab once [`Mux::settle_focused_bells`] ran.
+    pub fn focused_bell_pane(&self) -> Option<u64> {
+        self.active_focus()
+            .filter(|id| self.panes.get(id).is_some_and(Pane::focused_bell))
+    }
+
+    /// Whether the tab at `idx` is active and its focused pane's bell is
+    /// unanswered.
+    pub fn tab_focused_bell(&self, idx: usize) -> bool {
+        idx == self.active && self.focused_bell_pane().is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2642,6 +2841,7 @@ impl Mux {
                 pty_input,
                 user_input_generation: AtomicU64::new(0),
                 last_input_typed_text: AtomicBool::new(false),
+                focused_bell: AtomicBool::new(false),
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
@@ -2663,6 +2863,7 @@ impl Mux {
                 reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
+                remote_output_end: None,
                 agent_attached: false,
                 read_only: false,
                 completion_overlay: cfg.completion_overlay
@@ -2772,10 +2973,12 @@ impl Mux {
                 let geometry = geometries
                     .next()
                     .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
+                let mut replayed_remote = false;
                 self.initial_content = self.restore_content.pop_front().and_then(|mut pane| {
                     if !cfg.restore_scrollback_remote && (pane.remote || remote_launch(&argv)) {
                         return None;
                     }
+                    replayed_remote = pane.remote;
                     let keep = cfg
                         .restore_scrollback_lines
                         .min(kettle_core::restore::MAX_RESTORE_LINES);
@@ -2792,6 +2995,11 @@ impl Mux {
                 // Rejoin the saved broadcast group.
                 if let Some(p) = self.panes.get_mut(&id) {
                     p.group_name = group.clone();
+                    // Output saved as remote is remote output in this pane
+                    // too, though the pane itself starts local.
+                    if replayed_remote {
+                        p.note_remote_output_ended();
+                    }
                 }
                 Ok(Node::Leaf(id))
             }
@@ -3152,7 +3360,9 @@ impl Mux {
         waker: Waker,
         target: &str,
     ) -> Result<()> {
-        let argv = vec!["ssh".to_string(), "-t".to_string(), target.to_string()];
+        // The error names no target: the launcher logs it, and a target can
+        // be private.
+        let argv = ssh_tab_argv(target).ok_or_else(|| anyhow::anyhow!("invalid ssh target"))?;
         // `spawn_pane` sees argv[0] == "ssh" and seeds the pane title to
         // `ssh <target>` so the tab is distinguishable from a regular
         // shell tab while the connection is establishing. The OSC 2
@@ -3996,16 +4206,23 @@ impl Mux {
     }
 
     /// Focus whichever pane contains the pixel `(px, py)`.
-    pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) {
+    /// Focus the active tab's pane under `(px, py)` and return it, or `None`
+    /// (focus unchanged) when no pane is there.
+    pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) -> Option<u64> {
         let a = self.active;
         let rects = self.leaves(a, area);
-        if let Some(tab) = self.tabs.get_mut(a) {
-            for (id, (x, y, w, h)) in rects {
-                if px >= x && px < x + w && py >= y && py < y + h {
-                    tab.focus = id;
-                    break;
-                }
-            }
+        let tab = self.tabs.get_mut(a)?;
+        let (id, _) = rects
+            .into_iter()
+            .find(|(_, (x, y, w, h))| px >= *x && px < x + w && py >= *y && py < y + h)?;
+        tab.focus = id;
+        Some(id)
+    }
+
+    /// A pointer press in `pane_id` answers its focused bell.
+    pub fn answer_bell_by_press(&self, pane_id: u64) {
+        if let Some(pane) = self.panes.get(&pane_id) {
+            pane.answer_focused_bell();
         }
     }
 
@@ -6221,6 +6438,164 @@ mod node_tests {
         assert!(
             pane.last_input_was_typed_text(),
             "refused input changes nothing"
+        );
+        mux.kill_children();
+    }
+
+    #[cfg(unix)]
+    fn cat_mux(tabs: usize) -> Mux {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        for _ in 0..tabs {
+            mux.new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &["/bin/cat".to_owned()],
+                None,
+            )
+            .expect("PTY fixture");
+        }
+        mux
+    }
+
+    /// A bell in the pane the user is looking at marks it until they answer.
+    /// Every key, IME commit and paste the pane accepts answers it, Enter and
+    /// Escape included. Focus reports (what an OS window focus change sends),
+    /// pointer reports and key releases do not, and refused input does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_focused_bell_is_answered_by_every_accepted_key_ime_commit_and_paste() {
+        type Write = fn(&Pane) -> PaneInputResult;
+        let mut mux = cat_mux(1);
+        let id = mux.active_focus().unwrap();
+        let (queue, _rx) = input_queue_fixture();
+        mux.panes.get_mut(&id).unwrap().pty_input = queue;
+        let answers: [(&str, Write); 8] = [
+            ("typed key", |pane| pane.feed_input(b"a")),
+            ("Enter", |pane| pane.feed_input(b"\r")),
+            ("Escape", |pane| pane.feed_input(b"\x1b")),
+            ("Ctrl-C", |pane| pane.feed_input(b"\x03")),
+            ("key batch", |pane| {
+                pane.feed_key_inputs(&[b"\x1b[A".to_vec()])
+            }),
+            ("IME commit", |pane| {
+                pane.feed_input_shared(Arc::from("\u{65e5}\u{672c}".as_bytes()))
+            }),
+            ("paste", |pane| pane.feed_paste(b"pasted text")),
+            ("broadcast paste", |pane| {
+                pane.feed_paste_shared(Arc::from(&b"pasted text"[..]))
+            }),
+        ];
+        for (name, write) in answers {
+            mux.ring_focused_bell(id);
+            assert_eq!(mux.focused_bell_pane(), Some(id), "{name}: rang");
+            assert_eq!(write(&mux.panes[&id]), PaneInputResult::Queued, "{name}");
+            assert_eq!(mux.focused_bell_pane(), None, "{name} answers the bell");
+        }
+        let release = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+        mux.ring_focused_bell(id);
+        let pane = &mux.panes[&id];
+        for (name, result) in [
+            ("focus-out report", pane.feed_focus_report(false)),
+            ("focus-in report", pane.feed_focus_report(true)),
+            (
+                "pointer motion report",
+                pane.feed_pointer_input(b"\x1b[<35;1;1M"),
+            ),
+            ("mouse release", pane.feed_mouse_release(b"\x1b[<0;1;1m")),
+            (
+                "key release",
+                pane.feed_key_release(release, Arc::from(&b"\x1b[97;1:3u"[..])),
+            ),
+        ] {
+            assert_eq!(result, PaneInputResult::Queued, "{name}");
+            assert_eq!(mux.focused_bell_pane(), Some(id), "{name} must not answer");
+        }
+        mux.panes.get_mut(&id).unwrap().read_only = true;
+        assert_eq!(
+            mux.panes[&id].feed_input(b"refused"),
+            PaneInputResult::ReadOnly
+        );
+        assert_eq!(mux.focused_bell_pane(), Some(id), "refused input");
+        mux.answer_bell_by_press(id);
+        assert_eq!(mux.focused_bell_pane(), None, "a pointer press answers it");
+        mux.kill_children();
+    }
+
+    /// Only the pane the user is looking at takes the mark, and focus moving
+    /// to another pane or tab answers it; with focus unchanged it stays (the
+    /// mux has no OS window focus to lose). The active tab classifies as
+    /// `Bell` while the mark is up.
+    #[cfg(unix)]
+    #[test]
+    fn a_focused_bell_marks_only_the_focused_pane_until_mux_focus_leaves_it() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = cat_mux(2);
+        mux.focus_pane(*mux.tabs[0].root.leaf_ids().first().unwrap());
+        mux.split_geometry(
+            Dir::Horizontal,
+            false,
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+        )
+        .expect("split fixture");
+        let [left, right] = mux.tabs[0].root.leaf_ids()[..] else {
+            panic!("two panes in the first tab")
+        };
+        let other_tab = mux.tabs[1].root.leaf_ids()[0];
+        mux.focus_pane(left);
+        // A bell anywhere but the focused pane takes no focused mark.
+        for elsewhere in [right, other_tab] {
+            mux.ring_focused_bell(elsewhere);
+            assert!(!mux.panes[&elsewhere].focused_bell());
+        }
+        mux.ring_focused_bell(left);
+        mux.settle_focused_bells();
+        assert_eq!(mux.focused_bell_pane(), Some(left), "focus unchanged");
+        assert!(mux.tab_focused_bell(0) && !mux.tab_focused_bell(1));
+        let classify = |mux: &Mux, idx: usize| {
+            let now = std::time::Instant::now();
+            classify_tab_activity(
+                idx == mux.active,
+                mux.tabs[idx].bell,
+                mux.tab_focused_bell(idx),
+                None,
+                None,
+                now,
+                std::time::Duration::from_secs(10),
+            )
+        };
+        assert_eq!(classify(&mux, 0), TabActivity::Bell);
+        // Focus moving to the sibling pane answers it.
+        mux.focus_pane(right);
+        mux.settle_focused_bells();
+        mux.focus_pane(left);
+        assert_eq!(
+            mux.focused_bell_pane(),
+            None,
+            "pane focus left and came back"
+        );
+        assert_eq!(classify(&mux, 0), TabActivity::Normal);
+        // So does switching tabs, and the tab left behind shows nothing.
+        mux.ring_focused_bell(left);
+        mux.next_tab();
+        assert_eq!(classify(&mux, 0), TabActivity::Normal);
+        mux.settle_focused_bells();
+        mux.prev_tab();
+        assert_eq!(
+            mux.focused_bell_pane(),
+            None,
+            "tab focus left and came back"
         );
         mux.kill_children();
     }
@@ -9007,6 +9382,110 @@ mod node_tests {
     }
 
     #[test]
+    fn ssh_tab_argv_ends_options_before_the_target_and_refuses_invalid_ones() {
+        assert_eq!(
+            ssh_tab_argv("box").unwrap(),
+            ["ssh", "-t", "--", "box"],
+            "the target must follow `--` so ssh never reads it as an option"
+        );
+        assert_eq!(
+            ssh_tab_argv("me@box.example").unwrap(),
+            ["ssh", "-t", "--", "me@box.example"]
+        );
+        for invalid in [
+            "-oProxyCommand=x",
+            "-oX",
+            "a b",
+            "",
+            "x\u{7}",
+            "me@\u{202E}x",
+        ] {
+            assert_eq!(ssh_tab_argv(invalid), None, "{invalid:?}");
+        }
+        // The title still shows the destination, not the `--`.
+        assert_eq!(
+            initial_pane_title(&ssh_tab_argv("me@box").unwrap()),
+            "ssh me@box"
+        );
+        let mut mux = Mux::new();
+        let error = mux
+            .new_ssh_tab_geometry(
+                &kettle_config::Config::default(),
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                std::sync::Arc::new(|| {}),
+                "-oProxyCommand=touch-secret",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("secret"),
+            "the error must not echo the target: {error}"
+        );
+        assert!(mux.tabs.is_empty(), "an invalid target must not spawn");
+    }
+
+    /// Configuration-only probe of the installed OpenSSH, on every runner
+    /// that has one (Windows CI is the one that matters: Win32-OpenSSH).
+    /// `-G` prints the resolved configuration and exits without connecting,
+    /// and `-F none` reads no config file, so the user's own `~/.ssh/config`
+    /// is never read. The launcher's argv tail (`-- <target>`) must make ssh
+    /// treat the target as the host: `box` resolves as `hostname box`, and a
+    /// target shaped like options is never applied as one. The output is
+    /// checked line by line and never printed. Without ssh it is skipped.
+    #[test]
+    fn installed_ssh_reads_the_launcher_target_after_double_dash_as_the_host() {
+        // `trailing` gives an option-shaped target a host to apply to, had
+        // ssh parsed it as an option, so the probe can tell the two apart.
+        let probe = |target: &str, trailing: &[&str]| {
+            // The launcher's own argv shape, with validation bypassed on
+            // purpose: this asks what ssh itself does with an option-shaped
+            // word in the target's place.
+            let mut argv = ssh_tab_argv("placeholder").unwrap();
+            *argv.last_mut().unwrap() = target.to_string();
+            assert_eq!(argv[..2], ["ssh", "-t"]);
+            std::process::Command::new(&argv[0])
+                .args(["-F", "none", "-G"])
+                .args(&argv[2..])
+                .args(trailing)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+        };
+        let resolved = match probe("box", &[]) {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipped: no ssh on PATH");
+                return;
+            }
+            Err(error) => panic!("ssh -G could not run: {:?}", error.kind()),
+        };
+        let lines = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+        };
+        assert!(resolved.status.success(), "ssh -F none -G -- box failed");
+        assert!(
+            lines(&resolved).iter().any(|line| line == "hostname box"),
+            "ssh -G -- box did not resolve hostname box"
+        );
+        // After `--`, `-oProxyCommand=…` is a (bad) host name, never an
+        // option, and `-bogus` is never `-b ogus`. ssh may reject either as
+        // a host name; it must not apply them.
+        for (target, applied) in [
+            ("-oProxyCommand=kettle-probe", "proxycommand kettle-probe"),
+            ("-bogus", "bindaddress ogus"),
+        ] {
+            let output = probe(target, &["probe-host"]).expect("ssh ran above");
+            assert!(
+                !lines(&output).iter().any(|line| line == applied),
+                "ssh applied {target:?} as an option"
+            );
+        }
+    }
+
+    #[test]
     fn initial_pane_title_seeds_ssh_with_target_else_kettle() {
         // Plain shell (or empty argv) → "kettle" placeholder; the
         // cwd-basename fallback fills it in once OSC 7 arrives.
@@ -10670,15 +11149,29 @@ mod node_tests {
         // the existing transitions still fire under it.
         let silence = Duration::from_secs(10);
 
-        // Active tab → always Normal, regardless of output / bell. The
-        // focused-tab accent + window-title already telegraph "you're
-        // here" so adding a dot would be redundant.
+        // Active tab → Normal regardless of output and the background-tab
+        // latch. The focused-tab accent + window-title already telegraph
+        // "you're here" so a dot for output would be redundant.
         assert_eq!(
-            classify_tab_activity(true, true, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(true, true, false, Some(later), Some(earlier), now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(true, false, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(true, false, false, Some(later), Some(earlier), now, silence),
+            TabActivity::Normal
+        );
+        // ...except for a bell in its focused pane the user has not answered:
+        // the flash alone is gone before anyone sees it.
+        for (bell, output) in [(false, None), (true, Some(later))] {
+            assert_eq!(
+                classify_tab_activity(true, bell, true, output, Some(earlier), now, silence),
+                TabActivity::Bell
+            );
+        }
+        // The focused-pane mark never applies to a background tab, whose own
+        // latch decides.
+        assert_eq!(
+            classify_tab_activity(false, false, true, None, None, now, silence),
             TabActivity::Normal
         );
 
@@ -10686,42 +11179,58 @@ mod node_tests {
         // Bell is the stronger signal (the focused program explicitly
         // asked for attention) so it wins over plain output activity.
         assert_eq!(
-            classify_tab_activity(false, true, None, None, now, silence),
+            classify_tab_activity(false, true, false, None, None, now, silence),
             TabActivity::Bell
         );
         assert_eq!(
-            classify_tab_activity(false, true, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(false, true, false, Some(later), Some(earlier), now, silence),
             TabActivity::Bell
         );
 
         // Inactive tab + output after last-seen → Output (fresh, hasn't
         // exceeded silence threshold yet).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(
+                false,
+                false,
+                false,
+                Some(later),
+                Some(earlier),
+                now,
+                silence
+            ),
             TabActivity::Output
         );
 
         // Inactive tab + output BEFORE the user last looked → Normal.
         // The user already saw this output; no need to nudge again.
         assert_eq!(
-            classify_tab_activity(false, false, Some(earlier), Some(later), now, silence),
+            classify_tab_activity(
+                false,
+                false,
+                false,
+                Some(earlier),
+                Some(later),
+                now,
+                silence
+            ),
             TabActivity::Normal
         );
 
         // First-output edge: no last_seen_at yet → Output (the user
         // has never been on this tab and something happened on it).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), None, now, silence),
+            classify_tab_activity(false, false, false, Some(later), None, now, silence),
             TabActivity::Output
         );
 
         // No activity recorded at all → Normal.
         assert_eq!(
-            classify_tab_activity(false, false, None, None, now, silence),
+            classify_tab_activity(false, false, false, None, None, now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(false, false, None, Some(earlier), now, silence),
+            classify_tab_activity(false, false, false, None, Some(earlier), now, silence),
             TabActivity::Normal
         );
     }
@@ -10746,6 +11255,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 false,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_fresh,
@@ -10758,6 +11268,7 @@ mod node_tests {
         let now_at_threshold = last_out + silence;
         assert_eq!(
             classify_tab_activity(
+                false,
                 false,
                 false,
                 Some(last_out),
@@ -10774,6 +11285,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 false,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_late,
@@ -10787,6 +11299,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 true,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_late,
@@ -10801,6 +11314,7 @@ mod node_tests {
         let now_before = base + Duration::from_secs(29);
         assert_eq!(
             classify_tab_activity(
+                false,
                 false,
                 false,
                 Some(last_out),

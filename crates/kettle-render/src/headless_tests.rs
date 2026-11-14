@@ -5525,6 +5525,7 @@ fn tab_strip_legibility_at(font_size: f32) {
             (renderer.cell_h + 12.0).max(28.0).round()
         };
         tabs.in_titlebar = gnome_header;
+        tabs.linux_header = gnome_header;
         tabs.band = (0.0, 0.0, 480.0, tabs.height);
         // GNOME's header centres 28 px buttons, the window's close last.
         let (button_y, side) = if gnome_header {
@@ -5567,8 +5568,12 @@ fn tab_strip_legibility_at(font_size: f32) {
                 activity: TabActivity::Normal,
             });
         }
-        let (inactive_title, inactive_close) =
+        let (inactive_title, mut inactive_close) =
             (tabs.segments[1].title_rect, tabs.segments[1].close);
+        if gnome_header {
+            // Above the header's 1-pixel hairline, which runs under the tab.
+            inactive_close.3 -= 1.0;
+        }
         let fg = theme.foreground;
         // The renderer's roles: inactive titles and resting close glyphs are
         // secondary text, the strip's controls primary. An unfocused window
@@ -5642,27 +5647,47 @@ fn tab_strip_legibility_at(font_size: f32) {
             // Smallest ink side, with a pixel to spare for rasterizer edges.
             // At the default 16.25 px line the glyphs were × 6x5, + 10x8,
             // ▾ 6x6, ≡ 8x11 and the window close 12x12 before they grew.
+            // The GNOME header's `+` and `≡` are 16-point icons at any font
+            // size, 14x14 and 14x12 points of ink.
+            let icon = if gnome_header { 12.0 } else { 0.66 * line };
             let mut controls = vec![
-                ("×", inactive_close, 0.42 * line, secondary, floors.0),
-                ("+", tabs.new_tab, 0.66 * line, control, floors.1),
+                ("×", inactive_close, 0.42 * line, strip, secondary, floors.0),
+                ("+", tabs.new_tab, icon, strip, control, floors.1),
                 if gnome_header {
-                    ("≡", tabs.new_tab_menu, 0.66 * line, control, floors.1)
+                    ("≡", tabs.new_tab_menu, icon, strip, control, floors.1)
                 } else {
-                    ("▾", tabs.new_tab_menu, 0.42 * line, control, floors.1)
+                    (
+                        "▾",
+                        tabs.new_tab_menu,
+                        0.42 * line,
+                        strip,
+                        control,
+                        floors.1,
+                    )
                 },
             ];
             if gnome_header {
+                // Adwaita's 8-point cross on its disc, judged on the disc.
+                let (disc, glyph) = crate::tab_strip::window_control_colors(
+                    fg,
+                    strip,
+                    false,
+                    false,
+                    window_focused,
+                    &mut colors,
+                );
                 controls.push((
                     "window close",
-                    tabs.window_controls[0].rect,
-                    13.0,
-                    control,
+                    crate::header_icons::window_button_disc(tabs.window_controls[0].rect, 1.0),
+                    8.0,
+                    disc,
+                    glyph,
                     floors.1,
                 ));
             }
-            for (glyph, button, min_side, ink, floor) in controls {
-                let (x, y, w, h) =
-                    glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: {glyph}"));
+            for (glyph, button, min_side, background, ink, floor) in controls {
+                let (x, y, w, h) = glyph_ink(&frame, button, background)
+                    .unwrap_or_else(|| panic!("{case}: {glyph}"));
                 assert!(
                     w >= min_side && h >= min_side,
                     "{case}: {glyph} ink {w}x{h} < {min_side}"
@@ -5670,7 +5695,7 @@ fn tab_strip_legibility_at(font_size: f32) {
                 assert_glyph_painted(
                     &frame,
                     button,
-                    (strip, ink),
+                    (background, ink),
                     floor,
                     &format!("{case}: {glyph}"),
                 );
@@ -5790,6 +5815,175 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
                         strip,
                         "{case}: no hover fill behind the gear"
                     );
+                }
+            }
+        }
+    }
+}
+
+/// A GNOME header `w` by 46 points at `scale`: a window close button, the
+/// main menu `≡` before it and the leading `+`, with `tabs` tabs.
+fn gnome_header_tabs(w: f32, scale: f32, tabs: usize) -> TabBar {
+    let h = 46.0 * scale;
+    let side = 28.0 * scale;
+    let y = 9.0 * scale;
+    let mut bar = TabBar::hidden();
+    bar.height = h;
+    bar.in_titlebar = true;
+    bar.linux_header = true;
+    bar.lone_title = tabs == 1;
+    bar.band = (0.0, 0.0, w, h);
+    bar.new_tab = (8.0 * scale, y, side, side);
+    bar.new_tab_menu = (w - 46.0 * scale - 8.0 * scale - side, y, side, side);
+    bar.window_controls = vec![WindowControlButton {
+        action: WindowControl::Close,
+        rect: (w - 37.0 * scale, y, side, side),
+        label: String::new(),
+        hovered: false,
+        pressed: false,
+    }];
+    for idx in 0..tabs {
+        let rect = if tabs == 1 {
+            (120.0 * scale, 0.0, 200.0 * scale, h)
+        } else {
+            ((40.0 + idx as f32 * 120.0) * scale, 0.0, 120.0 * scale, h)
+        };
+        bar.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: rect,
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: String::new(),
+            path: None,
+            active: idx == 0,
+            activity: TabActivity::Normal,
+        });
+    }
+    bar
+}
+
+/// The GNOME header's `≡` is drawn, not shaped: its ink is the 14 by 12
+/// point icon at 1x and 2x whatever the font size, where a font's `≡`
+/// grew and shrank with the text. It keeps its glyph's ink colour.
+#[test]
+fn gnome_header_menu_icon_keeps_its_size_at_every_font_size() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for font_size in [11.0_f32, 14.0, 20.0] {
+            let cfg = Config {
+                font_size,
+                ..gpu_test_config()
+            };
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("menu icon check skipped: no GPU adapter");
+                return;
+            };
+            let theme = cfg.theme.clone();
+            let strip = resolve_chrome_bg(&cfg, &theme, None);
+            let tabs = gnome_header_tabs(w as f32, scale, 1);
+            let snap = snapshot_of(20, 2, b"");
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, tabs.height, w as f32, h as f32 - tabs.height);
+            terminal.terminal = terminal.rect;
+            let overlay = Overlay {
+                window_focused: true,
+                ..Overlay::default()
+            };
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &tabs);
+            let case = format!("{scale}x, font {font_size}");
+            let button = tabs.new_tab_menu;
+            let (_, _, iw, ih) =
+                glyph_ink(&frame, button, strip).unwrap_or_else(|| panic!("{case}: no ≡"));
+            assert_eq!((iw, ih), (14.0 * scale, 12.0 * scale), "{case}");
+            let ink = chrome::Colors::default().tab_text(theme.foreground, strip, true);
+            assert_glyph_painted(&frame, button, (strip, ink), chrome::TEXT_CONTRAST, &case);
+            // The leading `+` is painted in the rect the pointer and
+            // AccessKit use, centred in it; nothing is left beside `≡`.
+            let plus = tabs.new_tab;
+            let (px, py, pw, ph) =
+                glyph_ink(&frame, plus, strip).unwrap_or_else(|| panic!("{case}: no +"));
+            assert!(
+                ((px + pw * 0.5) - (plus.0 + plus.2 * 0.5)).abs() <= 1.5
+                    && ((py + ph * 0.5) - (plus.1 + plus.3 * 0.5)).abs() <= 1.5,
+                "{case}: + ink {:?} off the centre of {plus:?}",
+                (px, py, pw, ph)
+            );
+            let tab = tabs.segments[0].rect;
+            let beside = (
+                tab.0 + tab.2 + 2.0,
+                plus.1,
+                button.0 - tab.0 - tab.2 - 4.0,
+                plus.3,
+            );
+            assert_eq!(glyph_ink(&frame, beside, strip), None, "{case}: ink by ≡");
+        }
+    }
+}
+
+/// The GNOME header ends in a hairline that reads apart from the header and
+/// the terminal below it, at 1.5:1 against each as painted, in both default
+/// themes, focused and unfocused, at 1x and 2x. It stops under the active
+/// tab when there are two, which still joins the terminal.
+#[test]
+fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
+    let _serialized = gpu_test_guard();
+    let pixel = |frame: &image::RgbaImage, x: f32, y: f32| {
+        let p = frame.get_pixel(x as u32, y as u32);
+        Rgb::new(p[0], p[1], p[2])
+    };
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("header hairline check skipped: no GPU adapter");
+                return;
+            };
+            let snap = snapshot_of(20, 2, b"");
+            for tabs in [1, 2] {
+                for window_focused in [true, false] {
+                    let bar = gnome_header_tabs(w as f32, scale, tabs);
+                    let mut terminal = pane(&snap, w, h);
+                    terminal.rect = (0.0, bar.height, w as f32, h as f32 - bar.height);
+                    terminal.terminal = terminal.rect;
+                    let overlay = Overlay {
+                        window_focused,
+                        ..Overlay::default()
+                    };
+                    let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &overlay, &bar);
+                    let case =
+                        format!("{theme_name} {scale}x, {tabs} tabs, focused={window_focused}");
+                    let row = bar.height - 0.5;
+                    let thickness = scale.round();
+                    // Empty header space right of the tabs.
+                    let x = 400.0 * scale;
+                    let line = pixel(&frame, x, row);
+                    let header = pixel(&frame, x, bar.height - thickness - 0.5);
+                    let canvas = pixel(&frame, x, bar.height + 0.5);
+                    for (against, what) in [(header, "header"), (canvas, "terminal")] {
+                        let ratio = color::contrast_ratio(line, against);
+                        assert!(
+                            ratio >= 1.45,
+                            "{case}: hairline {line:?} reads {ratio:.2}:1 on the {what} {against:?}"
+                        );
+                    }
+                    for dy in 1..thickness as u32 {
+                        assert_eq!(pixel(&frame, x, row - dy as f32), line, "{case}");
+                    }
+                    let first = bar.segments[0].rect;
+                    let under = pixel(&frame, first.0 + first.2 * 0.5, row);
+                    if tabs == 1 {
+                        assert_eq!(under, line, "{case}: the line runs under the title");
+                    } else {
+                        assert_ne!(under, line, "{case}: the line crosses the active tab");
+                    }
                 }
             }
         }
@@ -7726,11 +7920,14 @@ fn a_see_through_window_paints_the_selection_measured_as_shown() {
     assert_eq!(sample(true), opaque);
 }
 
-/// Background tabs' activity markers reach the frame as three shapes beside
-/// their titles, at 1x and 2x and in a dark and a light theme: a filled
-/// disc for output, a ring once it stopped and a triangle for the bell.
+/// Background tabs and the active tab paint their activity markers beside
+/// their titles, at 1x and 2x and in a dark and a light theme: a filled disc
+/// for output, a ring once it stopped and a bell when the bell rang, on a
+/// background tab and on the active one (a bell in its focused pane). The
+/// bell's lip, the empty row under it, its clapper and its dome are sampled
+/// where the mask is solid or empty, not at antialiased edges.
 #[test]
-fn background_tab_markers_have_distinct_shapes() {
+fn tab_markers_have_distinct_shapes_on_background_and_active_tabs() {
     let _serialized = gpu_test_guard();
     for scale in [1.0_f32, 2.0] {
         let (width, height) = (480.0 * scale, 120.0 * scale);
@@ -7750,24 +7947,20 @@ fn background_tab_markers_have_distinct_shapes() {
             let mut tabs = TabBar::hidden();
             tabs.height = 28.0 * scale;
             tabs.band = (0.0, 0.0, width, tabs.height);
+            // The first tab is the active one.
             let kinds = [
-                TabActivity::Normal,
+                TabActivity::Bell,
                 TabActivity::Output,
                 TabActivity::Silent,
                 TabActivity::Bell,
             ];
             for (idx, activity) in kinds.into_iter().enumerate() {
                 let rect = (idx as f32 * 112.0 * scale, 0.0, 112.0 * scale, tabs.height);
-                let lane = if activity == TabActivity::Normal {
-                    0.0
-                } else {
-                    activity_lane(scale)
-                };
                 let content = horizontal_tab_content_layout(
                     rect,
                     false,
                     false,
-                    lane,
+                    activity_lane(activity, scale),
                     "fixture",
                     None,
                     renderer.overlay_text_cell_width(),
@@ -7788,23 +7981,42 @@ fn background_tab_markers_have_distinct_shapes() {
             terminal.rect = (0.0, tabs.height, width, height - tabs.height);
             terminal.terminal = terminal.rect;
             let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(false), &tabs);
-            let painted = |x: f32, y: f32| {
-                let p = frame.get_pixel(x as u32, y as u32);
-                [p[0], p[1], p[2]]
-                    .iter()
-                    .zip([strip.r, strip.g, strip.b])
-                    .any(|(&a, b)| a.abs_diff(b) > 24)
-            };
-            for (bi, seg) in tabs.segments.iter().enumerate().skip(1) {
+            for (bi, seg) in tabs.segments.iter().enumerate() {
+                // The active tab is the terminal's own surface.
+                let bg = if seg.active {
+                    cfg.theme.background
+                } else {
+                    strip
+                };
+                let painted = |x: f32, y: f32| {
+                    let p = frame.get_pixel(x as u32, y as u32);
+                    [p[0], p[1], p[2]]
+                        .iter()
+                        .zip([bg.r, bg.g, bg.b])
+                        .any(|(&a, b)| a.abs_diff(b) > 24)
+                };
                 let (label_left, _) = tab_strip::tab_label_origin(
                     seg.title_rect,
                     &renderer.tab_texts[bi],
                     (renderer.overlay_text_cell_width(), 1.0),
                 );
-                let case = format!("{name} at {scale}x, {:?}", seg.activity);
-                let (x, y, w, h) =
-                    tab_strip::activity_marker_rect(seg.rect, seg.title_rect, label_left, scale)
-                        .unwrap_or_else(|| panic!("{case}: no room for a marker"));
+                let case = format!(
+                    "{name} at {scale}x, {:?} on {} tab",
+                    seg.activity,
+                    if seg.active {
+                        "the active"
+                    } else {
+                        "a background"
+                    }
+                );
+                let (x, y, w, h) = tab_strip::activity_marker_rect(
+                    seg.rect,
+                    seg.title_rect,
+                    label_left,
+                    seg.activity,
+                    scale,
+                )
+                .unwrap_or_else(|| panic!("{case}: no room for a marker"));
                 let rows: Vec<usize> = (0..h as usize)
                     .map(|row| {
                         (0..w as usize)
@@ -7823,11 +8035,23 @@ fn background_tab_markers_have_distinct_shapes() {
                         assert!(rows[0] > 0, "{case}: a ring has a rim: {rows:?}");
                     }
                     TabActivity::Bell => {
-                        let (top, bottom) = (rows[0], rows[h as usize - 1]);
-                        assert!(
-                            top > 0 && bottom >= 3 * top,
-                            "{case}: a triangle widens downward: {rows:?}"
-                        );
+                        let n = w as usize;
+                        assert_eq!(n, (11.0 * scale).round() as usize, "{case}");
+                        let mask = tab_strip::bell_mask(n as u32);
+                        let solid =
+                            |row: usize| mask[row * n..(row + 1) * n].iter().all(|&c| c == 255);
+                        let lip = (0..n).rev().find(|&row| solid(row)).expect("a solid lip");
+                        let at = |col: usize, row: usize| painted(x + col as f32, y + row as f32);
+                        let mid = n / 2;
+                        assert!(at(mid, lip), "{case}: the lip: {rows:?}");
+                        assert!(!at(mid, lip + 1), "{case}: the gap under the lip: {rows:?}");
+                        assert!(at(mid, n - 1), "{case}: the clapper: {rows:?}");
+                        let quarter = n / 4;
+                        let shoulder = (0..mid)
+                            .find(|&col| mask[quarter * n + col] == 255)
+                            .expect("a solid shoulder");
+                        assert!(at(shoulder, quarter), "{case}: the dome: {rows:?}");
+                        assert!(!at(0, quarter), "{case}: outside the dome: {rows:?}");
                     }
                     TabActivity::Normal => unreachable!(),
                 }
@@ -7844,4 +8068,205 @@ fn background_tab_markers_have_distinct_shapes() {
         }
     }
     eprintln!("TAB_MARKER_GPU_PASS");
+}
+
+/// A pane `back` lines up from the bottom of `lines` short lines, so the
+/// right side of every row is blank, with a command that succeeded near the
+/// top of its history and one that failed further down, where the thumb is
+/// when 100 of 300 lines back.
+fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSnapshot {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let proxy = EventProxy::new(tx, std::sync::Arc::new(|| {}));
+    let mut term =
+        alacritty_terminal::Term::new(TermConfig::default(), &Size { cols, rows }, proxy);
+    let bytes: String = (0..lines).map(|line| format!("{line}\r\n")).collect();
+    Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new()
+        .advance(&mut term, bytes.as_bytes());
+    term.scroll_display(alacritty_terminal::grid::Scroll::Delta(back));
+    let mut snap = PaneSnapshot::default();
+    snap.capture(&term);
+    for (row, exit_code) in [(10, 0), (178, 1)] {
+        snap.command_marks.push(kettle_core::term::CommandMark {
+            row: snap.history_origin + row,
+            exit_code,
+        });
+    }
+    snap
+}
+
+/// A pane with history paints its thumb in a full-height channel as wide as
+/// it, in the resolved colours, and command ticks across the whole bar in
+/// the colour for what they lie on, channel or thumb: at its resting width
+/// at the bottom, and wide once scrolled back. On
+/// TokyoNight Night and Kettle Day, at 1x and 2x, painted solid inside a
+/// wide padding and as translucent layers over a narrow one. The colours are
+/// sampled where no glyph is, so the fonts on the host do not matter.
+#[test]
+fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (320_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snaps = [
+        history_snapshot(20, 20, 300, 100),
+        history_snapshot(20, 20, 300, 0),
+    ];
+    assert!(snaps[0].display_offset > 0 && snaps[0].history_size > snaps[0].display_offset);
+    assert!(snaps[1].display_offset == 0 && snaps[1].history_size > 0);
+    let linear = renderer.config.format.is_srgb();
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    for (name, snap) in ["TokyoNight Night", "Kettle Day"]
+        .into_iter()
+        .flat_map(|name| snaps.iter().map(move |snap| (name, snap)))
+    {
+        for scale in [1.0_f32, 2.0] {
+            renderer.set_scale(scale);
+            for padding in [12.0 * scale, 2.0] {
+                let cfg = Config {
+                    theme: kettle_config::Theme::by_name(name),
+                    background_opacity: 1.0,
+                    padding_x: padding,
+                    ..base.clone()
+                };
+                let panes = [pane(snap, width, height)];
+                let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+                let bar = crate::scrollback::pane_scrollbar_geometry(
+                    panes[0].terminal,
+                    scale,
+                    &cfg,
+                    snap.screen_lines,
+                    snap.history_size,
+                    snap.display_offset,
+                    false,
+                );
+                let back = snap.display_offset;
+                let context = format!("{name} scale {scale} padding {padding} back {back}");
+                assert_eq!(bar.opaque, padding >= 12.0 * scale, "{context}");
+                let colors = crate::scrollback::scrollbar_colors(&cfg.theme, linear);
+                let bg = cfg.theme.background;
+                let shown = |(ink, alpha): (kettle_config::Rgb, f32)| {
+                    crate::color::over(bg, ink, alpha.into(), linear)
+                };
+                let thumb = shown(colors.thumb(bar.state, bar.opaque));
+                let channel = shown(colors.track(bar.state, bar.opaque));
+                let (tx, ty, tw, _) = bar.track_rect;
+                assert_eq!(tw, if back > 0 { 10.0 } else { 6.0 } * scale, "{context}");
+                assert!(bar.channel, "{context}");
+                let (_, thumb_y, _, thumb_h) = bar.thumb_rect.expect("a thumb");
+                assert!(
+                    thumb_y - ty > 8.0 * scale,
+                    "{context}: room above the thumb"
+                );
+                let pixel = |x: f32, y: f32| *frame.get_pixel(x as u32, y as u32);
+                let mid_x = tx + tw / 2.0;
+                let thumb_px = pixel(mid_x, thumb_y + thumb_h / 2.0);
+                assert!(
+                    near(&thumb_px, thumb),
+                    "{context}: thumb {thumb_px:?} != {thumb:?}"
+                );
+                // Halfway down to the thumb: clear of both ticks.
+                let above = ty + (thumb_y - ty) * 0.5;
+                for x in [tx + 0.5, mid_x, tx + tw - 0.5] {
+                    let channel_px = pixel(x, above);
+                    assert!(
+                        near(&channel_px, channel),
+                        "{context}: channel at x {x} {channel_px:?} != {channel:?}"
+                    );
+                }
+                let outside = pixel(tx - 1.0, above);
+                assert!(near(&outside, bg), "{context}: beside the bar {outside:?}");
+                let mut on_thumb = false;
+                for mark in &snap.command_marks {
+                    let tick = kettle_core::scrollbar::command_tick_rect(
+                        panes[0].terminal,
+                        (tx, tw),
+                        scale,
+                        snap.history_origin,
+                        snap.history_size + snap.screen_lines,
+                        *mark,
+                    )
+                    .expect("a tick");
+                    let [x, y, w, h] = tick;
+                    assert_eq!((x, w), (tx, tw), "{context}");
+                    let mut pieces = crate::scrollback::tick_pieces(tick, bar.thumb_rect);
+                    let (_, on) = pieces.next().expect("a tick piece");
+                    assert!(pieces.next().is_none(), "{context}: off the thumb's edges");
+                    on_thumb |= on == crate::scrollback::TickSurface::Thumb;
+                    let under = match on {
+                        crate::scrollback::TickSurface::Channel => channel,
+                        crate::scrollback::TickSurface::Thumb => thumb,
+                    };
+                    let success = mark.exit_code == 0;
+                    let (ink, alpha) = colors.tick_paint(bar.state, on, success, bar.opaque);
+                    let want = crate::color::over(under, ink, alpha.into(), linear);
+                    for x in [x + 0.5, x + w - 0.5] {
+                        let got = pixel(x, y + h / 2.0);
+                        assert!(
+                            near(&got, want),
+                            "{context}: {on:?} tick {got:?} != {want:?}"
+                        );
+                    }
+                }
+                assert_eq!(on_thumb, back > 0, "{context}: a tick crosses the thumb");
+            }
+        }
+    }
+}
+
+/// The lone GNOME-header title is shaped in the bundled Fira Sans Bold at
+/// GNOME's 11 pt title size, whatever the terminal's font, at 1x and 2x: a
+/// long title is cut to the widest label its lane holds, ending in an
+/// ellipsis, and a short one stays whole.
+#[test]
+fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
+    let _serialized = gpu_test_guard();
+    let long = "a window title that a program set, far too long for the header lane";
+    for scale in [1.0_f32, 2.0] {
+        let cfg = gpu_test_config();
+        let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+        else {
+            eprintln!("lone header title at {scale}x skipped: no GPU adapter");
+            return;
+        };
+        let snap = snapshot_of(20, 2, b"");
+        let lane = (128.0 * scale, 0.0, 184.0 * scale, 46.0 * scale);
+        for (title, whole) in [(long, false), ("fixture", true)] {
+            let mut tabs = gnome_header_tabs(480.0 * scale, scale, 1);
+            tabs.segments[0].title = title.into();
+            tabs.segments[0].title_rect = lane;
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, 46.0 * scale, w as f32, h as f32 - 46.0 * scale);
+            terminal.terminal = terminal.rect;
+            capture_with_tabs(&mut renderer, &cfg, &[terminal], &Overlay::default(), &tabs);
+            let case = format!("{title:?} at {scale}x");
+            let buffer = &renderer.header_title_buffer;
+            assert!((buffer.metrics().font_size - 14.666_667 * scale).abs() < 0.01);
+            let text = buffer.lines[0].text().to_owned();
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(runs.len(), 1, "{case}: one line");
+            assert!(runs[0].line_w <= lane.2, "{case}: {} wide", runs[0].line_w);
+            assert_eq!(renderer.header_title_width, runs[0].line_w, "{case}");
+            if whole {
+                assert_eq!(text, title, "{case}");
+            } else {
+                assert!(
+                    text.contains('…') && text.len() < title.len(),
+                    "{case}: {text:?}"
+                );
+            }
+            for glyph in runs[0].glyphs {
+                let face = renderer.font_system.db().face(glyph.font_id).unwrap();
+                assert_eq!(face.post_script_name, "FiraSans-Bold", "{case}");
+            }
+        }
+    }
 }

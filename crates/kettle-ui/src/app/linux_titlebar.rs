@@ -1,7 +1,7 @@
 //! Linux client decorations, shared control geometry and compositor gestures.
 use super::*;
 
-pub(super) const LINUX_HEADER_HEIGHT: f32 = 46.0;
+pub(super) const LINUX_HEADER_HEIGHT: f32 = crate::window_buttons::HEADER_HEIGHT;
 const LINUX_RESIZE_GRIP: f32 = 6.0;
 
 #[cfg(any(test, target_os = "linux"))]
@@ -55,6 +55,64 @@ pub(super) fn linux_titlebar_gesture(button: u8, double: bool) -> LinuxTitlebarG
         (2, _) => LinuxTitlebarGesture::WindowMenu,
         _ => LinuxTitlebarGesture::Ignore,
     }
+}
+
+/// How long after a primary press on the header's title space a second one
+/// still counts as a double-click.
+pub(super) const LINUX_TITLE_DOUBLE_CLICK: std::time::Duration =
+    std::time::Duration::from_millis(400);
+
+/// Whether a press at `(x, y)` at `now` is the second of a double-click on
+/// the header: `previous` is the primary press it follows, if any, and
+/// `tolerance` how far apart the two may land on each axis.
+pub(super) fn linux_title_double_click(
+    previous: Option<(std::time::Instant, f32, f32)>,
+    now: std::time::Instant,
+    (x, y): (f32, f32),
+    tolerance: f32,
+) -> bool {
+    previous.is_some_and(|(t, px, py)| {
+        now.duration_since(t) <= LINUX_TITLE_DOUBLE_CLICK
+            && (x - px).abs() <= tolerance
+            && (y - py).abs() <= tolerance
+    })
+}
+
+/// Whether `(x, y)` is on what GNOME treats as the title bar itself: empty
+/// header space, or the lone title, which stands for the window's title as
+/// it does in a macOS title bar. With several tabs each is a tab, and its
+/// presses stay with the tab strip.
+pub(super) fn linux_title_space(bar: &TabBar, x: f32, y: f32) -> bool {
+    empty_titlebar_space(bar, x, y)
+        || bar.lone_title
+            && rect_contains(bar.band, x, y)
+            && !titlebar_button_at(bar, x, y)
+            && bar.segments.iter().any(|s| rect_contains(s.rect, x, y))
+}
+
+/// What a press in the Linux header acts on, past its resize band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LinuxHeaderPress {
+    /// A minimize, maximize/restore or close button.
+    Control(kettle_render::WindowControl),
+    /// The title space, with what `button` and `double` make of it there.
+    Title(LinuxTitlebarGesture),
+}
+
+/// What a press at `(x, y)` with `button` (0 primary, 1 middle, 2
+/// secondary) does in the Linux header: a window button, the title space
+/// (`linux_title_space`), or `None`, which leaves it to the tab strip.
+pub(super) fn linux_header_press(
+    bar: &TabBar,
+    (x, y): (f32, f32),
+    button: u8,
+    double: bool,
+) -> Option<LinuxHeaderPress> {
+    if let Some(action) = window_control_at(bar, x, y) {
+        return Some(LinuxHeaderPress::Control(action));
+    }
+    linux_title_space(bar, x, y)
+        .then(|| LinuxHeaderPress::Title(linux_titlebar_gesture(button, double)))
 }
 
 pub(super) fn linux_resize_edge(
@@ -216,33 +274,30 @@ impl App {
             ws.titlebar_click = None;
             return true;
         }
-        if let Some(action) = window_control_at(bar, x, y) {
-            ws.pressed_window_control = (button == 0).then_some(action);
-            ws.titlebar_click = None;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
+        let now = std::time::Instant::now();
+        let tolerance = 4.0 * ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
+        let double = linux_title_double_click(ws.titlebar_click, now, (x, y), tolerance);
+        let gesture = match linux_header_press(bar, (x, y), button, double) {
+            None => return false,
+            Some(LinuxHeaderPress::Control(action)) => {
+                ws.pressed_window_control = (button == 0).then_some(action);
+                ws.titlebar_click = None;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return true;
             }
-            return true;
-        }
-        if !empty_titlebar_space(bar, x, y) {
-            return false;
-        }
+            Some(LinuxHeaderPress::Title(gesture)) => gesture,
+        };
         let Some(window) = &ws.window else {
             return true;
         };
-        let now = std::time::Instant::now();
-        let tolerance = 4.0 * window.scale_factor() as f32;
-        let double = ws.titlebar_click.is_some_and(|(t, px, py)| {
-            now.duration_since(t).as_millis() <= 400
-                && (x - px).abs() <= tolerance
-                && (y - py).abs() <= tolerance
-        });
         ws.titlebar_click = if button == 0 && !double {
             Some((now, x, y))
         } else {
             None
         };
-        match linux_titlebar_gesture(button, double) {
+        match gesture {
             LinuxTitlebarGesture::Drag => {
                 let _ = window.drag_window();
             }
@@ -265,6 +320,12 @@ pub(super) fn window_control_tooltip_label(
         .map(|b| b.label.as_str())
 }
 
+/// The window buttons in the header `band`, laid out as libadwaita does:
+/// 34-point targets (a 24-point disc and its padding) 3 points apart, the
+/// outermost 7 points from the header's end, centred on its height. A header
+/// too narrow for them all shrinks every button evenly
+/// ([`ButtonLayout::fit`](crate::window_buttons::ButtonLayout::fit)), so the
+/// targets never overlap.
 pub(super) fn linux_window_control_layout_with_preferences(
     band: Rect,
     maximized: bool,
@@ -273,19 +334,22 @@ pub(super) fn linux_window_control_layout_with_preferences(
     tr: &kettle_i18n::Translator,
     preferences: &crate::window_buttons::ButtonLayout,
 ) -> Vec<kettle_render::WindowControlButton> {
+    use crate::window_buttons::{HEADER_EDGE, WINDOW_BUTTON, WINDOW_BUTTON_SPACING};
     use kettle_render::{WindowControl as C, WindowControlButton};
     let h = band.3;
-    let scale = h / LINUX_HEADER_HEIGHT;
-    let count = preferences.left.len() + preferences.right.len();
-    let slot = h.min(band.2 / count.max(1) as f32);
+    let (unit, _) = preferences.fit(band.2, h);
+    let size = (WINDOW_BUTTON * unit).min(h).max(0.0);
+    let pitch = (WINDOW_BUTTON + WINDOW_BUTTON_SPACING) * unit;
+    let edge = HEADER_EDGE * unit;
+    let right = preferences.right.len();
     preferences
         .left
         .iter()
         .enumerate()
-        .map(|(i, c)| (band.0 + i as f32 * slot, *c))
+        .map(|(i, c)| (band.0 + edge + i as f32 * pitch, *c))
         .chain(preferences.right.iter().enumerate().map(|(i, c)| {
             (
-                band.0 + band.2 - (preferences.right.len() - i) as f32 * slot,
+                band.0 + band.2 - edge - size - (right - 1 - i) as f32 * pitch,
                 *c,
             )
         }))
@@ -295,13 +359,7 @@ pub(super) fn linux_window_control_layout_with_preferences(
             } else {
                 action
             };
-            let size = (28.0 * scale).min(slot).max(0.0);
-            let rect = (
-                left + (slot - size) * 0.5,
-                band.1 + (h - size) * 0.5,
-                size,
-                size.min(h),
-            );
+            let rect = (left, band.1 + (h - size) * 0.5, size, size);
             let hovered = pointer.is_some_and(|(x, y)| rect_contains(rect, x, y));
             WindowControlButton {
                 action,
@@ -365,18 +423,75 @@ impl App {
     }
 }
 
+/// The GNOME header's new-tab `+`, Find button and main menu `≡` in its
+/// tab lane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LinuxHeaderControls {
+    pub(super) menu: Rect,
+    pub(super) plus: Rect,
+    /// Find, just before `≡`; a zero rect when the lane has no room for it.
+    pub(super) search: Rect,
+    /// Room the tabs leave before them, for `+`.
+    pub(super) lead: f32,
+    /// Room the tabs leave after them, for Find and `≡`.
+    pub(super) trail: f32,
+}
+
+/// A GNOME header's flat icon button at 1x: libadwaita's 16-point icon
+/// and its padding.
+pub(super) const LINUX_HEADER_BUTTON: f32 = 34.0;
+
+/// Between the header's buttons, and between them and the tabs:
+/// libadwaita's `border-spacing` in a header's start and end boxes.
+pub(super) const LINUX_HEADER_SPACING: f32 = 6.0;
+
+/// Lay out the GNOME header's `+`, Find and `≡` in `band`, the header less
+/// its window buttons: 34-point flat buttons centred on the header's
+/// height, `+` leading the lane, as GNOME Terminal and Ghostty place it,
+/// and `≡` ending it, each 7 points from the lane's edge (libadwaita's
+/// header padding), with Find 6 points before `≡`, as GNOME Terminal puts
+/// its search button, and the tabs 6 points from the buttons. In a lane too
+/// narrow for them all, Find gives way first, since its shortcut still
+/// opens Find, then `≡`, as it did when it sat beside `+`; whatever is left
+/// is clipped to the lane.
 pub(super) fn linux_header_tab_controls(
     band: Rect,
     scale: f32,
     dropdown: bool,
-) -> (Rect, Rect, f32) {
-    let height = (28.0 * scale).min(band.3);
-    let lane = (band.0, band.1 + (band.3 - height) * 0.5, band.2, height);
-    let (menu, plus, reserve) = horizontal_new_tab_controls(lane, scale, dropdown);
+) -> LinuxHeaderControls {
+    let side = (LINUX_HEADER_BUTTON * scale).min(band.3).max(0.0);
+    let y = band.1 + (band.3 - side) * 0.5;
+    let (edge, gap) = (
+        crate::window_buttons::HEADER_EDGE * scale,
+        LINUX_HEADER_SPACING * scale,
+    );
+    let end = band.0 + band.2;
     let clip = |r: Rect| {
-        let left = r.0.clamp(band.0, band.0 + band.2);
-        let right = (r.0 + r.2).clamp(left, band.0 + band.2);
+        let left = r.0.clamp(band.0, end);
+        let right = (r.0 + r.2).clamp(left, end);
         (left, r.1, right - left, r.3)
     };
-    (clip(menu), clip(plus), reserve.min(band.2))
+    let plus = clip((band.0 + edge, y, side, side));
+    let lead = (edge + side + gap).min(band.2);
+    let menu = (end - edge - side, y, side, side);
+    let menu = if dropdown && menu.0 >= plus.0 + plus.2 + gap {
+        menu
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    let search = (menu.0 - gap - side, y, side, side);
+    let search = if menu.2 > 0.0 && search.0 >= plus.0 + plus.2 + gap {
+        search
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
+    let trail = if menu.2 > 0.0 { side + edge + gap } else { 0.0 }
+        + if search.2 > 0.0 { side + gap } else { 0.0 };
+    LinuxHeaderControls {
+        menu,
+        plus,
+        search,
+        lead,
+        trail: trail.min(band.2 - lead),
+    }
 }
