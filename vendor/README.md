@@ -293,13 +293,32 @@ date. Recheck that before upgrading a crate or dropping a patch.
     alongside unattached-modifier boundaries. The pinned Unicode 18 InCB table
     does not classify Sinhala consonants as Consonant; the raw UAX state and
     its 853-vector test remain unchanged.
+- Local changes: a restore clear guard (`term/restore_clear_guard.rs`). This
+  one is a Kettle-only feature, not an upstream correctness fix, and is inert
+  until an embedder arms it: unarmed, each hook is one `Option` test and every
+  path behaves as upstream. Kettle arms it, off Windows, after parsing restored
+  session rows into a fresh terminal, at the cursor row below them. The first
+  ED 2 on the primary screen from the home position then erases only from
+  that row down and leaves the cursor there, so a shell's startup `clear` in
+  any byte order (`H 2J`, `3J H 2J`, `H 2J 3J`) keeps the restored rows in
+  view. ED 3 is honoured and never touches the guard. Any other erase (ED
+  0/1, ED 2 away from home, ISO or DEC selective erase), a primary-screen
+  scroll, entering the alternate screen, RIS, DECALN, DECCOLM, a disarm from
+  the embedder, or a user-input flag the embedder sets disarms it. A resize
+  re-anchors to the cursor row while no output has been parsed (the embedder
+  reports output through `note_restore_clear_guard_output`) and disarms
+  otherwise. The anchor is a stable row identity stamped with the grid
+  geometry, so a reflow that bypasses `Term::resize` falls back to the
+  upstream clear. `term/restore_clear_guard_tests.rs` tests it directly.
+  Upstream has no equivalent; there is nothing to track there.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
   [alacritty/alacritty#9035](https://github.com/alacritty/alacritty/pull/9035)
   merged on 2026-08-26, it caps combining marks at 9 per cell, so upgrading to
   that line means choosing between upstream's 9 and this copy's 30. `master`
-  has none of the other changes above.
+  has none of the other changes above. The restore clear guard (added
+  2026-11-13) is Kettle-only and has no upstream counterpart.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
@@ -307,8 +326,8 @@ date. Recheck that before upgrading a crate or dropping a patch.
   targets. Retained direct unit tests cover the mode stack, monotonic history
   origin, selection eviction, alternate-screen semantics, graphics-event
   ordering/coalescing, overflow recovery, region scrolls against the
-  row-by-row swap, and the query replies (including Neovim's exact undercurl
-  and truecolor probes); run them with
+  row-by-row swap, the query replies (including Neovim's exact undercurl
+  and truecolor probes), and the restore clear guard; run them with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p alacritty_terminal`.
 

@@ -758,13 +758,16 @@ impl MediaPasteReceiptState {
 }
 
 /// The theme picker's query and selected row, and the theme it opened on. That
-/// theme fixes the list's order while the preview changes the live theme, is
-/// ticked, and is what Esc restores.
+/// theme fixes the list's order while the preview changes the live theme and
+/// is ticked; the window's theme before the picker is what Esc restores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThemePickerState {
     pub(crate) query: crate::text_editor::TextEditor,
     pub(crate) selected: usize,
     pub(crate) opened_on: String,
+    /// The side the user chose on the picker's status line; `None` edits
+    /// the side the window wears. See `theme_commit_plan`.
+    pub(crate) slot: Option<kettle_render::ThemeSlot>,
 }
 
 /// One shelf item, with shared view state for the overlay and pinned lane.
@@ -945,6 +948,11 @@ pub(crate) struct WindowState {
     pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
     pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
+    /// The primary button is down in this window, as title-bar tracking saw.
+    pub(crate) titlebar_pressed: bool,
+    /// Kettle made the window unmovable because the pointer is over, or
+    /// pressed, a title-bar control; see `titlebar_hold_after`.
+    pub(crate) titlebar_window_held: bool,
     pub(crate) native_caption_drag: Option<crate::native_drag::NativeCaptionDrag>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
@@ -1109,6 +1117,9 @@ pub(crate) struct WindowState {
     pub(crate) palette_profiles: Option<Vec<String>>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
+    /// The open palette lists only commands with a keyboard shortcut
+    /// (`Action::ShowKeybinds`). Set on every open; read only while open.
+    pub(crate) palette_bound_only: bool,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
@@ -1276,6 +1287,10 @@ pub(crate) struct WindowState {
     pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
     pub(crate) hovered_new_tab_menu: bool,
+    /// The pointer is over, or pressed, the macOS title bar's Settings gear.
+    /// A press opens Settings on a release over the gear.
+    pub(crate) hovered_settings: bool,
+    pub(crate) pressed_settings: bool,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1410,15 +1425,23 @@ pub(crate) struct WindowState {
     pub(crate) accent: Option<WindowAccent>,
     /// When the user last typed bytes into a PTY in this window. Output
     /// arriving within `TYPING_ECHO_WINDOW` of a keystroke paints IMMEDIATELY
-    /// (request_redraw is vsync-coalesced, so this can't outpace the display)
     /// instead of through the output coalescer (`output_pacer`), whose
     /// WaitUntil deadline has ~16ms timer granularity on Windows and would make
-    /// held-key echo visibly stutter.
+    /// held-key echo visibly stutter. That redraw is not paced to the display
+    /// (on macOS each wake can present its own FIFO frame), so a pane whose
+    /// echoes arrive in two writes is held by `typed_echo`'s settle instead.
     pub(crate) last_typed: Option<std::time::Instant>,
+    /// Typed-echo diagnostics: echoes, split echoes, and frames that showed
+    /// the in-between state of a split echo (`ui_geometry.typed_echo`).
+    pub(crate) typed_echo: crate::typed_echo::TypedEcho,
     /// Ghostty `resize-overlay` parity: `Some((cols, rows, armed_at))`
     /// while the transient size chip is visible; expires
     /// `RESIZE_OVERLAY_DURATION` after the last resize event.
     pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
+    /// What the chip says instead of the bare grid: the font size and grid
+    /// after a font-size change (`App::show_font_size_chip`). A window
+    /// resize and the chip's expiry clear it.
+    pub(crate) resize_overlay_label: Option<String>,
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
@@ -1487,6 +1510,29 @@ impl WindowState {
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
         self.preview_overlay = Some(overlay);
+    }
+
+    /// On focus loss, drop every title-bar button press and the window
+    /// controls' hover: their releases may never come here. The Settings
+    /// gear loses its hover too, so a release elsewhere never opens
+    /// Settings and the gear never stays lit.
+    pub(crate) fn release_titlebar_buttons(&mut self) {
+        self.pressed_window_control = None;
+        self.hovered_window_control = None;
+        self.pressed_new_tab = false;
+        self.pressed_new_tab_menu = false;
+        self.hovered_settings = false;
+        self.pressed_settings = false;
+    }
+
+    /// When the pointer leaves the window, nothing in the tab bar is under
+    /// it or pressed any more.
+    pub(crate) fn leave_tab_bar(&mut self) {
+        self.release_titlebar_buttons();
+        self.hovered_close_idx = None;
+        self.hovered_tab_idx = None;
+        self.hovered_new_tab = false;
+        self.hovered_new_tab_menu = false;
     }
 
     /// Point `cursor` back at the physical pointer before a native button or
@@ -1635,6 +1681,8 @@ impl WindowState {
             pressed_window_control: None,
             hovered_window_control: None,
             titlebar_click: None,
+            titlebar_pressed: false,
+            titlebar_window_held: false,
             native_material: None,
             accessibility: None,
             accessibility_key: None,
@@ -1692,6 +1740,7 @@ impl WindowState {
             ssh_input: None,
             palette_input: None,
             palette_profiles: None,
+            palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,
             settings_restart_pending: false,
@@ -1737,6 +1786,8 @@ impl WindowState {
             pressed_new_tab_menu: false,
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            hovered_settings: false,
+            pressed_settings: false,
             context_menu_a11y_label: None,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
@@ -1776,7 +1827,9 @@ impl WindowState {
             dpi_resize_surface_suspended: false,
             accent: None,
             last_typed: None,
+            typed_echo: crate::typed_echo::TypedEcho::default(),
             resize_overlay: None,
+            resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),

@@ -185,6 +185,45 @@ fn reader_sidechannels_share_the_generation_ordered_output_gate() {
         pending < generation && generation < wake,
         "pending sync must suppress publication; otherwise Release generation precedes wake"
     );
+    let stamp = helper
+        .find("output_wake.stamp_publication();")
+        .expect("output publication is stamped");
+    assert!(
+        pending < stamp && stamp < generation,
+        "the publication stamp must precede the Release generation it belongs to"
+    );
+}
+
+/// Both places that publish output stamp its time before the `Release`
+/// generation increment, so a UI reader that acquires the new generation and
+/// then reads `Terminal::output_published_at` gets that publication's time or
+/// a later one's, never the previous publication's.
+#[test]
+fn every_output_publication_is_stamped_before_its_generation() {
+    let source = super::production_source();
+    for owner in ["fn publish_output_if_ready(", "fn force_sync_update_flush("] {
+        let start = source.find(owner).expect("publication site present");
+        let tail = &source[start..];
+        let body = &tail[..tail.find("\n}\n").expect("publication site end")];
+        let stamp = body
+            .find("output_wake.stamp_publication();")
+            .unwrap_or_else(|| panic!("{owner} must stamp its publication"));
+        let generation = body
+            .find(".fetch_add(1, std::sync::atomic::Ordering::Release);")
+            .unwrap_or_else(|| panic!("{owner} must bump the generation"));
+        let wake = body
+            .find("output_wake.request();")
+            .unwrap_or_else(|| panic!("{owner} must request a wake"));
+        assert!(
+            stamp < generation && generation < wake,
+            "{owner}: stamp, then Release generation, then wake"
+        );
+        assert_eq!(
+            body.matches("stamp_publication()").count(),
+            1,
+            "{owner} stamps once per publication"
+        );
+    }
 }
 
 #[test]

@@ -11,6 +11,8 @@ pub(super) fn tab_bar_geometry_json(
         "y": bar.y,
         "new_tab": rect_json(bar.new_tab),
         "new_tab_menu": rect_json(bar.new_tab_menu),
+        // The macOS title bar's Settings gear; zero-sized elsewhere.
+        "settings": rect_json(bar.settings),
         "drag_cursor_x": bar.drag_cursor_x,
         // A vertical strip reports the drag on its own axis;
         // additive, so a reader that only knows the x key still
@@ -1527,6 +1529,7 @@ impl App {
                 })
             })
             .collect::<Vec<_>>();
+        let echo_counts = target.typed_echo.counts();
         let mut geometry = serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
@@ -1647,6 +1650,19 @@ impl App {
                         "mapped_bytes": u.mapped_bytes,
                     })
                 }),
+                // Typed echo, for comparing builds: counts only. Per keystroke,
+                // `frames_presented / echoes`; `intermediate_frames` are frames
+                // that showed the in-between state of a split echo.
+                "typed_echo": {
+                    "echoes": echo_counts.echoes,
+                    "split_echoes": echo_counts.split_echoes,
+                    "frames_presented": echo_counts.frames_presented,
+                    "output_frames": echo_counts.output_frames,
+                    "intermediate_frames": echo_counts.intermediate_frames,
+                    "late_superseded_frames": echo_counts.late_superseded_frames,
+                    "settled_echoes": echo_counts.settled_echoes,
+                    "settled_early": echo_counts.settled_early,
+                },
                 // Who draws the blink: the GPU, or the window server's layer
                 // (macOS). Timing, geometry and counts only.
                 "cursor_blink": self.cursor_blink_diagnostics(target),
@@ -2483,7 +2499,12 @@ impl App {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
-            if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
+            if press_settings_gear(ws, &bar, (px, py), bcode) {
+                // Armed on a primary press; opens on release.
+            } else if bcode == 0
+                && bar.new_tab_menu.2 > 0.0
+                && rect_contains(bar.new_tab_menu, px, py)
+            {
                 ws.pressed_new_tab_menu = true;
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
@@ -2603,6 +2624,17 @@ impl App {
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
+        }
+        if bcode == 0
+            && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
+        {
+            if let Some(action) = action {
+                self.handle_action(ws, action, event_loop);
+            }
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return true;
         }
         if bcode == 0
             && let Some(action) = ws.pressed_window_control.take()

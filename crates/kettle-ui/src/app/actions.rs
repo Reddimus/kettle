@@ -226,16 +226,19 @@ impl App {
         input_time: std::time::Instant,
     ) -> PaneInputResult {
         let receipt_pane = Self::media_paste_receipt_owners(ws);
+        let before = input_generations(&ws.mux);
         let local = ws
             .mux
             .broadcast_write_delivery(bytes, scroll_to_bottom, receipt_pane);
         Self::dismiss_media_paste_receipt_after_delivery(ws, local);
-        stamp_accepted_input(&mut ws.last_typed, local, input_time);
+        let reached = input_recipients(&ws.mux, &before);
+        stamp_accepted_input(ws, local, input_time, &reached);
         let mut result = local.result;
         if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
             let scope = ws.mux.broadcast.clone();
             for other in self.windows.values_mut() {
                 let receipt_pane = Self::media_paste_receipt_owners(other);
+                let before = input_generations(&other.mux);
                 let delivery = other.mux.broadcast_write_foreign_delivery(
                     &scope,
                     bytes,
@@ -249,7 +252,8 @@ impl App {
                     window.request_redraw();
                 }
                 Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
-                stamp_accepted_input(&mut other.last_typed, delivery, input_time);
+                let reached = input_recipients(&other.mux, &before);
+                stamp_accepted_input(other, delivery, input_time, &reached);
                 result = result.merge(delivery.result);
             }
         }
@@ -285,18 +289,10 @@ impl App {
             .collect();
         drop(populated);
         if reset_current {
-            ws.mux.broadcast = BroadcastScope::Off;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
+            self.set_broadcast_scope(ws, BroadcastScope::Off);
         }
         for seq in reset_windows {
-            if let Some(target) = self.windows.get_mut(&seq) {
-                target.mux.broadcast = BroadcastScope::Off;
-                if let Some(window) = &target.window {
-                    window.request_redraw();
-                }
-            }
+            self.set_window_broadcast_scope(seq, BroadcastScope::Off);
         }
     }
 
@@ -319,12 +315,7 @@ impl App {
             .collect();
         drop(populated);
         for seq in reset_windows {
-            if let Some(target) = self.windows.get_mut(&seq) {
-                target.mux.broadcast = BroadcastScope::Off;
-                if let Some(window) = &target.window {
-                    window.request_redraw();
-                }
-            }
+            self.set_window_broadcast_scope(seq, BroadcastScope::Off);
         }
     }
 
@@ -687,6 +678,7 @@ impl App {
                     // scale factor on HiDPI.
                     r.set_font_size(font_size_after(&action, r.font_size(), self.cfg.font_size));
                 }
+                self.show_font_size_chip(ws);
                 // The user changed the font OUTSIDE a scaled-zoom
                 // enter/exit, so the saved pre-zoom size is now stale — drop it
                 // so a later zoom-out keeps this new chosen size instead of
@@ -701,48 +693,14 @@ impl App {
             Action::StartSearch => {
                 self.open_search(ws);
             }
-            Action::ToggleBroadcastAll => {
-                // Toggle: turn on the `broadcast-default` scope, or turn
-                // broadcast off when that scope is already on. The explicit off
-                // chord (`ToggleBroadcastOff`) still works.
-                let on = broadcast_scope_for_default(self.cfg.broadcast_default);
-                ws.mux.broadcast = if ws.mux.broadcast == on {
-                    crate::mux::BroadcastScope::Off
-                } else {
-                    on
-                };
-            }
-            Action::ToggleBroadcastOff => {
-                ws.mux.broadcast = crate::mux::BroadcastScope::Off;
-            }
-            Action::ToggleBroadcastGroup => {
-                // Toggle broadcast scope between Off and
-                // Group(focused_pane.group_name). If focused
-                // pane has no group, log + no-op.
-                let focused_group = ws.mux.focused().and_then(|p| p.group_name.clone());
-                let Some(group) = focused_group else {
-                    log::info!(
-                        "toggle-broadcast-group: focused pane has no group_name; \
-                         use Action::CreateGroup or Action::GroupTab first"
-                    );
+            Action::ToggleBroadcastAll
+            | Action::ToggleBroadcastOff
+            | Action::ToggleBroadcastGroup
+            | Action::ToggleBroadcastWindow
+            | Action::ToggleBroadcastPanesInTab => {
+                if !self.apply_broadcast_action(ws, &action) {
                     return;
-                };
-                ws.mux.broadcast = match &ws.mux.broadcast {
-                    crate::mux::BroadcastScope::Group(name) if name == &group => {
-                        crate::mux::BroadcastScope::Off
-                    }
-                    _ => crate::mux::BroadcastScope::Group(group),
-                };
-            }
-            Action::ToggleBroadcastWindow => {
-                // Toggle window-wide broadcast on/off. Unlike
-                // ToggleBroadcastAll, whose scope follows `broadcast-default`
-                // (per-tab by default), this always targets every pane in every
-                // tab.
-                ws.mux.broadcast = match &ws.mux.broadcast {
-                    crate::mux::BroadcastScope::All => crate::mux::BroadcastScope::Off,
-                    _ => crate::mux::BroadcastScope::All,
-                };
+                }
             }
             Action::ToggleZoom => {
                 // A tab with one pane has nothing to expand: entering zoom
@@ -1057,8 +1015,9 @@ impl App {
                 self.close_all_modals(ws);
                 ws.ssh_input = Some((Default::default(), 0));
             }
-            Action::CommandPalette => {
+            Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);
+                ws.palette_bound_only = matches!(action, Action::ShowKeybinds);
                 profiles::open_profile_palette(ws, self.profile_inventory.snapshot());
             }
             // Open the in-app settings overlay (Ctrl+, / right-click

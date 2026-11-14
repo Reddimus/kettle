@@ -367,6 +367,10 @@ pub enum Action {
     /// so it works on Linux/macOS/Windows without spawning a
     /// per-platform helper.
     ShowHelp,
+    /// Open the command palette listing only the commands that have a
+    /// keyboard shortcut, each with its shortcut: a searchable, runnable
+    /// shortcut reference (macOS Help > Keyboard Shortcuts).
+    ShowKeybinds,
     /// Terminator parity
     /// (`terminatorlib/layoutlauncher.py`). Open the runtime
     /// layout picker — an overlay modal that lists saved
@@ -504,6 +508,11 @@ pub enum Action {
     /// from the misnamed `ToggleBroadcastAll` which is
     /// actually per-tab.
     ToggleBroadcastWindow,
+    /// Toggle broadcast to every pane in the focused tab, whatever
+    /// `broadcast-default` says. `broadcast_tab` names `ToggleBroadcastAll`,
+    /// the chord's action, whose scope follows `broadcast-default`; this one
+    /// always targets the tab. No default binding.
+    ToggleBroadcastPanesInTab,
     ToggleQuickTerminal,
     ToggleFullscreen,
     /// Full terminal reset (RIS, `\e c`) of the focused pane's terminal.
@@ -821,6 +830,8 @@ pub fn action_names() -> Vec<&'static str> {
         "scaled_zoom",
         "help",
         "show_help",
+        "show_keybinds",
+        "keyboard_shortcuts",
         "send_newline",
         "layout_launcher",
         "open_layout_picker",
@@ -896,6 +907,8 @@ pub fn action_names() -> Vec<&'static str> {
         "broadcast-window",
         "toggle_broadcast_window",
         "toggle-broadcast-window",
+        "broadcast_panes_in_tab",
+        "broadcast-panes-in-tab",
         "toggle_quick_terminal",
         "toggle_fullscreen",
         "full_screen",
@@ -1141,6 +1154,9 @@ impl Action {
             "toggle_split_zoom" | "toggle_zoom" => ToggleZoom,
             "scaled_zoom" | "scaled-zoom" | "toggle_scaled_zoom" => ScaledZoom,
             "help" | "show_help" | "show-help" | "open_help" | "open-help" => ShowHelp,
+            "show_keybinds" | "show-keybinds" | "keyboard_shortcuts" | "keyboard-shortcuts" => {
+                ShowKeybinds
+            }
             "send_newline" | "send-newline" => SendNewline,
             "layout_launcher" | "layout-launcher" | "open_layout_picker" | "open-layout-picker"
             | "layout_picker" | "layout-picker" => OpenLayoutPicker,
@@ -1249,6 +1265,10 @@ impl Action {
             | "broadcast-window"
             | "toggle_broadcast_window"
             | "toggle-broadcast-window" => ToggleBroadcastWindow,
+            // Always the focused tab. Deliberately not `toggle_broadcast_tab`:
+            // every other scope pairs `broadcast_X` with `toggle_broadcast_X`
+            // for one action, and `broadcast_tab` is the chord's action.
+            "broadcast_panes_in_tab" | "broadcast-panes-in-tab" => ToggleBroadcastPanesInTab,
             // Terminator's `*_toggle` names toggle GROUPING (window.py:959,
             // :987), not broadcasting. Like Terminator, these generate the group
             // name rather than prompting for one.
@@ -2635,6 +2655,34 @@ mod tests {
         assert!(action_names().contains(&"move_tab_to_window"));
     }
 
+    /// The tab-scope toggle has a name of its own. `broadcast_tab` stays the
+    /// chord's action, whose scope follows `broadcast-default`, and the name a
+    /// user would guess from the `broadcast_X`/`toggle_broadcast_X` pairs is
+    /// not given a second meaning.
+    #[test]
+    fn the_tab_scope_toggle_cannot_be_mistaken_for_broadcast_tab() {
+        for name in ["broadcast_panes_in_tab", "broadcast-panes-in-tab"] {
+            assert_eq!(
+                Action::from_name(name),
+                Some(Action::ToggleBroadcastPanesInTab),
+                "{name}"
+            );
+            assert!(action_names().contains(&name), "{name}");
+        }
+        for name in ["broadcast_tab", "broadcast-tab"] {
+            assert_eq!(Action::from_name(name), Some(Action::ToggleBroadcastAll));
+        }
+        for name in ["toggle_broadcast_tab", "toggle-broadcast-tab"] {
+            assert_eq!(Action::from_name(name), None, "{name}");
+        }
+        // No default binding: the chord stays `ToggleBroadcastAll`'s.
+        assert!(
+            !defaults()
+                .values()
+                .any(|action| *action == Action::ToggleBroadcastPanesInTab)
+        );
+    }
+
     #[test]
     fn action_names_round_trip_through_from_name() {
         // Drift guard: every name `action_names()` lists must parse
@@ -3287,6 +3335,21 @@ mod tests {
                 "alias {s:?} should parse to SendNewline"
             );
         }
+    }
+
+    /// The keyboard-shortcut list's documented names resolve to
+    /// `Action::ShowKeybinds`, and `--list-actions` names it.
+    #[test]
+    fn from_name_accepts_show_keybinds_aliases() {
+        for s in [
+            "show_keybinds",
+            "show-keybinds",
+            "keyboard_shortcuts",
+            "keyboard-shortcuts",
+        ] {
+            assert_eq!(Action::from_name(s), Some(Action::ShowKeybinds), "{s}");
+        }
+        assert!(action_names().contains(&"show_keybinds"));
     }
 
     /// Drift guard. Terminator's F1 `key_help`

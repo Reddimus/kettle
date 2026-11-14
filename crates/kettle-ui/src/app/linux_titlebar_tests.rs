@@ -122,7 +122,7 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                     rect,
                     count > 1,
                     true,
-                    false,
+                    0.0,
                     "shell",
                     None,
                     8.0 * scale,

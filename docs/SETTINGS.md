@@ -85,6 +85,7 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 |---|---|---|
 | Appearance | `theme-mode` | Follow system (default), Light, Dark or Fixed theme. Fixed theme keeps the current palette; existing configs with `theme` alone remain fixed |
 | Theme | `theme`, `light-theme` or `dark-theme` | curated list: Kettle's default pair (TokyoNight Night, Kettle Day) and the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
+| Minimum contrast | `minimum-contrast` | Off (default) · 3 · 4.5 · 7, each a ratio to 1; lifts terminal text colours toward white or black until each reads at that ratio on its background. A ratio set by hand in the config (such as 2.5) shows as it is until you step it. The theme picker's **Contrast:** button steps the same values |
 | Font size | `font-size` | 6–72 px |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the row says "Not available in this session; opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works |
@@ -223,14 +224,24 @@ these config-only options; edits still reload immediately for every open pane.
 ### Theme picker
 
 The theme picker lists every bundled theme. Type part of a name to filter them,
-or move with ↑/↓ (and Tab); the window wears the selected theme while you
-browse. Enter keeps it and writes it to your config file, and Esc puts back the
-theme you started with. The prompt names the active appearance: **light theme:**
-or **dark theme:**. Following the system saves a pick to that side and keeps
-following. Forced Light/Dark modes also update their own side; Fixed theme
-writes `theme`. With nothing typed, the themes of your current theme's
-appearance come first, each followed by the most similar one, so the arrows
-never jump between a dark and a light palette until the end of the list; each
+or move with ↑/↓; the window wears the selected theme while you browse. Enter
+keeps it and writes it to your config file, and Esc puts back the theme you
+started with. The prompt names the side a pick saves to: **light theme:** or
+**dark theme:**. Following the system saves a pick to the active side and
+keeps following. Forced Light/Dark modes also update their own side; Fixed
+theme writes `theme`, and there Tab and Shift+Tab move down and up a row. With
+`theme-schedule` set, the schedule picks the side, so a pick saves to the side
+it wears now, whatever the mode. To change the other side's theme, press Tab
+or Shift+Tab (the hint reads "Tab: light theme" or "Tab: dark theme", and a
+narrow header leaves that part out first), or click its name on the status
+line under the list: the list moves to that side's theme, clearing anything
+typed, and the window previews it, and Enter (shown as "save for light
+appearance" or "save for dark appearance") writes `light-theme` or
+`dark-theme` only and puts the window back on the theme it wore. Esc still
+puts back the theme you started
+with. With nothing typed, the themes of your current theme's appearance come
+first, each followed by the most similar one, so the arrows never jump
+between a dark and a light palette until the end of the list; each
 row says whether its theme is dark or light and shows a strip of its colours
 (background, text and six accent colours), and your current theme is ticked.
 When the window is too narrow for every row's strip, no row shows one, so names
@@ -238,6 +249,29 @@ are never shortened for it. Open it from the Settings **Theme** row (Enter or a
 click), **right-click → Theme…**, the command palette's **Choose theme…**, or
 the bindable `open_theme_picker` action. Opened from Settings, it covers the
 panel and returns to it when it closes.
+
+Under the list, a sample card shows the highlighted theme as the terminal
+would draw it: a prompt, an `ls -l` listing, a diff and all 16 palette
+colours, in the theme's own colours with your colour overrides and
+`minimum-contrast` applied. Its last line reads the contrast of the theme's
+text and of its least readable palette colour (slots 1-7 and 9-15) against
+its background, with that colour's swatch and number; a warning dot follows
+when it is below 3:1, and with a minimum contrast set it also counts the
+colours the terminal lifts. Below the card, a status line says how the theme is
+chosen (**Follow system**, **Follow schedule** when `theme-schedule` is set,
+Light, Dark or Fixed theme) and names the dark and the light theme, with a
+dot and an underline on the side a pick saves to (a click on a side chooses
+it; a screen reader offers both as radio buttons in one group); a fixed theme
+shows only **Theme:**. The **Contrast:** button on it (a button to a screen
+reader too) steps `minimum-contrast` through Off, 3:1, 4.5:1 and 7:1 and
+saves it at once, like the Settings row. It is not part of the preview: Esc
+puts back the theme only, not the contrast. The footer gives way so the list
+keeps at least four rows: on a short window the card is left out first, then
+one status line. A window too narrow for them leaves them out rather than
+cutting them, except that a long mode label (such as Spanish "Seguir el
+sistema" beside "Contraste: Desactivado") is shortened with "…" to make room
+for the button on a narrow picker. The list shows up to 14 rows, and a
+screen reader reads the card and status as one line.
 
 > **Tip:** for keybinds beyond the curated list (or to unbind a default),
 > edit the config file directly (`keybind = ctrl+shift+e = split_right`,

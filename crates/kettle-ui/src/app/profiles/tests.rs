@@ -85,7 +85,12 @@ fn actual_new_tab_and_palette_snapshots_return_while_profile_enumeration_is_bloc
         let mut ws = WindowState::new(1, Mux::new());
         open_profile_palette(&mut ws, fixture.inventory.snapshot());
         assert!(ws.palette_profiles.is_none());
-        let palette = palette_entries(None, &tr, ws.palette_profiles.as_deref());
+        let palette = palette_entries(
+            None,
+            &tr,
+            ws.palette_profiles.as_deref(),
+            kettle_config::BroadcastDefault::default(),
+        );
         assert!(!palette.iter().any(|(_, action)| matches!(
             action,
             Action::LaunchProfile(_) | Action::OpenProfilesDirectory
@@ -118,9 +123,14 @@ fn actual_new_tab_and_palette_snapshots_return_while_profile_enumeration_is_bloc
             assert!(matches!(&choices[1], ContextMenuItem::Submenu { items, .. }
                 if matches!(items.as_slice(), [ContextMenuItem::ProfileChoice { profile, .. }] if profile == "profile0")));
             assert!(
-                palette_entries(None, &tr, profiles)
-                    .iter()
-                    .any(|(_, action)| *action == Action::LaunchProfile("profile0".into()))
+                palette_entries(
+                    None,
+                    &tr,
+                    profiles,
+                    kettle_config::BroadcastDefault::default()
+                )
+                .iter()
+                .any(|(_, action)| *action == Action::LaunchProfile("profile0".into()))
             );
         }
     }
@@ -313,7 +323,12 @@ fn worker_completions_preserve_deep_menu_viewports_typeahead_and_palette_editor_
         let mut editor = crate::text_editor::TextEditor::from("work");
         editor.move_left(true, false);
         assert!(editor.selection().is_some());
-        let commands = palette_entries(None, &tr, palette.palette_profiles.as_deref());
+        let commands = palette_entries(
+            None,
+            &tr,
+            palette.palette_profiles.as_deref(),
+            kettle_config::BroadcastDefault::default(),
+        );
         let ranked = kettle_config::palette::rank_entries(&editor, &commands, &tr);
         let selected = ranked
             .iter()
@@ -344,9 +359,14 @@ fn worker_completions_preserve_deep_menu_viewports_typeahead_and_palette_editor_
                 palette.palette_input.as_ref(),
                 Some(&(editor.clone(), selected))
             );
-            let commands = palette_entries(None, &tr, palette.palette_profiles.as_deref());
+            let commands = palette_entries(
+                None,
+                &tr,
+                palette.palette_profiles.as_deref(),
+                kettle_config::BroadcastDefault::default(),
+            );
             assert_eq!(
-                selected_palette_action(&editor, selected, &commands, &tr),
+                palette_enter_action(&editor, selected, &commands, &tr),
                 Some(Action::LaunchProfile("work".into()))
             );
             let reopened = App::new_tab_menu_items(&[], fixture.inventory.snapshot(), &tr);
@@ -410,9 +430,14 @@ fn pending_palette_header_does_not_shift_ranked_keyboard_or_pointer_actions() {
         open_profile_palette(&mut ws, None);
         for query in ["", "split", "zzzzqqqq"] {
             ws.palette_input = Some((query.into(), 0));
-            let commands = palette_entries(None, &tr, ws.palette_profiles.as_deref());
+            let commands = palette_entries(
+                None,
+                &tr,
+                ws.palette_profiles.as_deref(),
+                kettle_config::BroadcastDefault::default(),
+            );
             let ranked = kettle_config::palette::rank_entries(query, &commands, &tr);
-            let list = open_picker_list(&ws, &cfg, &tr, None).unwrap();
+            let list = open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap();
             assert_eq!(
                 palette_profile_status(ws.palette_profiles.as_deref(), &tr),
                 Some(tr.text(T::MenuProfilesPending))
@@ -429,7 +454,7 @@ fn pending_palette_header_does_not_shift_ranked_keyboard_or_pointer_actions() {
             }
             for surface in [(360.0, 600.0), (800.0, 600.0)] {
                 let menu = picker_context_menu(
-                    open_picker_list(&ws, &cfg, &tr, None).unwrap(),
+                    open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
                     surface,
                     (8.0, 16.0),
                     (8.0, 16.0),
@@ -449,7 +474,7 @@ fn pending_palette_header_does_not_shift_ranked_keyboard_or_pointer_actions() {
                     let selected = ws.palette_input.as_ref().unwrap().1;
                     assert_eq!(selected, index);
                     assert_eq!(
-                        selected_palette_action(query, selected, &commands, &tr),
+                        palette_enter_action(query, selected, &commands, &tr),
                         Some(commands[ranked[index]].1.clone())
                     );
                     let full_label = commands[ranked[selected]].0.shown(&tr);
@@ -720,10 +745,15 @@ fn pending_palette_status_survives_long_queries_narrow_widths_and_result_scroll(
             for width in [328.0, 358.0, 720.0] {
                 for query in [String::new(), "split".into(), "query".repeat(40)] {
                     ws.palette_input = Some((query.clone().into(), 0));
-                    let list = open_picker_list(&ws, &cfg, &tr, None).unwrap();
+                    let list = open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap();
                     let ranked = kettle_config::palette::rank_entries(
                         &query,
-                        &palette_entries(None, &tr, None),
+                        &palette_entries(
+                            None,
+                            &tr,
+                            None,
+                            kettle_config::BroadcastDefault::default(),
+                        ),
                         &tr,
                     );
                     let mut menu =
@@ -787,7 +817,12 @@ fn pending_palette_status_survives_long_queries_narrow_widths_and_result_scroll(
                         menu.scroll_offset = ranked.len() - 4;
                         assert_eq!(menu.status_rect(), Some(band), "status never scrolls");
                     }
-                    let commands = palette_entries(None, &tr, None);
+                    let commands = palette_entries(
+                        None,
+                        &tr,
+                        None,
+                        kettle_config::BroadcastDefault::default(),
+                    );
                     for (index, &entry) in ranked.iter().enumerate() {
                         let Some(row) = menu.visible_row_rect(index) else {
                             continue;
@@ -804,12 +839,21 @@ fn pending_palette_status_survives_long_queries_narrow_widths_and_result_scroll(
                         let selected = ws.palette_input.as_ref().unwrap().1;
                         assert_eq!(selected, index);
                         assert_eq!(
-                            selected_palette_action(&query, selected, &commands, &tr),
+                            palette_enter_action(&query, selected, &commands, &tr),
                             Some(commands[entry].1.clone())
                         );
                     }
                     assert_eq!(ws.palette_input.as_ref().unwrap().0.text(), query);
-                    let ready = command_picker_list(&query, 0, &cfg.keybinds, &tr, None, Some(&[]));
+                    let ready = command_picker_list(
+                        &query,
+                        0,
+                        &cfg.keybinds,
+                        &tr,
+                        None,
+                        Some(&[]),
+                        false,
+                        kettle_config::BroadcastDefault::default(),
+                    );
                     let ready =
                         picker_context_menu(ready, (width, 600.0), cell, text_cell, 0.0).unwrap();
                     assert!(ready.status_rect().is_none());

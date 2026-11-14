@@ -98,7 +98,8 @@ fn vim_menu_nav_intercepts_before_mnemonic_catchall() {
 }
 
 /// The `▾` menu is shells → separator → Windows
-/// Terminal's bottom section (Settings / Command palette / About).
+/// Terminal's bottom section (Settings / Command palette / Keyboard
+/// shortcuts / Help / About).
 #[test]
 fn new_tab_menu_items_has_wt_bottom_rows() {
     let shells = vec![
@@ -112,7 +113,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     );
     assert_eq!(
         items.len(),
-        11,
+        13,
         "shells, profile submenu, layouts, SSH and bottom rows"
     );
     assert!(matches!(
@@ -139,6 +140,22 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     assert!(matches!(
         items[10],
         ContextMenuItem::Item {
+            label: "Keyboard shortcuts",
+            action: Action::ShowKeybinds,
+            enabled: true
+        }
+    ));
+    assert!(matches!(
+        items[11],
+        ContextMenuItem::Item {
+            label: "Help",
+            action: Action::ShowHelp,
+            enabled: true
+        }
+    ));
+    assert!(matches!(
+        items[12],
+        ContextMenuItem::Item {
             label: "About kettle",
             action: Action::About,
             enabled: true
@@ -148,10 +165,10 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     // assignment must keep working with the new bottom rows.
     let mn = assign_mnemonics(&items, &[]);
     let mut letters: Vec<char> = mn.iter().flatten().map(|(_, c)| *c).collect();
-    assert_eq!(letters.len(), 9, "all dispatchable rows get mnemonics");
+    assert_eq!(letters.len(), 11, "all dispatchable rows get mnemonics");
     letters.sort_unstable();
     letters.dedup();
-    assert_eq!(letters.len(), 9, "mnemonics are distinct");
+    assert_eq!(letters.len(), 11, "mnemonics are distinct");
 }
 
 /// An `Info` row (About panel) is inert — not
@@ -650,6 +667,8 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
                 &kettle_i18n::Translator::new(kettle_i18n::Language::En),
                 None,
                 Some(&[]),
+                false,
+                kettle_config::BroadcastDefault::default(),
             )),
             None,
             None,
@@ -1373,6 +1392,10 @@ fn terminal_menu_groups_commands_and_fits_800_by_600_in_both_languages() {
             Action::CreateGroup,
             Action::GroupTab,
             Action::UngroupTab,
+            Action::ToggleBroadcastOff,
+            Action::ToggleBroadcastAll,
+            Action::ToggleBroadcastWindow,
+            Action::ToggleBroadcastGroup,
             Action::OpenSettings,
             Action::OpenThemePicker,
         ]
@@ -1469,6 +1492,7 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
         a11y_label: None,
         status: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     for index in [0, 1] {
         let mut ws = WindowState::new(1, Mux::new());
@@ -1698,6 +1722,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         a11y_label: None,
         status: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     let parent = panel(&parent_items, (40.0, 30.0), 0, parent_h);
     let active = panel(&items, (300.0, 30.0), 2, 5.0 * row_h);

@@ -172,7 +172,7 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
         natural_h
     };
     let (ax, ay) = menu.anchor;
-    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    let (inset, content_h) = menu_scroll_content(menu, natural_h, panel_h, row_h);
     let mut row_y = ay + inset;
     for row in menu
         .rows
@@ -195,7 +195,10 @@ pub(crate) fn menu_swatch_rects(menu: &ContextMenu, cw: f32, ch: f32) -> Vec<(Re
 }
 
 /// The most swatch squares one frame paints; whole rows past it are skipped.
-pub(crate) const MENU_SWATCH_SURFACES: usize = 32 * menu::SWATCH_COUNT;
+/// The theme picker's footer adds its card, 16 palette squares, the lowest
+/// colour's square, two marks and the contrast button.
+pub(crate) const MENU_SWATCH_SURFACES: usize =
+    32 * menu::SWATCH_COUNT + crate::theme_picker::FOOTER_SURFACES;
 
 /// Rounded swatch squares for every open menu level, outlined in the theme's
 /// foreground so a swatch matching the panel background stays visible.
@@ -271,6 +274,9 @@ pub struct ContextMenu {
     pub status: Option<MenuStatus>,
     /// Picker header above `anchor`; zero for ordinary context menus.
     pub picker_header_height: f32,
+    /// The theme picker's sample and status line under its rows, inside its
+    /// card; `None` for every other menu.
+    pub picker_footer: Option<crate::ThemePickerFooter>,
     /// Top-left of the panel in surface pixels (already clamped).
     pub anchor: (f32, f32),
     pub rows: Vec<ContextMenuRow>,
@@ -330,13 +336,30 @@ impl ContextMenu {
         let (x, y, w, h) = self.rows_rect();
         let above =
             self.picker_header_height + self.status.as_ref().map_or(0.0, MenuStatus::height);
-        (x, y - above, w, h + above)
+        (x, y - above, w, h + above + self.picker_footer_height())
     }
 
     pub(crate) fn text_buffer_count(&self) -> usize {
         self.rows.len() + self.status.as_ref().map_or(0, |status| status.lines.len())
     }
 
+    /// The height of the theme picker's footer under the rows, or zero.
+    pub fn picker_footer_height(&self) -> f32 {
+        self.picker_footer
+            .as_ref()
+            .map_or(0.0, |footer| footer.height.max(0.0))
+    }
+
+    /// The theme picker's footer laid out under the rows, in `tr`'s words.
+    pub fn picker_footer_layout(
+        &self,
+        tr: &Translator,
+        cell: (f32, f32),
+    ) -> Option<crate::ThemeFooterLayout> {
+        let footer = self.picker_footer.as_ref()?;
+        let (x, y, w, h) = self.rows_rect();
+        Some(crate::theme_footer_layout(footer, tr, (x, y + h, w), cell))
+    }
     /// Only fully painted picker rows have pointer/accessibility targets.
     pub fn visible_row_rect(&self, index: usize) -> Option<Rect4> {
         if self.picker_header_height <= 0.0
@@ -349,8 +372,7 @@ impl ContextMenu {
         // is configured; the picker header retains the latter.
         let row_h = self.picker_header_height - menu::PICKER_HEADER_PAD + menu::ROW_PAD;
         let height = |row: &ContextMenuRow| if row.separator { menu::SEP_H } else { row_h };
-        let natural_h: f32 = self.rows.iter().map(height).sum();
-        let (inset, content_h) = menu::scroll_content(natural_h, self.panel_h_clamped, row_h);
+        let (inset, content_h) = menu::picker_scroll_content(self.panel_h_clamped);
         let offset: f32 = self.rows[self.scroll_offset..index]
             .iter()
             .map(height)
@@ -546,6 +568,9 @@ pub struct Overlay {
     /// Window has keyboard focus. Terminal cursors are suppressed entirely
     /// while false and resume from the unchanged DEC state when focus returns.
     pub window_focused: bool,
+    /// The OS draws the window opaque whatever its pixels' alpha, as macOS
+    /// does under Reduce Transparency, so no desktop shows behind the panes.
+    pub window_opaque: bool,
     /// The focused pane's scrollbar should paint in its bright (interacting)
     /// state because the pointer is over the scrollbar gutter or the thumb is
     /// being dragged. At rest the bar is dim. The renderer brightens a
@@ -571,6 +596,10 @@ pub struct Overlay {
     /// transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
+    /// What the size chip says instead of the bare `cols×rows`: kettle-ui
+    /// puts the translated font size and grid here after a font-size change.
+    /// The chip is sized from this same text.
+    pub resize_overlay_text: Option<String>,
     pub update_toast: Option<UpdateToastOverlay>,
     /// Persistent notices use the same painter and geometry as update toasts.
     pub notices: Vec<UpdateToastOverlay>,
@@ -584,6 +613,17 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    /// The size chip's text while it shows: `resize_overlay_text`, or the
+    /// grid as `cols×rows`.
+    pub(crate) fn visible_resize_label(&self) -> Option<String> {
+        let (cols, rows) = self.visible_resize_overlay()?;
+        Some(
+            self.resize_overlay_text
+                .clone()
+                .unwrap_or_else(|| format!("{cols}×{rows}")),
+        )
+    }
+
     pub(crate) fn visible_resize_overlay(&self) -> Option<(u16, u16)> {
         if self.settings.is_some()
             || self.palette_query.is_some()
@@ -1284,8 +1324,9 @@ pub fn format_media_size(bytes: u64) -> String {
 }
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
-/// draws a small cyan dot, `Bell` draws a yellow dot. Terminator-
-/// parity affordance ("you've got new output in an inactive tab").
+/// draws a filled cyan disc, `Bell` a yellow triangle on a top or bottom
+/// tab bar; vertical tabs keep a square dot in each colour until 6.1.
+/// Terminator-parity affordance ("you've got new output in an inactive tab").
 /// Renderer-side enum so the UI doesn't need to leak its
 /// `kettle_ui::mux::TabActivity` type across crate boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1298,8 +1339,10 @@ pub enum TabActivity {
     /// at least `tab-silence-threshold-ms`. Terminator's "Silence
     /// Watcher" affordance — useful for tail-following long jobs
     /// (`tail -f`, build watchers) where the *absence* of output is
-    /// the signal the user wants. Drawn as a dim chrome-gray dot,
-    /// distinct from `Output` (cyan) and `Bell` (yellow).
+    /// the signal the user wants. Drawn on a top or bottom tab bar as a
+    /// dim chrome-gray ring, distinct from `Output` (a cyan disc) and
+    /// `Bell` (a yellow triangle) by shape as well as colour; vertical
+    /// tabs keep a gray dot until 6.1.
     Silent,
 }
 
@@ -1414,6 +1457,12 @@ pub struct TabBar {
     /// The pointer is over the shell-dropdown hit target immediately left of
     /// `+`. Kept separate so each half has an unambiguous hover response.
     pub hovered_new_tab_menu: bool,
+    /// The Settings button that leads the `▾ +` pair in a macOS title bar,
+    /// drawn as a gear. Zero-area `(0,0,0,0)` everywhere else, and in a lane
+    /// too narrow to keep a tab beside it; the renderer then draws nothing.
+    pub settings: Rect4,
+    pub hovered_settings: bool,
+    pub pressed_settings: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1489,6 +1538,9 @@ impl TabBar {
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             hovered_new_tab: false,
             hovered_new_tab_menu: false,
+            settings: (0.0, 0.0, 0.0, 0.0),
+            hovered_settings: false,
+            pressed_settings: false,
             broadcast: false,
             hovered_close_idx: None,
             hovered_tab_idx: None,
@@ -1535,6 +1587,16 @@ struct MenuPanel {
     row_h: f32,
 }
 
+/// A picker's rows fill its panel; a context menu keeps arrow strips at the
+/// edges it is cut at.
+fn menu_scroll_content(menu: &ContextMenu, natural_h: f32, panel_h: f32, row_h: f32) -> (f32, f32) {
+    if menu.picker_header_height > 0.0 {
+        menu::picker_scroll_content(panel_h)
+    } else {
+        menu::scroll_content(natural_h, panel_h, row_h)
+    }
+}
+
 fn menu_panel(menu: &ContextMenu, cw: f32, ch: f32) -> Option<MenuPanel> {
     let panel_w = context_menu_panel_width(menu, cw);
     let row_h = menu::row_height(ch);
@@ -1562,7 +1624,7 @@ fn menu_panel(menu: &ContextMenu, cw: f32, ch: f32) -> Option<MenuPanel> {
     {
         return None;
     }
-    let (inset, content_h) = menu::scroll_content(natural_h, panel_h, row_h);
+    let (inset, content_h) = menu_scroll_content(menu, natural_h, panel_h, row_h);
     Some(MenuPanel {
         ax,
         ay,
@@ -1697,8 +1759,9 @@ pub(crate) const MENU_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
     (6.0, 4.0, 0.05),
     (10.0, 6.0, 0.035),
 ];
-/// The most rounded surfaces one level paints: its shadow, panel and selection.
-pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 2;
+/// The most rounded surfaces one level paints: its shadow, panel, selection
+/// and a picker's scrollbar thumb.
+pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 3;
 /// Levels whose surfaces fit in one frame. Kettle's own menus nest a few
 /// levels deep at most; a deeper stack paints only its deepest levels' panels.
 pub(crate) const MENU_SURFACE_LEVELS: usize = 16;
@@ -1788,7 +1851,69 @@ pub(crate) fn menu_level_surfaces(
             });
         }
     }
+    if let Some((tx, ty, tw, th)) = picker_scroll_thumb(menu, (cw, ch), scale) {
+        out.push(RoundedSurface {
+            pos: [tx, ty],
+            size: [tw, th],
+            fill: rgba(picker_scroll_thumb_color(theme, colors), 1.0),
+            stroke: [0.0; 4],
+            params: [tw * 0.5, 0.0, 0.0, 0.0],
+        });
+    }
     out
+}
+
+/// The scrollbar thumb of a picker whose rows do not all fit: a pill in the
+/// gap between the selection's right inset and the panel border, so it
+/// never covers the selection, a label, a hint or a swatch strip. Its length
+/// is the visible share of the rows, at least one row, and its place follows
+/// the scroll offset.
+/// The track stops a corner radius short of the panel's rounded bottom.
+/// Decorative: pointer input does not hit it.
+pub(crate) fn picker_scroll_thumb(
+    menu: &ContextMenu,
+    cell: (f32, f32),
+    scale: f32,
+) -> Option<Rect4> {
+    if menu.picker_header_height <= 0.0 {
+        return None;
+    }
+    let panel = menu_panel(menu, cell.0, cell.1)?;
+    let total = menu.rows.len();
+    let visible = context_menu_row_rects(menu, cell).len();
+    if visible == 0 || visible >= total {
+        return None;
+    }
+    let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
+    // The panel border is one pixel at every scale.
+    let gap = inset_x - 1.0;
+    let width = (gap * 0.6).max(2.0).min(gap);
+    let x = panel.ax + panel.panel_w - inset_x + (gap - width) * 0.5;
+    let top = panel.ay + MENU_SELECTION_INSET.1 * scale;
+    let bottom = panel.ay + panel.panel_h - MENU_PANEL_RADIUS * scale;
+    let track = bottom - top;
+    if !(track > 0.0 && width > 0.0 && x.is_finite()) {
+        return None;
+    }
+    // At least one row tall, so a long list's thumb still reads as one.
+    let height = (track * visible as f32 / total as f32)
+        .max(panel.row_h.min(track))
+        .min(track);
+    let max_offset = total - visible;
+    let offset = menu.scroll_offset.min(max_offset) as f32 / max_offset as f32;
+    Some((x, top + (track - height) * offset, width, height))
+}
+
+/// The thumb's colour: the theme's foreground dimmed as muted text is, held
+/// at the 3:1 non-text minimum against the panel.
+pub(crate) fn picker_scroll_thumb_color(
+    theme: &kettle_config::Theme,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    colors.icon(
+        crate::dim_blend(theme.foreground, theme.background),
+        theme.background,
+    )
 }
 
 /// The fill and edge of a bar that asks for input.
@@ -1859,6 +1984,13 @@ pub mod menu {
     pub const SEP_H: f32 = 8.0;
     /// Height of each pointer target at the cut edges of a scrolling menu.
     pub const SCROLL_H: f32 = 18.0;
+
+    /// A picker's content inset and height: its rows fill the panel from the
+    /// header down. Pickers scroll with the selection and the wheel and show
+    /// a scrollbar thumb, so they keep no arrow strips at the cut edges.
+    pub fn picker_scroll_content(panel_h: f32) -> (f32, f32) {
+        (0.0, panel_h.max(0.0))
+    }
 
     /// Content inset and height shared by paint, pointer targets and navigation.
     pub fn scroll_content(natural_h: f32, panel_h: f32, row_h: f32) -> (f32, f32) {
@@ -2009,6 +2141,54 @@ pub(crate) fn menu_row_background(
         menu_selection_fill(theme, accent, colors, linear)
     } else {
         theme.background
+    }
+}
+
+/// The colour of a menu row's label on `background`. A picker's disabled row
+/// is its empty-state message ("No matching command"), which people read, so
+/// it is secondary text; a context menu's disabled row is an unavailable
+/// command and stays muted.
+pub(crate) fn menu_row_text_color(
+    menu: &ContextMenu,
+    row: &ContextMenuRow,
+    theme: &kettle_config::Theme,
+    background: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    if row.enabled {
+        colors.text(theme.foreground, background)
+    } else if menu.picker_header_height > 0.0 {
+        colors.secondary(theme.foreground, background)
+    } else {
+        colors.muted(theme.foreground, background)
+    }
+}
+
+/// The colour of a picker header's key hint and placeholder: secondary
+/// text, quieter than the query but clearer than muted chrome.
+pub(crate) fn picker_header_secondary_color(
+    theme: &kettle_config::Theme,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    colors.secondary(theme.foreground, theme.background)
+}
+
+/// The colour of text field slot `slot` (0 prefix, 1 editor, 2 key hint, as
+/// [`crate::text_field_rects`] orders them). A picker header paints its query
+/// as text and its key hint as secondary text; other fields use `fg`.
+pub(crate) fn text_field_slot_color(
+    picker: bool,
+    slot: usize,
+    theme: &kettle_config::Theme,
+    fg: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    if !picker {
+        fg
+    } else if slot == 2 {
+        picker_header_secondary_color(theme, colors)
+    } else {
+        colors.text(theme.foreground, theme.background)
     }
 }
 

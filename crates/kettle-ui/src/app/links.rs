@@ -1204,7 +1204,8 @@ pub(super) fn link_under_native_pointer(
     cell: (f32, f32),
     padding: (f32, f32),
 ) -> Option<&kettle_core::Link> {
-    if !link_hover_is_current(ws) {
+    // A drag paints a selection; the links it passes over are not hovered.
+    if !link_hover_is_current(ws) || (ws.selecting && ws.selection_dragged) {
         return None;
     }
     let pointer = ws.native_pointer?;
@@ -1221,6 +1222,58 @@ pub(super) fn link_under_native_pointer(
     // The pointer is over a drawn cell; links are found by logical cell.
     let col = painted_row_bidi(ws, pane, row).map_or(col, |map| map.logical(col));
     cached_link_at_cell(ws, row, col)
+}
+
+/// Whether any segment of link `group` lies on a selected cell. Links sit on
+/// viewport rows and the selection on grid lines, so a row moves up by
+/// `display_offset` when the view is scrolled back.
+pub(super) fn hover_group_intersects_selection(
+    links: &[kettle_core::Link],
+    group: usize,
+    selection: &kettle_core::SelectionRange,
+    display_offset: usize,
+) -> bool {
+    links.iter().filter(|link| link.group == group).any(|link| {
+        let line = kettle_core::Line(link.row as i32 - display_offset as i32);
+        (link.start_col..=link.end_col)
+            .any(|col| selection.contains(kettle_core::Point::new(line, kettle_core::Column(col))))
+    })
+}
+
+/// The focused pane's links as the renderer draws them. A hovered link is
+/// underlined unless part of it is selected: the underline would run through
+/// the selection the user just made. The status hint and hand cursor stay.
+pub(super) fn link_rects(
+    links: &[kettle_core::Link],
+    hovered_group: Option<usize>,
+    selection: Option<(kettle_core::SelectionRange, usize)>,
+) -> Vec<kettle_render::LinkRect> {
+    let hovered_group = hovered_group.filter(|&group| {
+        selection.as_ref().is_none_or(|(range, display_offset)| {
+            !hover_group_intersects_selection(links, group, range, *display_offset)
+        })
+    });
+    links
+        .iter()
+        .map(|l| kettle_render::LinkRect {
+            col: l.start_col,
+            row: l.row,
+            width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
+            hover: hovered_group == Some(l.group),
+            explicit: l.explicit,
+        })
+        .collect()
+}
+
+/// The focused pane's selection and its scroll offset, or `None` when nothing
+/// is selected (the empty selection a click leaves is nothing).
+pub(super) fn focused_selection_range(
+    ws: &WindowState,
+) -> Option<(kettle_core::SelectionRange, usize)> {
+    let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id))?;
+    let term = pane.term.term.lock().ok()?;
+    let range = term.selection.as_ref()?.to_range(&term)?;
+    Some((range, term.grid().display_offset()))
 }
 
 /// The bidi layout of viewport row `row` in the pane whose terminal is

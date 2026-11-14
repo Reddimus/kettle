@@ -834,8 +834,190 @@ fn confirm_close_decides_through_the_shared_policy() {
         .next()
         .unwrap();
     assert!(body.contains("close_needs_prompt(self.cfg.ask_before_closing, scope, busy"));
-    assert!(body.contains("lone_pane_job(&pane.term, pane.path_argv(), configured_shell)"));
+    assert!(body.contains("sample_lone_pane_job(&pane.term, pane.path_argv(), configured_shell)"));
     assert!(!body.contains("should_prompt("), "the decision lives in close_needs_prompt");
+    // The body, which may name a program, is built in one place and never
+    // logged.
+    assert!(body.contains("close_dialog_body(&self.ui_text, &on_confirm, scope, program.as_deref())"));
+    // A one-pane close names the program from the sample that decided it.
+    let compact = body.split_whitespace().collect::<String>();
+    assert!(compact.contains(
+        "letprogram=ifscope==1{sample_job().1.and_then(|pid|{busy_program_label(pid,kettle_remote::process_argv,"
+    ));
+    for logging in ["log::", "tracing::", "eprintln!", "println!", "dbg!"] {
+        assert!(!body.contains(logging), "confirm_close must not log: {logging}");
+    }
+}
+
+/// Only a safe program name reaches the close question: `argv[0]`'s base
+/// name up to the first space or `:`, with nothing a program could use to
+/// spoof or hide text, at most 32 columns.
+#[test]
+fn close_program_label_keeps_only_a_safe_program_name() {
+    let long = "x".repeat(200);
+    let cases: [(&str, Option<&str>); 8] = [
+        ("/usr/bin/sleep", Some("sleep")),
+        ("-zsh", Some("zsh")),
+        ("C:\\x\\foo.exe", Some("foo.exe")),
+        ("postgres: user db 10.0.0.5(5432) idle", Some("postgres")),
+        ("nginx: master process", Some("nginx")),
+        ("evil\u{202E}gpj.exe", Some("evil")),
+        ("a\nb", Some("a")),
+        ("sl\u{200B}eep", Some("sleep")),
+    ];
+    for (argv0, expected) in cases {
+        assert_eq!(
+            super::close_program_label(argv0).as_deref(),
+            expected,
+            "{argv0:?}"
+        );
+    }
+    let ellipsized = super::close_program_label(&long).expect("a long name is kept");
+    assert_eq!(crate::text_editor::display_width(&ellipsized), 32);
+    assert!(ellipsized.ends_with('…'));
+    for empty in ["", "/", "\u{200B}", "-", " :", "\u{202E}"] {
+        assert_eq!(super::close_program_label(empty), None, "{empty:?}");
+    }
+}
+
+/// A program cannot hide or pad its name with characters that draw nothing:
+/// every default-ignorable and format character goes, as do the blanks that
+/// take width (the Hangul fillers and the blank Braille pattern). U+061C, the
+/// Arabic letter mark, ends the name as the other bidirectional marks do.
+#[test]
+fn close_program_label_drops_every_invisible_character() {
+    let cases: [(&str, Option<&str>); 14] = [
+        ("evil\u{061C}gpj", Some("evil")),
+        ("a\u{3164}b", Some("ab")),
+        ("a\u{115F}\u{1160}b", Some("ab")),
+        ("a\u{FFA0}b", Some("ab")),
+        ("a\u{2800}\u{2800}b", Some("ab")),
+        ("a\u{00AD}b", Some("ab")),
+        ("a\u{034F}b", Some("ab")),
+        ("a\u{180E}b", Some("ab")),
+        ("a\u{2064}b", Some("ab")),
+        ("a\u{FFF9}b", Some("ab")),
+        ("a\u{13430}b", Some("ab")),
+        ("a\u{E0041}\u{E0100}b", Some("ab")),
+        ("\u{3164}\u{FFA0}\u{2800}", None),
+        ("\u{061C}", None),
+    ];
+    for (argv0, expected) in cases {
+        assert_eq!(
+            super::close_program_label(argv0).as_deref(),
+            expected,
+            "{argv0:?}"
+        );
+    }
+}
+
+/// A name is cut to 64 characters before it is fitted to 32 columns, so one
+/// base character cannot carry hundreds of combining marks into the dialog.
+#[test]
+fn close_program_label_caps_combining_marks() {
+    let stacked = format!("e{}", "\u{0301}".repeat(500));
+    let label = super::close_program_label(&stacked).expect("the base character is visible");
+    assert!(label.starts_with('e'), "{label:?}");
+    assert!(label.ends_with('…'), "a cut name says so: {label:?}");
+    assert!(label.chars().count() <= 65, "{} characters", label.chars().count());
+    // A real name is untouched by the cap.
+    let name = "x".repeat(30);
+    assert_eq!(super::close_program_label(&name).as_deref(), Some(name.as_str()));
+}
+
+/// The question never names a shell (an interactive one at its prompt or
+/// running integration's command), and never an argument.
+#[test]
+fn busy_program_label_never_names_a_shell_or_arguments() {
+    let etc_shells = "/bin/sh\n/bin/bash\n/bin/zsh\n";
+    let label = |argv: Option<&[&str]>| {
+        super::busy_program_label(
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                argv.map(|argv| argv.iter().map(|arg| arg.to_string()).collect())
+            },
+            etc_shells,
+            None,
+        )
+    };
+    assert_eq!(label(Some(&["-zsh"])), None);
+    assert_eq!(label(Some(&["/bin/bash"])), None);
+    // A script shows as its interpreter: the accepted limitation.
+    assert_eq!(label(Some(&["/bin/bash", "./deploy.sh"])).as_deref(), Some("bash"));
+    let sleep = label(Some(&["sleep", "600"])).expect("a named job");
+    assert_eq!(sleep, "sleep");
+    assert!(!sleep.contains("600"));
+    assert_eq!(
+        label(Some(&["mysql", "-psecret", "--host=db"])).as_deref(),
+        Some("mysql")
+    );
+    assert_eq!(label(None), None, "an unreadable process has no name");
+    assert_eq!(label(Some(&[])), None);
+}
+
+/// The name comes from the process the busy verdict came from, and only
+/// when there is one.
+#[test]
+fn busy_job_pid_follows_the_busy_verdict() {
+    use kettle_core::ForegroundJob;
+    use super::LonePaneJob::{Busy, Idle, Unknown};
+    assert_eq!(super::busy_job_pid(ForegroundJob::Child, Busy, Some(7)), Some(7));
+    assert_eq!(super::busy_job_pid(ForegroundJob::Child, Busy, None), None);
+    assert_eq!(super::busy_job_pid(ForegroundJob::Other(9), Busy, Some(7)), Some(9));
+    for decided in [Idle, Unknown] {
+        for job in [ForegroundJob::Child, ForegroundJob::Other(9), ForegroundJob::Unknown] {
+            assert_eq!(super::busy_job_pid(job, decided, Some(7)), None, "{job:?} {decided:?}");
+        }
+    }
+    assert_eq!(super::busy_job_pid(ForegroundJob::Unknown, Busy, Some(7)), None);
+}
+
+/// With a program name and one pane the body names it; otherwise it is
+/// exactly the general wording it was before names were shown.
+#[test]
+fn close_dialog_body_names_the_program_or_keeps_todays_text() {
+    use super::{ConfirmAction, DropPanes};
+    use kettle_i18n::{Language, Text, Translator};
+    let actions = [
+        ConfirmAction::ClosePane(1),
+        ConfirmAction::CloseTabHolding(vec![1]),
+        ConfirmAction::CloseWindow {
+            drop_panes: DropPanes::Yes,
+        },
+    ];
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for action in &actions {
+            let named = super::close_dialog_body(&tr, action, 1, Some("sleep"));
+            assert_eq!(named, tr.confirm_close_running("sleep"));
+            assert!(named.contains("sleep"), "{language:?}: {named}");
+            // Several panes keep the general wording even with a name.
+            let consequence = tr.text(Text::ConfirmCloseConsequences);
+            for scope in [1, 2, 3] {
+                let expected = if matches!(action, ConfirmAction::ClosePane(_)) {
+                    consequence.to_string()
+                } else if scope == 2 {
+                    format!("{} {consequence}", tr.text(Text::ConfirmCloseBothPanes))
+                } else {
+                    format!("{} {consequence}", tr.confirm_close_scope(scope as u64))
+                };
+                assert_eq!(super::close_dialog_body(&tr, action, scope, None), expected);
+                if scope > 1 {
+                    assert_eq!(super::close_dialog_body(&tr, action, scope, Some("sleep")), expected);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        super::close_dialog_body(
+            &Translator::new(Language::En),
+            &actions[0],
+            1,
+            Some("sleep")
+        ),
+        "The program sleep is still running. Closing stops it, and unsaved work may be lost."
+    );
 }
 
 #[test]
@@ -989,6 +1171,7 @@ fn close_dialog_text_never_names_the_product() {
         .into_iter()
         .map(|text| tr.text(text).to_string())
         .collect();
+        lines.push(tr.confirm_close_running("sleep"));
         for count in [1, 2, 3] {
             lines.push(tr.confirm_close_scope(count));
             lines.push(tr.confirm_close_tab(count));
@@ -1094,7 +1277,7 @@ fn a_lone_pane_is_busy_exactly_while_a_job_owns_its_terminal() {
         let Some((terminal, rx)) = spawn_lone_pane(&launch) else {
             return;
         };
-        let job = |terminal: &kettle_core::Terminal| super::lone_pane_job(terminal, &launch, None);
+        let job = |terminal: &kettle_core::Terminal| super::sample_lone_pane_job(terminal, &launch, None).0;
         // Split the marker so the echo of the typed line cannot match it.
         terminal.write(b"printf 'LONE_PANE''_READY\\n'\r");
         assert!(
@@ -1112,10 +1295,33 @@ fn a_lone_pane_is_busy_exactly_while_a_job_owns_its_terminal() {
             wrapped,
             "{launch:?}"
         );
+        assert_eq!(
+            super::sample_lone_pane_job(&terminal, &launch, None),
+            (super::LonePaneJob::Idle, None),
+            "{launch:?}: an idle prompt names nothing"
+        );
         terminal.write(b"sleep 30\r");
         assert!(
             wait_for_pane(&terminal, &rx, |t| job(t) == super::LonePaneJob::Busy),
             "{launch:?}: a running sleep must count as busy"
+        );
+        // The job's group can own the terminal a moment before its leader
+        // has exec'd `sleep`, while it is still a copy of the shell, which is
+        // never named; wait for the exec.
+        let named = |t: &kettle_core::Terminal| {
+            let (decided, pid) = super::sample_lone_pane_job(t, &launch, None);
+            assert_eq!(decided, super::LonePaneJob::Busy, "{launch:?}");
+            let pid = pid.expect("a busy pane names the job's process");
+            super::busy_program_label(
+                pid,
+                kettle_remote::process_argv,
+                &super::read_etc_shells(),
+                None,
+            )
+        };
+        assert!(
+            wait_for_pane(&terminal, &rx, |t| named(t).as_deref() == Some("sleep")),
+            "{launch:?}: the busy job is named sleep"
         );
         // Interrupt the job and leave the shell, so nothing outlives the test.
         terminal.write(b"\x03");
@@ -1136,9 +1342,19 @@ fn a_lone_pane_is_busy_exactly_while_a_job_owns_its_terminal() {
 #[test]
 fn a_lone_pane_running_its_own_program_is_busy() {
     let job = |terminal: &kettle_core::Terminal, launch: &[String]| {
-        super::lone_pane_job(terminal, launch, None)
+        super::sample_lone_pane_job(terminal, launch, None).0
     };
     let owned = |argv: &[&str]| argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    let cat_label = |terminal: &kettle_core::Terminal, launch: &[String]| {
+        let (decided, pid) = super::sample_lone_pane_job(terminal, launch, None);
+        assert_eq!(decided, super::LonePaneJob::Busy, "{launch:?}");
+        super::busy_program_label(
+            pid.expect("the busy child's pid"),
+            kettle_remote::process_argv,
+            &super::read_etc_shells(),
+            None,
+        )
+    };
     // The program is the child, or runs in the child's group: the foreground
     // group is the child's, as it is for a shell at its prompt.
     for launch in [owned(&["/bin/cat"]), owned(&["/bin/sh", "-c", "/bin/cat; :"])] {
@@ -1154,6 +1370,9 @@ fn a_lone_pane_running_its_own_program_is_busy() {
         );
         assert_eq!(terminal.foreground_job(), kettle_core::ForegroundJob::Child, "{launch:?}");
         assert_eq!(job(&terminal, &launch), super::LonePaneJob::Busy, "{launch:?}");
+        if launch.len() == 1 {
+            assert_eq!(cat_label(&terminal, &launch).as_deref(), Some("cat"));
+        }
         terminal.write(b"\x03");
     }
 
@@ -1194,6 +1413,8 @@ fn a_lone_pane_running_its_own_program_is_busy() {
         );
         assert_eq!(terminal.foreground_job(), kettle_core::ForegroundJob::Child, "{launch:?}");
         assert_eq!(job(&terminal, &launch), super::LonePaneJob::Busy, "{launch:?}");
+        // The shell that became cat is named as cat.
+        assert_eq!(cat_label(&terminal, &launch).as_deref(), Some("cat"), "{launch:?}");
         terminal.write(b"\x03");
     }
 }

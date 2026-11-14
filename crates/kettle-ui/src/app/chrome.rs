@@ -106,6 +106,7 @@ impl App {
             || ws.context_menu.is_some()
             || ws.pressed_new_tab
             || ws.pressed_new_tab_menu
+            || ws.pressed_settings
             || ws.pressed_window_control.is_some()
         {
             return None;
@@ -116,13 +117,15 @@ impl App {
         if ws.hovered_new_tab_menu && !controls.is_empty() {
             return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
         }
-        new_tab_tooltip(
-            ws.hovered_new_tab_menu
-                .then_some(NewTabHoverTarget::Menu)
-                .or_else(|| ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)),
-            &self.ui_text,
-            kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, &Action::NewTab).as_deref(),
-        )
+        let target = if ws.hovered_settings {
+            Some(NewTabHoverTarget::Settings)
+        } else if ws.hovered_new_tab_menu {
+            Some(NewTabHoverTarget::Menu)
+        } else {
+            ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
+        };
+        let shortcut = target.and_then(|target| chrome_button_shortcut(&self.cfg.keybinds, target));
+        new_tab_tooltip(target, &self.ui_text, shortcut.as_deref())
     }
 
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
@@ -175,6 +178,9 @@ impl App {
                 new_tab_menu: (0.0, 0.0, 0.0, 0.0),
                 hovered_new_tab: false,
                 hovered_new_tab_menu: false,
+                settings: (0.0, 0.0, 0.0, 0.0),
+                hovered_settings: false,
+                pressed_settings: false,
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 hovered_tab_idx: None,
@@ -206,6 +212,7 @@ impl App {
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
+            settings_rect,
             strip,
             layout,
         } = horizontal_tab_geometry(
@@ -288,7 +295,11 @@ impl App {
                     rect,
                     show_controls,
                     self.cfg.close_button_on_tab,
-                    activity != RenderTabActivity::Normal,
+                    if activity == RenderTabActivity::Normal {
+                        0.0
+                    } else {
+                        kettle_render::activity_lane(scale)
+                    },
                     &full_label,
                     hint.as_deref(),
                     cell_w,
@@ -341,6 +352,9 @@ impl App {
             new_tab_menu: arrow_rect,
             hovered_new_tab: ws.hovered_new_tab,
             hovered_new_tab_menu: ws.hovered_new_tab_menu,
+            settings: settings_rect,
+            hovered_settings: ws.hovered_settings,
+            pressed_settings: ws.pressed_settings,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Close hover and tab hover share the physical pointer geometry.
@@ -507,6 +521,9 @@ impl App {
             new_tab_menu: menu,
             hovered_new_tab: ws.hovered_new_tab,
             hovered_new_tab_menu: ws.hovered_new_tab_menu,
+            settings: (0.0, 0.0, 0.0, 0.0),
+            hovered_settings: false,
+            pressed_settings: false,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
             hovered_tab_idx: None,
@@ -941,18 +958,53 @@ pub(super) fn horizontal_new_tab_controls(
     (menu, plus, reserve)
 }
 
+/// The Settings gear that leads the `▾ +` pair in a macOS title bar, the
+/// size of `menu` and set apart from it by a gap twice theirs, so it reads
+/// as its own control rather than a third segment of the split button.
+/// `▾` and `+` stay where they were. The gear shows only while the lane
+/// still keeps `min_tab` for tabs beside every control; the tab count never
+/// decides, as extra tabs scroll. Returns the rect and the reservation it
+/// adds, both zero when hidden.
+pub(super) fn titlebar_settings_control(
+    menu: kettle_render::Rect4,
+    lane_width: f32,
+    reserve: f32,
+    scale: f32,
+    min_tab: f32,
+) -> (kettle_render::Rect4, f32) {
+    let gap = 8.0 * scale;
+    let side = menu.2;
+    let extra = side + gap;
+    if side <= 0.0 || lane_width - reserve - extra < min_tab.max(1.0) {
+        return ((0.0, 0.0, 0.0, 0.0), 0.0);
+    }
+    ((menu.0 - gap - side, menu.1, side, menu.3), extra)
+}
+
+/// The live shortcut a strip control's tooltip names: whatever key runs the
+/// control's action, so it follows a rebind and is gone when unbound.
+pub(super) fn chrome_button_shortcut(
+    bindings: &kettle_config::keybinds::Bindings,
+    target: NewTabHoverTarget,
+) -> Option<String> {
+    let action = match target {
+        NewTabHoverTarget::Settings => Action::OpenSettings,
+        NewTabHoverTarget::Menu | NewTabHoverTarget::Plus => Action::NewTab,
+    };
+    kettle_config::keybinds::ui_hint_label(bindings, &action)
+}
+
 pub(super) fn new_tab_tooltip(
     target: Option<NewTabHoverTarget>,
     tr: &kettle_i18n::Translator,
     shortcut: Option<&str>,
 ) -> Option<String> {
-    match target? {
-        NewTabHoverTarget::Menu => Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
-        NewTabHoverTarget::Plus => {
-            let label = tr.text(kettle_i18n::Text::MenuNewTab);
-            Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
-        }
-    }
+    let label = match target? {
+        NewTabHoverTarget::Menu => return Some(tr.text(kettle_i18n::Text::TabNewOptions).into()),
+        NewTabHoverTarget::Plus => tr.text(kettle_i18n::Text::MenuNewTab),
+        NewTabHoverTarget::Settings => tr.text(kettle_i18n::Text::SettingsA11yTitle),
+    };
+    Some(shortcut.map_or_else(|| label.into(), |key| format!("{label}  {key}")))
 }
 
 /// Split the trailing new-tab button into `(arrow_left, plus_right)`
@@ -973,10 +1025,137 @@ pub(super) fn split_new_tab_button(
 pub(super) enum NewTabHoverTarget {
     Menu,
     Plus,
+    /// The Settings gear that leads the pair in a macOS title bar.
+    Settings,
+}
+
+/// Whether `(x, y)` is on the title bar's Settings gear, when it has one.
+pub(super) fn settings_button_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.settings.2 > 0.0 && bar.settings.3 > 0.0 && rect_contains(bar.settings, x, y)
+}
+
+/// The action a primary release ends a press on the Settings gear with:
+/// Settings, as Cmd+, opens it, but only when the release lands on the gear
+/// too, so dragging off it cancels like any button.
+pub(super) fn settings_release_action(
+    pressed: bool,
+    bar: &TabBar,
+    x: f32,
+    y: f32,
+) -> Option<Action> {
+    (pressed && settings_button_at(bar, x, y)).then_some(Action::OpenSettings)
+}
+
+/// Whether a press goes to the Settings gear ahead of open Settings, which
+/// would take any press outside its panel as a request to close. A primary
+/// press on the gear arms it instead, so its release does what Cmd+, does.
+/// While Settings edits text or captures a key, Settings keeps the press.
+pub(super) fn settings_gear_takes_press_over_settings(
+    nav: Option<&crate::settings::SettingsNav>,
+    editing_text: bool,
+    primary: bool,
+    on_gear: bool,
+) -> bool {
+    primary && on_gear && !editing_text && nav.is_some_and(|nav| !nav.capturing)
+}
+
+/// With Settings open, a press at the pointer arms the gear ahead of
+/// Settings' close-on-outside-press when
+/// `settings_gear_takes_press_over_settings` says so. Says whether it did.
+pub(super) fn arm_settings_gear_over_settings(
+    ws: &mut WindowState,
+    bar: &TabBar,
+    button: u8,
+) -> bool {
+    let on_gear = settings_button_at(bar, ws.cursor.x as f32, ws.cursor.y as f32);
+    if !settings_gear_takes_press_over_settings(
+        ws.settings_nav.as_ref(),
+        ws.settings_text_edit.is_some(),
+        button == 0,
+        on_gear,
+    ) {
+        return false;
+    }
+    ws.pressed_settings = true;
+    true
+}
+
+/// A tab-bar press at `(x, y)` with `button` (0 primary, 1 middle) on the
+/// Settings gear: the gear takes it, and a primary press arms it so its
+/// release can open Settings, like a native button. A middle press there
+/// does nothing. Says whether the press was on the gear; native and ctl
+/// presses both come here.
+pub(super) fn press_settings_gear(
+    ws: &mut WindowState,
+    bar: &TabBar,
+    (x, y): (f32, f32),
+    button: u8,
+) -> bool {
+    if !settings_button_at(bar, x, y) {
+        return false;
+    }
+    ws.pressed_settings = button == 0;
+    true
+}
+
+/// A primary release, native or ctl, after a press on the gear: `None` when
+/// the gear was not pressed, so the release goes on to the rest of the
+/// window. Otherwise the press ends, and the release runs Settings when it
+/// lands back on the gear (`bar` gives the strip under the pointer then).
+pub(super) fn release_settings_gear(
+    ws: &mut WindowState,
+    bar: impl FnOnce(&WindowState) -> TabBar,
+) -> Option<Option<Action>> {
+    if !ws.pressed_settings {
+        return None;
+    }
+    ws.pressed_settings = false;
+    let bar = bar(ws);
+    ws.held_buttons.end_own(0);
+    Some(settings_release_action(
+        true,
+        &bar,
+        ws.cursor.x as f32,
+        ws.cursor.y as f32,
+    ))
+}
+
+/// What in the tab bar is under the pointer. A change between two pointer
+/// moves calls for a redraw.
+pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool);
+
+pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
+    (
+        ws.hovered_close_idx,
+        ws.hovered_tab_idx,
+        ws.hovered_new_tab,
+        ws.hovered_new_tab_menu,
+        ws.hovered_settings,
+    )
+}
+
+/// Point the tab bar's hover at what lies under the pointer on `bar`: a
+/// tab, its `✕`, or one of the strip's buttons. Returns the strip button
+/// hovered, if any, and whether the hover changed.
+pub(super) fn hover_tab_bar(
+    ws: &mut WindowState,
+    bar: &TabBar,
+) -> (Option<NewTabHoverTarget>, bool) {
+    let before = tab_bar_hover(ws);
+    let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+    ws.hovered_tab_idx = bar.hovered_tab_idx;
+    ws.hovered_close_idx = hovered_close_button(&bar.segments, x, y);
+    let target = new_tab_hover_target(bar, x, y);
+    ws.hovered_new_tab = target == Some(NewTabHoverTarget::Plus);
+    ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
+    ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
+    (target, tab_bar_hover(ws) != before)
 }
 
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
-    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+    if settings_button_at(bar, x, y) {
+        Some(NewTabHoverTarget::Settings)
+    } else if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
         Some(NewTabHoverTarget::Menu)
     } else if rect_contains(bar.new_tab, x, y) {
         Some(NewTabHoverTarget::Plus)
@@ -1184,8 +1363,7 @@ pub(super) fn titlebar_tab_layout(
         return TabStripLayout::empty(n);
     }
     let mut layout = tab_strip_layout(n, active, strip, reserve, height, min, scroll);
-    let scale = height / 28.0;
-    let preferred = (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0));
+    let preferred = titlebar_preferred_tab_width(n, height, min);
     if strip / n.max(1) as f32 >= preferred {
         layout.width = preferred;
         layout.last_width = preferred;
@@ -1199,6 +1377,40 @@ pub(super) fn titlebar_tab_layout(
         layout.arrow_right = None;
     }
     layout
+}
+
+/// The width a title-bar tab takes while the strip has room for it.
+fn titlebar_preferred_tab_width(n: usize, height: f32, min: f32) -> f32 {
+    let scale = height / 28.0;
+    (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0))
+}
+
+/// Keep a macOS title bar's lone tab centred on the window. Where the
+/// controls leave less than its preferred width on one side of the centre,
+/// the tab narrows evenly about the centre, down to `min`, rather than
+/// sliding off it; only below `min` does it clamp into the strip. A strip
+/// narrower than `min` keeps `titlebar_tab_layout`'s result. `space` and
+/// `height` are as `titlebar_tab_layout` takes them.
+pub(super) fn centre_lone_titlebar_tab(
+    layout: &mut TabStripLayout,
+    space: (f32, f32, f32),
+    height: f32,
+    min: f32,
+) {
+    let (strip, reserve, left) = space;
+    let min = min.max(1.0);
+    if layout.xs.len() != 1 || strip < min.max(2.0) {
+        return;
+    }
+    let preferred = titlebar_preferred_tab_width(1, height, min);
+    let centre = (strip + reserve - left) * 0.5;
+    let room = 2.0 * centre.min(strip - centre);
+    let width = preferred.min(room).max(min).min(strip);
+    layout.width = width;
+    layout.last_width = width;
+    layout.xs = vec![Some((centre - width * 0.5).clamp(0.0, strip - width))];
+    layout.arrow_left = None;
+    layout.arrow_right = None;
 }
 
 pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
@@ -1238,6 +1450,8 @@ pub(super) fn horizontal_tab_lane(band: Rect, reservations: (f32, f32)) -> Rect 
 pub(super) struct HorizontalTabGeometry {
     pub arrow_rect: Rect,
     pub plus_rect: Rect,
+    /// The macOS title bar's Settings gear, zero elsewhere.
+    pub settings_rect: Rect,
     pub strip: f32,
     pub layout: TabStripLayout,
 }
@@ -1252,21 +1466,38 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
-    let (arrow_rect, plus_rect, button_w) = if linux {
+    let (arrow_rect, plus_rect, mut button_w) = if linux {
         linux_header_tab_controls(lane, scale, new_tab_dropdown_visible())
     } else {
         horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
     };
+    // Only a macOS title bar gets the gear: Linux's header and plain strips
+    // keep Settings in their `≡` / `▾` menus.
+    let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
+    if titlebar && !linux {
+        let (rect, extra) =
+            titlebar_settings_control(arrow_rect, lane.2, button_w, scale, cfg.tab_min_width);
+        settings_rect = rect;
+        button_w += extra;
+    }
     let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
     let layout = if titlebar {
-        titlebar_tab_layout(
+        let space = (strip, button_w, lane.0);
+        let mut layout = titlebar_tab_layout(
             n,
             active,
-            (strip, button_w, lane.0),
+            space,
             lane.3,
             cfg.tab_min_width,
             cfg.scroll_tabbar,
-        )
+        );
+        // The gear takes its room from the right of the strip only, so a
+        // macOS lone tab narrows about the centre instead. The Linux header
+        // has no gear and keeps its layout.
+        if !linux && n == 1 {
+            centre_lone_titlebar_tab(&mut layout, space, lane.3, cfg.tab_min_width);
+        }
+        layout
     } else {
         tab_strip_layout(
             n,
@@ -1281,12 +1512,14 @@ pub(super) fn horizontal_tab_geometry(
     HorizontalTabGeometry {
         arrow_rect,
         plus_rect,
+        settings_rect,
         strip,
         layout,
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+/// The lone tab a torn-off window's title bar paints, in its own `band`:
+/// the tab its pointer grip is measured into, on every platform.
 pub(super) fn tear_off_destination_tab(
     cfg: &Config,
     band: Rect,
@@ -1310,6 +1543,20 @@ pub(super) fn tear_off_destination_tab(
         geometry.layout.last_width,
         band.3,
     )
+}
+
+/// How far along a torn window's title bar its pointer holds it: `in_tab`
+/// into the lone tab the destination paints, which leaves room for the
+/// macOS Settings gear and the Linux header's window buttons.
+pub(super) fn titlebar_tear_off_grab_x(
+    cfg: &Config,
+    band: Rect,
+    header: (bool, bool),
+    scale: f32,
+    buttons: &crate::window_buttons::ButtonLayout,
+    in_tab: f64,
+) -> f64 {
+    f64::from(tear_off_destination_tab(cfg, band, header, scale, buttons).0) + in_tab
 }
 
 /// The shortcut shown on tab `index`: whatever key the bindings give "go to

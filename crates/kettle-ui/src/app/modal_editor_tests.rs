@@ -11,6 +11,7 @@ fn field(kind: ModalKind) -> WindowState {
                 query: editor,
                 selected: 3,
                 opened_on: "Builtin Dark".into(),
+                slot: None,
             })
         }
         ModalKind::Layout => ws.layout_picker_input = Some((editor, 3)),

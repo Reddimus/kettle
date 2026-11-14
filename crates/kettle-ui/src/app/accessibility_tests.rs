@@ -186,6 +186,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
             a11y_label: None,
             status: None,
             picker_header_height: 0.0,
+            picker_footer: None,
             rows: [
                 ("Copy", false, true),
                 ("", true, false),
@@ -306,6 +307,15 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"mapped_uploads\": u.mapped_uploads",
         "\"mapped_writes\": u.mapped_writes",
         "\"chrome_prepares\": u.chrome_prepares",
+        "\"typed_echo\": {",
+        "\"echoes\": echo_counts.echoes",
+        "\"split_echoes\": echo_counts.split_echoes",
+        "\"frames_presented\": echo_counts.frames_presented",
+        "\"output_frames\": echo_counts.output_frames",
+        "\"intermediate_frames\": echo_counts.intermediate_frames",
+        "\"late_superseded_frames\": echo_counts.late_superseded_frames",
+        "\"settled_echoes\": echo_counts.settled_echoes",
+        "\"settled_early\": echo_counts.settled_early",
     ] {
         assert!(body.contains(needle), "ui_geometry lost {needle:?}");
     }
@@ -733,6 +743,7 @@ fn accessibility_reactivation_invalidates_published_tree() {
 fn modal_text_inputs_expose_their_text_and_selection() {
     let field = |text: &str, cursor_byte, selection| kettle_render::TextFieldOverlay {
         picker_header: false,
+        placeholder: String::new(),
         text: text.into(),
         cursor_byte,
         selection,
@@ -981,6 +992,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: "/tmp/image.png".into(),
             cursor_byte: 4,
             selection: Some((4, 14)),
@@ -1164,6 +1176,7 @@ fn accessible_editor_characters_follow_graphemes() {
         palette_query: Some(text.into()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
+            placeholder: String::new(),
             text: text.into(),
             cursor_byte: 3,
             selection: Some((3, 14)),
@@ -1244,6 +1257,7 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         layout_picker_query: Some(String::new()),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: true,
+            placeholder: String::new(),
             rect: header,
             text: String::new(),
             cursor_byte: 0,
@@ -1309,7 +1323,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
     let overlay = kettle_render::Overlay {
         settings: Some(settings),
         text_field: Some(kettle_render::TextFieldOverlay {
-            picker_header: false, text: "font".into(), cursor_byte: 4,
+            picker_header: false, text: "font".into(), cursor_byte: 4, placeholder: String::new(),
             selection: Some((0, 4)), rect: layout.search_rect, prefix: String::new(), hint: String::new(),
             horizontal_scroll: 0, accent_palette: 0 }), ..Default::default()
     };
@@ -1769,7 +1783,12 @@ fn pending_profile_palette_accessibility_explains_reopening_without_visual_hints
             super::profiles::open_profile_palette(&mut ws, snapshot.as_deref());
             for query in [String::new(), "query".repeat(40)] {
                 ws.palette_input = Some((query.as_str().into(), 0));
-                let commands = super::palette_entries(None, &tr, ws.palette_profiles.as_deref());
+                let commands = super::palette_entries(
+                    None,
+                    &tr,
+                    ws.palette_profiles.as_deref(),
+                    kettle_config::BroadcastDefault::default(),
+                );
                 if snapshot.is_none() {
                     assert!(!commands.iter().any(|(_, action)| matches!(
                         action,
@@ -1780,7 +1799,14 @@ fn pending_profile_palette_accessibility_explains_reopening_without_visual_hints
                     tr,
                     palette_query: Some(query.clone()),
                     context_menu: super::picker_context_menu(
-                        super::open_picker_list(&ws, &kettle_config::Config::default(), &tr, None).unwrap(),
+                        super::open_picker_list(
+                            &ws,
+                            &kettle_config::Config::default(),
+                            "dark-theme",
+                            &tr,
+                            None,
+                        )
+                        .unwrap(),
                         (360.0, 240.0),
                         (8.0, 16.0),
                         (8.0, 16.0),
@@ -1788,6 +1814,7 @@ fn pending_profile_palette_accessibility_explains_reopening_without_visual_hints
                     ),
                     text_field: Some(kettle_render::TextFieldOverlay {
                         picker_header: true,
+                        placeholder: String::new(),
                         text: query.clone(),
                         cursor_byte: query.len(),
                         selection: None,
@@ -1897,4 +1924,180 @@ fn pending_profile_palette_accessibility_explains_reopening_without_visual_hints
             }
         }
     }
+}
+
+/// A screen reader hears a picker's placeholder as the field's placeholder,
+/// not as its value: the keyboard-shortcut list says what it searches.
+#[test]
+fn picker_placeholder_is_the_inputs_placeholder_not_its_value() {
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let placeholder = es.text(kettle_i18n::Text::PickerPlaceholderShortcuts);
+    for (query, placeholder) in [("", placeholder), ("tab", placeholder), ("", "")] {
+        let overlay = kettle_render::Overlay {
+            palette_query: Some(query.into()),
+            text_field: Some(kettle_render::TextFieldOverlay {
+                picker_header: true,
+                placeholder: placeholder.into(),
+                rect: (10.0, 10.0, 400.0, 30.0),
+                text: query.into(),
+                cursor_byte: query.len(),
+                selection: None,
+                prefix: String::new(),
+                hint: String::new(),
+                horizontal_scroll: 0,
+                accent_palette: 0,
+            }),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (640.0, 480.0), (8.0, 24.0), 1.0, &es);
+        let input = &projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::TextInput)
+            .unwrap()
+            .1;
+        assert_eq!(input.value(), Some(query));
+        assert_eq!(
+            input.placeholder(),
+            (!placeholder.is_empty()).then_some(placeholder)
+        );
+    }
+}
+
+
+/// A background tab's activity marker is read after its name, in the
+/// window's language, so a screen reader hears what a sighted user sees.
+/// The close button keeps the bare title.
+#[test]
+fn background_tab_labels_name_their_activity() {
+    use kettle_render::TabActivity;
+    let label_for = |activity: TabActivity, language: kettle_i18n::Language| {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 28.0;
+        for (index, activity) in [TabActivity::Normal, activity].into_iter().enumerate() {
+            let rect = (index as f32 * 120.0, 0.0, 120.0, 28.0);
+            bar.segments.push(kettle_render::TabSeg {
+                idx: index,
+                rect,
+                title_rect: rect,
+                hint: None,
+                close: (rect.0 + rect.2 - 28.0, rect.1, 28.0, 28.0),
+                title: "fixture".into(),
+                path: None,
+                active: index == 0,
+                activity,
+            });
+        }
+        let tr = kettle_i18n::Translator::new(language);
+        let nodes = super::tab_accessibility_projection(&bar, &[10, 20], false, &tr);
+        let label = |id| {
+            nodes
+                .iter()
+                .find(|(node, _)| *node == id)
+                .and_then(|(_, node)| node.label())
+                .map(str::to_owned)
+                .expect("a labelled node")
+        };
+        (
+            label(super::accessibility_tab_id(20, false)),
+            label(super::accessibility_tab_id(20, true)),
+        )
+    };
+    use kettle_i18n::Language::{En, Es};
+    assert_eq!(label_for(TabActivity::Bell, En).0, "fixture, bell rang");
+    assert_eq!(label_for(TabActivity::Bell, Es).0, "fixture, sonó la campana");
+    assert_eq!(label_for(TabActivity::Output, En).0, "fixture, new output");
+    assert_eq!(label_for(TabActivity::Silent, En).0, "fixture, output stopped");
+    assert_eq!(label_for(TabActivity::Normal, En).0, "fixture");
+    for activity in [
+        TabActivity::Normal,
+        TabActivity::Output,
+        TabActivity::Bell,
+        TabActivity::Silent,
+    ] {
+        assert_eq!(label_for(activity, En).1, "Close fixture", "{activity:?}");
+        assert_eq!(label_for(activity, Es).1, "Cerrar fixture", "{activity:?}");
+    }
+    // The tree's change hash covers tab labels, so a tab whose state moves
+    // from new output to the bell is announced again.
+    assert_ne!(
+        label_for(TabActivity::Output, En).0,
+        label_for(TabActivity::Bell, En).0
+    );
+    let src = production_source().split_whitespace().collect::<String>();
+    let tabs = src
+        .split_once("for(id,node)intab_accessibility_projection(&self.tab_bar(ws),")
+        .expect("the tab projection feeds the tree hash")
+        .1;
+    assert!(
+        tabs.split_once("node.label().hash(&muthasher);")
+            .is_some_and(|(before, _)| !before.contains("for(pane,toast)")),
+        "tab labels feed the tree hash"
+    );
+}
+
+/// The close question names a busy program to screen readers through the
+/// dialog's description, cleaned of anything that could spoof or hide text.
+#[test]
+fn close_question_reads_the_cleaned_program_name() {
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let program = super::close_program_label("/usr/bin/sl\u{200B}eep\u{202E}gpj\u{7}")
+        .expect("a visible name");
+    let body =
+        super::close_dialog_body(&tr, &super::ConfirmAction::ClosePane(1), 1, Some(&program));
+    let overlay = kettle_render::Overlay {
+        confirm_dialog: Some(kettle_render::ConfirmDialogOverlay {
+            body,
+            hover_idx: None,
+            pressed_idx: None,
+            scroll: 0,
+            heading: "Close this pane?".into(),
+            buttons: vec![
+                kettle_render::ConfirmDialogButton {
+                    label: "Cancel".into(),
+                    destructive: false,
+                },
+                kettle_render::ConfirmDialogButton {
+                    label: "Close pane".into(),
+                    destructive: true,
+                },
+            ],
+            focus_idx: 0,
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &tr);
+    let dialog = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::AlertDialog)
+        .expect("confirm dialog node");
+    let description = dialog.1.description().expect("the body is the description");
+    assert!(description.contains("The program sleep is still running."), "{description:?}");
+    assert!(
+        !description
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{202E}' | '\u{200B}')),
+        "{description:?}"
+    );
+}
+
+/// ctl diagnostics for an open close question carry its geometry and button
+/// labels, never its body, which can name the program a pane is running.
+#[test]
+fn ctl_close_question_geometry_never_carries_the_body() {
+    let src = production_source();
+    let block = src
+        .split_once("let confirmation = diagnostic_overlay.confirm_dialog")
+        .expect("ctl confirmation geometry")
+        .1
+        .split_once("let modal_name =")
+        .expect("ctl modal name follows")
+        .0;
+    assert!(block.contains("\"body_rect\""));
+    assert!(!block.contains("dialog.body"));
+    assert!(!block.contains("dialog.heading"));
+    assert!(!block.contains("program"));
 }

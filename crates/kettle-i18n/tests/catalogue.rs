@@ -16,6 +16,8 @@ fn every_static_message_has_clean_text_in_both_languages() {
         let cognate = [
             Text::MacosMenuApp,
             Text::MacosMenuShell,
+            // macOS's own Spanish Window menu says Zoom.
+            Text::MacosMenuZoomWindow,
             Text::SettingsGpuKindVirtual,
             Text::SettingsGpuKindSoftware,
             Text::MediaViewerKindVideo,
@@ -53,6 +55,15 @@ fn formatted_messages_keep_their_arguments_verbatim() {
         en.settings_value_not_detected("{name} \"\\\n"),
         "{name} \"\\\n (not detected)"
     );
+    assert_eq!(
+        en.confirm_close_running("a{b}"),
+        "The program a{b} is still running. Closing stops it, and unsaved work may be lost."
+    );
+    // The Spanish sentence opens with the word for "program", which the
+    // spelling check reads as an English typo, so it is matched from the name.
+    assert!(es.confirm_close_running("a{b}").ends_with(
+        " a{b} sigue en ejecución. Al cerrar se detendrá y el trabajo sin guardar puede perderse."
+    ));
 }
 
 /// Only 1 selects the singular; 0 and every larger count read as plural.
@@ -181,6 +192,7 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_read"
                         | "osc52_denied_write"
                         | "mouse_override_hint"
+                        | "font_size_chip"
                 )
         })
         .cloned()
@@ -225,6 +237,7 @@ fn no_spanish_message_is_left_in_english() {
     let cognates = [
         "macos_menu_app",
         "macos_menu_shell",
+        "macos_menu_zoom_window",
         "settings_gpu_kind_software",
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
@@ -343,7 +356,7 @@ fn settings_descriptions_are_short_translated_and_marked_as_drafts() {
         }
     }
     assert_eq!(
-        descriptions, 64,
+        descriptions, 65,
         "every curated field and keybind has its own description"
     );
 }

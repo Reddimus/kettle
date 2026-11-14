@@ -69,6 +69,10 @@ context = "crates/kettle-ui/src/app.rs: Body explaining possible consequences of
 [messages.confirm_close_both_panes]
 context = "crates/kettle-ui/src/app.rs: Scope summary for closing a tab or window containing exactly two panes."
 
+[messages.confirm_close_running]
+context = "crates/kettle-ui/src/app/modals.rs: The whole body of a close question when exactly one pane would close and a program other than an idle shell owns its terminal. program is that program's name only (for example sleep or vim), never its arguments; it is shown unquoted."
+args = [{ name = "program", type = "str" }]
+
 [messages.confirm_rebind_generic]
 context = "crates/kettle-ui/src/app.rs: Rebind body when safe action labels are equal and cannot distinguish the actions."
 
@@ -182,6 +186,14 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 
 [messages.menu_command_palette]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown."
+
+
+[messages.menu_keyboard_shortcuts]
+context = "crates/kettle-ui/src/app/menus.rs new_tab_menu_with_profiles: row of the new-tab dropdown that opens the searchable list of every command with a keyboard shortcut."
+
+
+[messages.menu_help]
+context = "crates/kettle-ui/src/app/menus.rs new_tab_menu_with_profiles: row of the new-tab dropdown that opens Kettle's README in the web browser."
 
 [messages.menu_copy]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
@@ -956,6 +968,10 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 [messages.palette_show_help]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ShowHelp action."
 
+
+[messages.palette_show_keybinds]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ShowKeybinds action, which reopens the palette listing only the commands that have a keyboard shortcut."
+
 [messages.palette_split_auto]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitAuto action."
 
@@ -978,7 +994,7 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the TakeScreenshot action."
 
 [messages.palette_toggle_broadcast_all]
-context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastAll action."
+context = "crates/kettle-config/src/palette.rs commands_for(): command palette entry that toggles broadcast to every pane in the focused tab. It runs ToggleBroadcastAll (the broadcast chord) under broadcast-default = group, and ToggleBroadcastPanesInTab otherwise."
 
 [messages.palette_toggle_broadcast_group]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastGroup action."
@@ -987,7 +1003,7 @@ context = "crates/kettle-config/src/palette.rs commands(): command palette entry
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastOff action."
 
 [messages.palette_toggle_broadcast_window]
-context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastWindow action."
+context = "crates/kettle-config/src/palette.rs commands_for(): command palette entry that toggles broadcast to every pane in the window. It runs ToggleBroadcastAll (the broadcast chord) under broadcast-default = all, and ToggleBroadcastWindow otherwise."
 
 [messages.palette_toggle_copy_on_select]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleCopyOnSelect action."
@@ -1115,6 +1131,13 @@ context = "crates/kettle-ui/src/app.rs theme_picker_list: theme picker row when 
 
 [messages.picker_no_saved_layouts]
 context = "crates/kettle-ui/src/app.rs: Layout picker row when no layout is saved. A layout is a saved arrangement of tabs and panes."
+
+[messages.picker_placeholder_command]
+context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the command palette's empty search field, saying what to type. Replaced by the query as soon as anything is typed; left out in a window too narrow for all of it."
+
+
+[messages.picker_placeholder_shortcuts]
+context = "crates/kettle-ui/src/app/modals.rs: Grey placeholder in the empty search field of the keyboard-shortcuts list (the command palette showing only commands with a shortcut). Replaced by the query once anything is typed; left out in a window too narrow for all of it."
 
 [messages.picker_theme_dark]
 context = "crates/kettle-ui/src/app.rs theme_picker_list: hint beside a dark theme in the theme picker. Lowercase, one word; describes the theme (masculine 'tema' in Spanish)."
@@ -1274,7 +1297,7 @@ args = [{ name = "category", type = "str" }]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the list of Settings rows."
 
 [messages.settings_a11y_title]
-context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known."
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known. Also the name and tooltip of the gear button that opens Settings in the macOS title bar (crates/kettle-ui/src/app/accessibility.rs tab_accessibility_projection, app/chrome.rs new_tab_tooltip)."
 
 [messages.settings_active_gpu]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."
@@ -1655,7 +1678,7 @@ args = [{ name = "name", type = "str" }]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Update policy: tell the user about an update."
 
 [messages.settings_value_off]
-context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-off toggle or a disabled choice."
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-off toggle or a disabled choice. Also the theme picker's Contrast button value when minimum-contrast is off (crates/kettle-render/src/theme_picker.rs), so the button and the Settings row agree."
 
 [messages.settings_value_on]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-on toggle."
@@ -2457,6 +2480,46 @@ context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu comman
 [messages.macos_menu_move_tab_to_new_window]
 context = "crates/kettle-ui/src/macos_menu.rs: macOS menu bar Window menu command that moves the active tab, with its running programs, into a new window."
 
+
+[messages.macos_menu_help]
+context = "crates/kettle-ui/src/macos_menu.rs: title of the macOS menu bar's Help menu, the last menu. macOS adds its menu search field to it."
+
+
+[messages.macos_menu_kettle_help]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Help menu command that opens Kettle's README in the web browser. Kettle is the product name."
+
+
+[messages.macos_menu_keyboard_shortcuts]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Help menu command that opens the searchable list of every command with a keyboard shortcut. macOS title case in English; Spanish macOS menus use sentence case."
+
+
+[messages.macos_menu_ssh_launcher]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Shell menu command that opens the SSH host picker. macOS title case in English; Spanish macOS menus use sentence case."
+
+
+[messages.macos_menu_quick_select]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Edit menu command that labels the links, paths and hashes on screen so one can be picked by typing its label. macOS title case in English."
+
+
+[messages.macos_menu_quick_terminal]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS View menu command that shows or hides the drop-down quick terminal. macOS title case in English."
+
+
+[messages.macos_menu_minimize]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that minimizes the front window to the Dock, the system's standard item."
+
+
+[messages.macos_menu_zoom_window]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that toggles the front window between its size and filling the screen, the system's standard item (as the green title-bar button does with Option held). Not the pane zoom."
+
+
+[messages.macos_menu_bring_all_to_front]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS Window menu command that brings all of Kettle's windows in front of other apps, the system's standard item."
+
+
+[messages.macos_menu_exit_fullscreen]
+context = "crates/kettle-ui/src/macos_menu.rs: macOS View menu title of the full-screen command while the front window is full screen; the other state reads macos_menu_fullscreen."
+
 [messages.confirm_paste_heading]
 context = "Terminal paste confirmation or terminal context-menu category in kettle-ui. Preview is bounded and controls are escaped."
 [messages.confirm_paste_body]
@@ -2547,6 +2610,18 @@ context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exi
 context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
 args = [{ name = "title", type = "str" }]
 
+[messages.a11y_tab_new_output]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows new output since the tab was last viewed (a filled dot). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_tab_bell]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows the terminal bell rang (a triangle). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
+[messages.a11y_tab_output_stopped]
+context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows its watched output went quiet (a ring). The argument is the tab title."
+args = [{ name = "title", type = "str" }]
+
 [messages.a11y_new_tab_menu]
 context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
 
@@ -2616,8 +2691,23 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
 
-[messages.menu_new_tab_profile]
-context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu; profiles launch in a separate window/process."
+[messages.menu_new_window_profile]
+context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
+
+[messages.menu_broadcast_input]
+context = "crates/kettle-ui/src/macos_menu.rs and app/menus.rs: title of the Broadcast Input submenu in the macOS Shell menu and the right-click menu. Its rows choose which panes receive what you type. Matches the palette_toggle_broadcast_* wording (Enviar la entrada…)."
+
+[messages.menu_broadcast_off]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row, checked while input goes to the focused pane only. Choosing it stops broadcasting. Masculine: it describes the sending (el envío)."
+
+[messages.menu_broadcast_tab]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused tab. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_window]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in every tab of the window. Checked while that scope is on; choosing it again stops broadcasting."
+
+[messages.menu_broadcast_group]
+context = "crates/kettle-ui/src/app/broadcast.rs: Broadcast Input submenu row: send input to every pane in the focused pane's named group, in every window. Checked while any group is the target; unavailable when the focused pane has no group."
 
 [messages.menu_no_profiles]
 context = "crates/kettle-ui/src/app/pickers.rs: Empty profile list action: create and open the profiles directory."
@@ -2709,6 +2799,10 @@ context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hov
 [messages.mouse_override_hint]
 context = "crates/kettle-ui/src/app/notices.rs and menus.rs: brief pane notice after a right-click went to a program that uses the mouse (a full-screen editor, htop, tmux), and the first row of the menu Shift+right-click opens over such a program. Shift is the keyboard key. Also names a screen-reader live region. Never name the product."
 
+[messages.font_size_chip]
+context = "crates/kettle-ui/src/app/layout.rs font_size_chip_label: the chip shown in the middle of the window for a moment after the font is made larger, smaller or reset, and the screen-reader live region that announces it. size is the new font size in points, a number such as 14 or 13.5 (no unit), already written with the language's decimal separator (13,5 in Spanish); cols and rows are the terminal's new width in columns and height in rows. Use the same words as the Font size setting."
+args = [{ name = "size", type = "str" }, { name = "cols", type = "u64" }, { name = "rows", type = "u64" }]
+
 [messages.link_open_command_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on macOS, modifier click required."
 
@@ -2760,6 +2854,12 @@ context = "crates/kettle-ui/src/settings.rs: Settings appearance policy row, map
 [messages.settings_description_field_appearance]
 context = "crates/kettle-ui/src/settings.rs: Settings appearance policy help."
 
+[messages.settings_field_minimum_contrast]
+context = "crates/kettle-ui/src/settings.rs: Settings row for minimum-contrast, the WCAG ratio the terminal lifts text colours to."
+
+[messages.settings_description_field_minimum_contrast]
+context = "crates/kettle-ui/src/settings.rs: Settings help for minimum-contrast."
+
 [messages.settings_value_follow_system]
 context = "crates/kettle-ui/src/settings.rs: Settings appearance choice: follow OS light/dark preference."
 
@@ -2777,6 +2877,53 @@ context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessib
 
 [messages.picker_theme_for_dark_appearance]
 context = "crates/kettle-ui/src/app/pickers.rs: Theme picker header and accessible label: picks update dark-theme. Keep short; prefix is clipped separately from query."
+
+[messages.picker_theme_follow_schedule]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line: theme-schedule picks light or dark by the clock or the sun. Sibling of settings_value_follow_system. Keep short."
+
+[messages.picker_theme_dark_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line, before the name of the theme dark-theme names (the theme worn in dark appearance). A label ending in a colon; theme is masculine in Spanish."
+
+[messages.picker_theme_light_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line, before the name of the theme light-theme names (the theme worn in light appearance). A label ending in a colon; theme is masculine in Spanish."
+
+[messages.picker_theme_fixed_slot]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker status line in fixed-theme mode, before the name of the one theme the window wears. A label ending in a colon."
+
+[messages.picker_theme_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme picker button label before the minimum-contrast value (Off, 3:1, 4.5:1, 7:1); a click steps it. Keep short."
+
+[messages.picker_theme_text_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout: the contrast of the theme's text colour on its background. ratio is a WCAG ratio such as 11.4:1."
+args = [{ name = "ratio", type = "str" }]
+
+[messages.picker_theme_lowest_contrast]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout, after picker_theme_text_contrast and a middle dot: the lowest contrast of the theme's 14 text colours on its background. ratio is a WCAG ratio such as 1.9:1. A swatch of that colour and its palette number follow."
+args = [{ name = "ratio", type = "str" }]
+
+[messages.picker_theme_colours_lifted]
+context = "crates/kettle-render/src/theme_picker.rs: Theme sample readout with minimum-contrast on: how many of the theme's text colours the terminal draws lighter or darker so they reach the minimum."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.picker_theme_a11y_lowest_slot]
+context = "crates/kettle-ui/src/app/accessibility.rs: Screen-reader text after the theme sample readout, naming the palette colour (0-15) with the lowest contrast; sighted users see a swatch."
+args = [{ name = "slot", type = "u64" }]
+
+[messages.picker_theme_a11y_low_contrast]
+context = "crates/kettle-ui/src/app/accessibility.rs: Screen-reader text for the warning mark drawn when a theme colour is below 3:1 contrast on its background."
+
+[messages.picker_hint_save_for_light]
+context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Enter, while the picker edits the light side (light-theme) and the system is dark: save the pick as the light theme without wearing it now. Lowercase, a short phrase."
+
+[messages.picker_hint_save_for_dark]
+context = "crates/kettle-ui/src/app/redraw.rs: theme picker key hint, after Enter, while the picker edits the dark side (dark-theme) and the system is light: save the pick as the dark theme without wearing it now. Lowercase, a short phrase."
+
+[messages.picker_hint_tab_light_theme]
+context = "crates/kettle-ui/src/app/pickers.rs: theme picker key hint, after \"Tab:\", while the picker edits the dark side: Tab switches the picker to editing the light theme. Dropped first when the header is narrow. Lowercase, a short noun phrase."
+
+[messages.picker_hint_tab_dark_theme]
+context = "crates/kettle-ui/src/app/pickers.rs: theme picker key hint, after \"Tab:\", while the picker edits the light side: Tab switches the picker to editing the dark theme. Dropped first when the header is narrow. Lowercase, a short noun phrase."
 
 [messages.config_notice_open]
 context = "crates/kettle-ui/src/app/notices.rs: config error notice. Keys and range endpoints are trusted config metadata, never user values. Open Config uses the system app; Enter opens and Escape dismisses."

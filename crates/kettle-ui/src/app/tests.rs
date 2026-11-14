@@ -106,7 +106,7 @@ pub(super) fn title_test_argv() -> Vec<String> {
     }
 }
 
-fn title_test_split_mux() -> (Mux, u64, u64) {
+pub(super) fn title_test_split_mux() -> (Mux, u64, u64) {
     let cfg = title_test_config();
     let argv = title_test_argv();
     let waker: kettle_core::Waker = Arc::new(|| {});
@@ -369,6 +369,7 @@ include!("clipboard_tests.rs");
 include!("config_reload_tests.rs");
 include!("ctl_tests.rs");
 include!("cursor_tests.rs");
+include!("exit_tests.rs");
 include!("focus_tests.rs");
 include!("gpu_recovery_tests.rs");
 include!("ime_tests.rs");

@@ -799,7 +799,18 @@ fn create_unique_private_recording_before_lock(
                 if let Err(error) = ensure_regular_file(&file, &path)
                     .and_then(|()| fs4::FileExt::try_lock(&file).map_err(std::io::Error::from))
                 {
+                    // Retention may lock and unlink a file before its creator
+                    // locks it. A child forked at that moment (a new pane's
+                    // PTY) briefly inherits retention's descriptor and with it
+                    // the lock, so the unlinked file reads as locked. Take the
+                    // next name, as for the unlocked case below.
+                    let unlinked = error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::fs::symlink_metadata(&path)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
                     drop(file);
+                    if unlinked {
+                        continue;
+                    }
                     let _ = std::fs::remove_file(&path);
                     return Err(error);
                 }
@@ -2217,6 +2228,29 @@ mod tests {
         )
         .unwrap();
         drop(other);
+    }
+
+    /// A child forked while retention held its lock keeps that lock after
+    /// retention unlinks the file. Allocation must take the next name rather
+    /// than fail.
+    #[cfg(unix)]
+    #[test]
+    fn recording_allocation_retries_if_an_unlinked_file_is_still_locked() {
+        let temp = test_tempdir();
+        let mut lingering = None;
+        let (path, _file) =
+            super::create_unique_private_recording_before_lock(temp.path(), |path| {
+                if lingering.is_none() {
+                    let held = std::fs::File::open(path).unwrap();
+                    fs4::FileExt::try_lock(&held).unwrap();
+                    std::fs::remove_file(path).unwrap();
+                    lingering = Some((path.to_owned(), held));
+                }
+            })
+            .unwrap();
+        let (retired, _held) = lingering.unwrap();
+        assert_ne!(path, retired);
+        assert!(path.exists());
     }
 
     #[test]

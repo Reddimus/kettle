@@ -17376,7 +17376,7 @@ def run_interaction(kettle: str, root: Path, *, isolated_clipboard: bool = False
                         f"interaction smoke: {label} title edit overlaps tab text: "
                         f"segments={tab_bar.get('segments')}"
                     )
-                for button_name in ("new_tab", "new_tab_menu", "scroll_left", "scroll_right"):
+                for button_name in ("new_tab", "new_tab_menu", "settings", "scroll_left", "scroll_right"):
                     button = tab_bar.get(button_name)
                     if isinstance(button, dict) and float(button.get("width", 0.0)) > 0.0:
                         raise SystemExit(

@@ -29,13 +29,23 @@ use labels::overlay_label_cols;
 pub use scrollback::{ScrollbackPill, scrollback_pill, scrollbar_draw_width, scrollbar_hit_width};
 mod text_field;
 pub use text_field::{
-    TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels, text_field_rects,
+    TextFieldLayout, TextFieldOverlay, text_field_cell_width, text_field_labels,
+    text_field_placeholder, text_field_rects,
 };
 mod settings;
 mod tab_strip;
 mod terminal;
-pub use tab_strip::{HorizontalTabContent, horizontal_tab_content_layout, tab_text_scale};
+pub use tab_strip::{
+    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+};
 mod theme;
+mod theme_picker;
+pub use theme_picker::{
+    FooterInk, FooterLine, FooterRun, MINIMUM_CONTRAST_STEPS, Readability, ThemeFollow,
+    ThemeFooterLayout, ThemePickerFooter, ThemeSlot, contrast_button_text, minimum_contrast_token,
+    step_minimum_contrast, theme_follow_label, theme_footer_description, theme_footer_height,
+    theme_footer_layout, theme_footer_min_columns, theme_footer_slots, theme_readability,
+};
 
 use background::{BgImageAnim, BgImageWorker, starfield_time};
 #[cfg(test)]
@@ -100,6 +110,8 @@ use labels::{
 };
 /// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
 pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
+/// Space around the size chip's text, in pixels.
+const RESIZE_CHIP_PAD: f32 = 14.0;
 /// Size of a tab's close `×` relative to its title.
 pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
@@ -338,6 +350,14 @@ mod dim_blend_tests;
 #[cfg(test)]
 mod context_menu_row_width_tests;
 
+#[cfg(test)]
+mod picker_chrome_tests;
+
+/// The search segment buffer a text field's placeholder is shaped into; the
+/// field itself uses the first three (prefix, editor, hint).
+const TEXT_FIELD_PLACEHOLDER_SEGMENT: usize = 3;
+const _: () = assert!(TEXT_FIELD_PLACEHOLDER_SEGMENT < SEARCH_SEGMENTS);
+
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
@@ -418,6 +438,9 @@ pub struct Renderer {
     /// palette across thousands of cells, while the lift itself performs a
     /// bisection with many nonlinear color conversions.
     minimum_contrast_cache: MinimumContrastCache,
+    /// How opaque this frame shows a pane's default background over the
+    /// desktop (`1.0` when nothing shows through), for selection contrast.
+    selection_backdrop_alpha: f64,
     chrome_colors: chrome::Colors,
     /// Per-pane, per-row content keys for the line-level shaping cache.
     /// `build_pane` hashes each grid row's style runs (text, fg, bold, italic).
@@ -588,6 +611,11 @@ pub struct Renderer {
     context_menu_hint_buffers: Vec<TextBuffer>,
     /// Last text shaped into each `context_menu_hint_buffers` slot.
     context_menu_hint_texts: Vec<String>,
+    /// The theme picker footer's lines, and what each was last shaped from.
+    theme_footer_buffers: Vec<TextBuffer>,
+    theme_footer_keys: Vec<u64>,
+    /// Every footer line's key together, for the chrome's damage hash.
+    theme_footer_key: u64,
     /// Shaped settings slots, truncated to the shared layout's visible text.
     settings_buffers: Vec<TextBuffer>,
     settings_texts: Vec<(String, bool)>,
@@ -627,6 +655,9 @@ pub struct Renderer {
     new_tab_arrow_buffer: TextBuffer,
     tab_tooltip_buffer: TextBuffer,
     tab_tooltip_text: String,
+    /// The Settings gear's coverage at its last side length, so a frame
+    /// reuses it instead of rasterizing the gear again.
+    settings_gear_mask: tab_strip::GearMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -903,6 +934,22 @@ impl Renderer {
             .find(|p| p.focused)
             .and_then(|p| color::resolve_query(257, theme, &p.snap.colors))
             .unwrap_or(theme.background);
+        // The active horizontal tab is the terminal's own surface: as
+        // translucent as the window, unless its text needs it a little more
+        // opaque. Over Kettle's own wallpapers it never is: the tab would
+        // show as a seam.
+        let active_tab_alpha = chrome::text_surface_alpha(
+            default_bg,
+            composed_bg_alpha(cfg),
+            color::PLATFORM_BACKDROP_LIFT,
+            cfg.background_type == kettle_config::BackgroundType::Solid,
+        );
+        let active_tab_backing = color::Backing::translucent(
+            default_bg,
+            active_tab_alpha,
+            color::PLATFORM_BACKDROP_LIFT,
+        );
+        let translucent_window = composed_bg_alpha(cfg) < 1.0;
         let pad_x = cfg.padding_x;
         let pad_y = cfg.padding_y;
         let cw = self.cell_w;
@@ -1348,19 +1395,26 @@ impl Renderer {
                 let (x, y, width, height) = tabbar.band;
                 quads.push(rect(x, y, width, height, chrome_strip_bg, 1.0));
             }
-            let tab_accent = if !overlay.window_focused {
-                chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
-            } else if tabbar.broadcast {
-                theme.palette[3]
-            } else {
-                self.ui_accent(cfg, theme)
-            };
+            // Broadcast's warning yellow or the window's accent, at 3:1 on
+            // the active tab and the strip where the colours allow it; grey
+            // in an unfocused window.
+            let tab_accent = chrome::tab_accent(
+                if tabbar.broadcast {
+                    theme.palette[3]
+                } else {
+                    self.ui_accent(cfg, theme)
+                },
+                chrome_strip_bg,
+                default_bg,
+                theme.foreground,
+                overlay.window_focused,
+            );
             if !cfg.tab_bar_pos.is_vertical() {
                 let tabs = tab_strip::horizontal_tab_quads(
                     tabbar,
                     (0.0, by, sw, tabbar.height),
                     theme,
-                    (default_bg, composed_bg_alpha(cfg) as f32),
+                    (default_bg, active_tab_alpha as f32),
                     chrome_strip_bg,
                     tab_accent,
                     cfg.tab_bar_pos,
@@ -1384,23 +1438,18 @@ impl Renderer {
                     let (x, seg_y, w, seg_h) = s.rect;
                     if s.active {
                         quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
-                        // When broadcast / group-input mode is on,
-                        // use a warning-yellow accent (theme palette index 3,
-                        // the standard ANSI "yellow" slot) for the active tab
-                        // so the user can't forget broadcast is enabled and
-                        // type to one pane expecting it to stay local. Other
-                        // tabs are unaffected — broadcast is scoped to the
-                        // active tab, so only the
-                        // active segment's accent flips.
-                        let accent = if tabbar.broadcast {
-                            theme.palette[3]
-                        } else {
-                            // Multi-window: the per-WINDOW accent
-                            // (Peacock pool slot, live-deduped), falling back to
-                            // explicit `accent-color` → theme signature.
-                            self.ui_accent(cfg, theme)
-                        };
-                        quads.push(rect(x, seg_y, 2.0, seg_h, accent, 1.0));
+                        // The same bar as a horizontal strip's: broadcast's
+                        // warning yellow (only the active tab broadcasts) or
+                        // the window's accent, grey while the window is
+                        // unfocused.
+                        quads.push(rect(
+                            x,
+                            seg_y,
+                            (3.0 * self.scale).round(),
+                            seg_h,
+                            tab_accent,
+                            1.0,
+                        ));
                     }
                     // Thin separator on the right (horizontal) or
                     // bottom (vertical) of each segment. For vertical,
@@ -1543,9 +1592,14 @@ impl Renderer {
                         tabbar.hovered_new_tab,
                         tabbar.pressed_new_tab,
                     ),
+                    (
+                        tabbar.settings,
+                        tabbar.hovered_settings,
+                        tabbar.pressed_settings,
+                    ),
                 ] {
-                    if hovered {
-                        let hover = chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed);
+                    if hovered && bounds.2 > 0.0 {
+                        let hover = chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed);
                         tab_strip::rounded_fill(
                             &mut quads,
                             bounds,
@@ -1555,6 +1609,33 @@ impl Renderer {
                             None,
                         );
                     }
+                }
+                // The Settings gear is drawn, not shaped, in the `▾`'s ink:
+                // the accent while hovered, and never under 3:1 in an
+                // unfocused window.
+                if tabbar.settings.2 > 0.0 {
+                    let (ink, background) = if tabbar.hovered_settings {
+                        (
+                            accent,
+                            chrome::strip_hover(
+                                chrome_strip_bg,
+                                theme.foreground,
+                                tabbar.pressed_settings,
+                            ),
+                        )
+                    } else {
+                        (theme.foreground, chrome_strip_bg)
+                    };
+                    let ink = self
+                        .chrome_colors
+                        .tab_text(ink, background, overlay.window_focused);
+                    tab_strip::push_settings_gear(
+                        &mut quads,
+                        tabbar.settings,
+                        ink,
+                        self.scale,
+                        &mut self.settings_gear_mask,
+                    );
                 }
             }
             // Drag-in-progress ghost. While the user holds a
@@ -1705,6 +1786,12 @@ impl Renderer {
         // it this frame if a solid block cursor is visible.
         self.pending_cursor_glyph = None;
         self.minimum_contrast_cache.clear();
+        self.selection_backdrop_alpha = theme::selection_backdrop_alpha(
+            cfg,
+            self.config.alpha_mode,
+            opaque_wallpaper_covers_surface,
+            overlay.window_opaque,
+        );
         // Inline image instances share one renderer/window budget. Allocate it
         // across panes before iterating so pane order cannot monopolize all
         // slots. Offscreen placements consume no quota.
@@ -2236,13 +2323,19 @@ impl Renderer {
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
             let accent = cfg.search_background.unwrap_or(theme.palette[3]);
 
+            let (bar_fill, bar_alpha) = search::search_bar_layer(
+                theme,
+                translucent_window,
+                self.config.format.is_srgb(),
+                &mut self.chrome_colors,
+            );
             quads.push(rect(
                 geometry.rect.0,
                 geometry.rect.1,
                 geometry.rect.2,
                 geometry.rect.3,
-                theme.palette[8],
-                0.98,
+                bar_fill,
+                bar_alpha as f32,
             ));
             // A distinct editor well survives low-contrast themes. All button
             // rectangles get a subtle surface; the focused one uses the same
@@ -2331,30 +2424,15 @@ impl Renderer {
                     editor_clusters =
                         segment_clusters(&self.search_segment_buffers[index], &segment);
                 }
-                let bar =
-                    self.chrome_colors
-                        .surface(theme.background, theme.palette[8], 0.98, linear);
-                let background = match segment.control {
-                    Some(SearchControl::Editor) => {
-                        self.chrome_colors
-                            .surface(bar, theme.background, 0.72, linear)
-                    }
-                    Some(control) => {
-                        let (fill, alpha) = if search.focused == control {
-                            (accent, SEARCH_FOCUSED_FILL_ALPHA)
-                        } else {
-                            (theme.background, 0.28)
-                        };
-                        let fill = self
-                            .chrome_colors
-                            .surface(bar, fill, f64::from(alpha), linear);
-                        tint_of(control).map_or(fill, |(tint, alpha)| {
-                            self.chrome_colors
-                                .surface(fill, tint, f64::from(alpha), linear)
-                        })
-                    }
-                    None => bar,
-                };
+                let background = search::search_segment_fill(
+                    theme,
+                    accent,
+                    segment.control,
+                    search.focused,
+                    segment.control.and_then(tint_of),
+                    linear,
+                    &mut self.chrome_colors,
+                );
                 let color = Some(self.chrome_colors.text(
                     if segment.control == Some(search.focused)
                         && search.focused != SearchControl::Editor
@@ -2475,7 +2553,12 @@ impl Renderer {
                 );
                 let cw = text_field_cell_width(field, cw, metrics.line_height);
                 let (prefix, hint) = text_field::text_field_labels(field, cw);
-                for (index, text) in [(0, prefix.as_str()), (2, hint.as_str())] {
+                let placeholder = text_field::text_field_placeholder(field, cw);
+                for (index, text) in [
+                    (0, prefix.as_str()),
+                    (2, hint.as_str()),
+                    (TEXT_FIELD_PLACEHOLDER_SEGMENT, placeholder.as_str()),
+                ] {
                     text_field::shape_field_label(
                         &mut self.font_system,
                         &mut self.search_segment_buffers[index],
@@ -2749,15 +2832,15 @@ impl Renderer {
         // text ("120×40"). Drawn later in the menu pass so it sits above pane
         // content; the equality gate means a live resize only re-shapes when
         // the GRID size actually changed.
-        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
-            let label = format!("{rcols}×{rrows}");
+        if let Some(label) = overlay.visible_resize_label() {
             // Metrics/size stay OUTSIDE the text gate: a DPI change can re-show
             // the chip with an UNCHANGED label, and gating them would leave the
             // glyphs shaped at the old monitor's scale. Both calls early-out
             // when unchanged, like the other chrome buffers.
             self.resize_overlay_buffer.set_metrics(metrics);
-            self.resize_overlay_buffer
-                .set_size(Some(sw), Some(ch * 2.0));
+            // One line, never wrapped: a caption wider than the window at a
+            // large font is drawn smaller instead (below).
+            self.resize_overlay_buffer.set_size(None, Some(ch * 2.0));
             if self.resize_overlay_text != label {
                 self.resize_overlay_buffer.set_text(
                     &label,
@@ -2769,6 +2852,23 @@ impl Renderer {
             }
             self.resize_overlay_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+            let width = self
+                .resize_overlay_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            // The chip's padding inside, and as much again to the window edge.
+            let room = (sw - 4.0 * RESIZE_CHIP_PAD).max(1.0);
+            if width > room {
+                let fit = room / width;
+                self.resize_overlay_buffer
+                    .set_metrics(glyphon::Metrics::new(
+                        metrics.font_size * fit,
+                        metrics.line_height * fit,
+                    ));
+                self.resize_overlay_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
         }
 
         let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
@@ -2984,6 +3084,85 @@ impl Renderer {
                 }
                 row_base += menu.text_buffer_count();
             }
+        }
+
+        // The theme picker's footer: one buffer per line, its runs in their
+        // own colours. A line is reshaped when its words or colours change,
+        // which a new selection does by changing the sample theme.
+        {
+            let lines = overlay
+                .context_menu
+                .as_ref()
+                .and_then(|menu| {
+                    Some((
+                        menu.picker_footer.as_ref()?,
+                        menu.picker_footer_layout(&overlay.tr, (cw, ch))?,
+                    ))
+                })
+                .map(|(footer, layout)| {
+                    layout
+                        .lines
+                        .into_iter()
+                        .map(|line| {
+                            let runs: Vec<(String, Rgb)> = line
+                                .runs
+                                .into_iter()
+                                .map(|run| {
+                                    let ink = theme_picker::footer_ink(
+                                        run.ink,
+                                        footer,
+                                        theme,
+                                        &mut self.chrome_colors,
+                                        &mut self.minimum_contrast_cache,
+                                    );
+                                    (run.text, ink)
+                                })
+                                .collect();
+                            (line.bounds, runs)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            while self.theme_footer_buffers.len() < lines.len() {
+                self.theme_footer_buffers
+                    .push(TextBuffer::new(&mut self.font_system, metrics));
+            }
+            self.theme_footer_buffers.truncate(lines.len());
+            self.theme_footer_keys.resize(lines.len(), 0);
+            for (i, (bounds, runs)) in lines.iter().enumerate() {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::hash::DefaultHasher::new();
+                for (text, ink) in runs {
+                    text.hash(&mut hash);
+                    (ink.r, ink.g, ink.b).hash(&mut hash);
+                }
+                metrics.font_size.to_bits().hash(&mut hash);
+                metrics.line_height.to_bits().hash(&mut hash);
+                bounds.2.to_bits().hash(&mut hash);
+                family.hash(&mut hash);
+                let key = hash.finish();
+                let buf = &mut self.theme_footer_buffers[i];
+                if self.theme_footer_keys[i] != key {
+                    buf.set_metrics(metrics);
+                    buf.set_size(Some(bounds.2.max(1.0)), Some(ch * 2.0));
+                    let base = Attrs::new().family(Family::Name(&family));
+                    buf.set_rich_text(
+                        runs.iter()
+                            .map(|(text, ink)| (text.as_str(), base.clone().color(gc(*ink)))),
+                        &base,
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.theme_footer_keys[i] = key;
+                }
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
+            self.theme_footer_key = {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::hash::DefaultHasher::new();
+                self.theme_footer_keys.hash(&mut hash);
+                hash.finish()
+            };
         }
 
         // Shape the same clipped slots used by painting and pointer input.
@@ -3466,8 +3645,9 @@ impl Renderer {
         }
         for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
             let (x, y, w, h) = pill.rect;
-            let fill = color::with_min_contrast(theme.palette[0], theme.background, 3.0);
-            let ink = color::with_min_contrast(theme.foreground, fill, 4.5);
+            let (fill, ink) = self
+                .chrome_colors
+                .scrollback_pill(theme, self.config.format.is_srgb());
             tab_strip::rounded_fill(
                 &mut menu_q,
                 (x, y, w, h),
@@ -3524,11 +3704,20 @@ impl Renderer {
         }
         // Ghostty parity: the transient resize chip, centered and drawn in the
         // menu pass (last) so it reads over any pane content.
-        if let Some((rcols, rrows)) = overlay.visible_resize_overlay() {
-            let label_cells = format!("{rcols}×{rrows}").chars().count() as f32;
-            let pad = 14.0_f32;
-            let chip_w = label_cells * cw + pad * 2.0;
-            let chip_h = ch + pad;
+        if overlay.visible_resize_overlay().is_some() {
+            // Sized from the text shaped above, which may be a translated
+            // font-size caption rather than `cols×rows`.
+            let label_w = self
+                .resize_overlay_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max)
+                .max(cw);
+            let pad = RESIZE_CHIP_PAD;
+            let chip_w = (label_w.ceil() + pad * 2.0).min(sw);
+            // A caption drawn smaller to fit gets a chip as much shorter.
+            let fit = (self.resize_overlay_buffer.metrics().font_size / metrics.font_size).min(1.0);
+            let chip_h = ch * fit + pad;
             let cx = (sw - chip_w) / 2.0;
             let cy = (sh - chip_h) / 2.0;
             let acc = self.ui_accent(cfg, theme);
@@ -4176,21 +4365,26 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
-                let tab_background = if s.active {
-                    default_bg
-                } else if !cfg.tab_bar_pos.is_vertical() && tabbar.hovered_tab_idx == Some(s.idx) {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, false)
+                let tab_background = tab_strip::tab_title_background(
+                    s.active,
+                    tabbar.hovered_tab_idx == Some(s.idx),
+                    cfg.tab_bar_pos.is_vertical(),
+                    default_bg,
+                    chrome_strip_bg,
+                    theme.foreground,
+                );
+                let tab_backing = if s.active && !cfg.tab_bar_pos.is_vertical() {
+                    active_tab_backing
                 } else {
-                    chrome_strip_bg
+                    color::Backing::opaque(tab_background)
                 };
-                let title_fg = if s.active || cfg.tab_bar_pos.is_vertical() {
-                    self.chrome_colors.text(fg, tab_background)
-                } else {
-                    self.chrome_colors.secondary(fg, tab_background)
-                };
-                let title_fg =
-                    self.chrome_colors
-                        .tab_text(title_fg, tab_background, overlay.window_focused);
+                let title_fg = self.chrome_colors.tab_title(
+                    fg,
+                    tab_background,
+                    tab_backing,
+                    s.active || cfg.tab_bar_pos.is_vertical(),
+                    overlay.window_focused,
+                );
                 let (centered_left, label_top) = tab_strip::tab_label_origin(
                     s.title_rect,
                     &self.tab_texts[bi],
@@ -4210,13 +4404,13 @@ impl Renderer {
                     default_color: gc(title_fg),
                     custom_glyphs: &[],
                 });
-                if let Some((hint_rect, _)) = &s.hint {
-                    let hint_fg = self.chrome_colors.muted(fg, tab_background);
-                    let hint_fg = self.chrome_colors.tab_text(
-                        hint_fg,
-                        tab_background,
-                        overlay.window_focused,
-                    );
+                // The Cmd+N hints are for the keyboard in a focused window.
+                // An unfocused one keeps their lane, so nothing moves when
+                // focus returns, but does not paint them.
+                if overlay.window_focused
+                    && let Some((hint_rect, _)) = &s.hint
+                {
+                    let hint_fg = self.chrome_colors.tab_hint(fg, tab_background, tab_backing);
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,
@@ -4227,23 +4421,26 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
-                if !cfg.tab_bar_pos.is_vertical() && tx - s.rect.0 >= 20.0 {
-                    let dot = match s.activity {
-                        TabActivity::Bell => Some(theme.palette[3]),
-                        TabActivity::Output => Some(theme.palette[6]),
-                        TabActivity::Silent => Some(theme.palette[8]),
-                        TabActivity::Normal => None,
-                    };
-                    if let Some(color) = dot {
-                        tab_strip::rounded_fill(
-                            &mut quads,
-                            (centered_left - 10.0, ty_px + th * 0.5 - 3.0, 6.0, 6.0),
-                            3.0,
-                            (true, true),
-                            (color, 1.0),
-                            None,
-                        );
-                    }
+                if !cfg.tab_bar_pos.is_vertical()
+                    && let Some(marker) = tab_strip::activity_marker_rect(
+                        s.rect,
+                        s.title_rect,
+                        centered_left,
+                        self.scale,
+                    )
+                    && let Some(ink) = chrome::activity_ink(theme, s.activity)
+                {
+                    let ink =
+                        self.chrome_colors
+                            .tab_marker(ink, tab_background, overlay.window_focused);
+                    tab_strip::activity_marker_quads(
+                        &mut quads,
+                        s.activity,
+                        marker,
+                        self.scale,
+                        ink,
+                        tab_background,
+                    );
                 }
                 // `✕` close glyph — separate text area so we can color
                 // it independently of the title. Bright on hover, dim
@@ -4294,20 +4491,33 @@ impl Renderer {
                     (s.active, hovered),
                     self.config.format.is_srgb(),
                 );
-                let (close_fg, close_background) = if cfg.tab_bar_pos.is_vertical() {
-                    (close_fg, close_background)
+                // The hover chip is opaque; a resting glyph sits on the tab.
+                let (close_fg, close_background, close_backing) = if cfg.tab_bar_pos.is_vertical() {
+                    (
+                        close_fg,
+                        close_background,
+                        color::Backing::opaque(close_background),
+                    )
                 } else if hovered {
                     let background = color::over(tab_background, theme.foreground, 0.06, false);
-                    (self.chrome_colors.text(fg, background), background)
+                    (
+                        self.chrome_colors.text(fg, background),
+                        background,
+                        color::Backing::opaque(background),
+                    )
                 } else {
                     (
                         self.chrome_colors.secondary(fg, tab_background),
                         tab_background,
+                        tab_backing,
                     )
                 };
-                let close_fg =
-                    self.chrome_colors
-                        .tab_text(close_fg, close_background, overlay.window_focused);
+                let close_fg = self.chrome_colors.tab_close(
+                    close_fg,
+                    close_background,
+                    close_backing,
+                    overlay.window_focused,
+                );
                 let (close_left, close_top) =
                     centered_text_origin((cx, cy, ccw, cch), (close_w, close_ch));
                 areas.push(TextArea {
@@ -4333,7 +4543,7 @@ impl Renderer {
             };
             let toolbar_background = |colors: &mut chrome::Colors, hovered, pressed| {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
-                    chrome::tab_detail(chrome_strip_bg, theme.foreground, pressed)
+                    chrome::strip_hover(chrome_strip_bg, theme.foreground, pressed)
                 } else if hovered {
                     colors.surface(
                         chrome_strip_bg,
@@ -4599,6 +4809,27 @@ impl Renderer {
                     .into_iter()
                     .take(room),
             );
+            // The theme picker's footer: its divider and underline are flat
+            // chrome; its card, squares and marks draw with the swatches.
+            let footer_layout = menu.picker_footer.as_ref().and_then(|footer| {
+                Some((footer, menu.picker_footer_layout(&overlay.tr, (cw, ch))?))
+            });
+            if let Some((footer, layout)) = &footer_layout {
+                let fc =
+                    theme_picker::footer_colors(footer, theme, accent, &mut self.chrome_colors);
+                if let Some((x, y, w, h)) = layout.divider {
+                    menu_q.push(rect(x, y, w, h, theme.palette[8], 0.65));
+                }
+                if let Some((x, y, w, h)) = layout.slot_underline {
+                    menu_q.push(rect(x, y, w, h, fc.underline, 1.0));
+                }
+                let room = overlays::MENU_SWATCH_SURFACES.saturating_sub(menu_swatches.len());
+                menu_swatches.extend(
+                    theme_picker::footer_surfaces(layout, footer, &fc, self.scale)
+                        .into_iter()
+                        .take(room),
+                );
+            }
             menu_level_draws.push(MenuLevelDraw {
                 surfaces: surfaces_start..menu_surfaces.len() as u32,
                 quads: quads_start..menu_q.len() as u32,
@@ -4619,11 +4850,13 @@ impl Renderer {
                     &mut self.chrome_colors,
                     linear,
                 );
-                let fg = if row.enabled {
-                    self.chrome_colors.text(theme.foreground, background)
-                } else {
-                    self.chrome_colors.muted(theme.foreground, background)
-                };
+                let fg = overlays::menu_row_text_color(
+                    menu,
+                    row,
+                    theme,
+                    background,
+                    &mut self.chrome_colors,
+                );
                 let bounds = TextBounds {
                     left: ax as i32,
                     top: row_y as i32,
@@ -4685,6 +4918,25 @@ impl Renderer {
                     });
                 }
             }
+            if let Some((_, layout)) = &footer_layout {
+                for (line, buffer) in layout.lines.iter().zip(&self.theme_footer_buffers) {
+                    let (x, y, w, h) = line.bounds;
+                    areas.push(TextArea {
+                        buffer,
+                        left: line.left,
+                        top: line.top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: gc(theme.foreground),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
             menu_level_areas.push(areas);
             menu_row_base += menu.text_buffer_count();
         }
@@ -4699,17 +4951,16 @@ impl Renderer {
                 self.overlay_text_cell_width(),
             );
             let acc = self.ui_accent(cfg, theme);
-            let selected = self.chrome_colors.surface(
-                theme.background,
+            let settings::SettingsColors {
+                selected,
+                border,
+                control,
+                selected_control,
+            } = settings::settings_colors(
+                theme,
                 acc,
-                0.18,
                 self.config.format.is_srgb(),
-            );
-            let border = self.chrome_colors.surface(
-                theme.background,
-                theme.palette[8],
-                0.65,
-                self.config.format.is_srgb(),
+                &mut self.chrome_colors,
             );
             let rail = self.chrome_colors.icon(acc, selected);
             // Ink on a switched-on toggle: whichever theme end stands out more
@@ -4772,27 +5023,33 @@ impl Renderer {
                 .into_iter()
                 .flatten()
             {
-                shape(rect, theme.background, 1.0, border, 1.0, 4.0);
+                shape(rect, theme.background, 1.0, control, 1.0, 4.0);
             }
             shape(
                 layout.search_rect,
                 theme.background,
                 1.0,
-                if set.search_focused { acc } else { border },
+                if set.search_focused { acc } else { control },
                 1.0,
                 4.0,
             );
             for row in &layout.rows {
-                if row.index == set.focused_row && !set.search_focused {
+                let row_selected = row.index == set.focused_row && !set.search_focused;
+                if row_selected {
                     shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
                 }
+                let control = if row_selected {
+                    selected_control
+                } else {
+                    control
+                };
                 let data = &set.rows[row.index];
                 let on = data.control == SettingsControl::Toggle(true) && !data.disabled;
                 shape(
                     row.chip_rect,
                     if on { acc } else { theme.background },
                     1.0,
-                    border,
+                    control,
                     1.0,
                     if matches!(data.control, SettingsControl::Toggle(_)) {
                         row.chip_rect.3 / 2.0
@@ -4806,7 +5063,7 @@ impl Renderer {
                     let (x, y, w, h) = row.chip_rect;
                     let d = settings_toggle_knob(h);
                     let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
-                    let fill = if on { on_ink } else { border };
+                    let fill = if on { on_ink } else { control };
                     shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
                 }
             }
@@ -4890,17 +5147,34 @@ impl Renderer {
                         bottom: (slot.1 + slot.3) as i32,
                     },
                     default_color: {
-                        let color = if picker {
-                            if index == 2 {
-                                self.chrome_colors.muted(theme.foreground, theme.background)
-                            } else {
-                                self.chrome_colors.text(theme.foreground, theme.background)
-                            }
-                        } else {
-                            fg
-                        };
+                        let color = overlays::text_field_slot_color(
+                            picker,
+                            index,
+                            theme,
+                            fg,
+                            &mut self.chrome_colors,
+                        );
                         GColor::rgb(color.r, color.g, color.b)
                     },
+                    custom_glyphs: &[],
+                });
+            }
+            let placeholder = text_field::text_field_placeholder(field, cw);
+            if !placeholder.is_empty() {
+                let slot = slots[1];
+                let color = overlays::picker_header_secondary_color(theme, &mut self.chrome_colors);
+                menu_areas.push(TextArea {
+                    buffer: &self.search_segment_buffers[TEXT_FIELD_PLACEHOLDER_SEGMENT],
+                    left: layout.text_left,
+                    top: slot.1,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: slot.0 as i32,
+                        top: slot.1 as i32,
+                        right: (slot.0 + slot.2) as i32,
+                        bottom: (slot.1 + slot.3) as i32,
+                    },
+                    default_color: GColor::rgb(color.r, color.g, color.b),
                     custom_glyphs: &[],
                 });
             }
@@ -5196,6 +5470,8 @@ impl Renderer {
                 context_menu_text_damage_key(Some(parent), theme.foreground, theme.background)
                     .hash(&mut h);
             }
+            // Footer lines keep their buffers when only their colours change.
+            self.theme_footer_key.hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -6074,6 +6350,9 @@ mod pane_buffer_lifecycle_tests;
 mod search_bar_tests;
 
 #[cfg(test)]
+mod chrome_contrast_sweep_tests;
+
+#[cfg(test)]
 mod completion_panel_tests;
 
 #[cfg(test)]
@@ -6124,5 +6403,7 @@ mod fallback_walk_tests;
 #[cfg(test)]
 mod emoji_shaping_tests;
 
+#[cfg(test)]
+mod theme_picker_tests;
 #[cfg(test)]
 mod update_toast_tests;

@@ -2,8 +2,10 @@
 //!
 //! Kettle key equivalents are display hints. The root NSMenu declines them,
 //! leaving the original event to winit, including modal handling, keybind
-//! resolution, program-ownership yielding and press/release tracking. Only
-//! mouse selections send actions through the event-loop proxy.
+//! resolution, program-ownership yielding and press/release tracking. Mouse
+//! selections send actions through the event-loop proxy, and so do the
+//! native window items AppKit would otherwise perform past winit (full
+//! screen, Minimize and Zoom), whether chosen or typed.
 
 #[cfg(any(target_os = "macos", test))]
 use crate::profile_inventory::ProfileInventory;
@@ -20,6 +22,81 @@ pub(crate) enum NativeAction {
     HideOthers,
     ShowAll,
     Quit,
+    /// AppKit's own full-screen toggle, sent to the key window. Having it in
+    /// the View menu keeps AppKit from adding a second Enter Full Screen.
+    ToggleFullScreen,
+    Minimize,
+    Zoom,
+    BringAllToFront,
+}
+
+/// A window change Kettle makes through winit for a native Window menu item.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowCommand {
+    Minimize,
+    Zoom,
+}
+
+/// Where Kettle sends an item's selection, through the event-loop proxy.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Route {
+    Action(Action),
+    Window(WindowCommand),
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl NativeAction {
+    /// The AppKit action the item carries. Keeping the system's selector on
+    /// the full-screen item is what stops AppKit adding a second one.
+    pub(crate) fn selector(self) -> &'static str {
+        match self {
+            Self::About => "orderFrontStandardAboutPanel:",
+            Self::Hide => "hide:",
+            Self::HideOthers => "hideOtherApplications:",
+            Self::ShowAll => "unhideAllApplications:",
+            Self::Quit => "terminate:",
+            Self::ToggleFullScreen => "toggleFullScreen:",
+            Self::Minimize => "performMiniaturize:",
+            Self::Zoom => "performZoom:",
+            Self::BringAllToFront => "arrangeInFront:",
+        }
+    }
+
+    /// Kettle answers these selectors itself. AppKit's own versions skip
+    /// winit: `toggleFullScreen:` does nothing on a borderless window, which
+    /// winit's `set_fullscreen` first gives a title bar, and
+    /// `performMiniaturize:` and `performZoom:` press title-bar buttons a
+    /// borderless window lacks. The others go to AppKit unchanged.
+    pub(crate) fn route(self) -> Option<Route> {
+        match self {
+            Self::ToggleFullScreen => Some(Route::Action(Action::ToggleFullscreen)),
+            Self::Minimize => Some(Route::Window(WindowCommand::Minimize)),
+            Self::Zoom => Some(Route::Window(WindowCommand::Zoom)),
+            Self::About
+            | Self::Hide
+            | Self::HideOthers
+            | Self::ShowAll
+            | Self::Quit
+            | Self::BringAllToFront => None,
+        }
+    }
+
+    /// The window items need a focused window; Minimize and Zoom are off in
+    /// full screen, as in the system's own Window menu.
+    fn enabled(self, context: Context) -> bool {
+        match self {
+            Self::ToggleFullScreen => context.window,
+            Self::Minimize | Self::Zoom => context.window && !context.fullscreen,
+            Self::About
+            | Self::Hide
+            | Self::HideOthers
+            | Self::ShowAll
+            | Self::Quit
+            | Self::BringAllToFront => true,
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -27,6 +104,49 @@ pub(crate) enum NativeAction {
 pub(crate) enum Command {
     Kettle(Action),
     Native(NativeAction),
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Command {
+    /// The item's AppKit action selector.
+    pub(crate) fn selector(&self) -> &'static str {
+        match self {
+            Self::Kettle(_) => "kettleMenuAction:",
+            Self::Native(action) => action.selector(),
+        }
+    }
+
+    /// Where a Kettle target sends the selection; `None` leaves it to AppKit.
+    pub(crate) fn route(&self) -> Option<Route> {
+        match self {
+            Self::Kettle(action) => Some(Route::Action(action.clone())),
+            Self::Native(action) => action.route(),
+        }
+    }
+}
+
+/// The items AppKit may perform from the keyboard: the native ones, in menu
+/// order. Kettle's own equivalents stay off this list so that the original
+/// key event reaches winit.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn key_equivalent_rows(model: &[Menu]) -> Vec<&Row> {
+    fn collect<'a>(rows: &'a [Row], out: &mut Vec<&'a Row>) {
+        for row in rows {
+            match row {
+                Row::Item {
+                    command: Command::Native(_),
+                    ..
+                } => out.push(row),
+                Row::Submenu { rows, .. } => collect(rows, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for menu in model {
+        collect(&menu.rows, &mut out);
+    }
+    out
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -38,6 +158,8 @@ pub(crate) enum Row {
         shortcut: Option<Trigger>,
         shortcut_label: Option<String>,
         enabled: bool,
+        /// Shown with a checkmark (`NSControlStateValueOn`).
+        checked: bool,
     },
     Submenu {
         title: &'static str,
@@ -54,6 +176,8 @@ pub(crate) struct Menu {
     title: &'static str,
     rows: Vec<Row>,
     windows: bool,
+    /// AppKit's Help menu, which gains the system's menu search field.
+    help: bool,
 }
 
 /// Facts from the focused window; no AppKit, window or terminal handles.
@@ -72,6 +196,14 @@ pub(crate) struct Context {
     pub renderer: bool,
     /// The `detachable-tabs` config key; off, a tab cannot leave its window.
     pub detachable_tabs: bool,
+    /// The focused window is full screen.
+    pub fullscreen: bool,
+    /// What the window broadcasts to, for the Broadcast Input checkmark.
+    pub broadcast: crate::app::BroadcastKind,
+    /// The focused pane has a group, so Panes in This Group can turn on.
+    pub pane_group: bool,
+    /// The `broadcast-default` config key: which row the chord's action runs.
+    pub broadcast_default: kettle_config::BroadcastDefault,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -100,6 +232,8 @@ impl Context {
             | Action::ClosePane
             | Action::SplitRight
             | Action::SplitDown
+            | Action::SplitLeft
+            | Action::SplitUp
             | Action::StartSearch
             | Action::HintMode => self.pane,
             _ => true,
@@ -141,7 +275,8 @@ pub(crate) fn menu_model_with_profiles(
         .filter(|(trigger, _)| trigger.mods.contains(Mods::SUPER))
         .map(|(trigger, action)| (*trigger, action.clone()))
         .collect();
-    let item = |text, action: Action| {
+    // `available` narrows the action's own enabled state; `checked` marks it.
+    let toggle_item = |text, action: Action, available: bool, checked: bool| {
         let shortcut = command_shortcut(&command_bindings, &action).or_else(|| {
             matches!(action, Action::HintMode)
                 .then(|| command_shortcut(bindings, &action))
@@ -149,20 +284,23 @@ pub(crate) fn menu_model_with_profiles(
         });
         Row::Item {
             title: tr.text(text).to_string(),
-            enabled: context.enables(&action),
+            enabled: available && context.enables(&action),
             command: Command::Kettle(action),
             shortcut: shortcut.as_ref().map(|(trigger, _)| *trigger),
             shortcut_label: shortcut.map(|(_, label)| label),
+            checked,
         }
     };
-    let native = |text, action, chord: Option<Trigger>| {
+    let item = |text, action: Action| toggle_item(text, action, true, false);
+    let native = |text, action: NativeAction, chord: Option<Trigger>| {
         let shortcut = chord.filter(|trigger| !bindings.contains_key(trigger));
         Row::Item {
             title: tr.text(text).to_string(),
             command: Command::Native(action),
             shortcut,
             shortcut_label: shortcut.map(|trigger| trigger.label()),
-            enabled: true,
+            enabled: action.enabled(context),
+            checked: false,
         }
     };
     let chord = |key, mods| Some(Trigger::new(mods | Mods::SUPER, Key::Char(key)));
@@ -170,6 +308,7 @@ pub(crate) fn menu_model_with_profiles(
         title: tr.text(text),
         rows,
         windows,
+        help: false,
     };
     vec![
         menu(
@@ -205,9 +344,8 @@ pub(crate) fn menu_model_with_profiles(
             T::MacosMenuShell,
             vec![
                 item(T::MenuNewWindow, Action::NewWindow),
-                item(T::MenuNewTab, Action::NewTab),
                 Row::Submenu {
-                    title: tr.text(T::MenuNewTabProfile),
+                    title: tr.text(T::MenuNewWindowProfile),
                     rows: if profiles.is_none() {
                         vec![Row::Info(tr.text(T::MenuProfilesPending))]
                     } else {
@@ -219,16 +357,31 @@ pub(crate) fn menu_model_with_profiles(
                                 command: Command::Kettle(action),
                                 shortcut: None,
                                 shortcut_label: None,
+                                checked: false,
                             })
                             .collect()
                     },
                 },
+                item(T::MenuNewTab, Action::NewTab),
                 item(T::MenuSaveLayout, Action::SaveLayout),
                 item(T::MenuOpenLayout, Action::OpenLayoutPicker),
-                item(T::PaletteOpenSsh, Action::OpenSsh),
+                item(T::MacosMenuSshLauncher, Action::OpenSsh),
+                Row::Submenu {
+                    title: tr.text(T::MenuBroadcastInput),
+                    rows: crate::app::broadcast_rows(
+                        context.broadcast_default,
+                        context.broadcast,
+                        context.pane_group,
+                    )
+                    .into_iter()
+                    .map(|row| toggle_item(row.kind.text(), row.action, row.enabled, row.checked))
+                    .collect(),
+                },
                 Sep,
                 item(T::MenuSplitRight, Action::SplitRight),
+                item(T::MenuSplitLeft, Action::SplitLeft),
                 item(T::MenuSplitDown, Action::SplitDown),
+                item(T::MenuSplitUp, Action::SplitUp),
                 Sep,
                 item(T::MenuClosePane, Action::ClosePane),
                 item(T::MenuCloseTab, Action::CloseTab),
@@ -244,7 +397,7 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuSelectAll, Action::SelectAll),
                 Sep,
                 item(T::MacosMenuFind, Action::StartSearch),
-                item(T::PaletteHintMode, Action::HintMode),
+                item(T::MacosMenuQuickSelect, Action::HintMode),
                 Sep,
                 item(T::MacosMenuClear, Action::ClearHistory),
             ],
@@ -261,15 +414,34 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuFontReset, Action::ResetFontSize),
                 Sep,
                 item(T::MacosMenuZoomPane, Action::ToggleZoom),
-                item(T::MacosMenuFullscreen, Action::ToggleFullscreen),
-                item(T::QuickTerminalToggle, Action::ToggleQuickTerminal),
+                item(T::MacosMenuQuickTerminal, Action::ToggleQuickTerminal),
+                Sep,
+                // AppKit's own selector, so the system adds no second item,
+                // answered by Kettle through winit (`NativeAction::route`).
+                // The title follows the focused window; F11 and the green
+                // button toggle the same native full screen.
+                native(
+                    if context.fullscreen {
+                        T::MacosMenuExitFullscreen
+                    } else {
+                        T::MacosMenuFullscreen
+                    },
+                    NativeAction::ToggleFullScreen,
+                    chord('f', Mods::CTRL),
+                ),
             ],
             false,
         ),
-        // No Minimize, Zoom Window or Bring All to Front Action exists.
         menu(
             T::MacosMenuWindow,
             vec![
+                native(
+                    T::MacosMenuMinimize,
+                    NativeAction::Minimize,
+                    chord('m', Mods::empty()),
+                ),
+                native(T::MacosMenuZoomWindow, NativeAction::Zoom, None),
+                Sep,
                 item(T::MacosMenuNextTab, Action::NextTab),
                 item(T::MacosMenuPreviousTab, Action::PrevTab),
                 Sep,
@@ -277,9 +449,26 @@ pub(crate) fn menu_model_with_profiles(
                 item(T::MacosMenuMoveTabLeft, Action::MoveTabLeft),
                 item(T::MacosMenuMoveTabRight, Action::MoveTabRight),
                 item(T::MacosMenuMoveTabToNewWindow, Action::MoveTabToNewWindow),
+                Sep,
+                native(
+                    T::MacosMenuBringAllToFront,
+                    NativeAction::BringAllToFront,
+                    None,
+                ),
             ],
             true,
         ),
+        Menu {
+            help: true,
+            ..menu(
+                T::MacosMenuHelp,
+                vec![
+                    item(T::MacosMenuKettleHelp, Action::ShowHelp),
+                    item(T::MacosMenuKeyboardShortcuts, Action::ShowKeybinds),
+                ],
+                false,
+            )
+        },
     ]
 }
 
@@ -297,6 +486,19 @@ pub(crate) fn sync(
 ) {
     let tr = Translator::new(cfg.language.resolve(kettle_i18n::os_locale));
     imp::sync(proxy, menu_model(&tr, &cfg.keybinds, context, inventory));
+}
+
+/// Make a Window menu item's change through winit, which works on a borderless
+/// window too. A full-screen window is left alone, as AppKit leaves it.
+#[cfg(target_os = "macos")]
+pub(crate) fn perform(command: WindowCommand, window: &winit::window::Window) {
+    if window.fullscreen().is_some() {
+        return;
+    }
+    match command {
+        WindowCommand::Minimize => window.set_minimized(true),
+        WindowCommand::Zoom => window.set_maximized(!window.is_maximized()),
+    }
 }
 
 #[cfg(test)]

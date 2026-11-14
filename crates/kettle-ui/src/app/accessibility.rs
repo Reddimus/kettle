@@ -188,6 +188,11 @@ impl App {
                 children.push(persistent_notice_id(pane, 0));
                 nodes.extend(persistent_notice_nodes(pane, &toast));
             }
+            if let Some(label) = overlay.resize_overlay_text.as_deref() {
+                let (id, node) = font_size_chip_node(label);
+                children.push(id);
+                nodes.push((id, node));
+            }
         }
         ws.accessibility_text_rows
             .borrow_mut()
@@ -1051,6 +1056,7 @@ impl App {
                 }
             }
         }
+        overlay_live_region_key(overlay).hash(&mut hasher);
         self.update_toast_focus.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
@@ -1326,8 +1332,8 @@ impl App {
                     .find(|b| window_control_accessibility_id(b.action) == request.target_node)
                 {
                     self.activate_window_control(ws, control.action, event_loop);
-                } else if request.target_node == ACCESSIBILITY_TAB_NEW_ID {
-                    self.handle_action(ws, Action::NewTab, event_loop);
+                } else if let Some(action) = tab_button_action(request.target_node) {
+                    self.handle_action(ws, action, event_loop);
                 } else if request.target_node == ACCESSIBILITY_TAB_MENU_ID {
                     let (x, y, _, h) = bar.new_tab_menu;
                     self.open_new_tab_menu(ws, x, y + h);
@@ -1586,6 +1592,20 @@ impl App {
             }
             return;
         }
+        if ws.theme_picker_input.is_some()
+            && let Some(slot) = accessibility_theme_slot(request.target_node)
+        {
+            if request.action == AccessibilityAction::Click {
+                self.switch_theme_slot(ws, slot);
+            }
+            return;
+        }
+        if ws.theme_picker_input.is_some() && accessibility_theme_contrast(request.target_node) {
+            if request.action == AccessibilityAction::Click {
+                self.step_picker_contrast(ws);
+            }
+            return;
+        }
         if let Some(kind) = accessibility_modal_input_kind(ws)
             && [
                 accessibility_modal_id(kind, 1),
@@ -1722,6 +1742,33 @@ const ACCESSIBILITY_UPDATE_STATUS_ID: NodeId = NodeId((1 << 59) + 2);
 pub(super) const ACCESSIBILITY_UPDATE_DETAILS_ID: NodeId = NodeId((1 << 59) + 3);
 pub(super) const ACCESSIBILITY_UPDATE_DISMISS_ID: NodeId = NodeId((1 << 59) + 4);
 pub(super) const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+/// The font size chip's live region.
+const ACCESSIBILITY_FONT_SIZE_ID: NodeId = NodeId((1 << 59) + 5);
+
+/// The live regions an `Overlay` brings to the tree on its own: the font
+/// size chip's comes and goes, and changes text, with no other change to the
+/// tree, so the tree must rebuild when it does.
+pub(super) fn overlay_live_region_key(overlay: &Overlay) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    overlay.resize_overlay_text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A polite live region that says what the font size chip shows, so a
+/// screen reader hears the new size and grid as the chip appears.
+///
+/// Screen readers speak a live region when its content changes. A chip
+/// shown again with the same caption while this node is still in the tree
+/// (another step at the 5 or 72 size limit, say) leaves its label as it was,
+/// so it is not spoken again; the painted chip still shows. That is accepted:
+/// the size did not change. Not yet checked live with VoiceOver or Orca.
+pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
+    let mut status = Node::new(Role::Status);
+    status.set_label(label.to_owned());
+    status.set_live(accesskit::Live::Polite);
+    (ACCESSIBILITY_FONT_SIZE_ID, status)
+}
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
 /// stays below this bit; never by its nonce.
@@ -2201,6 +2248,35 @@ fn push_text_input_run(
     nodes.push((run_id, run));
 }
 
+/// The theme picker footer's node index, past any row's (rows start at 3).
+pub(super) const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
+/// The footer's dark and light sides, as radio buttons, just below it.
+const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
+    (PICKER_FOOTER_A11Y_INDEX - 2, kettle_render::ThemeSlot::Dark),
+    (
+        PICKER_FOOTER_A11Y_INDEX - 1,
+        kettle_render::ThemeSlot::Light,
+    ),
+];
+/// The radio group that holds the two sides, below them.
+const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
+/// The footer's Contrast button, below the group. It is the lowest footer
+/// index, so the rows below it never reach the footer's nodes.
+pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
+
+/// Whether `node` is the theme picker's Contrast button.
+pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
+    node == accessibility_modal_id(MODAL_KIND_THEMES, PICKER_CONTRAST_A11Y_INDEX)
+}
+
+/// The theme picker side whose radio button `node` is, if any.
+pub(super) fn accessibility_theme_slot(node: NodeId) -> Option<kettle_render::ThemeSlot> {
+    PICKER_SLOT_A11Y_INDEX
+        .into_iter()
+        .find(|&(index, _)| accessibility_modal_id(MODAL_KIND_THEMES, index) == node)
+        .map(|(_, slot)| slot)
+}
+
 fn push_picker_accessibility(
     projection: &mut ModalAccessibilityProjection,
     overlay: &Overlay,
@@ -2221,6 +2297,10 @@ fn push_picker_accessibility(
     let mut input = Node::new(Role::TextInput);
     if let Some(field) = field {
         input.set_bounds(bounds(field.rect));
+        // What the painted placeholder says; never the field's value.
+        if !field.placeholder.is_empty() {
+            input.set_placeholder(field.placeholder.clone());
+        }
     }
     input.set_label(label);
     input.set_value(query);
@@ -2271,9 +2351,81 @@ fn push_picker_accessibility(
     list.set_children(list_children);
     projection.nodes.push((list_id, list));
 
+    let mut dialog_children = vec![input_id, list_id];
+    // The theme picker's footer reads as one line of text: the painted
+    // readout and status, plus what its swatch and marks show.
+    if let Some(menu) = menu
+        && let Some(footer) = menu.picker_footer.as_ref()
+    {
+        let footer_id = accessibility_modal_id(kind, PICKER_FOOTER_A11Y_INDEX);
+        let mut text = Node::new(Role::Label);
+        text.set_label(kettle_render::theme_footer_description(footer, tr));
+        let (x, y, w, h) = menu.rows_rect();
+        text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
+        projection.nodes.push((footer_id, text));
+        dialog_children.push(footer_id);
+        let layout = menu.picker_footer_layout(tr, footer.cell);
+        // The Contrast button, over its painted words and rect; a click
+        // steps it as a press does.
+        let button_id = accessibility_modal_id(kind, PICKER_CONTRAST_A11Y_INDEX);
+        let mut button = Node::new(Role::Button);
+        button.set_label(kettle_render::contrast_button_text(
+            footer.minimum_contrast,
+            tr,
+        ));
+        button.add_action(AccessibilityAction::Click);
+        match layout.as_ref().and_then(|layout| layout.contrast_button) {
+            Some(rect) => button.set_bounds(bounds(rect)),
+            None => button.set_hidden(),
+        }
+        projection.nodes.push((button_id, button));
+        dialog_children.push(button_id);
+        // Each side is a radio button in one group: a click edits that
+        // side's theme. Its words and bounds are the painter's. A fixed
+        // theme has no sides, and no group.
+        let chips = layout.map(|layout| layout.slot_chips).unwrap_or_default();
+        let sides = kettle_render::theme_footer_slots(footer, tr);
+        let mut group_children = Vec::new();
+        for (slot, words, editing) in sides {
+            let Some((index, _)) = PICKER_SLOT_A11Y_INDEX
+                .into_iter()
+                .find(|&(_, side)| side == slot)
+            else {
+                continue;
+            };
+            let id = accessibility_modal_id(kind, index);
+            let mut radio = Node::new(Role::RadioButton);
+            radio.set_label(words);
+            radio.set_toggled(editing.into());
+            radio.add_action(AccessibilityAction::Click);
+            match chips.iter().find(|&&(_, side)| side == slot) {
+                Some(&(rect, _)) => radio.set_bounds(bounds(rect)),
+                None => radio.set_hidden(),
+            }
+            projection.nodes.push((id, radio));
+            group_children.push(id);
+        }
+        if !group_children.is_empty() {
+            let group_id = accessibility_modal_id(kind, PICKER_SIDES_A11Y_INDEX);
+            let mut group = Node::new(Role::RadioGroup);
+            group.set_label(kettle_render::theme_follow_label(footer.follow, tr));
+            if let Some(rect) = chips.iter().map(|&(rect, _)| rect).reduce(|a, b| {
+                let x0 = a.0.min(b.0);
+                let y0 = a.1.min(b.1);
+                let x1 = (a.0 + a.2).max(b.0 + b.2);
+                let y1 = (a.1 + a.3).max(b.1 + b.3);
+                (x0, y0, x1 - x0, y1 - y0)
+            }) {
+                group.set_bounds(bounds(rect));
+            }
+            group.set_children(group_children);
+            projection.nodes.push((group_id, group));
+            dialog_children.push(group_id);
+        }
+    }
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);
-    dialog.set_children([input_id, list_id]);
+    dialog.set_children(dialog_children);
     dialog.set_bounds(menu.map_or(full_bounds, |menu| bounds(menu.card_rect())));
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
@@ -3345,6 +3497,21 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+/// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
+const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
+
+/// The action a screen reader's click on one of the strip's own buttons
+/// runs: New tab opens a tab, and the macOS title bar's gear opens Settings
+/// as Cmd+, does.
+pub(super) fn tab_button_action(node: NodeId) -> Option<Action> {
+    if node == ACCESSIBILITY_TAB_NEW_ID {
+        Some(Action::NewTab)
+    } else if node == ACCESSIBILITY_TAB_SETTINGS_ID {
+        Some(Action::OpenSettings)
+    } else {
+        None
+    }
+}
 
 pub(super) fn accessibility_tab_id(anchor: u64, close: bool) -> NodeId {
     NodeId((1 << 54) | (anchor * 2 + 4) | u64::from(close))
@@ -3376,7 +3543,14 @@ pub(super) fn tab_accessibility_projection(
         };
         let id = accessibility_tab_id(anchor, false);
         let mut tab = Node::new(Role::Tab);
-        tab.set_label(seg.title.clone());
+        // The marker a background tab shows is read after its name, as a
+        // label: every platform reads labels, not every one descriptions.
+        tab.set_label(match seg.activity {
+            RenderTabActivity::Normal => seg.title.clone(),
+            RenderTabActivity::Output => tr.a11y_tab_new_output(&seg.title),
+            RenderTabActivity::Bell => tr.a11y_tab_bell(&seg.title),
+            RenderTabActivity::Silent => tr.a11y_tab_output_stopped(&seg.title),
+        });
         tab.set_selected(seg.active);
         tab.add_action(AccessibilityAction::Click);
         tab.add_action(AccessibilityAction::Focus);
@@ -3411,6 +3585,11 @@ pub(super) fn tab_accessibility_projection(
             } else {
                 kettle_i18n::Text::A11yMainMenu
             }),
+        ),
+        (
+            ACCESSIBILITY_TAB_SETTINGS_ID,
+            bar.settings,
+            tr.text(kettle_i18n::Text::SettingsA11yTitle),
         ),
     ] {
         if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {
@@ -3485,6 +3664,7 @@ mod context_menu_nesting_tests {
         ContextMenu {
             status: None,
             picker_header_height: 0.0,
+            picker_footer: None,
             anchor,
             rows: vec![ContextMenuRow {
                 toggle: None,

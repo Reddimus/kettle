@@ -270,14 +270,8 @@ impl App {
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = None;
-                ws.hovered_close_idx = None;
-                ws.hovered_tab_idx = None;
-                ws.pressed_new_tab = false;
-                ws.pressed_new_tab_menu = false;
-                ws.hovered_new_tab = false;
-                ws.hovered_new_tab_menu = false;
-                ws.hovered_window_control = None;
-                ws.pressed_window_control = None;
+                ws.leave_tab_bar();
+                self.track_titlebar_pointer(ws, TitlebarPointer::Leave);
                 ws.search.hovered_control = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
@@ -293,6 +287,7 @@ impl App {
             WindowEvent::CursorEntered { .. } => {
                 let prev = std::mem::take(&mut ws.detach_drag);
                 ws.detach_drag = prev.on_cursor_reenter_window();
+                self.track_titlebar_entry(ws);
                 ws.selection_autoscroll_edge = 0;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -302,6 +297,10 @@ impl App {
                 ws.link_hover_key = Some(current_links_scan_key(ws));
                 ws.cursor = position;
                 ws.native_pointer = Some(position);
+                // Before AppKit sees a press here, hold the window still over
+                // a title-bar control.
+                let at = (position.x as f32, position.y as f32);
+                self.track_titlebar_pointer(ws, TitlebarPointer::Move(at.0, at.1));
                 ws.selection_autoscroll_edge = 0;
                 // A press the lane took owns the pointer's motion until its
                 // release: it resizes the lane or pans its item, and nothing
@@ -531,6 +530,10 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left {
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Press(at.0, at.1));
+                }
                 // A fresh press while torn-drag tracking is live. For a NATIVE
                 // drag any client press means the tracking is stale (the OS
                 // modal loop / WM grab swallows presses mid-drag) — abandon,
@@ -756,7 +759,13 @@ impl App {
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
-                    if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
+                    if press_settings_gear(ws, &bar, (px, py), bcode) {
+                        // The Settings gear opens on release, like a native
+                        // button; a middle press does nothing.
+                    } else if bcode == 0
+                        && bar.new_tab_menu.2 > 0.0
+                        && in_bar(bar.new_tab_menu, px, py)
+                    {
                         // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
                         // `+` so the arrow region isn't swallowed by the button.
@@ -1041,12 +1050,27 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                if button == MouseButton::Left {
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
+                }
                 if button == MouseButton::Left && (ws.pressed_new_tab || ws.pressed_new_tab_menu) {
                     ws.pressed_new_tab = false;
                     ws.pressed_new_tab_menu = false;
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
+                }
+                if button == MouseButton::Left
+                    && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
+                {
+                    if let Some(action) = action {
+                        self.handle_action(ws, action, event_loop);
+                    }
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
                 }
                 if button == MouseButton::Left
                     && let Some(action) = ws.pressed_window_control.take()
@@ -1179,7 +1203,16 @@ impl App {
                     return;
                 }
                 if selection_release_matches(ws.selection_button, bcode) {
+                    let dragged = ws.selection_dragged;
                     self.finish_selection_gesture(ws);
+                    // A drag hid the link under the pointer. Its hint and
+                    // hand cursor come back on release, not on the next move.
+                    if dragged {
+                        self.sync_cursor_icon(ws);
+                        if let Some(w) = &ws.window {
+                            w.request_redraw();
+                        }
+                    }
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
@@ -1393,11 +1426,10 @@ impl App {
                     }
                 }
                 if !f {
-                    ws.pressed_window_control = None;
-                    ws.hovered_window_control = None;
+                    ws.release_titlebar_buttons();
+                    let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                     ws.titlebar_click = None;
-                    ws.pressed_new_tab = false;
-                    ws.pressed_new_tab_menu = false;
                     self.confirm_cancel_press(ws);
                     ws.confirm_pointer_release = false;
                     // Retire the blink layer so the next frame paints the steady
@@ -1973,8 +2005,9 @@ impl App {
                 // The theme picker sits over Settings when the Theme row
                 // opened it, so it takes the keys first.
                 if ws.theme_picker_input.is_some() {
+                    let sides = self.theme_picker_key_for(ws) != "theme";
                     if !modal_repeat_is_inert(
-                        ModalRepeat::Palette,
+                        ModalRepeat::ThemePicker { sides },
                         event.repeat,
                         &event.logical_key,
                         ws.mods.control_key(),

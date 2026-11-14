@@ -207,6 +207,7 @@ fn context_menu_hover_preserves_text_damage_key() {
         a11y_label: None,
         status: None,
         picker_header_height: 0.0,
+        picker_footer: None,
     };
     let foreground = kettle_config::Rgb::new(220, 220, 220);
     let background = kettle_config::Rgb::new(20, 20, 20);

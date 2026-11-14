@@ -10,6 +10,88 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Settings › Appearance has a Minimum contrast row after Theme, for
+  `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
+  config, such as 2.5, shows as it is until you step it.
+
+- The theme picker shows more under its list. A sample card draws the
+  highlighted theme as the terminal would: a prompt, an `ls -l` listing, a
+  diff and all 16 palette colours, with your colour overrides and
+  `minimum-contrast` applied. Its last line gives the contrast of the
+  theme's text and of its least readable colour, with that colour's swatch,
+  and marks a colour below 3:1. A status line says whether the theme
+  follows the system, a schedule, a forced side or is fixed, names the dark
+  and the light theme and marks the side a pick saves to, and has a
+  Contrast button that steps `minimum-contrast` through Off, 3:1, 4.5:1
+  and 7:1. The list now shows up to 14 rows when the window has room; on a
+  short window the card goes first.
+
+- The theme picker can change the theme for the appearance you are not in.
+  Click the other side's name on its status line, such as "Light:" while
+  the system is dark: the list moves to that theme, the window previews your
+  picks, and Enter (the hint reads "save for light appearance") writes only
+  `light-theme` and puts the window back on its dark theme. Screen readers
+  offer both sides as radio buttons. Tab or Shift+Tab switches to the other
+  side too (the hint reads "Tab: light theme"), while the arrows keep moving
+  rows; with a fixed theme, which has no sides, Tab moves down a row and
+  Shift+Tab now moves up one.
+
+- A searchable list of every keyboard shortcut. Choose Help > Keyboard
+  Shortcuts on macOS, Keyboard shortcuts in the new-tab ▾ menu, or "Show
+  keyboard shortcuts" in the command palette: the palette opens listing only
+  the commands that have a shortcut, each with its shortcut, and Enter runs
+  the selected one. Its empty field reads "Search keyboard shortcuts…". The
+  action is `show_keybinds` (alias `keyboard_shortcuts`) for a `keybind` line;
+  it has no default shortcut.
+
+- macOS has a Help menu, last in the menu bar, with Kettle Help (the README,
+  as the palette's help command opens) and Keyboard Shortcuts. As in other
+  Mac apps, its search field finds any menu command by name. The new-tab ▾
+  menu on every platform gains Keyboard shortcuts and Help rows.
+
+- The command palette's empty search field says "Type a command…" in grey
+  until you type, in the UI language. In a window too narrow for it beside the
+  key hint, it is left out rather than cut off.
+
+- Broadcast input has its own menu. The macOS Shell menu and the
+  right-click menu have a Broadcast Input submenu (Enviar la entrada a varios
+  paneles) with Off, Panes in This Tab, Panes in This Window and Panes in
+  This Group. The current scope is checked, choosing the checked row stops
+  broadcasting, and the broadcast chord's shortcut shows on the row it turns
+  on. Panes in This Group is unavailable while the focused pane has no
+  group. The checkmark also follows a group scope that ends because its last
+  pane closed.
+
+- On macOS, the title bar shows a Settings gear before the new-tab `▾ +`
+  buttons, so Settings is one click away in every window. Clicking it opens
+  Settings, as Cmd+, does; its tooltip names whichever key opens Settings,
+  and screen readers call it Settings (Configuración in Spanish). The gear
+  sits apart from `▾ +`, which do not move, and it hides only when the
+  window is too narrow to keep a tab beside it. A lone tab stays centred
+  on the window beside it, narrowing in a narrow window. Windows and Linux keep
+  Settings in their `▾` and `≡` menus.
+
+- Making the font larger or smaller, or resetting it, from the keyboard,
+  the menus or Ctrl+scroll shows the new size and the grid it leaves, such
+  as "Font size 14 · 80×24", in the middle of the window for a moment, the
+  way a window resize shows its size. Screen readers announce the same
+  text. `resize-overlay = never` turns it off along with the resize chip.
+
+- Vi mode can select whole lines and blocks from the keyboard, as Vim does:
+  `V` starts a line selection and `Ctrl+v` a block (rectangular) selection
+  at the vi cursor, beside `v` for characters. Pressing another of the three
+  turns the current selection into that kind, and the same key again ends
+  it. `y` copies whole lines or the selected columns of each row.
+
+- After a session restore on macOS and Linux, a shell that runs `clear` at
+  startup no longer hides the restored output. The restored rows and the
+  "Restored" divider stay on screen with the prompt below them, whichever
+  order `clear` sends its sequences in. Only that first clear is affected;
+  later clears work as before. A startup program that clears and then draws
+  at fixed positions outside the alternate screen can draw over restored
+  rows; `restore-scrollback-lines = 0` turns restored output off. Windows is
+  unchanged.
+
 - Renaming a tab and moving it to a new window no longer need the right-click
   menu or a tab drag. The command palette lists "Rename tab…" beside its
   existing "Move tab to new window", and on macOS the menu bar's Window menu
@@ -148,8 +230,131 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the Window menu. Shortcuts chosen from the keyboard still go through
   Kettle's own key handling, so a program that owns the keyboard keeps its
   chords.
+- `kettle ctl ui_geometry` reports `typed_echo`, counts for comparing builds
+  while typing: keystroke echoes, echoes the shell wrote in two parts (as
+  zsh-autosuggestions does when a key changes its suggestion), frames
+  presented per keystroke, `output_frames` (those that painted the keystroke's
+  echo), `intermediate_frames` (frames that showed the half-written state of a
+  split echo), `late_superseded_frames` (frames replaced within one refresh
+  rather than within 3 ms), `settled_echoes` (waits that ran to the 3 ms
+  deadline) and `settled_early` (waits that ended when Kettle handled the
+  wake of the echo's second write). They count only typed characters and
+  backspaces sent to a pane with nothing left unpainted, and only that pane's
+  output: Enter, Tab, arrows, control keys, pastes, other panes' output and
+  type-ahead while a pane prints are left out. Counts only, never text.
 
 ### Changed
+
+- The macOS menu bar reads like a Mac app's. View has one Enter Full Screen
+  item, on Control-Command-F, that reads Exit Full Screen while the window
+  is full screen; before, View listed Kettle's item and the system's both.
+  F11 and the green button still toggle the same full screen. Shell lists
+  Split Left and Split Up beside Split Right and Split Down. Window starts
+  with the system's Minimize (Command-M) and Zoom and ends with Bring All to
+  Front. Full screen, Minimize and Zoom work on a borderless window too, and
+  Minimize and Zoom are off while the window is full screen, as in other
+  apps. English titles are in title case: SSH Launcher…, Quick-Select Hints
+  and Toggle Quick Terminal. A chord you bind yourself still wins over the
+  menu's. When Command-M and Control-Command-F are not bound in Kettle, macOS
+  takes them for the menu before Kettle sees them, so programs running in
+  Kettle and keybind capture in Settings don't receive them.
+- The key hint beside a picker's search field and its "No matching command"
+  style messages are easier to read: they use the same clearer grey as menu
+  shortcuts, at least 7:1 against the panel where the theme's own text
+  reaches that, instead of about 4.5:1. Unavailable rows in right-click menus
+  stay dimmed.
+- The command palette and the theme, layout and SSH pickers show eight full
+  rows starting right under the search field when the list is longer than
+  that, instead of six rows under an empty strip, and a thin scrollbar thumb
+  at the right edge shows where in the list you are. The panel ends at its
+  last row in a short window. The wheel and the arrow keys scroll as before;
+  the strips that scrolled when hovered are gone. Right-click menus are
+  unchanged.
+- The command palette ranks a command by the best way the typed text fits
+  its name, and leaves out names the text only lies scattered through while
+  a closer match exists. "font" now lists the font-size commands and no
+  longer puts "Focus next pane" first, "split" no longer lists the broadcast
+  and close-confirmation rows, and "theme" marks the word in "Next theme"
+  instead of the "t" of "Next". The SSH launcher and theme picker rank by the
+  same better fit. A text that only fits scattered still lists everything it
+  fits.
+
+- On macOS, Kettle waits up to 3 ms before painting a typed echo from a pane
+  whose echoes have been arriving in two writes, so both writes can land in
+  one frame. The second write wakes Kettle, and Kettle paints when it handles
+  that wake; only an echo that comes in one write waits the full 3 ms, and so
+  does a key typed before the previous key's echo has arrived.
+  zsh-autosuggestions redraws each key that changes its suggestion in two
+  writes about a millisecond apart, first without the gray suggestion and
+  then with the new one, and Kettle could present the first on its own for a
+  whole refresh. A pane starts waiting when the echo of a typed character or
+  backspace arrives in two writes within 3 ms, and stops 5 seconds after the
+  last such echo. Only typed characters
+  and backspaces wait: Enter, Tab, arrows and other control keys are painted
+  at once, even in a pane that waits, and so is type-ahead while the pane is
+  still printing. A paste of any length never starts a wait or teaches a pane
+  to wait. Shells that echo each typed key in one write are painted at once,
+  as before. `ui_geometry.typed_echo.settled_echoes` counts the waits that ran
+  to their deadline, and `settled_early` those that ended at the second write.
+  In a live comparison on macOS with zsh-autosuggestions, a build that always
+  waited the full 3 ms, before the wait could end early, cut the frames that
+  showed a half-written echo from about one per split echo to one in twenty.
+  Ending the wait at the second write has not been measured live.
+
+- The command palette names the broadcast chord's row after the scope it
+  turns on, so with `broadcast-default = all` it reads "Broadcast input to
+  every pane in window" instead of claiming the tab. Each scope is listed
+  once in both languages. A new `broadcast_panes_in_tab` action always
+  broadcasts to the focused tab, whatever `broadcast-default` says; it has no
+  default chord. `broadcast-default = off` still keeps the chord from turning
+  broadcast on.
+
+- The profile menu is now called New Window with Profile (Nueva ventana con
+  perfil), since each profile has always opened in a new window. In the
+  macOS Shell menu it sits right below New Window.
+
+- The size chip a window resize shows (`120×40`) is now as wide as its drawn
+  text, measured from the same text it paints, rather than from a count of
+  grid cells. That lets it fit the font size caption, and on any platform the
+  plain `cols×rows` chip may be a pixel wider or narrower than before.
+
+- When a window loses focus its selection turns a neutral grey, as a
+  selection in an inactive macOS window does, instead of a dimmer shade of
+  the same colour, so it changes colour as well as strength. The grey stays
+  at least 2:1 from the theme's background and at least 1.3:1 quieter than
+  the focused colour. With the window's background see-through (the macOS
+  and Windows default), selection colours are now chosen against the
+  background as it shows over the desktop, not against the theme's solid
+  colour. There the unfocused grey reaches about 2:1 where the focused
+  colour leaves room for it (TokyoNight Night at 86% opacity: 1.85:1, from
+  1.31:1 before), and the focused colour moves a little further from the
+  background, on the side it already sits, while selected text keeps at
+  least 4.5:1. Where the background as shown would pass the selection
+  itself, as TokyoNight Night's does over a white page below about 65%
+  opacity, both colours stay those of an opaque window. Linux, at 99%
+  opacity, changes by about 1%. An opaque window, and one under macOS
+  Reduce Transparency, keeps the focused colours it had.
+
+- Background tabs in a top or bottom tab bar mark their state with a shape
+  as well as a colour: a filled dot for new output, a ring when the output
+  has stopped, and a triangle when the bell rang. The marks are larger,
+  scale with the display instead of shrinking on Retina screens, and keep at
+  least 3:1 contrast against the tab behind them, hovered or not. Vertical
+  tabs keep the old dots until 6.1. Screen readers read the state after the
+  tab's name, for example "build, bell rang".
+
+- The active tab's bar is thicker (3 pixels, scaled) and keeps at least 3:1
+  contrast against both the tab and the strip, in broadcast mode too. Over
+  a wallpaper, some strip colours leave no colour at 3:1 against both (41
+  bundled themes under the default `chrome-background = theme`), and the
+  bar then takes the strongest contrast it can.
+  Hovering a tab or a strip button now shades it more lightly, so the active
+  tab stays the strongest mark in the strip.
+
+- When closing a tab, window or pane would stop a program running in a
+  single pane, the question names it: "The program sleep is still running."
+  Only the program's name is shown, never its arguments. Shells, programs
+  Kettle cannot read, and Windows keep the general wording.
 
 - Kettle's own menus look more like the system's. The right-click menu and
   its submenus are rounded panels on a soft shadow, as the command palette,
@@ -365,6 +570,93 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On macOS, title-bar buttons no longer drag the window. AppKit moved the
+  window with any press in the title bar, so a press on the Settings gear,
+  `▾`, `+` or a tab's close button that was dragged off came back over the
+  button with the window, and a release there opened Settings. Dragging a
+  tab in a window with several tabs moved the window too, instead of
+  reordering the tab or tearing it off. Empty title-bar space and a lone
+  tab still move the window, and a double-click on empty space still zooms
+
+- The outlines of Settings' fields, choices and switches, the search
+  field, the category arrows and an off switch's knob were about 1.5:1. They
+  now keep 3:1 against the panel (3.0:1 in TokyoNight Night). On the
+  highlighted row they are brighter, keeping 3:1 against the highlight too
+  (6.2:1 against the panel there). The panel's own outline and divider stay
+  quiet.
+
+- On a translucent window, text on the active tab was checked against the
+  theme's background rather than what the window shows over the desktop.
+  Over a light desktop the Cmd+N hint fell to about 3.2:1 at macOS's default
+  86%. In a focused window the title, hint and close glyph now keep 4.5:1
+  against the tab as it shows over a black or a white backdrop. On macOS,
+  which shows a translucent window a few levels brighter at both ends, the
+  backdrop is lifted by the amount one capture measured. Where no text colour
+  can reach 4.5:1, the active tab is drawn up to 10% more opaque over a solid
+  background; at 86% that is Blue Dolphin, Grass and Hot Dog Stand, and on
+  macOS also Fairyfloss and Ocean. It is never raised over an image,
+  starfield or transparent background, where it would show as a seam, and
+  past that limit the text is as clear as it can be. Linux's default 99%
+  window is translucent too, so its tab hints move by up to 7 levels.
+
+- In an unfocused window, tab titles and Cmd+N hints were dimmed to 3:1, as
+  low as 2.5:1 on a translucent window. Titles are still dimmed, but keep
+  4.5:1, because they name the tabs. The hints, which are for the keyboard,
+  are no longer drawn until the window is focused again; their space stays,
+  so nothing moves. The +, ▾ and × glyphs keep their 3:1.
+
+- The search bar's "No matches" fell to 4.45:1 on a translucent window,
+  because the terminal showed through the bar. Over a translucent terminal
+  the bar is now drawn opaque, in the colour it always had over the theme's
+  background.
+
+- The "↓ N lines" button's label reached 4.5:1 only at full ink, passing by
+  a rounding step (4.503:1 in TokyoNight Night). It now keeps 4.5:1 at the
+  edges of its strokes too. In a few themes the button's fill moves slightly
+  toward the terminal to make room.
+
+- On macOS, quitting with ⌘Q, the Dock's or the app menu's Quit, or by
+  logging out or shutting down now saves the session on the way out, as
+  closing the last window already did. Before, the restored session could
+  miss whatever changed since the last background save (a directory, a
+  split, a tab title), and a save still being written could be lost. The
+  same quit now also deletes the private copies of pasted screenshots and of
+  files opened in the image viewer, document viewer or video player, which
+  were left behind. A slow disk or a hung network home holds a quit up for
+  at most about 2 seconds; a session write that has not finished by then
+  leaves the previous session file intact.
+
+- A link no longer draws its hover underline across text you have selected.
+  While a selection is being dragged, the links it passes over show no
+  underline, "click to open" hint or hand cursor. Once the button is
+  released, a selected link keeps its hint and hand cursor, and its underline
+  comes back when the selection is cleared. ⌘-click and Ctrl+click still open
+  it.
+
+- Starting a recording into a directory could fail with "resource
+  temporarily unavailable" when a new pane opened at the same moment as
+  recording retention removed an old file. Kettle now takes the next file
+  name instead.
+
+- In an unfocused window, the active tab's bar was the same colour as a
+  hovered tab and reached only 1.5:1. It is now grey at 3:1 or more, with
+  the same wallpaper exception as the bar itself, and vertical tabs follow
+  window focus too.
+
+- In a top or bottom tab bar, tab activity marks in several light themes,
+  and the Silent mark in TokyoNight Night, fell below 3:1 contrast.
+  Vertical tabs keep the old dots until 6.1.
+
+- When the config file is saved while the theme picker previews a theme,
+  such as by the picker's Contrast button or an edit in another app, the
+  reload puts the preview back at once, so the window no longer briefly
+  shows the saved theme under the picker.
+
+- A scrolling picker (the command palette, theme, layout and SSH pickers) no
+  longer leaves a blank part-row under its last result. It used to paint six
+  whole rows in room for eight; it now paints eight, and the last row it
+  paints takes a click.
 
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the

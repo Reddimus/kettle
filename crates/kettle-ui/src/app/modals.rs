@@ -110,6 +110,11 @@ pub(super) fn place_picker_header(
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
+        // The title bar's Settings gear is outside the Settings panel, but a
+        // press there arms the gear rather than closing Settings.
+        if self.press_settings_gear_over_settings(ws, button) {
+            return true;
+        }
         let Some((kind, inside)) = self.modal_press_target(ws) else {
             return false;
         };
@@ -192,20 +197,28 @@ impl App {
             })
         } else {
             field_hit
-                || open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())
-                    .and_then(|list| {
-                        picker_context_menu(
-                            list,
-                            surface,
-                            (cw, ch),
-                            (
-                                self.overlay_text_cell_width(ws),
-                                self.overlay_text_line_height(ws),
-                            ),
-                            self.picker_top_chrome(ws),
-                        )
-                    })
-                    .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
+                || open_picker_list(
+                    ws,
+                    &self.cfg,
+                    self.theme_picker_key_for(ws),
+                    &self.ui_text,
+                    self.update_notice().as_ref(),
+                )
+                .and_then(|list| {
+                    picker_context_menu(
+                        list,
+                        surface,
+                        (cw, ch),
+                        (
+                            self.overlay_text_cell_width(ws),
+                            self.overlay_text_line_height(ws),
+                        ),
+                        self.picker_top_chrome(ws),
+                    )
+                })
+                // The whole card: the query header, any pinned status band
+                // and the theme picker's footer included.
+                .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
     }
@@ -229,7 +242,7 @@ impl App {
         let prefix = if ws.palette_input.is_some() {
             "  \u{2318} ".to_string()
         } else if ws.theme_picker_input.is_some() {
-            theme_picker_appearance_prefix(self.theme_pick_key(), &self.ui_text)
+            theme_picker_appearance_prefix(self.theme_picker_key_for(ws), &self.ui_text)
         } else if ws.settings_text_edit.is_some() {
             let set = self.settings_overlay_projection(ws)?;
             rect = kettle_render::settings_value_rect(
@@ -279,7 +292,13 @@ impl App {
             || ws.ssh_input.is_some();
         let picker_menu = if picker {
             Some(picker_context_menu(
-                open_picker_list(ws, &self.cfg, &self.ui_text, self.update_notice().as_ref())?,
+                open_picker_list(
+                    ws,
+                    &self.cfg,
+                    self.theme_picker_key_for(ws),
+                    &self.ui_text,
+                    self.update_notice().as_ref(),
+                )?,
                 (sw, sh),
                 (cw, ch),
                 (
@@ -298,6 +317,8 @@ impl App {
                 .is_some_and(|nav| nav.search_focused)
         {
             use kettle_i18n::Text as T;
+            let theme_hints =
+                theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true);
             let hints: &[(&str, T)] = if ws.palette_input.is_some() {
                 &[
                     ("Enter", T::PickerHintRun),
@@ -305,11 +326,7 @@ impl App {
                     ("Esc", T::PickerHintCancel),
                 ]
             } else if ws.theme_picker_input.is_some() {
-                &[
-                    ("Enter", T::PickerHintKeep),
-                    ("↑↓", T::PickerHintSelect),
-                    ("Esc", T::PickerHintRestore),
-                ]
+                &theme_hints
             } else if ws.layout_picker_input.is_some() {
                 &[
                     ("Enter", T::PickerHintSpawn),
@@ -331,6 +348,7 @@ impl App {
         let (text, cursor_byte, selection) = project_modal_editor(editor, ws.ime_preedit.as_ref());
         let mut field = kettle_render::TextFieldOverlay {
             picker_header: picker,
+            placeholder: picker_placeholder(ws, &self.ui_text),
             text,
             cursor_byte,
             selection,
@@ -356,6 +374,16 @@ impl App {
             );
         }
         let cw = self.modal_field_cell_width(ws, &field);
+        // The theme picker's Tab hint is the first part to go in a narrow header.
+        if ws.theme_picker_input.is_some() && !field.hint.is_empty() {
+            field.hint = theme_picker_header_hint(
+                &field,
+                cw,
+                &self.ui_text,
+                self.theme_picker_key_for(ws),
+                self.theme_pick_key(),
+            );
+        }
         let width = kettle_render::text_field_rects(&field, cw)[1].2;
         field.horizontal_scroll = crate::text_editor::TextEditor::visible_scroll_for(
             &field.text,
@@ -1084,20 +1112,46 @@ impl App {
     ) -> bool {
         let lone_pane = lone_pane_in_scope(ws, scope, &on_confirm);
         let configured_shell = self.cfg.shell.as_deref();
-        let prompt = close_needs_prompt(self.cfg.ask_before_closing, scope, busy, || {
-            lone_pane
-                .and_then(|id| ws.mux.panes.get(&id))
-                .map_or(LonePaneJob::Unknown, |pane| {
-                    if pane.held {
-                        LonePaneJob::Idle
-                    } else {
-                        lone_pane_job(&pane.term, pane.path_argv(), configured_shell)
-                    }
-                })
-        });
+        // One PTY sample decides whether to ask and names what would stop.
+        let sample = std::cell::OnceCell::new();
+        let sample_job = || {
+            *sample.get_or_init(|| {
+                lone_pane.and_then(|id| ws.mux.panes.get(&id)).map_or(
+                    (LonePaneJob::Unknown, None),
+                    |pane| {
+                        if pane.held {
+                            (LonePaneJob::Idle, None)
+                        } else {
+                            sample_lone_pane_job(&pane.term, pane.path_argv(), configured_shell)
+                        }
+                    },
+                )
+            })
+        };
+        let prompt =
+            close_needs_prompt(self.cfg.ask_before_closing, scope, busy, || sample_job().0);
         if !prompt {
             return false;
         }
+        // The busy program's name only, never its arguments. It is private:
+        // neither it nor the body is logged, and ctl diagnostics carry only
+        // the dialog's rectangles and button labels.
+        #[cfg(unix)]
+        let program = if scope == 1 {
+            sample_job().1.and_then(|pid| {
+                busy_program_label(
+                    pid,
+                    kettle_remote::process_argv,
+                    &read_etc_shells(),
+                    configured_shell,
+                )
+            })
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let program: Option<String> = None;
+        let body = close_dialog_body(&self.ui_text, &on_confirm, scope, program.as_deref());
         use kettle_i18n::Text;
         let (title, affirmative) = match &on_confirm {
             ConfirmAction::CloseWindow { .. } => (
@@ -1111,17 +1165,6 @@ impl App {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
             ConfirmAction::RebindKeybind { .. } | ConfirmAction::Paste { .. } => return false,
-        };
-        let consequence = self.ui_text.text(Text::ConfirmCloseConsequences);
-        let body = if matches!(&on_confirm, ConfirmAction::ClosePane(_)) {
-            consequence.to_string()
-        } else {
-            let scope_label = if scope == 2 {
-                self.ui_text.text(Text::ConfirmCloseBothPanes).to_string()
-            } else {
-                self.ui_text.confirm_close_scope(scope as u64)
-            };
-            format!("{scope_label} {consequence}")
         };
         self.close_all_modals(ws);
         self.install_confirm_dialog(
@@ -1498,6 +1541,15 @@ impl App {
             return;
         }
 
+        if let Some(kind) = vi_visual_kind(key, ch, ws.mods) {
+            let cursor = term.vi_mode_cursor.point;
+            let visual = toggle_vi_visual(&mut term.selection, owner.visual, kind, cursor);
+            if let Some(state) = ws.vi_mode.as_mut() {
+                state.visual = visual;
+            }
+            return;
+        }
+
         match ch {
             'g' => {
                 use kettle_core::Dimensions as _;
@@ -1508,23 +1560,6 @@ impl App {
                 use kettle_core::Dimensions as _;
                 let point = kettle_core::Point::new(term.bottommost_line(), kettle_core::Column(0));
                 term.vi_goto_point(point);
-            }
-            'v' => {
-                if owner.visual {
-                    term.selection = None;
-                } else {
-                    let point = term.vi_mode_cursor.point;
-                    let mut selection = kettle_core::Selection::new(
-                        kettle_core::SelectionType::Simple,
-                        point,
-                        kettle_core::Side::Left,
-                    );
-                    selection.update(point, kettle_core::Side::Right);
-                    term.selection = Some(selection);
-                }
-                if let Some(state) = ws.vi_mode.as_mut() {
-                    state.visual = !owner.visual;
-                }
             }
             'y' => {
                 let yanked = if owner.visual {
@@ -1706,10 +1741,13 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
-        let cmds = palette_entries(
+        let cmds = palette_view_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
             ws.palette_profiles.as_deref(),
+            self.cfg.broadcast_default,
+            &self.cfg.keybinds,
+            ws.palette_bound_only,
         );
         let Some((q, sel)) = ws.palette_input.as_mut() else {
             return;
@@ -1736,7 +1774,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let action = selected_palette_action(q, *sel, &cmds, &self.ui_text);
+                let action = palette_enter_action(q, *sel, &cmds, &self.ui_text);
                 ws.palette_input = None;
                 if let Some(a) = action {
                     self.handle_action(ws, a, event_loop);
@@ -2191,6 +2229,44 @@ impl App {
         }
     }
 
+    /// Edit `slot`'s theme in the open theme picker (see
+    /// `switch_theme_picker_slot`) and preview it now: a screen reader's
+    /// click arrives as a user event, which skips `window_event`'s preview
+    /// sync.
+    pub(super) fn switch_theme_slot(
+        &mut self,
+        ws: &mut WindowState,
+        slot: kettle_render::ThemeSlot,
+    ) {
+        let active = self.theme_pick_key();
+        let Some(state) = ws.theme_picker_input.as_mut() else {
+            return;
+        };
+        if switch_theme_picker_slot(state, &self.cfg, active, slot, &self.ui_text) {
+            self.sync_theme_preview(ws);
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// The theme picker's contrast button: step `minimum-contrast` to the
+    /// next listed ratio and save it, as the Settings row does. It is not part
+    /// of the picker's preview, so Esc leaves it as set.
+    pub(super) fn step_picker_contrast(&mut self, ws: &mut WindowState) {
+        let next = kettle_render::step_minimum_contrast(self.cfg.minimum_contrast, true);
+        self.settings_store(
+            ws,
+            "minimum-contrast",
+            kettle_render::minimum_contrast_token(next),
+        );
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// Persist `new_val` for `key_str` from Settings, with the companion keys
     /// and restart notes some settings need, then reload.
     fn settings_store(&mut self, ws: &mut WindowState, key_str: &str, new_val: String) {
@@ -2516,6 +2592,7 @@ impl App {
         if self.modal_editor_key(ws, key) {
             return;
         }
+        let save_key = self.theme_picker_key_for(ws);
         let Some(state) = ws.theme_picker_input.as_mut() else {
             return;
         };
@@ -2540,7 +2617,7 @@ impl App {
                 crate::modal_input::backspace(&mut state.query);
                 state.selected = 0;
             }
-            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+            Key::Named(NamedKey::ArrowDown) => {
                 let n = count(state);
                 step(state, true, n);
             }
@@ -2548,6 +2625,14 @@ impl App {
                 let n = count(state);
                 step(state, false, n);
             }
+            // Tab switches sides when the picker has them (see `theme_picker_tab`).
+            Key::Named(NamedKey::Tab) => match theme_picker_tab(save_key, ws.mods.shift_key()) {
+                ThemePickerTab::Side(slot) => self.switch_theme_slot(ws, slot),
+                ThemePickerTab::Row { forward } => {
+                    let n = count(state);
+                    step(state, forward, n);
+                }
+            },
             Key::Character(s)
                 if self.cfg.vim_menu_nav
                     && ws.mods.control_key()
@@ -2559,9 +2644,10 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 let pick = theme_picker_selection(state, &self.ui_text);
+                let plan = theme_commit_plan(state, &self.cfg, self.theme_active_dark());
                 ws.theme_picker_input = None;
                 if let Some(name) = pick {
-                    self.commit_theme(ws, name);
+                    self.commit_theme(ws, name, plan);
                 }
             }
             Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
@@ -2582,18 +2668,26 @@ impl App {
         }
     }
 
-    /// Keep `name` as the theme. Dropping the preview's baseline makes the
-    /// post-event `sync_theme_preview` keep this pick instead of restoring the
-    /// theme the picker opened on.
-    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str) {
-        ws.theme_preview = None;
-        let key = self.theme_pick_key();
+    /// Save `name` under `plan.key`. A pick for the side the window wears
+    /// is kept: dropping the preview's baseline makes the post-event
+    /// `sync_theme_preview` keep it instead of restoring the theme the picker
+    /// opened on. A pick for the other side is only saved, and the baseline
+    /// puts the window back on the theme it wore.
+    pub(super) fn commit_theme(&mut self, ws: &mut WindowState, name: &str, plan: ThemeCommitPlan) {
+        let key = plan.key;
         match key {
             "light-theme" => self.cfg.light_theme = name.to_string(),
             "dark-theme" => self.cfg.dark_theme = name.to_string(),
             _ => {}
         }
-        self.set_runtime_theme_name(ws, name);
+        if !plan.restore_active {
+            ws.theme_preview = None;
+            self.set_runtime_theme_name(ws, name);
+        } else {
+            // Put the window's theme back now, not at the next window event:
+            // Enter can come from a control or remote command.
+            self.sync_theme_preview(ws);
+        }
         // Theme is config-governed, so persist it to the config file, not the
         // session. A session-pinned theme would OVERRIDE the config/compile-time
         // default on restore, so neither a default change nor a fresh-config
@@ -2843,6 +2937,148 @@ pub(super) enum LonePaneJob {
     Unknown,
 }
 
+/// The close question's body. When one pane would close and the program it
+/// would stop is known, the body names that program; otherwise it is the
+/// general wording for the scope. The same string is measured, painted and
+/// read to screen readers.
+///
+/// Accepted limitations: a script shows as its interpreter (`bash` for
+/// `./deploy.sh`), a pipeline is named after its first command (`cat` for
+/// `cat f | less`), the text is not refreshed if the job exits while the
+/// question is open, and "closing stops it" is wrong for a program that
+/// ignores SIGHUP.
+pub(super) fn close_dialog_body(
+    tr: &kettle_i18n::Translator,
+    action: &ConfirmAction,
+    scope: usize,
+    program: Option<&str>,
+) -> String {
+    use kettle_i18n::Text;
+    if let Some(program) = program
+        && scope == 1
+    {
+        return tr.confirm_close_running(program);
+    }
+    let consequence = tr.text(Text::ConfirmCloseConsequences);
+    if matches!(action, ConfirmAction::ClosePane(_)) {
+        consequence.to_string()
+    } else {
+        let scope_label = if scope == 2 {
+            tr.text(Text::ConfirmCloseBothPanes).to_string()
+        } else {
+            tr.confirm_close_scope(scope as u64)
+        };
+        format!("{scope_label} {consequence}")
+    }
+}
+
+/// The name a close question shows for a program: `argv[0]`'s base name, cut
+/// at the first space or `:` (programs that rewrite `argv[0]`, such as
+/// `postgres: user db host idle`, put private detail after it), with control
+/// and bidirectional characters ending it, invisible ones gone, at most 64
+/// characters and 32 columns. `None` when nothing visible is left. `argv[0]`
+/// is untrusted: the program sets it.
+#[cfg(any(unix, test))]
+pub(super) fn close_program_label(argv0: &str) -> Option<String> {
+    // Enough for any real program name; a base character can otherwise
+    // carry hundreds of combining marks in one column.
+    const MAX_NAME_CHARS: usize = 64;
+    let name = argv0.strip_prefix('-').unwrap_or(argv0);
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let name: String = super::title::sanitize_title(name)
+        .chars()
+        .filter(|&c| !is_invisible_in_a_name(c))
+        .collect();
+    let name = name
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if crate::text_editor::display_width(name) == 0 {
+        return None;
+    }
+    let mut capped: String = name.chars().take(MAX_NAME_CHARS).collect();
+    if capped.len() < name.len() {
+        capped.push('…');
+    }
+    Some(super::menus::ellipsize_menu_label(&capped, 32))
+}
+
+/// Characters that draw nothing in a program name, so a program could use
+/// them to hide or pad what the question shows: every
+/// Default_Ignorable_Code_Point (DerivedCoreProperties.txt) and format
+/// character (General_Category Cf) as of Unicode 16.0, and U+2800 BRAILLE
+/// PATTERN BLANK, which has width but no ink. The Hangul fillers U+115F,
+/// U+1160, U+3164 and U+FFA0 are blank with width too, and are
+/// default-ignorable.
+#[cfg(any(unix, test))]
+fn is_invisible_in_a_name(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x00AD
+            | 0x034F
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x115F..=0x1160
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x2800
+            | 0x3164
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFA0
+            | 0xFFF0..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
+}
+
+/// The program a busy lone pane would stop, by name, or `None` for a shell
+/// (an interactive shell running integration's command is still the shell),
+/// for a process whose `argv` cannot be read, and for a name with nothing
+/// visible. Only `argv[0]` is used; the arguments may hold secrets.
+#[cfg(any(unix, test))]
+pub(super) fn busy_program_label(
+    pid: u32,
+    read_argv: impl Fn(u32) -> Option<Vec<String>>,
+    etc_shells: &str,
+    configured_shell: Option<&str>,
+) -> Option<String> {
+    let argv = read_argv(pid)?;
+    if argv_is_interactive_shell(&argv, etc_shells, configured_shell) {
+        return None;
+    }
+    close_program_label(argv.first()?)
+}
+
+/// The process a busy lone pane's verdict came from: the pane's own child
+/// when its group owns the terminal, the foreground group's leader when
+/// another group does (the job, or for a pipeline its first command).
+#[cfg(any(unix, test))]
+pub(super) fn busy_job_pid(
+    job: kettle_core::ForegroundJob,
+    decided: LonePaneJob,
+    child: Option<u32>,
+) -> Option<u32> {
+    use kettle_core::ForegroundJob;
+    match (decided, job) {
+        (LonePaneJob::Busy, ForegroundJob::Child) => child,
+        (LonePaneJob::Busy, ForegroundJob::Other(leader)) => Some(leader),
+        _ => None,
+    }
+}
+
 /// The pane a one-pane close would take, named by the confirm action so it is
 /// the pane the gesture pointed at.
 pub(super) fn lone_pane_in_scope(
@@ -2897,18 +3133,22 @@ pub(super) fn lone_pane_in_scope(
 /// prompt. A shell running a script or a `-c` command is a job.
 ///
 /// Windows keeps the old behaviour: ConPTY has no foreground process group.
-pub(super) fn lone_pane_job(
+///
+/// Alongside the verdict comes, when it is busy, the pid whose program it is
+/// ([`busy_job_pid`]), both from one sample of the PTY's foreground group.
+pub(super) fn sample_lone_pane_job(
     term: &kettle_core::Terminal,
     launch_argv: &[String],
     configured_shell: Option<&str>,
-) -> LonePaneJob {
+) -> (LonePaneJob, Option<u32>) {
     #[cfg(unix)]
     {
         let integration_running = term.shell_integration_seen() && !term.shell_at_prompt();
         let shells = std::cell::OnceCell::new();
         let etc_shells = || shells.get_or_init(read_etc_shells).as_str();
-        classify_lone_pane_job(
-            term.foreground_job(),
+        let job = term.foreground_job();
+        let decided = classify_lone_pane_job(
+            job,
             integration_running,
             || {
                 let live = term.child_pid().and_then(kettle_remote::process_argv);
@@ -2920,16 +3160,17 @@ pub(super) fn lone_pane_job(
                     argv_is_interactive_shell(&argv, etc_shells(), configured_shell)
                 })
             },
-        )
+        );
+        (decided, busy_job_pid(job, decided, term.child_pid()))
     }
     #[cfg(not(unix))]
     {
         let _ = (term, launch_argv, configured_shell);
-        LonePaneJob::Unknown
+        (LonePaneJob::Unknown, None)
     }
 }
 
-/// The pure decision behind [`lone_pane_job`]. `child_is_shell` says whether
+/// The pure decision behind [`sample_lone_pane_job`]. `child_is_shell` says whether
 /// the pane's spawned child is an interactive shell; `leader_is_shell` runs
 /// only for a foreground group that is not the child's, under a child that
 /// is not a shell.
@@ -3003,7 +3244,7 @@ pub(super) fn argv_is_interactive_shell(
 
 /// `/etc/shells`, bounded; empty when it cannot be read.
 #[cfg(unix)]
-fn read_etc_shells() -> String {
+pub(super) fn read_etc_shells() -> String {
     use std::io::Read;
     const MAX_ETC_SHELLS_BYTES: u64 = 64 * 1024;
     let mut text = String::new();
@@ -3362,6 +3603,22 @@ pub(super) fn project_modal_editor(
     (text, cursor, selection)
 }
 
+/// What the open picker's empty query field says it is for: the command
+/// palette's placeholder, or nothing for the other pickers. The renderer
+/// fits and paints this same translated string.
+pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator) -> String {
+    if ws.palette_input.is_some() {
+        tr.text(if ws.palette_bound_only {
+            kettle_i18n::Text::PickerPlaceholderShortcuts
+        } else {
+            kettle_i18n::Text::PickerPlaceholderCommand
+        })
+        .to_string()
+    } else {
+        String::new()
+    }
+}
+
 pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
     if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
         return None;
@@ -3660,6 +3917,60 @@ pub(super) fn confirmation_button_action(
                 paste_as_one_line(text)
             };
             Some(action)
+        }
+    }
+}
+
+/// The selection a vi-mode visual key makes: `v` by character, `V` by line
+/// and Ctrl-v a block, as in Vim. `ch` is the key's accepted text, which is
+/// `'\0'` while Ctrl is held, so Ctrl-v is read from the key itself, in
+/// either case for Caps Lock. Ctrl+Shift+V, the Linux and Windows paste
+/// chord, is not a block key.
+pub(super) fn vi_visual_kind(
+    key: &Key,
+    ch: char,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<kettle_core::SelectionType> {
+    use kettle_core::SelectionType;
+    match ch {
+        'v' => return Some(SelectionType::Simple),
+        'V' => return Some(SelectionType::Lines),
+        _ => {}
+    }
+    let ctrl_v = mods.control_key()
+        && !mods.shift_key()
+        && !mods.alt_key()
+        && !mods.super_key()
+        && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("v") || c == "\u{16}");
+    ctrl_v.then_some(SelectionType::Block)
+}
+
+/// Start, switch or end vi mode's visual selection at the vi `cursor`, and
+/// return whether visual mode is on afterwards. The key for the kind already
+/// shown ends it; another kind's key turns the same selection into that kind,
+/// keeping both of its ends.
+pub(super) fn toggle_vi_visual(
+    selection: &mut Option<kettle_core::Selection>,
+    visual: bool,
+    kind: kettle_core::SelectionType,
+    cursor: kettle_core::Point,
+) -> bool {
+    match selection.as_mut() {
+        Some(current) if visual && current.ty == kind => {
+            *selection = None;
+            false
+        }
+        Some(current) if visual => {
+            current.ty = kind;
+            // Each kind puts the anchor sides on different edges.
+            current.include_all();
+            true
+        }
+        _ => {
+            let mut started = kettle_core::Selection::new(kind, cursor, kettle_core::Side::Left);
+            started.update(cursor, kettle_core::Side::Right);
+            *selection = Some(started);
+            true
         }
     }
 }

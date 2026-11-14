@@ -35,12 +35,23 @@ pub struct HorizontalTabContent {
     pub hint: Option<Rect4>,
 }
 
-/// Hidden controls reserve no hint or close space; title and activity take priority.
+/// Room an activity marker takes before a tab's title: an
+/// `ACTIVITY_MARKER`-sized box and a gap, in device pixels at `scale`.
+pub fn activity_lane(scale: f32) -> f32 {
+    (12.0 * scale).round()
+}
+
+/// Side of the square box an activity marker is drawn in, at 1x.
+const ACTIVITY_MARKER: f32 = 8.0;
+
+/// Hidden controls reserve no hint or close space; title and activity take
+/// priority. `activity_lane` is [`activity_lane`] for a tab with a marker
+/// and `0.0` for one without.
 pub fn horizontal_tab_content_layout(
     segment: Rect4,
     show_controls: bool,
     close_enabled: bool,
-    activity: bool,
+    activity_lane: f32,
     label: &str,
     hint: Option<&str>,
     cell_width: f32,
@@ -63,7 +74,7 @@ pub fn horizontal_tab_content_layout(
         x + w - 8.0
     })
     .max(x);
-    let left = (x + 8.0 + if activity { 12.0 } else { 0.0 }).min(right);
+    let left = (x + 8.0 + activity_lane.max(0.0)).min(right);
     let cw = cell_width.max(1.0);
     let hint = hint.filter(|_| show_controls).and_then(|hint| {
         let width = display_width(hint) as f32 * cw;
@@ -83,8 +94,77 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
+/// Where a background tab's activity marker draws: a box of
+/// `ACTIVITY_MARKER * scale` device pixels whose right edge leaves the lane's
+/// gap before the title text at `label_left`, centred on the title line.
+/// `None` when the box would not lie wholly inside the tab, so the painter
+/// never needs to work the condition out again from title geometry.
+pub(crate) fn activity_marker_rect(
+    segment: Rect4,
+    title: Rect4,
+    label_left: f32,
+    scale: f32,
+) -> Option<Rect4> {
+    let size = (ACTIVITY_MARKER * scale).round().max(1.0);
+    let x = (label_left - activity_lane(scale)).round();
+    let y = (title.1 + title.3 * 0.5 - size * 0.5).round();
+    let inside = x >= segment.0 - 0.5 && x + size <= segment.0 + segment.2 + 0.5;
+    inside.then_some((x, y, size, size))
+}
+
+/// A background tab's activity marker, told apart by shape as well as
+/// colour: a filled disc for new output, a ring once the output stopped and
+/// a triangle pointing up when the bell rang. The ring's hole is filled with
+/// `tab_bg`, the flat full-height fill behind the marker, so it is exact.
+pub(crate) fn activity_marker_quads(
+    quads: &mut Vec<QuadInstance>,
+    kind: crate::TabActivity,
+    marker: Rect4,
+    scale: f32,
+    ink: Rgb,
+    tab_bg: Rgb,
+) {
+    use crate::TabActivity;
+    let (x, y, w, h) = marker;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    match kind {
+        TabActivity::Normal => {}
+        TabActivity::Output => {
+            rounded_fill(quads, marker, w * 0.5, (true, true), (ink, 1.0), None);
+        }
+        TabActivity::Silent => {
+            rounded_fill(quads, marker, w * 0.5, (true, true), (ink, 1.0), None);
+            let stroke = (2.0 * scale).round().max(1.0);
+            let hole = (x + stroke, y + stroke, w - stroke * 2.0, h - stroke * 2.0);
+            rounded_fill(quads, hole, hole.2 * 0.5, (true, true), (tab_bg, 1.0), None);
+        }
+        TabActivity::Bell => {
+            // One quad per device-pixel row, widening downward. Whole-pixel
+            // insets on both sides keep every row centred on the box.
+            let rows = h.round().max(1.0) as usize;
+            for i in 0..rows {
+                let raw = w * (i + 1) as f32 / rows as f32;
+                let inset = ((w - raw) * 0.5).floor().max(0.0);
+                quads.push(rect(
+                    x + inset,
+                    y + i as f32,
+                    w - inset * 2.0,
+                    1.0,
+                    ink,
+                    1.0,
+                ));
+            }
+        }
+    }
+}
+
 /// Anchor to the actual control while keeping tooltips outside the header.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    if bar.hovered_settings && !bar.pressed_settings && bar.settings.2 > 0.0 {
+        return (bar.settings.0, bar.band.1, bar.settings.2, bar.band.3);
+    }
     bar.window_controls
         .iter()
         .find(|b| b.hovered && !b.pressed)
@@ -186,6 +266,26 @@ pub(crate) fn rounded_fill(
     }
 }
 
+/// What a tab's title sits on: the terminal's colour on the active tab, the
+/// strip's hover fill on a hovered horizontal tab, the strip otherwise. The
+/// painter fills with it and resolves the tab's text against it.
+pub(crate) fn tab_title_background(
+    active: bool,
+    hovered: bool,
+    vertical: bool,
+    active_bg: Rgb,
+    strip: Rgb,
+    foreground: Rgb,
+) -> Rgb {
+    if active {
+        active_bg
+    } else if hovered && !vertical {
+        crate::chrome::strip_hover(strip, foreground, false)
+    } else {
+        strip
+    }
+}
+
 pub(crate) struct HorizontalTabQuads {
     pub chrome: Vec<QuadInstance>,
     /// Translucent tab backgrounds, including their opaque accent line.
@@ -208,8 +308,8 @@ pub(crate) fn horizontal_tab_quads(
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
-    let hover = crate::chrome::tab_detail(chrome, theme.foreground, false);
-    let divider = hover;
+    let hover = tab_title_background(false, true, false, background.0, chrome, theme.foreground);
+    let divider = crate::chrome::tab_detail(chrome, theme.foreground, false);
     for (i, tab) in bar.segments.iter().enumerate() {
         let hovered = bar.hovered_tab_idx == Some(tab.idx);
         if tab.active || hovered {
@@ -220,7 +320,8 @@ pub(crate) fn horizontal_tab_quads(
                 6.0 * scale,
                 (!bottom, bottom),
                 if tab.active { background } else { (hover, 1.0) },
-                tab.active.then_some((accent, 2.0, bottom)),
+                tab.active
+                    .then_some((accent, (3.0 * scale).round(), bottom)),
             );
             if tab.active && background.1 < 1.0 {
                 // Cut with the actual surface slices so the rounded corners'
@@ -256,6 +357,112 @@ pub(crate) fn horizontal_tab_quads(
     HorizontalTabQuads {
         chrome: band,
         surface,
+    }
+}
+
+/// Side of the Settings gear's ink box at 1x, in pixels.
+const GEAR_SIDE: f32 = 14.0;
+
+/// Coverage of a gear `side` pixels square, row by row, 0..=255. Drawn
+/// rather than shaped: U+2699 can fall back to a colour emoji and its weight
+/// depends on the installed fonts. A ring of eight square teeth around a
+/// hole; the ring is wide enough at 1x to hold fully covered pixels.
+pub(crate) fn gear_mask(side: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    let s = side as f32;
+    let (outer, body, hole, half_tooth) = (0.48 * s, 0.32 * s, 0.19 * s, 0.105 * s);
+    let centre = s * 0.5;
+    let inside = |x: f32, y: f32| {
+        let (dx, dy) = (x - centre, y - centre);
+        let r = dx.hypot(dy);
+        if r < hole || r > outer {
+            return false;
+        }
+        if r <= body {
+            return true;
+        }
+        // Distance from the nearest tooth's centre line, at 0, 45, 90... deg.
+        let step = std::f32::consts::FRAC_PI_4;
+        let angle = dy.atan2(dx);
+        let off = angle - (angle / step).round() * step;
+        r * off.sin().abs() <= half_tooth
+    };
+    let mut mask = Vec::with_capacity((side * side) as usize);
+    for py in 0..side {
+        for px in 0..side {
+            let mut hits = 0;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                    hits += u32::from(inside(x, y));
+                }
+            }
+            mask.push((hits * 255 / (SAMPLES * SAMPLES)) as u8);
+        }
+    }
+    mask
+}
+
+/// A gear's coverage for one side length, kept between frames.
+#[derive(Default)]
+pub(crate) struct GearMask {
+    side: u32,
+    mask: Vec<u8>,
+}
+
+impl GearMask {
+    fn get(&mut self, side: u32) -> &[u8] {
+        if self.side != side || self.mask.is_empty() {
+            self.mask = gear_mask(side);
+            self.side = side;
+        }
+        &self.mask
+    }
+}
+
+/// The Settings gear in `ink`, centred in `button` and snapped to whole
+/// pixels, as one quad per run of equal coverage. Nothing for a zero rect.
+pub(crate) fn push_settings_gear(
+    quads: &mut Vec<QuadInstance>,
+    button: Rect4,
+    ink: Rgb,
+    scale: f32,
+    cache: &mut GearMask,
+) {
+    let (x, y, w, h) = button;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    // An even side keeps the centre on a pixel corner, so the four
+    // axis-aligned teeth cover whole pixels.
+    let side = ((GEAR_SIDE * scale.max(0.5)).min(w.min(h) - 4.0) * 0.5).floor() * 2.0;
+    if side < 8.0 {
+        return;
+    }
+    let left = (x + (w - side) * 0.5).round();
+    let top = (y + (h - side) * 0.5).round();
+    let n = side as u32;
+    for (row, line) in cache.get(n).chunks(n as usize).enumerate() {
+        let mut start = 0;
+        while start < line.len() {
+            let coverage = line[start];
+            let mut end = start + 1;
+            while end < line.len() && line[end] == coverage {
+                end += 1;
+            }
+            if coverage > 0 {
+                quads.push(rect(
+                    left + start as f32,
+                    top + row as f32,
+                    (end - start) as f32,
+                    1.0,
+                    ink,
+                    f32::from(coverage) / 255.0,
+                ));
+            }
+            start = end;
+        }
     }
 }
 
@@ -335,8 +542,8 @@ mod tests {
         for statement in [
             "let plus_fg = self.chrome_colors.tab_text(plus_fg, background, overlay.window_focused);",
             "let arrow_fg = self.chrome_colors.tab_text(arrow_fg, background, overlay.window_focused);",
-            "let close_fg = self.chrome_colors.tab_text(close_fg, close_background, overlay.window_focused);",
-            "let hint_fg = self.chrome_colors.muted(fg, tab_background);",
+            "let close_fg = self.chrome_colors.tab_close(close_fg, close_background, close_backing, overlay.window_focused,);",
+            "let hint_fg = self.chrome_colors.tab_hint(fg, tab_background, tab_backing);",
         ] {
             assert!(
                 source
@@ -357,7 +564,7 @@ mod tests {
                     (0.0, 0.0, 320.0, 28.0),
                     visible,
                     true,
-                    false,
+                    0.0,
                     "shell",
                     Some("Cmd+1"),
                     8.0,
@@ -389,7 +596,7 @@ mod tests {
                             (10.0, 20.0, width, 28.0),
                             active || hovered,
                             enabled,
-                            false,
+                            0.0,
                             "shell",
                             Some("Cmd+1"),
                             8.0,
@@ -417,29 +624,221 @@ mod tests {
 
     #[test]
     fn horizontal_content_prioritizes_title_and_activity_over_hint() {
-        for width in [80.0, 160.0, 320.0] {
-            let full = horizontal_tab_content_layout(
-                (0.0, 0.0, width, 28.0),
+        // The marker lane scales with the display: 12 px at 1x, 24 at 2x.
+        for (scale, lane) in [(1.0_f32, 12.0_f32), (1.5, 18.0), (2.0, 24.0)] {
+            for width in [80.0, 160.0, 320.0] {
+                let (width, height) = (width * scale, 28.0 * scale);
+                let full = horizontal_tab_content_layout(
+                    (0.0, 0.0, width, height),
+                    true,
+                    true,
+                    0.0,
+                    "shell",
+                    None,
+                    8.0 * scale,
+                );
+                let dot = horizontal_tab_content_layout(
+                    (0.0, 0.0, width, height),
+                    true,
+                    true,
+                    activity_lane(scale),
+                    "a very long title that needs an ellipsis",
+                    Some("Cmd+1"),
+                    8.0 * scale,
+                );
+                assert_eq!(dot.title.0, full.title.0 + lane, "scale {scale}");
+                assert!(dot.hint.is_none());
+                assert_eq!(dot.close, full.close);
+            }
+        }
+    }
+
+    /// The marker box sits in the lane before the title at every scale, for
+    /// a plain strip's tab and for a lone titlebar tab whose title lane is
+    /// centred on the window. A paint condition worked out again from title
+    /// geometry once hid every marker at 2x.
+    #[test]
+    fn activity_marker_rect_paints_beside_the_title_at_every_scale() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let cell = (8.0 * scale, 16.0 * scale);
+            let size = (8.0 * scale).round();
+            let height = 28.0 * scale;
+            // (segment, centre of a lone titlebar tab's title lane)
+            let cases = [
+                ((0.0, 0.0, 160.0 * scale, height), None),
+                ((78.0 * scale, 0.0, 240.0 * scale, height), None),
+                (
+                    (78.0 * scale, 0.0, 320.0 * scale, height),
+                    Some(300.0 * scale),
+                ),
+                ((90.0 * scale, 32.0 * scale, 120.0 * scale, height), None),
+            ];
+            for (segment, centre) in cases {
+                for label in ["shell", "a very long title that fills its whole lane"] {
+                    let mut content = horizontal_tab_content_layout(
+                        segment,
+                        true,
+                        true,
+                        activity_lane(scale),
+                        label,
+                        Some("Cmd+1"),
+                        cell.0,
+                    );
+                    if let Some(centre) = centre {
+                        // The lone-tab centring `centered_title_lane` does.
+                        let lane = content.title;
+                        let half = (centre - lane.0).min(lane.0 + lane.2 - centre).max(0.0);
+                        assert!(half > 0.0, "the centre lies in the lane");
+                        content.title = (centre - half, lane.1, half * 2.0, lane.3);
+                    }
+                    let (label_left, _) = tab_label_origin(content.title, label, cell);
+                    let marker = activity_marker_rect(segment, content.title, label_left, scale)
+                        .unwrap_or_else(|| {
+                            panic!("no marker at {scale}x for {label:?} in {segment:?}")
+                        });
+                    let case = format!("{scale}x, {label:?}, {segment:?}: {marker:?}");
+                    assert_eq!((marker.2, marker.3), (size, size), "{case}");
+                    assert!(marker.0 >= segment.0 - 0.5, "{case}");
+                    assert!(marker.0 + marker.2 <= segment.0 + segment.2 + 0.5, "{case}");
+                    assert!(
+                        marker.0 + marker.2 <= label_left - 4.0 * scale + 0.5,
+                        "{case}: touches the title at {label_left}"
+                    );
+                    assert!(marker.1 >= segment.1 && marker.1 + marker.3 <= segment.1 + segment.3);
+                }
+            }
+            // A tab too narrow for the lane draws no marker outside itself.
+            let narrow = (40.0, 0.0, 12.0 * scale - 1.0, height);
+            let content = horizontal_tab_content_layout(
+                narrow,
                 true,
                 true,
-                false,
+                activity_lane(scale),
                 "shell",
                 None,
-                8.0,
+                cell.0,
             );
-            let dot = horizontal_tab_content_layout(
-                (0.0, 0.0, width, 28.0),
-                true,
-                true,
-                true,
-                "a very long title that needs an ellipsis",
-                Some("Cmd+1"),
-                8.0,
+            let (label_left, _) = tab_label_origin(content.title, "shell", cell);
+            assert_eq!(
+                activity_marker_rect(narrow, content.title, label_left, scale),
+                None,
+                "{scale}x"
             );
-            assert_eq!(dot.title.0, full.title.0 + 12.0);
-            assert!(dot.hint.is_none());
-            assert_eq!(dot.close, full.close);
         }
+    }
+
+    /// Which device pixels of `marker` are painted `ink`.
+    fn marker_grid(kind: TabActivity, scale: f32, ink: Rgb, tab_bg: Rgb) -> Vec<Vec<bool>> {
+        let marker = activity_marker_rect(
+            (0.0, 0.0, 200.0 * scale, 28.0 * scale),
+            (
+                8.0 * scale + activity_lane(scale),
+                0.0,
+                100.0 * scale,
+                28.0 * scale,
+            ),
+            40.0 * scale,
+            scale,
+        )
+        .expect("room for a marker");
+        let mut quads = vec![rect(0.0, 0.0, 200.0 * scale, 28.0 * scale, tab_bg, 1.0)];
+        activity_marker_quads(&mut quads, kind, marker, scale, ink, tab_bg);
+        let ink = rect(0.0, 0.0, 1.0, 1.0, ink, 1.0).color;
+        (0..marker.3 as usize)
+            .map(|row| {
+                (0..marker.2 as usize)
+                    .map(|col| {
+                        sample(
+                            &quads,
+                            marker.0 + col as f32 + 0.5,
+                            marker.1 + row as f32 + 0.5,
+                        ) == Some(ink)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// (left, top, width, height) of the painted pixels.
+    fn painted_bounds(grid: &[Vec<bool>]) -> (usize, usize, usize, usize) {
+        let rows: Vec<usize> = (0..grid.len())
+            .filter(|&r| grid[r].contains(&true))
+            .collect();
+        let cols: Vec<usize> = (0..grid[0].len())
+            .filter(|&c| grid.iter().any(|row| row[c]))
+            .collect();
+        let (top, bottom) = (rows[0], *rows.last().unwrap());
+        let (left, right) = (cols[0], *cols.last().unwrap());
+        (left, top, right - left + 1, bottom - top + 1)
+    }
+
+    /// Output, Silent and Bell differ by shape, so a reader who cannot tell
+    /// the theme's cyan, grey and yellow apart still can tell them apart.
+    #[test]
+    fn activity_markers_differ_by_shape_not_only_colour() {
+        let (ink, tab_bg) = (Rgb::new(0xe0, 0xaf, 0x68), Rgb::new(0x14, 0x15, 0x1d));
+        let mut bounds_1x = Vec::new();
+        for scale in [1.0_f32, 2.0] {
+            let grids: Vec<_> = [TabActivity::Output, TabActivity::Silent, TabActivity::Bell]
+                .into_iter()
+                .map(|kind| marker_grid(kind, scale, ink, tab_bg))
+                .collect();
+            let [output, silent, bell] = [&grids[0], &grids[1], &grids[2]];
+            let side = output.len();
+            assert_eq!(side, (8.0 * scale).round() as usize);
+            let c = side / 2;
+            assert!(output[c][c], "{scale}x: Output's centre is filled");
+            assert!(!silent[c][c], "{scale}x: Silent's centre is the tab");
+            assert!(silent[0][c] && silent[c][0], "{scale}x: Silent has a rim");
+            let width = |row: &Vec<bool>| row.iter().filter(|&&p| p).count();
+            assert!(width(&bell[0]) > 0);
+            assert!(
+                width(&bell[side - 1]) >= 3 * width(&bell[0]),
+                "{scale}x: Bell widens downward: {bell:?}"
+            );
+            assert_ne!(output, silent);
+            assert_ne!(output, bell);
+            assert_ne!(silent, bell);
+            let none = marker_grid(TabActivity::Normal, scale, ink, tab_bg);
+            assert!(none.iter().flatten().all(|&p| !p), "Normal draws nothing");
+            let bounds: Vec<_> = grids.iter().map(|g| painted_bounds(g)).collect();
+            if scale == 1.0 {
+                bounds_1x = bounds;
+            } else {
+                for (two, one) in bounds.iter().zip(&bounds_1x) {
+                    assert_eq!(
+                        (two.2, two.3),
+                        (one.2 * 2, one.3 * 2),
+                        "the 2x marker is twice the 1x one"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The horizontal painter places and draws markers through the tested
+    /// functions, not a threshold of its own.
+    #[test]
+    fn horizontal_tab_markers_paint_through_the_marker_rect() {
+        let source = crate::production_source();
+        let block = source
+            .split_once("let (centered_left, label_top) = tab_strip::tab_label_origin(")
+            .expect("horizontal text pass")
+            .1
+            .split_once("let close_fg = if hovered {")
+            .expect("close glyph colours follow the marker")
+            .0;
+        assert!(block.contains("tab_strip::activity_marker_rect("));
+        assert!(block.contains("tab_strip::activity_marker_quads("));
+        // Marker ink is resolved against the tab it sits on.
+        assert!(block.contains("chrome::activity_ink(theme, s.activity)"));
+        let compact = block.split_whitespace().collect::<String>();
+        assert!(compact.contains("self.chrome_colors.tab_marker(ink,tab_background,"));
+        for raw in ["theme.palette[3]", "theme.palette[6]", "theme.palette[8]"] {
+            assert!(!block.contains(raw), "raw marker ink {raw}");
+        }
+        assert!(!block.contains(">= 20.0"));
+        assert!(!block.contains("centered_left - 10.0"));
     }
 
     #[test]
@@ -449,7 +848,7 @@ mod tests {
                 (0.0, 0.0, width, 28.0),
                 true,
                 true,
-                true,
+                activity_lane(1.0),
                 "shell",
                 Some("Cmd+1"),
                 8.0,
@@ -473,7 +872,7 @@ mod tests {
                     (0.0, 0.0, width, 28.0),
                     true,
                     true,
-                    false,
+                    0.0,
                     label,
                     Some("Cmd+1"),
                     8.0,
@@ -495,7 +894,7 @@ mod tests {
             (0.0, 0.0, 124.0, 28.0),
             true,
             true,
-            false,
+            0.0,
             "shell",
             Some("Cmd+1"),
             8.0,
@@ -505,7 +904,7 @@ mod tests {
             (0.0, 0.0, 123.5, 28.0),
             true,
             true,
-            false,
+            0.0,
             "shell",
             Some("Cmd+1"),
             8.0,
@@ -712,7 +1111,7 @@ mod tests {
                 (0.0, 0.0, 320.0, 32.0),
                 true,
                 true,
-                true,
+                activity_lane(1.0),
                 "shell",
                 Some(&hint),
                 text_advance,
@@ -803,6 +1202,172 @@ mod tests {
         }
     }
 
+    /// The active tab's bar is three device pixels per point on its outer
+    /// edge, top or bottom, and a hovered tab gets none. It was a bare 2 px,
+    /// one point on a Retina display.
+    #[test]
+    fn active_accent_is_three_scaled_pixels() {
+        let theme = kettle_config::Theme::by_name("TokyoNight Night");
+        let accent = Rgb::new(0xff, 0x00, 0xff);
+        let accent_color = rect(0.0, 0.0, 1.0, 1.0, accent, 1.0).color;
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let h = (28.0 * scale).round();
+            for pos in [TabBarPos::Top, TabBarPos::Bottom] {
+                let mut bar = TabBar::hidden();
+                for i in 0..2 {
+                    let r = (i as f32 * 160.0 * scale, 0.0, 160.0 * scale, h);
+                    bar.segments.push(crate::TabSeg {
+                        idx: i,
+                        rect: r,
+                        title_rect: r,
+                        hint: None,
+                        close: (0.0, 0.0, 0.0, 0.0),
+                        title: "shell".into(),
+                        path: None,
+                        active: i == 0,
+                        activity: TabActivity::Normal,
+                    });
+                }
+                bar.hovered_tab_idx = Some(1);
+                let quads = horizontal_tab_quads(
+                    &bar,
+                    (0.0, 0.0, 320.0 * scale, h),
+                    &theme,
+                    (theme.background, 1.0),
+                    theme.palette[0],
+                    accent,
+                    pos,
+                    scale,
+                );
+                let rows: Vec<u32> = (0..h as u32)
+                    .filter(|&y| {
+                        sample(&quads.chrome, 80.0 * scale, y as f32 + 0.5) == Some(accent_color)
+                    })
+                    .collect();
+                let thickness = (3.0 * scale).round() as u32;
+                let expected: Vec<u32> = if pos == TabBarPos::Top {
+                    (0..thickness).collect()
+                } else {
+                    (h as u32 - thickness..h as u32).collect()
+                };
+                assert_eq!(rows, expected, "{scale}x, {pos:?}");
+                let hovered = bar.segments[1].rect;
+                assert!(
+                    !quads.chrome.iter().any(|q| q.color == accent_color
+                        && q.pos[0] >= hovered.0
+                        && q.pos[0] < hovered.0 + hovered.2),
+                    "{scale}x, {pos:?}: the hovered tab has no bar"
+                );
+            }
+        }
+    }
+
+    /// A hovered tab is shaded at about 1.3:1, less than half the active
+    /// tab's bar, so hovering never looks like selecting. The hover was a
+    /// 1.5:1 fill (#343641 in TokyoNight Night), as loud as the unfocused bar.
+    /// The fill painted is the colour the tab's text is resolved against.
+    #[test]
+    fn hovered_tab_is_quieter_than_the_active_accent() {
+        let cfg = kettle_config::Config::default();
+        let mut failures = Vec::new();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let strip = crate::resolve_chrome_bg(&cfg, &theme, None);
+            let mut bar = TabBar::hidden();
+            for i in 0..2 {
+                let r = (i as f32 * 160.0, 0.0, 160.0, 28.0);
+                bar.segments.push(crate::TabSeg {
+                    idx: i,
+                    rect: r,
+                    title_rect: r,
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: "shell".into(),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            bar.hovered_tab_idx = Some(1);
+            let accent = crate::chrome::tab_accent(
+                theme.accent,
+                strip,
+                theme.background,
+                theme.foreground,
+                true,
+            );
+            let quads = horizontal_tab_quads(
+                &bar,
+                (0.0, 0.0, 320.0, 28.0),
+                &theme,
+                (theme.background, 1.0),
+                strip,
+                accent,
+                TabBarPos::Top,
+                1.0,
+            );
+            let text_bg = tab_title_background(
+                false,
+                true,
+                false,
+                theme.background,
+                strip,
+                theme.foreground,
+            );
+            let painted = sample(&quads.chrome, 240.0, 14.0);
+            if painted != Some(rect(0.0, 0.0, 1.0, 1.0, text_bg, 1.0).color) {
+                failures.push(format!("{name}: painted {painted:?}, text on {text_bg:?}"));
+            }
+            let hover = crate::color::contrast_ratio(text_bg, strip);
+            let bar_ratio = crate::color::contrast_ratio(accent, strip);
+            if !(1.3 - 1e-6..=1.4).contains(&hover) || bar_ratio < 2.0 * hover {
+                failures.push(format!(
+                    "{name}: hover {hover:.2}:1, active bar {bar_ratio:.2}:1"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} themes: {}",
+            failures.len(),
+            failures
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        // Every hover site on the strip paints the shared token; only the
+        // tooltip's edge still uses the divider's 1.5:1 detail.
+        let source = crate::production_source();
+        assert_eq!(
+            source.matches("tab_detail(").count(),
+            1,
+            "a stray 1.5:1 hover"
+        );
+        assert!(source.contains("let edge = chrome::tab_detail(fill, theme.foreground, false);"));
+    }
+
+    /// The painter builds every tab bar, horizontal and vertical, from one
+    /// resolved accent.
+    #[test]
+    fn tab_bars_paint_the_resolved_accent() {
+        let source = crate::production_source()
+            .split_whitespace()
+            .collect::<String>();
+        assert!(source.contains("lettab_accent=chrome::tab_accent("));
+        let vertical = source
+            .split_once("quads.push(rect(x,seg_y,w,seg_h,default_bg,1.0));")
+            .expect("vertical active tab")
+            .1
+            .split_once("ifcfg.tab_bar_pos.is_vertical(){")
+            .expect("vertical separator follows")
+            .0;
+        assert!(vertical.contains("(3.0*self.scale).round(),seg_h,tab_accent,"));
+        assert!(!vertical.contains("theme.palette[3]"));
+        assert!(!vertical.contains("ui_accent("));
+    }
+
     /// An overflowing top or bottom strip's `‹` / `›` share the tab titles'
     /// text line. 6.0's 46 px GNOME header drew them 4 px under the band's
     /// top, about 9 px above the titles centred in the same band.
@@ -818,7 +1383,7 @@ mod tests {
                     let cell = (8.0 * scale, line);
                     let segment = (8.0 * scale + h, y, 120.0 * scale, h);
                     let content = horizontal_tab_content_layout(
-                        segment, true, true, false, "fixture", None, cell.0,
+                        segment, true, true, 0.0, "fixture", None, cell.0,
                     );
                     let (_, title_top) = tab_label_origin(content.title, "fixture", cell);
                     for button in [(8.0 * scale, y, h, h), (1450.0 * scale, y, h * 0.5, h)] {
@@ -969,7 +1534,7 @@ fn window_control_colors(
     colors: &mut crate::chrome::Colors,
 ) -> (Rgb, Rgb) {
     let fill = if hovered {
-        crate::chrome::tab_detail(bg, fg, pressed)
+        crate::chrome::strip_hover(bg, fg, pressed)
     } else {
         bg
     };
@@ -1016,6 +1581,53 @@ mod window_control_tests {
     }
 
     #[test]
+    fn settings_gear_mask_is_kept_per_side_length() {
+        let mut cache = GearMask::default();
+        assert_eq!(cache.get(16), gear_mask(16).as_slice());
+        let first = cache.mask.as_ptr();
+        cache.get(16);
+        assert_eq!(cache.mask.as_ptr(), first, "re-rasterized at the same side");
+        assert_eq!(cache.get(32).len(), 32 * 32);
+        assert_eq!(cache.side, 32);
+    }
+
+    #[test]
+    fn settings_gear_tooltip_hangs_under_the_gear_inside_the_window() {
+        for scale in [1.0, 2.0] {
+            let width = 640.0 * scale;
+            let mut bar = TabBar::hidden();
+            bar.band = (78.0 * scale, 0.0, width - 78.0 * scale, 32.0 * scale);
+            let gear = (width - 124.0 * scale, 0.0, 32.0 * scale, 32.0 * scale);
+            bar.settings = gear;
+            bar.hovered_settings = true;
+            let anchor = tooltip_anchor(&bar);
+            assert_eq!(anchor, (gear.0, 0.0, gear.2, bar.band.3));
+            for text in [80.0, 900.0] {
+                let bounds = tooltip_rect(
+                    anchor,
+                    (width, 400.0 * scale),
+                    (text * scale, 20.0 * scale),
+                    scale,
+                );
+                assert!(
+                    bounds.0 >= 0.0 && bounds.0 + bounds.2 <= width,
+                    "{bounds:?}"
+                );
+                assert_eq!(bounds.1, 36.0 * scale);
+                if text < 100.0 {
+                    // Ends under the gear, not at the window's far edge.
+                    assert!(bounds.0 + bounds.2 <= gear.0 + gear.2);
+                }
+            }
+            bar.pressed_settings = true;
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+            bar.pressed_settings = false;
+            bar.settings = (0.0, 0.0, 0.0, 0.0);
+            assert_eq!(tooltip_anchor(&bar), bar.band);
+        }
+    }
+
+    #[test]
     fn linux_header_buttons_use_current_chrome_contrast_hover_and_dimming() {
         for name in kettle_config::Theme::list() {
             let theme = kettle_config::Theme::by_name(name);
@@ -1035,7 +1647,7 @@ mod window_control_tests {
                         assert_eq!(
                             fill,
                             if hovered {
-                                crate::chrome::tab_detail(bg, theme.foreground, pressed)
+                                crate::chrome::strip_hover(bg, theme.foreground, pressed)
                             } else {
                                 bg
                             }
