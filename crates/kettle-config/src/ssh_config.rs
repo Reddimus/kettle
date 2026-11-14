@@ -408,8 +408,11 @@ fn refuse_new_malformed(existing: &str, out: &str) -> std::io::Result<()> {
 /// `WouldBlock` and the file is not touched. Like the other config writers
 /// this is atomic and locked, refuses a change made while it runs, keeps
 /// comments, line endings and the encoding, makes a `.bak` on the first
-/// write (its path is returned) and refuses to add a malformed value. Error
-/// messages it composes name no host, target or path.
+/// write (its path is returned) and refuses to add a malformed value.
+///
+/// The messages this module composes name no host, target or path. Errors
+/// passed up from opening, locking, reading or replacing the file can include
+/// its path, so callers that log should log only the `ErrorKind`.
 pub fn upsert_ssh_host(
     path: &Path,
     name: &str,
