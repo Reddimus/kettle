@@ -225,10 +225,17 @@ fn the_focused_bell_mark_is_set_by_visual_bells_and_settled_on_every_dispatch() 
     for answer in ["answer_focused_bell", "settle_focused_bells", "answer_bell_by_press"] {
         assert!(!focus_arm.contains(answer), "OS focus must not answer the bell");
     }
-    // A press in a pane answers it whether or not the program reports the mouse.
-    assert!(src.contains(
-        "                {\n                    ws.mux.answer_bell_by_press(pressed);\n                }\n                self.note_focus_change(ws, pre);\n                if self.send_mouse(ws, bcode, true, false) {"
-    ));
+    // A press in a pane answers it whether or not the program reports the
+    // mouse: the answer comes before the press can go to the program.
+    let press = src
+        .split("let pre = self.focus_key(ws);")
+        .find(|arm| arm.contains("ws.mux.answer_bell_by_press(pressed);"))
+        .expect("native press arm");
+    let answer = press.find("ws.mux.answer_bell_by_press(pressed);").unwrap();
+    let report = press
+        .find("if self.send_mouse(ws, bcode, true, false) {")
+        .expect("mouse report after the press");
+    assert!(answer < report, "the bell is answered before the program sees the press");
 }
 
 /// The flash is motion Kettle starts on its own: `reduce-motion` (or the
