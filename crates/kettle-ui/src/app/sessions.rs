@@ -184,40 +184,104 @@ impl App {
         Some(s)
     }
 
+    /// Whether the default session is someone else's for this launch: see
+    /// [`DefaultSessionClaim`]. Restoring, saving and cleaning up
+    /// `session.json` and `session.content` all wait on it.
+    pub(super) fn default_session_elsewhere(&self) -> bool {
+        let another_build = self.other_builds.running();
+        another_build || !self.default_session.borrow_mut().owns(another_build)
+    }
+
+    /// Whether this launch restores and saves the default session now:
+    /// restore mode is on for it and it owns the session. Ownership is only
+    /// asked, and so only claimed, while restore mode is on.
+    pub(super) fn default_session_restoring(&self) -> bool {
+        should_restore_session(self.startup.restore, self.cfg.restore_session, false)
+            && !self.default_session_elsewhere()
+    }
+
     pub(super) fn clear_disabled_content(&self) {
         if self.other_builds.running() {
             return;
         }
-        let disabled = self.cfg.restore_scrollback_lines == 0
-            || (self.startup.layout.is_none()
-                && !should_restore_session(self.startup.restore, self.cfg.restore_session, false));
-        if disabled {
-            let path = match self.startup.layout.as_deref() {
-                Some(name) => crate::session::Session::path_for_layout(name),
-                None => crate::session::Session::path(),
-            };
-            if let Some(path) = path {
-                self.session_writer.remove_content(path);
+        let restoring =
+            should_restore_session(self.startup.restore, self.cfg.restore_session, false);
+        let lines = self.cfg.restore_scrollback_lines;
+        let owned = match self.startup.layout.as_deref() {
+            Some(_) => self.named_layout_writable,
+            // Restore mode off: never claim the session to clean it up.
+            None if !restoring => {
+                self.remove_disabled_default_content();
+                return;
             }
+            None => !self.default_session_elsewhere(),
+        };
+        if !content_cleanup_due(owned, self.startup.layout.is_some(), lines, restoring) {
+            return;
+        }
+        // Whatever is written next is a fresh snapshot, never a keep.
+        self.content_throttle.borrow_mut().reset();
+        self.session_writer
+            .remove_content(self.startup.layout.clone());
+    }
+
+    /// Restore mode is off: remove the default session's output file if this
+    /// process owns the session, or, if it never claimed it, while nobody
+    /// does (see [`remove_unclaimed_content`]). A secondary, a waiting build
+    /// and a separate launch leave it alone.
+    fn remove_disabled_default_content(&self) {
+        match &*self.default_session.borrow() {
+            DefaultSessionClaim::Owner { .. } => {
+                self.content_throttle.borrow_mut().reset();
+                self.session_writer.remove_content(None);
+            }
+            DefaultSessionClaim::Unclaimed(lock) => {
+                if let Some(path) = self.session_path.as_deref() {
+                    remove_unclaimed_content(lock, path);
+                }
+            }
+            DefaultSessionClaim::Waiting(_)
+            | DefaultSessionClaim::Secondary
+            | DefaultSessionClaim::Separate => {}
         }
     }
 
+    /// Where automatic saves go right now, before any snapshot is taken.
+    pub(super) fn autosave_target(&self) -> SessionWriteTarget<'_> {
+        session_write_target(
+            self.startup.layout.as_deref(),
+            self.named_layout_writable,
+            self.default_session_restoring(),
+            false,
+        )
+    }
+
+    /// [`autosave_eligible`] for this launch, as the sweep's wake asks it.
+    pub(super) fn session_autosave_eligible(&self) -> bool {
+        let quick = self.quick_terminal.model.window;
+        autosave_eligible(
+            self.session_load_failed,
+            &self.autosave_target(),
+            self.windows
+                .values()
+                .any(|w| quick != Some(w.seq) && !w.mux.tabs.is_empty()),
+        )
+    }
+
+    /// Save the session after a gesture or an explicit request.
     pub(super) fn save_session(&self, ws: &WindowState) {
+        self.save_session_as(ws, SaveKind::Gesture);
+    }
+
+    pub(super) fn save_session_as(&self, ws: &WindowState, kind: SaveKind) {
         self.clear_disabled_content();
         if self.session_load_failed {
             return;
         }
-        let target = session_write_target(
-            self.startup.layout.as_deref(),
-            self.named_layout_writable,
-            should_restore_session(
-                self.startup.restore,
-                self.cfg.restore_session,
-                self.other_builds.running(),
-            ),
-            false,
-        );
+        let target = self.autosave_target();
         if target == SessionWriteTarget::Skip {
+            // Nothing is owed while nothing can be written.
+            self.content_throttle.borrow_mut().pending = false;
             return;
         }
         let Some(s) = Self::snapshot_session(
@@ -241,6 +305,7 @@ impl App {
             SessionWriteTarget::DefaultSession => None,
             _ => return,
         };
+        let stale = self.session_writer.take_content_stale();
         let content = if self.cfg.restore_scrollback_lines > 0 {
             let mut windows: Vec<_> = std::iter::once(ws)
                 .chain(self.windows.values())
@@ -258,18 +323,46 @@ impl App {
                 )
             });
             windows.truncate(crate::session::MAX_RESTORE_WINDOWS);
-            let mut budget = crate::session_content::TEXT_BUDGET;
-            Some(crate::session_content::ContentSnapshot::new(
-                &s,
+            // The key is read before any grid, and decides whether to walk
+            // them at all.
+            let session_hash = crate::session_content::session_hash(&s);
+            let key = crate::session_content::ContentKey::new(
+                session_hash,
+                self.cfg.restore_scrollback_lines,
+                self.cfg.restore_scrollback_remote,
                 windows
                     .iter()
-                    .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
+                    .map(|w| (w.seq, w.mux.content_key_panes()))
                     .collect(),
-            ))
+            );
+            let write = self.content_throttle.borrow_mut().decide(
+                &key,
+                std::time::Instant::now(),
+                kind,
+                stale,
+            );
+            if !write {
+                crate::session::ContentJob::Keep
+            } else {
+                let mut budget = crate::session_content::TEXT_BUDGET;
+                let snapshot = crate::session_content::ContentSnapshot::bound(
+                    session_hash,
+                    windows
+                        .iter()
+                        .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
+                        .collect(),
+                );
+                crate::session::ContentJob::Write(snapshot)
+            }
         } else {
-            None
+            self.content_throttle.borrow_mut().reset();
+            crate::session::ContentJob::Remove
         };
-        self.session_writer.submit_content(s, layout, content);
+        self.session_writer.submit_job(crate::session::SaveJob {
+            session: Some(s),
+            layout,
+            content,
+        });
     }
 
     /// Move a session aside when it loaded but could not be restored.
@@ -333,23 +426,25 @@ impl App {
             )?;
             self.restore_identity = Some(identity);
             Some(session)
-        } else if should_restore_session(
-            self.startup.restore,
-            self.cfg.restore_session,
-            self.other_builds.running(),
-        ) {
-            self.restore_source = crate::session::Session::path();
+        } else if self.default_session_restoring() {
+            self.restore_source = self.session_path.clone();
             let (session, identity) = loaded_startup_snapshot(
-                crate::session::Session::load_with_identity(),
+                match self.session_path.as_deref() {
+                    Some(path) => crate::session::load_snapshot_result(path),
+                    None => Ok(None),
+                },
                 &mut self.session_load_failed,
             )?;
             self.restore_identity = Some(identity);
             Some(session)
         } else {
-            if !self.other_builds.running()
-                && let Some(path) = crate::session::Session::path()
+            // Restore is off, so a leftover output file goes, but never one
+            // another process owns. A launch that does restore, only not
+            // this session, leaves it alone.
+            if !should_restore_session(self.startup.restore, self.cfg.restore_session, false)
+                && !self.other_builds.running()
             {
-                crate::session_content::remove(&path);
+                self.remove_disabled_default_content();
             }
             None
         };
@@ -553,8 +648,7 @@ mod tests {
     }
 }
 
-/// How much of the saved session can be stale before the next event-loop turn
-/// writes it out.
+/// How much of the saved session can be stale before it is written out.
 ///
 /// Most of what `session.json` holds is announced by a gesture that already
 /// saves — splitting, closing, opening a tab. Some of it is not: a shell `cd`
@@ -564,13 +658,119 @@ mod tests {
 /// bring back directories the user left an hour ago.
 ///
 /// Saving on every turn instead would serialize the whole tree at PTY-output
-/// rates, and arming a timer for it would keep the process awake and show up as
-/// idle CPU — kettle measures that. So the sweep rides on turns the event loop
-/// was running anyway: it never wakes the process on its own account, and an
-/// idle kettle simply saves the moment anything next happens. The write itself
-/// is skipped when the serialized text matches what is already on disk, so a
+/// rates. So the sweep rides on turns the event loop was running anyway, at
+/// most once per interval. That alone leaves the last change before Kettle goes
+/// quiet unwritten until something else happens, which on macOS can be the
+/// next key press: an idle window there gets no turns at all. So a turn that
+/// delivered an event and did not sweep asks for one wake at the end of the
+/// interval ([`session_sweep_wake`]). The wake itself delivers no event and so
+/// asks for nothing more, and an idle Kettle, which gets no events, never asks:
+/// a crash loses at most this much, and idle stays idle. The write itself is
+/// skipped when the serialized text matches what is already on disk, so a
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 pub(super) const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the session sweep last ran, and whether anything has happened since
+/// that it has not seen.
+///
+/// Only [`SessionSweep::take_due`], the sweep itself, clears the flag.
+#[derive(Debug, Default)]
+pub(super) struct SessionSweep {
+    last: Option<std::time::Instant>,
+    touched: bool,
+    wake: Option<std::time::Instant>,
+    /// The latest time `take_due` was asked about since the last deadline:
+    /// the instant this turn's sweep decision was made.
+    checked: Option<std::time::Instant>,
+}
+
+impl SessionSweep {
+    /// Something happened that may have changed what the session holds: any
+    /// window event except a redraw, and any user event.
+    pub(super) fn touch(&mut self) {
+        self.touched = true;
+    }
+
+    /// Whether this window's turn sweeps, per [`session_sweep_due`]. A sweep
+    /// starts a new interval and has seen everything so far.
+    pub(super) fn take_due(&mut self, now: std::time::Instant, window_has_tabs: bool) -> bool {
+        // Only a window that could sweep marks the check: a tabless window
+        // checked later in the same turn must not move it past the wake that
+        // a window with tabs declined just before.
+        if window_has_tabs {
+            self.checked = Some(self.checked.map_or(now, |checked| checked.max(now)));
+        }
+        if !session_sweep_due(self.last, now, window_has_tabs) {
+            return false;
+        }
+        self.last = Some(now);
+        self.touched = false;
+        self.wake = None;
+        true
+    }
+
+    /// The wake this turn should ask for, once every window has had its turn.
+    ///
+    /// `pending` is a save the sweep owes but put off; it asks for the wake as
+    /// a change does. `eligible` (see [`autosave_eligible`]) is asked at most
+    /// once per interval, and a sweep that could not save then asks for
+    /// nothing. A wake whose time had come when the sweep was checked, without
+    /// a sweep, means no window had anything to sweep, so it is dropped rather
+    /// than left in the past, where it would spin the loop.
+    ///
+    /// All of that is judged at the instant this turn's sweep was checked, not
+    /// at `now`, which is only used when no window was. The clock can pass
+    /// the wake between the two: the sweep declined just before its time, and
+    /// judging the wake just after would drop the change it never saw. Judged
+    /// at the check, the wake stays, already due, and the next turn sweeps.
+    pub(super) fn deadline(
+        &mut self,
+        now: std::time::Instant,
+        pending: bool,
+        eligible: impl FnOnce() -> bool,
+    ) -> Option<std::time::Instant> {
+        let now = self.checked.take().unwrap_or(now);
+        if self.wake.is_some_and(|wake| wake <= now) {
+            self.wake = None;
+            self.touched = false;
+        }
+        if (self.touched || pending) && self.wake.is_none() {
+            self.wake = session_sweep_wake(self.last, now, true, eligible());
+            if self.wake.is_none() {
+                self.touched = false;
+            }
+        }
+        self.wake
+    }
+}
+
+/// When to wake for the sweep a change is owed: the end of the current
+/// interval, if something has happened since the last sweep (`touched`), this
+/// launch saves at all (`eligible`) and the interval is still running. A sweep
+/// that is already due runs on the turn it is due; with no sweep yet there is
+/// no interval, and the first turn always sweeps.
+pub(super) fn session_sweep_wake(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    touched: bool,
+    eligible: bool,
+) -> Option<std::time::Instant> {
+    let due = last
+        .filter(|_| touched && eligible)?
+        .checked_add(SESSION_SWEEP)?;
+    (due > now).then_some(due)
+}
+
+/// Whether automatic saving can write anything for this launch: its startup
+/// snapshot was read, it has a destination, and some window other than the
+/// quick terminal has tabs. The sweep's wake is armed only when it is.
+pub(super) fn autosave_eligible(
+    load_failed: bool,
+    target: &SessionWriteTarget<'_>,
+    any_window_with_tabs: bool,
+) -> bool {
+    !load_failed && *target != SessionWriteTarget::Skip && any_window_with_tabs
+}
 
 /// Whether a session sweep is owed as of `now`. The first turn always sweeps,
 /// so a workspace that changes and then goes quiet is written once rather than
@@ -592,6 +792,100 @@ pub(super) fn session_sweep_due(
     window_has_tabs: bool,
 ) -> bool {
     window_has_tabs && last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
+}
+
+/// Why a session save runs, which decides how it treats the output file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveKind {
+    /// A gesture, or an explicit save.
+    Gesture,
+    /// The background sweep (see [`SESSION_SWEEP`]).
+    Sweep,
+    /// The last save before the process goes. It always takes a fresh
+    /// snapshot, which also restores an output file deleted or replaced on
+    /// disk; the writer skips the write when the file already holds it.
+    Exit,
+}
+
+/// While output keeps changing, how often its saved snapshot is replaced.
+///
+/// An agent pane whose spinner redraws all day, or a long build, changes the
+/// output on every sweep. Replacing an up-to-8 MiB file and syncing it twice
+/// every 2 seconds for that is about 1,800 writes an hour; every 30 seconds it
+/// is 120. A change that went quiet is still written within two sweeps (see
+/// [`ContentThrottle::decide`]), and the exit save writes whatever is owed.
+pub(super) const CONTENT_STREAM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// When a save takes a fresh output snapshot, given the last one submitted.
+#[derive(Debug, Default)]
+pub(super) struct ContentThrottle {
+    /// The key and time of the last snapshot handed to the writer. `None`
+    /// before the first one, so the first output after launch is written at
+    /// the first save rather than 30 seconds in.
+    written: Option<(crate::session_content::ContentKey, std::time::Instant)>,
+    /// The key the previous sweep saw.
+    swept: Option<crate::session_content::ContentKey>,
+    /// A snapshot is owed but was put off. Like a change, it asks for the
+    /// sweep's wake, so the write it is waiting for happens without another
+    /// event.
+    pub(super) pending: bool,
+}
+
+impl ContentThrottle {
+    /// Whether this save writes a fresh snapshot (`true`) or keeps the file.
+    ///
+    /// In order:
+    ///
+    /// 1. The exit save writes, and so does a save after the writer found
+    ///    the file was not the one it wrote (`stale`).
+    /// 2. So does the first save, and one whose [`ContentBinding`] changed:
+    ///    the layout the file is bound to, or what the settings let it hold.
+    ///    The pair has to stay matched, and a privacy change has to reach the
+    ///    disk at once.
+    /// 3. A key equal to the one written keeps the file.
+    /// 4. A sweep whose key equals the previous sweep's writes: the output
+    ///    has gone quiet for a whole interval.
+    /// 5. A save 30 seconds or more after the last write writes.
+    /// 6. Anything else is put off, and asks for one more sweep.
+    ///
+    /// A gesture (copy, a font size change) follows the same rules, apart
+    /// from rule 4, which only a sweep's fixed interval can judge: a burst of
+    /// gestures while output streams cannot bypass the interval.
+    ///
+    /// [`ContentBinding`]: crate::session_content::ContentBinding
+    pub(super) fn decide(
+        &mut self,
+        key: &crate::session_content::ContentKey,
+        now: std::time::Instant,
+        kind: SaveKind,
+        stale: bool,
+    ) -> bool {
+        let quiet = kind == SaveKind::Sweep && self.swept.as_ref() == Some(key);
+        if kind == SaveKind::Sweep {
+            self.swept = Some(key.clone());
+        }
+        let write = match &self.written {
+            _ if kind == SaveKind::Exit || stale => true,
+            None => true,
+            Some((written, _)) if written.binding() != key.binding() => true,
+            Some((written, _)) if written == key => false,
+            Some((_, at)) => quiet || now.saturating_duration_since(*at) >= CONTENT_STREAM_INTERVAL,
+        };
+        if write {
+            self.written = Some((key.clone(), now));
+        }
+        self.pending = !write
+            && self
+                .written
+                .as_ref()
+                .is_some_and(|(written, _)| written != key);
+        write
+    }
+
+    /// Forget what was written: the next save takes a fresh snapshot.
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Where a session snapshot should be written, if anywhere.
@@ -638,6 +932,218 @@ pub(super) fn session_write_target(
     }
 }
 
+/// Whether a launch removes the output file beside the session it owns:
+/// only when it owns that file (`owned`), and output saving is off for it,
+/// either `restore-scrollback-lines = 0` or, for the default session, restore
+/// mode off. A launch override, a secondary or a profile owns nothing to
+/// remove, so a `restore-scrollback-lines = 0` there cannot erase the main
+/// process's file.
+pub(super) fn content_cleanup_due(
+    owned: bool,
+    named_layout: bool,
+    lines: usize,
+    restore_mode: bool,
+) -> bool {
+    owned && (lines == 0 || (!named_layout && !restore_mode))
+}
+
+/// Who restores and writes the default session (`session.json` and
+/// `session.content`) while this process runs.
+///
+/// Only one process should. Each restores the session it finds, so a second
+/// one opens a copy of the first one's tabs; and each writes whenever what it
+/// has differs from the file, so two take turns replacing each other's
+/// windows, and a `kettle -d DIR` launch would replace the saved session
+/// with its one window on its first sweep.
+///
+/// The activation lock does not settle it. This build's primary holds that
+/// lock, but so does a process started with `-e` or `--profile` while no
+/// primary ran, and a bare launch that such a process refuses then runs beside
+/// it holding no lock at all. So the owner holds a lock of its own,
+/// `session.owner.lock` beside `session.json`, taken at startup and kept
+/// until it exits. A process that finds it held does not take it over when
+/// its holder exits: the last process to quit would otherwise replace the
+/// session the user meant to keep. The one exception is another build's
+/// primary (#575): a new build's primary waits for the old one to exit and
+/// then saves, as it did before the lock existed.
+#[derive(Debug)]
+pub(crate) enum DefaultSessionClaim {
+    /// This process holds the owner lock, released when it exits. `None`
+    /// when the lock could not be taken for a reason other than a holder (no
+    /// config directory, a read-only one): restore and saving then go ahead
+    /// as before the lock existed.
+    Owner {
+        _lock: Option<kettle_state::ExclusiveFileLock>,
+    },
+    /// Restore mode was off when this launch started, so it took no lock:
+    /// it neither restores nor writes the session, and holds nothing that
+    /// would stop a `kettle --restore` started beside it. It claims the lock
+    /// the first time restore mode is on, which a settings change can do.
+    Unclaimed(std::path::PathBuf),
+    /// The lock was held while another build's primary ran: take it once
+    /// that build has exited.
+    Waiting(std::path::PathBuf),
+    /// Another process of this build owns the default session. This one
+    /// neither restores nor writes it, and never takes it over.
+    Secondary,
+    /// A launch that never touches the default session: a profile or
+    /// `--new-process`, `-e`, `-d`, the quick terminal or `--layout` (see
+    /// [`separate_launch`]).
+    Separate,
+}
+
+impl DefaultSessionClaim {
+    /// Claim the default session for a launch, at startup. `restoring` is
+    /// whether restore mode is on for it; `lock` is where the owner lock lives
+    /// (`None` without a config directory).
+    pub(super) fn claim(
+        separate: bool,
+        another_build_running: bool,
+        restoring: bool,
+        lock: Option<&std::path::Path>,
+    ) -> Self {
+        if separate {
+            return Self::Separate;
+        }
+        let Some(path) = lock else {
+            return Self::Owner { _lock: None };
+        };
+        if !restoring {
+            // No lock file either: a launch that cannot restore or save
+            // leaves nothing behind.
+            return Self::Unclaimed(path.to_path_buf());
+        }
+        Self::take(path, another_build_running)
+    }
+
+    fn take(path: &std::path::Path, another_build_running: bool) -> Self {
+        match take_owner_lock(path) {
+            Ok(Some(lock)) => Self::Owner { _lock: Some(lock) },
+            Ok(None) if another_build_running => Self::Waiting(path.to_path_buf()),
+            Ok(None) => Self::Secondary,
+            Err(error) => {
+                log::warn!(
+                    "session owner lock unavailable ({:?}); restoring and saving as before",
+                    error.kind()
+                );
+                Self::Owner { _lock: None }
+            }
+        }
+    }
+
+    /// Whether this process owns the default session now. Ask only while
+    /// restore mode is on: an unclaimed launch claims it here, as it would
+    /// have at startup, and a waiting one takes the lock over once no other
+    /// build runs and the lock is free, or becomes a secondary if a process
+    /// of this build took it first.
+    pub(super) fn owns(&mut self, another_build_running: bool) -> bool {
+        match self {
+            Self::Unclaimed(path) => {
+                let path = std::mem::take(path);
+                *self = Self::take(&path, another_build_running);
+            }
+            // The other build has gone. If a process of this build claimed
+            // the lock first, it owns the session now, and this one, like any
+            // secondary, never takes it over.
+            Self::Waiting(path) if !another_build_running => match take_owner_lock(path) {
+                Ok(Some(lock)) => *self = Self::Owner { _lock: Some(lock) },
+                Ok(None) => *self = Self::Secondary,
+                Err(_) => {}
+            },
+            _ => {}
+        }
+        matches!(self, Self::Owner { .. })
+    }
+}
+
+/// With restore mode off, remove the output file beside `session` that an
+/// earlier launch left, but only while no process owns the session: the owner
+/// lock at `lock` is taken just for the removal and never kept. Returns
+/// whether it removed one. Nothing is created when there is no file.
+pub(super) fn remove_unclaimed_content(lock: &std::path::Path, session: &std::path::Path) -> bool {
+    if !crate::session_content::path(session).exists() {
+        return false;
+    }
+    let Ok(Some(_held)) = take_owner_lock(lock) else {
+        return false;
+    };
+    crate::session_content::remove(session);
+    true
+}
+
+fn take_owner_lock(
+    path: &std::path::Path,
+) -> std::io::Result<Option<kettle_state::ExclusiveFileLock>> {
+    if let Some(dir) = path.parent() {
+        kettle_state::create_private_dirs(dir)?;
+    }
+    kettle_state::ExclusiveFileLock::try_acquire(path)
+}
+
+/// The default-session file this launch restores and saves: `session.json`,
+/// or with `--config FILE` that file's own (see
+/// `crate::session::config_session_path`). `None` without a config directory.
+pub(super) fn launch_session_path(options: &crate::Options) -> Option<std::path::PathBuf> {
+    launch_session_path_with(
+        options,
+        crate::session::Session::path().as_deref(),
+        kettle_config::Config::default_path().as_deref(),
+    )
+}
+
+/// [`launch_session_path`] with the default session and config files given.
+pub(super) fn launch_session_path_with(
+    options: &crate::Options,
+    default_session: Option<&std::path::Path>,
+    default_config: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let default_session = default_session?;
+    Some(
+        match options
+            .config
+            .as_deref()
+            .filter(|_| options.explicit_config)
+        {
+            Some(config) => {
+                crate::session::config_session_path(default_session, default_config, config)
+            }
+            None => default_session.to_path_buf(),
+        },
+    )
+}
+
+/// Whether a launch never touches the default session: `--profile` or
+/// `--new-process` (`separate_process`), `-e` or `-d`, a quick-terminal
+/// launch, or `--layout NAME`, which saves to its own file. `--config FILE`
+/// is not one: its default session is that file's own.
+pub(super) fn separate_launch(options: &crate::Options) -> bool {
+    options.separate_process
+        || options.command.is_some()
+        || options.cwd.is_some()
+        || options.quick_terminal
+        || options.layout.is_some()
+}
+
+/// The notification body for a `--restore` this launch cannot honour, if
+/// any. `explicit` is `--restore` with no other restore target (a named
+/// layout or a tab handoff).
+pub(super) fn restore_refusal(
+    explicit: bool,
+    claim: &DefaultSessionClaim,
+    elsewhere: bool,
+) -> Option<kettle_i18n::Text> {
+    if !explicit {
+        return None;
+    }
+    match claim {
+        DefaultSessionClaim::Separate => {
+            Some(kettle_i18n::Text::NotifySessionNotRestoredSeparateBody)
+        }
+        _ if elsewhere => Some(kettle_i18n::Text::NotifySessionNotRestoredOwnedBody),
+        _ => None,
+    }
+}
+
 /// Is the default last-session (`session.json`) active for THIS launch?
 /// Drives BOTH the startup restore gate (whether to `load()`) and the
 /// `save_session` gate (whether to `save()` the default session). They MUST
@@ -647,15 +1153,17 @@ pub(super) fn session_write_target(
 /// `--layout NAME` is independent (its own file, explicit intent) and never
 /// consults this gate.
 ///
-/// While another build's primary still runs, typically the old version after
-/// an update, the session is its: restoring it here would duplicate its open
-/// tabs, and saving would overwrite them (#575). Both wait until it exits.
+/// While the session is someone else's (`owned_elsewhere`: another build's
+/// primary still runs, typically the old version after an update (#575);
+/// another process of this build owns it; or this launch never touches it,
+/// see [`DefaultSessionClaim`]), restoring it here would duplicate its open
+/// tabs, and saving would overwrite them. Both wait.
 pub(super) fn should_restore_session(
     startup_restore: bool,
     cfg_restore_session: kettle_config::RestoreSession,
-    another_build_running: bool,
+    owned_elsewhere: bool,
 ) -> bool {
-    (startup_restore || restore_session_enabled(cfg_restore_session)) && !another_build_running
+    (startup_restore || restore_session_enabled(cfg_restore_session)) && !owned_elsewhere
 }
 
 fn restore_session_enabled(policy: kettle_config::RestoreSession) -> bool {

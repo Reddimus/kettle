@@ -1100,6 +1100,14 @@ pub struct Pane {
     /// to the PTY. Unix input policy accepts it only when its pid still matches
     /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
     pub foreground_process: Option<kettle_remote::ForegroundProcess>,
+    /// Document row (see `kettle_core::restore::primary_end_row`) before which
+    /// this pane's primary grid may still hold a remote session's output,
+    /// recorded when the pane stops counting as remote, or when restore
+    /// replays output saved as remote. It never moves back, so with
+    /// `restore-scrollback-remote` off those rows stay out of the saved output
+    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
+    /// taken every one of them out of the grid.
+    pub remote_output_end: Option<u64>,
     /// Media shown in this pane with `show`. It moves with the pane, into
     /// another window too.
     pub media_shelf: crate::media::Shelf,
@@ -1120,6 +1128,19 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Everything now in the primary grid may be a remote session's output:
+    /// keep it out of the saved output (see [`Pane::remote_output_end`]).
+    pub(crate) fn note_remote_output_ended(&mut self) {
+        let end = kettle_core::restore::primary_end_row(
+            &self
+                .term
+                .term
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.remote_output_end = Some(self.remote_output_end.map_or(end, |known| known.max(end)));
+    }
+
     #[cfg(test)]
     pub(crate) fn capture_input_for_test(&mut self) -> impl Fn() -> Vec<Vec<u8>> + use<> {
         let (user_tx, user_rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_DEPTH);
@@ -2302,11 +2323,81 @@ pub struct RestoreOutcome {
     pub skipped: usize,
 }
 
+/// Which of a pane's rows its saved output may hold.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemoteRows {
+    /// Every row; `remote` marks the saved output as remote, so a restore with
+    /// `restore-scrollback-remote` off drops it.
+    All { remote: bool },
+    /// Only rows from this document row on: a remote session wrote the ones
+    /// before it.
+    From(u64),
+}
+
+/// Which rows of a local pane are saved. `remote_now` is whether it counts
+/// as remote now (a pane that does, with remote saving off, saves no rows at
+/// all), `remote_end` its [`Pane::remote_output_end`], and `first_row` the
+/// oldest document row its grid still holds. A remote session's rows that
+/// are still there stay out unless `remote_allowed`, and saved with them the
+/// output is marked remote.
+pub(crate) fn remote_rows(
+    remote_now: bool,
+    remote_end: Option<u64>,
+    first_row: u64,
+    remote_allowed: bool,
+) -> RemoteRows {
+    let residue = remote_end.filter(|&end| end > first_row);
+    match residue {
+        Some(end) if !remote_allowed => RemoteRows::From(end),
+        _ => RemoteRows::All {
+            remote: remote_now || residue.is_some(),
+        },
+    }
+}
+
 fn remote_launch(argv: &[String]) -> bool {
     kettle_remote::detect_ssh(argv).is_some() || kettle_remote::detect_container(argv).is_some()
 }
 
+/// Whether a pane counts as remote now: a detected remote context, a remote
+/// launch, or a remote program in the foreground.
+pub(crate) fn pane_saves_as_remote(pane: &Pane) -> bool {
+    pane.remote_context.is_some()
+        || remote_launch(&pane.argv)
+        || pane
+            .foreground_process
+            .as_ref()
+            .is_some_and(|p| remote_launch(&p.argv))
+}
+
 impl Mux {
+    /// What each pane's saved rows depend on, in [`Mux::snapshot_content`]'s
+    /// order, read without locking any grid. Each generation is read before
+    /// the snapshot that follows it, so output racing the save makes the next
+    /// key differ rather than going unseen.
+    pub(crate) fn content_key_panes(&self) -> Vec<crate::session_content::PaneContentKey> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.root.leaf_ids())
+            .map(|id| match self.panes.get(&id) {
+                Some(pane) => crate::session_content::PaneContentKey {
+                    id,
+                    output: pane.term.output_generation(),
+                    geometry: pane.term.geometry_generation(),
+                    remote: pane_saves_as_remote(pane),
+                    remote_end: pane.remote_output_end,
+                },
+                None => crate::session_content::PaneContentKey {
+                    id,
+                    output: 0,
+                    geometry: 0,
+                    remote: false,
+                    remote_end: None,
+                },
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot_content(
         &self,
         cfg: &Config,
@@ -2322,22 +2413,41 @@ impl Mux {
                         let Some(pane) = self.panes.get(id) else {
                             return Default::default();
                         };
-                        let remote = pane.remote_context.is_some()
-                            || remote_launch(&pane.argv)
-                            || pane
-                                .foreground_process
-                                .as_ref()
-                                .is_some_and(|p| remote_launch(&p.argv));
-                        let lines = if remote && !cfg.restore_scrollback_remote {
-                            Vec::new()
-                        } else {
-                            kettle_core::restore::snapshot(
-                                &pane.term.term.lock().unwrap(),
-                                cfg.restore_scrollback_lines,
-                                budget,
-                            )
-                        };
-                        crate::session_content::PaneContent { remote, lines }
+                        let remote_now = pane_saves_as_remote(pane);
+                        if remote_now && !cfg.restore_scrollback_remote {
+                            return crate::session_content::PaneContent {
+                                remote: true,
+                                lines: Vec::new(),
+                            };
+                        }
+                        let term = pane.term.term.lock().unwrap();
+                        let first = kettle_core::restore::primary_first_row(&term);
+                        match remote_rows(
+                            remote_now,
+                            pane.remote_output_end,
+                            first,
+                            cfg.restore_scrollback_remote,
+                        ) {
+                            RemoteRows::All { remote } => crate::session_content::PaneContent {
+                                remote,
+                                lines: kettle_core::restore::snapshot(
+                                    &term,
+                                    cfg.restore_scrollback_lines,
+                                    budget,
+                                ),
+                            },
+                            // The rows left hold no remote output, so they
+                            // restore like any local pane's.
+                            RemoteRows::From(row) => crate::session_content::PaneContent {
+                                remote: false,
+                                lines: kettle_core::restore::snapshot_from(
+                                    &term,
+                                    cfg.restore_scrollback_lines,
+                                    row,
+                                    budget,
+                                ),
+                            },
+                        }
                     })
                     .collect()
             })
@@ -2676,6 +2786,7 @@ impl Mux {
                 reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
+                remote_output_end: None,
                 agent_attached: false,
                 read_only: false,
                 completion_overlay: cfg.completion_overlay
@@ -2785,10 +2896,12 @@ impl Mux {
                 let geometry = geometries
                     .next()
                     .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
+                let mut replayed_remote = false;
                 self.initial_content = self.restore_content.pop_front().and_then(|mut pane| {
                     if !cfg.restore_scrollback_remote && (pane.remote || remote_launch(&argv)) {
                         return None;
                     }
+                    replayed_remote = pane.remote;
                     let keep = cfg
                         .restore_scrollback_lines
                         .min(kettle_core::restore::MAX_RESTORE_LINES);
@@ -2805,6 +2918,11 @@ impl Mux {
                 // Rejoin the saved broadcast group.
                 if let Some(p) = self.panes.get_mut(&id) {
                     p.group_name = group.clone();
+                    // Output saved as remote is remote output in this pane
+                    // too, though the pane itself starts local.
+                    if replayed_remote {
+                        p.note_remote_output_ended();
+                    }
                 }
                 Ok(Node::Leaf(id))
             }

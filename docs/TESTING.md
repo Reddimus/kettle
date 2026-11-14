@@ -2949,6 +2949,16 @@ check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
 field name alone, including on macOS.
 
+## Static text names on every platform
+
+`theme_picker_readout_is_spoken_on_every_platform` and
+`settings_no_matches_is_spoken_on_every_platform` hand the modal projection to
+AccessKit's consumer, as the platform adapters do, and read each node's name as
+AT-SPI and UI Automation do: a label's from its value, any other node's from its
+label. They check the theme picker's footer text (with the lowest colour's
+number and the below-3:1 warning) and Settings' no-match line in English and
+Spanish. They do not run Orca or Narrator.
+
 ## Configured-session and desktop acceptance, 2026-11-01
 
 On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,
@@ -3202,7 +3212,11 @@ hit testing and accessibility to one layout, and `kettle-render`'s
 `picker_scroll_thumb_is_drawn_last_at_three_to_one` pin the scrollbar thumb.
 `bound_only_palette_lists_every_bound_command_with_its_shortcut` and
 `enter_in_the_shortcut_list_runs_the_selected_bound_row` cover the Keyboard
-Shortcuts list. `picker_key_hint_slot_is_secondary_text` pins the header key
+Shortcuts list, and `the_shortcut_list_shows_its_placeholder_in_a_standard_window`
+its placeholder in a standard window's header in both languages; `kettle-render`'s
+`an_empty_picker_header_gives_its_hint_up_before_its_placeholder` holds the rule
+that the key hint gives way to an empty query's placeholder.
+`picker_key_hint_slot_is_secondary_text` pins the header key
 hint's colour without a GPU; `a_picker_header_paints_its_key_hint_as_secondary_text`
 and `an_empty_picker_query_paints_its_placeholder` check the frame and print
 `PICKER_HEADER_GPU_SKIP` when no GPU adapter exists.

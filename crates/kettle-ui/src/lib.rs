@@ -448,6 +448,14 @@ pub struct Options {
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,
+    /// `--profile` or `--new-process`: this process runs beside the main one,
+    /// so it neither restores nor writes the default session
+    /// (`session.json` and `session.content`).
+    pub separate_process: bool,
+    /// `config` came from `--config FILE`: this launch restores and saves a
+    /// session of that file's own, never the default one (see
+    /// `session::config_session_path`).
+    pub explicit_config: bool,
     /// `--agent-server MODE` overrides the `agent-server` config for THIS launch
     /// (`off`|`read-only`|`full`). `None` = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,
