@@ -193,6 +193,11 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_denied_write"
                         | "mouse_override_hint"
                         | "font_size_chip"
+                        // The notification toast's Show button is named by
+                        // it when the tab has no title, and its overflow line
+                        // describes the live status.
+                        | "notification_toast_show"
+                        | "notification_toast_more"
                         // The SSH launcher's status line is also a polite
                         // live region.
                         | "ssh_status_saved"
@@ -248,6 +253,9 @@ fn no_spanish_message_is_left_in_english() {
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
         "media_viewer_kind_video",
+        // Punctuation and a counter, no words.
+        "notification_toast_sourced",
+        "notification_toast_repeats",
     ];
     for (key, text) in &english {
         if !cognates.contains(&key.as_str()) {

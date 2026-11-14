@@ -3031,6 +3031,7 @@ impl App {
                 self.quick_terminal.focus_check = None;
             }
             self.close_update_toast_window(seq);
+            self.forget_window_notifications(seq);
             // A dying window that is the torn window or the manual-follow
             // capture holder takes its drag with it. Abandon eagerly (clears
             // the latched preview on the still-mapped target and restores
@@ -3064,6 +3065,7 @@ impl App {
         }
         let mut ws = ws;
         self.sync_pane_focus_reports(&mut ws);
+        self.sync_focused_bell(&mut ws);
         if seq == self.focused_seq {
             self.sync_macos_menu(Some(&ws));
         }

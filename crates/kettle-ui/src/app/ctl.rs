@@ -1057,6 +1057,8 @@ impl App {
                     "fitted_title": fitted_title,
                     "label": label,
                     "active": seg.active,
+                    // The marker the strip draws: normal, output, silent or bell.
+                    "activity": format!("{:?}", seg.activity).to_ascii_lowercase(),
                     "hovered": bar.hovered_tab_idx == Some(seg.idx),
                     "rect": rect_json(seg.rect),
                     "title_rect": rect_json(seg.title_rect),
@@ -1162,7 +1164,10 @@ impl App {
                     let (cols, rows) = self.grid_of(target, partition.terminal);
                     let size_text =
                         (!self.cfg.title_hide_sizetext).then(|| format!("{}x{}", cols, rows));
-                    let bell = diagnostic_titlebar_bell(self.cfg.icon_bell, pane.bell);
+                    let bell = diagnostic_titlebar_bell(
+                        self.cfg.icon_bell,
+                        pane.bell || pane.focused_bell(),
+                    );
                     let budget = (rect.2 / cell_w.max(1.0)).floor().max(1.0) as usize;
                     let group = pane.group_name.as_deref().filter(|g| !g.is_empty());
                     let fitted_title = kettle_render::fit_pane_titlebar_title(
@@ -1690,6 +1695,20 @@ impl App {
         });
         geometry["tab_bar"]["window_controls"] = window_control_geometry(&bar);
         geometry["notices"] = notices.into();
+        // Where the notification toast is, without its text.
+        geometry["notification_toast"] = self
+            .notification_toast_projection(target)
+            .map(|view| {
+                let controls = view.overlay.control_geometry();
+                serde_json::json!({
+                    "rect": rect_json(controls.rect),
+                    "message": rect_json(controls.message),
+                    "show": view.show.then(|| rect_json(controls.details)),
+                    "close": rect_json(controls.close),
+                    "opacity": view.overlay.opacity,
+                })
+            })
+            .into();
         geometry["picker"] = picker.into();
         geometry["text_field"] = diagnostic_overlay
             .text_field
@@ -1716,7 +1735,7 @@ impl App {
                 "unavailable": self.update_toast_unavailable,
                 "retry_in_ms": self.update_toast_retry.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
                 "receipt_pending": self.update_toast_receipts.as_ref().map_or(0, crate::update_toast::ReceiptWriter::pending_count),
-                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.presented,"remaining_ms":t.remaining().as_millis()})),
+                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.clock.presented,"remaining_ms":t.remaining().as_millis()})),
             }));
             fields.insert(
                 "fullscreen".into(),
@@ -2615,7 +2634,9 @@ impl App {
             return true;
         }
         let pre = self.focus_key(ws);
-        ws.mux.focus_at(area, px, py);
+        if let Some(pressed) = ws.mux.focus_at(area, px, py) {
+            ws.mux.answer_bell_by_press(pressed);
+        }
         self.note_focus_change(ws, pre);
         // As natively, a press in the terminal restarts the cursor blink.
         self.reset_blink_phase(ws);

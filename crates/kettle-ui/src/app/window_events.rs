@@ -732,6 +732,7 @@ impl App {
                 // A preview lane owns every press over it, so the terminal
                 // beside it never gets one.
                 if self.press_persistent_notice(ws, px, py, bcode)
+                    || self.press_notification_toast(ws, px, py, bcode)
                     || self.press_update_toast(ws, px, py, bcode)
                 {
                     return;
@@ -962,8 +963,14 @@ impl App {
                     return;
                 }
                 let pre = self.focus_key(ws);
-                ws.mux
-                    .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32);
+                // A press in a pane answers its bell, whether or not the
+                // program reports the mouse.
+                if let Some(pressed) = ws
+                    .mux
+                    .focus_at(area, ws.cursor.x as f32, ws.cursor.y as f32)
+                {
+                    ws.mux.answer_bell_by_press(pressed);
+                }
                 self.note_focus_change(ws, pre);
                 // A press in the terminal shows the cursor at once and
                 // restarts its blink, as a click does in GTK and Cocoa text
@@ -1670,6 +1677,14 @@ impl App {
                     &event.logical_key,
                     ws.mods,
                 );
+                // The notification toast takes keys only while assistive
+                // technology has one of its buttons focused.
+                let notification_owns_key = update_toast::owns_key(
+                    ws.notification_toast_focus.is_some()
+                        && self.notification_toast_projection(ws).is_some(),
+                    &event.logical_key,
+                    ws.mods,
+                );
                 let config_key = notices::config_notice_key(
                     self.config_notice.is_some()
                         && !self.any_modal_open(ws)
@@ -1696,6 +1711,7 @@ impl App {
                 let ui_owns_key = config_key.is_some()
                     || held_key.is_some()
                     || toast_owns_key
+                    || notification_owns_key
                     || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
                     || ws.context_menu.is_some()
                     || ws.vi_mode.is_some()
@@ -1802,6 +1818,36 @@ impl App {
                             ws.accessibility_pending = true;
                         }
                     }
+                }
+                if !notification_owns_key && ws.notification_toast_focus.take().is_some() {
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
+                if notification_owns_key {
+                    update_toast::guard_activation(
+                        &event.logical_key,
+                        event.physical_key,
+                        &mut ws.closing_keys,
+                    );
+                    self.notification_toast_key(ws, &event.logical_key);
+                    return;
+                }
+                // A plain Escape over the notification toast dismisses the
+                // toast on screen and, like any key over a link hover, still
+                // reaches the program: Kettle never takes Escape from vim or
+                // a shell.
+                if ws.ime_preedit.is_none()
+                    && escape_dismisses_notification(
+                        event.state,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods,
+                    )
+                    && self.notification_toast_projection(ws).is_some()
+                {
+                    self.dismiss_notification_toast(ws);
                 }
                 if ws.ime_preedit.is_some() {
                     return;

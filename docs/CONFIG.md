@@ -95,7 +95,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` is an alias for `bar` |
 | `cursor-unfocused-style` | `hollow`\|`hidden`\|`unchanged` | `hollow` | Steady cursor in unfocused windows and split panes: hollow block, hidden, or the terminal-selected shape. Respects DEC cursor hiding and cursor colour. Applies live |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
-| `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
+| `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | What `BEL` does. `visual`: the pane that rang flashes (unless `reduce-motion` holds motion back), and a bell in the pane you are looking at marks the active tab with a bell until you answer it: the next key, IME commit or paste that pane takes, a click in it, or focus moving to another pane or tab. Switching to another app and back does not clear it. With no tab strip to show it (one tab under `tab-bar = auto` off the macOS and GNOME titlebars, or `tab-bar = off`), the window title starts with `[!] ` (the bell emoji on macOS) instead. `attention`: window attention (taskbar/dock urgency) while the window is unfocused. Bells in background tabs and panes are marked in every mode; see [Notifications](#notifications) |
 | `bell-flash-intensity` (`bell_flash_intensity`) | float 0–1 | `0.03` | Peak strength of the visual-bell flash as a step of CIE L\* lightness (a fraction of the 0–100 scale): `0.03` lifts a dark theme's background by 3 L\* and dips a light theme's by 3 L\* on the frame the bell rings, then eases out to nothing over 300 ms. Only the pane that rang flashes, under its text. Defined perceptually rather than as an alpha because the renderer blends in linear light, where one alpha reads very differently per theme (a `0.10` alpha would be a +22 L\* jump on TokyoNight). The most frequent bell in practice is an empty Tab completion, which does not warrant more than a barely-there cue; raise this (`0.06`–`0.10`) for a stronger flash, `1` paints the foreground solid, or set `0` to drop the flash while keeping window attention and the tab/titlebar bell marks. Full-pane flashes are also the part of a terminal most likely to affect a photosensitive user |
 | `osc52-notify` | bool | `true` | Show a dismissible notice after a successful OSC 52 write, at most once every five seconds per pane. Counts Unicode code points after sanitising internal markers and applying the size limit. `false` silences successful-write notices; denied reads and writes each still show one policy notice per pane. See [Pasting](../README.md#pasting) |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read. Target `c` uses the regular clipboard; target `p`/`s` uses Linux PRIMARY without cross-target fallback (platforms without a separate selection use their one clipboard). DA1 advertises clipboard extension `52` only when writes are enabled and the platform clipboard is available; live reload updates that advertisement for existing panes |
@@ -153,7 +153,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `agent-display-agy` (alias `agent_display_agy`) | bool | `false` | agy previews: enables the explicitly installed native display plugin and its visual guidance. Install with `kettle agent-setup --agent agy --install`; start a new agy session afterwards. Explicit artifact fallback requires a signed macOS agy TUI with foreground terminal input. MCP display also supports Linux. Delivery uses the media shelf; native agy hooks cannot print Kettle inline cards. Needs `agent-display`. |
 | `add-kettle-to-path` (alias `add_kettle_to_path`) | `auto`\|`off` | `auto` | macOS and Linux: a new pane whose `PATH`, after the configured `env`, has no executable `kettle` gets the running Kettle's folder appended, after every entry, so `kettle show`, `kettle mcp` and `kettle agent-setup` work there; it is never put in front of your commands, and never a translocated copy's folder (run Kettle from `/Applications` first). Only absolute entries are looked in, and an empty `PATH` (which means the working directory) is left as it is. `off` leaves the `PATH` as configured. Panes already open keep theirs. |
 | `video-preview-hover` (alias `video_preview_hover`) | bool | `off` | Loop a video's silent preview while the pointer rests on its lane, for at most four seconds, from frames the lane already holds; it never starts decoding. Held back by `reduce-motion`. Applies live. |
-| `reduce-motion` (alias `reduce_motion`) | `auto`\|`on`\|`off` | `auto` | Whether Kettle avoids motion it would start on its own; today that is the video hover preview. `auto` follows macOS Reduce Motion or the Linux Settings portal and avoids motion if that preference is unavailable; `on` always avoids it; `off` never. A preview the user starts plays either way. Applies live. |
+| `reduce-motion` (alias `reduce_motion`) | `auto`\|`on`\|`off` | `auto` | Whether Kettle avoids motion it would start on its own: the video hover preview, the visual-bell flash (the bell mark on the tab still shows) and the notification toast's fade. `auto` follows macOS Reduce Motion or the Linux Settings portal and avoids motion if that preference is unavailable; `on` always avoids it; `off` never. A preview the user starts plays either way. Applies live. |
 | `media-open-mode` (alias `media_open_mode`) | `overlay`\|`lane` | `overlay` | How manual previews open. `overlay` centers within 90% of the owning split without resizing its terminal. Esc or a backdrop click closes it; Pin moves the same preview into a lane. Applies to newly opened previews. |
 | `preview-lane-side` (alias `preview_lane_side`) | `bottom`\|`right` | `bottom` | Where a pane's preview lane opens: `bottom` keeps the terminal's columns, `right` keeps its rows. A lane takes about 40% of the pane and leaves the terminal at least 20 columns and 5 rows. Applies to lanes opened after it changes. See **Media** under keybind actions. |
 | `agent-display-claude-code` (alias `agent_display_claude_code`) | bool | `false` | Claude Code previews: Claude Code started in a new pane gets Kettle's own plugin (the display server and the hook that prints inline cards) through `CLAUDE_CODE_PLUGIN_DIRS`. Needs `agent-display`. Kettle writes the plugin into its own data directory, checks it before every new pane, and offers nothing while Claude Code's managed policy forbids plugins from the environment; it changes none of Claude Code's settings. On Linux, Kettle also offers a `claude` launch function for cards. Your own `claude` function (defined or autoloadable) still wins, and `kettle agent-setup --status` reports it. Aliases are not checked; fish abbreviations do not suppress Kettle's function. See [Wrapping your own claude or codex function](AGENT.md#wrapping-your-own-claude-or-codex-function). Panes already open keep what they started with. See [Kettle's Claude Code plugin](AGENT.md#kettles-claude-code-plugin) |
@@ -537,7 +537,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `show-titlebar` | bool | `true` | Per-pane titlebar; renders only when a tab has >1 pane (a single-pane tab uses the OS window title instead). Also the grab handle for dragging a pane elsewhere in its tab — with it off, use `move_split:{up,down,left,right}` |
 | `title-at-bottom` | bool | `false` | Per-pane titlebar position |
 | `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
-| `icon-bell` | bool | `true` | Render a bell glyph in the titlebar when the pane ringed BEL |
+| `icon-bell` | bool | `true` | Render a bell glyph in a split pane's titlebar when the pane rang BEL: a pane you were not looking at until you focus it, the focused pane until you answer it (see `bell`) |
 | `title-transmit-bg-color` / `-fg-color` | color | `focused-split-color` → window accent / theme `cursor-text` | Focused-pane (broadcast-source) titlebar colors; unset values follow the active theme cascade |
 | `title-receive-bg-color` / `-fg-color` | color | window accent / theme `cursor-text` | Broadcast-group-member titlebar colors; unset values follow the active theme cascade |
 | `title-inactive-bg-color` / `-fg-color` | color | theme `palette[8]` / theme foreground | Idle-pane titlebar colors; unset values follow the active theme cascade |
@@ -557,7 +557,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `split-to-group` | bool | `false` | A new split joins the broadcast group of the pane it came from, so splitting a grouped pane widens the group instead of quietly dropping out of it |
 | `autoclean-groups` | bool | `true` | Forget a broadcast group after its last pane closes. This prevents a stale group target from claiming a later pane that reuses the same name |
 | `always-split-with-profile` | bool | `false` | Repeat the parent pane's direct launch command in a new split instead of opening a shell. Ordinary shell panes are cloned either way |
-| `force-no-bell` | bool | `false` | Silence every bell path regardless of `bell`: visual flash, window attention, and the tab activity mark |
+| `force-no-bell` | bool | `false` | Silence every bell path regardless of `bell`: visual flash, window attention, the tab activity mark and the active tab's and window title's bell mark |
 | `visible-bell` / `urgent-bell` | bool / bool | `—` | Legacy aliases for the unified `bell` key. Together they map to `both`; individually they map to `visual` or `attention`. An explicit `bell = …` setting wins regardless of file order |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
 | `light-theme` / `dark-theme` | theme name | `Kettle Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
@@ -714,6 +714,44 @@ most 90% cover, so text under it stays visible; it still shows in the same
 colours over the background. Command ticks on the bar are painted the same
 way. In a pane narrower than the bar, the bar narrows to fit.
 
+
+## Notifications
+
+A program can ask for a notification with OSC 9 (`printf '\e]9;Build finished\a'`)
+or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
+`kettle.notify(title, body)`. Where it shows depends on where you are:
+
+- **A Kettle window has focus**: a toast at the top of that window, under
+  the tab strip, names the tab it came from ("build: Build finished"). No
+  desktop notification is sent, on any platform. If it came from another
+  tab, pane or window, **Show** goes there; clicking the toast does too.
+  × or Escape dismisses it, and Escape still reaches the program, so it never
+  costs you a keystroke in vim or the shell. It stays for 7 seconds of time
+  you can see it, not counting time the window is in the background, behind
+  a dialog or under the pointer, and fades out only when motion is allowed.
+  Screen readers announce it politely. With assistive focus on its Show or
+  Dismiss button, Enter, Space, Tab and Escape answer the toast.
+- **No Kettle window has focus**: a desktop notification, as before, and
+  the window asks for attention. If the desktop refuses it or the delivery
+  fails (a D-Bus error on Linux, a toast error on Windows), the toast is
+  shown in its window when you return to it. macOS does not report a
+  notification the system hid, so there that cannot be detected yet.
+
+One toast shows at a time and three wait behind it. The same message from
+the same pane within five seconds is counted on its toast (`×3`) rather
+than shown or sent again, and a pane's messages less than two seconds
+apart are folded into one, its newest, shown when the two seconds are up
+with a count of the others ("2 more notifications"); this applies to desktop
+notifications too, so a flood never fills the desktop queue. When more wait
+than fit, the oldest waiting one is dropped and counted on the toast on
+screen, never that toast itself.
+
+Notification text is terminal output and is treated as such: control and
+Unicode bidi formatting characters are removed, whitespace runs collapse,
+and it is shortened to fit three lines. It is never written to a log or
+saved. On Linux, markup in a body is escaped before it reaches a
+notification server that would render it. Kettle's own messages (a failed
+paste, a config problem, a long command finishing) still go to the desktop.
 
 ## Editing the config from inside kettle (Preferences submenu)
 

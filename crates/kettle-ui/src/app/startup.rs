@@ -931,6 +931,8 @@ impl App {
             update_toast_unavailable: None,
             update_toast_retry: None,
             update_toast_focus: None,
+            notification_router: Default::default(),
+            notification_pending: Default::default(),
             config_notice_focus: false,
             update_facts_requested: None,
             update_facts_refresh: Default::default(),
@@ -945,6 +947,11 @@ impl App {
         if let Some((path, diagnostics)) = config_diagnostics {
             app.set_config_notice(&path, &diagnostics);
         }
+        // A failed desktop notification is shown in its window instead.
+        let failure_proxy = app.proxy.clone();
+        crate::on_desktop_notification_failure(move || {
+            let _ = failure_proxy.send_event(UserEvent::DesktopNotificationFailed);
+        });
         app.runtime_tracker.set_window_count(app.windows.len());
         // Before the first pane, which may start Claude Code or Codex.
         app.reconcile_claude_plugin();

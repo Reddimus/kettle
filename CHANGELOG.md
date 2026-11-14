@@ -8,6 +8,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- A bell in the pane you are looking at now marks the active tab with the
+  same bell a background tab gets, until you answer it: the next key, IME
+  commit or paste in that pane, a click in it, or moving to another pane or
+  tab. There is no timer, and switching to another app and back keeps it,
+  so a bell that rang while you looked away is still there. Without a tab
+  strip the window title starts with `[!] ` (the bell emoji on macOS).
+  `bell = attention` and `bell = off` do not mark it; `force-no-bell`
+  silences it with everything else.
+
+- Program notifications (OSC 9, OSC 777, `kettle.notify`) show as a toast in
+  the window while Kettle has focus, labelled with the tab they came from,
+  with Show (go to that tab, pane or window) and ×. Escape dismisses the
+  toast and still reaches the program. Screen readers announce it. While a
+  Kettle window has focus nothing is sent to the desktop, on any platform;
+  with none focused the desktop notification is sent as before, and one the
+  desktop refuses or fails to deliver is shown in its window when you come
+  back. A pane's notifications less than two seconds apart fold into one,
+  and a repeat within five seconds is counted (`×3`) instead of shown again,
+  for the toast and the desktop alike. See
+  [Notifications](docs/CONFIG.md#notifications).
+
 - The SSH launcher (Ctrl+Shift+S) also lists the `Host` aliases in
   `~/.ssh/config` (`%USERPROFILE%\.ssh\config` on Windows), marked "from
   ~/.ssh/config", after the configured `ssh-host` entries. The file is read
@@ -297,6 +318,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The bell marker is a drawn bell instead of a triangle, which read as a
+  warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
+  yellow lifted to 3:1 against its tab, with the lip, the gap under it and
+  the clapper on whole pixels so it stays crisp at 1x.
+
+- The visual-bell flash follows `reduce-motion`: with motion held back (by
+  the setting or the system's Reduce Motion under `auto`) the pane no longer
+  flashes, and the bell mark on the tab shows the bell instead.
+
 - The scrollbar is easier to find. A pane with history shows a faint channel
   the height of the terminal under its thumb, and scrolled back the bar
   widens to at least 10 px, its channel as wide as the thumb. The thumb is
@@ -420,7 +450,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
-  has stopped, and a triangle when the bell rang. The marks are larger,
+  has stopped, and a drawn bell when the bell rang. The marks are larger,
   scale with the display instead of shrinking on Retina screens, and keep at
   least 3:1 contrast against the tab behind them, hovered or not. Vertical
   tabs keep the old dots until 6.1. Screen readers read the state after the
@@ -641,6 +671,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   appear once a tab is split, and while broadcast input is on.
 
 ### Security
+
+- Notification text from programs and scripts is stripped of Unicode bidi
+  formatting characters, which could reorder what a notification says, as
+  well as control characters, before it reaches the desktop, the toast or
+  `protocol_notification` subscribers. On Linux, a body sent to a
+  notification server that renders markup is escaped, so a program's text
+  cannot become bold, a link or a local image there.
 
 - The SSH launcher passes its target to `ssh` after `--`, as
   `ssh -t -- <target>`, so a target can never be read as an ssh option such

@@ -4241,6 +4241,32 @@ non-regression claim.
   configured CIE L* step (`bell-flash-intensity`, scaled by the ramp) into a
   linear-light alpha via `perceptual_wash_alpha` so every theme moves by the
   same visible amount.
+- **The focused-bell mark** — a bell in the focused pane of the active tab
+  sets `Pane::focused_bell` (for `bell = visual` or `both`), which marks the
+  active tab (`classify_tab_activity`), the pane's titlebar and, with no
+  strip, the native title. `record_bell_answer` clears it when the pane
+  accepts a key, IME commit or paste, a pointer press in the pane clears it,
+  and `App::sync_focused_bell`, run on every drain and window dispatch,
+  clears it on any pane focus has left and repaints when the marked pane
+  changes. OS window focus never clears it. The flash is held back by
+  `motion_allowed` (`bell_flashes`); the mark is not.
+- **Program notifications are routed before they reach the desktop.** OSC
+  9/777 and `kettle.notify` go to `App::notify_from_program`. Their text is
+  sanitized there (`notification_router::sanitize_text`: controls and bidi
+  formatting characters removed, whitespace collapsed, capped at grapheme
+  boundaries), as is the source tab title. `notification_router::Router`
+  applies a per-source 2 s cooldown, which folds a burst into its newest
+  message with a count and delivers it when the cooldown ends
+  (`take_due`, woken by `next_due`), and 5 s identical-message suppression,
+  both before `route` picks a toast (some Kettle window has focus) or the
+  desktop (none has). A toast joins the window's `notification_toast::ToastQueue`
+  (one visible, three waiting; repeats and overflow are counted on toasts,
+  never by evicting the visible one), is painted through the update toast's
+  painter as one of the overlay's notices, and keeps its time in the update
+  toast's `ToastClock`. A desktop delivery is remembered in
+  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  failures with, so a refused or failed one is queued as a toast in its own
+  window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
   command-completion, and internal diagnostic toast enters a 64-message
   `try_send` queue. The worker preserves order while calling the OS backend.
@@ -4254,7 +4280,12 @@ non-regression claim.
   notification delivery. Linux retains one D-Bus sender connection across
   notifications: GNOME removes an app's notifications when that sender exits.
   Each call has a one-second reply timeout; a failed connection is replaced
-  on the next message. macOS and Windows keep their native backends.
+  on the next message. Linux asks the server's capabilities once per
+  connection and escapes `&`, `<` and `>` in bodies when it renders body
+  markup. A tracked (program) notification the backend refuses, errors on or
+  panics in is reported back to the UI by id only, over a bounded channel
+  that wakes the event loop (`UserEvent::DesktopNotificationFailed`). macOS
+  and Windows keep their native backends.
 - **Monitor-DPI transitions are one layout transaction per window.** winit
   delivers Windows `WM_DPICHANGED` as `ScaleFactorChanged` before the
   `SetWindowPos`-driven physical `Resized`. The renderer adopts the new glyph

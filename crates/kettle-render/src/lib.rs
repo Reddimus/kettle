@@ -134,7 +134,7 @@ pub use overlays::{
     media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
     notification_geometry_with_notices, persistent_notice_geometry,
     persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_geometry,
+    toast_text_rows, update_toast_columns, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -674,6 +674,7 @@ pub struct Renderer {
     header_title_scratch: TextBuffer,
     header_title_key: Option<header_title::HeaderTitleKey>,
     header_title_width: f32,
+    tab_bell_mask: tab_strip::BellMask,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -4519,6 +4520,7 @@ impl Renderer {
                         s.rect,
                         s.title_rect,
                         centered_left,
+                        s.activity,
                         self.scale,
                     )
                     && let Some(ink) = chrome::activity_ink(theme, s.activity)
@@ -4531,8 +4533,8 @@ impl Renderer {
                         s.activity,
                         marker,
                         self.scale,
-                        ink,
-                        tab_background,
+                        (ink, tab_background),
+                        &mut self.tab_bell_mask,
                     );
                 }
                 // `✕` close glyph — separate text area so we can color

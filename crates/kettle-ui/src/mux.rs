@@ -1028,6 +1028,14 @@ pub struct Pane {
     /// window reads it when it records a keystroke; only typed text is
     /// followed by the typed-echo counts and settle (see `crate::typed_echo`).
     last_input_typed_text: AtomicBool,
+    /// The bell rang while this pane was its window's focused pane and the
+    /// user has not answered it: drives the bell mark on the active tab and
+    /// on this pane's titlebar. The next key, IME commit or paste written to
+    /// the pane answers it, as do a pointer press in the pane and focus
+    /// moving to another pane or tab. OS window focus does not: a bell that
+    /// rang while the user was in another app is still marked when they come
+    /// back. Atomic because the input path writes through `&self`.
+    focused_bell: AtomicBool,
     /// Terminator plugin parity: optional output sidechannel, `Some` when a
     /// LuaEngine or the recorder needs PTY output. The App drains it each
     /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
@@ -1155,6 +1163,16 @@ impl Pane {
 
     pub(crate) fn input_generation(&self) -> u64 {
         self.user_input_generation.load(Ordering::Relaxed)
+    }
+
+    /// See `focused_bell`.
+    pub(crate) fn focused_bell(&self) -> bool {
+        self.focused_bell.load(Ordering::Relaxed)
+    }
+
+    /// The user answered this pane's focused bell (see `focused_bell`).
+    pub(crate) fn answer_focused_bell(&self) {
+        self.focused_bell.store(false, Ordering::Relaxed);
     }
 
     /// Live terminal mode adjusted by Kettle's pre-negotiation modified-Enter
@@ -1311,6 +1329,7 @@ impl Pane {
                         .enqueue_user_with_echo(reporting_mode, bytes.clone(), echo);
                 self.record_user_input(result, !bytes.is_empty());
                 self.record_typed_text(result, typed_text);
+                self.record_bell_answer(result, !bytes.is_empty());
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1352,6 +1371,7 @@ impl Pane {
                     .enqueue_user_with_echo(reporting_mode, joined, echo);
                 self.record_user_input(result, nonempty);
                 self.record_typed_text(result, nonempty && typed_text);
+                self.record_bell_answer(result, nonempty);
                 (result, result.is_queued())
             })
             .unwrap_or_else(PaneInputResult::from)
@@ -1382,6 +1402,16 @@ impl Pane {
         if result.is_queued() {
             self.last_input_typed_text
                 .store(typed_text, Ordering::Relaxed);
+        }
+    }
+
+    /// Keys, IME commits and pastes the pane accepted answer its focused
+    /// bell. Pointer reports do not (motion would clear it on hover; a press
+    /// answers it in the window's own press path), and neither do key
+    /// releases, which can belong to the key that made the bell ring.
+    fn record_bell_answer(&self, result: PaneInputResult, nonempty: bool) {
+        if result.is_queued() && nonempty {
+            self.answer_focused_bell();
         }
     }
 
@@ -2065,20 +2095,22 @@ pub struct Tab {
     pub(crate) scaled_zoom_owner: bool,
 }
 
-/// Activity state of an *inactive* tab, used by the renderer to pick
-/// the tab-bar indicator-dot color. Active tabs are always `Normal`
-/// (the focused tab's "you are here" accent already says enough).
+/// Activity state of a tab, used by the renderer to pick the tab-bar
+/// marker. An active tab is `Normal` unless the bell rang in its focused
+/// pane and the user has not answered it (`Pane::focused_bell`); output
+/// there needs no marker, since the user is looking at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabActivity {
-    /// Nothing to surface — active tab OR inactive tab with no output
-    /// since the user last saw it.
+    /// Nothing to surface — an active tab with no unanswered bell, or an
+    /// inactive tab with no output since the user last saw it.
     Normal,
     /// Output arrived since the user last looked at this tab. Drawn
     /// as a filled cyan disc on a top or bottom tab bar (a cyan dot on
     /// vertical tabs until 6.1) — the standard "something happened" cue.
     Output,
-    /// A `TermEvent::Bell` fired since the user last looked. Drawn as
-    /// a yellow triangle on a top or bottom tab bar (a yellow dot on
+    /// A `TermEvent::Bell` fired since the user last looked, or, on the
+    /// active tab, in its focused pane since the user last answered it. Drawn as
+    /// a yellow bell on a top or bottom tab bar (a yellow dot on
     /// vertical tabs until 6.1), overrides `Output` because a bell is a stronger
     /// signal (the focused program explicitly asked for attention).
     Bell,
@@ -2089,14 +2121,14 @@ pub enum TabActivity {
     /// *absence* of recent output is the signal the user wants.
     /// Drawn on a top or bottom tab bar as a dim chrome-gray ring to
     /// read as a state distinct from `Output` (a cyan disc) and `Bell`
-    /// (a yellow triangle); vertical tabs keep a gray dot until 6.1.
+    /// (a yellow bell); vertical tabs keep a gray dot until 6.1.
     Silent,
 }
 
-/// Pure: classify an inactive tab's activity from its state. Active
-/// tabs short-circuit to `Normal` because the focused-pane border and
-/// the tab-bar accent already convey focus — adding a dot there would
-/// be redundant.
+/// Pure: classify a tab's activity from its state. An active tab is `Bell`
+/// while its focused pane has an unanswered bell (`focused_bell`) and
+/// `Normal` otherwise: the focused-pane border and the tab-bar accent
+/// already convey focus, so output there needs no dot.
 ///
 /// `now` and `silence_threshold` drive the `TabActivity::Silent` variant
 /// — when an inactive tab had unseen output that's been quiet for at
@@ -2106,13 +2138,18 @@ pub enum TabActivity {
 pub fn classify_tab_activity(
     is_active: bool,
     bell: bool,
+    focused_bell: bool,
     last_output_at: Option<std::time::Instant>,
     last_seen_at: Option<std::time::Instant>,
     now: std::time::Instant,
     silence_threshold: std::time::Duration,
 ) -> TabActivity {
     if is_active {
-        return TabActivity::Normal;
+        return if focused_bell {
+            TabActivity::Bell
+        } else {
+            TabActivity::Normal
+        };
     }
     if bell {
         return TabActivity::Bell;
@@ -2597,6 +2634,45 @@ impl Mux {
         }
     }
 
+    /// Mark the bell that rang in `pane_id` if it is the pane the user is
+    /// looking at: the focused pane of the active tab, whatever the OS
+    /// window focus. The mark stays until the user answers it (see
+    /// `Pane::focused_bell`). A bell anywhere else has the tab and titlebar
+    /// latches of [`Mux::touch_tab_bell`].
+    pub fn ring_focused_bell(&self, pane_id: u64) {
+        if Some(pane_id) == self.active_focus()
+            && let Some(pane) = self.panes.get(&pane_id)
+        {
+            pane.focused_bell.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Answer the focused bell of every pane that is no longer the focused
+    /// pane of the active tab: focus leaving a pane or tab answers it, by
+    /// whatever route focus moved. Only the mux focus counts, never the OS
+    /// window focus.
+    pub fn settle_focused_bells(&self) {
+        let focus = self.active_focus();
+        for (id, pane) in &self.panes {
+            if Some(*id) != focus {
+                pane.answer_focused_bell();
+            }
+        }
+    }
+
+    /// The pane whose focused bell is unanswered, if any: only ever the
+    /// focused pane of the active tab once [`Mux::settle_focused_bells`] ran.
+    pub fn focused_bell_pane(&self) -> Option<u64> {
+        self.active_focus()
+            .filter(|id| self.panes.get(id).is_some_and(Pane::focused_bell))
+    }
+
+    /// Whether the tab at `idx` is active and its focused pane's bell is
+    /// unanswered.
+    pub fn tab_focused_bell(&self, idx: usize) -> bool {
+        idx == self.active && self.focused_bell_pane().is_some()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_pane(
         &mut self,
@@ -2765,6 +2841,7 @@ impl Mux {
                 pty_input,
                 user_input_generation: AtomicU64::new(0),
                 last_input_typed_text: AtomicBool::new(false),
+                focused_bell: AtomicBool::new(false),
                 output_rx,
                 title: initial_title,
                 title_is_placeholder,
@@ -4129,16 +4206,23 @@ impl Mux {
     }
 
     /// Focus whichever pane contains the pixel `(px, py)`.
-    pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) {
+    /// Focus the active tab's pane under `(px, py)` and return it, or `None`
+    /// (focus unchanged) when no pane is there.
+    pub fn focus_at(&mut self, area: Rect, px: f32, py: f32) -> Option<u64> {
         let a = self.active;
         let rects = self.leaves(a, area);
-        if let Some(tab) = self.tabs.get_mut(a) {
-            for (id, (x, y, w, h)) in rects {
-                if px >= x && px < x + w && py >= y && py < y + h {
-                    tab.focus = id;
-                    break;
-                }
-            }
+        let tab = self.tabs.get_mut(a)?;
+        let (id, _) = rects
+            .into_iter()
+            .find(|(_, (x, y, w, h))| px >= *x && px < x + w && py >= *y && py < y + h)?;
+        tab.focus = id;
+        Some(id)
+    }
+
+    /// A pointer press in `pane_id` answers its focused bell.
+    pub fn answer_bell_by_press(&self, pane_id: u64) {
+        if let Some(pane) = self.panes.get(&pane_id) {
+            pane.answer_focused_bell();
         }
     }
 
@@ -6354,6 +6438,164 @@ mod node_tests {
         assert!(
             pane.last_input_was_typed_text(),
             "refused input changes nothing"
+        );
+        mux.kill_children();
+    }
+
+    #[cfg(unix)]
+    fn cat_mux(tabs: usize) -> Mux {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        for _ in 0..tabs {
+            mux.new_tab_with_geometry(
+                &cfg,
+                PtyGeometry::from_cell_size(80, 24, 8, 16),
+                Arc::new(|| {}),
+                &["/bin/cat".to_owned()],
+                None,
+            )
+            .expect("PTY fixture");
+        }
+        mux
+    }
+
+    /// A bell in the pane the user is looking at marks it until they answer.
+    /// Every key, IME commit and paste the pane accepts answers it, Enter and
+    /// Escape included. Focus reports (what an OS window focus change sends),
+    /// pointer reports and key releases do not, and refused input does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_focused_bell_is_answered_by_every_accepted_key_ime_commit_and_paste() {
+        type Write = fn(&Pane) -> PaneInputResult;
+        let mut mux = cat_mux(1);
+        let id = mux.active_focus().unwrap();
+        let (queue, _rx) = input_queue_fixture();
+        mux.panes.get_mut(&id).unwrap().pty_input = queue;
+        let answers: [(&str, Write); 8] = [
+            ("typed key", |pane| pane.feed_input(b"a")),
+            ("Enter", |pane| pane.feed_input(b"\r")),
+            ("Escape", |pane| pane.feed_input(b"\x1b")),
+            ("Ctrl-C", |pane| pane.feed_input(b"\x03")),
+            ("key batch", |pane| {
+                pane.feed_key_inputs(&[b"\x1b[A".to_vec()])
+            }),
+            ("IME commit", |pane| {
+                pane.feed_input_shared(Arc::from("\u{65e5}\u{672c}".as_bytes()))
+            }),
+            ("paste", |pane| pane.feed_paste(b"pasted text")),
+            ("broadcast paste", |pane| {
+                pane.feed_paste_shared(Arc::from(&b"pasted text"[..]))
+            }),
+        ];
+        for (name, write) in answers {
+            mux.ring_focused_bell(id);
+            assert_eq!(mux.focused_bell_pane(), Some(id), "{name}: rang");
+            assert_eq!(write(&mux.panes[&id]), PaneInputResult::Queued, "{name}");
+            assert_eq!(mux.focused_bell_pane(), None, "{name} answers the bell");
+        }
+        let release = winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+        mux.ring_focused_bell(id);
+        let pane = &mux.panes[&id];
+        for (name, result) in [
+            ("focus-out report", pane.feed_focus_report(false)),
+            ("focus-in report", pane.feed_focus_report(true)),
+            (
+                "pointer motion report",
+                pane.feed_pointer_input(b"\x1b[<35;1;1M"),
+            ),
+            ("mouse release", pane.feed_mouse_release(b"\x1b[<0;1;1m")),
+            (
+                "key release",
+                pane.feed_key_release(release, Arc::from(&b"\x1b[97;1:3u"[..])),
+            ),
+        ] {
+            assert_eq!(result, PaneInputResult::Queued, "{name}");
+            assert_eq!(mux.focused_bell_pane(), Some(id), "{name} must not answer");
+        }
+        mux.panes.get_mut(&id).unwrap().read_only = true;
+        assert_eq!(
+            mux.panes[&id].feed_input(b"refused"),
+            PaneInputResult::ReadOnly
+        );
+        assert_eq!(mux.focused_bell_pane(), Some(id), "refused input");
+        mux.answer_bell_by_press(id);
+        assert_eq!(mux.focused_bell_pane(), None, "a pointer press answers it");
+        mux.kill_children();
+    }
+
+    /// Only the pane the user is looking at takes the mark, and focus moving
+    /// to another pane or tab answers it; with focus unchanged it stays (the
+    /// mux has no OS window focus to lose). The active tab classifies as
+    /// `Bell` while the mark is up.
+    #[cfg(unix)]
+    #[test]
+    fn a_focused_bell_marks_only_the_focused_pane_until_mux_focus_leaves_it() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = cat_mux(2);
+        mux.focus_pane(*mux.tabs[0].root.leaf_ids().first().unwrap());
+        mux.split_geometry(
+            Dir::Horizontal,
+            false,
+            &cfg,
+            PtyGeometry::from_cell_size(80, 24, 8, 16),
+            Arc::new(|| {}),
+        )
+        .expect("split fixture");
+        let [left, right] = mux.tabs[0].root.leaf_ids()[..] else {
+            panic!("two panes in the first tab")
+        };
+        let other_tab = mux.tabs[1].root.leaf_ids()[0];
+        mux.focus_pane(left);
+        // A bell anywhere but the focused pane takes no focused mark.
+        for elsewhere in [right, other_tab] {
+            mux.ring_focused_bell(elsewhere);
+            assert!(!mux.panes[&elsewhere].focused_bell());
+        }
+        mux.ring_focused_bell(left);
+        mux.settle_focused_bells();
+        assert_eq!(mux.focused_bell_pane(), Some(left), "focus unchanged");
+        assert!(mux.tab_focused_bell(0) && !mux.tab_focused_bell(1));
+        let classify = |mux: &Mux, idx: usize| {
+            let now = std::time::Instant::now();
+            classify_tab_activity(
+                idx == mux.active,
+                mux.tabs[idx].bell,
+                mux.tab_focused_bell(idx),
+                None,
+                None,
+                now,
+                std::time::Duration::from_secs(10),
+            )
+        };
+        assert_eq!(classify(&mux, 0), TabActivity::Bell);
+        // Focus moving to the sibling pane answers it.
+        mux.focus_pane(right);
+        mux.settle_focused_bells();
+        mux.focus_pane(left);
+        assert_eq!(
+            mux.focused_bell_pane(),
+            None,
+            "pane focus left and came back"
+        );
+        assert_eq!(classify(&mux, 0), TabActivity::Normal);
+        // So does switching tabs, and the tab left behind shows nothing.
+        mux.ring_focused_bell(left);
+        mux.next_tab();
+        assert_eq!(classify(&mux, 0), TabActivity::Normal);
+        mux.settle_focused_bells();
+        mux.prev_tab();
+        assert_eq!(
+            mux.focused_bell_pane(),
+            None,
+            "tab focus left and came back"
         );
         mux.kill_children();
     }
@@ -10907,15 +11149,29 @@ mod node_tests {
         // the existing transitions still fire under it.
         let silence = Duration::from_secs(10);
 
-        // Active tab → always Normal, regardless of output / bell. The
-        // focused-tab accent + window-title already telegraph "you're
-        // here" so adding a dot would be redundant.
+        // Active tab → Normal regardless of output and the background-tab
+        // latch. The focused-tab accent + window-title already telegraph
+        // "you're here" so a dot for output would be redundant.
         assert_eq!(
-            classify_tab_activity(true, true, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(true, true, false, Some(later), Some(earlier), now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(true, false, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(true, false, false, Some(later), Some(earlier), now, silence),
+            TabActivity::Normal
+        );
+        // ...except for a bell in its focused pane the user has not answered:
+        // the flash alone is gone before anyone sees it.
+        for (bell, output) in [(false, None), (true, Some(later))] {
+            assert_eq!(
+                classify_tab_activity(true, bell, true, output, Some(earlier), now, silence),
+                TabActivity::Bell
+            );
+        }
+        // The focused-pane mark never applies to a background tab, whose own
+        // latch decides.
+        assert_eq!(
+            classify_tab_activity(false, false, true, None, None, now, silence),
             TabActivity::Normal
         );
 
@@ -10923,42 +11179,58 @@ mod node_tests {
         // Bell is the stronger signal (the focused program explicitly
         // asked for attention) so it wins over plain output activity.
         assert_eq!(
-            classify_tab_activity(false, true, None, None, now, silence),
+            classify_tab_activity(false, true, false, None, None, now, silence),
             TabActivity::Bell
         );
         assert_eq!(
-            classify_tab_activity(false, true, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(false, true, false, Some(later), Some(earlier), now, silence),
             TabActivity::Bell
         );
 
         // Inactive tab + output after last-seen → Output (fresh, hasn't
         // exceeded silence threshold yet).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), Some(earlier), now, silence),
+            classify_tab_activity(
+                false,
+                false,
+                false,
+                Some(later),
+                Some(earlier),
+                now,
+                silence
+            ),
             TabActivity::Output
         );
 
         // Inactive tab + output BEFORE the user last looked → Normal.
         // The user already saw this output; no need to nudge again.
         assert_eq!(
-            classify_tab_activity(false, false, Some(earlier), Some(later), now, silence),
+            classify_tab_activity(
+                false,
+                false,
+                false,
+                Some(earlier),
+                Some(later),
+                now,
+                silence
+            ),
             TabActivity::Normal
         );
 
         // First-output edge: no last_seen_at yet → Output (the user
         // has never been on this tab and something happened on it).
         assert_eq!(
-            classify_tab_activity(false, false, Some(later), None, now, silence),
+            classify_tab_activity(false, false, false, Some(later), None, now, silence),
             TabActivity::Output
         );
 
         // No activity recorded at all → Normal.
         assert_eq!(
-            classify_tab_activity(false, false, None, None, now, silence),
+            classify_tab_activity(false, false, false, None, None, now, silence),
             TabActivity::Normal
         );
         assert_eq!(
-            classify_tab_activity(false, false, None, Some(earlier), now, silence),
+            classify_tab_activity(false, false, false, None, Some(earlier), now, silence),
             TabActivity::Normal
         );
     }
@@ -10983,6 +11255,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 false,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_fresh,
@@ -10995,6 +11268,7 @@ mod node_tests {
         let now_at_threshold = last_out + silence;
         assert_eq!(
             classify_tab_activity(
+                false,
                 false,
                 false,
                 Some(last_out),
@@ -11011,6 +11285,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 false,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_late,
@@ -11024,6 +11299,7 @@ mod node_tests {
             classify_tab_activity(
                 false,
                 true,
+                false,
                 Some(last_out),
                 Some(last_seen),
                 now_late,
@@ -11038,6 +11314,7 @@ mod node_tests {
         let now_before = base + Duration::from_secs(29);
         assert_eq!(
             classify_tab_activity(
+                false,
                 false,
                 false,
                 Some(last_out),

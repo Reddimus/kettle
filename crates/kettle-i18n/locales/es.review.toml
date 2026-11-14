@@ -1017,6 +1017,15 @@ mouse_override_hint = "draft"
 font_size_chip = "draft"
 menu_a11y_submenu = "draft"
 
+notification_toast_sourced = "draft"
+notification_toast_repeats = "draft"
+notification_toast_show = "draft"
+notification_toast_show_a11y = "draft"
+notification_toast_a11y = "draft"
+notification_toast_a11y_unsourced = "draft"
+notification_toast_more = "draft"
+notification_toast_a11y_repeats = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1175,4 +1184,10 @@ keys = [
     "mouse_override_hint",
     "font_size_chip",
     "a11y_header_find",
+    "notification_toast_show",
+    "notification_toast_show_a11y",
+    "notification_toast_a11y",
+    "notification_toast_a11y_unsourced",
+    "notification_toast_more",
+    "notification_toast_a11y_repeats",
 ]

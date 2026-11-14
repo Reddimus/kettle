@@ -1198,6 +1198,12 @@ pub(crate) struct WindowState {
     pub(crate) card_focus: Option<u64>,
     /// A tab focused by assistive technology, until ordinary input resumes.
     pub(crate) tab_focus: Option<accesskit::NodeId>,
+    /// Program notifications shown in this window: one on screen, a few
+    /// waiting (see `crate::notification_toast`).
+    pub(crate) notification_toasts: crate::notification_toast::ToastQueue,
+    /// The notification toast control assistive technology focused; only
+    /// then do Enter, Space, Tab and Escape belong to the toast.
+    pub(crate) notification_toast_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1345,6 +1351,9 @@ pub(crate) struct WindowState {
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
     pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
+    /// The pane whose unanswered focused bell the last repaint was asked to
+    /// mark (`Mux::focused_bell_pane`), so a change repaints once.
+    pub(crate) focused_bell_drawn: Option<u64>,
     /// Coalesce output-driven repaints. `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
@@ -1787,6 +1796,8 @@ impl WindowState {
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
             tab_focus: None,
+            notification_toasts: Default::default(),
+            notification_toast_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,
@@ -1833,6 +1844,7 @@ impl WindowState {
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
             cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
             bell_flashes: std::collections::HashMap::new(),
+            focused_bell_drawn: None,
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,

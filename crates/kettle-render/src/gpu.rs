@@ -942,6 +942,7 @@ impl Renderer {
             header_title_scratch,
             header_title_key: None,
             header_title_width: 0.0,
+            tab_bell_mask: Default::default(),
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,

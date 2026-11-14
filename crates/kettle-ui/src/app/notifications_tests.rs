@@ -44,8 +44,12 @@ fn protocol_notifications_are_wired_to_ui_dispatch() {
         "drain_events must consume OSC 9/777 notification requests"
     );
     assert!(
-        src.contains("fire_notify(&ev.title, &ev.body);"),
-        "protocol notifications must use the desktop notification helper"
+        src.contains("self.notify_from_program(ws, Some(pane_id), &ev.title, &ev.body);"),
+        "protocol notifications must go through the notification router"
+    );
+    assert!(
+        !src.contains("fire_notify(&ev.title, &ev.body);"),
+        "a program notification never goes straight to the desktop"
     );
     assert!(
         src.contains("\"protocol_notification\""),
@@ -91,7 +95,7 @@ fn bell_flash_ramp_is_instant_on_and_eases_out_within_the_duration() {
 fn the_bell_flash_is_stamped_per_pane_and_pruned_on_expiry() {
     let src = production_source();
     let drain = src
-        .split("if self.cfg.bell.visual() {")
+        .split("if bell_flashes(self.cfg.bell, self.motion_allowed()) {")
         .nth(1)
         .and_then(|body| body.split("if self.cfg.bell.attention()").next())
         .expect("visual bell branch in drain_events");
@@ -131,7 +135,7 @@ fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
     let at = src.find("metas.push((").expect("frame builder");
     let push: String = src[at..].chars().take(900).collect();
     assert!(
-        push.contains("p.bell,"),
+        push.contains("p.bell || p.focused_bell(),"),
         "the frame must carry each pane's OWN bell state; a literal here is \
              what made `icon_bell` undrawable"
     );
@@ -173,3 +177,87 @@ fn malformed_config_notification_is_edge_triggered() {
     assert!(!should_notify_malformed(&none, &b));
 }
 
+
+/// A bell in the focused pane marks the active tab (`bell = visual` or
+/// `both` only), and the mark follows answers and focus moves from every
+/// route: the drain and every window dispatch reconcile it against the mux
+/// focus. The OS window focus arm never touches it, so an unseen bell
+/// survives the window losing and regaining focus.
+#[test]
+fn the_focused_bell_mark_is_set_by_visual_bells_and_settled_on_every_dispatch() {
+    let src = production_source();
+    let drain = src
+        .split("fn drain_events(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .and_then(|b| b.split("\n    }\n").next())
+        .expect("drain_events body");
+    let ring = drain
+        .split("for id in bell_panes {")
+        .nth(1)
+        .and_then(|b| b.split("ws.mux.touch_tab_bell(id);").next())
+        .expect("bell loop");
+    assert!(
+        ring.contains("if self.cfg.bell.visual() {\n                ws.mux.ring_focused_bell(id);"),
+        "only a visual bell marks the focused pane"
+    );
+    let clear = drain.find("ws.mux.clear_focused_pane_bell();").unwrap();
+    let sync = drain.find("self.sync_focused_bell(ws);").unwrap();
+    assert!(clear < sync);
+    let finish = src
+        .split("fn finish_window_dispatch(")
+        .nth(1)
+        .and_then(|b| b.split("\n    }\n").next())
+        .expect("finish_window_dispatch");
+    let settle = finish.find("self.sync_focused_bell(&mut ws);").unwrap();
+    assert!(settle < finish.rfind("self.windows.insert(seq, ws);").unwrap());
+    let sync_body = src
+        .split("fn sync_focused_bell(")
+        .nth(1)
+        .and_then(|b| b.split("\n    }\n").next())
+        .expect("sync_focused_bell");
+    assert!(sync_body.contains("ws.mux.settle_focused_bells();"));
+    assert!(!sync_body.contains("window_focused"));
+    let focus_arm = src
+        .split("WindowEvent::Focused(f) => {")
+        .nth(1)
+        .and_then(|body| body.split("WindowEvent::").next())
+        .expect("focus event arm");
+    for answer in ["answer_focused_bell", "settle_focused_bells", "answer_bell_by_press"] {
+        assert!(!focus_arm.contains(answer), "OS focus must not answer the bell");
+    }
+    // A press in a pane answers it whether or not the program reports the mouse.
+    assert!(src.contains(
+        "                {\n                    ws.mux.answer_bell_by_press(pressed);\n                }\n                self.note_focus_change(ws, pre);\n                if self.send_mouse(ws, bcode, true, false) {"
+    ));
+}
+
+/// The flash is motion Kettle starts on its own: `reduce-motion` (or the
+/// system's Reduce Motion under `auto`) holds it back, and only the drain's
+/// flash branch asks. The focused-bell mark does not depend on it.
+#[test]
+fn the_bell_flash_honours_reduced_motion() {
+    use kettle_config::BellMode;
+    for bell in [BellMode::Visual, BellMode::Both] {
+        assert!(super::bell_flashes(bell, true), "{bell:?} with motion");
+        assert!(!super::bell_flashes(bell, false), "{bell:?} reduced");
+    }
+    for bell in [BellMode::Off, BellMode::Attention] {
+        for motion in [true, false] {
+            assert!(!super::bell_flashes(bell, motion), "{bell:?}");
+        }
+    }
+    let src = production_source();
+    let drain = src
+        .split("fn drain_events(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .and_then(|b| b.split("\n    }\n").next())
+        .expect("drain_events body");
+    let flash = drain
+        .find("if bell_flashes(self.cfg.bell, self.motion_allowed()) {")
+        .expect("the flash asks for motion");
+    let stamp = drain.find("ws.bell_flashes.insert(*id, now);").unwrap();
+    assert!(flash < stamp);
+    assert_eq!(drain.matches("ws.bell_flashes.insert(").count(), 1);
+    // The mark is set on the visual mode alone.
+    assert!(drain.contains("if self.cfg.bell.visual() {\n                ws.mux.ring_focused_bell(id);"));
+}
