@@ -151,8 +151,30 @@ pub fn registry_dir_from(get: impl Fn(&str) -> Option<String>) -> PathBuf {
 }
 
 /// The default registry directory from the real environment.
+///
+/// On Windows the registry is itself the directory the OS names, and the one
+/// variable that moves it, `LOCALAPPDATA`, moves everything else a program
+/// keeps there. So on Windows an absolute [`TEST_OS_REGISTRY_DIR_ENV`]
+/// stands in for the registry as well.
 pub fn registry_dir() -> PathBuf {
-    registry_dir_from(|k| std::env::var(k).ok())
+    registry_dir_with(
+        cfg!(windows),
+        std::env::var_os(TEST_OS_REGISTRY_DIR_ENV),
+        |k| std::env::var(k).ok(),
+    )
+}
+
+/// [`registry_dir`] with the platform, the test variable's value and the
+/// environment injected.
+fn registry_dir_with(
+    windows: bool,
+    stand_in: Option<std::ffi::OsString>,
+    get: impl Fn(&str) -> Option<String>,
+) -> PathBuf {
+    stand_in
+        .map(PathBuf::from)
+        .filter(|dir| windows && dir.is_absolute())
+        .unwrap_or_else(|| registry_dir_from(get))
 }
 
 /// The registry directory the OS names for this user, whatever the
@@ -184,8 +206,10 @@ pub fn registry_locations() -> Vec<PathBuf> {
 /// looks for servers where the OS puts the registry, which is the account's
 /// own (`~/.local/state/kettle/ctl`); with this set to an absolute path it
 /// uses that directory instead, and with any other value (empty, relative,
-/// `none`) it uses none at all. Every build reads it, because smokes drive
-/// release builds.
+/// `none`) it uses none at all. On Windows, where the registry is the
+/// directory the OS names, an absolute value moves the registry with it
+/// ([`registry_dir`]). Every build reads it, because smokes drive release
+/// builds.
 pub const TEST_OS_REGISTRY_DIR_ENV: &str = "KETTLE_TEST_OS_CTL_DIR";
 
 /// The registry directories the OS names for this user, best first, or what
@@ -2132,10 +2156,34 @@ mod tests {
         );
     }
 
+    /// On Windows the registry is the directory the OS names, so an absolute
+    /// test variable moves it as well; `LOCALAPPDATA` alone would leave a
+    /// Kettle under test in the account's registry. Elsewhere, and for any
+    /// other value, the environment still names the registry.
+    #[test]
+    fn the_test_variable_moves_the_registry_itself_only_on_windows() {
+        let stand_in = std::env::temp_dir().join("kettle-os-ctl");
+        let nothing = |_: &str| None;
+        let from_environment = registry_dir_from(nothing);
+        assert_ne!(from_environment, stand_in);
+        let value = || Some(stand_in.clone().into_os_string());
+        assert_eq!(registry_dir_with(true, value(), nothing), stand_in);
+        assert_eq!(registry_dir_with(false, value(), nothing), from_environment);
+        for other in ["", "none", "relative/ctl"] {
+            assert_eq!(
+                registry_dir_with(true, Some(other.into()), nothing),
+                from_environment,
+                "{other:?}"
+            );
+        }
+        assert_eq!(registry_dir_with(true, None, nothing), from_environment);
+    }
+
     /// The server's alias directory, its prune and every client's list all
-    /// follow the variable. Run in a child started with it set, since a test
-    /// cannot change its own environment safely; each check that could reach
-    /// the account's own registry comes after the one proving it will not.
+    /// follow the variable, and on Windows so does the registry. Run in a
+    /// child started with it set, since a test cannot change its own
+    /// environment safely; each check that could reach the account's own
+    /// registry comes after the one proving it will not.
     #[test]
     fn every_os_named_registry_lookup_follows_the_test_variable() {
         const CHILD: &str = "KETTLE_TEST_OS_CTL_LOOKUP_CHILD";
@@ -2166,7 +2214,13 @@ mod tests {
         let stand_in = root.join("os-ctl");
         if std::env::var_os(TEST_OS_REGISTRY_DIR_ENV) == Some(stand_in.clone().into_os_string()) {
             assert_eq!(canonical_registry_dir(), Some(stand_in.clone()));
-            assert_eq!(registry_locations(), vec![own, stand_in.clone()]);
+            let locations = if cfg!(windows) {
+                assert_eq!(own, stand_in, "the registry itself moves on Windows");
+                vec![stand_in.clone()]
+            } else {
+                vec![own, stand_in.clone()]
+            };
+            assert_eq!(registry_locations(), locations);
             write_alias(&stand_in, never_alive(0), &root.join("gone"), None);
             assert_eq!(prune_stale_aliases(), 1);
             assert_eq!(alias_count(&stand_in), 0);

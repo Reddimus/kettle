@@ -5545,7 +5545,9 @@ def isolate_ctl_registry() -> None:
     (`~/.local/state/kettle/ctl`), and a `kettle ctl` run with this process's
     environment finds that Kettle through the alias. Pointing
     KETTLE_TEST_OS_CTL_DIR at one private directory for the whole run keeps
-    them meeting there instead. Removed at exit; a value already set wins.
+    them meeting there instead. On Windows, where the registry is the
+    directory the OS names, Kettle registers there too. Removed at exit; a
+    value already set wins.
     """
     if os.environ.get(CTL_OS_DIR_ENV):
         return

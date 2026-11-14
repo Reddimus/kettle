@@ -568,8 +568,10 @@ database's home `~/.local/state/kettle/ctl`, `/run/user/<uid>/kettle/ctl` on
 Linux, the Local AppData known folder on Windows. A private `XDG_RUNTIME_DIR`
 moves only the first. `KETTLE_TEST_OS_CTL_DIR` moves the second: an absolute
 path stands in for every directory the OS names, and any other value (empty,
-relative, `none`) leaves none. It exists for tests and smokes, and every build
-reads it, since smokes drive release builds.
+relative, `none`) leaves none. On Windows the two are one directory, and the
+only variable that moves it, `LOCALAPPDATA`, moves everything else kept there,
+so an absolute value moves the registry as well. It exists for tests and
+smokes, and every build reads it, since smokes drive release builds.
 
 - Integration tests start `kettle` through
   `kettle_test_support::isolate_ctl_registry(&mut command, root)`, which sets

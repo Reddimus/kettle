@@ -786,9 +786,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `kettle` crate's unit tests looked for servers there, so a suite run inside
   Kettle could reach the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for
   tests and smokes only, names the directory to use instead of every one the
-  OS names; a value that is not an absolute path names none. The test suites
-  and smokes set it, and the `kettle` crate's unit tests no longer look for a
-  running Kettle at all.
+  OS names; a value that is not an absolute path names none. On Windows,
+  where the registry is that directory, it moves the registry too. The test
+  suites and smokes set it, and the `kettle` crate's unit tests no longer
+  look for a running Kettle at all.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
