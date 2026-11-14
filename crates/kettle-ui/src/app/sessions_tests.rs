@@ -1372,6 +1372,21 @@ fn a_wake_is_kept_when_the_clock_passes_it_between_the_sweep_and_the_deadline() 
     assert_eq!(sweep.deadline(t0 + interval / 2, false, || true), Some(end));
     assert!(!sweep.take_due(end + ms(1), false));
     assert_eq!(sweep.deadline(end + ms(2), false, || true), None);
+
+    // Two windows in one turn: the one with tabs declines just before the
+    // end, and a tabless one is checked just after. The tabless check must
+    // not carry the turn past the wake.
+    let mut sweep = SessionSweep::default();
+    assert!(sweep.take_due(t0, true));
+    sweep.touch();
+    assert!(!sweep.take_due(end - ms(1), true));
+    assert!(!sweep.take_due(end + ms(1), false));
+    assert_eq!(
+        sweep.deadline(end + ms(2), false, || true),
+        Some(end),
+        "a tabless window's check dropped the change"
+    );
+    assert!(sweep.take_due(end + ms(2), true), "the next turn sweeps it");
 }
 
 /// A build waiting for another build to exit (#575) takes the session over

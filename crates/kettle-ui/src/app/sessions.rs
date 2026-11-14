@@ -694,7 +694,12 @@ impl SessionSweep {
     /// Whether this window's turn sweeps, per [`session_sweep_due`]. A sweep
     /// starts a new interval and has seen everything so far.
     pub(super) fn take_due(&mut self, now: std::time::Instant, window_has_tabs: bool) -> bool {
-        self.checked = Some(self.checked.map_or(now, |checked| checked.max(now)));
+        // Only a window that could sweep marks the check: a tabless window
+        // checked later in the same turn must not move it past the wake that
+        // a window with tabs declined just before.
+        if window_has_tabs {
+            self.checked = Some(self.checked.map_or(now, |checked| checked.max(now)));
+        }
         if !session_sweep_due(self.last, now, window_has_tabs) {
             return false;
         }
