@@ -181,11 +181,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - GNOME/Wayland windows now show their title in a Kettle header, even with one
   tab, with minimize/maximize/close buttons, tooltips and screen-reader actions.
-  A single tab is drawn as the window title, as other GNOME apps title their
-  header bars; screen readers still find it as the selected tab, a second tab
-  brings the tabs back, and `tab-bar = always` keeps the tab look. New Tab (+)
-  leads the header, the main menu (≡) ends it, and a faint hairline separates
-  the header from the terminal. Drag empty header space or the title to move,
+  It is laid out and drawn as GNOME's own header bars are: round window
+  buttons, and New Tab (+), Find and the main menu (≡) as GNOME's symbolic
+  icons in flat buttons. A single tab is drawn as the window title, in
+  GNOME's bold title face at its size (the bundled Fira Sans Bold, 11 pt) and
+  shortened with an ellipsis when it does not fit, as other GNOME apps title
+  their header bars; screen readers still find it as the selected tab, a
+  second tab brings the tabs back, and `tab-bar = always` keeps the tab look.
+  New Tab (+) leads the header, the main menu (≡) ends it, and a faint
+  hairline separates the header from the terminal. The Find button (a
+  magnifier) before the menu opens Find and closes it again, shows pressed
+  while Find is open, and its tooltip names your Find shortcut. Drag empty header space or the title to move,
   double-click to maximize, right-click for the window menu, or drag an edge to
   resize. KDE server frames and X11 frames stay native;
   `linux-titlebar-style = native` restores the previous header.
@@ -511,6 +517,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   primary menu, named "Main menu" and placed at the end of the header as GNOME
   apps place it. It is drawn as GNOME's 16 px symbolic ≡ icon rather than a
   font glyph, so it looks the same whatever fonts are installed.
+
+- A click in the terminal shows the cursor at once and restarts its blink,
+  as a click does in GTK and macOS text views, whether the click selects,
+  goes to a program that reads the mouse or opens the context menu. While
+  you drag a selection the cursor stays solid, and it starts blinking again,
+  visible, when you let go. Moving the pointer and scrolling leave the blink
+  alone, and its timing is unchanged.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.

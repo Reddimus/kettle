@@ -4216,8 +4216,10 @@ non-regression claim.
   cursor-blink and visual-bell timers (scheduled via
   `ControlFlow::WaitUntil` only while something animates, so an idle
   terminal does no work). The blink itself counts as animation, so it stops
-  `cursor-blink-timeout` after the last keystroke, paste, focus change, or
-  settings change, always on its visible phase. Output does not restart it,
+  `cursor-blink-timeout` after the last keystroke, paste, focus change,
+  pointer press in the terminal, or settings change, always on its visible
+  phase. A selection drag holds the cursor solid (`cursor_held_steady`) and
+  its release restarts the blink. Output does not restart it,
   as in kitty and Alacritty. Blink phase advances at the timer edge before the
   redraw request, so a delayed Wayland frame callback cannot enqueue the same
   phase repeatedly. On macOS an idle window hands the blink to the window
@@ -5646,21 +5648,33 @@ not `always` and the bar at the top. The painter then skips the tab surface,
 accent line and hover fill and resolves the title against the header
 (`tab_strip::tab_paint_state`); the strip drops the close button and hint, and
 `linux_title_space` routes presses on the title like empty header space. The
-main menu is three pixel-snapped bars (`main_menu_icon_bars`), and
-`header_hairline_rects` draws a one-point line, 1.5:1 against the header and
-the terminal, along the header's bottom, broken under an active tab.
+lone title is shaped in the bundled Fira Sans Bold (`header_title`), registered
+under a family of its own so no installed font matches it, at GNOME's 11 pt,
+centred on the header and fitted to its lane by measured width with the tab
+strip's own shortenings; only Linux builds embed the face. `+`, Find and the
+main menu are GNOME's `tab-new`, `edit-find` and `open-menu` symbolic icons,
+rasterized as coverage masks (`header_icons`) in 34-point flat buttons, 7
+points from the lane's ends and 6 apart, as libadwaita lays out a header.
+Find (`TabBar::search`) toggles the search bar through `toggle_header_find`
+from a press, ctl or AccessKit, shows toggled while Find is open and gives way
+first in a narrow lane. `header_hairline_rects` draws a one-point line, 1.5:1
+against the header and the terminal, along the header's bottom, broken under
+an active tab.
 `TabBar::window_controls`
 carries the same physical rectangles, localized names and hover/press state
 to painting, pointer routing, AccessKit and
 `kettle ctl ui_geometry`. Terminal layout, status/search bands, title editing
 and IME candidate positioning continue to use the shared content area. Startup
 size correction adds the header before renderer creation, preserving explicit
-grid dimensions. The strip uses `resolve_chrome_bg`, and window controls use
-28-point targets with 12-point glyphs, rounded `chrome::tab_detail`
-hover/pressed fills and `Colors::tab_text` unfocused dimming, like the current
-New Tab controls. Glyphs retain 4.5:1 contrast when focused and 3:1 when
-dimmed; tab titles keep 4.5:1 when dimmed, since they still name the tabs,
-and an unfocused window paints no shortcut hints. Outer corners remain square.
+grid dimensions. The strip uses `resolve_chrome_bg`. Window controls follow
+libadwaita: 34-point targets 3 points apart, the outermost 7 points from the
+header's end (`window_buttons::ButtonLayout::reservations`), each a 24-point
+disc of the header's foreground (10 % at rest, 15 % hovered, 30 % pressed,
+floored at 1.15:1, 1.4:1 and 2:1) under its symbolic glyph, 1.5 to 2 points
+wide. Glyphs and the title retain 4.5:1 contrast when focused and 3:1 when an
+unfocused window fades the header; tab titles keep 4.5:1 when dimmed, since
+they still name the tabs, and an unfocused window paints no shortcut hints.
+Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side
 decorations, so Kettle decides by desktop: on Wayland, when `XDG_CURRENT_DESKTOP`
@@ -5670,7 +5684,7 @@ winit keeps negotiating the compositor's frame, and X11 keeps the window
 manager's. Once the window exists, its display handle confirms Wayland, and
 reloads keep `is_decorated()` equal to "Kettle does not own the header". Without
 a tiled-state query, maximized and fullscreen windows drop the resize band. No
-text renderer or font dependency is added.
+text renderer or font dependency is added; the title face is a bundled asset.
 
 Primary presses on empty space or a lone title call `drag_window`; a second
 nearby press within 400 ms toggles maximize. Secondary presses call `show_window_menu`; middle
