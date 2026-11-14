@@ -77,8 +77,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   menu on every platform gains Keyboard shortcuts and Help rows.
 
 - The command palette's empty search field says "Type a command…" in grey
-  until you type, in the UI language. In a window too narrow for it beside the
-  key hint, it is left out rather than cut off.
+  until you type, in the UI language. When it does not fit beside the key
+  hint, the hint is left out until you type; in a window too narrow for it
+  alone, it is left out rather than cut off.
 
 - Broadcast input has its own menu. The macOS Shell menu and the
   right-click menu have a Broadcast Input submenu (Enviar la entrada a varios
@@ -645,6 +646,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Settings' "No settings match" was silent there too. Both were text labels
   that AT-SPI and UI Automation name from a value Kettle left empty; they now
   read the same text as VoiceOver on macOS, in the UI language.
+
+- In Spanish, the keyboard-shortcut list opened with an empty field instead
+  of "Buscar un atajo de teclado…": beside the Spanish key hint it did not
+  fit even the widest picker, so it was left out at every window size. An
+  empty picker field's placeholder now comes before the key hint: when both
+  do not fit, the hint is left out until you type. The command palette's
+  "Type a command…" follows the same rule, so it also shows in windows that
+  used to keep only the hint.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,

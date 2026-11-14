@@ -1789,7 +1789,10 @@ shaping and grapheme-cluster helpers. Selection spans, caret positions,
 horizontal scrolling and pointer stops all come from that shaped buffer.
 Prefix and hint text have separate clipped slots of at most 30% of the field
 each outside pickers. Picker headers keep the complete right-aligned key hint
-only when it fits beside the query; otherwise they drop it. Other fields drop
+only when it fits beside the query; otherwise they drop it. An empty query's
+placeholder (`text_field_placeholder`) comes first: the hint is also dropped
+while only that lets the placeholder fit whole, and the placeholder is left
+out, never cut, when it does not fit alone. Other fields drop
 hint segments before truncating the final segment with an ellipsis. Settings computes the inline
 value slot from the same column budgets and scrolling layout as its row painter.
 The UI projects IME preedit over the selected range or at the caret, retains
