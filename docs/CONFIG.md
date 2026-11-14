@@ -197,18 +197,24 @@ SSH pane titles show the destination after skipping option operands, including
 
 ### SSH launcher
 
-The SSH launcher (`Ctrl+Shift+S`, or the `ssh` action) lists, in order:
+The SSH launcher (`Ctrl+Shift+S`, or the `ssh` action) lists the `ssh-host`
+entries, then the `Host` aliases in `~/.ssh/config` (with the hint
+`from ~/.ssh/config`), each best match first. The first row, which Enter
+connects to without any navigation, depends on what you typed (trimmed):
 
-1. the `ssh-host` entries, best match first;
-2. the `Host` aliases in `~/.ssh/config`, with the hint `from ~/.ssh/config`;
-3. **Connect to "…"**, when the typed text is a valid target that is not
-   exactly a listed name or alias (ignoring case), so a fuzzy match can never
-   take over a target you typed in full.
+- When a row's name or alias equals it, ignoring ASCII case, that host is the
+  first row and there is no Connect row.
+- Otherwise, when it is a valid target, **Connect to "…"** is the first row and
+  is selected, and the fuzzy matches follow it. Typing `prod` while
+  `~/.ssh/config` has `prod-db` connects to `prod`; press Down to pick
+  `prod-db`.
+- Otherwise it is not a valid target (it starts with `-`, or contains
+  whitespace, control or bidi characters): only a disabled refusal row shows,
+  the fuzzy matches are hidden, and Enter starts nothing. An `ssh-host` name
+  with a space, typed in full, is still listed alone as that host.
 
-An exact name or alias match is always the first row. Enter connects to the
-selected row as `ssh -t -- <target>`. A typed target that starts with `-` or
-contains a space is refused with a message, and nothing is started. `Up` from
-the first row does not wrap onto the Connect row.
+Enter connects to the selected row as `ssh -t -- <target>`. Tab completes to
+the selected host, or from the Connect row to the best match below it.
 
 **What is read.** Only when `ssh-config-hosts` is on (the default), and only
 when the launcher opens: `$HOME/.ssh/config`, or `%USERPROFILE%\.ssh\config`
@@ -225,10 +231,10 @@ are one alias.
 **Bounds and permissions.** At most 256 KiB of the file is read; a longer file
 is parsed up to its last complete line within that prefix. At most 256 aliases
 of at most 255 bytes each are kept. The file is opened the way Kettle opens its
-own config: a symlinked dotfile is followed only through folders other users
-cannot write, and the file is skipped if anyone other than you or an
-administrator can change it, if it has more than one hard link, or if it is not
-a regular file. A skip leaves the list empty and logs a fixed reason, never the
+own config: a symlinked dotfile is followed only through trusted folders, and
+the file is skipped if anyone other than you, root or an administrator can
+change it or a folder above it, if it has more than one hard link, or if it is
+not a regular file. A skip leaves the list empty and logs a fixed reason, never the
 path or any alias. A missing file is not an error.
 
 **Privacy.** The list of imported aliases is never saved: not to the config, the

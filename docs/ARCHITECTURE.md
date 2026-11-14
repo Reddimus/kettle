@@ -1800,9 +1800,11 @@ from those shaped stops. A pointer press ends composition before mapping into
 committed text.
 
 The SSH launcher's rows come from one model, `SshRow` in
-`kettle-ui::app::pickers`: configured `ssh-host` entries, then the `Host`
-aliases of `~/.ssh/config`, then a Connect row for a typed target that no host
-row is exactly. Painting, keys, Tab, Enter, the pointer and AccessKit all read
+`kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
+(ignoring ASCII case) comes first; otherwise a valid typed target comes first as
+a Connect row, and an invalid one shows only a refusal row with the fuzzy
+matches hidden. The fuzzy matches follow: configured `ssh-host` entries, then
+the `Host` aliases of `~/.ssh/config`. Painting, keys, Tab, Enter, the pointer and AccessKit all read
 that list, and `ssh_picker_hint` is the one key-hint builder. `kettle-config`'s
 `ssh_config` module owns the parser, the path (`HOME`, or `USERPROFILE` on
 Windows) and the reader, which opens the file through

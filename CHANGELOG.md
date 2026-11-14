@@ -17,9 +17,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   read, and a file anyone else can change is skipped. The aliases are not
   saved anywhere; one you connect to is, like a typed target, part of the
   tab's saved command and its title. Set `ssh-config-hosts = false` to turn
-  this off. When the typed text is not exactly a listed host, a **Connect to
-  "…"** row connects to what was typed, so a similar alias never takes over a
-  target typed in full; an exact name or alias is always the first row.
+  this off. When a row's name or alias equals the typed text (ignoring case),
+  that host is the first row. Otherwise a **Connect to "…"** row comes first
+  and is selected, with the fuzzy matches below it, so typing `prod` connects
+  to `prod` even when `~/.ssh/config` has `prod-db`.
 
 - Settings › Appearance has a Minimum contrast row after Theme, for
   `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the
@@ -259,12 +260,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `ssh-host` entries whose target starts with `-` or contains whitespace,
   control or bidi characters, or whose name is longer than 128 bytes or holds
   control or bidi characters, are now ignored, and `--check-config` reports
-  them. None of those targets could connect; a name over 128 bytes is the one
-  such entry that worked before. In the SSH launcher, a typed target that
-  starts with `-` or contains a space shows why it cannot be used, and Enter
-  leaves the launcher open instead of starting `ssh`. Up from the first row no
-  longer wraps onto the Connect row, and the "No configured host matches" row
-  is gone: the Connect row takes its place.
+  them. None of those targets could connect, but some of those names worked
+  before and are now dropped: a name containing a tab, another control
+  character or a bidi mark, and a name over 128 bytes. In the SSH launcher, a
+  typed target that starts with `-` or contains whitespace or control
+  characters shows only a row saying why it cannot be used; the hosts it would
+  fuzzy-match are hidden, and Enter leaves the launcher open instead of
+  starting `ssh`. The "No configured host matches" row is gone: the Connect row
+  takes its place.
 
 - The macOS menu bar reads like a Mac app's. View has one Enter Full Screen
   item, on Control-Command-F, that reads Exit Full Screen while the window

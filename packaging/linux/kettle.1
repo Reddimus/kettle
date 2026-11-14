@@ -1136,7 +1136,8 @@ OpenSSH client config. Read, never written, each time the SSH launcher opens,
 for its literal
 .B Host
 aliases only; at most 256 KiB and 256 aliases. Skipped when anyone other than
-the user can change the file. Set
+the user, root or an administrator can change the file or a folder above it.
+Set
 .B ssh-config-hosts = false
 to stop kettle reading it.
 .TP
