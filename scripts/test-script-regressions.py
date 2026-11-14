@@ -863,8 +863,24 @@ class ControlRegistryIsolationTests(unittest.TestCase):
 
     # Shared harnesses whose Kettle launches isolate the registry.
     HARNESSES = ('check-live-ui-smoke.py', 'check-modal-shortcuts.py')
-    CONTROL_SERVER = re.compile(
-        r'agent-server\s*=\s*(full|read-only)|--agent-server["\'\s,]+(full|read-only)')
+    # `agent-server = full` in a config, quoted or not, and `--agent-server`
+    # however its value is attached: the next argument, `=`, or the next item
+    # of a list.
+    CONTROL_SERVER = re.compile(r'''agent-server[\s"',=\\]+(full|read-only)''')
+
+    def test_the_control_server_pattern_knows_every_spelling(self):
+        on = ['agent-server = full', 'agent-server=read-only', 'agent-server = "full"',
+              "agent-server = 'read-only'", 'agent-server = \\"full\\"',
+              '--agent-server full', '--agent-server=full', '--agent-server=read-only',
+              '--agent-server="full"', '"--agent-server", "full"',
+              '"--agent-server",\n        "read-only"']
+        off = ['agent-server = off', 'agent-server = "off"', '--agent-server off',
+               '--agent-server=off', '"--agent-server", "off"', 'agent-server',
+               'agent-server-full']
+        for text in on:
+            self.assertRegex(text, self.CONTROL_SERVER)
+        for text in off:
+            self.assertNotRegex(text, self.CONTROL_SERVER)
 
     def test_scripts_that_start_a_control_server_isolate_its_registry(self):
         checked = []
