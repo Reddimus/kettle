@@ -208,9 +208,10 @@ previous receipt, and later input removes it; closing the card does not delete
 the retained PNG.
 
 On Linux, Wayland text copy and paste use the window's Wayland connection,
-including on GNOME without XWayland. Middle-click uses PRIMARY when the
-compositor supports the primary-selection protocol. Text access requires the
-window to have focus. Images and explicit file lists still use arboard's X11
+including on GNOME without XWayland. Middle-click pastes PRIMARY when Kettle
+can read it and it is not empty, and the regular clipboard otherwise; in a
+Wayland session without XWayland, PRIMARY may be unavailable. Text access
+requires the window to have focus. Images and explicit file lists still use arboard's X11
 backend in this build: without XWayland they are unavailable, image paste logs
 the limitation and falls through to text, and drag and drop remains available.
 No clipboard configuration change is needed.
