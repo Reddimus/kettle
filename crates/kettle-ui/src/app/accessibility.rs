@@ -291,10 +291,7 @@ impl App {
                 }
                 if Some(pane_id) == focused && !alt && !state.text.is_empty() {
                     let id = accessibility_output_id(pane_id, state.serial);
-                    let mut announcement = Node::new(Role::Label);
-                    // A label's text is its value on AT-SPI; macOS reads the label.
-                    announcement.set_label(state.text.clone());
-                    announcement.set_value(state.text.clone());
+                    let mut announcement = static_text_node(state.text.clone());
                     announcement.set_live(accesskit::Live::Polite);
                     announcement.set_bounds(accesskit::Rect::new(
                         f64::from(text_rect.0),
@@ -1777,6 +1774,18 @@ pub(super) fn font_size_chip_node(label: &str) -> (NodeId, Node) {
     status.set_live(accesskit::Live::Polite);
     (ACCESSIBILITY_FONT_SIZE_ID, status)
 }
+
+/// A line of static text that every screen reader reads as `text`. AccessKit
+/// names a `Role::Label` from its value on AT-SPI and UI Automation, and macOS
+/// shows its label as the text's value, so it carries both: with the label
+/// alone, Orca and Narrator hear an empty name.
+pub(super) fn static_text_node(text: impl Into<String>) -> Node {
+    let text = text.into();
+    let mut node = Node::new(Role::Label);
+    node.set_label(text.clone());
+    node.set_value(text);
+    node
+}
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 /// Inline cards on screen, each by its placement's instance number, which
 /// stays below this bit; never by its nonce.
@@ -2371,8 +2380,7 @@ fn push_picker_accessibility(
         && let Some(footer) = menu.picker_footer.as_ref()
     {
         let footer_id = accessibility_modal_id(kind, PICKER_FOOTER_A11Y_INDEX);
-        let mut text = Node::new(Role::Label);
-        text.set_label(kettle_render::theme_footer_description(footer, tr));
+        let mut text = static_text_node(kettle_render::theme_footer_description(footer, tr));
         let (x, y, w, h) = menu.rows_rect();
         text.set_bounds(bounds((x, y + h, w, menu.picker_footer_height())));
         projection.nodes.push((footer_id, text));
@@ -2787,8 +2795,7 @@ pub(super) fn modal_accessibility_projection(
             list.set_children(children.clone());
         } else if settings.rows.is_empty() {
             let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
-            let mut empty = Node::new(Role::Label);
-            empty.set_label(tr.text(kettle_i18n::Text::SettingsNoMatches));
+            let mut empty = static_text_node(tr.text(kettle_i18n::Text::SettingsNoMatches));
             empty.set_bounds(bounds(layout.empty_rect));
             projection.nodes.push((id, empty));
             list.set_children([id]);
