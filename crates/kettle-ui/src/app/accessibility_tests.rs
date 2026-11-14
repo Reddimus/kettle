@@ -41,13 +41,16 @@ fn confirm_dialog_accessibility_focuses_the_selected_button() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".to_string(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close".to_string(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 1,
+            detail: None,
         }),
         ..kettle_render::Overlay::default()
     };
@@ -87,13 +90,16 @@ fn confirmation_accessibility_bounds_follow_chrome_metrics() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".into(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 0,
+            detail: None,
         }),
         ..Default::default()
     };
@@ -2022,13 +2028,16 @@ fn close_question_reads_the_cleaned_program_name() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".into(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close pane".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 0,
+            detail: None,
         }),
         ..Default::default()
     };

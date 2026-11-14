@@ -3303,19 +3303,16 @@ pub(super) fn confirm_dialog_overlay(
             .iter()
             .map(|button| kettle_render::ConfirmDialogButton {
                 label: confirm_button_label(button, tr).to_string(),
-                destructive: matches!(
-                    button,
-                    ConfirmButton::Confirm {
-                        destructive: true,
-                        ..
-                    }
-                ),
+                destructive: button.destructive(),
+                neutral: false,
+                access_key: None,
             })
             .collect(),
         focus_idx: dialog.focus_idx,
         hover_idx: None,
         pressed_idx: dialog.space_pressed,
         scroll: dialog.scroll,
+        detail: None,
     }
 }
 
@@ -3449,6 +3446,23 @@ pub enum ConfirmButton {
         label: String,
         destructive: bool,
     },
+}
+
+impl ConfirmButton {
+    /// Whether the button carries the warning colour.
+    ///
+    /// Every variant has its own arm on purpose. Written as
+    /// `matches!(button, Self::Confirm { destructive: true, .. })`, rustc
+    /// 1.99.1 at `opt-level = 1` read the flag's byte without checking the
+    /// variant once the projection built a larger struct, and a paste
+    /// button's flag came back as the low byte of its label's length. The
+    /// paste dialog tests compare the projected flags and catch it.
+    pub(super) fn destructive(&self) -> bool {
+        match self {
+            Self::Confirm { destructive, .. } => *destructive,
+            Self::Cancel | Self::PasteOneLine { .. } | Self::PasteWithoutControls { .. } => false,
+        }
+    }
 }
 
 /// Live state for an open confirm dialog. `focus_idx`

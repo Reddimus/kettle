@@ -249,17 +249,15 @@ fn confirmation_test_overlay() -> kettle_render::ConfirmDialogOverlay {
         buttons: vec![
             kettle_render::ConfirmDialogButton {
                 label: "Cancel".into(),
-                destructive: false,
+                ..Default::default()
             },
             kettle_render::ConfirmDialogButton {
                 label: "Close window".into(),
                 destructive: true,
+                ..Default::default()
             },
         ],
-        focus_idx: 0,
-        hover_idx: None,
-        pressed_idx: None,
-        scroll: 0,
+        ..Default::default()
     }
 }
 

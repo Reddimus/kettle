@@ -126,15 +126,16 @@ use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
 use overlays::input_bar_colors;
 pub use overlays::{
-    ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
-    MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, MenuToggle, NotificationGeometry, Overlay, StatusBar, TabActivity,
-    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    WindowControl, WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
-    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    notification_geometry_with_notices, persistent_notice_geometry,
-    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_columns, update_toast_geometry,
+    ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
+    ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
+    MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuToggle,
+    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
+    UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
+    context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
+    menu_row_chars, notification_geometry, notification_geometry_with_notices,
+    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
+    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
+    update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -223,7 +224,7 @@ mod color;
 
 mod confirm;
 
-pub use confirm::ConfirmDialogLayout;
+pub use confirm::{ConfirmDetailLayout, ConfirmDialogLayout, access_key_index};
 
 mod cursor_marks;
 
@@ -5256,10 +5257,26 @@ impl Renderer {
         }
 
         let mut confirmation_surfaces = Vec::new();
-        let mut confirmation_colors = Vec::new();
+        let mut confirmation_colors = None;
         if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
-            self.confirmation_text
-                .prepare(&mut self.font_system, &family, layout, dialog);
+            // The window's accent draws the focus ring. The recommended
+            // button and the link take an accent that cannot be mistaken for
+            // the warning colour beside them.
+            let window_accent = self.ui_accent(cfg, theme);
+            let accent = if dialog.detail.is_some()
+                || dialog.buttons.iter().any(|button| button.destructive)
+            {
+                confirm::choice_accent(theme, window_accent)
+            } else {
+                window_accent
+            };
+            let detail_colors = confirm::detail_colors(theme, accent);
+            self.confirmation_text.prepare(
+                &mut self.font_system,
+                &family,
+                layout,
+                gc(detail_colors.warning),
+            );
             let rgba = |color: Rgb, alpha: f32| {
                 [
                     color.r as f32 / 255.0,
@@ -5297,25 +5314,67 @@ impl Renderer {
                 layout.unit,
             );
             let foreground = confirm_dialog_text_color(theme);
-            confirmation_colors.extend([GColor::rgb(foreground.r, foreground.g, foreground.b); 2]);
+            let mut colors = confirm::ConfirmTextColors {
+                text: gc(foreground),
+                link: gc(detail_colors.link),
+                buttons: Vec::with_capacity(layout.buttons.len()),
+            };
+            let focus = confirm::focus_color(theme, window_accent);
+            let focus_ring = |rect: Rect4, grow: f32| {
+                confirm::intersect(
+                    (
+                        rect.0 - grow,
+                        rect.1 - grow,
+                        rect.2 + grow * 2.0,
+                        rect.3 + grow * 2.0,
+                    ),
+                    layout.rect,
+                )
+            };
+            if let Some(detail) = &layout.detail {
+                // The preview sits in an inset box, and each control token
+                // in a chip: an outline and a faint fill mark it apart from
+                // typed text without relying on its colour.
+                shape(
+                    detail.preview_rect,
+                    detail_colors.preview_fill,
+                    1.0,
+                    confirm_dialog_border_color(theme),
+                    1.0,
+                    4.0 * layout.unit,
+                    layout.unit,
+                );
+                for chip in self.confirmation_text.chips(layout) {
+                    shape(
+                        chip,
+                        detail_colors.chip_fill,
+                        1.0,
+                        detail_colors.warning,
+                        1.0,
+                        3.0 * layout.unit,
+                        layout.unit,
+                    );
+                }
+                let link = detail.link_rect;
+                if layout.link_stop() == Some(dialog.focus_idx) && link.2 > 0.0 && link.3 > 0.0 {
+                    shape(
+                        focus_ring(link, 3.0 * layout.unit),
+                        black,
+                        0.0,
+                        focus,
+                        1.0,
+                        5.0 * layout.unit,
+                        2.0 * layout.unit,
+                    );
+                }
+            }
             for (index, &rect) in layout.buttons.iter().enumerate() {
-                let (fill, label) =
-                    confirm::button_colors(theme, self.ui_accent(cfg, theme), dialog, index);
+                let (fill, label) = confirm::button_colors(theme, accent, dialog, index);
                 let stroke = color::with_min_contrast(fill, theme.background, 3.0);
                 shape(rect, fill, 1.0, stroke, 1.0, 6.0 * layout.unit, layout.unit);
                 if index == dialog.focus_idx && rect.2 > 0.0 && rect.3 > 0.0 {
-                    let focus = confirm::focus_color(theme, self.ui_accent(cfg, theme));
-                    let ring = confirm::intersect(
-                        (
-                            rect.0 - 4.0 * layout.unit,
-                            rect.1 - 4.0 * layout.unit,
-                            rect.2 + 8.0 * layout.unit,
-                            rect.3 + 8.0 * layout.unit,
-                        ),
-                        layout.rect,
-                    );
                     shape(
-                        ring,
+                        focus_ring(rect, 4.0 * layout.unit),
                         black,
                         0.0,
                         focus,
@@ -5324,8 +5383,24 @@ impl Renderer {
                         2.0 * layout.unit,
                     );
                 }
-                confirmation_colors.push(GColor::rgb(label.r, label.g, label.b));
+                colors.buttons.push(gc(label));
             }
+            for line in self.confirmation_text.underlines(layout, dialog) {
+                let ink = match line.role {
+                    confirm::TextRole::Button(index) => colors.buttons[index],
+                    _ => colors.link,
+                };
+                shape(
+                    line.rect,
+                    Rgb::new(ink.r(), ink.g(), ink.b()),
+                    1.0,
+                    black,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+            }
+            confirmation_colors = Some(colors);
             if layout.max_scroll > 0 {
                 let region = if layout.whole_scroll {
                     layout.rect
@@ -5373,10 +5448,9 @@ impl Renderer {
                 }
             }
         }
-        let confirmation_areas = if let Some(layout) = &confirmation_layout {
-            self.confirmation_text.areas(layout, &confirmation_colors)
-        } else {
-            Vec::new()
+        let confirmation_areas = match (&confirmation_layout, &confirmation_colors) {
+            (Some(layout), Some(colors)) => self.confirmation_text.areas(layout, colors),
+            _ => Vec::new(),
         };
 
         let label_count = self.card_scene.labels.len();
