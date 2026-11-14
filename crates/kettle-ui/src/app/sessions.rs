@@ -192,13 +192,10 @@ impl App {
             || (self.startup.layout.is_none()
                 && !should_restore_session(self.startup.restore, self.cfg.restore_session, false));
         if disabled {
-            let path = match self.startup.layout.as_deref() {
-                Some(name) => crate::session::Session::path_for_layout(name),
-                None => crate::session::Session::path(),
-            };
-            if let Some(path) = path {
-                self.session_writer.remove_content(path);
-            }
+            // Whatever is written next is a fresh snapshot, never a keep.
+            self.content_submitted.borrow_mut().take();
+            self.session_writer
+                .remove_content(self.startup.layout.clone());
         }
     }
 
@@ -228,7 +225,12 @@ impl App {
         )
     }
 
+    /// Save the session after a gesture or an explicit request.
     pub(super) fn save_session(&self, ws: &WindowState) {
+        self.save_session_as(ws, SaveKind::Gesture);
+    }
+
+    pub(super) fn save_session_as(&self, ws: &WindowState, kind: SaveKind) {
         self.clear_disabled_content();
         if self.session_load_failed {
             return;
@@ -258,6 +260,7 @@ impl App {
             SessionWriteTarget::DefaultSession => None,
             _ => return,
         };
+        let stale = self.session_writer.take_content_stale();
         let content = if self.cfg.restore_scrollback_lines > 0 {
             let mut windows: Vec<_> = std::iter::once(ws)
                 .chain(self.windows.values())
@@ -275,18 +278,42 @@ impl App {
                 )
             });
             windows.truncate(crate::session::MAX_RESTORE_WINDOWS);
-            let mut budget = crate::session_content::TEXT_BUDGET;
-            Some(crate::session_content::ContentSnapshot::new(
-                &s,
+            // The key is read before any grid, and decides whether to walk
+            // them at all.
+            let session_hash = crate::session_content::session_hash(&s);
+            let key = crate::session_content::ContentKey::new(
+                session_hash,
+                self.cfg.restore_scrollback_lines,
+                self.cfg.restore_scrollback_remote,
                 windows
                     .iter()
-                    .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
+                    .map(|w| (w.seq, w.mux.content_key_panes()))
                     .collect(),
-            ))
+            );
+            let mut submitted = self.content_submitted.borrow_mut();
+            if content_unchanged(kind, stale, submitted.as_ref(), &key) {
+                crate::session::ContentJob::Keep
+            } else {
+                let mut budget = crate::session_content::TEXT_BUDGET;
+                let snapshot = crate::session_content::ContentSnapshot::bound(
+                    session_hash,
+                    windows
+                        .iter()
+                        .map(|w| w.mux.snapshot_content(&self.cfg, &mut budget))
+                        .collect(),
+                );
+                *submitted = Some(key);
+                crate::session::ContentJob::Write(snapshot)
+            }
         } else {
-            None
+            self.content_submitted.borrow_mut().take();
+            crate::session::ContentJob::Remove
         };
-        self.session_writer.submit_content(s, layout, content);
+        self.session_writer.submit_job(crate::session::SaveJob {
+            session: Some(s),
+            layout,
+            content,
+        });
     }
 
     /// Move a session aside when it loaded but could not be restored.
@@ -698,6 +725,32 @@ pub(super) fn session_sweep_due(
     window_has_tabs: bool,
 ) -> bool {
     window_has_tabs && last.is_none_or(|then| now.saturating_duration_since(then) >= SESSION_SWEEP)
+}
+
+/// Why a session save runs, which decides how it treats the output file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveKind {
+    /// A gesture, or an explicit save.
+    Gesture,
+    /// The background sweep (see [`SESSION_SWEEP`]).
+    Sweep,
+    /// The last save before the process goes. It always takes a fresh
+    /// snapshot, which also restores an output file deleted or replaced on
+    /// disk; the writer skips the write when the file already holds it.
+    Exit,
+}
+
+/// Whether a save can keep the output file instead of walking every grid:
+/// nothing the snapshot depends on changed since the last snapshot submitted
+/// (`submitted`), and the writer has not since found that file gone or
+/// replaced (`stale`). The exit save never keeps.
+pub(super) fn content_unchanged(
+    kind: SaveKind,
+    stale: bool,
+    submitted: Option<&crate::session_content::ContentKey>,
+    key: &crate::session_content::ContentKey,
+) -> bool {
+    kind != SaveKind::Exit && !stale && submitted == Some(key)
 }
 
 /// Where a session snapshot should be written, if anywhere.

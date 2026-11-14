@@ -364,7 +364,7 @@ impl App {
         // Not part of this window's returned deadline: `about_to_wait` asks
         // once per app for the one wake a change since the sweep is owed.
         if self.session_sweep.take_due(now, !ws.mux.tabs.is_empty()) {
-            self.save_session(ws);
+            self.save_session_as(ws, SaveKind::Sweep);
         }
         let lua_wait = self.poll_pending_lua_commands(ws, event_loop, now);
         let remote_wait = if should_poll_remote_window(

@@ -202,7 +202,7 @@ fn the_session_sweep_wake_is_armed_only_by_events_and_cleared_only_by_the_sweep(
         .nth(1)
         .expect("about_to_wait_inner present");
     assert!(
-        wait.contains("if self.session_sweep.take_due(now, !ws.mux.tabs.is_empty()) {\n            self.save_session(ws);"),
+        wait.contains("if self.session_sweep.take_due(now, !ws.mux.tabs.is_empty()) {\n            self.save_session_as(ws, SaveKind::Sweep);"),
         "the sweep must be driven from the event-loop turn itself, and must \
              pass the window's own emptiness so it cannot overwrite a saved \
              session with a window that has nothing in it"
@@ -412,7 +412,7 @@ fn review_unread_startup_snapshot_disables_saving() {
     let source: String = include_str!("sessions.rs").split_whitespace().collect();
     assert!(
         source
-            .contains("fnsave_session(&self,ws:&WindowState){self.clear_disabled_content();ifself.session_load_failed{return;}"),
+            .contains("fnsave_session_as(&self,ws:&WindowState,kind:SaveKind){self.clear_disabled_content();ifself.session_load_failed{return;}"),
         "automatic saves must stop before taking a default snapshot"
     );
     // Both named layouts and the default restored session need this guard.
@@ -503,4 +503,108 @@ fn saved_windows_fit_restore_budget_in_focus_order() {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(loaded.validated_restore_windows().unwrap().len(), 16);
     assert_eq!(loaded.tabs[0].title_override.as_deref(), Some("17"));
+}
+
+/// The content key changes with everything a snapshot depends on and with
+/// nothing else, so an unchanged key can keep the file.
+#[test]
+fn content_key_tracks_every_input() {
+    use crate::session_content::{ContentKey, PaneContentKey};
+    let pane = |id, output, geometry, remote| PaneContentKey {
+        id,
+        output,
+        geometry,
+        remote,
+    };
+    let key = |hash: u8, lines, remote, windows: Vec<(u64, Vec<PaneContentKey>)>| {
+        ContentKey::new([hash; 32], lines, remote, windows)
+    };
+    let base = || vec![(1, vec![pane(7, 10, 2, false), pane(8, 4, 1, false)])];
+    let reference = key(0, 1000, false, base());
+    assert_eq!(reference, key(0, 1000, false, base()), "nothing changed");
+    let mut variants = vec![
+        ("layout", key(1, 1000, false, base())),
+        ("restore-scrollback-lines", key(0, 999, false, base())),
+        ("restore-scrollback-remote", key(0, 1000, true, base())),
+        (
+            "window order",
+            key(0, 1000, false, vec![(2, base()[0].1.clone())]),
+        ),
+        (
+            "pane order",
+            key(
+                0,
+                1000,
+                false,
+                vec![(1, vec![pane(8, 4, 1, false), pane(7, 10, 2, false)])],
+            ),
+        ),
+    ];
+    for (name, change) in [
+        ("output generation", pane(7, 11, 2, false)),
+        ("geometry generation", pane(7, 10, 3, false)),
+        ("remote", pane(7, 10, 2, true)),
+        ("pane id", pane(9, 10, 2, false)),
+    ] {
+        variants.push((
+            name,
+            key(0, 1000, false, vec![(1, vec![change, pane(8, 4, 1, false)])]),
+        ));
+    }
+    for (name, variant) in variants {
+        assert_ne!(variant, reference, "the key ignores {name}");
+    }
+}
+
+/// A save keeps the output file only when the key matches the last snapshot
+/// submitted and the writer has not found that file gone. The exit save
+/// always takes a fresh one.
+#[test]
+fn only_an_unchanged_key_keeps_the_output_file() {
+    use super::sessions::{SaveKind, content_unchanged};
+    let key = crate::session_content::ContentKey::new([0; 32], 1000, false, vec![]);
+    let other = crate::session_content::ContentKey::new([1; 32], 1000, false, vec![]);
+    for kind in [SaveKind::Gesture, SaveKind::Sweep] {
+        assert!(content_unchanged(kind, false, Some(&key), &key));
+        assert!(!content_unchanged(kind, false, Some(&other), &key));
+        assert!(!content_unchanged(kind, false, None, &key), "nothing submitted yet");
+        assert!(!content_unchanged(kind, true, Some(&key), &key), "the file went stale");
+    }
+    assert!(!content_unchanged(SaveKind::Exit, false, Some(&key), &key));
+}
+
+/// Source guards for the save: the key is read before any grid is walked,
+/// the grids are walked only when it changed, and the key's panes come in
+/// the snapshot's order under the snapshot's remote rule.
+#[test]
+fn the_content_key_is_read_before_the_grids_and_decides_the_walk() {
+    let src = production_source();
+    let save = src
+        .split("fn save_session_as(&self, ws: &WindowState, kind: SaveKind) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("save_session_as body");
+    let key = save.find("w.mux.content_key_panes()").unwrap();
+    let decision = save
+        .find("if content_unchanged(kind, stale, submitted.as_ref(), &key) {")
+        .unwrap();
+    let walk = save.find("w.mux.snapshot_content(&self.cfg, &mut budget)").unwrap();
+    assert!(key < decision && decision < walk, "the key must decide the walk");
+    assert_eq!(save.matches("snapshot_content(").count(), 1);
+    let mux = include_str!("../mux.rs");
+    for body in ["fn content_key_panes(&self)", "fn snapshot_content("] {
+        let body = mux
+            .split(body)
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap();
+        assert!(body.contains("pane_saves_as_remote(pane)"), "{body}");
+        assert!(body.contains("tab.root") && body.contains("leaf_ids()"), "{body}");
+    }
+    let exit = src
+        .split("fn save_session_on_exit(&mut self) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap();
+    assert!(exit.contains("self.save_session_as(&ws, SaveKind::Exit);"));
 }

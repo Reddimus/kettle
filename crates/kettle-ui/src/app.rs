@@ -266,6 +266,10 @@ pub enum UserEvent {
         window_seq: u64,
         request: ActionRequest,
     },
+    /// The session writer found the output file was not the one it wrote,
+    /// so the next sweep must save again. Every user event marks the session
+    /// touched, which arms that sweep.
+    SessionResave,
     /// A compatible bare Kettle launch asked this primary process to open a
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
@@ -372,6 +376,9 @@ pub struct App {
     /// An unread restore snapshot must survive automatic saves for this launch.
     session_load_failed: bool,
     session_writer: crate::session::SessionWriter,
+    /// The content key of the last output snapshot handed to the writer, or
+    /// `None` when the next save must take a fresh one.
+    content_submitted: std::cell::RefCell<Option<crate::session_content::ContentKey>>,
     /// All per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -800,6 +807,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_quick_terminal(el);
             }
             UserEvent::Activation => self.drain_activation_requests(el),
+            // `touch` above did what this asks.
+            UserEvent::SessionResave => {}
             #[cfg(target_os = "macos")]
             UserEvent::DockReopen => {
                 self.focus_or_open_window(el, None);

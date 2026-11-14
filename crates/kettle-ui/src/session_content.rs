@@ -27,7 +27,62 @@ pub(crate) struct ContentSnapshot {
     pub windows: Vec<WindowContent>,
 }
 
-fn session_hash(session: &Session) -> [u8; 32] {
+/// Everything a content snapshot depends on, read without walking any grid.
+///
+/// Two saves with equal keys would write the same rows, so the second keeps
+/// the file instead (`ContentJob::Keep`). The key is read before the grids
+/// are, so output that lands while a snapshot is taken can only make the next
+/// key differ, never hide in this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContentKey {
+    binding: ContentBinding,
+    /// Per saved window, in save order: its sequence number and its panes in
+    /// snapshot order.
+    windows: Vec<(u64, Vec<PaneContentKey>)>,
+}
+
+/// What ties a content file to its session, and what the user chose to save.
+/// When this changes, the file on disk no longer matches what restore would
+/// accept or what the settings allow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContentBinding {
+    session_hash: [u8; 32],
+    lines: usize,
+    remote: bool,
+}
+
+/// What one pane's saved rows depend on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneContentKey {
+    pub id: u64,
+    /// `Terminal::output_generation`: every PTY read and local output.
+    pub output: u64,
+    /// `Terminal::geometry_generation`: every resize and reflow.
+    pub geometry: u64,
+    /// Whether the pane saves as remote, which with remote saving off
+    /// empties its rows.
+    pub remote: bool,
+}
+
+impl ContentKey {
+    pub(crate) fn new(
+        session_hash: [u8; 32],
+        lines: usize,
+        remote: bool,
+        windows: Vec<(u64, Vec<PaneContentKey>)>,
+    ) -> Self {
+        Self {
+            binding: ContentBinding {
+                session_hash,
+                lines,
+                remote,
+            },
+            windows,
+        }
+    }
+}
+
+pub(crate) fn session_hash(session: &Session) -> [u8; 32] {
     struct HashWriter(Sha256);
     impl io::Write for HashWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -49,10 +104,16 @@ pub(crate) fn path(session_path: &Path) -> PathBuf {
 }
 
 impl ContentSnapshot {
+    #[cfg(test)]
     pub fn new(session: &Session, windows: Vec<WindowContent>) -> Self {
+        Self::bound(session_hash(session), windows)
+    }
+
+    /// A snapshot for the session whose [`session_hash`] is `session_hash`.
+    pub(crate) fn bound(session_hash: [u8; 32], windows: Vec<WindowContent>) -> Self {
         Self {
             version: 1,
-            session_hash: session_hash(session),
+            session_hash,
             windows,
         }
     }
@@ -92,12 +153,34 @@ impl ContentSnapshot {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn save(&self, session_path: &Path) -> io::Result<()> {
+        self.save_if_changed(session_path, &mut None).map(|_| ())
+    }
+
+    /// Write this snapshot beside `session_path`, unless the file there is
+    /// still the one `written` records and holds exactly these bytes. Returns
+    /// whether it wrote. `written` then records this write, or nothing after
+    /// a failure.
+    pub(crate) fn save_if_changed(
+        &self,
+        session_path: &Path,
+        written: &mut Option<WrittenContent>,
+    ) -> io::Result<bool> {
         let destination = path(session_path);
         let bytes = serde_json::to_vec(self).map_err(invalid)?;
         if bytes.len() > MAX_BYTES {
+            *written = None;
             return Err(invalid("content snapshot exceeds 8 MiB"));
         }
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if written
+            .as_ref()
+            .is_some_and(|known| known.digest == digest && known.still_at(&destination))
+        {
+            return Ok(false);
+        }
+        *written = None;
         if let Some(parent) = destination.parent() {
             kettle_state::create_private_dirs(parent)?;
         }
@@ -105,8 +188,42 @@ impl ContentSnapshot {
             &destination,
             &bytes,
             kettle_state::AtomicWriteOptions::PRIVATE,
-        )
+        )?;
+        // A file that cannot be identified is only rewritten next time.
+        *written = WrittenContent::of(&destination, digest).ok();
+        Ok(true)
     }
+}
+
+/// The content file this writer wrote last, and a digest of what it wrote.
+///
+/// The file is held open, as `SnapshotIdentity` holds `session.json`, so a
+/// deleted or replaced file is told apart from the one written even when the
+/// path names a new file with the same size and time.
+pub(crate) struct WrittenContent {
+    identity: crate::session::SnapshotIdentity,
+    digest: [u8; 32],
+}
+
+impl WrittenContent {
+    fn of(destination: &Path, digest: [u8; 32]) -> io::Result<Self> {
+        let file = kettle_state::open_trusted_file_read(destination)?;
+        Ok(Self {
+            identity: crate::session::SnapshotIdentity::of(&file)?,
+            digest,
+        })
+    }
+
+    /// Whether `destination` still names this file, unchanged.
+    pub(crate) fn still_at(&self, destination: &Path) -> bool {
+        self.identity.matches(destination).unwrap_or(false)
+    }
+}
+
+/// Whether the content file beside `session_path` is still the one `written`
+/// records: what a `Keep` relies on.
+pub(crate) fn kept(session_path: &Path, written: Option<&WrittenContent>) -> bool {
+    written.is_some_and(|known| known.still_at(&path(session_path)))
 }
 
 fn invalid(error: impl std::fmt::Display) -> io::Error {

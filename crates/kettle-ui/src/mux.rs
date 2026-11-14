@@ -2306,7 +2306,43 @@ fn remote_launch(argv: &[String]) -> bool {
     kettle_remote::detect_ssh(argv).is_some() || kettle_remote::detect_container(argv).is_some()
 }
 
+/// Whether a pane's saved output counts as remote: a detected remote context,
+/// a remote launch, or a remote program in the foreground.
+fn pane_saves_as_remote(pane: &Pane) -> bool {
+    pane.remote_context.is_some()
+        || remote_launch(&pane.argv)
+        || pane
+            .foreground_process
+            .as_ref()
+            .is_some_and(|p| remote_launch(&p.argv))
+}
+
 impl Mux {
+    /// What each pane's saved rows depend on, in [`Mux::snapshot_content`]'s
+    /// order, read without locking any grid. Each generation is read before
+    /// the snapshot that follows it, so output racing the save makes the next
+    /// key differ rather than going unseen.
+    pub(crate) fn content_key_panes(&self) -> Vec<crate::session_content::PaneContentKey> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.root.leaf_ids())
+            .map(|id| match self.panes.get(&id) {
+                Some(pane) => crate::session_content::PaneContentKey {
+                    id,
+                    output: pane.term.output_generation(),
+                    geometry: pane.term.geometry_generation(),
+                    remote: pane_saves_as_remote(pane),
+                },
+                None => crate::session_content::PaneContentKey {
+                    id,
+                    output: 0,
+                    geometry: 0,
+                    remote: false,
+                },
+            })
+            .collect()
+    }
+
     pub(crate) fn snapshot_content(
         &self,
         cfg: &Config,
@@ -2322,12 +2358,7 @@ impl Mux {
                         let Some(pane) = self.panes.get(id) else {
                             return Default::default();
                         };
-                        let remote = pane.remote_context.is_some()
-                            || remote_launch(&pane.argv)
-                            || pane
-                                .foreground_process
-                                .as_ref()
-                                .is_some_and(|p| remote_launch(&p.argv));
+                        let remote = pane_saves_as_remote(pane);
                         let lines = if remote && !cfg.restore_scrollback_remote {
                             Vec::new()
                         } else {

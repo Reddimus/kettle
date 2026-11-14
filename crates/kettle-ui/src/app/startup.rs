@@ -763,6 +763,12 @@ impl App {
         let video_previewer =
             crate::video_preview::VideoPreviewer::new(proxy.clone(), startup.media.clone());
         let plan = startup_plan(&startup, &initial_cfg, another_build_running);
+        let session_writer = {
+            let proxy = proxy.clone();
+            crate::session::SessionWriter::new(move || {
+                let _ = proxy.send_event(UserEvent::SessionResave);
+            })?
+        };
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
             pending_shell_action: PendingShellAction::default(),
@@ -776,7 +782,8 @@ impl App {
             restore_content: Default::default(),
             restore_identity: None,
             session_load_failed: false,
-            session_writer: crate::session::SessionWriter::new()?,
+            session_writer,
+            content_submitted: Default::default(),
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
