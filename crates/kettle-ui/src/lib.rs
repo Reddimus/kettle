@@ -122,7 +122,10 @@ mod dev_record;
 
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
-pub use notifications::{flush_desktop_notifications, queue_desktop_notification};
+pub use notifications::{
+    flush_desktop_notifications, on_desktop_notification_failure, queue_desktop_notification,
+    queue_tracked_desktop_notification, take_failed_desktop_notifications,
+};
 
 #[doc(hidden)]
 pub fn run_media_preview_worker() -> i32 {

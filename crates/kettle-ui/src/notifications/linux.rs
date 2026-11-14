@@ -30,14 +30,17 @@ impl Backend {
             .build()
     }
 
-    pub(super) fn show(&mut self, notification: DesktopNotification) {
-        if let Err(error) = self.send(&notification) {
-            super::discard_closed_sender(&mut self.connection, Connection::is_closed);
-            if self.connection.is_none() {
-                self.body_markup = None;
-            }
-            log::warn!("kettle.notify: notification send failed: {error}");
+    /// Whether the notification server accepted it.
+    pub(super) fn show(&mut self, notification: DesktopNotification) -> bool {
+        let Err(error) = self.send(&notification) else {
+            return true;
+        };
+        super::discard_closed_sender(&mut self.connection, Connection::is_closed);
+        if self.connection.is_none() {
+            self.body_markup = None;
         }
+        log::warn!("kettle.notify: notification send failed: {error}");
+        false
     }
 
     fn send(&mut self, notification: &DesktopNotification) -> zbus::Result<()> {
@@ -158,6 +161,7 @@ mod tests {
         };
         for title in ["first", "second"] {
             backend.show(DesktopNotification {
+                id: None,
                 title: title.into(),
                 body: "local body".into(),
             });
@@ -208,6 +212,7 @@ mod tests {
         };
         for title in ["first", "fail", "second"] {
             backend.show(DesktopNotification {
+                id: None,
                 title: title.into(),
                 body: String::new(),
             });
@@ -234,6 +239,7 @@ mod tests {
             ..Backend::default()
         };
         backend.show(DesktopNotification {
+            id: None,
             title: "before service".into(),
             body: "not delivered".into(),
         });
@@ -247,6 +253,7 @@ mod tests {
             .build()
             .unwrap();
         backend.show(DesktopNotification {
+            id: None,
             title: "after service".into(),
             body: "delivered".into(),
         });
@@ -314,6 +321,7 @@ mod tests {
             };
             for _ in 0..2 {
                 backend.show(DesktopNotification {
+                    id: None,
                     title: "<i>title</i>".into(),
                     body: body.into(),
                 });
