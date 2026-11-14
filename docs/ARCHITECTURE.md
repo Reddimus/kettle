@@ -1830,10 +1830,17 @@ writes are `kettle_config::ssh_config::upsert_ssh_host` and
 writers. The upsert takes a `HostExpect` (absent, or a specific old target)
 and checks it against the file as read under the lock, so a hand edit the
 in-memory list has not reloaded yet is refused as `WouldBlock` rather than
-overwritten. On success `cfg.ssh_hosts` changes in place and the launcher
-reopens with `ws.ssh_status`, which the hint lane paints and the picker's
-accessibility projection announces as a polite `Status` node. Failures are
-logged by `ErrorKind` only.
+overwritten. `submit_ssh_host_name` and `confirm_ssh_host_change` hold that
+flow without the event loop, so tests drive it: on success `cfg.ssh_hosts`
+changes in place and the launcher reopens with `ws.ssh_status`, which the
+hint lane paints and the picker's accessibility projection announces as a
+polite `Status` node over that lane; a failure keeps the name editor, or
+reopens the launcher on what was typed with a "not saved" or "not removed"
+status. Each window records the hosts its launcher shows
+(`ws.ssh_hosts_shown`), and `sync_ssh_hosts`, run for every window on a
+reload and after a write, sends a launcher whose list changed back to row 0,
+so a selection cannot slide onto the action row. Failures are logged by
+`ErrorKind` only.
 
 Transient popups share one outside-press dispatch and consume the dismissing
 click: context menus, the command palette, theme/layout pickers, SSH, title

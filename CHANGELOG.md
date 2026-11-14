@@ -29,10 +29,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and other lines with that name are removed. Typing a saved name exactly
   offers **Remove "…" from Kettle…**, which asks first and never touches
   `~/.ssh/config`. Neither row is reached by the mouse wheel, an Up press
-  from the top or a hover: press Down to it or click it. If the config file
-  changed since Kettle read it, nothing is written and a notification says
-  so. After either, the launcher reopens with "Saved" or "Removed" in its
-  hint line, announced politely to screen readers.
+  from the top or a hover: press Down to it or click it, and an open launcher
+  whose host list changes goes back to its first row. If that host's own
+  entry changed by hand since Kettle read the file, nothing is written, a
+  notification says so, and the launcher or name editor keeps what you typed
+  with a "not saved" or "not removed" line. After a write, the launcher
+  reopens with "Saved" or "Removed" in its hint line, announced politely to
+  screen readers.
 
 - Settings › Appearance has a Minimum contrast row after Theme, for
   `minimum-contrast`: Off, 3, 4.5 or 7. A ratio set by hand in the

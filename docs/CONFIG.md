@@ -234,16 +234,23 @@ moved after the list shrank never land on it: press Down to it, or click it.
   as the default), then deletes that name's lines with that target. Kettle
   never writes `~/.ssh/config`, so an imported alias has no Remove row.
 
-Both check the file as it is when they write. If it changed since Kettle last
-read it, for example a host added by hand that has not been reloaded yet,
-nothing is written and a notification says so; try again once the config has
-reloaded. The write keeps comments, line endings and the file's encoding,
-lands where Kettle reads it in a Terminator-style file, and keeps a `.bak` of
-the file as it was before Kettle first changed it. The launcher then reopens,
-on the saved host after a save or empty after a removal, with `Saved "…"` or
-`Removed "…"` in place of the key hint until you type; screen readers hear
-it as a polite status. Logs name the kind of failure only, never a host, a
-target or a path.
+Both check that host's own entry in the file as it is when they write. A Save
+is refused if the name now has an entry Kettle had not read (for example one
+added by hand that has not been reloaded yet), a Replace if the name no longer
+has the target the question showed, and a Remove if the name and target are
+gone; changes to other lines do not matter. A change to the file made while
+the write itself runs is refused too. Nothing is then written, a notification
+says so, and the launcher (or, for a plain Save, the name editor) stays on
+what you typed with `"…" was not saved` or `"…" was not removed` in the hint
+lane; try again once the config has reloaded. The write keeps comments, line
+endings and the file's encoding, lands where Kettle reads it in a
+Terminator-style file, and keeps a `.bak` of the file as it was before Kettle
+first changed it. After a write the launcher reopens, on the saved host after
+a save or empty after a removal, with `Saved "…"` or `Removed "…"` in place
+of the key hint until you type; screen readers hear it as a polite status.
+Any other window's open launcher goes back to its first row, since its list
+changed. Logs name the kind of failure only, never a host, a target or a
+path.
 
 **What is read.** Only when `ssh-config-hosts` is on (the default), and only
 when the launcher opens: `$HOME/.ssh/config`, or `%USERPROFILE%\.ssh\config`
