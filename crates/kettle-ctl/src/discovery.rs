@@ -160,25 +160,57 @@ pub fn registry_dir() -> PathBuf {
 /// account's home from the user database; on Windows the known Local
 /// AppData folder. A server whose environment points elsewhere leaves an
 /// alias here, so a client started with a stripped environment still finds
-/// it. `None` when the OS names no such place.
+/// it. `None` when the OS names no such place. Only
+/// [`TEST_OS_REGISTRY_DIR_ENV`] changes it.
 pub fn canonical_registry_dir() -> Option<PathBuf> {
-    os_registry_bases()
-        .into_iter()
-        .next()
-        .map(|base| base.join("kettle").join("ctl"))
+    os_registry_dirs().into_iter().next()
 }
 
 /// Every registry directory a client checks, most specific first and without
 /// repeats: the one this environment names, then the ones the OS names.
 pub fn registry_locations() -> Vec<PathBuf> {
     let mut locations = vec![registry_dir()];
-    for base in os_registry_bases() {
-        let dir = base.join("kettle").join("ctl");
+    for dir in os_registry_dirs() {
         if !locations.contains(&dir) {
             locations.push(dir);
         }
     }
     locations
+}
+
+/// For tests and smokes only: a directory that stands in for every registry
+/// directory the OS names ([`canonical_registry_dir`]). A Kettle started with
+/// a private `XDG_RUNTIME_DIR` still publishes its alias, prunes aliases and
+/// looks for servers where the OS puts the registry, which is the account's
+/// own (`~/.local/state/kettle/ctl`); with this set to an absolute path it
+/// uses that directory instead, and with any other value (empty, relative,
+/// `none`) it uses none at all. Every build reads it, because smokes drive
+/// release builds.
+pub const TEST_OS_REGISTRY_DIR_ENV: &str = "KETTLE_TEST_OS_CTL_DIR";
+
+/// The registry directories the OS names for this user, best first, or what
+/// [`TEST_OS_REGISTRY_DIR_ENV`] puts in their place.
+fn os_registry_dirs() -> Vec<PathBuf> {
+    os_registry_dirs_from(
+        std::env::var_os(TEST_OS_REGISTRY_DIR_ENV),
+        os_registry_bases,
+    )
+}
+
+/// [`os_registry_dirs`] with the variable's value and the OS's bases
+/// injected; the bases are not consulted when the variable is set.
+fn os_registry_dirs_from(
+    replacement: Option<std::ffi::OsString>,
+    bases: impl FnOnce() -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    match replacement.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => vec![dir],
+        Some(_) => Vec::new(),
+        None => bases()
+            .into_iter()
+            .map(|base| base.join("kettle").join("ctl"))
+            .collect(),
+    }
 }
 
 /// Registry bases the OS names for this user, best first.
@@ -430,9 +462,9 @@ const MAX_ALIAS_PRUNE_PER_PASS: usize = 256;
 /// into a deleted directory (a test's private `XDG_RUNTIME_DIR`) stayed
 /// forever.
 pub fn prune_stale_aliases() -> usize {
-    os_registry_bases()
-        .into_iter()
-        .map(|base| prune_stale_aliases_in(&base.join("kettle").join("ctl")))
+    os_registry_dirs()
+        .iter()
+        .map(|dir| prune_stale_aliases_in(dir))
         .sum()
 }
 
@@ -2063,6 +2095,96 @@ mod tests {
         let legacy: AliasRecord =
             serde_json::from_str(r#"{"v":1,"pid":5,"registry":"/k/ctl"}"#).unwrap();
         assert_eq!(legacy.start_token, None);
+    }
+
+    fn os_bases_unused() -> Vec<PathBuf> {
+        panic!("the OS-named bases were consulted while the test variable was set")
+    }
+
+    /// An absolute value replaces every directory the OS names, and any
+    /// other value leaves none, so a typo cannot fall back to the account's
+    /// own registry.
+    #[test]
+    fn the_test_variable_replaces_every_os_named_registry_dir() {
+        let stand_in = std::env::temp_dir().join("kettle-os-ctl");
+        assert_eq!(
+            os_registry_dirs_from(Some(stand_in.clone().into_os_string()), os_bases_unused),
+            vec![stand_in]
+        );
+        for value in ["", "none", "relative/ctl"] {
+            assert_eq!(
+                os_registry_dirs_from(Some(value.into()), os_bases_unused),
+                Vec::<PathBuf>::new(),
+                "{value:?}"
+            );
+        }
+        let bases = vec![PathBuf::from("first"), PathBuf::from("second")];
+        assert_eq!(
+            os_registry_dirs_from(None, || bases),
+            vec![
+                PathBuf::from("first").join("kettle").join("ctl"),
+                PathBuf::from("second").join("kettle").join("ctl"),
+            ]
+        );
+    }
+
+    /// The server's alias directory, its prune and every client's list all
+    /// follow the variable. Run in a child started with it set, since a test
+    /// cannot change its own environment safely; each check that could reach
+    /// the account's own registry comes after the one proving it will not.
+    #[test]
+    fn every_os_named_registry_lookup_follows_the_test_variable() {
+        const CHILD: &str = "KETTLE_TEST_OS_CTL_LOOKUP_CHILD";
+        let name = "discovery::tests::every_os_named_registry_lookup_follows_the_test_variable";
+        let Some(root) = std::env::var_os(CHILD).map(PathBuf::from) else {
+            let root = kettle_test_support::private_tempdir("kettle-ctl-os-variable-");
+            for value in [root.join("os-ctl").into_os_string(), "none".into()] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", name, "--nocapture"])
+                    .env(CHILD, root.path())
+                    .env(TEST_OS_REGISTRY_DIR_ENV, &value)
+                    .env("XDG_RUNTIME_DIR", root.join("run"))
+                    .env("LOCALAPPDATA", root.join("local"))
+                    .output()
+                    .expect("re-exec the test binary");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    output.status.success() && stdout.contains("test result: ok. 1 passed"),
+                    "{value:?}: {}\n{stdout}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let own = registry_dir();
+        assert!(own.starts_with(&root), "{}", own.display());
+        let stand_in = root.join("os-ctl");
+        if std::env::var_os(TEST_OS_REGISTRY_DIR_ENV) == Some(stand_in.clone().into_os_string()) {
+            assert_eq!(canonical_registry_dir(), Some(stand_in.clone()));
+            assert_eq!(registry_locations(), vec![own, stand_in.clone()]);
+            write_alias(&stand_in, never_alive(0), &root.join("gone"), None);
+            assert_eq!(prune_stale_aliases(), 1);
+            assert_eq!(alias_count(&stand_in), 0);
+        } else {
+            assert_eq!(canonical_registry_dir(), None);
+            assert_eq!(registry_locations(), vec![own]);
+            assert_eq!(prune_stale_aliases(), 0);
+        }
+    }
+
+    /// Every lookup of the directories the OS names goes through
+    /// `os_registry_dirs`, so none can skip the test variable.
+    #[test]
+    fn only_os_registry_dirs_reads_the_os_named_bases() {
+        let src = kettle_test_support::production_source(include_str!("discovery.rs"));
+        let call = ["os_registry", "_bases()"].concat();
+        assert_eq!(
+            src.matches(call.as_str()).count(),
+            1,
+            "only the definition of os_registry_bases may spell it with a call; \
+             go through os_registry_dirs"
+        );
     }
 
     #[cfg(unix)]
