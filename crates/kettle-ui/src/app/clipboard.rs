@@ -116,10 +116,13 @@ pub(super) struct PaneClipboard<'a, C> {
     pub notify: bool,
     pub notices: &'a mut crate::mux::Osc52NoticeState,
     pub tr: &'a kettle_i18n::Translator,
-    /// Names the program a notice is about: the pane's foreground program,
-    /// its name only, sanitised and bounded, or `None` when it is a shell or
-    /// cannot be told. Asked only when a notice is about to be shown, so a
-    /// flood of requests costs no process lookups.
+    /// Names the pane's foreground program for a notice: its name only,
+    /// sanitised and bounded, or `None` when it is a shell or cannot be
+    /// told. The foreground program is not necessarily the sender: a
+    /// background job in the same pane can write OSC 52 too, and Kettle sees
+    /// only the pane. The notices say "while NAME was in the foreground" for
+    /// that reason. Asked only when a notice is about to be shown, after the
+    /// throttle, so a flood of requests costs no process lookups.
     pub program: &'a dyn Fn() -> Option<String>,
 }
 
@@ -192,11 +195,15 @@ impl crate::mux::Osc52NoticeState {
         };
         if !*seen {
             *seen = true;
+            // The notice points at the Settings row by the names Settings
+            // shows, in the running language.
+            let setting = tr.text(kettle_i18n::Text::SettingsFieldOsc52);
+            let category = tr.text(kettle_i18n::Text::SettingsCategoryBehavior);
             self.show(match (program(), read) {
-                (Some(program), true) => tr.osc52_denied_read_by(&program),
-                (Some(program), false) => tr.osc52_denied_write_by(&program),
-                (None, true) => tr.text(kettle_i18n::Text::Osc52DeniedRead).to_string(),
-                (None, false) => tr.text(kettle_i18n::Text::Osc52DeniedWrite).to_string(),
+                (Some(program), true) => tr.osc52_blocked_read_by(&program, setting, category),
+                (Some(program), false) => tr.osc52_blocked_write_by(&program, setting, category),
+                (None, true) => tr.osc52_blocked_read(setting, category),
+                (None, false) => tr.osc52_blocked_write(setting, category),
             });
         }
     }

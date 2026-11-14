@@ -201,11 +201,11 @@ fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
         for read in [true, false] {
             state.denied(read, || None, &tr);
             let message = state.message.take().unwrap();
-            assert!(message.contains(if read {
-                "osc52 = paste"
-            } else {
-                "osc52 = copy"
-            }));
+            // The notice points at the Settings row by the names Settings
+            // shows in this language, and names the config key.
+            assert!(message.contains(tr.text(kettle_i18n::Text::SettingsFieldOsc52)));
+            assert!(message.contains(tr.text(kettle_i18n::Text::SettingsCategoryBehavior)));
+            assert!(message.contains("osc52") && !message.contains("osc52 ="));
             assert!(!message.contains("secret"));
             state.denied(read, || None, &tr);
             assert_eq!(state.message, None);
@@ -312,7 +312,13 @@ fn osc52_policy_gates_backend_effects_and_only_successful_writes_notify() {
         if policy.can_copy() {
             assert_eq!(notices.message, Some(tr.osc52_copied(2)));
         } else {
-            assert!(notices.message.as_ref().unwrap().contains("osc52 = copy"));
+            assert_eq!(
+                notices.message,
+                Some(tr.osc52_blocked_write(
+                    tr.text(kettle_i18n::Text::SettingsFieldOsc52),
+                    tr.text(kettle_i18n::Text::SettingsCategoryBehavior)
+                ))
+            );
         }
     }
     for (available, fail, notify) in [
@@ -345,12 +351,26 @@ fn osc52_policy_notice_geometry_has_room_for_the_shared_word_wrapping() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
         let tr = kettle_i18n::Translator::new(language);
         for message in [
-            tr.text(kettle_i18n::Text::Osc52DeniedRead).to_string(),
-            tr.text(kettle_i18n::Text::Osc52DeniedWrite).to_string(),
+            tr.osc52_blocked_read(
+                tr.text(kettle_i18n::Text::SettingsFieldOsc52),
+                tr.text(kettle_i18n::Text::SettingsCategoryBehavior),
+            ),
+            tr.osc52_blocked_write(
+                tr.text(kettle_i18n::Text::SettingsFieldOsc52),
+                tr.text(kettle_i18n::Text::SettingsCategoryBehavior),
+            ),
             tr.osc52_copied(123456),
             // The longest program label a notice can carry: 32 columns.
-            tr.osc52_denied_read_by(&"W".repeat(32)),
-            tr.osc52_denied_write_by(&"W".repeat(32)),
+            tr.osc52_blocked_read_by(
+                &"W".repeat(32),
+                tr.text(kettle_i18n::Text::SettingsFieldOsc52),
+                tr.text(kettle_i18n::Text::SettingsCategoryBehavior),
+            ),
+            tr.osc52_blocked_write_by(
+                &"W".repeat(32),
+                tr.text(kettle_i18n::Text::SettingsFieldOsc52),
+                tr.text(kettle_i18n::Text::SettingsCategoryBehavior),
+            ),
             tr.osc52_copied_by(&"W".repeat(32), 123456),
         ] {
             for width in [240.0, 400.0, 800.0] {
@@ -390,6 +410,8 @@ fn osc52_notices_name_the_program_when_it_is_known() {
         // Unknown keeps the wording that names nobody.
         state.copied(now + Duration::from_secs(5), true, 1, || None, &tr);
         assert_eq!(state.message, Some(tr.osc52_copied(1)));
+        let setting = tr.text(kettle_i18n::Text::SettingsFieldOsc52);
+        let category = tr.text(kettle_i18n::Text::SettingsCategoryBehavior);
         for read in [true, false] {
             let mut named = crate::mux::Osc52NoticeState::default();
             named.denied(read, || Some("ssh".into()), &tr);
@@ -397,35 +419,47 @@ fn osc52_notices_name_the_program_when_it_is_known() {
             assert_eq!(
                 message,
                 if read {
-                    tr.osc52_denied_read_by("ssh")
+                    tr.osc52_blocked_read_by("ssh", setting, category)
                 } else {
-                    tr.osc52_denied_write_by("ssh")
+                    tr.osc52_blocked_write_by("ssh", setting, category)
                 }
             );
-            assert!(message.contains("ssh"));
-            // The value to set is still named.
-            assert!(message.contains(if read {
-                "osc52 = paste"
-            } else {
-                "osc52 = copy"
-            }));
+            // The way to allow it is the Settings row, under the names
+            // Settings shows; the config key is still named.
+            assert!(message.contains("ssh") && message.contains(setting));
+            assert!(message.contains(category) && message.contains("osc52"));
             let mut unnamed = crate::mux::Osc52NoticeState::default();
             unnamed.denied(read, || None, &tr);
             assert_eq!(
-                unnamed.message.as_deref(),
-                Some(tr.text(if read {
-                    kettle_i18n::Text::Osc52DeniedRead
+                unnamed.message,
+                Some(if read {
+                    tr.osc52_blocked_read(setting, category)
                 } else {
-                    kettle_i18n::Text::Osc52DeniedWrite
-                }))
+                    tr.osc52_blocked_write(setting, category)
+                })
             );
+            assert!(!unnamed.message.unwrap().contains("ssh"));
         }
+        // The row the notice names is a real Settings row for this key.
+        let row = crate::settings::categories(&[])
+            .into_iter()
+            .find(|cat| cat.name == kettle_i18n::Text::SettingsCategoryBehavior)
+            .and_then(|cat| cat.fields.into_iter().find(|field| field.key == "osc52"))
+            .expect("an osc52 row in Behavior");
+        assert_eq!(tr.text(row.label), setting);
     }
+    // The name is the foreground program's. Kettle cannot tell whether it or
+    // a background job in the pane sent the request, and does not claim to.
     let en = kettle_i18n::Translator::default();
     assert_eq!(
         en.osc52_copied_by("vim", 42),
-        "vim copied 42 characters to the clipboard"
+        "A program copied 42 characters to the clipboard while vim was in the foreground"
     );
+    let named = en.osc52_blocked_read_by("vim", "x", "y");
+    assert!(named.starts_with("A program was blocked from reading the clipboard while vim was"));
+    for text in [en.osc52_copied_by("vim", 1), named] {
+        assert!(!text.starts_with("vim"), "{text}");
+    }
 }
 
 #[test]
@@ -521,10 +555,14 @@ fn osc52_notices_show_a_sanitised_bounded_name_and_never_the_arguments() {
             assert!(!message.contains("secret") && !message.contains("hunter2"));
             assert!(!message.contains("copied text"));
             assert!(!message.chars().any(|c| c.is_control()), "{message:?}");
-            assert!(message.chars().count() < 200, "{message:?}");
+            assert!(message.chars().count() < 260, "{message:?}");
+            assert!(message.starts_with("A program "), "{message}");
             match &label {
-                Some(label) => assert!(message.starts_with(label.as_str()), "{message}"),
-                None => assert!(message.starts_with("A program "), "{message}"),
+                Some(label) => assert!(
+                    message.contains(&format!("while {label} was in the foreground")),
+                    "{message}"
+                ),
+                None => assert!(!message.contains("foreground"), "{message}"),
             }
         }
     }

@@ -1020,8 +1020,6 @@ ssh_status_not_saved = "No se guardó \"{name}\": el host cambió en el archivo 
 ssh_status_not_removed = "No se quitó \"{name}\": el host cambió en el archivo de configuración o no se pudo escribir el archivo"
 
 confirm_paste_without_controls = "Pegar sin caracteres de control"
-osc52_denied_read = "La política osc52 bloqueó la lectura del portapapeles por un programa. Las lecturas requieren osc52 = paste o both."
-osc52_denied_write = "La política osc52 bloqueó la copia al portapapeles por un programa. Las copias requieren osc52 = copy o both."
 
 link_open_click = "Hacer clic para abrir"
 link_open_command_click = "⌘-clic para abrir"
@@ -1088,8 +1086,12 @@ confirm_paste_policy = "Protección al pegar: {value}"
 confirm_paste_a11y_control = "carácter de control {name}"
 confirm_paste_a11y_preview = "Vista previa: {preview}"
 confirm_paste_a11y_access_key = "Tecla de acceso: Alt+{key}"
-osc52_denied_read_by = "La política osc52 bloqueó la lectura del portapapeles por {program}. Las lecturas requieren osc52 = paste o both."
-osc52_denied_write_by = "La política osc52 bloqueó la copia al portapapeles por {program}. Las copias requieren osc52 = copy o both."
+confirm_paste_finding_bidi = "cambia el orden en que se muestra el texto"
+confirm_paste_finding_removed = "{meaning}; Kettle lo quita"
+osc52_blocked_read = "Se impidió que un programa leyera el portapapeles. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
+osc52_blocked_write = "Se impidió que un programa copiara al portapapeles. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
+osc52_blocked_read_by = "Se impidió que un programa leyera el portapapeles mientras {program} estaba en primer plano. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
+osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mientras {program} estaba en primer plano. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
 
 [completion_matches]
 one = "{count} coincidencia"
@@ -1168,5 +1170,5 @@ one = "{token}: {meaning}, una vez"
 other = "{token}: {meaning}, {count} veces"
 
 [osc52_copied_by]
-one = "{program} copió {count} carácter al portapapeles"
-other = "{program} copió {count} caracteres al portapapeles"
+one = "Un programa copió {count} carácter al portapapeles mientras {program} estaba en primer plano"
+other = "Un programa copió {count} caracteres al portapapeles mientras {program} estaba en primer plano"

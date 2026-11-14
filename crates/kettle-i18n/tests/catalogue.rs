@@ -192,11 +192,11 @@ fn every_spanish_message_has_a_review_status() {
                         | "process_close"
                         | "notice_dismiss"
                         | "osc52_copied"
-                        | "osc52_denied_read"
-                        | "osc52_denied_write"
                         | "osc52_copied_by"
-                        | "osc52_denied_read_by"
-                        | "osc52_denied_write_by"
+                        | "osc52_blocked_read"
+                        | "osc52_blocked_write"
+                        | "osc52_blocked_read_by"
+                        | "osc52_blocked_write_by"
                         | "mouse_override_hint"
                         | "font_size_chip"
                         // The notification toast's Show button is named by
@@ -452,6 +452,7 @@ fn paste_reasons_and_findings_are_translated() {
         Text::ConfirmPasteFindingQuit,
         Text::ConfirmPasteFindingEndOfInput,
         Text::ConfirmPasteFindingEscape,
+        Text::ConfirmPasteFindingBidi,
         Text::ConfirmPasteFindingBell,
         Text::ConfirmPasteFindingBackspace,
         Text::ConfirmPasteFindingDelete,
@@ -492,24 +493,51 @@ fn paste_reasons_and_findings_are_translated() {
         es.text(Text::ConfirmPasteA11yEscape),
         "carácter de control escape"
     );
+    // A notice names the foreground program without saying it sent the
+    // request: Kettle cannot tell which program in the pane did.
     assert_eq!(
         en.osc52_copied_by("vim", 1),
-        "vim copied 1 character to the clipboard"
+        "A program copied 1 character to the clipboard while vim was in the foreground"
+    );
+    assert!(
+        es.osc52_copied_by("vim", 42)
+            .ends_with("42 caracteres al portapapeles mientras vim estaba en primer plano")
+    );
+    // A refusal points at the Settings row, by its translated names, and
+    // keeps the config key for those who edit the file.
+    let (setting, category) = ("Clipboard access by programs", "Behavior");
+    for (read, text) in [
+        (true, en.osc52_blocked_read(setting, category)),
+        (false, en.osc52_blocked_write(setting, category)),
+        (true, en.osc52_blocked_read_by("vim", setting, category)),
+        (false, en.osc52_blocked_write_by("vim", setting, category)),
+    ] {
+        assert!(text.starts_with("A program was blocked from "), "{text}");
+        assert!(
+            text.contains(if read { "reading" } else { "copying" }),
+            "{text}"
+        );
+        assert!(
+            text.contains("change Clipboard access by programs in Settings > Behavior"),
+            "{text}"
+        );
+        assert!(text.contains("config key osc52"), "{text}");
+        assert!(!text.contains("osc52 ="), "{text}");
+    }
+    assert!(
+        en.osc52_blocked_read_by("vim", "x", "y")
+            .contains("while vim was in the foreground")
+    );
+    assert!(
+        es.osc52_blocked_write_by("vim", "x", "y")
+            .contains("mientras vim estaba en primer plano")
     );
     assert_eq!(
-        es.osc52_copied_by("vim", 42),
-        "vim copió 42 caracteres al portapapeles"
+        en.confirm_paste_finding_removed("interrupt (Ctrl+C)"),
+        "interrupt (Ctrl+C); Kettle removes it"
     );
-    for (read, text) in [
-        (true, en.osc52_denied_read_by("vim")),
-        (false, en.osc52_denied_write_by("vim")),
-    ] {
-        assert!(text.starts_with("vim was blocked from "), "{text}");
-        assert!(text.contains(if read {
-            "osc52 = paste"
-        } else {
-            "osc52 = copy"
-        }));
-    }
-    assert!(es.osc52_denied_read_by("vim").contains("por vim. "));
+    assert_eq!(
+        es.confirm_paste_finding_removed("campana"),
+        "campana; Kettle lo quita"
+    );
 }

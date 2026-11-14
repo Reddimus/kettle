@@ -1019,8 +1019,6 @@ ssh_status_not_saved = "\"{name}\" was not saved: the host changed in the config
 ssh_status_not_removed = "\"{name}\" was not removed: the host changed in the config file, or the file could not be written"
 
 confirm_paste_without_controls = "Paste without controls"
-osc52_denied_read = "A program was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
-osc52_denied_write = "A program was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."
 
 link_open_click = "Click to open"
 link_open_command_click = "⌘-click to open"
@@ -1087,8 +1085,12 @@ confirm_paste_policy = "Paste protection: {value}"
 confirm_paste_a11y_control = "control character {name}"
 confirm_paste_a11y_preview = "Preview: {preview}"
 confirm_paste_a11y_access_key = "Access key: Alt+{key}"
-osc52_denied_read_by = "{program} was blocked from reading the clipboard by the osc52 policy. Clipboard reads require osc52 = paste or both."
-osc52_denied_write_by = "{program} was blocked from copying to the clipboard by the osc52 policy. Clipboard writes require osc52 = copy or both."
+confirm_paste_finding_bidi = "changes the order text is shown in"
+confirm_paste_finding_removed = "{meaning}; Kettle removes it"
+osc52_blocked_read = "A program was blocked from reading the clipboard. To allow it, change {setting} in Settings > {category} (config key osc52)."
+osc52_blocked_write = "A program was blocked from copying to the clipboard. To allow it, change {setting} in Settings > {category} (config key osc52)."
+osc52_blocked_read_by = "A program was blocked from reading the clipboard while {program} was in the foreground. To allow it, change {setting} in Settings > {category} (config key osc52)."
+osc52_blocked_write_by = "A program was blocked from copying to the clipboard while {program} was in the foreground. To allow it, change {setting} in Settings > {category} (config key osc52)."
 
 [completion_matches]
 one = "{count} match"
@@ -1167,5 +1169,5 @@ one = "{token}: {meaning}, once"
 other = "{token}: {meaning}, {count} times"
 
 [osc52_copied_by]
-one = "{program} copied {count} character to the clipboard"
-other = "{program} copied {count} characters to the clipboard"
+one = "A program copied {count} character to the clipboard while {program} was in the foreground"
+other = "A program copied {count} characters to the clipboard while {program} was in the foreground"
