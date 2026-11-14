@@ -10,7 +10,8 @@
 //! | a file list of local files | `paste-files = on` | their paths |
 //! | a file list of local files | `paste-files = off` | nothing, not even the text copy of the paths |
 //! | a file list that is not all local files | either | the offer's text, if it has any |
-//! | a malformed or oversize file list | either | a refusal |
+//! | a malformed or oversize file list | `paste-files = on` | a refusal |
+//! | a malformed or oversize file list | `paste-files = off` | nothing, and nothing is said |
 //! | a text type | | the text |
 //! | `image/png` and no text type | `paste-images = on` | the PNG bytes |
 //!
@@ -307,9 +308,11 @@ pub(crate) fn paste<O: Offered>(
             (Err(error), _) if error.kind() == ErrorKind::TimedOut => {
                 return PasteContent::Text(Err(arboard::Error::Timeout));
             }
-            (Ok(UriList::Malformed) | Err(_), _) => {
+            (Ok(UriList::Malformed) | Err(_), true) => {
                 return PasteContent::Refused(PasteRefusal::Files);
             }
+            // Nothing is said about a list that would not have been pasted.
+            (Ok(UriList::Malformed) | Err(_), false) => return PasteContent::FilesOff,
         }
     }
     if kinds.text.is_some() {

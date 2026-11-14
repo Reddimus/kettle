@@ -46,9 +46,10 @@ pub(crate) enum PasteContent {
     /// The text, or why there is none. `ContentNotAvailable` is an empty
     /// clipboard; a timeout or an oversize text is said to the user.
     Text(Result<String, arboard::Error>),
-    /// The clipboard holds local files and `paste-files` is off: nothing is
-    /// pasted, not from the list and not from the plain-text copy of the
-    /// paths that file managers add beside it.
+    /// The clipboard holds local files, or a list too damaged to tell, and
+    /// `paste-files` is off: nothing is pasted, not from the list and not
+    /// from the plain-text copy of the paths that file managers add beside
+    /// it, and nothing is said.
     FilesOff,
     /// Nothing is pasted and the user is told why.
     #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]

@@ -419,10 +419,37 @@ fn paste_files_off_is_not_bypassed_by_the_text_copy_of_the_paths() {
         outcome(paste_from(&plain, FILES_OFF)),
         "text \"/home/u/typed by hand\""
     );
-    // A malformed list is refused either way, never replaced by its text.
-    let bad = Loopback::new(&[(URI_LIST, bytes("file:///a/../b\r\n")), (UTF8, text)]);
-    assert_eq!(outcome(paste_from(&bad, FILES_OFF)), "refused Files");
-    assert_eq!(bad.asked(), [URI_LIST]);
+}
+
+#[test]
+fn paste_files_off_says_nothing_about_a_list_it_would_not_have_pasted() {
+    let text = bytes("/home/u/secret plan.txt");
+    let many = "file:///tmp/a\r\n".repeat(33);
+    for (name, list) in [
+        ("a bad path", bytes("file:///a/../b\r\n")),
+        (
+            "a bad escape",
+            bytes("file:///home/u/secret%GGplan.txt\r\n"),
+        ),
+        ("more than 32 files", bytes(&many)),
+        ("over 1 MiB", Answer::Fill(uri_list::MAX_BYTES + 1)),
+        ("a list that never ends", Answer::Endless),
+    ] {
+        // With file paste on the user is told why nothing came.
+        let on = Loopback::new(&[(URI_LIST, list.clone()), (UTF8, text.clone())]);
+        assert_eq!(outcome(paste_from(&on, ALL)), "refused Files", "{name}");
+        // With it off there is no notice to act on: nothing is pasted, not
+        // even the text copy of the paths, and nothing is said.
+        let off = Loopback::new(&[(URI_LIST, list), (UTF8, text.clone())]);
+        assert_eq!(outcome(paste_from(&off, FILES_OFF)), "files off", "{name}");
+        assert_eq!(off.asked(), [URI_LIST], "{name}: the text is not read");
+    }
+    // A list that stalls is a transfer that timed out, whatever the policy.
+    let stalled = Loopback::new(&[(URI_LIST, Answer::Stall(Vec::new())), (UTF8, text)]);
+    let content = run(within(Duration::from_millis(80)), |transfer| {
+        paste(stalled.held(), FILES_OFF, TEXT_MAX, transfer)
+    });
+    assert_eq!(outcome(content), "no text: Timeout");
 }
 
 #[test]
