@@ -8090,3 +8090,54 @@ fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
         }
     }
 }
+
+/// The lone GNOME-header title is shaped in the bundled Fira Sans Bold at
+/// GNOME's 11 pt title size, whatever the terminal's font, at 1x and 2x: a
+/// long title is cut to the widest label its lane holds, ending in an
+/// ellipsis, and a short one stays whole.
+#[test]
+fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
+    let _serialized = gpu_test_guard();
+    let long = "a window title that a program set, far too long for the header lane";
+    for scale in [1.0_f32, 2.0] {
+        let cfg = gpu_test_config();
+        let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+        else {
+            eprintln!("lone header title at {scale}x skipped: no GPU adapter");
+            return;
+        };
+        let snap = snapshot_of(20, 2, b"");
+        let lane = (128.0 * scale, 0.0, 184.0 * scale, 46.0 * scale);
+        for (title, whole) in [(long, false), ("fixture", true)] {
+            let mut tabs = gnome_header_tabs(480.0 * scale, scale, 1);
+            tabs.segments[0].title = title.into();
+            tabs.segments[0].title_rect = lane;
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, 46.0 * scale, w as f32, h as f32 - 46.0 * scale);
+            terminal.terminal = terminal.rect;
+            capture_with_tabs(&mut renderer, &cfg, &[terminal], &Overlay::default(), &tabs);
+            let case = format!("{title:?} at {scale}x");
+            let buffer = &renderer.header_title_buffer;
+            assert!((buffer.metrics().font_size - 14.666_667 * scale).abs() < 0.01);
+            let text = buffer.lines[0].text().to_owned();
+            let runs: Vec<_> = buffer.layout_runs().collect();
+            assert_eq!(runs.len(), 1, "{case}: one line");
+            assert!(runs[0].line_w <= lane.2, "{case}: {} wide", runs[0].line_w);
+            assert_eq!(renderer.header_title_width, runs[0].line_w, "{case}");
+            if whole {
+                assert_eq!(text, title, "{case}");
+            } else {
+                assert!(
+                    text.contains('…') && text.len() < title.len(),
+                    "{case}: {text:?}"
+                );
+            }
+            for glyph in runs[0].glyphs {
+                let face = renderer.font_system.db().face(glyph.font_id).unwrap();
+                assert_eq!(face.post_script_name, "FiraSans-Bold", "{case}");
+            }
+        }
+    }
+}

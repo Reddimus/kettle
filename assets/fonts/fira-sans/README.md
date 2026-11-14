@@ -9,8 +9,12 @@ Italic style subdirectories. Their original copyright and OFL 1.1 license are
 preserved in the font name tables and OFL.txt. The reserved font name is Fira.
 
 These matching faces keep diagram measurement and SVG output on the same
-weight and style. They are embedded only in the macOS and Linux media worker,
-with no host font discovery. Explicit per-job fallback fonts supplement them.
+weight and style. They are embedded in the macOS and Linux media worker, with
+no host font discovery. Explicit per-job fallback fonts supplement them.
+
+The Linux GUI also embeds the bold face for the title of its GNOME header
+bar (`crates/kettle-render/src/header_title.rs`), registered under a family
+name of its own so that it never matches an installed font.
 
 SHA-256:
 

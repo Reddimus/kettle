@@ -703,6 +703,8 @@ impl Renderer {
             metrics.font_size,
         );
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
+        let header_title_buffer = TextBuffer::new(&mut font_system, metrics);
+        let header_title_scratch = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let tab_tooltip_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -935,6 +937,11 @@ impl Renderer {
             tab_tooltip_text: String::new(),
             settings_gear_mask: Default::default(),
             header_icon_masks: Default::default(),
+            header_title_face: None,
+            header_title_buffer,
+            header_title_scratch,
+            header_title_key: None,
+            header_title_width: 0.0,
             scroll_left_buffer,
             scroll_right_buffer,
             tab_close_buffer,

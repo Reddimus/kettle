@@ -36,6 +36,7 @@ pub use text_field::{
     text_field_placeholder, text_field_rects,
 };
 mod header_icons;
+mod header_title;
 mod settings;
 mod tab_strip;
 mod terminal;
@@ -664,6 +665,15 @@ pub struct Renderer {
     settings_gear_mask: tab_strip::GearMask,
     /// The GNOME header's icons and window-button discs, by icon and side.
     header_icon_masks: header_icons::IconMasks,
+    /// Whether the bundled title face is in `font_system`; `None` until the
+    /// first lone GNOME-header title asks for it.
+    header_title_face: Option<bool>,
+    /// The lone GNOME-header title as shaped, what it was fitted from, and
+    /// its width; `header_title_scratch` measures the candidates.
+    header_title_buffer: TextBuffer,
+    header_title_scratch: TextBuffer,
+    header_title_key: Option<header_title::HeaderTitleKey>,
+    header_title_width: f32,
     /// The tab bar's overflow scroll-arrow glyphs (`‹ ›` across a top or
     /// bottom bar, `⌃ ⌄` down a side one), each in its own buffer, reshaped
     /// only when the glyph changes. Drawn only while the bar overflows.
@@ -2685,6 +2695,17 @@ impl Renderer {
             self.tab_hint_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, title_w, title_h) = s.title_rect;
+                // The GNOME header's lone title is the window's title, in
+                // GNOME's bold sans at its title size, not a tab label.
+                if tabbar.lone_title {
+                    self.prepare_header_title(
+                        s,
+                        &cfg.tab_format,
+                        &tabbar.recording_notice,
+                        &family,
+                    );
+                    continue;
+                }
                 if let Some((hint_rect, hint)) = &s.hint {
                     let buf = &mut self.tab_hint_buffers[bi];
                     buf.set_metrics(tab_metrics);
@@ -4391,7 +4412,30 @@ impl Renderer {
                 .map_or(tab_cw, |run| run.line_w);
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (tx, ty_px, tw, th) = s.title_rect;
-                // A lone GNOME-header title sits on the header, not a tab.
+                // A lone GNOME-header title sits on the header, centred on
+                // it, in the header's text colour: 4.5:1, and in an
+                // unfocused window faded halfway as GNOME fades its header,
+                // at no less than 3:1.
+                if tabbar.lone_title {
+                    let ink =
+                        self.chrome_colors
+                            .tab_text(fg, chrome_strip_bg, overlay.window_focused);
+                    let (left, top) = header_title::header_title_origin(
+                        s.title_rect,
+                        self.header_title_width,
+                        header_title::header_title_metrics(self.scale).line_height,
+                    );
+                    areas.push(TextArea {
+                        buffer: &self.header_title_buffer,
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect(s.title_rect),
+                        default_color: gc(ink),
+                        custom_glyphs: &[],
+                    });
+                    continue;
+                }
                 let (painted_active, painted_hover) = tab_strip::tab_paint_state(tabbar, s);
                 let tab_background = tab_strip::tab_title_background(
                     painted_active,

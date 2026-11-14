@@ -1478,9 +1478,10 @@ mod tests {
     }
 
     /// The lone title's text is resolved against the header it sits on, as
-    /// the painter resolves it: 4.5:1 or better in a focused window and at
-    /// least 3:1 in an unfocused one, in both default themes. Resolved
-    /// colours, not glyph pixels: local fonts would hide a CI difference.
+    /// the painter resolves it: the header's text colour at 4.5:1 or better
+    /// in a focused window, and faded halfway, as GNOME fades an unfocused
+    /// header, to no less than 3:1, in both default themes. Resolved colours,
+    /// not glyph pixels: local fonts would hide a CI difference.
     #[test]
     fn lone_header_title_ink_reads_against_the_header() {
         let cfg = kettle_config::Config::default();
@@ -1491,46 +1492,29 @@ mod tests {
                 strip, theme.background,
                 "{name}: header and terminal differ"
             );
-            let mut bar = gnome_header(1, 1.0);
-            for hovered in [None, Some(0)] {
-                bar.hovered_tab_idx = hovered;
-                let tab = &bar.segments[0];
-                let (active, hovered) = tab_paint_state(&bar, tab);
-                let surface = tab_title_background(
-                    active,
-                    hovered,
-                    false,
-                    theme.background,
-                    strip,
-                    theme.foreground,
-                );
-                assert_eq!(surface, strip, "{name}: the title sits on the header");
-                let mut colors = crate::chrome::Colors::default();
-                for focused in [true, false] {
-                    let ink = colors.tab_title(
-                        theme.foreground,
-                        surface,
-                        crate::color::Backing::opaque(surface),
-                        tab.active,
-                        focused,
-                    );
-                    let ratio = crate::color::contrast_ratio(ink, strip);
-                    let floor = if focused { 4.5 } else { 3.0 };
-                    assert!(
-                        ratio >= floor - 1e-9,
-                        "{name} focused={focused}: {ratio:.2}:1"
-                    );
-                }
-            }
+            let bar = gnome_header(1, 1.0);
+            let tab = &bar.segments[0];
+            assert_eq!(tab_paint_state(&bar, tab), (false, false));
+            let mut colors = crate::chrome::Colors::default();
+            let focused = colors.tab_text(theme.foreground, strip, true);
+            let unfocused = colors.tab_text(theme.foreground, strip, false);
+            let (lit, dim) = (
+                crate::color::contrast_ratio(focused, strip),
+                crate::color::contrast_ratio(unfocused, strip),
+            );
+            assert!(lit >= 4.5 - 1e-9, "{name}: focused {lit:.2}:1");
+            assert!(dim >= 3.0 - 1e-9, "{name}: unfocused {dim:.2}:1");
+            assert!(dim < lit, "{name}: an unfocused title is dimmer");
         }
-        // The painter picks the title's surface through the same state.
+        // The painter draws the lone title from its own buffer in this ink.
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
         assert!(source.contains(
-            "let(painted_active,painted_hover)=tab_strip::tab_paint_state(tabbar,s);\
-             lettab_background=tab_strip::tab_title_background(painted_active,painted_hover,"
+            "iftabbar.lone_title{letink=self.chrome_colors.tab_text(fg,chrome_strip_bg,overlay.window_focused);\
+             let(left,top)=header_title::header_title_origin(s.title_rect,self.header_title_width,"
         ));
+        assert!(source.contains("buffer:&self.header_title_buffer,"));
     }
 
     /// The hairline under the GNOME header keeps 1.5:1 against the header
