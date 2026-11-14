@@ -327,12 +327,24 @@ impl CommandMarks {
             }
             Some((shift(start)?, shift(last)?.checked_add(1)?))
         };
+        // A running command's output so far starts at `output` and ends at
+        // the cursor, which can be anywhere on screen, so the same rule holds
+        // it over every row from `output` to the bottom of the screen. An
+        // `output` still below the screen has no rows to split yet.
+        let screen_end = old_screen_top.saturating_add(screen_lines as u64);
+        let shift_output = |output: u64| {
+            if output >= screen_end {
+                shift(output)
+            } else {
+                shift_span(output, screen_end).map(|(start, _)| start)
+            }
+        };
         self.prompt = self.prompt.and_then(shift);
         if let Some(started) = self.pending.as_mut() {
             *started = started.and_then(|Started { row, output }| {
                 Some(Started {
                     row: shift(row)?,
-                    output: output.and_then(shift),
+                    output: output.and_then(shift_output),
                 })
             });
         }
@@ -473,6 +485,20 @@ mod tests {
         // The prompt row left history: the mark and its span go with it.
         assert_eq!(marks.output_rows(Some(11), 11, 30), None);
         assert!(marks.retained(0, 30).is_empty());
+    }
+
+    /// A span is cut to the rows scrollback still holds, so a selection gets
+    /// the rows that remain. A span normally leaves with its prompt row; one
+    /// that starts above its prompt row can outlive its first rows.
+    #[test]
+    fn a_span_partly_gone_from_scrollback_keeps_the_rows_that_remain() {
+        let mut marks = CommandMarks::default();
+        marks.begin(Some(10), 8); // C written above the prompt row
+        marks.end(Some(0), 12);
+        assert_eq!(marks.output_rows(None, 0, 30), Some((8, 12)));
+        assert_eq!(marks.output_rows(None, 9, 30), Some((9, 12)));
+        assert_eq!(marks.output_rows(Some(8), 9, 30), None, "row 8 is gone");
+        assert_eq!(marks.output_rows(Some(9), 9, 30), Some((9, 12)));
     }
 
     const FIXTURE_ENV: &str = "KETTLE_TEST_COMMAND_MARK_WIRE";
@@ -946,6 +972,60 @@ mod tests {
             assert_eq!(scrolled.output(None), span, "{scroll:?}");
             assert_eq!(scrolled.rows(), [(prompt, 0)], "{scroll:?}");
         }
+    }
+
+    /// A running command's output so far is held to the same rule: a region
+    /// scroll that moves part of it before D leaves the command no output
+    /// rows and keeps its tick. Output pushed up into history whole, or a
+    /// region scroll above it, keeps them.
+    #[test]
+    fn a_scroll_that_splits_a_running_commands_output_drops_it() {
+        let running = format!("{PROMPT}cmd\x1b]133;C\x07\r\nout1\r\nout2\r\nout3\r\n");
+        // Rows 2 to 5 scroll up: out2 goes, out3 moves up beside out1.
+        let mut split = parse(
+            &format!("{running}\x1b[3;6r\x1b[S\x1b[r\x1b[5;1H\x1b]133;D;0\x07{PROMPT}"),
+            4,
+        );
+        assert_eq!(split.text(1), "out1");
+        assert_eq!(split.text(2), "out3");
+        assert_eq!(split.output(None), None);
+        assert_eq!(split.rows(), [(0, 0)]);
+
+        // Eight rows of output push the command line four rows into history.
+        let lines: String = (1..=8).map(|n| format!("l{n}\r\n")).collect();
+        let mut long = parse(
+            &format!("{PROMPT}cmd\x1b]133;C\x07\r\n{lines}\x1b]133;D;0\x07{PROMPT}"),
+            4,
+        );
+        assert_eq!(long.text(-3), "l1");
+        assert_eq!(long.output(None), Some((-3, 5)));
+        assert_eq!(long.rows(), [(-4, 0)]);
+
+        // Rows 1 and 2 scroll; the command line and output start below them.
+        let mut above = parse(
+            &format!(
+                "\x1b[4;1H{PROMPT}cmd\x1b]133;C\x07\r\nout1\x1b[2;3r\x1b[S\x1b[r\x1b[6;1H\x1b]133;D;0\x07"
+            ),
+            4,
+        );
+        assert_eq!(above.text(4), "out1");
+        assert_eq!(above.output(None), Some((4, 5)));
+        assert_eq!(above.rows(), [(3, 0)]);
+    }
+
+    /// A full reset (RIS) through the parser clears the output rows with the
+    /// marks; a command after it gets rows of its own.
+    #[test]
+    fn a_full_reset_clears_output_rows() {
+        let mut reset = parse(&format!("{}\x1bc", two_line_command()), 4);
+        assert_eq!(reset.output(None), None);
+        assert_eq!(reset.rows(), []);
+        let mut again = parse(
+            &format!("{}\x1bc{}", two_line_command(), two_line_command()),
+            4,
+        );
+        assert_eq!(again.output(None), Some((1, 3)));
+        assert_eq!(again.rows(), [(0, 0)]);
     }
 
     #[test]
