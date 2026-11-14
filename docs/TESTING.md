@@ -2118,6 +2118,14 @@ failure. Unix job control has no equivalent Windows acceptance leg.
   A passing MCP self-test does not prove the host client's configuration.
 - [ ] Check real SSH/tmux nesting and local versus remote path opening in a
   disposable session. The fixture cannot model every remote desktop policy.
+- [ ] Check the SSH launcher's `~/.ssh/config` import with a scratch `HOME`
+  only, never your own: create `$HOME/.ssh` at `0700` and a `0600` `config`
+  with two `Host` lines, then start Kettle with that `HOME` and press
+  `Ctrl+Shift+S`. Both aliases show `from ~/.ssh/config`; typing a third name
+  offers **Connect to "…"**; `-oX` shows the refusal row. Repeat with
+  `ssh-config-hosts = false` (no aliases) and on Windows with `USERPROFILE`.
+  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep the
+  owner's real aliases out of screenshots and audit artifacts.
 
 See [AGENT.md](AGENT.md) for the control and agent surfaces.
 Keep large request/response examples there rather than duplicating them here.
