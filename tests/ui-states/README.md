@@ -26,7 +26,13 @@ artifact `ui-states-43502436986-1`, in the same environment: pickers fill their
 rows and show a scrollbar thumb, and the palette drops weak matches. The PR
 description shows each before and after.
 
-The 16 `settings` and `theme-picker` captures were then replaced by PR #857
+Seven `settings` captures were then replaced by PR #862 from the Linux CI job
+in [run 43527358684](https://github.com/Reddimus/kettle/actions/runs/43527358684),
+artifact `ui-states-43527358684-1`, in the same environment: Settings control
+outlines now keep 3:1 against the panel, and the footer separates its hint
+groups with "·". The PR description shows each before and after.
+
+The 16 `settings` and `theme-picker` captures were last replaced by PR #857
 from the Linux CI job in
 [run 43529693080](https://github.com/Reddimus/kettle/actions/runs/43529693080),
 artifact `ui-states-43529693080-1`, in the same environment: the theme picker
