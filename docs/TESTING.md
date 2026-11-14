@@ -3231,7 +3231,15 @@ list acceptance.
 
 `cargo test -p kettle-config paste_protection` exercises every C0 byte and the
 three config policies; `cargo test -p kettle-ui paste` checks paste preview,
-flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+flattening and ESC neutralization, the C1 markers and each signal byte the
+encoder drops, the dialog's reason sentences, findings rows, preview anchoring
+on a late end marker, access keys (the typed letter only; none on macOS),
+focus order with the Settings link, `y` under `vim-menu-nav`, and the AccessKit
+tree against the layout. `cargo test -p kettle-render confirm` covers the row
+and stack arrangements at several widths and scales, the pinned policy line,
+the height cap, chips, access-key underlines and token contrast in every
+theme; one of its tests shapes text with the system fonts. `cargo test -p
+kettle-ui osc52` covers notices that name the program. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
 `cargo test -p kettle-ui menu_text_tests` builds the real Read only row and

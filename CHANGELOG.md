@@ -233,6 +233,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
   once per pane. The README now documents paste choices and accessibility.
 
+- The Confirm paste dialog says why it asked and what it found. Its first
+  sentence names the bracketed-paste end code in the text (`ESC[201~`, or
+  `CSI 201~` for the one-character form), says when a receiving program has
+  bracketed paste off and line breaks will arrive as Enter, or says that the
+  policy is Always. The preview spells each control character in ASCII inside
+  an outlined chip (`ESC`, `^C`, `CSI`) instead of a one-cell control picture,
+  shows a tab as plain space, and moves to the most serious control when that
+  lies beyond the first lines, so a harmless first line cannot hide an end
+  code below it. Up to four findings say what each kind of control does, with
+  backspace and delete on separate rows, and counts of zero are gone. The
+  four choices share one row when the window is wide enough and stack edge to
+  edge otherwise; only the recommended one keeps the accent color. A policy
+  line shows the setting in force with a "Paste settings…" link, which pastes
+  nothing and opens Settings on the new Paste protection row. On Linux and
+  Windows each choice has an Alt+letter access key, matched by the letter the
+  keyboard layout types. Screen readers hear control characters as words
+  ("control character escape"). See [Pasting](README.md#pasting).
+
+- Settings > Behavior has rows for Paste protection (`paste-protection`) and
+  Clipboard access by programs (`osc52`: Off, Copy only, Read only, Copy and
+  read).
+
+- OSC 52 notices name the program in the pane's foreground when Kettle can
+  tell which it is, on macOS and Linux: "vim copied 42 characters to the
+  clipboard". Only the program's name is shown, sanitised and at most 32
+  columns wide; a shell at its prompt is not named.
+
 - Links now highlight under the pointer and show their destination and opening
   gesture in a status pill. Quick-select hints include on-screen help, shorter
   labels that use nearby blank space, and entries in the Edit and terminal
@@ -687,6 +714,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
   even where bracketed paste is on, as such text was made to escape it. Kettle
   still removes the marker whichever choice is made.
+
+- The one-character form of the bracketed-paste end marker (U+009B followed
+  by `201~`) opened the Confirm paste dialog and was then sent on by Paste
+  and by Paste as one line. Both markers are now removed in that form too, in
+  every mode.
+
+- Inside a bracketed paste Kettle now drops the bytes a terminal turns into a
+  signal before the program reads them: 0x03 (interrupt), 0x1A (suspend) and
+  0x1C (quit), and 0x19 (delayed suspend) on macOS. A shell interrupted in the
+  middle of a paste left bracketed mode and ran the rest as typed input.
+  Alacritty, Ghostty and VTE neutralize the interrupt byte in pasted text too.
+
+- With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
+  when it held control characters. It now takes the recommended choice, Paste
+  without controls, whenever the text has controls.
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
@@ -702,6 +744,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- Up and Down in a confirmation whose buttons are stacked move focus from one
+  button to the next. They only scrolled the text, which did nothing visible
+  when it fit. A row of buttons keeps Up and Down for scrolling, except in the
+  Confirm paste dialog, where they reach the Paste settings link above the
+  row. PageUp, PageDown, Home and End scroll every confirmation.
 
 - A crash, `kill -9`, power loss or a logout that hangs no longer loses the
   last changes to a saved session. Kettle saved every tab, split and window

@@ -5434,18 +5434,50 @@ Text paste consent is a `kettle-ui` confirmation action carrying bounded text,
 the original pane, and the broadcast scope and recipient set. Consent fails
 closed if that scope changes. Queued input behind a paste cannot pass through
 an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
-`input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
-`paste_safety` scans Unicode code points in linear time for the summary and
-control-removing alternative. It removes whole escape/control strings, retaining
-TAB/CR/LF even within malformed strings. Preview work is capped at 160 visible
-characters and three lines. The fourth action uses the same confirmation layout
-for painting, pointer input, AccessKit and `ui_geometry`; it adds no IME caret.
+`input::paste_payload` removes both bracketed-paste markers, in their 7-bit and
+C1 forms, in every mode, and inside bracketed wrappers every other ESC byte and
+the signal bytes 0x03, 0x1A and 0x1C (0x19 too on macOS). Marker removal is one
+stack pass to a fixpoint, run again after the byte removal, which can join the
+halves of a C1 marker.
+`paste_safety` scans Unicode code points in linear time for the summary, the
+findings and the control-removing alternative. It removes whole escape/control
+strings, retaining TAB/CR/LF even within malformed strings. `findings` returns
+at most one entry per kind of control, ranked by an enum's derived order with
+the end marker first; that order picks the four rows shown and the control the
+preview is anchored on. Preview work is capped at 160 visible characters and
+three lines whatever the clipboard size: the window opens at the start of the
+text and moves, with at most 40 characters of lead-in, only when it ends before
+the anchor does.
+
+A paste question carries a `PasteQuestion` beside the generic dialog state: a
+`kettle_render::ConfirmDialogDetail` (preview with token ranges, summary,
+findings, policy text, link, and the description assistive technology reads),
+one access key per button, and the recommended button. `ConfirmDialogLayout`
+resolves all of it: buttons in one row of equal widths inside 480 units, else
+one row of natural widths in a dialog widened to at most 800 units, else one
+full-width stack; the preview box, a chip per token, the findings rows and the
+pinned policy line with its link. The link is the focus stop after the last
+button and the first in focus order. The same layout serves painting, pointer
+input, AccessKit and `ui_geometry`, which carries rectangles and the fixed
+labels only; the reason, preview and findings never leave the process. The
+painter refines each chip and access-key underline from the shaped glyphs, so
+a fallback face that leaves the cell grid moves them with the letters. The
+recommended button and the link use the window's accent unless its hue is the
+warning colour's (a window's accent can be the theme's red); then they take
+the first palette colour of another hue, so the recommended and the
+destructive choice never look alike. The summary's counts share a line while
+they fit, and like the policy line drop their separator where a line breaks.
+The dialog adds no IME caret. Activating the link runs the same modal reset as
+opening Settings, which drops the pending paste, then focuses the
+`paste-protection` row. Access keys compare the logical key only.
 Path pastes retain their stricter rejection of control characters in filenames.
 
 OSC 52 operations remain ordered in the terminal clipboard journal. The UI
 records successful platform clipboard writes in per-pane notice state, with a
 five-second successful-copy interval and separate lifetime read/write denial
-latches. The pane's dismissible notice uses the persistent notice painter and
+latches. A notice names the pane's foreground program through the close
+question's label (`argv[0]`'s base name, sanitised, at most 32 columns, `None`
+for an interactive shell), looked up only when a notice is about to show. The pane's dismissible notice uses the persistent notice painter and
 its shared word wrapper, geometry, hit tests and polite AccessKit status. Held
 process banners take precedence. Notice content contains counts and policy text,
 never clipboard contents, and never moves terminal or IME geometry.
