@@ -3031,6 +3031,7 @@ impl App {
                 self.quick_terminal.focus_check = None;
             }
             self.close_update_toast_window(seq);
+            self.forget_window_notifications(seq);
             // A dying window that is the torn window or the manual-follow
             // capture holder takes its drag with it. Abandon eagerly (clears
             // the latched preview on the still-mapped target and restores

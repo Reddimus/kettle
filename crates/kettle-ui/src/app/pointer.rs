@@ -1845,6 +1845,10 @@ impl App {
             .into_iter()
             .rev()
             .map(|(_, toast)| toast)
+            .chain(
+                self.notification_toast_projection(ws)
+                    .map(|view| view.overlay),
+            )
             .chain(self.update_toast_projection(ws))
             .find_map(|toast| {
                 let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);

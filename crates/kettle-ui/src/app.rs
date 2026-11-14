@@ -100,6 +100,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/linux_titlebar.rs"),
         include_str!("app/update_toast.rs"),
         include_str!("app/notices.rs"),
+        include_str!("app/notification_toast.rs"),
         include_str!("app/window_events.rs"),
         include_str!("app/windowing.rs"),
     ]
@@ -139,6 +140,7 @@ mod ime;
 mod keyboard;
 mod layout;
 mod links;
+mod notification_toast;
 mod notifications;
 mod output;
 mod pickers;
@@ -175,6 +177,7 @@ pub(crate) use links::*;
 use media::*;
 pub(crate) use menus::*;
 pub(crate) use modals::*;
+use notification_toast::*;
 pub(crate) use notifications::*;
 use output::*;
 use paste::*;
@@ -299,6 +302,8 @@ pub enum UserEvent {
         window: u64,
         reply: crate::update_toast::ClaimReply,
     },
+    /// The notification worker reported failed desktop notifications.
+    DesktopNotificationFailed,
     /// An automatic update completed. Existing windows keep running the
     /// current image; the next kettle launch uses the installed release.
     UpdateInstalled {
@@ -628,6 +633,11 @@ pub struct App {
     update_toast_unavailable: Option<crate::update_notice::Notice>,
     update_toast_retry: Option<std::time::Instant>,
     update_toast_focus: Option<NodeId>,
+    /// Program notifications' cooldown and repeat suppression, before they
+    /// are routed to a toast or the desktop.
+    notification_router: crate::notification_router::Router,
+    /// Desktop notifications in flight, to bring back as a toast if they fail.
+    notification_pending: crate::notification_router::PendingDesktop,
     /// Whether a screen reader moved focus to the config notice; only then do
     /// Enter and Escape answer it instead of reaching the terminal.
     config_notice_focus: bool,
@@ -740,6 +750,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.sync_macos_menu(None);
             }
             UserEvent::CardsTipClaimed(claimed) => self.cards_tip_claimed(claimed),
+            UserEvent::DesktopNotificationFailed => self.receive_failed_desktop_notifications(),
             UserEvent::GpusDetected(choices) => {
                 self.gpu_choices = choices;
                 self.gpu_discovery_pending = false;
@@ -1111,8 +1122,16 @@ impl ApplicationHandler<UserEvent> for App {
         // Every window ticks (reap, blink, coalesced-paint deadlines);
         // the per-window wait requests merge to the EARLIEST deadline so one
         // window's animation can't starve another's coalesced output flush.
+        // Held notifications whose source's cooldown ended, before the
+        // windows tick, so a toast they make is shown this turn.
+        self.deliver_due_notifications(now);
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
         let mut earliest_deadline = self.quick_terminal_tick(now);
+        if let Some(wait) = self.notification_router.next_due(now) {
+            let deadline = now + wait.max(std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
         // The poll covers every window, so one checkout is enough.
         let mut remote_poll_due = self.remote_poll_due.is_some_and(|due| due <= now);
         for seq in seqs {

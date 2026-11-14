@@ -1198,6 +1198,12 @@ pub(crate) struct WindowState {
     pub(crate) card_focus: Option<u64>,
     /// A tab focused by assistive technology, until ordinary input resumes.
     pub(crate) tab_focus: Option<accesskit::NodeId>,
+    /// Program notifications shown in this window: one on screen, a few
+    /// waiting (see `crate::notification_toast`).
+    pub(crate) notification_toasts: crate::notification_toast::ToastQueue,
+    /// The notification toast control assistive technology focused; only
+    /// then do Enter, Space, Tab and Escape belong to the toast.
+    pub(crate) notification_toast_focus: Option<accesskit::NodeId>,
     /// The card a primary press at the pointer would take, for the hand
     /// cursor and the hover outline.
     pub(crate) card_hover: Option<kettle_render::PaintedCard>,
@@ -1784,6 +1790,8 @@ impl WindowState {
             card_sightings: crate::media::CardSightings::default(),
             card_focus: None,
             tab_focus: None,
+            notification_toasts: Default::default(),
+            notification_toast_focus: None,
             card_hover: None,
             card_settle_wake: None,
             card_hover_stale: false,

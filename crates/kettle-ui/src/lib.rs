@@ -82,6 +82,8 @@ mod mux;
 mod native_drag;
 mod native_fullscreen;
 mod native_material;
+mod notification_router;
+mod notification_toast;
 mod notifications;
 mod owned_dir;
 mod pane_partition;

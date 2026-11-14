@@ -437,6 +437,10 @@ impl App {
                     .persistent_notices(ws)
                     .into_iter()
                     .map(|(_, toast)| toast)
+                    .chain(
+                        self.notification_toast_projection(ws)
+                            .map(|view| view.overlay),
+                    )
                     .collect(),
                 context_menu,
                 context_menu_parents: self.context_menu_parent_overlays(ws),
@@ -590,6 +594,10 @@ impl App {
                 .persistent_notices(ws)
                 .into_iter()
                 .map(|(_, toast)| toast)
+                .chain(
+                    self.notification_toast_projection(ws)
+                        .map(|view| view.overlay),
+                )
                 .collect(),
             context_menu,
             context_menu_parents: self.context_menu_parent_overlays(ws),
@@ -1034,6 +1042,9 @@ impl App {
         // Whether anything covers the cards, for the tip: no dialog, menu or
         // viewer over them.
         let cards_uncovered = !self.pointer_modal_open(ws);
+        // Whether this frame's overlay carries the notification toast, read
+        // before the renderer borrow.
+        let notification_toast_shown = self.notification_toast_projection(ws).is_some();
         // Status bar state is built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -1105,6 +1116,13 @@ impl App {
         }
         if presented && overlay.update_toast.is_some() {
             self.update_toast_presented(ws.seq);
+        }
+        // The toast's time starts once a frame showing it reached the screen.
+        if presented
+            && notification_toast_shown
+            && let Some(toast) = ws.notification_toasts.visible_mut()
+        {
+            toast.clock.presented = true;
         }
         // The first card a user ever sees says a click opens it, once its
         // image is on screen with nothing over it: a card that loads in

@@ -513,7 +513,7 @@ impl App {
                     }
                 }
                 PendingLuaCommand::Notify { title, body, .. } => {
-                    fire_notify(&title, &body);
+                    self.notify_from_program(ws, None, &title, &body);
                 }
                 PendingLuaCommand::CallbackStopped { event, dropped, .. } => {
                     fire_notify(

@@ -601,6 +601,7 @@ impl App {
         // The resize chip needs repaints until it expires (then one more to
         // erase it); clear the state once it has.
         let update_toast_wait = self.tick_update_toast(ws, now);
+        let notification_toast_wait = self.tick_notification_toast(ws, now);
         let resize_chip_live = ws
             .resize_overlay
             .map(|(_, _, t)| t.elapsed() < RESIZE_OVERLAY_DURATION)
@@ -968,6 +969,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = update_toast_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = notification_toast_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = media_receipt_wait {

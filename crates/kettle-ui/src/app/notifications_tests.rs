@@ -44,8 +44,12 @@ fn protocol_notifications_are_wired_to_ui_dispatch() {
         "drain_events must consume OSC 9/777 notification requests"
     );
     assert!(
-        src.contains("fire_notify(&ev.title, &ev.body);"),
-        "protocol notifications must use the desktop notification helper"
+        src.contains("self.notify_from_program(ws, Some(pane_id), &ev.title, &ev.body);"),
+        "protocol notifications must go through the notification router"
+    );
+    assert!(
+        !src.contains("fire_notify(&ev.title, &ev.body);"),
+        "a program notification never goes straight to the desktop"
     );
     assert!(
         src.contains("\"protocol_notification\""),

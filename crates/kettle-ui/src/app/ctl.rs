@@ -1715,7 +1715,7 @@ impl App {
                 "unavailable": self.update_toast_unavailable,
                 "retry_in_ms": self.update_toast_retry.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
                 "receipt_pending": self.update_toast_receipts.as_ref().map_or(0, crate::update_toast::ReceiptWriter::pending_count),
-                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.presented,"remaining_ms":t.remaining().as_millis()})),
+                "active": self.update_toast.as_ref().map(|t| serde_json::json!({"notice": t.claim.notice,"window":t.window,"presented":t.clock.presented,"remaining_ms":t.remaining().as_millis()})),
             }));
             fields.insert(
                 "fullscreen".into(),

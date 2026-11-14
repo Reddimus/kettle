@@ -751,13 +751,8 @@ impl App {
             self.resolve_pending_correlated_run(ws, pane_id, &event);
         }
         for (pane_id, ev) in protocol_notifications_local {
-            fire_notify(&ev.title, &ev.body);
-            if !ws.window_focused
-                && let Some(w) = &ws.window
-            {
-                w.request_user_attention(Some(UserAttentionType::Informational));
-                ws.attention_active = true;
-            }
+            // A toast while Kettle has focus, the desktop otherwise.
+            self.notify_from_program(ws, Some(pane_id), &ev.title, &ev.body);
             self.ctl_broadcast(
                 "protocol_notification",
                 Some(pane_id),
@@ -864,7 +859,8 @@ impl App {
             | UserEvent::RemoteScanReady
             | UserEvent::MediaRendered
             | UserEvent::LanePlayback
-            | UserEvent::UpdateToastClaimed { .. } => {}
+            | UserEvent::UpdateToastClaimed { .. }
+            | UserEvent::DesktopNotificationFailed => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request, _el);
             }

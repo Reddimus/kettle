@@ -56,6 +56,12 @@ impl App {
                     .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
                     .is_some()
             })
+            || self.notification_toast_projection(ws).is_some_and(|view| {
+                view.overlay
+                    .geometry
+                    .hit_test(ws.cursor.x as f32, ws.cursor.y as f32)
+                    .is_some()
+            })
     }
 
     pub(super) fn cursor_in_tab_bar(&self, ws: &WindowState) -> bool {
