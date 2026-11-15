@@ -3806,6 +3806,10 @@ pub(super) fn persistent_notice_nodes(
 }
 
 #[cfg(test)]
+#[path = "accessibility_id_tests.rs"]
+mod id_tests;
+
+#[cfg(test)]
 mod context_menu_nesting_tests {
     use super::*;
 
