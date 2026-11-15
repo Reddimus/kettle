@@ -761,11 +761,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   with no control characters), `y` does nothing: press Enter on the focused
   button, or use its access key.
 
-- A program that turned bracketed paste off while the Confirm paste dialog
-  was open received the answer given for the other mode: the dialog had said
-  Kettle removes `ESC` and the signal keys, and Paste then sent them and ran
-  each line. Kettle now sends nothing in that case and asks again, describing
-  the paste for the mode the program is in.
+- An answer given in the Confirm paste dialog while every receiving program
+  had bracketed paste on was used even when one of them turned it off before
+  the answer. The text then arrived outside bracketed paste: each line break
+  as Enter, with `ESC` and the signal keys intact. Kettle now sends nothing
+  in that case and asks again, describing the paste for the mode the program
+  is in. A choice with no line break or control character left in it, such as
+  Paste as one line, is sent as before.
 
 - Up and Down in a confirmation whose buttons are stacked move focus from one
   button to the next. They only scrolled the text, which did nothing visible

@@ -1151,7 +1151,9 @@ impl App {
         true
     }
 
-    /// Dispatch the accepted confirmation action without asking again.
+    /// Carry out the accepted confirmation action. Only a paste can end in
+    /// another question: one whose recipient left bracketed paste since the
+    /// question was asked (`paste_answer`).
     pub(super) fn dispatch_confirm_action(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         self.dispatch_confirm_action_arms(ws, action);
         self.hoover_groups(ws);
