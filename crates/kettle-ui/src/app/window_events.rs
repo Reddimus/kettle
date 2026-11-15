@@ -270,8 +270,8 @@ impl App {
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = None;
-                // Likewise a jump button's hover fill.
-                if ws.scrollback_pill_hover.take().is_some()
+                // Likewise a jump button's hover fill, and a press it took.
+                if ws.leave_scrollback_pill()
                     && let Some(window) = &ws.window
                 {
                     window.request_redraw();

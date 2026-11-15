@@ -350,6 +350,35 @@ fn only_the_focused_scrolled_back_pane_is_viewing_history() {
     assert_eq!(viewing_history_pane(&panes.ws), Some(other));
 }
 
+/// When the pointer leaves the window a jump button is no longer hovered,
+/// and a press it took is over, so a release the window never hears of
+/// cannot leave it painted pressed when the pointer comes back.
+#[test]
+fn leaving_the_window_ends_the_jump_buttons_hover_and_press() {
+    let mut ws = WindowState::new(1, crate::mux::Mux::new());
+    assert!(!ws.leave_scrollback_pill(), "nothing to repaint");
+    ws.scrollback_pill_hover = Some(PANE);
+    ws.scrollback_pill_press = Some(PANE);
+    assert_eq!(
+        ScrollbackPillState::of(PANE, ws.scrollback_pill_hover, ws.scrollback_pill_press),
+        ScrollbackPillState::Pressed
+    );
+    assert!(ws.leave_scrollback_pill());
+    assert_eq!(
+        (ws.scrollback_pill_hover, ws.scrollback_pill_press),
+        (None, None)
+    );
+    // Back over the button, it is hovered, not pressed.
+    assert_eq!(
+        ScrollbackPillState::of(PANE, Some(PANE), ws.scrollback_pill_press),
+        ScrollbackPillState::Hovered
+    );
+    // A press alone is ended too.
+    ws.scrollback_pill_press = Some(PANE);
+    assert!(ws.leave_scrollback_pill());
+    assert_eq!(ws.scrollback_pill_press, None);
+}
+
 /// The tree, the pointer, both input paths and the frame take the button,
 /// the label and their state from those shared helpers.
 #[test]
@@ -379,6 +408,8 @@ fn the_jump_button_and_label_are_wired_to_the_painted_geometry() {
         "letreached=self.scrollback_pill_target(ws,px,py);Self::press_reached_scrollback_pill(ws,reached,button)",
         "letreached=self.scrollback_pill_target(ws,px,py);Self::release_reached_scrollback_pill(ws,reached,button)",
         "scrollback_pill_reach(Some(hit),&self.scrollback_pill_covers(ws,px,py),(px,py),)",
+        // Leaving the window ends the hover and the press.
+        "ifws.leave_scrollback_pill()&&letSome(window)=&ws.window",
     ] {
         assert!(source.contains(needle), "missing: {needle}");
     }

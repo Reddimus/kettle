@@ -1573,6 +1573,16 @@ impl WindowState {
         self.pressed_search = false;
     }
 
+    /// When the pointer leaves the window no jump button is under it, and a
+    /// press one took is over: its release may land outside, where the
+    /// window never hears of it, and the button would stay pressed. Whether
+    /// either was set, so the frame needs repainting.
+    pub(crate) fn leave_scrollback_pill(&mut self) -> bool {
+        let hovered = self.scrollback_pill_hover.take().is_some();
+        let pressed = self.scrollback_pill_press.take().is_some();
+        hovered || pressed
+    }
+
     /// When the pointer leaves the window, nothing in the tab bar is under
     /// it or pressed any more.
     pub(crate) fn leave_tab_bar(&mut self) {
