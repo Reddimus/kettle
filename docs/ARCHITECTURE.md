@@ -4954,7 +4954,12 @@ window title). Layout:
 ```
 
 Three color variants based on broadcast state: transmit (focused
-source), receive (group member), inactive (idle). Click on the bar
+source), receive (a pane the broadcast reaches), inactive (idle). The
+pane outlines follow the same roles: the sending pane solid in the
+broadcast yellow, receivers dashed in it, the rest the divider colour.
+`app::broadcast::BroadcastRoles` resolves them each frame from the
+scope's targets for the outlines, the screen-reader descriptions and
+`ui_geometry`. Click on the bar
 focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
 action edits the broadcast-group label.
 

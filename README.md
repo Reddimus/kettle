@@ -284,7 +284,8 @@ visible with one tab), or the macOS **Shell** menu:
 The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
 profile, and **Broadcast input…** actions for all panes in the tab, a group or the
 window. Broadcast sends input to multiple panes; choose **Stop broadcasting
-input** when finished. The macOS **Shell** menu and the right-click menu have a
+input** when finished. While it is on, the pane you type in has a solid yellow
+outline, each pane that receives its input a dashed one, and the tab is marked. The macOS **Shell** menu and the right-click menu have a
 **Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
 Window** and **Panes in This Group**, with the current one checked; choosing the
 checked row stops broadcasting. The broadcast chord (`Ctrl+Cmd+B` on macOS,
