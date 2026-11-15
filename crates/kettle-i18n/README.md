@@ -66,6 +66,11 @@ accepts it.
 Spanish writes decimals with a comma (`1,5x`). A number that code puts into a
 message goes through `Translator::decimal`, which uses the same separator.
 
+Known limit: whole numbers are grouped with a comma in every language. The
+jump button's count and the kept-history label's line count read `10,000` in
+Spanish too, where a period or a thin space is usual, and there is no
+`Translator` helper for locale grouping yet.
+
 ## Choosing the language
 
 The `language` config key (`auto`, `en`, `es`) is read once at startup.
