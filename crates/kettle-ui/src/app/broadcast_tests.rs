@@ -519,3 +519,251 @@ fn the_right_click_menu_has_the_broadcast_submenu() {
         }
     }
 }
+
+/// One window: a tab of three panes (the focused `sender`, `grouped` in
+/// "fleet" and `loose` in no group) and a second tab with `other`.
+fn broadcast_role_window() -> (WindowState, [u64; 4]) {
+    let cfg = crate::app::tests::title_test_config();
+    let argv = crate::app::tests::title_test_argv();
+    let waker: kettle_core::Waker = std::sync::Arc::new(|| {});
+    let (mut mux, sender, grouped) = crate::app::tests::title_test_split_mux();
+    mux.split_with(
+        crate::mux::Dir::Vertical,
+        &cfg,
+        80,
+        24,
+        8,
+        16,
+        waker.clone(),
+        argv.clone(),
+        None,
+    )
+    .expect("spawn a third pane");
+    let loose = mux.active_focus().expect("third pane id");
+    mux.new_tab_with(&cfg, 80, 24, 8, 16, waker, &argv, None)
+        .expect("spawn a second tab");
+    let other = mux.active_focus().expect("second tab's pane id");
+    assert!(mux.focus_pane(sender));
+    mux.panes.get_mut(&grouped).unwrap().group_name = Some("fleet".into());
+    (WindowState::new(1, mux), [sender, grouped, loose, other])
+}
+
+/// The roles every reader shares (the outlines, the screen-reader
+/// descriptions, `ui_geometry`) follow the scope's targets: the focused pane
+/// sends, every other target receives, and a pane outside the scope keeps
+/// no role. Stopping broadcast clears them all.
+#[test]
+fn broadcast_roles_follow_the_tab_window_and_group_scopes() {
+    use kettle_render::PaneBroadcast::{Off, Receiving, Sending};
+    let (mut ws, [sender, grouped, loose, other]) = broadcast_role_window();
+    let roles = |ws: &WindowState| {
+        let roles = BroadcastRoles::of_window(ws, None);
+        [sender, grouped, loose, other].map(|pane| roles.of(pane))
+    };
+    for (scope, expected) in [
+        (BroadcastScope::Off, [Off, Off, Off, Off]),
+        // The tab: every pane in it, none in the other tab.
+        (BroadcastScope::Tab, [Sending, Receiving, Receiving, Off]),
+        // The window: every pane in every tab (the other tab's is not
+        // visible, so nothing draws it until that tab is shown).
+        (
+            BroadcastScope::All,
+            [Sending, Receiving, Receiving, Receiving],
+        ),
+        // A group: its members, plus the focused pane that sends to them.
+        (
+            BroadcastScope::Group("fleet".into()),
+            [Sending, Receiving, Off, Off],
+        ),
+        (BroadcastScope::Off, [Off, Off, Off, Off]),
+    ] {
+        ws.mux.broadcast = scope.clone();
+        assert_eq!(roles(&ws), expected, "{scope:?}");
+    }
+
+    // Focus moves: the pane it moves to sends, the one it left receives.
+    ws.mux.broadcast = BroadcastScope::Tab;
+    assert!(ws.mux.focus_pane(loose));
+    assert_eq!(roles(&ws), [Receiving, Receiving, Sending, Off]);
+}
+
+/// A group broadcast crosses windows: from the window the user types in it
+/// reaches this window's members of the group, whatever this window's own
+/// scope. A tab or window scope elsewhere reaches nothing here.
+#[test]
+fn another_windows_group_broadcast_marks_this_windows_members() {
+    use kettle_render::PaneBroadcast::{Off, Receiving, Sending};
+    let (mut ws, [sender, grouped, loose, other]) = broadcast_role_window();
+    let roles = |ws: &WindowState, focused: Option<&BroadcastScope>| {
+        let roles = BroadcastRoles::of_window(ws, focused);
+        [sender, grouped, loose, other].map(|pane| roles.of(pane))
+    };
+    let fleet = BroadcastScope::Group("fleet".into());
+    assert_eq!(roles(&ws, Some(&fleet)), [Off, Receiving, Off, Off]);
+    for scope in [
+        BroadcastScope::Tab,
+        BroadcastScope::All,
+        BroadcastScope::Off,
+    ] {
+        assert_eq!(roles(&ws, Some(&scope)), [Off; 4], "{scope:?}");
+    }
+    assert_eq!(
+        roles(&ws, Some(&BroadcastScope::Group("ops".into()))),
+        [Off; 4]
+    );
+    // This window broadcasting too: its focused pane still sends.
+    ws.mux.broadcast = BroadcastScope::Tab;
+    assert_eq!(
+        roles(&ws, Some(&fleet)),
+        [Sending, Receiving, Receiving, Off]
+    );
+}
+
+/// Screen readers hear the role after the pane's name, in both languages;
+/// a pane broadcast does not reach gets no description.
+#[test]
+fn pane_broadcast_descriptions_name_the_role_in_both_languages() {
+    use kettle_i18n::{Language, Translator};
+    use kettle_render::PaneBroadcast::{Off, Receiving, Sending};
+    let en = Translator::new(Language::En);
+    let es = Translator::new(Language::Es);
+    assert_eq!(pane_broadcast_description(Off, &en), None);
+    assert_eq!(pane_broadcast_description(Off, &es), None);
+    assert_eq!(
+        pane_broadcast_description(Sending, &en),
+        Some("Broadcasting input")
+    );
+    assert_eq!(
+        pane_broadcast_description(Receiving, &en),
+        Some("Receiving broadcast input")
+    );
+    assert_eq!(
+        pane_broadcast_description(Sending, &es),
+        Some("Envía la entrada a varios paneles")
+    );
+    assert_eq!(
+        pane_broadcast_description(Receiving, &es),
+        Some("Recibe la entrada enviada a varios paneles")
+    );
+}
+
+/// The terminal node a screen reader reads carries the description while
+/// broadcast reaches the pane, and loses it when broadcast stops: the tree
+/// is rebuilt from the roles, and the publish key hashes them so a scope
+/// change publishes. A description, never a live region, so a scope change
+/// re-describes panes without announcing each one.
+#[test]
+fn terminal_nodes_are_described_from_the_roles_and_republished_on_change() {
+    use kettle_render::PaneBroadcast::{Receiving, Sending};
+    let (mut ws, [sender, grouped, loose, _]) = broadcast_role_window();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let described = |ws: &WindowState| {
+        let roles = BroadcastRoles::of_window(ws, None);
+        [sender, grouped, loose].map(|pane| {
+            let mut node = accesskit::Node::new(accesskit::Role::Terminal);
+            if let Some(description) = pane_broadcast_description(roles.of(pane), &tr) {
+                node.set_description(description);
+            }
+            node.description().map(str::to_owned)
+        })
+    };
+    ws.mux.broadcast = BroadcastScope::Group("fleet".into());
+    let sending = pane_broadcast_description(Sending, &tr).map(str::to_owned);
+    let receiving = pane_broadcast_description(Receiving, &tr).map(str::to_owned);
+    assert_eq!(described(&ws), [sending.clone(), receiving.clone(), None]);
+    ws.mux.broadcast = BroadcastScope::Tab;
+    assert_eq!(described(&ws), [sending, receiving.clone(), receiving]);
+    ws.mux.broadcast = BroadcastScope::Off;
+    assert_eq!(described(&ws), [None, None, None]);
+
+    let source = production_source();
+    let tree = source
+        .split("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .nth(1)
+        .and_then(|rest| rest.split("fn accessibility_key").next())
+        .expect("accessibility_tree");
+    let terminal = tree
+        .split("let mut node = Node::new(Role::Terminal);")
+        .nth(1)
+        .expect("the terminal node");
+    let terminal = &terminal[..terminal
+        .find("nodes.push((node_id, node));")
+        .expect("pushed")];
+    assert!(
+        terminal.contains("pane_broadcast_description(broadcast_roles.of(pane_id), &self.ui_text)")
+            && terminal.contains("node.set_description(description);"),
+        "the terminal node is described from the frame's roles"
+    );
+    assert!(
+        !terminal.contains("node.set_live"),
+        "the pane node is not a live region"
+    );
+    assert!(tree.contains("let broadcast_roles = self.broadcast_roles(ws);"));
+    let key = source
+        .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .nth(1)
+        .and_then(|rest| rest.split("fn publish_accessibility_if_due").next())
+        .expect("accessibility_key");
+    assert!(
+        key.contains("let broadcast_roles = self.broadcast_roles(ws);")
+            && key.contains("broadcast_roles.of(pane_id).hash(&mut hasher);"),
+        "the publish key hashes each visible pane's role"
+    );
+}
+
+/// `ui_geometry` reports each pane's role as its outline shows it, from the
+/// same roles the frame draws.
+#[test]
+fn ui_geometry_reports_each_panes_broadcast_role() {
+    use kettle_render::PaneBroadcast::{Off, Receiving, Sending};
+    assert_eq!(broadcast_role_json(Off), serde_json::Value::Null);
+    assert_eq!(broadcast_role_json(Sending), "sending");
+    assert_eq!(broadcast_role_json(Receiving), "receiving");
+    let source = production_source();
+    let geometry = source
+        .split("fn ctl_ui_geometry(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ctl_perform_action(").next())
+        .expect("ctl_ui_geometry");
+    assert!(geometry.contains("let broadcast_roles = self.broadcast_roles(target);"));
+    assert!(geometry.contains("\"broadcast\": broadcast_role_json(broadcast_roles.of(*id)),"));
+    let redraw = source
+        .split("fn redraw(&mut self, ws: &mut WindowState)")
+        .nth(1)
+        .expect("redraw");
+    assert!(
+        redraw.contains("let broadcast_roles = self.broadcast_roles(ws);")
+            && redraw.contains("broadcast: broadcast_roles.of(*id),"),
+        "the frame's panes take their roles from the same reading"
+    );
+}
+
+/// A group broadcast outlines receivers in other windows, which read the
+/// focused window's scope: a group scope set or cleared, and focus moving
+/// between windows while any window broadcasts to a group, redraw them.
+#[test]
+fn group_broadcasts_redraw_the_other_windows_they_reach() {
+    let source = production_source();
+    let body = |name: &str| {
+        let body = source.split(name).nth(1).expect(name);
+        body[..body.find("\n    }\n").unwrap_or(body.len())].to_string()
+    };
+    let set = body("fn set_broadcast_scope(");
+    let crosses = set
+        .find("let crosses = crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast)")
+        .expect("reads the old scope");
+    let write = set.find("ws.mux.broadcast = scope;").expect("the write");
+    assert!(crosses < write, "the old scope is read before the write");
+    assert!(set.contains("|| crate::mux::Mux::scope_crosses_windows(&scope);"));
+    assert!(set.contains("if crosses {\n            self.redraw_other_windows();"));
+    let moved = body("fn broadcast_focus_moved(");
+    assert!(moved.contains("if crosses(ws) || self.windows.values().any(crosses) {"));
+    assert!(moved.contains("self.redraw_other_windows();"));
+    let focused = source
+        .split("WindowEvent::Focused(f) =>")
+        .nth(1)
+        .expect("the Focused arm");
+    let focused = &focused[..focused.find("if self.quick_terminal").expect("arm body")];
+    assert!(focused.contains("self.focused_seq = ws.seq;"));
+    assert!(focused.contains("self.broadcast_focus_moved(ws);"));
+}

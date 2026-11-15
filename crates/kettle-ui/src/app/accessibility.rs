@@ -196,6 +196,7 @@ impl App {
         ws.accessibility_text_rows
             .borrow_mut()
             .retain(|pane, _| ws.mux.panes.contains_key(pane));
+        let broadcast_roles = self.broadcast_roles(ws);
         // A pane's terminal node covers its terminal, clear of its titlebar
         // and lane.
         for (pane_id, partition) in layout {
@@ -215,6 +216,13 @@ impl App {
                 pane.title.clone()
             };
             node.set_label(label);
+            // The outline's meaning, for screen readers: this pane sends or
+            // receives broadcast input.
+            if let Some(description) =
+                pane_broadcast_description(broadcast_roles.of(pane_id), &self.ui_text)
+            {
+                node.set_description(description);
+            }
             let text = pane.term.accessible_text().unwrap_or_default();
             let mut text_rows = ws.accessibility_text_rows.borrow_mut();
             let ids = text_rows
@@ -1179,8 +1187,11 @@ impl App {
         }
         let mut layout = self.pane_layout(ws, self.area(ws));
         layout.sort_by_key(|(pane_id, _)| *pane_id);
+        let broadcast_roles = self.broadcast_roles(ws);
         for (pane_id, partition) in layout {
             pane_id.hash(&mut hasher);
+            // A scope change re-describes the panes it reaches.
+            broadcast_roles.of(pane_id).hash(&mut hasher);
             let lane = partition
                 .lane
                 .and_then(crate::pane_partition::LaneShare::rect);

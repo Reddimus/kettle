@@ -38,6 +38,15 @@ pub(super) fn tab_bar_geometry_json(
     })
 }
 
+/// A pane's broadcast role in `ui_geometry.panes[].broadcast`.
+pub(super) fn broadcast_role_json(role: kettle_render::PaneBroadcast) -> serde_json::Value {
+    match role {
+        kettle_render::PaneBroadcast::Off => serde_json::Value::Null,
+        kettle_render::PaneBroadcast::Sending => "sending".into(),
+        kettle_render::PaneBroadcast::Receiving => "receiving".into(),
+    }
+}
+
 pub(super) fn diagnostic_titlebar_bell(icon_enabled: bool, bell: bool) -> Option<&'static str> {
     (icon_enabled && bell).then_some("\u{1f514}")
 }
@@ -1067,6 +1076,7 @@ impl App {
             })
             .collect();
         let pane_layout = self.pane_layout(target, self.area(target));
+        let broadcast_roles = self.broadcast_roles(target);
         let active_search_match_rects: Vec<serde_json::Value> = target
             .search
             .target_pane
@@ -1598,6 +1608,9 @@ impl App {
                             }).collect::<Vec<_>>()
                         }).unwrap_or_default(),
                         "focused": target.mux.active_focus() == Some(*id),
+                        // What broadcast does here: "sending", "receiving"
+                        // or null, as the pane's outline shows it.
+                        "broadcast": broadcast_role_json(broadcast_roles.of(*id)),
                     }))
                     .collect::<Vec<_>>(),
                 "modals": {
