@@ -1623,6 +1623,7 @@ fn palette_shows_twelve_rows_at_1280x820() {
         );
         let ctl_row = ctl_rows.next().unwrap();
         assert_eq!(ctl_row["index"], index);
+        assert_eq!(ctl_row["option"], option, "ctl names the command index too");
         assert_eq!(ctl_row["rect"]["y"].as_f64().unwrap() as f32, y, "ctl row {index}");
     }
     assert_eq!(menu.visible_row_rect(12), None);
@@ -1664,26 +1665,55 @@ fn palette_card_is_sized_in_points_and_other_pickers_keep_pixels() {
     assert_eq!(menu.panel_w_clamped, 720.0);
 }
 
-/// The painted palette and the pressed palette are one card: the frame's
-/// overlay builds it through `palette_picker_list`, as presses do, never
-/// straight from `command_picker_list`, which leaves the card at 1x.
+/// At 2x, the open palette's one layout, the one the frame paints and
+/// presses, the header field, accessibility and ctl measure, gives a card
+/// and header 1440 pixels (720 points) wide where 1x caps it at 720 pixels,
+/// header and card share their x and width with no gap between them, the
+/// described rows in view show their descriptions whole, and the theme
+/// picker's card keeps its pixel limit.
 #[test]
-fn the_painted_palette_takes_the_window_scale_like_presses() {
-    let src = production_source();
-    let overlay = src
-        .split("fn overlay(")
-        .nth(1)
-        .and_then(|rest| rest.split("fn redraw(").next())
-        .expect("overlay body");
-    assert!(!overlay.contains("command_picker_list("), "the frame builds the palette without its scale");
-    assert!(overlay.contains("palette_picker_list("));
-    let open = src
-        .split("fn open_picker_list(")
-        .nth(1)
-        .and_then(|rest| rest.split("fn picker_result_row(").next())
-        .expect("open_picker_list body");
-    assert!(!open.contains("command_picker_list("));
-    assert!(open.contains("palette_picker_list("));
+fn the_open_palette_is_sized_in_points_at_2x() {
+    let cfg = kettle_config::Config::default();
+    let surface = (2713.0, 1635.0);
+    let cell = kettle_render::bundled_cell_size(kettle_config::DEFAULT_FONT_SIZE, 2.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    let menu_at = |ws: &WindowState| {
+        super::open_picker_menu(ws, &cfg, "TokyoNight Night", &EN_TEXT, None, surface, cell, 64.0).unwrap()
+    };
+    ws.startup_scale = 2.0;
+    let menu = menu_at(&ws);
+    let (x, y, w, h) = menu.picker_header_rect();
+    assert!(menu.panel_w_clamped >= 1400.0, "card {} px", menu.panel_w_clamped);
+    assert_eq!((x, w), (menu.anchor.0, menu.panel_w_clamped));
+    assert_eq!(y + h, menu.anchor.1, "the header sits on the rows");
+    assert_eq!(menu.card_rect().1, y);
+    let painted = kettle_render::context_menu_row_rects(&menu, cell);
+    let described: Vec<&str> = painted
+        .iter()
+        .map(|&(index, _)| &menu.rows[index])
+        .filter(|row| !row.description.is_empty())
+        .map(|row| {
+            assert!(
+                kettle_render::menu_row_description_left(row, menu.anchor.0, menu.panel_w_clamped, cell.0).is_some(),
+                "{} hides its description at 2x",
+                row.label
+            );
+            row.label.as_str()
+        })
+        .collect();
+    assert!(described.len() >= 3, "{described:?}");
+    ws.startup_scale = 1.0;
+    assert_eq!(menu_at(&ws).panel_w_clamped, 720.0, "1x caps at 720 pixels");
+    ws.startup_scale = 2.0;
+    ws.palette_input = None;
+    ws.theme_picker_input = Some(crate::window_state::ThemePickerState {
+        query: Default::default(),
+        selected: 0,
+        opened_on: "TokyoNight Night".into(),
+        slot: None,
+    });
+    assert_eq!(menu_at(&ws).panel_w_clamped, 720.0, "the theme picker keeps its pixels");
 }
 
 /// One-row wheel steps scroll the whole empty palette, headings and all: a

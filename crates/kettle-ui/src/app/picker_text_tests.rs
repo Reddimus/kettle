@@ -461,7 +461,8 @@ fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
 
 /// The described rows the palette shows, in `tr`'s language, as the painter
 /// receives them at 1280x820 under a 32 px tab bar, at the `font_px` default
-/// font (13 px on macOS, 14 elsewhere; the bundled font is 0.6 em wide), with
+/// font (13 px on macOS, 14 elsewhere; the cell measured from the bundled
+/// font), with
 /// each row's hint in either notation: `macos` glyphs or `Ctrl+Shift` text. A
 /// row's action is read from the same view entries the rows are ranked from.
 fn described_palette_rows(
@@ -516,7 +517,7 @@ fn described_palette_rows(
             selected: 0,
             footer: None,
         };
-        let cell = (font_px * 0.6, font_px * 1.25);
+        let cell = kettle_render::bundled_cell_size(font_px, 1.0);
         let mut menu = super::picker_context_menu(list, (1280.0, 820.0), cell, 32.0).unwrap();
         let row = menu.rows.remove(0);
         out.push((entry.action.clone(), row, menu));
@@ -535,14 +536,15 @@ fn every_description_fits_the_default_palette() {
         for tr in [EN, ES, Translator::pseudo()] {
             for macos in [true, false] {
                 let rows = described_palette_rows(&tr, macos, font_px);
-                assert_eq!(rows.len(), 12, "described commands");
+                assert_eq!(rows.len(), 11, "described commands");
                 for (action, row, menu) in rows {
                     assert!(!row.description.is_empty(), "{action:?}");
+                    let cell = kettle_render::bundled_cell_size(font_px, 1.0);
                     let painted = kettle_render::menu_row_description_left(
                         &row,
                         menu.anchor.0,
                         menu.panel_w_clamped,
-                        font_px * 0.6,
+                        cell.0,
                     );
                     assert!(
                         painted.is_some(),
@@ -819,6 +821,67 @@ fn selection_and_accessibility_skip_the_headings() {
                     node.label()
                 ),
             }
+        }
+    }
+}
+
+/// A screen reader hears each result's place among all of them, not among
+/// the rows in view: every command of the empty palette is "n of" the whole
+/// registry, and after `split` "n of 6". The no-match message is no result.
+#[test]
+fn palette_options_report_their_place_among_all_results() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN, ES] {
+        let entries = super::palette_view_entries(
+            None,
+            &tr,
+            &[],
+            kettle_config::BroadcastDefault::default(),
+            &bindings,
+            false,
+        );
+        for (query, total) in [("", entries.len()), ("split", 6), ("zzqx", 0)] {
+            let list = command_picker_list(
+                query,
+                0,
+                &bindings,
+                &tr,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            let menu =
+                super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+            let overlay = kettle_render::Overlay {
+                palette_query: Some(query.into()),
+                context_menu: Some(menu),
+                ..Default::default()
+            };
+            let projection =
+                modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &tr);
+            let options: Vec<_> = projection
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == accesskit::Role::ListBoxOption && !node.is_disabled()
+                })
+                .collect();
+            assert_eq!(options.len(), total, "{query:?}");
+            for (n, (_, node)) in options.iter().enumerate() {
+                assert_eq!(node.position_in_set(), Some(n + 1), "{query:?}");
+                assert_eq!(node.size_of_set(), Some(total), "{query:?}");
+            }
+            let list = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::ListBox)
+                .unwrap();
+            assert_eq!(
+                list.1.size_of_set(),
+                (total > 0).then_some(total),
+                "{query:?}"
+            );
         }
     }
 }

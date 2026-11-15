@@ -714,81 +714,119 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
 }
 
 /// A row's description is painted whole or not at all: two columns after the
-/// label, and ending at least two columns before the right-aligned hint, at
-/// the 86 columns of the 1280x820 palette and the 41 of the 640x820 one, in
-/// English and in the expanded pseudo-locale. When it would not fit whole it
-/// is not painted, rather than ellipsized or run into the hint.
+/// label, ending at least two columns before the right-aligned hint and
+/// inside the panel. Checked in English, Spanish and the expanded
+/// pseudo-locale, at both platforms' default fonts (13 and 14 px, the cell
+/// measured from the bundled font), in the palette of a 1280x820 window,
+/// where every case shows, and of a 640x820 one, where some give way.
 #[test]
 fn palette_description_is_whole_or_hidden() {
     use kettle_i18n::{Language, Text, Translator};
     use unicode_width::UnicodeWidthStr as _;
-    let cw = 7.8;
-    let ax = 280.0;
+    let ax = 40.0;
     let cases = [
-        (Text::PaletteSplitRight, Text::PaletteDescSplitRight, "⌘D"),
-        (Text::PaletteNewTab, Text::PaletteDescNewTab, "Ctrl+Shift+T"),
         (
-            Text::PaletteJumpPrevPrompt,
-            Text::PaletteDescNeedsShellIntegration,
-            "Ctrl+Up",
+            Text::PaletteSplitRight,
+            Text::PaletteDescSplitRight,
+            ["⌘D", "Ctrl+Shift+E"],
+        ),
+        (
+            Text::PaletteNewTab,
+            Text::PaletteDescNewTab,
+            ["⌘T", "Ctrl+Shift+T"],
+        ),
+        (
+            Text::PaletteUndoCloseTab,
+            Text::PaletteDescUndoCloseTab,
+            ["", ""],
+        ),
+        (
+            Text::PaletteJumpNextPrompt,
+            Text::PaletteDescPromptNeedsShellIntegration,
+            ["⌘Down", "Ctrl+Down"],
         ),
         (
             Text::PaletteSelectCommandOutput,
             Text::PaletteDescNeedsShellIntegration,
-            "",
+            ["", ""],
         ),
     ];
-    let mut shown = [0, 0];
-    for tr in [Translator::new(Language::En), Translator::pseudo()] {
-        for (columns_at, columns) in [86usize, 41].into_iter().enumerate() {
-            let panel_w = menu::panel_width(columns as f32, cw);
-            for (label, description, hint) in cases {
-                let row = ContextMenuRow {
-                    label: tr.text(label).to_string(),
-                    description: tr.text(description).to_string(),
-                    hint: hint.to_string(),
-                    enabled: true,
-                    ..Default::default()
-                };
-                let needed = row.label.width()
-                    + 2
-                    + row.description.width()
-                    + if hint.is_empty() { 0 } else { 2 + hint.width() };
-                let left = menu_row_description_left(&row, ax, panel_w, cw);
-                assert_eq!(
-                    left.is_some(),
-                    needed <= columns,
-                    "{} at {columns}",
-                    row.label
-                );
-                let Some(left) = left else { continue };
-                shown[columns_at] += 1;
-                assert_eq!(left, ax + 16.0 + (row.label.width() + 2) as f32 * cw);
-                let end = left + row.description.width() as f32 * cw;
-                let hint_left =
-                    super::overlays::menu_hint_left(ax, panel_w, hint.width() as f32 * cw);
-                if !hint.is_empty() {
+    for font_px in [13.0, 14.0] {
+        let (cw, _) = crate::bundled_cell_size(font_px, 1.0);
+        for tr in [
+            Translator::new(Language::En),
+            Translator::new(Language::Es),
+            Translator::pseudo(),
+        ] {
+            for window in [1280.0_f32, 640.0] {
+                // The palette card's width rule at 1x.
+                let panel_w = (window * 0.56).clamp(360.0, 720.0);
+                let columns = menu::panel_columns(panel_w, cw);
+                let mut shown = 0;
+                for (label, description, hints) in cases {
+                    for hint in hints {
+                        let row = ContextMenuRow {
+                            label: tr.text(label).to_string(),
+                            description: tr.text(description).to_string(),
+                            hint: hint.to_string(),
+                            enabled: true,
+                            ..Default::default()
+                        };
+                        let what = format!(
+                            "{font_px} px {:?} {window} {} {hint:?}",
+                            tr.language(),
+                            row.label
+                        );
+                        let needed = row.label.width()
+                            + 2
+                            + row.description.width()
+                            + if hint.is_empty() { 0 } else { 2 + hint.width() };
+                        let left = menu_row_description_left(&row, ax, panel_w, cw);
+                        assert_eq!(left.is_some(), needed <= columns, "{what}");
+                        let Some(left) = left else { continue };
+                        shown += 1;
+                        assert_eq!(
+                            left,
+                            ax + 16.0 + (row.label.width() + 2) as f32 * cw,
+                            "{what}"
+                        );
+                        let end = left + row.description.width() as f32 * cw;
+                        let hint_left =
+                            super::overlays::menu_hint_left(ax, panel_w, hint.width() as f32 * cw);
+                        if !hint.is_empty() {
+                            assert!(
+                                end + 2.0 * cw <= hint_left + 0.01,
+                                "{what}: runs into its hint"
+                            );
+                        }
+                        assert!(
+                            end <= ax + panel_w - 16.0 + 0.01,
+                            "{what}: leaves the panel"
+                        );
+                    }
+                }
+                let all = cases.len() * 2;
+                if window == 1280.0 {
+                    assert_eq!(
+                        shown,
+                        all,
+                        "{font_px} px {:?}: all show at 1280",
+                        tr.language()
+                    );
+                } else {
                     assert!(
-                        end + 2.0 * cw <= hint_left + 0.01,
-                        "{} runs into its hint",
-                        row.label
+                        shown < all,
+                        "{font_px} px {:?}: some give way at 640",
+                        tr.language()
                     );
                 }
-                assert!(
-                    end <= ax + panel_w - 16.0 + 0.01,
-                    "{} leaves the panel",
-                    row.label
-                );
             }
         }
     }
-    // Every case shows at 86 columns; at 41 some do and some give way.
-    assert_eq!(shown[0], 2 * cases.len());
-    assert!(shown[1] > 0 && shown[1] < 2 * cases.len(), "{shown:?}");
     // A row with no description, or a separator, paints none.
     let plain = ContextMenuRow {
         label: "Copy".into(),
         ..Default::default()
     };
-    assert_eq!(menu_row_description_left(&plain, ax, 1000.0, cw), None);
+    assert_eq!(menu_row_description_left(&plain, ax, 1000.0, 7.8), None);
 }

@@ -3934,12 +3934,15 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
     Some(serde_json::json!({
         "rect": rect_json(menu.card_rect()),
         "rows_rect": rect_json(menu.rows_rect()),
-        // Headings are not rows a probe can select or press: left out, so the
-        // indices listed are the rows' own, and an empty palette's first
-        // command is row 1.
-        "rows": menu.rows.iter().enumerate().filter(|(_, row)| !row.heading).filter_map(|(index, row)| {
+        // Headings are not rows a probe can select or press, so they are
+        // left out. `index` is the painted row (an empty palette's first
+        // command is row 1, under the Tabs heading); `option` is the command
+        // index that selection, Enter and accessibility count, headings
+        // skipped.
+        "rows": menu.rows.iter().enumerate().filter_map(|(index, row)| {
+            let option = kettle_render::menu_row_option(&menu.rows, index)?;
             menu.visible_row_rect(index).map(|rect| serde_json::json!({
-                "index": index, "rect": rect_json(rect), "enabled": row.enabled,
+                "index": index, "option": option, "rect": rect_json(rect), "enabled": row.enabled,
                 "selected": index == menu.highlight,
             }))
         }).collect::<Vec<_>>(),

@@ -219,6 +219,25 @@ fn every_spanish_message_has_a_review_status() {
                         | "palette_group_layouts_profiles_ssh"
                         | "palette_group_settings"
                         | "palette_group_help"
+                        // Palette descriptions are read after their command,
+                        // and the relabelled entries are its name.
+                        | "palette_desc_split_right"
+                        | "palette_desc_split_down"
+                        | "palette_desc_split_auto"
+                        | "palette_desc_new_tab"
+                        | "palette_desc_undo_close_tab"
+                        | "palette_desc_duplicate_tab"
+                        | "palette_desc_duplicate_pane"
+                        | "palette_desc_needs_shell_integration"
+                        | "palette_desc_prompt_needs_shell_integration"
+                        | "palette_desc_show_help"
+                        | "palette_about"
+                        | "palette_show_help"
+                        | "palette_split_right"
+                        | "palette_split_down"
+                        | "palette_split_left"
+                        | "palette_split_up"
+                        | "palette_equalize_splits"
                         // The SSH launcher's status line is also a polite
                         // live region.
                         | "ssh_status_saved"

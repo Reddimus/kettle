@@ -82,7 +82,9 @@ use completion::{
 pub use completion::{
     CompletionOverlay, CompletionOverlayRow, completion_overlay_rect, completion_overlay_row_rects,
 };
-pub use fonts::{PreparedFonts, StartupFonts, clamp_font_size, metrics_for, pane_metrics};
+pub use fonts::{
+    PreparedFonts, StartupFonts, bundled_cell_size, clamp_font_size, metrics_for, pane_metrics,
+};
 #[cfg(test)]
 use fonts::{TEXT_SYMBOL_PROBE, resolve_text_symbol_family};
 use fonts::{font_features, load_bundled_font, measure_cell, single_column_text_presentation};

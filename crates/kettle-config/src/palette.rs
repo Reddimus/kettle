@@ -363,7 +363,6 @@ pub fn description(action: &Action) -> Option<Text> {
         UndoCloseTab => T::PaletteDescUndoCloseTab,
         DuplicateTab => T::PaletteDescDuplicateTab,
         DuplicatePane => T::PaletteDescDuplicatePane,
-        EqualizeSplits => T::PaletteDescEqualizeSplits,
         SelectCommandOutput => T::PaletteDescNeedsShellIntegration,
         // The prompt rows have their own message: their labels already name
         // the shell, and in Spanish they are long.
@@ -1420,20 +1419,23 @@ mod tests {
                 .map(|entry| (cmds[entry.index].1.clone(), entry.matched_chars.is_some()))
                 .collect()
         };
+        // The two divider commands lead, however each was found (in Spanish
+        // "divider" also spells out "Divi…der…" in a label).
+        let leading = |query: &str, tr: &Translator| -> Vec<Action> {
+            let mut two: Vec<Action> = found(query, tr)
+                .into_iter()
+                .take(2)
+                .map(|(a, _)| a)
+                .collect();
+            two.sort_by_key(|a| format!("{a:?}"));
+            two
+        };
+        for (query, tr) in [("divider", &EN), ("divisor", &ES), ("divider", &ES)] {
+            assert_eq!(leading(query, tr), [SplitDown, SplitRight], "{query:?}");
+        }
         assert_eq!(
             found("divider", &EN),
             [(SplitRight, false), (SplitDown, false)]
-        );
-        assert_eq!(
-            found("divisor", &ES),
-            [(SplitRight, false), (SplitDown, false)]
-        );
-        // The English word from a Spanish palette: Split down through its
-        // English description, Split right through its own label, which
-        // "divider" spells out ("Divi…der…").
-        assert_eq!(
-            found("divider", &ES),
-            [(SplitRight, true), (SplitDown, false)]
         );
         let shell = found("shell integration", &EN);
         for action in [SelectCommandOutput, JumpPrevPrompt, JumpNextPrompt] {
@@ -1456,15 +1458,16 @@ mod tests {
             "{div:?}"
         );
         // Every described command's description is its own text in both
-        // languages, and no description repeats its label.
+        // languages and shares no word with its label: a description says
+        // what the label cannot.
         for tr in [EN, ES] {
             for (label, action) in &cmds {
                 if let Some(text) = description(action) {
                     let (label, text) = (tr.text(*label), tr.text(text));
                     assert!(!text.is_empty(), "{action:?}");
                     assert!(
-                        !label.to_lowercase().contains(&text.to_lowercase()),
-                        "{action:?}: {text:?} repeats {label:?}"
+                        !restates(label, text),
+                        "{action:?}: {text:?} restates {label:?}"
                     );
                 }
             }
@@ -1513,6 +1516,94 @@ mod tests {
             let mut names = std::collections::BTreeSet::new();
             for group in &seen {
                 assert!(names.insert(tr.text(group.text())), "{group:?}");
+            }
+        }
+    }
+
+    /// Whether `description` repeats a word of `label`: two words of four or
+    /// more letters that share their first five (or all, when shorter), so
+    /// "Equal pane areas" restates "Equalize splits" and "Last closed"
+    /// restates "Undo close tab", while "Divisor vertical" does not restate
+    /// "Dividir a la derecha".
+    fn restates(label: &str, description: &str) -> bool {
+        let stems = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| word.chars().count() >= 4)
+                .map(|word| word.to_lowercase().chars().take(5).collect())
+                .collect()
+        };
+        let label = stems(label);
+        stems(description).iter().any(|stem| label.contains(stem))
+    }
+
+    #[test]
+    fn the_restate_rule_catches_paraphrase() {
+        assert!(restates("Equalize splits", "Equal pane areas"));
+        assert!(restates("Undo close tab", "Last closed, in its folder"));
+        assert!(restates("Split left", "New pane on the left"));
+        assert!(!restates("Dividir a la derecha", "Divisor vertical"));
+        assert!(!restates("Undo close tab", "Most recent, in its folder"));
+    }
+
+    /// Common queries beyond `split`: equal matches with a shortcut lead,
+    /// then shorter labels, then registry order, in English and Spanish.
+    #[test]
+    fn common_queries_rank_shortcut_commands_first() {
+        use Action::*;
+        let (cmds, entries) = default_entries();
+        let order = |query: &str, tr: &Translator| -> Vec<Action> {
+            rank_matches(query, &entries, tr)
+                .into_iter()
+                .map(|entry| cmds[entry.index].1.clone())
+                .collect()
+        };
+        assert_eq!(
+            order("reset", &EN),
+            [ResetFontSize, Reset, ZoomNormalAll, ResetAndClear]
+        );
+        assert_eq!(
+            order("restablecer", &ES),
+            [Reset, ResetFontSize, ZoomNormalAll, ResetAndClear]
+        );
+        assert_eq!(
+            order("copy", &EN),
+            [Copy, PreviewCopy, CopyAgentSetup, ToggleCopyOnSelect]
+        );
+        assert_eq!(order("copiar", &ES), [Copy, PreviewCopy, CopyAgentSetup]);
+        assert_eq!(
+            order("theme", &EN),
+            [NextTheme, OpenThemePicker, PrevTheme, ToggleLightDark]
+        );
+        assert_eq!(
+            order("tema", &ES),
+            [NextTheme, PrevTheme, OpenThemePicker, ToggleLightDark]
+        );
+        // `tab`: New tab first, and among the rows the query starts a word
+        // of, every one with a shortcut before every one without.
+        for (query, tr) in [("tab", &EN), ("pestaña", &ES)] {
+            let ranked = rank_matches(query, &entries, tr);
+            assert_eq!(
+                cmds[ranked[0].index].1,
+                if tr.language() == Language::En {
+                    NewTab
+                } else {
+                    NextTab
+                }
+            );
+            let bound: Vec<bool> = ranked
+                .iter()
+                .map(|entry| entries[entry.index].bound)
+                .collect();
+            let first_unbound = bound.iter().position(|b| !b).unwrap();
+            assert!(
+                bound[first_unbound..].iter().all(|b| !b),
+                "{query:?}: {bound:?}"
+            );
+            for action in [UndoCloseTab, DuplicateTab] {
+                assert!(
+                    ranked.iter().any(|e| cmds[e.index].1 == action),
+                    "{query:?} {action:?}"
+                );
             }
         }
     }

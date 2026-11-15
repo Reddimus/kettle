@@ -2364,6 +2364,17 @@ fn push_picker_accessibility(
 
     let mut list_children = Vec::new();
     let mut selected = None;
+    // Only the painted rows are shown to a screen reader, so the list's own
+    // child count is the window, not the results. Every result says where it
+    // stands among all of them instead: "3 of 6" after `split`, and out of
+    // every command in the empty palette.
+    let results = menu.map_or(0, |menu| {
+        menu.rows
+            .iter()
+            .filter(|row| row.enabled && !row.heading && !row.separator)
+            .count()
+    });
+    let mut position = 0;
     if let Some(menu) = menu {
         for (index, row) in menu.rows.iter().enumerate() {
             // A heading is not an option: the list stays flat, and the
@@ -2394,7 +2405,11 @@ fn push_picker_accessibility(
                 }
                 None => {}
             }
-            if !row.enabled {
+            if row.enabled {
+                position += 1;
+                option.set_position_in_set(position);
+                option.set_size_of_set(results);
+            } else {
                 option.set_disabled();
             }
             // A disabled placeholder is never the selected option: Enter does
@@ -2414,6 +2429,9 @@ fn push_picker_accessibility(
     }
     list.set_label(tr.picker_a11y_results(label));
     list.set_children(list_children);
+    if results > 0 {
+        list.set_size_of_set(results);
+    }
     projection.nodes.push((list_id, list));
 
     let mut dialog_children = vec![input_id, list_id];

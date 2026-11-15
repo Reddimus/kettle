@@ -351,9 +351,12 @@ keyboard-shortcut list stay flat. The palette's selection counts commands, not
 rows: `kettle_render::menu_row_option` and `menu_option_row` convert between
 the two for the painter's highlight, a press, accessibility (one flat ListBox
 whose option ids skip headings, the group's name read after its first command)
-and `ctl ui_geometry`, which leaves headings out. The palette's card (and its
-header) is 360 to 720 points wide, scaled by the window's scale factor
-(`PickerList::card_scale`); the other pickers keep their pixel limits. The search bar sizes each control from its
+and `ctl ui_geometry`, which leaves headings out and reports both a row's
+`index` and its `option`. The open picker is laid out once, by
+`open_picker_menu`: the frame paints it and presses, the query header
+(`ContextMenu::picker_header_rect`), accessibility and ctl measure it. The
+palette's card is 360 to 720 points wide, scaled by the window's scale
+factor (`PickerList::card_scale`); the other pickers keep their pixel limits. The search bar sizes each control from its
 longest label in the UI's language, never narrower than in English, and paint
 and hit testing share that geometry. Control-protocol JSON (`ui_geometry`)
 keeps English labels in every language, and so do logs: where a notification

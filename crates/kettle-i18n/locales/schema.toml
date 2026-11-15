@@ -3140,9 +3140,6 @@ context = "crates/kettle-config/src/palette.rs description(): secondary text pai
 [messages.palette_desc_duplicate_pane]
 context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_duplicate_pane and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new pane runs the focused pane's program in its folder, to the right of it."
 
-[messages.palette_desc_equalize_splits]
-context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_equalize_splits and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. Every pane in the tab gets the same share of the space."
-
 [messages.palette_desc_needs_shell_integration]
 context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_select_command_output and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. These commands find commands and prompts through the marks shell integration writes (OSC 133). Shell is feminine, as in the prompt entries."
 

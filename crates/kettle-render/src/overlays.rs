@@ -333,6 +333,16 @@ impl ContextMenu {
         )
     }
 
+    /// A picker's query header: as wide as the card, just above its rows.
+    pub fn picker_header_rect(&self) -> Rect4 {
+        (
+            self.anchor.0,
+            self.anchor.1 - self.picker_header_height,
+            self.panel_w_clamped,
+            self.picker_header_height,
+        )
+    }
+
     pub fn card_rect(&self) -> Rect4 {
         let (x, y, w, h) = self.rows_rect();
         (

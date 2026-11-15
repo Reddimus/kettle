@@ -1474,19 +1474,28 @@ pub(super) fn picker_context_menu(
     })
 }
 
-/// The open picker's rows as a menu panel: the first of `pickers` that is
-/// open, in key-routing order.
-pub(super) fn picker_overlay_context_menu(
-    pickers: [Option<PickerList>; 4],
+/// The open picker laid out once: its card, its rows and its header (see
+/// `ContextMenu::picker_header_rect`). The frame paints this, and presses,
+/// the header's text field, accessibility and `ctl ui_geometry` measure it,
+/// so the command palette's card and header have one size, in points, at
+/// every scale. `None` when no picker is open or the window has no room.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_picker_menu(
+    ws: &WindowState,
+    cfg: &Config,
+    theme_key: &str,
+    tr: &kettle_i18n::Translator,
+    notice: Option<&crate::update_notice::Notice>,
     surface: (f32, f32),
     cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    pickers
-        .into_iter()
-        .flatten()
-        .next()
-        .and_then(|list| picker_context_menu(list, surface, cell, top_chrome))
+    picker_context_menu(
+        open_picker_list(ws, cfg, theme_key, tr, notice)?,
+        surface,
+        cell,
+        top_chrome,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1712,6 +1721,28 @@ impl App {
         }
     }
 
+    /// [`open_picker_menu`] for this window: its surface, cell and chrome.
+    pub(super) fn picker_menu(&self, ws: &WindowState) -> Option<ContextMenu> {
+        let surface = ws
+            .renderer
+            .as_ref()
+            .map(|renderer| {
+                let (w, h) = renderer.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        open_picker_menu(
+            ws,
+            &self.cfg,
+            self.theme_picker_key_for(ws),
+            &self.ui_text,
+            self.update_notice().as_ref(),
+            surface,
+            self.menu_cell(ws),
+            self.picker_top_chrome(ws),
+        )
+    }
+
     pub(super) fn picker_pointer(
         &mut self,
         ws: &mut WindowState,
@@ -1721,26 +1752,8 @@ impl App {
         if ws.context_menu.is_some() {
             return false;
         }
-        let Some(list) = open_picker_list(
-            ws,
-            &self.cfg,
-            self.theme_picker_key_for(ws),
-            &self.ui_text,
-            self.update_notice().as_ref(),
-        ) else {
-            return false;
-        };
-        let surface = ws
-            .renderer
-            .as_ref()
-            .map(|renderer| {
-                let (w, h) = renderer.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
         let cell = self.menu_cell(ws);
-        let Some(menu) = picker_context_menu(list, surface, cell, self.picker_top_chrome(ws))
-        else {
+        let Some(menu) = self.picker_menu(ws) else {
             return false;
         };
         // The theme picker's footer takes its own presses: its contrast

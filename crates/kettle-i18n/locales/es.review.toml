@@ -1055,7 +1055,6 @@ palette_desc_new_tab = "draft"
 palette_desc_undo_close_tab = "draft"
 palette_desc_duplicate_tab = "draft"
 palette_desc_duplicate_pane = "draft"
-palette_desc_equalize_splits = "draft"
 palette_desc_needs_shell_integration = "draft"
 palette_desc_prompt_needs_shell_integration = "draft"
 palette_desc_show_help = "draft"
@@ -1316,4 +1315,21 @@ keys = [
     "palette_group_layouts_profiles_ssh",
     "palette_group_settings",
     "palette_group_help",
+    "palette_desc_split_right",
+    "palette_desc_split_down",
+    "palette_desc_split_auto",
+    "palette_desc_new_tab",
+    "palette_desc_undo_close_tab",
+    "palette_desc_duplicate_tab",
+    "palette_desc_duplicate_pane",
+    "palette_desc_needs_shell_integration",
+    "palette_desc_prompt_needs_shell_integration",
+    "palette_desc_show_help",
+    "palette_about",
+    "palette_show_help",
+    "palette_split_right",
+    "palette_split_down",
+    "palette_split_left",
+    "palette_split_up",
+    "palette_equalize_splits",
 ]

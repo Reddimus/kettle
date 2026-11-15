@@ -657,20 +657,15 @@ fn hover_updates_menu_highlight_skipping_separators() {
 
 #[test]
 fn picker_overlay_projection_installs_the_vertical_context_menu() {
-    let menu = picker_overlay_context_menu(
-        [
-            Some(command_picker_list(
-                "",
-                3,
-                &kettle_config::keybinds::defaults(),
-                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
-                None,
-                &[], false, kettle_config::BroadcastDefault::default(),
-            )),
+    let menu = picker_context_menu(
+        command_picker_list(
+            "",
+            3,
+            &kettle_config::keybinds::defaults(),
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
             None,
-            None,
-            None,
-        ],
+            &[], false, kettle_config::BroadcastDefault::default(),
+        ),
         (480.0, 240.0),
         (8.0, 16.0),
         0.0,
@@ -686,8 +681,8 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
     // The theme picker's rows use the same panel.
     let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
     let themes = super::theme_picker_list("", 2, "TokyoNight Night", &tr);
-    let menu = picker_overlay_context_menu(
-        [None, Some(themes), None, None],
+    let menu = picker_context_menu(
+        themes,
         (480.0, 240.0),
         (8.0, 16.0),
         0.0,

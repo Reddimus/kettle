@@ -150,7 +150,7 @@ impl App {
         let field_hit = self
             .modal_text_projection(ws)
             .is_some_and(|field| rect_contains(field.rect, x, y));
-        let (cw, ch) = self.menu_cell(ws);
+        let (cw, _) = self.menu_cell(ws);
         let surface = ws
             .renderer
             .as_ref()
@@ -183,18 +183,10 @@ impl App {
             })
         } else {
             field_hit
-                || open_picker_list(
-                    ws,
-                    &self.cfg,
-                    self.theme_picker_key_for(ws),
-                    &self.ui_text,
-                    self.update_notice().as_ref(),
-                )
-                .and_then(|list| {
-                    picker_context_menu(list, surface, (cw, ch), self.picker_top_chrome(ws))
-                })
-                // The whole card, the theme picker's footer included.
-                .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
+                || self
+                    .picker_menu(ws)
+                    // The whole card, the theme picker's footer included.
+                    .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
     }
@@ -267,14 +259,8 @@ impl App {
             || ws.layout_picker_input.is_some()
             || ws.ssh_input.is_some();
         if picker {
-            // The palette's card is sized in points; the header shares it.
-            let scale = if ws.palette_input.is_some() {
-                palette_card_scale(ws)
-            } else {
-                1.0
-            };
-            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1, scale)?
-                .header;
+            // The header of the card the frame paints, from the same layout.
+            rect = self.picker_menu(ws)?.picker_header_rect();
         }
         if ws.settings_text_edit.is_none()
             && !ws

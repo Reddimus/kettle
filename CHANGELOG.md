@@ -348,8 +348,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On a HiDPI display the command palette is as wide, in points, as at 1x:
   56% of the window, from 360 to 720 points. It was held to 720 pixels, so
   on a 2x Retina display a 1280-point window got a 360-point palette, about
-  43 columns, too narrow for most command descriptions. The theme, layout
-  and SSH pickers keep their sizes.
+  43 columns, too narrow for most command descriptions. The painted card,
+  its query header, presses, accessibility and `ctl ui_geometry` all take
+  one layout, so they agree at every scale. The theme, layout and SSH
+  pickers keep their pixel widths.
 
 - Command palette rows can carry a short description after the label, in
   secondary text, where the label leaves something out: which way a split's
@@ -359,13 +361,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   parenthetical notes that used to sit in five split labels moved there, or
   were dropped where they only repeated the label, and "About kettle" and
   "Open kettle help / README" read "About Kettle" and "Open Kettle help".
-  Between equally good matches, a command with a shortcut now ranks first,
-  so `split` lists Split right, Split down and Split automatically before
-  Split up and Split left, in English and Spanish. A search of four or more
-  characters that matches fewer than three labels also searches
-  descriptions. Screen readers hear each command's name, then its shortcut
-  in words ("Shift Command right bracket", never glyphs) and its
-  description.
+  For every query, between equally good matches, a command with a shortcut
+  now ranks first, ahead of a shorter label without one: `split` lists Split
+  right, Split down and Split automatically before Split up and Split left,
+  in English and Spanish, and `tab` lists the tab commands that have
+  shortcuts first. A search of four or more characters that matches fewer
+  than three labels also searches descriptions. For a screen reader each
+  command's name is its label, and its description is the shortcut in words
+  ("Command T" for New tab on macOS, "Control Shift T" elsewhere; never
+  glyphs), then the description; checked with Orca and in the macOS
+  accessibility tree. Each result also reports its place among all results
+  ("3 of 6" after `split`), not among the rows in view.
 
 - With nothing typed, the command palette lists its commands under headings
   in order of use: Tabs (New tab, Close tab, Next tab, Previous tab first),
@@ -376,7 +382,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   keyboard-shortcut list. Arrows, Enter, the pointer and screen readers skip
   the headings; screen readers keep one flat list and hear a group's name
   after its first command. `ctl ui_geometry` leaves headings out of the
-  picker's `rows`, so the empty palette's first command is row 1.
+  picker's `rows`; each row's `index` is still its painted row, so the empty
+  palette's first command has `index` 1, and a new `option` field gives the
+  command index that selection, Enter and accessibility use (0 for it).
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's

@@ -114,16 +114,15 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
         let ssh_status = ssh_status_line(ws).map(str::to_string);
-        let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
+        let (ssh_query, ssh_hint) = match &ws.ssh_input {
             Some((query, _)) => (
                 Some(with_preedit(query)),
                 ssh_picker_hint(ssh_status.as_deref(), tr),
-                ssh_picker_list_for(ws, &self.cfg, tr),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
 
-        let (palette_query, palette_hint, palette_picker) = match &ws.palette_input {
+        let (palette_query, palette_hint) = match &ws.palette_input {
             Some((query, _)) => (
                 Some(with_preedit(query)),
                 picker_hint(
@@ -134,18 +133,16 @@ impl App {
                         ("Esc", T::PickerHintCancel),
                     ],
                 ),
-                palette_picker_list(ws, &self.cfg, tr, self.update_notice().as_ref()),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
 
         // Terminator parity (layoutlauncher.py): build the layout picker's
         // query and hint the same way as the command palette. An empty
         // layouts dir is fine; the picker shows a "No saved layouts" row
         // hinting `kettle --layout NAME`.
-        let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
-        {
-            Some((query, selected)) => (
+        let (layout_picker_query, layout_picker_hint) = match &ws.layout_picker_input {
+            Some((query, _)) => (
                 Some(with_preedit(query)),
                 picker_hint(
                     tr,
@@ -155,30 +152,18 @@ impl App {
                         ("Esc", T::PickerHintCancel),
                     ],
                 ),
-                Some(layout_picker_list(
-                    query,
-                    *selected,
-                    &ws.layout_picker_entries,
-                    tr,
-                )),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
-        let (theme_picker_query, theme_picker_hint, theme_picker) = match &ws.theme_picker_input {
+        let (theme_picker_query, theme_picker_hint) = match &ws.theme_picker_input {
             Some(state) => (
                 Some(with_preedit(&state.query)),
                 picker_hint(
                     tr,
                     &theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true),
                 ),
-                Some(theme_picker_list_with_footer(
-                    state,
-                    &self.cfg,
-                    self.theme_picker_key_for(ws),
-                    tr,
-                )),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
         let hint_labels: Vec<HintLabel> = match &ws.hint_state {
             Some((targets, typed)) => targets
@@ -316,22 +301,9 @@ impl App {
             .resize_overlay
             .and_then(|(c, r, t)| (t.elapsed() < RESIZE_OVERLAY_DURATION).then_some((c, r)));
 
-        let context_menu = self.context_menu_overlay(ws).or_else(|| {
-            let surface = ws
-                .renderer
-                .as_ref()
-                .map(|renderer| {
-                    let (width, height) = renderer.surface_size();
-                    (width as f32, height as f32)
-                })
-                .unwrap_or((800.0, 600.0));
-            picker_overlay_context_menu(
-                [palette_picker, theme_picker, layout_picker, ssh_picker],
-                surface,
-                self.menu_cell(ws),
-                self.picker_top_chrome(ws),
-            )
-        });
+        let context_menu = self
+            .context_menu_overlay(ws)
+            .or_else(|| self.picker_menu(ws));
         // Marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing. The
         // title-edit rect is app chrome, never a bottom overlay over terminal
