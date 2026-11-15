@@ -141,22 +141,39 @@ These fixtures create no App, native window, renderer, clipboard or global UI
 services. Native and control event dispatch still require a live integration pass.
 The button acts on release: the same fixtures check that a press only arms it
 and that a release elsewhere, over another pane's button or under a receipt
-does nothing.
+does nothing. `scrollback_receipt_hit_a_covered_jump_button_is_neither_hovered_nor_pressed`
+covers a real pane's button with a real persistent notice, the search bar's
+geometry, a receipt and a dialog, and checks the hover state, the press and
+the release under each: the hover, the hand, the press and the release all
+ask `scrollback_pill_reach`.
 
 `kettle-render`'s `scrollback_pill_tests` pin the button and the "Start of kept
 history" label as resolved geometry and colours, never glyph pixels: the key
 hint shown, dropped and rebound; each state's fill, edge and label floors on
 every bundled theme; the quads the painter emits at 1x and 2x; the label's
 condition, including a live prompt after Clear Scrollback and one line below
-the top, from a real terminal as well; its English and Spanish text; and its
-clearance of the scrollbar, the button and the search bar. The search bar is a
-lane reserved under the panes, so that last check holds by layout and guards
-it. `headless_tests::a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label`
-samples the fill, edge and rule in rendered frames, away from any glyph.
+the top, from a real terminal as well; its English and Spanish text; its
+clearance of the scrollbar and the button; the edge over a translucent window
+(opaque, 0.99, 0.86, 0.7 and 0.43, with and without macOS's backdrop lift);
+and the macOS and portable chords shaped in the bundled face, ending inside
+the button. `headless_tests::a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label`
+samples the fill, edge and rule in rendered frames, away from any glyph, and
+`headless_tests::the_painted_chord_ends_inside_the_jump_button` reads the chord
+the painter shaped. Both skip on a host with no GPU adapter unless
+`KETTLE_REQUIRE_GPU` is set, which turns the skip into a failure, as
+`KETTLE_REQUIRE_AUDIO` does for the sound tests.
 `kettle-ui`'s `scrollback_indicator_tests` check that the pointer, AccessKit
-and `ui_geometry` read those rects, and that the "Viewing history" status is
-one node that does not change between offsets. Hover and press feedback under
-a real pointer, and what a screen reader speaks, need a desktop.
+and `ui_geometry` read those rects; that the "Viewing history" status is one
+node that does not change between offsets, and that AccessKit's own hit test
+over a scrolled-back pane never lands on it; that leaving the window ends a
+press; and, with `App::area`'s `pane_area`, that the button and the label
+stay out of the search bar at every window size and bar placement.
+`accessibility_id_tests` checks that no two AccessKit ids collide.
+Checked live with Orca in a private headless GNOME session on Tower
+(2026-11-14): Orca spoke "Viewing history" on the first Shift+PageUp from live
+output, not on the two that scrolled further, and again on the first
+Shift+PageUp after Ctrl+End returned to live output; AT-SPI showed one
+`object:announcement` each time. VoiceOver and Narrator were not checked.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.

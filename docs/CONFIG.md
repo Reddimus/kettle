@@ -705,18 +705,26 @@ bound to `scroll_to_bottom` (**Ctrl+End** by default, **⌃End** on macOS). The
 key follows a rebind, and is left out when the action is unbound or the pane
 is too narrow for both: the count always shows. The button has an outline at
 least 3:1 against the terminal, a hover and a pressed state, and acts when the
-press is released over it, so moving off it cancels. It disappears at the
+press is released over it; a release anywhere else, or the pointer leaving the
+window, cancels it. In a translucent window the outline keeps 3:1 against
+whatever desktop shows through at `background-opacity` 0.86 and above; below
+that, on some themes no colour can, and it takes the white or black that
+comes closest. A toast, the search bar, a paste receipt or a dialog over the
+button takes the pointer, and the button shows no hover there. It disappears at the
 bottom and when a pane is too small to fit its count. It remains available
 with `scrollbar = never`. Screen readers get it as a button with that key as
-its shortcut, and hear **Viewing history** once when the focused pane leaves
-live output.
+its shortcut, and a polite **Viewing history** status when the focused pane
+leaves live output. Orca on GNOME speaks the status once each time the pane
+leaves live output, not again as it scrolls further; VoiceOver and Narrator
+are not yet checked.
 
 Scrolled to the very top of a history that has lost its oldest lines, a pane
 shows **Start of kept history · 10,000 lines** at its top right: where the
 history Kettle still holds begins, and how many lines that is. The lines are
 gone because `scrollback` or `scrollback-bytes` dropped them, or because the
 history was cleared; the count is what the pane holds now, which is the
-`scrollback` limit once that limit is what drops lines. A pane too narrow for
+history limit once that limit is what drops lines: `scrollback`, or in a pane
+wide enough for `scrollback-bytes` to bind first, fewer lines. A pane too narrow for
 the count shows the label alone, and a pane with nothing dropped, or back at
 its live output, shows none.
 The scrollbar keeps its configured width at rest and grows to at least 10
