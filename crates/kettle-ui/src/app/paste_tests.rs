@@ -1707,6 +1707,24 @@ fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
         PasteDispatch::Drop
     ));
     mux.broadcast = BroadcastScope::Off;
+    // Either half of the consent alone is enough to drop it: the same scope
+    // with another recipient set, and the same recipients under another
+    // scope.
+    let other_recipients = super::paste::PasteNow {
+        recipients: vec![pane],
+        ..paste_now(&mux, Always)
+    };
+    let other_scope = super::paste::PasteNow {
+        broadcast: BroadcastScope::Tab,
+        ..paste_now(&mux, Always)
+    };
+    for now in [other_recipients, other_scope] {
+        assert!(matches!(
+            super::paste::text_paste_dispatch(&answered, now, tr),
+            PasteDispatch::Drop
+        ));
+    }
+    assert!(captured().is_empty());
 
     // The program turns bracketed paste off while the question is open. The
     // same answer would now send ^C and ESC and run both lines, so nothing
