@@ -1,5 +1,12 @@
-//! Platform text selection and the unchanged arboard image/file path.
-use std::time::Instant;
+//! Platform selections, and what a paste takes from the clipboard.
+//!
+//! One order holds on every platform: a file list, then text, then an image.
+//! Text wins over an image because a source that offers both, such as
+//! spreadsheet cells, means the text. On native Wayland the bridge negotiates
+//! from the offer's type list (`crate::wayland`); everywhere else arboard is
+//! asked in that order.
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", test))]
 use winit::raw_window_handle::RawDisplayHandle;
@@ -23,6 +30,50 @@ pub(crate) fn text_backend(display: RawDisplayHandle) -> TextBackend {
         _ => TextBackend::Arboard,
     }
 }
+
+/// What a paste may take besides text: the `paste-files` and `paste-images`
+/// policies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PasteWant {
+    pub(crate) files: bool,
+    pub(crate) images: bool,
+}
+
+/// What the clipboard gives a paste.
+pub(crate) enum PasteContent {
+    Files(Vec<PathBuf>),
+    Image(PasteImage),
+    /// The text, or why there is none. `ContentNotAvailable` is an empty
+    /// clipboard; a timeout or an oversize text is said to the user.
+    Text(Result<String, arboard::Error>),
+    /// The clipboard holds local files, or a list too damaged to tell, and
+    /// `paste-files` is off: nothing is pasted, not from the list and not
+    /// from the plain-text copy of the paths that file managers add beside
+    /// it, and nothing is said.
+    FilesOff,
+    /// Nothing is pasted and the user is told why.
+    Refused(PasteRefusal),
+}
+
+pub(crate) enum PasteImage {
+    /// Pixels arboard decoded.
+    Rgba(arboard::ImageData<'static>),
+    /// Encoded bytes from another program, untrusted and still to be decoded.
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    Png(Vec<u8>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteRefusal {
+    /// A malformed or oversize file list.
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    Files,
+    /// An image that could not be read.
+    Image,
+}
+
+/// The longest a clipboard read may take.
+const READ_WITHIN: Duration = Duration::from_secs(2);
 
 pub(crate) struct Clipboard<F = arboard::Clipboard> {
     arboard: Option<F>,
@@ -66,34 +117,12 @@ impl Clipboard {
     pub(crate) fn get_text(&mut self) -> Result<String, arboard::Error> {
         #[cfg(any(target_os = "linux", test))]
         if let Some(wayland) = &self.wayland {
-            return wayland.load(
-                false,
-                (4 << 20) + 1,
-                Instant::now() + std::time::Duration::from_secs(2),
-            );
+            return wayland.load(false, (4 << 20) + 1, Instant::now() + READ_WITHIN);
         }
         self.arboard
             .as_mut()
             .ok_or(arboard::Error::ContentNotAvailable)?
             .get_text()
-    }
-
-    pub(crate) fn get_image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
-        let Some(clipboard) = self.arboard.as_mut() else {
-            // Every paste asks for an image first; startup already warned once
-            // that arboard is missing, so this stays out of the default log.
-            log::debug!("clipboard image paste unavailable: no arboard clipboard");
-            return Err(arboard::Error::ContentNotAvailable);
-        };
-        clipboard.get_image()
-    }
-
-    pub(crate) fn file_list(&mut self) -> Result<Vec<std::path::PathBuf>, arboard::Error> {
-        self.arboard
-            .as_mut()
-            .ok_or(arboard::Error::ContentNotAvailable)?
-            .get()
-            .file_list()
     }
 }
 
@@ -106,6 +135,10 @@ pub(crate) trait SelectionFallback {
         max: usize,
         deadline: Instant,
     ) -> Result<String, arboard::Error>;
+    /// The CLIPBOARD file list; empty when it holds none.
+    fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error>;
+    /// The CLIPBOARD bitmap, decoded.
+    fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error>;
 }
 
 impl SelectionFallback for arboard::Clipboard {
@@ -136,11 +169,97 @@ impl SelectionFallback for arboard::Clipboard {
         let _ = primary;
         self.get_text_bounded(max, deadline)
     }
+
+    fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        self.get().file_list()
+    }
+
+    fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+        self.get_image()
+    }
 }
 
-// Native Wayland has no PRIMARY protocol; unsupported channels stay on
-// arboard (XWayland) without treating native CLIPBOARD errors as a fallback.
+/// What a paste takes from a clipboard that is asked one format at a time.
+fn fallback_paste(
+    clipboard: &mut impl SelectionFallback,
+    want: PasteWant,
+    text_max: usize,
+) -> PasteContent {
+    // The list is read with `paste-files` off as well: copied files must
+    // then paste nothing, rather than the text copy of their paths. A list
+    // read that fails is treated as no list. On X11 a failure does not show
+    // that a list exists: xclip answers every request with its own type, an
+    // owner may leave a request it cannot serve unanswered, and both still
+    // have text to paste.
+    if let Ok(paths) = clipboard.files()
+        && !paths.is_empty()
+    {
+        return if want.files {
+            PasteContent::Files(paths)
+        } else {
+            PasteContent::FilesOff
+        };
+    }
+    let text = clipboard.load(false, text_max, Instant::now() + READ_WITHIN);
+    match &text {
+        Ok(text) if text.is_empty() => {}
+        // A text that timed out or is too large is still the text.
+        Ok(_) | Err(arboard::Error::Timeout | arboard::Error::LimitExceeded) => {
+            return PasteContent::Text(text);
+        }
+        Err(_) => {}
+    }
+    if want.images {
+        match clipboard.image() {
+            Ok(image) => return PasteContent::Image(PasteImage::Rgba(image)),
+            // An image is there and could not be had: over the read cap or
+            // the decode limits, undecodable, or never sent. That is said,
+            // as the Wayland route says it. Any other error is a clipboard
+            // with no image, which pastes nothing quietly.
+            Err(arboard::Error::LimitExceeded | arboard::Error::ConversionFailure) => {
+                return PasteContent::Refused(PasteRefusal::Image);
+            }
+            Err(arboard::Error::Timeout) => {
+                return PasteContent::Text(Err(arboard::Error::Timeout));
+            }
+            Err(_) => {}
+        }
+    }
+    PasteContent::Text(text)
+}
+
+// PRIMARY is native where the compositor has the primary-selection protocol.
+// Where it does not, that channel stays on arboard (XWayland); native
+// CLIPBOARD errors are never treated as a reason to fall back.
 impl<F: SelectionFallback> Clipboard<F> {
+    /// What a paste takes from CLIPBOARD under `want`, with text capped at
+    /// `text_max` bytes. On Wayland the bridge is the authority and arboard is
+    /// not asked as well: an X11-owned selection reaches a focused Wayland
+    /// client as an ordinary offer, and a second probe would only double the
+    /// worst-case wait.
+    pub(crate) fn paste_content(&mut self, want: PasteWant, text_max: usize) -> PasteContent {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(wayland) = &self.wayland {
+            return wayland.paste(want, text_max, Instant::now() + READ_WITHIN);
+        }
+        match self.arboard.as_mut() {
+            Some(clipboard) => fallback_paste(clipboard, want, text_max),
+            None => PasteContent::Text(Err(arboard::Error::ContentNotAvailable)),
+        }
+    }
+
+    /// The local files CLIPBOARD names, for a preview of what a paste brings.
+    pub(crate) fn file_list(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(wayland) = &self.wayland {
+            return wayland.files(Instant::now() + READ_WITHIN);
+        }
+        self.arboard
+            .as_mut()
+            .ok_or(arboard::Error::ContentNotAvailable)?
+            .files()
+    }
+
     pub(crate) fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
         self.set_selection(false, text)
     }

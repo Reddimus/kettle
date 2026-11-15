@@ -491,7 +491,7 @@ fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
     let image = body("paste_clipboard_image");
     assert!(
         image.contains("self.pasted_images.reserve_png(")
-            && image.contains("encoder.submit(id, png, rgba)")
+            && image.contains("encoder.submit(id, png, pixels)")
             && !image.contains("save_rgba"),
         "the window thread reserves the PNG and hands the encode to the encoder"
     );
