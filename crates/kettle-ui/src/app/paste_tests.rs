@@ -3686,10 +3686,11 @@ fn direction_formatting_is_a_finding_that_the_sanitised_paste_removes() {
 
 #[test]
 fn every_paste_button_projects_its_own_flag_and_sends_its_own_text() {
-    // rustc 1.99 to 1.102 on AArch64 at opt-level 1, the level tests and
-    // debug builds use, compiled the projection's `matches!` on the
-    // `destructive` payload into a read of that byte for every variant: a
-    // paste button's flag came back as its label's length. The variant
+    // rustc stable 1.99.1 and 1.100.0, and nightly 1.102.0 (LLVM 23), on
+    // AArch64 at opt-level 1, the level tests and debug builds use, compiled
+    // the projection's `matches!` on the `destructive` payload into a read of
+    // that byte for every variant: a paste button's flag came back as its
+    // label's length (see `ConfirmButton::destructive`). The variant
     // matches that choose what is pasted are checked here beside the flags,
     // for every button of both dialog shapes, as values and as raw bytes.
     for (text, kinds, flags, sends) in [

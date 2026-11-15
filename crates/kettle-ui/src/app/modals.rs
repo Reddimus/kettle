@@ -3697,24 +3697,16 @@ pub enum ConfirmButton {
 impl ConfirmButton {
     /// Whether the button carries the warning colour.
     ///
-    /// This is a method with an arm per variant because of a code-generation
-    /// fault in the toolchain, not in Kettle: no `unsafe` is involved, Miri
-    /// runs the code clean, and the MIR and LLVM IR are right. rustc 1.99 to
-    /// 1.102 (LLVM 23) on AArch64, at `opt-level = 1` or `s`, lower
-    /// `select(variant is Confirm, flag, false)` to a one-bit mask when the
-    /// read sits in the projecting closure, as
-    /// `matches!(button, Self::Confirm { destructive: true, .. })` or as a
-    /// `match` with a wildcard arm did. `ConfirmButton` keeps its tag in the
-    /// label's capacity word, so for the other variants that byte is the low
-    /// byte of their label's length, and it came back with bit 0 cleared.
-    /// Dev and test builds use `opt-level = 1`. x86_64 and opt-levels 0, 2
-    /// and 3 are not affected by the reduced case. This shape compiles to a
-    /// compare and an `and`, which is right for every input, but it is right
-    /// by what the compiler emits today, not by construction:
-    /// `every_paste_button_projects_its_own_flag_and_sends_its_own_text`
-    /// checks the flags and what each button sends, at the level tests build
-    /// at. The reduced case is `rustc-repro/repro.rs` in the C14 audit
-    /// evidence.
+    /// One arm per variant avoids an AArch64 code-generation fault in rustc
+    /// stable 1.99.1 and 1.100.0, and nightly 1.102.0 (LLVM 23), at
+    /// `opt-level` 1 (dev and test builds) or `s`. Read in a projecting
+    /// closure, `matches!(button, Self::Confirm { destructive: true, .. })`
+    /// was lowered to `lsr #63` of the tag word and a `bic` of the flag byte
+    /// with it, not to a select: for the other variants the flag came back as
+    /// the low byte of their label's length with bit 0 cleared. The MIR and
+    /// LLVM IR are right and no `unsafe` is involved. The detector is
+    /// `every_paste_button_projects_its_own_flag_and_sends_its_own_text`,
+    /// on arm64 hosts. Upstream issue: none filed yet.
     pub(super) fn destructive(&self) -> bool {
         match self {
             Self::Confirm { destructive, .. } => *destructive,

@@ -3245,9 +3245,11 @@ and what an answered paste does is `text_paste_dispatch`; both are tested
 directly. One source-order guard remains where no seam reaches `App`: the
 paste entry points.
 `every_paste_button_projects_its_own_flag_and_sends_its_own_text` is the
-detector for an AArch64 code-generation fault at `opt-level = 1` (see
-`ConfirmButton::destructive`); it only detects on arm64 hosts. `cargo test -p kettle-render confirm` covers the row
-and stack arrangements at several widths and scales, the pinned policy line,
+detector for an AArch64 code-generation fault in rustc stable 1.99.1 and
+1.100.0, and nightly 1.102.0 (LLVM 23), at `opt-level = 1` (see
+`ConfirmButton::destructive`); it only detects on arm64 hosts.
+`cargo test -p kettle-render confirm` covers the row and stack arrangements
+at several widths and scales, the pinned policy line,
 the height cap, chips, access-key underlines and token contrast in every
 theme; one of its tests shapes text with the system fonts. `cargo test -p
 kettle-ui osc52` covers notices that name the program. `cargo test -p kettle-ui context_menu` and
