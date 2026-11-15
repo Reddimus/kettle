@@ -113,7 +113,7 @@ Kettle starts with these pane and tab keys:
 | Move focus between panes, macOS | `Cmd+Opt+Arrow` |
 | Cycle panes | `Ctrl+Shift+N` / `Ctrl+Shift+P` |
 | Resize the split (a program such as Codex or Neovim gets the keys while it runs) | `Shift + Arrow` |
-| Next / previous tab | `Ctrl+PageDown` / `Ctrl+PageUp` |
+| Next / previous tab | `Ctrl+PageDown` / `Ctrl+PageUp`, or `Shift+Cmd+]` / `Shift+Cmd+[` on macOS |
 | Search screen + scrollback | `Ctrl+Shift+F` |
 | Settings | `Ctrl+,` |
 | Command palette (search every action) | `Ctrl+Shift+K` |

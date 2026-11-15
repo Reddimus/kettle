@@ -1059,6 +1059,13 @@ pub(super) fn program_key_rule(
         {
             WhenKettleIdleAndDistinct
         }
+        // Shift+Cmd+] / [ on macOS switch tabs as Cmd+1-9 do, and yield the
+        // same way. Shift+Cmd+W and Cmd+A, like Cmd+W and Cmd+C, stay Kettle's.
+        (m, Char(']'), Action::NextTab) | (m, Char('['), Action::PrevTab)
+            if macos && m == Mods::SUPER | Mods::SHIFT =>
+        {
+            WhenKettleIdle
+        }
         // Alt+1-9 everywhere, and Cmd+1-9 on macOS.
         (m, Char(digit @ '1'..='9'), Action::GotoTab(index))
             if (m == Mods::ALT || (macos && m == Mods::SUPER))

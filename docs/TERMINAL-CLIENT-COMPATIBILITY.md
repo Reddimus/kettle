@@ -526,8 +526,8 @@ keyboard:
   no program has the keyboard. Drag the divider meanwhile, or bind resizing to
   a chord of your own (`keybind = ctrl+alt+left=resize_left`).
 - Jump to prompt (`Ctrl+Up/Down`, and `Cmd+Up/Down` on macOS), the scroll
-  chords, `Shift+Home/End`, tab switching and `Alt+1`-`9` (and `Cmd+1`-`9` on
-  macOS) go to the program only when Kettle's action would do nothing: no
+  chords, `Shift+Home/End`, tab switching and `Alt+1`-`9` (and `Cmd+1`-`9` and
+  `Shift+Cmd+]/[` on macOS) go to the program only when Kettle's action would do nothing: no
   prompt to jump to, nothing to scroll, one tab, no selection to extend. While
   the view is scrolled back into history they stay Kettle's, because a key
   sent to the program would snap the view to the bottom.
@@ -544,7 +544,8 @@ keyboard:
   On a tab with one pane it does nothing.
 - Copy stays Kettle's: Codex reads `Ctrl+Shift+C` as `Ctrl+C`, which would
   discard its draft.
-- Every other chord stays Kettle's, and so do all of them while broadcast
+- Every other chord stays Kettle's, among them `Shift+Cmd+W` (close window)
+  and `Cmd+A` (select all) on macOS, and so do all of them while broadcast
   input is on, since the other panes may not own their keyboards.
 
 A chord you bind yourself is always Kettle's, even when your line restates the
