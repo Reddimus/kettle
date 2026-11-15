@@ -91,8 +91,9 @@ A zoomed pane keeps its titlebar, which shows how many panes the zoom hides
 and the key that restores them.
 
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
-below), `Cmd+C/V`, `Cmd+F` and `Cmd+,`; the gear before `▾ +` in the title
-bar opens Settings too. Run
+below), `Shift+Cmd+]` and `Shift+Cmd+[` (next and previous tab),
+`Shift+Cmd+W` (close the window), `Cmd+A` (select all), `Cmd+C/V`, `Cmd+F`
+and `Cmd+,`; the gear before `▾ +` in the title bar opens Settings too. Run
 `kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
 the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
 command palette then lists only the commands that have a shortcut, with the

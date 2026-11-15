@@ -827,8 +827,9 @@ into a bare-key binding.
 
 `action` is one of:
 
-**Tabs**: `new_tab`, `close_tab`, `next_tab`, `previous_tab`,
-`move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based, N is the tab
+**Tabs**: `new_tab`, `close_tab`, `next_tab`, `previous_tab` (also
+`Shift+Cmd+]` and `Shift+Cmd+[` on macOS, beside `Ctrl+PageDown` and
+`Ctrl+PageUp`), `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based, N is the tab
 number — `goto_tab:1` is the first tab), `new_tab_shell_N` (1-based —
 open the Nth entry of the new-tab `▾` dropdown; `Ctrl+Shift+1..9` by
 default), `undo_close_tab` (also
@@ -856,8 +857,8 @@ turning the screen would have put it, and the two
 directions undo each other).
 
 **Window**: `new_window` (opens another window **in this process**, so
-tabs can move live between windows), `close_window`,
-`toggle_fullscreen`, `toggle_quick_terminal`, `move_tab_to_new_window` (tear the focused tab out
+tabs can move live between windows), `close_window` (`Ctrl+Shift+Q`, and
+`Shift+Cmd+W` on macOS), `toggle_fullscreen`, `toggle_quick_terminal`, `move_tab_to_new_window` (tear the focused tab out
 into its own window LIVE — running programs keep running; dragging a tab
 past the tab bar does the same with the mouse, Chromium-style: the live
 window rides the pointer, and dropping it on another
@@ -871,7 +872,8 @@ command palette, including on Wayland), `open_settings`
 
 **Editing**: `copy` (`copy_to_clipboard`), `paste`
 (`paste_from_clipboard`), `select_all` (select the whole scrollback + screen;
-in the command palette, bindable, no default chord), `select_to_top`
+`Cmd+A` on macOS, in the command palette, no default chord elsewhere),
+`select_to_top`
 (`select_to_first_line`) and `select_to_bottom` (`select_to_last_line`) —
 extend the selection to the top / bottom of the buffer, bound by default to
 **Shift+Home** / **Shift+End** (Shift+click still extends to the click point).

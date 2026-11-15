@@ -341,6 +341,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file managers put beside the list (on macOS, the file's name), or to an
   image of the file.
 
+- macOS gains the standard tab, window and select-all chords of Terminal,
+  Safari, iTerm2 and Ghostty: `Shift+Cmd+]` and `Shift+Cmd+[` go to the next
+  and previous tab, `Shift+Cmd+W` closes the window and `Cmd+A` selects all.
+  Window › Next Tab and Previous Tab, Shell › Close Window and Edit › Select
+  All show them, and so do the command palette and the keyboard-shortcut
+  list. `Ctrl+PageDown`/`Ctrl+PageUp` and `Ctrl+Shift+Q` still work. On
+  macOS a shortcut hint now always shows the Cmd chord when an action has
+  one, rather than whichever chord has the shorter name.
+
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
   yellow lifted to 3:1 against its tab, with the lip, the gap under it and
