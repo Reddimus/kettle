@@ -8022,7 +8022,12 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
             .zip([want.r, want.g, want.b])
             .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
     };
-    for name in ["TokyoNight Night", "Kettle Day"] {
+    // The button's top lands on any fraction of a pixel, as line heights
+    // do: each quarter is painted and sampled.
+    for (name, nudge) in ["TokyoNight Night", "Kettle Day"]
+        .into_iter()
+        .flat_map(|name| [0.0_f32, 0.25, 0.5, 0.75].map(|nudge| (name, nudge)))
+    {
         for scale in [1.0_f32, 2.0] {
             renderer.set_scale(scale);
             let cfg = Config {
@@ -8030,7 +8035,8 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
                 background_opacity: 1.0,
                 ..base.clone()
             };
-            let panes = [pane(&snap, width, height)];
+            let mut panes = [pane(&snap, width, height)];
+            panes[0].terminal.3 -= nudge;
             let text_cell = (
                 renderer.overlay_text_cell_width(),
                 renderer.overlay_text_line_height(),
@@ -8071,14 +8077,16 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
                 };
                 let frame = capture(&mut renderer, &cfg, &panes, &overlay);
                 let surface = colors.surface(state);
-                let context = format!("{name} scale {scale} {state:?}");
+                let context = format!("{name} scale {scale} top {y} {state:?}");
                 let at = |px: f32, py: f32| frame.get_pixel(px as u32, py as u32);
                 let middle = y + h / 2.0;
                 // In the left padding, inside the edge.
                 let fill = at(x + 3.0 * scale, middle);
                 assert!(near(fill, surface.fill), "{context}: fill {fill:?}");
-                // On the top edge, clear of the rounded corners.
-                let edge = at(x + w / 2.0, y + scale / 2.0);
+                // On the top edge, clear of the rounded corners: the first
+                // row whose centre is inside it, wherever the button's
+                // fractional top falls.
+                let edge = at(x + w / 2.0, (y - 0.5).ceil());
                 assert!(near(edge, surface.edge), "{context}: edge {edge:?}");
                 let ruled = at(rule.0 + rule.2 / 2.0, rule.1 + rule.3 / 2.0);
                 assert!(near(ruled, surface.edge), "{context}: rule {ruled:?}");
