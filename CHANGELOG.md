@@ -370,8 +370,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   command's name is its label, and its description is the shortcut in words
   ("Command T" for New tab on macOS, "Control Shift T" elsewhere; never
   glyphs), then the description; checked with Orca and in the macOS
-  accessibility tree. Each result also reports its place among all results
-  ("3 of 6" after `split`), not among the rows in view.
+  accessibility tree. On Linux each result also exposes its place among all
+  results, not among the rows in view (AT-SPI `posinset`/`setsize`), which
+  Orca reads as "1 of 6" after `split` when its "speak position in set"
+  option is on; macOS's AccessKit adapter does not pass it on.
 
 - With nothing typed, the command palette lists its commands under headings
   in order of use: Tabs (New tab, Close tab, Next tab, Previous tab first),

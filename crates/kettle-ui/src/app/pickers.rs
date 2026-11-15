@@ -1429,7 +1429,15 @@ pub(super) fn picker_context_menu(
             footer.fits(width, cell.0)
         })?
     } else {
-        picker_card_geometry(surface, cell, top_chrome, list.rows.len(), list.card_scale)?
+        // At least one row: the query header comes from this layout, and an
+        // open picker keeps its field even with nothing listed.
+        picker_card_geometry(
+            surface,
+            cell,
+            top_chrome,
+            list.rows.len().max(1),
+            list.card_scale,
+        )?
     };
     let footer = list.footer.take().and_then(|mut footer| {
         let (sample, lines, height) = geometry.footer?;

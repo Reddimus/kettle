@@ -1754,3 +1754,13 @@ fn wheel_steps_scroll_past_headings() {
         }
     }
 }
+
+/// An open picker keeps its query header even with no row to list: the
+/// header is laid out from the card's own layout, at least one row tall.
+#[test]
+fn an_empty_picker_list_keeps_its_header() {
+    let list = super::PickerList { rows: Vec::new(), selected: 0, footer: None, card_scale: 1.0 };
+    let menu = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).expect("a header and card");
+    let (_, _, w, h) = menu.picker_header_rect();
+    assert!(w > 0.0 && h > 0.0);
+}
