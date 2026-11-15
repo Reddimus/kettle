@@ -411,9 +411,18 @@ fn accessibility_key_tracks_each_visible_panes_scroll_offset() {
         .unwrap()
         .1;
     let flat: String = panes.split_whitespace().collect();
-    assert!(flat.contains(
-        "pane.term.term.lock().ok().map(|term|term.grid().display_offset()).hash(&muthasher);"
-    ));
+    assert!(flat.contains("hash_terminal_pane(&muthasher,pane,broadcast_roles.of(pane_id));"));
+    let pane = src
+        .split_once("fn hash_terminal_pane(")
+        .unwrap()
+        .1
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    let flat: String = pane.split_whitespace().collect();
+    assert!(
+        flat.contains("pane.term.term.lock().ok().map(|term|term.grid().display_offset()).hash(hasher);")
+    );
 }
 
 #[test]

@@ -487,7 +487,8 @@ pub(crate) fn pane_outline(
         border_width: border_width.max(0.0),
         corner_radius: corner_radius.max(0.0),
         corner_mask,
-        _pad: 0,
+        dash: 0.0,
+        gap: 0.0,
     }
 }
 

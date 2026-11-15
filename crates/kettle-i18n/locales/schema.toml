@@ -3113,6 +3113,12 @@ context = "crates/kettle-ui/src/app/notification_toast.rs: screen-reader descrip
 args = [{ name = "count", type = "u64" }]
 plural = "count"
 
+[messages.pane_a11y_broadcast_sending]
+context = "crates/kettle-ui/src/app/broadcast.rs and accessibility.rs: screen-reader description of the focused terminal pane while broadcast input is on: what is typed in it is also sent to other panes (the panes in the tab, in the window or in a broadcast group). Its outline is drawn solid in the broadcast colour. Read after the pane's name; a state, not an action. The progressive form of the Broadcast Input menu's wording (menu_broadcast_input), as the English is. Needs screen-reader second pass."
+
+[messages.pane_a11y_broadcast_receiving]
+context = "crates/kettle-ui/src/app/broadcast.rs and accessibility.rs: screen-reader description of a terminal pane that receives what is typed in the broadcasting pane (pane_a11y_broadcast_sending); its outline is drawn dashed in the broadcast colour. Read after the pane's name; a state, not an action. Kept short: screen readers read it on every visit to the pane. Needs screen-reader second pass."
+
 [messages.confirm_paste_reason_lines]
 context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when the text has line breaks and a receiving program (one pane, or several under broadcast) has bracketed paste off. Also read by screen readers. Bracketed paste is the terminal mode that marks pasted text; Enter is the key."
 

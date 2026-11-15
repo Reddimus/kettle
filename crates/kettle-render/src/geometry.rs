@@ -296,15 +296,193 @@ pub(crate) const MACOS_WINDOW_CORNER_RADIUS_POINTS: f32 = 16.0;
 
 const PANE_EDGE_EPSILON: f32 = 1.0;
 
+pub(crate) const OUTLINE_TOP_LEFT: u32 = 1;
+
+pub(crate) const OUTLINE_TOP_RIGHT: u32 = 1 << 1;
+
 pub(crate) const OUTLINE_BOTTOM_RIGHT: u32 = 1 << 2;
 
 pub(crate) const OUTLINE_BOTTOM_LEFT: u32 = 1 << 3;
 
 /// Whether a pane is outlined. With more than one pane the focused one carries
 /// the accent and the rest the divider colour; a lone pane is outlined only
-/// while broadcast input is on, where the yellow frame is the warning.
+/// while broadcast input reaches it (it sends, or another window's group sends
+/// to it), where the yellow frame is the warning.
 pub(crate) fn pane_border_visible(pane_count: usize, broadcast: bool) -> bool {
     pane_count > 1 || broadcast
+}
+
+/// The part of `area` clear of the `border`-wide outline strips along the
+/// edges of the pane `leaf`; `None` when nothing is left.
+pub(crate) fn clear_of_outline(area: Rect4, leaf: Rect4, border: f32) -> Option<Rect4> {
+    let border = border.max(0.0);
+    let (lx, ly, lw, lh) = leaf;
+    let (ax, ay, aw, ah) = area;
+    let left = ax.max(lx + border);
+    let top = ay.max(ly + border);
+    let right = (ax + aw).min(lx + lw - border);
+    let bottom = (ay + ah).min(ly + lh - border);
+    (right > left && bottom > top).then_some((left, top, right - left, bottom - top))
+}
+
+/// The rects that dim `area` clear of a receiving pane's outline: the
+/// `border`-wide strips along `leaf`'s edges and, at each corner
+/// `corner_mask` rounds with `radius` (clamped as the outline shader clamps
+/// it), the arc the shader draws there. In a rounded corner's rows the dim
+/// stops at the arc's inner edge, one row of at most a pixel at a time, so
+/// the arc keeps its contrast while the pane behind it is dimmed.
+pub(crate) fn dim_clear_of_outline(
+    area: Rect4,
+    leaf: Rect4,
+    border: f32,
+    radius: f32,
+    corner_mask: u32,
+) -> Vec<Rect4> {
+    let Some(base) = clear_of_outline(area, leaf, border) else {
+        return Vec::new();
+    };
+    let (lx, ly, lw, lh) = leaf;
+    let radius = radius.min(lw.min(lh) * 0.5).max(0.0);
+    if corner_mask & 0b1111 == 0 || radius <= border {
+        return vec![base];
+    }
+    let (bx, by, bw, bh) = base;
+    let (bx1, by1) = (bx + bw, by + bh);
+    let top_end = if corner_mask & (OUTLINE_TOP_LEFT | OUTLINE_TOP_RIGHT) != 0 {
+        (ly + radius).clamp(by, by1)
+    } else {
+        by
+    };
+    let bottom_start = if corner_mask & (OUTLINE_BOTTOM_RIGHT | OUTLINE_BOTTOM_LEFT) != 0 {
+        (ly + lh - radius).clamp(top_end, by1)
+    } else {
+        by1
+    };
+    let mut out = Vec::new();
+    if bottom_start > top_end {
+        out.push((bx, top_end, bw, bottom_start - top_end));
+    }
+    // The stroke's inner edge: the outline's centreline radius (`radius`
+    // less half the border) less half the border and half a pixel of
+    // antialiasing.
+    let inner = (radius - border - 0.5).max(0.0);
+    // (bit, centre x, centre y, on the left, at the top)
+    let corners = [
+        (OUTLINE_TOP_LEFT, lx + radius, ly + radius, true, true),
+        (
+            OUTLINE_TOP_RIGHT,
+            lx + lw - radius,
+            ly + radius,
+            false,
+            true,
+        ),
+        (
+            OUTLINE_BOTTOM_RIGHT,
+            lx + lw - radius,
+            ly + lh - radius,
+            false,
+            false,
+        ),
+        (
+            OUTLINE_BOTTOM_LEFT,
+            lx + radius,
+            ly + lh - radius,
+            true,
+            false,
+        ),
+    ];
+    for (y0, y1) in [(by, top_end), (bottom_start, by1)] {
+        let mut y = y0;
+        while y < y1 {
+            let next = (y.floor() + 1.0).min(y1);
+            let middle = (y + next) * 0.5;
+            let (mut x0, mut x1) = (bx, bx1);
+            for (bit, cx, cy, left, top) in corners {
+                let in_box = if top { middle < cy } else { middle > cy };
+                if corner_mask & bit == 0 || !in_box {
+                    continue;
+                }
+                let dy = (middle - cy).abs();
+                let half = if dy < inner {
+                    (inner * inner - dy * dy).sqrt()
+                } else {
+                    0.0
+                };
+                if left {
+                    x0 = x0.max(cx - half);
+                } else {
+                    x1 = x1.min(cx + half);
+                }
+            }
+            if x1 > x0 {
+                out.push((x0, y, x1 - x0, next - y));
+            }
+            y = next;
+        }
+    }
+    out
+}
+
+/// Dash length and gap of a receiving pane's outline, in physical pixels: 6
+/// and 4 logical pixels, and at least three and two border widths so a wide
+/// `handle-size` still reads as dashes rather than blocks.
+pub(crate) fn broadcast_dash(scale: f32, border: f32) -> (f32, f32) {
+    let dash = (6.0 * scale).max(3.0 * border).round().max(1.0);
+    let gap = (4.0 * scale).max(2.0 * border).round().max(1.0);
+    (dash, gap)
+}
+
+/// The dashes along one outline edge `len` pixels long, as `(offset, length)`.
+/// The first starts at 0 and the last ends at `len`, so each corner of the
+/// outline is a solid join. The gaps stretch, never below `gap`, to make the
+/// count fit; an edge too short for two dashes is drawn solid. Offsets are
+/// not rounded: a quad and the outline shader's `fitted_dash_on` then cover
+/// the same pixel centres, on whole and fractional edges alike.
+pub(crate) fn fitted_dashes(len: f32, dash: f32, gap: f32) -> impl Iterator<Item = (f32, f32)> {
+    let len = len.max(0.0);
+    let count = if dash > 0.0 && gap > 0.0 && len >= 2.0 * dash + gap {
+        ((len + gap) / (dash + gap)).floor() as usize
+    } else {
+        1
+    };
+    let step = if count > 1 {
+        (len - dash) / (count - 1) as f32
+    } else {
+        0.0
+    };
+    (0..count).map(move |k| {
+        if count == 1 {
+            (0.0, len)
+        } else if k + 1 == count {
+            // Exactly at the far corner, whatever `step` rounded to.
+            (len - dash, dash)
+        } else {
+            (k as f32 * step, dash)
+        }
+    })
+}
+
+/// A receiving pane's dashed outline: each dash on its four edges, `border`
+/// wide and inside `rect`, where the solid outline's four strips lie.
+pub(crate) fn dashed_outline_rects(
+    rect: Rect4,
+    border: f32,
+    (dash, gap): (f32, f32),
+) -> impl Iterator<Item = Rect4> {
+    let (x, y, w, h) = rect;
+    let horizontal = fitted_dashes(w, dash, gap).flat_map(move |(offset, length)| {
+        [
+            (x + offset, y, length, border),
+            (x + offset, y + h - border, length, border),
+        ]
+    });
+    let vertical = fitted_dashes(h, dash, gap).flat_map(move |(offset, length)| {
+        [
+            (x, y + offset, border, length),
+            (x + w - border, y + offset, border, length),
+        ]
+    });
+    horizontal.chain(vertical)
 }
 
 pub(crate) fn pane_bottom_window_corner_mask(
@@ -450,6 +628,137 @@ mod tests {
         assert!(
             pane_border_visible(2, false),
             "split panes keep their borders"
+        );
+    }
+
+    /// A receiving pane's dashes start and end at every corner, so the
+    /// outline still reads as a frame, and stretch their gaps rather than
+    /// shrink them, so they never run together into the sender's solid line.
+    #[test]
+    fn broadcast_dashes_fit_each_edge_between_its_corners() {
+        let (dash, gap) = broadcast_dash(1.0, 1.0);
+        assert_eq!((dash, gap), (6.0, 4.0));
+        assert_eq!(broadcast_dash(2.0, 1.0), (12.0, 8.0), "dashes scale");
+        assert_eq!(
+            broadcast_dash(1.0, 10.0),
+            (30.0, 20.0),
+            "a wide handle keeps dashes longer than they are wide"
+        );
+        // Whole and fractional edges: an uneven split or a fractional scale
+        // gives fractional pane edges.
+        for len in (0..=4200).map(|n| n as f32 / 7.0) {
+            let dashes: Vec<_> = fitted_dashes(len, dash, gap).collect();
+            assert_eq!(dashes[0].0, 0.0, "len {len}: first dash at the corner");
+            let (last, length) = *dashes.last().unwrap();
+            assert!(
+                (last + length - len).abs() <= len * f32::EPSILON,
+                "len {len}: last dash ends at the corner, not {}",
+                last + length
+            );
+            if len < 2.0 * dash + gap {
+                assert_eq!(dashes, [(0.0, len)], "len {len}: too short for a gap");
+                continue;
+            }
+            assert!(dashes.len() >= 2, "len {len}");
+            for pair in dashes.windows(2) {
+                let ((a, la), (b, _)) = (pair[0], pair[1]);
+                assert_eq!(la, dash, "len {len}");
+                let between = b - (a + la);
+                assert!(
+                    between >= gap - 1e-3 && between <= dash + 2.0 * gap,
+                    "len {len}: gap {between} in {dashes:?}"
+                );
+            }
+        }
+    }
+
+    /// A receiving pane at a rounded window corner is dimmed up to the arc
+    /// the outline shader draws there and no further: no dim rect reaches
+    /// the stroke, and the pane inside the arc is still dimmed.
+    #[test]
+    fn the_dim_stops_at_a_rounded_corner_arc() {
+        let leaf = (0.0, 30.0, 300.0, 200.0);
+        let (border, radius) = (1.0, 32.0);
+        let mask = OUTLINE_BOTTOM_LEFT | OUTLINE_BOTTOM_RIGHT;
+        let dims = dim_clear_of_outline(leaf, leaf, border, radius, mask);
+        let covered = |x: f32, y: f32| {
+            dims.iter()
+                .any(|&(dx, dy, dw, dh)| x >= dx && x < dx + dw && y >= dy && y < dy + dh)
+        };
+        let (lx, ly, lw, lh) = leaf;
+        let centreline = radius - border * 0.5;
+        for (cx, cy, sx) in [
+            (lx + radius, ly + lh - radius, -1.0),
+            (lx + lw - radius, ly + lh - radius, 1.0),
+        ] {
+            for step in 0..=90 {
+                let angle = (step as f32).to_radians();
+                // The stroke, from its centreline to its inner edge.
+                for r in [centreline, centreline - border * 0.5] {
+                    let (x, y) = (cx + sx * r * angle.cos(), cy + r * angle.sin());
+                    assert!(!covered(x, y), "the arc at ({x}, {y}) is dimmed");
+                }
+                // Well inside the arc the pane is dimmed.
+                let r = centreline - 3.0;
+                let (x, y) = (cx + sx * r * angle.cos(), cy + r * angle.sin());
+                assert!(covered(x, y), "({x}, {y}) inside the arc is not dimmed");
+            }
+        }
+        // Clear of the strips everywhere, and the middle is one rect.
+        for &(x, y, w, h) in &dims {
+            assert!(x >= lx + border && x + w <= lx + lw - border, "{x} {w}");
+            assert!(y >= ly + border && y + h <= ly + lh - border, "{y} {h}");
+        }
+        assert!(covered(150.0, 130.0));
+        // Square corners: the rectangle inside the strips, as before.
+        assert_eq!(
+            dim_clear_of_outline(leaf, leaf, border, radius, 0),
+            vec![clear_of_outline(leaf, leaf, border).unwrap()]
+        );
+    }
+
+    /// The dashes lie on the four strips the solid outline paints, cover
+    /// every corner, and leave gaps: less ink than the sender's outline.
+    #[test]
+    fn a_dashed_outline_lies_on_the_solid_outlines_strips() {
+        let pane = (100.0, 40.0, 301.0, 157.0);
+        let border = 1.0;
+        let dashes: Vec<_> =
+            dashed_outline_rects(pane, border, broadcast_dash(1.0, border)).collect();
+        let (x, y, w, h) = pane;
+        let strips = [
+            (x, y, w, border),
+            (x, y + h - border, w, border),
+            (x, y, border, h),
+            (x + w - border, y, border, h),
+        ];
+        let inside = |(dx, dy, dw, dh): Rect4, (sx, sy, sw, sh): Rect4| {
+            dx >= sx && dy >= sy && dx + dw <= sx + sw && dy + dh <= sy + sh
+        };
+        for dash in &dashes {
+            assert!(
+                strips.iter().any(|strip| inside(*dash, *strip)),
+                "{dash:?} is off the outline"
+            );
+        }
+        for corner in [
+            (x, y),
+            (x + w - 1.0, y),
+            (x, y + h - 1.0),
+            (x + w - 1.0, y + h - 1.0),
+        ] {
+            assert!(
+                dashes
+                    .iter()
+                    .any(|&d| inside((corner.0, corner.1, 1.0, 1.0), d)),
+                "corner {corner:?} is not drawn"
+            );
+        }
+        let area = |rects: &[Rect4]| rects.iter().map(|r| r.2 * r.3).sum::<f32>();
+        let ratio = area(&dashes) / area(&strips);
+        assert!(
+            (0.4..0.8).contains(&ratio),
+            "dashes cover {ratio} of the solid outline"
         );
     }
 

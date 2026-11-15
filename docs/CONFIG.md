@@ -132,8 +132,8 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `tab-format` (`tab-title-format`) | string | `{title}` | Per-tab label template — placeholders `{n}` (1-based tab index), `{title}` (focused pane title). Horizontal tabs show a close button on the active or hovered tab and, on macOS, a Cmd+1 through Cmd+9 hint when space permits and the window is focused |
 | `scrollbar` | `never`\|`auto`\|`always` | `auto` | Per-pane overlay scrollbar. `auto` shows it whenever the pane has scrollback history: a dim thumb in a faint channel the height of the terminal at rest, wider and brighter while scrolled back or while the pointer hovers or drags it. `always` also draws the empty channel with no history, and keeps one width while there is history. Its colours are worked out per theme: the thumb is at least 3:1 against the background at rest and 4.5:1 while scrolled back or under the pointer. Click or drag the thumb to scroll |
 | `scrollbar-width` | float 2–40 logical px | `6` | Overlay-thumb width at rest. Kettle scales it for display DPI, widens the bar to at least 10 logical px while scrolled back, hovered or dragged (with `scrollbar = always`, whenever there is history), and keeps a separate invisible hit strip of at least 12 logical px that reaches the pane's edge. The thumb is at least 40 logical px long. Dragging preserves the pointer's position inside the thumb |
-| `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
-| `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent. Pane borders are drawn only when a tab has more than one pane, or while broadcast input is on. While **broadcast mode** is on (`Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, or `Super+G` elsewhere), this is temporarily overridden by theme `palette[3]` (yellow) to signal the active state; the configured color is restored when broadcast turns off |
+| `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes. While broadcast input is on, a pane that receives it is outlined dashed in the broadcast colour instead; other panes keep this color |
+| `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent. Pane borders are drawn only when a tab has more than one pane, or while broadcast input is on. While broadcast input is on, the broadcast outlines take its place (see **Broadcast** under [Keybind grammar](#keybind-grammar)); the configured color is restored when broadcast turns off |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period: how long the cursor stays on, and then off, while it blinks. A restart of the blink first holds the cursor visible for two half-periods (1060 ms by default), then the on and off phases alternate. Clamped to `50`-`5000` |
 | `cursor-blink-timeout` | int s | `10` | Stop blinking after this many seconds without typing, leaving the cursor visible. Typing, pasting, clicking in the terminal, refocusing, or changing a setting restarts the blink, each time holding the cursor visible for one whole blink period first (see `cursor-blink-interval`), and the cursor stays solid while you drag a selection; output, moving the pointer and scrolling do not, as in kitty and Alacritty. `0` blinks for as long as the window is focused. Clamped to `0`-`3600`. The default matches GTK's cursor blink timeout, which Terminator follows. An idle window that stops drawing lets macOS release the GPU memory it holds while drawing. On macOS an idle window stops drawing its blink sooner, at an on-to-off edge after one quiet half-period (see `macos-cursor-blink-layer`), and the timeout still stops the blink on its visible phase |
 | `macos-cursor-blink-layer` | bool | `true` | macOS only. Once a focused window has drawn nothing but its cursor blink for one half-period, the window server blinks the cursor in a Core Animation layer: Kettle presents no frame and does not wake until something else changes, such as typing, output, focus, a resize or a setting, which returns the blink to Kettle. macOS then releases the GPU driver memory a drawing window holds. Each blink looks the same either way. An inverted glyph that overhangs a block cursor in a translucent window, and any failure to set up the layer, keep the redrawn blink. `false` redraws the window at every blink. Applies on live reload. The key is parsed but reported inert on other platforms, so one shared config works everywhere |
@@ -539,7 +539,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `title-hide-sizetext` | bool | `false` | Hide the `WxH` size annotation in the titlebar |
 | `icon-bell` | bool | `true` | Render a bell glyph in a split pane's titlebar when the pane rang BEL: a pane you were not looking at until you focus it, the focused pane until you answer it (see `bell`) |
 | `title-transmit-bg-color` / `-fg-color` | color | `focused-split-color` → window accent / theme `cursor-text` | Focused-pane (broadcast-source) titlebar colors; unset values follow the active theme cascade |
-| `title-receive-bg-color` / `-fg-color` | color | window accent / theme `cursor-text` | Broadcast-group-member titlebar colors; unset values follow the active theme cascade |
+| `title-receive-bg-color` / `-fg-color` | color | window accent / theme `cursor-text` | Titlebar colors of a pane that receives broadcast input; unset values follow the active theme cascade |
 | `title-inactive-bg-color` / `-fg-color` | color | theme `palette[8]` / theme foreground | Idle-pane titlebar colors; unset values follow the active theme cascade |
 | `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (a zero-config procedural GPU starfield that needs no `background-image`; a fixed built-in example whose look is not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
@@ -926,6 +926,18 @@ pressing it again turns broadcast off, so you never have to reach for a second
 chord to stop. Which scope it turns *on* is `broadcast-default`, and the
 command palette names the chord's row after that scope. Under
 `broadcast-default = off` the chord can only turn broadcast off.
+
+While broadcast is on, the pane you type in is outlined solid in theme
+`palette[3]` (yellow), in place of `focused-split-color`, and every pane its
+input reaches, in the tab, the window or the group (in any window), is
+outlined dashed in the same colour; per-pane titlebars use the
+`title-receive-*` colours on those panes only. A read-only pane, or one held
+after its shell exited, receives nothing and keeps `split-divider-color`. A
+window you are not typing in keeps showing its own scope: it is armed and
+broadcasts as soon as it has the focus. The yellow is moved in its own hue
+until it reaches 3:1 against the opaque pane background (a program's OSC 11
+background included); over a translucent window or a wallpaper that
+background is an approximation of what shows through.
 
 The macOS **Shell** menu and the right-click menu offer the same scopes in a
 **Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This

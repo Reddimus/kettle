@@ -1046,6 +1046,8 @@ notification_toast_a11y = "draft"
 notification_toast_a11y_unsourced = "draft"
 notification_toast_more = "draft"
 notification_toast_a11y_repeats = "draft"
+pane_a11y_broadcast_sending = "draft"
+pane_a11y_broadcast_receiving = "draft"
 
 # 2026-11-14: the C14 paste-safety messages below (Confirm paste reasons,
 # findings, access keys, policy line, the Paste protection and Clipboard
@@ -1271,6 +1273,9 @@ keys = [
     "notification_toast_a11y_unsourced",
     "notification_toast_more",
     "notification_toast_a11y_repeats",
+    "pane_a11y_broadcast_sending",
+    "pane_a11y_broadcast_receiving",
+
     "confirm_paste_reason_lines",
     "confirm_paste_reason_controls",
     "confirm_paste_reason_always",

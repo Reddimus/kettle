@@ -1051,6 +1051,8 @@ notification_toast_show = "Mostrar"
 notification_toast_show_a11y = "Mostrar {source}"
 notification_toast_a11y = "Notificación de {source}: {message}"
 notification_toast_a11y_unsourced = "Notificación: {message}"
+pane_a11y_broadcast_sending = "Enviando la entrada a varios paneles"
+pane_a11y_broadcast_receiving = "Recibiendo la entrada de otro panel"
 
 confirm_paste_reason_lines = "Un programa que recibe este pegado no activó el pegado entre corchetes, así que cada salto de línea se envía como Enter y las líneas pegadas pueden ejecutarse como comandos."
 confirm_paste_reason_controls = "Este texto contiene caracteres de control, y un programa que recibe este pegado no activó el pegado entre corchetes."
