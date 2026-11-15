@@ -218,8 +218,8 @@ legacy-xterm or negotiated Kitty keyboard encoding, but that proves input
 transport only; it does not prove that a client attached clipboard image data.
 
 For Kettle's stable, client-independent path, focus the agent pane and press
-`Ctrl+Shift+V`. When the clipboard contains a bitmap and `paste-images` is on
-(the default), Kettle writes a bounded owner-only temporary PNG and pastes its
+`Ctrl+Shift+V`. When the clipboard contains a bitmap with no text and
+`paste-images` is on (the default), Kettle writes a bounded owner-only temporary PNG and pastes its
 shell-quoted path. The running agent can read that path without needing native
 clipboard-bitmap support. A short-lived thumbnail confirms the image dimensions
 and says the path is on the command line without claiming the client attached
@@ -316,7 +316,8 @@ raw bytes):
 
 - **Copy a file** in Explorer/Finder, then paste (`Ctrl+Shift+V`). When the
   clipboard holds a file list instead of text, Kettle pastes the path(s).
-  Controlled by `paste-files` (on by default; `paste-files = off` disables it).
+  Controlled by `paste-files` (on by default; with `paste-files = off` copied
+  files paste nothing). On Linux this works on native Wayland and X11.
 - **Copy a screenshot** (Win+Shift+S, Snipping Tool, macOS Cmd+Shift+4, GNOME
   Screenshot), then paste. A capture puts a raw *bitmap* on the clipboard with
   no file and no text behind it, so Kettle writes it to a temporary PNG and

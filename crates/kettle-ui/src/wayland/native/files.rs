@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use wayland_client::protocol::wl_data_offer;
 
-pub(crate) const URI_LIST: &str = "text/uri-list";
+pub(crate) use crate::wayland::offer::URI_LIST;
 const MAX_PENDING: usize = 2;
 
 pub(crate) enum FileUpdate {

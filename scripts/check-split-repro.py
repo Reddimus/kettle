@@ -158,6 +158,10 @@ def main() -> int:
                         help="drive a real Claude Code pane instead of the fixture")
     parser.add_argument("--out-dir", default=os.environ.get("KETTLE_DIAG_DIR", "target/diagnostics"))
     args = parser.parse_args()
+    # Kettle and every `kettle ctl` here share one environment, so they meet
+    # in its registry and need no alias: keep the run out of the control
+    # registry directory the OS names for this account (docs/TESTING.md).
+    os.environ.setdefault("KETTLE_TEST_OS_CTL_DIR", "none")
 
     here = Path(__file__).resolve().parent
     check = subprocess.run(

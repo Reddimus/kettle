@@ -14,8 +14,8 @@ fn the_schema_prints_without_a_running_kettle() {
         .env_clear()
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
-        .env("XDG_RUNTIME_DIR", home.path().join("run"))
         .env("PATH", "/usr/bin:/bin");
+    kettle_test_support::isolate_ctl_registry(&mut command, home.path());
     // Windows starts no process without its system root.
     for kept in ["SystemRoot", "windir"] {
         if let Some(value) = std::env::var_os(kept) {

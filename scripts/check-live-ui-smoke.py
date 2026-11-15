@@ -9,6 +9,7 @@ It intentionally uses only Python stdlib plus `kettle ctl`.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import csv
 import errno
@@ -5530,6 +5531,35 @@ def _create_owned_nvim_sandbox(
     return sandbox_path, windows_job
 
 
+# Read by Kettle (kettle-ctl's TEST_OS_REGISTRY_DIR_ENV): the directory that
+# stands in for the control registry directory the OS names for this account.
+CTL_OS_DIR_ENV = "KETTLE_TEST_OS_CTL_DIR"
+
+
+def isolate_ctl_registry() -> None:
+    """Keep every Kettle this run starts, and every `kettle ctl` it runs, out
+    of the account's own control registry directory.
+
+    A Kettle given private XDG directories still publishes its alias, and
+    prunes others', where the OS puts this account's registry
+    (`~/.local/state/kettle/ctl`), and a `kettle ctl` run with this process's
+    environment finds that Kettle through the alias. Pointing
+    KETTLE_TEST_OS_CTL_DIR at one private directory for the whole run keeps
+    them meeting there instead. On Windows, where the registry is the
+    directory the OS names, Kettle registers there too. Removed at exit; a
+    value already set wins.
+    """
+    if os.environ.get(CTL_OS_DIR_ENV):
+        return
+    if os.name == "nt":
+        root = create_windows_private_directory("kettle-smoke-os-ctl-")
+    else:
+        root = Path(tempfile.mkdtemp(prefix="kettle-smoke-os-ctl-"))
+        root.chmod(0o700)
+    atexit.register(shutil.rmtree, root, True)
+    os.environ[CTL_OS_DIR_ENV] = str(root / "ctl")
+
+
 class LiveKettle:
     def __init__(
         self,
@@ -6209,6 +6239,7 @@ while True:
         return probe.stdout if probe.returncode == 0 else None
 
     def __enter__(self) -> "LiveKettle":
+        isolate_ctl_registry()
         # Machine-local escape hatch. Each scenario writes a minimal config
         # without the developer's settings, such as a pinned
         # `gpu-device-id`/`gpu-vendor-id`. A dual-GPU laptop then silently runs

@@ -204,12 +204,17 @@ of a paste would run the rest as typed input. Within the wrapper LF stays LF
 and CRLF becomes LF; without it, line endings become CR for terminal input.
 Removing controls does not make pasted shell commands safe to run.
 
+A paste reads the clipboard in one order on every platform: copied files,
+then text, then a bitmap. Text wins over a bitmap, so cells copied from a
+spreadsheet, which offer both, paste as text.
+
 With `paste-files = on` (default), copied files paste their existing local
-paths, quoted for the pane's shell. `paste-files = off` ignores copied file
-references and uses text instead; explicit drops still paste paths. Kettle
-does not upload the files or change their lifetime.
-With `paste-images = on` (the default), a clipboard bitmap becomes a private
-PNG such as `$TMPDIR/kettle-paste-*/0001.png` in an owner-only directory
+paths, quoted for the pane's shell. With `paste-files = off`, a clipboard that
+holds copied files pastes nothing: not their paths, and not the plain-text
+copy of the paths that file managers put beside the list. Explicit drops
+still paste paths. Kettle does not upload the files or change their lifetime.
+With `paste-images = on` (the default), a clipboard bitmap that comes with no
+text becomes a private PNG such as `$TMPDIR/kettle-paste-*/0001.png` in an owner-only directory
 under the OS temporary directory
 (on Windows, under per-user Local App Data). Its quoted local path is written
 to the pane. Kettle keeps the PNG until exit, with a per-session limit of 64 PNGs and
@@ -223,14 +228,29 @@ and `paste-video-preview` disable these cards. A new media paste replaces the
 previous receipt, and later input removes it; closing the card does not delete
 the retained PNG.
 
-On Linux, Wayland text copy and paste use the window's Wayland connection,
-including on GNOME without XWayland. Middle-click pastes PRIMARY when Kettle
-can read it and it is not empty, and the regular clipboard otherwise; in a
-Wayland session without XWayland, PRIMARY may be unavailable. Text access
-requires the window to have focus. Images and explicit file lists still use arboard's X11
-backend in this build: without XWayland they are unavailable, image paste logs
-the limitation and falls through to text, and drag and drop remains available.
-No clipboard configuration change is needed.
+On Linux, a Wayland session copies and pastes through the window's own
+Wayland connection and needs no XWayland: text, copied files
+(`text/uri-list`, or GNOME's `x-special/gnome-copied-files`) and PNG images.
+Kettle decides from the types the clipboard lists, then reads what it chose
+once, within a size cap and one two-second deadline: 4 MiB of text, a 1 MiB
+list of at most 32 local files, 64 MiB of PNG. A source that stops sending
+costs the paste those two seconds and no more.
+
+- A copied link or remote file (`https:`, `sftp:`, a `file:` URI on another
+  host) is not a file list: its text is pasted instead. A damaged or oversize
+  list pastes nothing; a notification says so unless `paste-files` is off.
+- A copied PNG is untrusted. It is decoded with limits set before any pixel is
+  allocated (16,384 pixels a side, 256 MiB) and then re-encoded, so the
+  temporary file is always a PNG Kettle wrote, with none of the source's
+  metadata. An image that cannot be read or stored pastes nothing, and a
+  notification says so. An X11 session applies the same caps.
+- Middle-click pastes PRIMARY, and selecting text sets it, through the
+  compositor's primary-selection protocol. Where the compositor has none,
+  PRIMARY uses XWayland if it is running; otherwise middle-click pastes the
+  clipboard.
+
+Clipboard access requires the window to have focus. No clipboard
+configuration change is needed.
 
 Programs can use OSC 52 to access the clipboard. `osc52 = copy` (default)
 allows writes and denies reads; `off` denies both, `paste` allows reads only,

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -245,6 +246,10 @@ def main() -> int:
     if not args.config.exists():
         raise SystemExit(f"kettle-live-probes: missing config: {args.config}")
 
+    # Kettle and every `kettle ctl` here share one environment, so they meet
+    # in its registry and need no alias: keep the run out of the control
+    # registry directory the OS names for this account (docs/TESTING.md).
+    os.environ.setdefault("KETTLE_TEST_OS_CTL_DIR", "none")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="kettle-live-probes-") as tmp:
         log = Path(tmp) / "kettle.log"
