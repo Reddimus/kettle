@@ -63,6 +63,28 @@ impl BroadcastRoles {
     }
 }
 
+/// The scope of the window the user types in, for drawing `target_seq`'s
+/// panes; `None` when that is `target_seq` itself. The window being
+/// dispatched, `in_hand`, is out of `App::windows` while it is, so it is
+/// asked first: a `ui_geometry` read of another window runs while the
+/// focused window is in hand. `others` looks up the rest.
+pub(crate) fn focused_window_scope<'a>(
+    focused_seq: u64,
+    target_seq: u64,
+    in_hand: &'a WindowState,
+    others: impl FnOnce(u64) -> Option<&'a WindowState>,
+) -> Option<&'a BroadcastScope> {
+    if focused_seq == target_seq {
+        return None;
+    }
+    let focused = if in_hand.seq == focused_seq {
+        Some(in_hand)
+    } else {
+        others(focused_seq)
+    };
+    focused.map(|window| &window.mux.broadcast)
+}
+
 /// What a screen reader adds after a terminal pane's name while broadcast
 /// reaches it; nothing otherwise. A description, not a live region, so a
 /// scope change re-describes the panes without announcing each one.
@@ -283,13 +305,23 @@ impl App {
         true
     }
 
-    /// `ws`'s [`BroadcastRoles`], with the scope of the focused window when
-    /// that is another one.
+    /// `ws`'s [`BroadcastRoles`] while it is the window in hand, with the
+    /// scope of the focused window when that is another one.
     pub(super) fn broadcast_roles(&self, ws: &WindowState) -> BroadcastRoles {
-        let focused = (ws.seq != self.focused_seq)
-            .then(|| self.windows.get(&self.focused_seq))
-            .flatten();
-        BroadcastRoles::of_window(ws, focused.map(|window| &window.mux.broadcast))
+        self.broadcast_roles_beside(ws, ws)
+    }
+
+    /// `target`'s [`BroadcastRoles`] while `in_hand` is the window being
+    /// dispatched; `target` may be another window, read from `self.windows`.
+    pub(super) fn broadcast_roles_beside(
+        &self,
+        target: &WindowState,
+        in_hand: &WindowState,
+    ) -> BroadcastRoles {
+        let scope = focused_window_scope(self.focused_seq, target.seq, in_hand, |seq| {
+            self.windows.get(&seq)
+        });
+        BroadcastRoles::of_window(target, scope)
     }
 
     /// Request a frame from every window not in hand.

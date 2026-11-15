@@ -619,6 +619,38 @@ fn another_windows_group_broadcast_marks_this_windows_members() {
     );
 }
 
+/// Another window's roles are read while the focused window is the one in
+/// hand, out of `App::windows`: a `ui_geometry` read of an unfocused window
+/// does exactly that. The focused window's group scope must still reach
+/// the target's members, and a window never reads its own scope as foreign.
+#[test]
+fn another_window_is_read_against_the_focused_window_in_hand() {
+    use kettle_render::PaneBroadcast::{Off, Receiving};
+    let (target, [sender, grouped, loose, other]) = broadcast_role_window();
+    let (mux, panes) = crate::app::tests::title_test_tab_mux(1);
+    let mut focused = WindowState::new(2, mux);
+    focused.mux.panes.get_mut(&panes[0]).unwrap().group_name = Some("fleet".into());
+    focused.mux.broadcast = BroadcastScope::Group("fleet".into());
+    let mut windows = std::collections::BTreeMap::new();
+    windows.insert(target.seq, target);
+    let target = &windows[&1];
+    // `focused` is in hand: it is not in the map.
+    let scope = focused_window_scope(focused.seq, target.seq, &focused, |seq| windows.get(&seq));
+    assert_eq!(scope, Some(&focused.mux.broadcast));
+    let roles = BroadcastRoles::of_window(target, scope);
+    assert_eq!(
+        [sender, grouped, loose, other].map(|pane| roles.of(pane)),
+        [Off, Receiving, Off, Off]
+    );
+    // The target in hand and focused reads no foreign scope.
+    assert_eq!(focused_window_scope(2, 2, &focused, |_| None), None);
+    // The focused window in the map, another window in hand.
+    assert_eq!(
+        focused_window_scope(1, 2, &focused, |seq| windows.get(&seq)),
+        Some(&BroadcastScope::Off)
+    );
+}
+
 /// Screen readers hear the role after the pane's name, in both languages;
 /// a pane broadcast does not reach gets no description.
 #[test]
@@ -725,7 +757,7 @@ fn ui_geometry_reports_each_panes_broadcast_role() {
         .nth(1)
         .and_then(|rest| rest.split("fn ctl_perform_action(").next())
         .expect("ctl_ui_geometry");
-    assert!(geometry.contains("let broadcast_roles = self.broadcast_roles(target);"));
+    assert!(geometry.contains("let broadcast_roles = self.broadcast_roles_beside(target, ws);"));
     assert!(geometry.contains("\"broadcast\": broadcast_role_json(broadcast_roles.of(*id)),"));
     let redraw = source
         .split("fn redraw(&mut self, ws: &mut WindowState)")

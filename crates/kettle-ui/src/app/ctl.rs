@@ -1076,7 +1076,8 @@ impl App {
             })
             .collect();
         let pane_layout = self.pane_layout(target, self.area(target));
-        let broadcast_roles = self.broadcast_roles(target);
+        // `target` may be another window than the one in hand (`ws`).
+        let broadcast_roles = self.broadcast_roles_beside(target, ws);
         let active_search_match_rects: Vec<serde_json::Value> = target
             .search
             .target_pane
