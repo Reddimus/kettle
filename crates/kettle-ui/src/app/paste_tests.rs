@@ -2686,6 +2686,11 @@ fn the_settings_link_sends_nothing_and_opens_settings_at_paste_protection() {
         assert_eq!(link, dialog.buttons.len());
         assert_ne!(dialog.focus_idx, link);
         assert!(super::confirmation_button_action(&dialog, link).is_none());
+        assert_eq!(stop_paste(&dialog, link), None);
+        assert!(matches!(
+            super::confirm_stop_action(&dialog, link),
+            Some(super::ConfirmStopAction::PasteSettings)
+        ));
         // The pointer reaches it where it is painted.
         let overlay = super::confirm_dialog_overlay(&dialog, &tr);
         for surface in [(1280.0, 800.0), (520.0, 700.0)] {

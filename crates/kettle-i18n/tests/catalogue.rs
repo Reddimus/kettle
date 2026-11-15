@@ -499,10 +499,18 @@ fn paste_reasons_and_findings_are_translated() {
         en.osc52_copied_by("vim", 1),
         "A program copied 1 character to the clipboard while vim was in the foreground"
     );
-    assert!(
-        es.osc52_copied_by("vim", 42)
-            .ends_with("42 caracteres al portapapeles mientras vim estaba en primer plano")
+    assert_eq!(
+        en.osc52_copied_by("vim", 42),
+        "A program copied 42 characters to the clipboard while vim was in the foreground"
     );
+    for (count, noun) in [(1, "1 carácter"), (42, "42 caracteres")] {
+        assert!(
+            es.osc52_copied_by("vim", count).ends_with(&format!(
+                "{noun} al portapapeles mientras vim estaba en primer plano"
+            )),
+            "{count}"
+        );
+    }
     // A refusal points at the Settings row, by its translated names, and
     // keeps the config key for those who edit the file.
     let (setting, category) = ("Clipboard access by programs", "Behavior");
