@@ -1051,6 +1051,7 @@ notification_toast_a11y_repeats = "draft"
 confirm_paste_reason_lines = "draft"
 confirm_paste_reason_controls = "draft"
 confirm_paste_reason_always = "draft"
+confirm_paste_reason_reasked = "draft"
 confirm_paste_finding_end_marker = "draft"
 confirm_paste_finding_end_marker_c1 = "draft"
 confirm_paste_finding_interrupt = "draft"
@@ -1265,6 +1266,7 @@ keys = [
     "confirm_paste_reason_lines",
     "confirm_paste_reason_controls",
     "confirm_paste_reason_always",
+    "confirm_paste_reason_reasked",
     "confirm_paste_finding_end_marker",
     "confirm_paste_finding_end_marker_c1",
     "confirm_paste_finding_interrupt",

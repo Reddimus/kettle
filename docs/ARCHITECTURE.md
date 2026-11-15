@@ -5504,7 +5504,8 @@ on that snapshot: nothing is sent when the scope or the recipient set changed;
 a question asked with every recipient bracketed does not cover a recipient
 that has since turned bracketed paste off, if the chosen text has a line
 break or a control in it (`paste_answer`), so Kettle sends nothing and returns
-the question again for the modes of now. Otherwise the same snapshot encodes
+the question again for the modes of now, its reason led by a sentence saying
+why (`PasteAsk::reasked`). Otherwise the same snapshot encodes
 the paste. A mode change between that sample and the write is not covered; the
 snapshot decides, as it does for a paste Kettle never asked about.
 Path pastes retain their stricter rejection of control characters in filenames.

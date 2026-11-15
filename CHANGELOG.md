@@ -766,7 +766,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the answer. The text then arrived outside bracketed paste: each line break
   as Enter, with `ESC` and the signal keys intact. Kettle now sends nothing
   in that case and asks again, describing the paste for the mode the program
-  is in. A choice with no line break or control character left in it, such as
+  is in. The new question opens by saying the program stopped using bracketed
+  paste after the answer, so nothing was pasted. A choice with no line break or control character left in it, such as
   Paste as one line, is sent as before.
 
 - Up and Down in a confirmation whose buttons are stacked move focus from one

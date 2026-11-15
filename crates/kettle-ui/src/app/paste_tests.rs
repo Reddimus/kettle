@@ -1433,6 +1433,7 @@ fn paste_ask(policy: kettle_config::PasteProtection, unbracketed: bool) -> super
         unbracketed,
         access_keys: true,
         delayed_suspend: false,
+        reasked: false,
     }
 }
 
@@ -1760,6 +1761,47 @@ fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
         b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
     );
     mux.kill_children();
+}
+
+#[test]
+fn a_question_asked_again_says_first_that_the_answer_was_not_used() {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    use kettle_i18n::{Language, Text as T, Translator};
+    let text = "echo one\x03\necho two\n";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let (mux, pane, captured, dialog) =
+            bracketed_question(text, kettle_config::PasteProtection::Auto);
+        let reasked = tr.text(T::ConfirmPasteReasonReasked);
+        // The first question has no such sentence.
+        assert!(!dialog.body.contains(reasked));
+        mux.panes[&pane]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .unset_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+        let Some(super::ConfirmStopAction::Dispatch(answered)) =
+            super::confirm_stop_action(&dialog, dialog.buttons.len() - 1)
+        else {
+            panic!("paste action")
+        };
+        let super::paste::PasteDispatch::AskAgain(again) = super::paste::text_paste_dispatch(
+            &answered,
+            paste_now(&mux, kettle_config::PasteProtection::Auto),
+            tr,
+        ) else {
+            panic!("asked again")
+        };
+        // The second one opens with why the answer was not used, then gives
+        // the reason that holds now. A screen reader hears it first too.
+        let lines: Vec<_> = again.body.lines().collect();
+        assert_eq!(lines, [reasked, tr.text(T::ConfirmPasteReasonLines)]);
+        let detail = &again.paste.as_ref().unwrap().detail;
+        assert!(detail.description.starts_with(reasked));
+        assert!(captured().is_empty());
+        mux.kill_children();
+    }
 }
 
 #[test]

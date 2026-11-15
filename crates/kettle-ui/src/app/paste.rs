@@ -889,6 +889,7 @@ impl App {
             unbracketed: modes.values().any(|bracketed| !bracketed),
             access_keys: confirm_access_keys(cfg!(target_os = "macos")),
             delayed_suspend: cfg!(target_os = "macos"),
+            reasked: false,
         }
     }
 
@@ -2027,6 +2028,9 @@ pub(super) struct PasteAsk {
     /// The platform has a delayed-suspend byte (0x19) that a bracketed paste
     /// drops: macOS.
     pub delayed_suspend: bool,
+    /// Kettle asks again because a recipient left bracketed paste after the
+    /// question was answered, and the answer was not used.
+    pub reasked: bool,
 }
 
 pub(super) fn text_paste_confirmation(
@@ -2097,6 +2101,11 @@ pub(super) fn text_paste_confirmation(
     let breaks = text.contains(['\n', '\r']);
     let lines_reason = || tr.text(T::ConfirmPasteReasonLines).to_string();
     let mut reason = Vec::new();
+    // A question asked again says first why the answer was not used: the
+    // dialog may otherwise look like the one just answered.
+    if ask.reasked {
+        reason.push(tr.text(T::ConfirmPasteReasonReasked).to_string());
+    }
     if let Some(marker) = marker {
         reason.push(tr.confirm_paste_reason_marker(marker));
         // Removing the marker does not make the line breaks safe where
@@ -2301,7 +2310,10 @@ pub(super) fn text_paste_dispatch(
             text,
             now.broadcast,
             now.recipients,
-            now.ask,
+            PasteAsk {
+                reasked: true,
+                ..now.ask
+            },
             tr,
         ))),
     }

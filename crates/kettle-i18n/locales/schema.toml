@@ -3099,6 +3099,9 @@ context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm past
 [messages.confirm_paste_reason_always]
 context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when only the paste-protection = always policy asked. Always is the Settings value settings_value_always; Paste protection is the Settings row settings_field_paste_protection."
 
+[messages.confirm_paste_reason_reasked]
+context = "crates/kettle-ui/src/app/paste.rs: first sentence of a Confirm paste dialog that opens again after the user answered one: while the first dialog was open, a receiving program (one pane, or several under broadcast) turned bracketed paste off, so the answer was not used and nothing was pasted. The usual reason sentence follows it. Also read by screen readers. Bracketed paste is the terminal mode that marks pasted text."
+
 [messages.confirm_paste_finding_end_marker]
 context = "crates/kettle-ui/src/app/paste.rs: meaning column of a findings row in the Confirm paste dialog, beside the token ESC[201~. Lower case, no period."
 

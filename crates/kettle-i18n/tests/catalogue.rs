@@ -442,6 +442,23 @@ fn paste_reasons_and_findings_are_translated() {
         es.text(Text::ConfirmPasteReasonLines)
             .contains("cada salto de línea se envía como Enter")
     );
+    // A question asked again says first that the answer was not used.
+    assert!(
+        en.text(Text::ConfirmPasteReasonReasked)
+            .contains("after you answered")
+    );
+    assert!(
+        en.text(Text::ConfirmPasteReasonReasked)
+            .ends_with("nothing was pasted.")
+    );
+    assert!(
+        es.text(Text::ConfirmPasteReasonReasked)
+            .contains("después de que respondiste")
+    );
+    assert!(
+        es.text(Text::ConfirmPasteReasonReasked)
+            .ends_with("no se pegó nada.")
+    );
     assert_eq!(en.text(Text::ConfirmPasteFindingQuit), "quit (Ctrl+\\)");
     assert_eq!(es.text(Text::ConfirmPasteFindingQuit), "salir (Ctrl+\\)");
     for finding in [

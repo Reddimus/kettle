@@ -167,7 +167,8 @@ policy is Always. Below that it shows:
   and the signal keys when every program receiving the paste has bracketed
   paste on. If such a program turns bracketed paste off before you answer,
   and your choice would send a line break or a control character, Kettle
-  sends nothing and asks again for the new mode.
+  sends nothing and asks again for the new mode. The new question starts by
+  saying that nothing was pasted and why.
 - The policy in force and a **Paste settings…** link. The link pastes nothing,
   closes the dialog and opens Settings on the Paste protection row. There is
   no "don't ask again" box: the policy changes only in Settings or the config.
