@@ -1592,25 +1592,8 @@ fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
     assert!(submit.contains("let modes = self.text_paste_modes(ws, target)"));
     assert!(submit.contains("confirm_text_paste(ws, target, text, &modes)"));
     assert!(submit.contains("deliver_text_paste(ws, target, text, &modes)"));
-    let dispatch = include_str!("modals.rs");
-    assert!(
-        dispatch.contains(
-            "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
-        )
-    );
-    // One snapshot of the modes judges the answer and encodes the paste.
-    let answered = dispatch
-        .split("unbracketed,\n            } => {")
-        .nth(1)
-        .unwrap()
-        .split("ConfirmAction::RebindKeybind")
-        .next()
-        .unwrap();
-    assert_eq!(answered.matches("self.text_paste_modes(ws, target)").count(), 1);
-    let judged = answered.find("paste_answer(unbracketed, self.cfg.paste_protection, &text, &modes)");
-    let sent = answered.find("self.deliver_text_paste(ws, target, &text, &modes)");
-    let asked = answered.find("self.ask_text_paste(ws, target, &text, &modes)");
-    assert!(judged.unwrap() < sent.unwrap() && sent.unwrap() < asked.unwrap());
+    // What an answer does is `text_paste_dispatch`, tested in
+    // `an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile`.
 }
 
 /// A pane with bracketed paste on and its input captured, the question Kettle
@@ -1646,31 +1629,52 @@ fn bracketed_question(
     (mux, pane, captured, dialog)
 }
 
+/// The recipients of a paste in `mux` as they are now, as the handler
+/// samples them before it asks `text_paste_dispatch`.
+fn paste_now(mux: &Mux, policy: kettle_config::PasteProtection) -> super::paste::PasteNow {
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let mut recipients = if mux.is_broadcast_on() {
+        mux.broadcast_target_ids()
+    } else {
+        Vec::new()
+    };
+    recipients.sort_unstable();
+    super::paste::PasteNow {
+        broadcast: mux.broadcast.clone(),
+        recipients,
+        ask: paste_ask(policy, modes.values().any(|bracketed| !bracketed)),
+        modes,
+    }
+}
+
 #[test]
 fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
-    use super::paste::{PasteAnswer, paste_answer, paste_text_into_target, text_paste_modes};
+    use super::paste::{PasteAnswer, PasteDispatch, paste_answer, paste_text_into_target};
     use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
     use kettle_config::PasteProtection::{Always, Auto, Off};
     let mode = PrivateMode::Named(NamedPrivateMode::BracketedPaste);
+    let tr = kettle_i18n::Translator::default();
     let text = "echo one\x03\necho \x1b[31mtwo\n";
-    // What the dispatch arm does with an activated stop: judge the answer on
-    // one snapshot of the modes, and send on that snapshot only if it holds.
+    // Activate stop `index` and carry out what `text_paste_dispatch` decides
+    // as the handler does: a delivery reaches the pane through its encoder,
+    // a second question is returned.
     let answer = |mux: &mut Mux, dialog: &super::ConfirmDialogState, index: usize, policy| {
-        let Some(super::ConfirmStopAction::Dispatch(super::ConfirmAction::Paste {
-            target,
-            text,
-            unbracketed,
-            ..
-        })) = super::confirm_stop_action(dialog, index)
+        let Some(super::ConfirmStopAction::Dispatch(answered)) =
+            super::confirm_stop_action(dialog, index)
         else {
             panic!("paste action")
         };
-        let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
-        let answer = paste_answer(unbracketed, policy, &text, &modes);
-        if answer == PasteAnswer::Deliver {
-            paste_text_into_target(mux, target, &text, &modes);
+        let super::ConfirmAction::Paste { target, text, .. } = &answered else {
+            panic!("paste action")
+        };
+        match super::paste::text_paste_dispatch(&answered, paste_now(mux, policy), tr) {
+            PasteDispatch::Deliver(modes) => {
+                paste_text_into_target(mux, *target, text, &modes);
+                None
+            }
+            PasteDispatch::AskAgain(question) => Some(*question),
+            PasteDispatch::Drop => panic!("the scope is unchanged"),
         }
-        answer
     };
 
     // Asked with bracketed paste on: both controls are rows Kettle removes,
@@ -1683,24 +1687,39 @@ fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
 
     // Answered in the mode it was asked for, the raw Paste arrives as the
     // rows said: bracketed, without ^C and ESC.
-    assert_eq!(answer(&mut mux, &dialog, raw, Always), PasteAnswer::Deliver);
+    assert!(answer(&mut mux, &dialog, raw, Always).is_none());
     assert_eq!(
         captured().concat(),
         b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
     );
 
+    // Broadcast turned on while the question was open: the answer covered
+    // one pane, not a scope, and nothing is sent.
+    mux.broadcast = BroadcastScope::Tab;
+    let Some(super::ConfirmStopAction::Dispatch(answered)) =
+        super::confirm_stop_action(&dialog, raw)
+    else {
+        panic!("paste action")
+    };
+    assert!(matches!(
+        super::paste::text_paste_dispatch(&answered, paste_now(&mux, Always), tr),
+        PasteDispatch::Drop
+    ));
+    mux.broadcast = BroadcastScope::Off;
+
     // The program turns bracketed paste off while the question is open. The
     // same answer would now send ^C and ESC and run both lines, so nothing
     // is sent and Kettle asks again.
     mux.panes[&pane].term.term.lock().unwrap().unset_private_mode(mode);
-    assert_eq!(answer(&mut mux, &dialog, raw, Always), PasteAnswer::AskAgain);
-    assert_eq!(answer(&mut mux, &dialog, raw, Auto), PasteAnswer::AskAgain);
+    for policy in [Always, Auto] {
+        assert!(answer(&mut mux, &dialog, raw, policy).is_some());
+    }
     // The sanitised choice still has two lines to run: asked again too.
-    assert_eq!(answer(&mut mux, &dialog, 1, Auto), PasteAnswer::AskAgain);
+    assert!(answer(&mut mux, &dialog, 1, Auto).is_some());
     assert!(captured().is_empty());
     // A single line that keeps a control is refused under either policy,
     // though `always` by its own rule asks only about line breaks.
-    let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let modes = paste_now(&mux, Auto).modes;
     for policy in [Auto, Always] {
         assert_eq!(
             paste_answer(false, policy, "echo one\x03", &modes),
@@ -1717,30 +1736,25 @@ fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
             )
         })
         .unwrap();
-    assert_eq!(answer(&mut mux, &dialog, one_line, Always), PasteAnswer::Deliver);
+    assert!(answer(&mut mux, &dialog, one_line, Always).is_none());
     assert_eq!(captured().concat(), b"echo one  echo  [31mtwo ");
     // With the policy `off` Kettle does not ask at all.
-    assert_eq!(answer(&mut mux, &dialog, raw, Off), PasteAnswer::Deliver);
+    assert!(answer(&mut mux, &dialog, raw, Off).is_none());
     assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
 
     // The second question is asked for the modes of now: every control is a
     // live row and the raw Paste carries the warning colour. Its answer
     // stands, in this mode and after a return to bracketed paste.
-    let again = super::text_paste_confirmation(
-        Some(pane),
-        text,
-        BroadcastScope::Off,
-        vec![],
-        paste_ask(Always, modes.values().any(|bracketed| !bracketed)),
-        kettle_i18n::Translator::default(),
-    );
+    let again = answer(&mut mux, &dialog, raw, Always).unwrap();
     let detail = &again.paste.as_ref().unwrap().detail;
+    assert!(!detail.findings.is_empty());
     assert!(detail.findings.iter().all(|row| !row.removed));
     assert!(again.buttons[raw].destructive());
-    assert_eq!(answer(&mut mux, &again, raw, Always), PasteAnswer::Deliver);
+    assert_eq!(stop_paste(&again, raw).as_deref(), Some(text));
+    assert!(answer(&mut mux, &again, raw, Always).is_none());
     assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
     mux.panes[&pane].term.term.lock().unwrap().set_private_mode(mode);
-    assert_eq!(answer(&mut mux, &again, raw, Always), PasteAnswer::Deliver);
+    assert!(answer(&mut mux, &again, raw, Always).is_none());
     assert_eq!(
         captured().concat(),
         b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
@@ -2939,7 +2953,7 @@ fn the_settings_link_sends_nothing_and_opens_settings_at_paste_protection() {
 
 #[test]
 fn the_settings_link_is_cancel_then_settings_for_queued_input_and_broadcast() {
-    use super::{ConfirmStopAction, cancel_confirm_dialog_in, confirm_stop_action};
+    use super::{ConfirmFollowUp, ConfirmStopAction, answer_confirm_stop, confirm_stop_action};
     // A paste question over a tab that broadcasts to two panes, each with
     // its input captured, as it stands when the user reaches for the link.
     let window = || {
@@ -2981,12 +2995,19 @@ fn the_settings_link_is_cancel_then_settings_for_queued_input_and_broadcast() {
     ));
     assert!(confirm_stop_action(dialog, link + 1).is_none());
 
-    // The link: Cancel, then Settings on the row. Cancel alone beside it.
-    cancel_confirm_dialog_in(&mut by_link);
+    // The link answers as Cancel does, and leaves only Settings to open, on
+    // the Paste protection row. The app then opens it as `open_settings`
+    // and `focus_settings_key` do.
+    let Some(ConfirmFollowUp::Settings(key)) = answer_confirm_stop(&mut by_link, link) else {
+        panic!("the link opens Settings")
+    };
+    assert_eq!(key, "paste-protection");
     let mut nav = crate::settings::SettingsNav::default();
-    assert!(nav.focus_key(&categories, "paste-protection"));
+    assert!(nav.focus_key(&categories, key));
     by_link.settings_nav = Some(nav);
-    cancel_confirm_dialog_in(&mut by_cancel);
+    assert!(answer_confirm_stop(&mut by_cancel, 0).is_none());
+    // With the question gone, a second press answers nothing.
+    assert!(answer_confirm_stop(&mut by_cancel, 0).is_none());
 
     for (ws, captures) in [(&by_link, &link_captures), (&by_cancel, &cancel_captures)] {
         // The question is gone with its text, target and broadcast consent.
@@ -3009,31 +3030,6 @@ fn the_settings_link_is_cancel_then_settings_for_queued_input_and_broadcast() {
     );
     by_link.mux.kill_children();
     by_cancel.mux.kill_children();
-
-    // No seam reaches `App`: the three calls the handler makes for the link
-    // are pinned by their order in the source. Cancel comes first, so the
-    // question is answered before Settings is touched.
-    let resolve = include_str!("modals.rs")
-        .split("pub(super) fn resolve_confirm_button(")
-        .nth(1)
-        .unwrap()
-        .split("pub(super) fn confirm_cancel_press(")
-        .next()
-        .unwrap();
-    let arm = resolve
-        .split("ConfirmStopAction::PasteSettings => {")
-        .nth(1)
-        .unwrap()
-        .split("ConfirmStopAction::Dispatch")
-        .next()
-        .unwrap();
-    let cancel = arm.find("self.cancel_confirm_dialog(ws);").unwrap();
-    let open = arm.find("self.open_settings(ws);").unwrap();
-    let focus = arm
-        .find("self.focus_settings_key(ws, \"paste-protection\");")
-        .unwrap();
-    assert!(cancel < open && open < focus);
-    assert!(!arm.contains("dispatch_confirm_action"));
 }
 
 #[test]

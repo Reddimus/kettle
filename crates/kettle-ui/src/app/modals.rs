@@ -561,27 +561,13 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_button(&mut self, ws: &mut WindowState, index: usize) {
-        let Some(action) = ws
-            .confirm_dialog
-            .as_ref()
-            .and_then(|dialog| confirm_stop_action(dialog, index))
-        else {
-            return;
-        };
-        match action {
-            ConfirmStopAction::Cancel => self.cancel_confirm_dialog(ws),
-            // The link answers the question with Cancel: nothing is pasted
-            // and the consent it carried is gone. Then Settings opens on the
-            // row that decides when Kettle asks.
-            ConfirmStopAction::PasteSettings => {
-                self.cancel_confirm_dialog(ws);
+        match answer_confirm_stop(ws, index) {
+            None => {}
+            Some(ConfirmFollowUp::Settings(key)) => {
                 self.open_settings(ws);
-                self.focus_settings_key(ws, "paste-protection");
+                self.focus_settings_key(ws, key);
             }
-            ConfirmStopAction::Dispatch(action) => {
-                ws.confirm_dialog = None;
-                self.dispatch_confirm_action(ws, action);
-            }
+            Some(ConfirmFollowUp::Dispatch(action)) => self.dispatch_confirm_action(ws, action),
         }
         ws.wheel.reset();
         ws.lane_wheel.reset();
@@ -1153,7 +1139,7 @@ impl App {
 
     /// Carry out the accepted confirmation action. Only a paste can end in
     /// another question: one whose recipient left bracketed paste since the
-    /// question was asked (`paste_answer`).
+    /// question was asked (`text_paste_dispatch`).
     pub(super) fn dispatch_confirm_action(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         self.dispatch_confirm_action_arms(ws, action);
         self.hoover_groups(ws);
@@ -1249,27 +1235,9 @@ impl App {
                     w.request_redraw();
                 }
             }
-            ConfirmAction::Paste {
-                target,
-                text,
-                broadcast,
-                recipients,
-                unbracketed,
-            } => {
-                if ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients {
-                    // One snapshot of the recipients' modes judges the
-                    // answer and encodes the paste. The answer does not
-                    // cover a program that left bracketed paste while the
-                    // question was open: Kettle asks again, for these modes.
-                    let modes = self.text_paste_modes(ws, target);
-                    match paste_answer(unbracketed, self.cfg.paste_protection, &text, &modes) {
-                        PasteAnswer::Deliver => {
-                            self.deliver_text_paste(ws, target, &text, &modes);
-                        }
-                        PasteAnswer::AskAgain => self.ask_text_paste(ws, target, &text, &modes),
-                    }
-                }
-            }
+            // One snapshot of the recipients' modes judges the answer and
+            // encodes the paste (`text_paste_dispatch`).
+            answer @ ConfirmAction::Paste { .. } => self.answer_text_paste(ws, answer),
             ConfirmAction::RebindKeybind {
                 trig,
                 act,
@@ -3438,6 +3406,33 @@ pub(super) fn confirm_stop_action(
         | ConfirmButton::PasteWithoutControls { .. } => {
             confirmation_button_action(dialog, index).map(ConfirmStopAction::Dispatch)
         }
+    }
+}
+
+/// What the app still does after a stop has answered the question.
+#[derive(Debug)]
+pub(super) enum ConfirmFollowUp {
+    /// Open Settings on the row that edits this config key.
+    Settings(&'static str),
+    /// Carry out the chosen action.
+    Dispatch(ConfirmAction),
+}
+
+/// Answer the open question with focus stop `index`, as far as the window
+/// goes: the dialog closes, and with it whatever its answer does not carry.
+/// Cancel and the Settings link carry nothing, so no paste can follow them;
+/// the link then opens Settings on the Paste protection row. `None` when no
+/// question is open, `index` is no stop, or nothing is left to do.
+pub(super) fn answer_confirm_stop(ws: &mut WindowState, index: usize) -> Option<ConfirmFollowUp> {
+    let action = ws
+        .confirm_dialog
+        .as_ref()
+        .and_then(|dialog| confirm_stop_action(dialog, index))?;
+    cancel_confirm_dialog_in(ws);
+    match action {
+        ConfirmStopAction::Cancel => None,
+        ConfirmStopAction::PasteSettings => Some(ConfirmFollowUp::Settings("paste-protection")),
+        ConfirmStopAction::Dispatch(action) => Some(ConfirmFollowUp::Dispatch(action)),
     }
 }
 

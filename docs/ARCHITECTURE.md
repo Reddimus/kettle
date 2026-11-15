@@ -5477,8 +5477,10 @@ logical key, the modifiers and three flags (`vim-menu-nav`, stacked, macOS);
 compare the logical key only. A bare letter never sends the text as it is:
 `y` activates only a sanitising recommended button. What a stop does is
 `confirm_stop_action`: Cancel, the Settings link, or the dialog's action for
-that button. The link calls the Cancel routine itself and then opens Settings
-on the `paste-protection` row. Cancel is `cancel_confirm_dialog_in`: it drops
+that button. `answer_confirm_stop` answers the question with a stop as far as
+the window goes and returns what the app still does: for the link it runs the
+Cancel routine and returns Settings on the `paste-protection` row, which
+`resolve_confirm_button` opens. Cancel is `cancel_confirm_dialog_in`: it drops
 the dialog, and with it the pending text, target and broadcast consent. It
 does not touch the paste queue. Queued input that comes ready while any
 confirmation is open is discarded by `drain_queued_pastes`
@@ -5496,13 +5498,14 @@ by `without_controls`; `PasteProtection::confirms` does not ask for them
 alone. `ui_geometry`'s confirmation object is built by `confirmation_json`.
 
 The action records whether the question was asked for an unbracketed
-recipient. When it is answered, the dispatch arm samples the recipients'
-modes once and `paste_answer` judges the answer on that snapshot: a question
-asked with every recipient bracketed does not cover a recipient that has
-since turned bracketed paste off, if the chosen text has a line break or a
-control in it. Kettle then sends nothing and opens the question again for the
-modes of now (`ask_text_paste`). Otherwise the same snapshot encodes the
-paste. A mode change between that sample and the write is not covered; the
+recipient. When it is answered, `App::answer_text_paste` samples the broadcast
+scope, the recipients and their modes once, and `text_paste_dispatch` decides
+on that snapshot: nothing is sent when the scope or the recipient set changed;
+a question asked with every recipient bracketed does not cover a recipient
+that has since turned bracketed paste off, if the chosen text has a line
+break or a control in it (`paste_answer`), so Kettle sends nothing and returns
+the question again for the modes of now. Otherwise the same snapshot encodes
+the paste. A mode change between that sample and the write is not covered; the
 snapshot decides, as it does for a paste Kettle never asked about.
 Path pastes retain their stricter rejection of control characters in filenames.
 

@@ -869,36 +869,53 @@ impl App {
         let needs_confirmation =
             text_paste_needs_confirmation(self.cfg.paste_protection, text, modes);
         if needs_confirmation {
-            self.ask_text_paste(ws, target, text, modes);
+            let dialog = text_paste_confirmation(
+                target,
+                text,
+                ws.mux.broadcast.clone(),
+                self.broadcast_recipients(ws),
+                self.paste_ask(modes),
+                self.ui_text,
+            );
+            self.show_paste_question(ws, dialog);
         }
         needs_confirmation
     }
 
-    /// Open the paste question for `text`, described for `modes`.
-    pub(super) fn ask_text_paste(
-        &mut self,
-        ws: &mut WindowState,
-        target: Option<u64>,
-        text: &str,
-        modes: &std::collections::HashMap<u64, bool>,
-    ) {
-        let recipients = self.broadcast_recipients(ws);
-        let dialog = text_paste_confirmation(
-            target,
-            text,
-            ws.mux.broadcast.clone(),
-            recipients,
-            PasteAsk {
-                policy: self.cfg.paste_protection,
-                unbracketed: modes.values().any(|bracketed| !bracketed),
-                access_keys: confirm_access_keys(cfg!(target_os = "macos")),
-                delayed_suspend: cfg!(target_os = "macos"),
-            },
-            self.ui_text,
-        );
+    /// The paste question as this platform and policy ask it, for `modes`.
+    fn paste_ask(&self, modes: &std::collections::HashMap<u64, bool>) -> PasteAsk {
+        PasteAsk {
+            policy: self.cfg.paste_protection,
+            unbracketed: modes.values().any(|bracketed| !bracketed),
+            access_keys: confirm_access_keys(cfg!(target_os = "macos")),
+            delayed_suspend: cfg!(target_os = "macos"),
+        }
+    }
+
+    fn show_paste_question(&mut self, ws: &mut WindowState, dialog: ConfirmDialogState) {
         self.install_confirm_dialog(ws, dialog);
         if let Some(window) = &ws.window {
             window.request_redraw();
+        }
+    }
+
+    /// Carry out an answered paste question, as [`text_paste_dispatch`]
+    /// decides on the recipients as they are now.
+    pub(super) fn answer_text_paste(&mut self, ws: &mut WindowState, answer: ConfirmAction) {
+        let ConfirmAction::Paste { target, text, .. } = &answer else {
+            return;
+        };
+        let modes = self.text_paste_modes(ws, *target);
+        let now = PasteNow {
+            broadcast: ws.mux.broadcast.clone(),
+            recipients: self.broadcast_recipients(ws),
+            ask: self.paste_ask(&modes),
+            modes,
+        };
+        match text_paste_dispatch(&answer, now, self.ui_text) {
+            PasteDispatch::Drop => {}
+            PasteDispatch::Deliver(modes) => self.deliver_text_paste(ws, *target, text, &modes),
+            PasteDispatch::AskAgain(dialog) => self.show_paste_question(ws, *dialog),
         }
     }
 
@@ -2229,6 +2246,65 @@ pub(super) fn text_paste_modes<'a>(
 pub(super) enum PasteAnswer {
     Deliver,
     AskAgain,
+}
+
+/// The recipients of a paste as they are when its question is answered.
+pub(super) struct PasteNow {
+    pub broadcast: BroadcastScope,
+    /// The broadcast recipients, sorted; empty when broadcast is off.
+    pub recipients: Vec<u64>,
+    /// Bracketed paste on or off, per writable recipient, sampled once.
+    pub modes: std::collections::HashMap<u64, bool>,
+    /// The question as Kettle would ask it for these modes.
+    pub ask: PasteAsk,
+}
+
+/// What answering a paste question does.
+#[derive(Debug)]
+pub(super) enum PasteDispatch {
+    /// The broadcast scope or its recipients changed since the question:
+    /// the answer covered other panes, and nothing is sent.
+    Drop,
+    /// Send the text, encoded for these modes: the snapshot that judged it.
+    Deliver(std::collections::HashMap<u64, bool>),
+    /// A recipient left bracketed paste after the question was asked. Nothing
+    /// is sent, and this question, asked for the modes of now, replaces it.
+    AskAgain(Box<ConfirmDialogState>),
+}
+
+/// Decide what the answer `answered` (a paste action) does for the
+/// recipients as they are `now`. The handler only carries the result out.
+pub(super) fn text_paste_dispatch(
+    answered: &ConfirmAction,
+    now: PasteNow,
+    tr: kettle_i18n::Translator,
+) -> PasteDispatch {
+    let ConfirmAction::Paste {
+        target,
+        text,
+        broadcast,
+        recipients,
+        unbracketed,
+    } = answered
+    else {
+        return PasteDispatch::Drop;
+    };
+    // Consent covers the original pane or the unchanged broadcast scope and
+    // recipient set, nothing else.
+    if now.broadcast != *broadcast || now.recipients != *recipients {
+        return PasteDispatch::Drop;
+    }
+    match paste_answer(*unbracketed, now.ask.policy, text, &now.modes) {
+        PasteAnswer::Deliver => PasteDispatch::Deliver(now.modes),
+        PasteAnswer::AskAgain => PasteDispatch::AskAgain(Box::new(text_paste_confirmation(
+            *target,
+            text,
+            now.broadcast,
+            now.recipients,
+            now.ask,
+            tr,
+        ))),
+    }
 }
 
 /// Whether the answer to a paste question still covers the paste.
