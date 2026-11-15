@@ -8062,7 +8062,11 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
                 &panes[0].tr,
             )
             .expect("a label");
-            let colors = crate::scrollback::scrollback_button_colors(&cfg.theme, linear);
+            let colors = crate::scrollback::scrollback_button_colors(
+                &cfg.theme,
+                linear,
+                crate::color::Backing::opaque(cfg.theme.background),
+            );
             let (x, y, w, h) = pill.rect;
             for (hovered, pressed, state) in [
                 (None, None, ScrollbackPillState::Rest),

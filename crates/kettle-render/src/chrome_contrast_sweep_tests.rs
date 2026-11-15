@@ -595,15 +595,17 @@ fn the_jump_button_label_clears_the_floor_at_its_stems() {
 }
 
 /// The jump button's colours take several bisections, so the painter
-/// resolves them once per theme, not every frame: a later frame reads what
-/// is saved.
+/// resolves them once per theme and window opacity, not every frame: a later
+/// frame reads what is saved, and another theme, blend mode or opacity
+/// resolves afresh.
 #[test]
 fn the_jump_button_colours_are_resolved_once_per_theme() {
     use crate::scrollback::{PillSurface, ScrollbackPillColors, scrollback_button_colors};
     let mut colors = Colors::default();
     let night = Theme::by_name("TokyoNight Night");
-    let resolved = scrollback_button_colors(&night, true);
-    assert_eq!(colors.scrollback_pill(&night, true), resolved);
+    let opaque = color::Backing::opaque(night.background);
+    let resolved = scrollback_button_colors(&night, true, opaque);
+    assert_eq!(colors.scrollback_pill(&night, true, opaque), resolved);
     // The pill's own fill and ink are the button's at rest.
     assert_eq!(
         (resolved.rest.fill, resolved.rest.ink),
@@ -622,16 +624,23 @@ fn the_jump_button_colours_are_resolved_once_per_theme() {
     };
     let (key, _) = colors.pill.expect("the first frame saves its colours");
     colors.pill = Some((key, marked));
-    assert_eq!(colors.scrollback_pill(&night, true), marked);
-    // Another theme or blend mode resolves afresh.
-    let day = Theme::by_name("TokyoNight Day");
+    assert_eq!(colors.scrollback_pill(&night, true, opaque), marked);
+    // Another theme, blend mode or window opacity resolves afresh.
+    let translucent =
+        color::Backing::translucent(night.background, 0.86, color::MACOS_BACKDROP_LIFT);
     assert_eq!(
-        colors.scrollback_pill(&day, true),
-        scrollback_button_colors(&day, true)
+        colors.scrollback_pill(&night, true, translucent),
+        scrollback_button_colors(&night, true, translucent)
+    );
+    let day = Theme::by_name("TokyoNight Day");
+    let day_opaque = color::Backing::opaque(day.background);
+    assert_eq!(
+        colors.scrollback_pill(&day, true, day_opaque),
+        scrollback_button_colors(&day, true, day_opaque)
     );
     assert_eq!(
-        colors.scrollback_pill(&day, false),
-        scrollback_button_colors(&day, false)
+        colors.scrollback_pill(&day, false, day_opaque),
+        scrollback_button_colors(&day, false, day_opaque)
     );
 }
 
@@ -692,7 +701,7 @@ fn the_painter_uses_the_swept_helpers() {
         "let(bar_fill,bar_alpha)=search::search_bar_layer(theme,translucent_window,self.config.format.is_srgb(),&mutself.chrome_colors,);",
         "geometry.rect.3,bar_fill,bar_alpha asf32,",
         "letbackground=search::search_segment_fill(",
-        "letpill_colors=self.chrome_colors.scrollback_pill(theme,self.config.format.is_srgb());",
+        "letterminal=color::Backing::translucent(theme.background,composed_bg_alpha(cfg),color::PLATFORM_BACKDROP_LIFT,);letpill_colors=self.chrome_colors.scrollback_pill(theme,self.config.format.is_srgb(),terminal);",
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "}=settings::settings_colors(",

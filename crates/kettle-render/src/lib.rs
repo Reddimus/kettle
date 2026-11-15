@@ -3753,9 +3753,16 @@ impl Renderer {
             }
         }
         if !scrollback_texts.is_empty() {
-            let pill_colors = self
-                .chrome_colors
-                .scrollback_pill(theme, self.config.format.is_srgb());
+            // The button is opaque; its edge meets the terminal, which shows
+            // the desktop through a translucent window.
+            let terminal = color::Backing::translucent(
+                theme.background,
+                composed_bg_alpha(cfg),
+                color::PLATFORM_BACKDROP_LIFT,
+            );
+            let pill_colors =
+                self.chrome_colors
+                    .scrollback_pill(theme, self.config.format.is_srgb(), terminal);
             let mut buffers = self.scrollback_buffers.iter();
             let mut text = |origin: (f32, f32), (x, y, w, h): Rect4, ink: Rgb| {
                 if let Some(buffer) = buffers.next() {

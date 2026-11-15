@@ -10,7 +10,7 @@ pub(crate) const SECONDARY_TEXT_CONTRAST: f64 = 7.0;
 
 /// The jump button's colours, keyed by the theme colours and blend mode
 /// they came from.
-type PillColors = (([u32; 3], bool), crate::scrollback::ScrollbackPillColors);
+type PillColors = (([u32; 5], bool), crate::scrollback::ScrollbackPillColors);
 
 /// The scrollbar's colours, keyed the same way.
 type ScrollbarColorKey = ([u32; 4], bool);
@@ -53,17 +53,25 @@ impl Colors {
         palette
     }
 
-    /// The jump-to-bottom button's colours in each of its states
-    /// ([`crate::scrollback::scrollback_button_colors`]), resolved once per
-    /// theme rather than every frame.
+    /// The jump-to-bottom button's colours in each of its states on
+    /// `terminal` ([`crate::scrollback::scrollback_button_colors`]), resolved
+    /// once per theme and window opacity rather than every frame.
     pub(crate) fn scrollback_pill(
         &mut self,
         theme: &kettle_config::Theme,
         linear: bool,
+        terminal: color::Backing,
     ) -> crate::scrollback::ScrollbackPillColors {
+        // An opaque terminal's two ends are the same colour.
         let key = (
-            [theme.palette[0], theme.background, theme.foreground]
-                .map(MinimumContrastCache::color_key),
+            [
+                theme.palette[0],
+                theme.background,
+                theme.foreground,
+                terminal.over_black,
+                terminal.over_white,
+            ]
+            .map(MinimumContrastCache::color_key),
             linear,
         );
         if let Some((saved, colors)) = self.pill
@@ -71,7 +79,7 @@ impl Colors {
         {
             return colors;
         }
-        let colors = crate::scrollback::scrollback_button_colors(theme, linear);
+        let colors = crate::scrollback::scrollback_button_colors(theme, linear, terminal);
         self.pill = Some((key, colors));
         colors
     }

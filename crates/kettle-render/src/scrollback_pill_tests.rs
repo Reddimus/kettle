@@ -6,7 +6,7 @@
 //! that says where kept history starts and how much of it there is, as
 //! resolved geometry and colours: no test here reads a glyph.
 
-use crate::color::{self, contrast_ratio, relative_luminance};
+use crate::color::{self, Backing, contrast_ratio, relative_luminance};
 use crate::scrollback::{
     PILL_EDGE_CONTRAST, PILL_EDGE_ON_FILL, PILL_STATE_STEP, kept_history_label_quads,
     pane_scrollbar_geometry, scrollback_button_colors, scrollback_pill_colors,
@@ -263,7 +263,8 @@ fn the_jump_button_states_keep_their_floors_on_every_theme() {
     for name in Theme::list() {
         let theme = Theme::by_name(name);
         for linear in [true, false] {
-            let colors = scrollback_button_colors(&theme, linear);
+            let colors =
+                scrollback_button_colors(&theme, linear, Backing::opaque(theme.background));
             let bg = theme.background;
             assert_eq!(
                 (colors.rest.fill, colors.rest.ink),
@@ -341,7 +342,8 @@ fn the_jump_button_states_on_the_default_themes() {
     for name in ["TokyoNight Night", "Kettle Day"] {
         let theme = Theme::by_name(name);
         for linear in [true, false] {
-            let colors = scrollback_button_colors(&theme, linear);
+            let colors =
+                scrollback_button_colors(&theme, linear, Backing::opaque(theme.background));
             let bg = theme.background;
             let on_bg = |c: Rgb| contrast_ratio(c, bg);
             assert!(on_bg(colors.rest.fill) >= 2.99, "{name} linear={linear}");
@@ -359,7 +361,7 @@ fn the_jump_button_states_on_the_default_themes() {
     }
     let night = Theme::by_name("TokyoNight Night");
     for linear in [true, false] {
-        let colors = scrollback_button_colors(&night, linear);
+        let colors = scrollback_button_colors(&night, linear, Backing::opaque(night.background));
         let on_bg = |c: Rgb| contrast_ratio(c, night.background);
         assert!(on_bg(colors.hover.fill) > on_bg(colors.rest.fill));
         assert!(on_bg(colors.pressed.fill) < on_bg(colors.rest.fill));
@@ -405,7 +407,8 @@ fn bounds(quads: &[QuadInstance]) -> Rect4 {
 fn the_painted_button_and_label_fill_their_rects() {
     let tr = Translator::default();
     for name in ["TokyoNight Night", "Kettle Day"] {
-        let colors = scrollback_button_colors(&Theme::by_name(name), true);
+        let theme = Theme::by_name(name);
+        let colors = scrollback_button_colors(&theme, true, Backing::opaque(theme.background));
         for scale in SCALES {
             let pane = terminal(800.0, scale);
             let pill = scrollback_pill(
@@ -783,4 +786,69 @@ fn the_label_and_the_button_stay_out_of_the_search_bar() {
             }
         }
     }
+}
+
+/// In a translucent window the button stays opaque, so its fill and label
+/// are the opaque window's; its edge meets the terminal, which shows the
+/// desktop through it. At the default opacities (0.99, and 0.86 where the
+/// window has a native material) and opaque, on every bundled theme, in
+/// both blend modes, with and without macOS's backdrop lift, the edge in
+/// every state is 3:1 against everything the terminal can show over any
+/// desktop, and 1.3:1 against the fill. Below that, where no grey can be
+/// 3:1 against both a black and a white desktop seen through the terminal,
+/// the edge is the white or black that comes closest.
+#[test]
+fn the_jump_button_edge_holds_over_a_translucent_window() {
+    use crate::scrollback::{PILL_EDGE_CONTRAST, PILL_EDGE_ON_FILL, pill_edge_fallback};
+    let mut failures = Vec::new();
+    let mut short = 0;
+    for lift in [color::NO_BACKDROP_LIFT, color::MACOS_BACKDROP_LIFT] {
+        for alpha in [1.0, 0.99, 0.86, 0.7, 0.43] {
+            for name in Theme::list() {
+                let theme = Theme::by_name(name);
+                for linear in [true, false] {
+                    let terminal = Backing::translucent(theme.background, alpha, lift);
+                    let colors = scrollback_button_colors(&theme, linear, terminal);
+                    let opaque =
+                        scrollback_button_colors(&theme, linear, Backing::opaque(theme.background));
+                    let context = format!("{name} linear={linear} alpha {alpha} lift {lift:?}");
+                    for (state, surface, opaque) in [
+                        ("rest", colors.rest, opaque.rest),
+                        ("hover", colors.hover, opaque.hover),
+                        ("pressed", colors.pressed, opaque.pressed),
+                    ] {
+                        if (surface.fill, surface.ink) != (opaque.fill, opaque.ink) {
+                            failures.push(format!("{context} {state}: the fill or label moved"));
+                        }
+                        let against = terminal.weakest_contrast(surface.edge);
+                        let holds = against >= PILL_EDGE_CONTRAST
+                            && contrast_ratio(surface.edge, surface.fill) >= PILL_EDGE_ON_FILL;
+                        if holds {
+                            continue;
+                        }
+                        if alpha >= 0.86 {
+                            failures.push(format!("{context} {state}: edge {against:.3}"));
+                        } else if surface.edge != pill_edge_fallback(terminal) {
+                            failures.push(format!("{context} {state}: not the closest grey"));
+                        } else {
+                            short += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failures, first: {}",
+        failures.len(),
+        failures
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    // Below the defaults some themes do run out of greys.
+    assert!(short > 0);
 }

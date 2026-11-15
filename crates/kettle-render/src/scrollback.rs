@@ -326,7 +326,9 @@ impl ScrollbackPillColors {
 }
 
 /// The edge of the button in every state, against the terminal around it:
-/// the WCAG 2.2 1.4.11 floor for a control's boundary.
+/// the WCAG 2.2 1.4.11 floor for a control's boundary. In a translucent
+/// window it is held against everything the terminal can show over the
+/// desktop, where some grey can be.
 pub(crate) const PILL_EDGE_CONTRAST: f64 = crate::chrome::ICON_CONTRAST;
 /// The edge against the button's own fill, so the outline shows.
 pub(crate) const PILL_EDGE_ON_FILL: f64 = 1.3;
@@ -334,11 +336,17 @@ pub(crate) const PILL_EDGE_ON_FILL: f64 = 1.3;
 /// this, so the change of state shows.
 pub(crate) const PILL_STATE_STEP: f64 = 1.15;
 
-/// The jump button's colours. At rest it keeps the pill's fill and ink
-/// ([`scrollback_pill_colors`]) and gains an edge: the fill moved a third of
-/// the way to the ink, then as far as it takes to be 3:1 against the
-/// terminal and 1.3:1 against the fill. On a theme where the fill had to
-/// step back for its label, the edge still bounds the button.
+/// The jump button's colours, on `terminal`: what the pane shows around the
+/// button, the theme background, opaque or over any desktop
+/// ([`color::Backing`](crate::color::Backing)). At rest it keeps the pill's
+/// fill and ink ([`scrollback_pill_colors`]) and gains an edge: the fill
+/// moved a third of the way to the ink, then as far as it takes to be 3:1
+/// against the terminal and 1.3:1 against the fill. On a theme where the
+/// fill had to step back for its label, the edge still bounds the button.
+///
+/// The button is painted opaque, so its fill and label are the same in a
+/// translucent window; only the edge, which meets the terminal, depends on
+/// it.
 ///
 /// Under the pointer the fill takes one step away from the terminal's
 /// colour and the edge takes the ink's; held down, the fill takes a second
@@ -348,10 +356,13 @@ pub(crate) const PILL_STATE_STEP: f64 = 1.15;
 /// terminal instead: on TokyoNight Night the fill lifts under the pointer
 /// and sinks when pressed. In every state the label clears `TEXT_CONTRAST`
 /// at its stem pixel and the edge is 3:1 against the terminal, whatever the
-/// fill.
+/// fill, wherever a grey can be: over a translucent window that lets enough
+/// of the desktop through, no grey is 3:1 against both a black and a white
+/// desktop, and the edge is the white or black that comes closest.
 pub(crate) fn scrollback_button_colors(
     theme: &kettle_config::Theme,
     linear: bool,
+    terminal: crate::color::Backing,
 ) -> ScrollbackPillColors {
     use crate::color::{self, contrast_ratio, relative_luminance};
     let bg = theme.background;
@@ -403,7 +414,7 @@ pub(crate) fn scrollback_button_colors(
         };
         PillSurface {
             fill,
-            edge: pill_edge(start, bg, fill),
+            edge: pill_edge(start, terminal, fill),
             ink,
         }
     };
@@ -415,15 +426,17 @@ pub(crate) fn scrollback_button_colors(
 }
 
 /// `start` moved toward white or black, whichever is nearer, until it is
-/// [`PILL_EDGE_CONTRAST`] against the terminal and [`PILL_EDGE_ON_FILL`]
-/// against the button's fill. Where no grey of it is both, the terminal's
-/// floor is the one kept.
-fn pill_edge(start: Rgb, bg: Rgb, fill: Rgb) -> Rgb {
+/// [`PILL_EDGE_CONTRAST`] against everything `terminal` can show and
+/// [`PILL_EDGE_ON_FILL`] against the button's fill. Where no grey of it is
+/// both, the white or black with the most contrast against the terminal.
+fn pill_edge(start: Rgb, terminal: crate::color::Backing, fill: Rgb) -> Rgb {
     use crate::color::{self, contrast_ratio};
     let passes = |c: Rgb| {
-        contrast_ratio(c, bg) >= PILL_EDGE_CONTRAST && contrast_ratio(c, fill) >= PILL_EDGE_ON_FILL
+        terminal.weakest_contrast(c) >= PILL_EDGE_CONTRAST
+            && contrast_ratio(c, fill) >= PILL_EDGE_ON_FILL
     };
     const STEPS: u32 = 64;
+    let (white, black) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
     let toward = |end: Rgb| {
         (0..=STEPS)
             .map(|step| {
@@ -434,14 +447,22 @@ fn pill_edge(start: Rgb, bg: Rgb, fill: Rgb) -> Rgb {
             })
             .find(|(_, c)| passes(*c))
     };
-    [toward(Rgb::new(255, 255, 255)), toward(Rgb::new(0, 0, 0))]
+    [toward(white), toward(black)]
         .into_iter()
         .flatten()
         .min_by_key(|(step, _)| *step)
-        .map_or_else(
-            || color::with_min_contrast(start, bg, PILL_EDGE_CONTRAST),
-            |(_, c)| c,
-        )
+        .map_or_else(|| pill_edge_fallback(terminal), |(_, c)| c)
+}
+
+/// The edge where no grey reaches both of its floors: white or black,
+/// whichever stands out more against the terminal.
+pub(crate) fn pill_edge_fallback(terminal: crate::color::Backing) -> Rgb {
+    let (white, black) = (Rgb::new(255, 255, 255), Rgb::new(0, 0, 0));
+    if terminal.weakest_contrast(white) >= terminal.weakest_contrast(black) {
+        white
+    } else {
+        black
+    }
 }
 
 /// The corner radius of the jump button, in logical px: a button's, where
