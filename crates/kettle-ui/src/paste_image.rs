@@ -182,8 +182,9 @@ const MAX_DIMENSION: usize = 16_384;
 
 /// Most encoded PNG bytes read from another program's clipboard offer. The
 /// decoded bitmap has its own bounds: [`MAX_DIMENSION`] a side and the
-/// store's byte budget as RGBA.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+/// store's byte budget as RGBA. Only the Wayland offer reader uses it, which
+/// is built on Linux and in Unix test builds.
+#[cfg_attr(not(any(target_os = "linux", all(test, unix))), allow(dead_code))]
 pub(crate) const PNG_SOURCE_MAX: usize = 64 * 1024 * 1024;
 
 /// Most bytes the PNG decoder may allocate for one clipboard image.
