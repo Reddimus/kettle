@@ -1877,10 +1877,9 @@ impl App {
             .or(media_receipt_hover);
         // The jump button under the pointer, where a press would reach it:
         // it takes the hand and paints its hover fill, repainted only as the
-        // pointer enters or leaves it.
-        let pill_hover = scrollback_pill_hover(above_pill.is_some(), || {
-            self.scrollback_pill_target(ws, cursor_x, cursor_y)
-        });
+        // pointer enters or leaves it. Whatever covers it here also takes
+        // the press, so neither is left to the order of this chain.
+        let pill_hover = self.scrollback_pill_target(ws, cursor_x, cursor_y);
         if pill_hover != ws.scrollback_pill_hover {
             ws.scrollback_pill_hover = pill_hover;
             if let Some(window) = &ws.window {
@@ -2089,29 +2088,63 @@ impl App {
 
     /// The pane whose jump button a press at `(px, py)` reaches: the one
     /// rule the hover fill, the pointer cursor, the press and its release
-    /// share. A dialog or menu, the completion list and a paste receipt over
-    /// the button each take the pointer first.
+    /// share, through [`scrollback_pill_reach`].
     pub(super) fn scrollback_pill_target(&self, ws: &WindowState, px: f32, py: f32) -> Option<u64> {
-        if self.pointer_modal_open(ws) || ws.preview_overlay.is_some() {
-            return None;
-        }
         let hit = self.scrollback_pill_at(ws, px, py)?;
-        let completion = self.completion_overlay_projection(ws, terminal_surface_available(ws));
-        if completion_overlay_hit_test(completion.as_ref(), self.menu_cell(ws), (px, py)) {
-            return None;
+        scrollback_pill_reach(
+            Some(hit),
+            &self.scrollback_pill_covers(ws, px, py),
+            (px, py),
+        )
+    }
+
+    /// What lies over the panes at `(px, py)` and takes a press before a jump
+    /// button there would: whatever the press path in `window_events.rs` and
+    /// `ctl.rs` hands the press to first.
+    fn scrollback_pill_covers(&self, ws: &WindowState, px: f32, py: f32) -> PillCovers {
+        let blocked = self.pointer_modal_open(ws)
+            || ws.context_menu.is_some()
+            || ws.preview_overlay.is_some()
+            || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
+            || self.linux_resize_at(ws, px, py).is_some();
+        if blocked {
+            return PillCovers {
+                blocked,
+                ..PillCovers::default()
+            };
         }
+        let toasts = self
+            .persistent_notices(ws)
+            .into_iter()
+            .map(|(_, toast)| toast.geometry)
+            .chain(
+                self.notification_toast_projection(ws)
+                    .map(|view| view.overlay.geometry),
+            )
+            .chain(self.update_toast_projection(ws).map(|toast| toast.geometry))
+            .collect();
+        let completion = self
+            .completion_overlay_projection(ws, terminal_surface_available(ws))
+            .map(|completion| (completion, self.menu_cell(ws)));
         let receipt = self
             .media_paste_receipt_projection(ws)
-            .map(|(receipt, completion)| {
+            .and_then(|(receipt, completion)| {
                 self.media_paste_receipt_placement(ws, receipt, completion)
+                    .geometry()
             });
-        scrollback_pill_reached(Some(hit), receipt.as_ref(), (px, py))
+        PillCovers {
+            blocked,
+            toasts,
+            search: self.search_geometry(ws).map(|geometry| geometry.rect),
+            completion,
+            receipt,
+        }
     }
 
     /// Take a press on a jump button, before focus, links, selection and
     /// mouse reporting. A primary press arms the button; it acts on release,
-    /// as a native button does, so its pressed state shows and moving off it
-    /// cancels.
+    /// as a native button does, so its pressed state shows and a release
+    /// anywhere else cancels it.
     pub(super) fn press_scrollback_pill(
         &self,
         ws: &mut WindowState,
@@ -2119,10 +2152,8 @@ impl App {
         py: f32,
         button: u8,
     ) -> bool {
-        let Some(pane) = self.scrollback_pill_target(ws, px, py) else {
-            return false;
-        };
-        Self::press_scrollback_pill_with_receipt(ws, Some(pane), None, (px, py), button)
+        let reached = self.scrollback_pill_target(ws, px, py);
+        Self::press_reached_scrollback_pill(ws, reached, button)
     }
 
     /// End a press a jump button took. Released over the same button, it
@@ -2138,19 +2169,9 @@ impl App {
         if button != 0 || ws.scrollback_pill_press.is_none() {
             return false;
         }
-        let over = self.scrollback_pill_target(ws, px, py);
-        Self::release_scrollback_pill_with_receipt(ws, over, None, (px, py), button)
+        let reached = self.scrollback_pill_target(ws, px, py);
+        Self::release_reached_scrollback_pill(ws, reached, button)
     }
-}
-
-/// The jump button that shows as hovered and gives the pointer its hand:
-/// the one a press would reach, unless something drawn over it (a toast, a
-/// dialog button, the search bar, a paste receipt) has the pointer.
-pub(super) fn scrollback_pill_hover(
-    pointer_taken: bool,
-    target: impl FnOnce() -> Option<u64>,
-) -> Option<u64> {
-    if pointer_taken { None } else { target() }
 }
 
 pub(super) fn scrollback_pill_hit(
@@ -2162,35 +2183,62 @@ pub(super) fn scrollback_pill_hit(
         .find_map(|(pane, pill)| rect_contains(pill.rect, point.0, point.1).then_some(pane))
 }
 
-/// The pane whose jump button `point` reaches, given the button under it
-/// and the paste receipt on screen: a receipt over the button keeps the
-/// pointer.
-pub(super) fn scrollback_pill_reached(
+/// What is drawn over the panes, or holds the pointer, and so takes a press
+/// before a jump button under it.
+#[derive(Default)]
+pub(super) struct PillCovers {
+    /// A dialog, menu or the media viewer has the pointer, a tab is being
+    /// dragged, or the point is on the window's resize edge.
+    pub(super) blocked: bool,
+    /// Persistent notices, the notification toast and the update toast.
+    pub(super) toasts: Vec<kettle_render::UpdateToastGeometry>,
+    /// The search bar, while Find is open.
+    pub(super) search: Option<Rect>,
+    /// The completion list and the cell it is laid out in.
+    pub(super) completion: Option<(kettle_render::CompletionOverlay, (f32, f32))>,
+    /// A pasted-media receipt, where it is placed.
+    pub(super) receipt: Option<kettle_render::MediaPasteReceiptGeometry>,
+}
+
+impl PillCovers {
+    /// Whether something here takes a press at `(x, y)`.
+    pub(super) fn cover(&self, (x, y): (f32, f32)) -> bool {
+        self.blocked
+            || self
+                .toasts
+                .iter()
+                .any(|toast| toast.hit_test(x, y).is_some())
+            || self.search.is_some_and(|rect| rect_contains(rect, x, y))
+            || self.completion.as_ref().is_some_and(|(completion, cell)| {
+                completion_overlay_hit_test(Some(completion), *cell, (x, y))
+            })
+            || self
+                .receipt
+                .is_some_and(|geometry| geometry.hit_test(x, y).is_some())
+    }
+}
+
+/// The pane whose jump button `point` reaches: `hit`, the button under it,
+/// unless something in `covers` takes the press there. The hover fill, the
+/// hand cursor, the press and its release all ask this.
+pub(super) fn scrollback_pill_reach(
     hit: Option<u64>,
-    receipt: Option<&MediaPasteReceiptPlacement>,
+    covers: &PillCovers,
     point: (f32, f32),
 ) -> Option<u64> {
-    hit.filter(|_| {
-        !receipt.is_some_and(|placement| {
-            placement
-                .geometry()
-                .is_some_and(|geometry| geometry.hit_test(point.0, point.1).is_some())
-        })
-    })
+    hit.filter(|_| !covers.cover(point))
 }
 
 impl App {
-    /// A press at `point` with `hit` the jump button under it. A primary
-    /// press arms that button for its release; any other button is taken and
-    /// does nothing.
-    pub(super) fn press_scrollback_pill_with_receipt(
+    /// A press of `button` that reached `reached`'s jump button. A primary
+    /// press arms it for its release; any other button is taken and does
+    /// nothing. Nothing reached, the press is not the button's.
+    pub(super) fn press_reached_scrollback_pill(
         ws: &mut WindowState,
-        hit: Option<u64>,
-        receipt: Option<&MediaPasteReceiptPlacement>,
-        point: (f32, f32),
+        reached: Option<u64>,
         button: u8,
     ) -> bool {
-        let Some(pane) = scrollback_pill_reached(hit, receipt, point) else {
+        let Some(pane) = reached else {
             return false;
         };
         if button == 0 {
@@ -2202,14 +2250,12 @@ impl App {
         true
     }
 
-    /// The primary release that ends a press a jump button took, with `hit`
-    /// the button now under `point`. Only a release over the button that
-    /// took the press returns its pane to live output.
-    pub(super) fn release_scrollback_pill_with_receipt(
+    /// The primary release that ends a press a jump button took, with
+    /// `reached` the button it reaches now. Only a release over the button
+    /// that took the press returns its pane to live output.
+    pub(super) fn release_reached_scrollback_pill(
         ws: &mut WindowState,
-        hit: Option<u64>,
-        receipt: Option<&MediaPasteReceiptPlacement>,
-        point: (f32, f32),
+        reached: Option<u64>,
         button: u8,
     ) -> bool {
         if button != 0 {
@@ -2218,7 +2264,7 @@ impl App {
         let Some(pressed) = ws.scrollback_pill_press.take() else {
             return false;
         };
-        if scrollback_pill_reached(hit, receipt, point) == Some(pressed) {
+        if reached == Some(pressed) {
             Self::return_pane_to_live(ws, pressed);
         } else if let Some(window) = &ws.window {
             window.request_redraw();

@@ -1,4 +1,6 @@
-use super::{App, MediaPasteReceiptPlacement, scrollback_pill_hit};
+use super::{
+    App, MediaPasteReceiptPlacement, PillCovers, scrollback_pill_hit, scrollback_pill_reach,
+};
 use crate::window_state::WindowState;
 use kettle_i18n::{Language, Translator};
 use kettle_render::{
@@ -106,8 +108,8 @@ impl Fixture {
         point: (f32, f32),
         button: u8,
     ) -> bool {
-        let hit = self.hit(height, point);
-        App::press_scrollback_pill_with_receipt(&mut self.ws, hit, receipt, point, button)
+        let reached = self.reach(height, receipt, point);
+        App::press_reached_scrollback_pill(&mut self.ws, reached, button)
     }
 
     fn release(
@@ -117,8 +119,28 @@ impl Fixture {
         point: (f32, f32),
         button: u8,
     ) -> bool {
-        let hit = self.hit(height, point);
-        App::release_scrollback_pill_with_receipt(&mut self.ws, hit, receipt, point, button)
+        let reached = self.reach(height, receipt, point);
+        App::release_reached_scrollback_pill(&mut self.ws, reached, button)
+    }
+
+    /// The button a press at `point` reaches with `receipt` on screen, by
+    /// the rule the window's hover, press and release share.
+    fn reach(
+        &self,
+        height: f32,
+        receipt: Option<&MediaPasteReceiptPlacement>,
+        point: (f32, f32),
+    ) -> Option<u64> {
+        let covers = PillCovers {
+            receipt: receipt.and_then(MediaPasteReceiptPlacement::geometry),
+            ..PillCovers::default()
+        };
+        self.reach_under(height, &covers, point)
+    }
+
+    /// The button a press at `point` reaches under `covers`.
+    fn reach_under(&self, height: f32, covers: &PillCovers, point: (f32, f32)) -> Option<u64> {
+        scrollback_pill_reach(self.hit(height, point), covers, point)
     }
 }
 
@@ -346,4 +368,114 @@ fn scrollback_receipt_hit_jump_button_acts_on_release_over_the_same_button() {
     assert!(fixture.release(192.0, None, on_first, 0));
     assert_eq!(fixture.offsets(), [0, 30]);
     assert!(fixture.ws.accessibility_pending);
+}
+
+/// A jump button under something drawn over the panes is neither hovered
+/// nor pressed, and the same button uncovered is both. The window stores
+/// the reach at the pointer as the hover, which paints the hover fill and
+/// gives the hand, and a press and its release ask the same reach, so they
+/// cannot disagree. Covered here by a real persistent notice, the search
+/// bar's real geometry, a real paste receipt, and while a dialog holds the
+/// pointer.
+#[test]
+fn scrollback_receipt_hit_a_covered_jump_button_is_neither_hovered_nor_pressed() {
+    use kettle_render::ScrollbackPillState;
+    let mut fixture = Fixture::new(1);
+    let pane = fixture.panes[0];
+    let tr = Translator::new(Language::En);
+    // A short pane: the notice across the window's top and the search bar
+    // across its bottom both reach its button.
+    let (short, on_short) = (60.0, (740.0, 43.0));
+    let notice =
+        kettle_render::persistent_notice_geometry((0.0, 0.0, 800.0, 192.0), (8.0, 16.0), 1, 0, 7)
+            .expect("a notice");
+    let bar = kettle_render::search_bar_geometry(1600.0, short, 8.0, 18.0, &tr);
+    let (tall, on_tall) = (192.0, (740.0, 170.0));
+    let receipt = placement(tall, true, Some((0.0, 0.0, 800.0, tall)));
+    for (what, height, point, covers) in [
+        (
+            "a notice",
+            short,
+            on_short,
+            PillCovers {
+                toasts: vec![notice],
+                ..PillCovers::default()
+            },
+        ),
+        (
+            "the search bar",
+            short,
+            on_short,
+            PillCovers {
+                search: Some(bar.rect),
+                ..PillCovers::default()
+            },
+        ),
+        (
+            "a receipt",
+            tall,
+            on_tall,
+            PillCovers {
+                receipt: receipt.geometry(),
+                ..PillCovers::default()
+            },
+        ),
+        (
+            "a dialog",
+            tall,
+            on_tall,
+            PillCovers {
+                blocked: true,
+                ..PillCovers::default()
+            },
+        ),
+    ] {
+        fixture.reset();
+        assert_eq!(
+            fixture.hit(height, point),
+            Some(pane),
+            "{what}: on the button"
+        );
+        assert!(covers.cover(point), "{what}: over the button");
+        // Covered: no hover fill or hand, and the press is not the button's.
+        let hover = fixture.reach_under(height, &covers, point);
+        assert_eq!(hover, None, "{what}");
+        assert_eq!(
+            ScrollbackPillState::of(pane, hover, fixture.ws.scrollback_pill_press),
+            ScrollbackPillState::Rest
+        );
+        let reached = fixture.reach_under(height, &covers, point);
+        assert!(!App::press_reached_scrollback_pill(
+            &mut fixture.ws,
+            reached,
+            0
+        ));
+        assert_eq!(fixture.ws.scrollback_pill_press, None, "{what}");
+        assert_eq!(fixture.offsets(), [30, 30], "{what}");
+        // Uncovered: hovered, pressed, and released back to live output.
+        let open = PillCovers::default();
+        let hover = fixture.reach_under(height, &open, point);
+        assert_eq!(hover, Some(pane), "{what}");
+        assert_eq!(
+            ScrollbackPillState::of(pane, hover, fixture.ws.scrollback_pill_press),
+            ScrollbackPillState::Hovered
+        );
+        let reached = fixture.reach_under(height, &open, point);
+        assert!(App::press_reached_scrollback_pill(
+            &mut fixture.ws,
+            reached,
+            0
+        ));
+        assert_eq!(
+            ScrollbackPillState::of(pane, hover, fixture.ws.scrollback_pill_press),
+            ScrollbackPillState::Pressed
+        );
+        let reached = fixture.reach_under(height, &open, point);
+        assert!(App::release_reached_scrollback_pill(
+            &mut fixture.ws,
+            reached,
+            0
+        ));
+        assert_eq!(fixture.offsets(), [0, 30], "{what}");
+    }
 }

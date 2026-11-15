@@ -6,7 +6,7 @@
 use super::accessibility::{scrollback_accessibility_nodes, viewing_history_pane};
 use super::{
     kept_history_label_json, production_source, rect_contains, scrollback_pill_hit,
-    scrollback_pill_hover, scrollback_pill_json,
+    scrollback_pill_json,
 };
 use crate::window_state::WindowState;
 use accesskit::{Action, Live, Node, Role};
@@ -350,18 +350,6 @@ fn only_the_focused_scrolled_back_pane_is_viewing_history() {
     assert_eq!(viewing_history_pane(&panes.ws), Some(other));
 }
 
-/// The hover fill and the hand go to the button a press would reach, and to
-/// none while something drawn over it has the pointer.
-#[test]
-fn a_covered_jump_button_is_not_hovered() {
-    assert_eq!(scrollback_pill_hover(false, || Some(PANE)), Some(PANE));
-    assert_eq!(scrollback_pill_hover(false, || None), None);
-    assert_eq!(
-        scrollback_pill_hover(true, || panic!("not asked while the pointer is taken")),
-        None
-    );
-}
-
 /// The tree, the pointer, both input paths and the frame take the button,
 /// the label and their state from those shared helpers.
 #[test]
@@ -384,11 +372,13 @@ fn the_jump_button_and_label_are_wired_to_the_painted_geometry() {
         // The frame paints the state the pointer set.
         "scrollback_pill_hovered:ws.scrollback_pill_hover,",
         "scrollback_pill_pressed:ws.scrollback_pill_press,",
-        // The hand and the hover fill share the press's target.
-        "letpill_hover=scrollback_pill_hover(above_pill.is_some(),||{self.scrollback_pill_target(ws,cursor_x,cursor_y)});",
+        // The hand, the hover fill, the press and the release all take the
+        // one target, and it is the covers' rule.
+        "letpill_hover=self.scrollback_pill_target(ws,cursor_x,cursor_y);",
         ".or(pill_hover.map(|_|CursorIcon::Pointer))",
-        "letSome(pane)=self.scrollback_pill_target(ws,px,py)else{returnfalse;};",
-        "letover=self.scrollback_pill_target(ws,px,py);",
+        "letreached=self.scrollback_pill_target(ws,px,py);Self::press_reached_scrollback_pill(ws,reached,button)",
+        "letreached=self.scrollback_pill_target(ws,px,py);Self::release_reached_scrollback_pill(ws,reached,button)",
+        "scrollback_pill_reach(Some(hit),&self.scrollback_pill_covers(ws,px,py),(px,py),)",
     ] {
         assert!(source.contains(needle), "missing: {needle}");
     }
@@ -417,6 +407,11 @@ fn the_jump_button_and_label_are_wired_to_the_painted_geometry() {
             "scrollback_pill_hovered:ws.scrollback_pill_hover,",
             2,
             "both overlays carry the hover",
+        ),
+        (
+            "self.scrollback_pill_target(",
+            3,
+            "the hover, the press and the release ask the one target",
         ),
     ] {
         assert_eq!(source.matches(needle).count(), count, "{why}");
