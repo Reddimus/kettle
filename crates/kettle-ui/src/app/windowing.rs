@@ -3047,14 +3047,8 @@ impl App {
             if let Some((name, theme)) = cancel_theme_preview(&mut ws) {
                 self.set_runtime_theme_state(&ws, name, theme);
             }
-            // A group broadcast from this window outlines its members in the
-            // other windows; they redraw without it.
-            let broadcast_crossed = crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast);
             drop(ws);
             self.hoover_mapped_groups();
-            if broadcast_crossed {
-                self.redraw_other_windows();
-            }
             self.window_focus_order.retain(|known| *known != seq);
             if self.windows.is_empty() {
                 event_loop.exit();

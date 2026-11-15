@@ -808,6 +808,7 @@ impl App {
             windows,
             accent_registry: crate::window_accent::AccentRegistry::default(),
             focused_seq: 1,
+            foreign_broadcast_reach: None,
             window_focus_order: VecDeque::from([1]),
             next_window_seq: 2,
             gpu: None,

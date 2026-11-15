@@ -1436,7 +1436,6 @@ impl App {
                 if f {
                     self.focused_seq = ws.seq;
                     record_window_focus(&mut self.window_focus_order, ws.seq);
-                    self.broadcast_focus_moved(ws);
                 }
                 if self.quick_terminal.model.visible {
                     if f {

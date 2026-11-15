@@ -209,20 +209,17 @@ impl App {
             };
             let node_id = accessibility_pane_id(pane_id);
             children.push(node_id);
-            let mut node = Node::new(Role::Terminal);
             let label = if pane.title.trim().is_empty() {
                 self.ui_text.a11y_pane(pane_id)
             } else {
                 pane.title.clone()
             };
-            node.set_label(label);
-            // The outline's meaning, for screen readers: this pane sends or
-            // receives broadcast input.
-            if let Some(description) =
-                pane_broadcast_description(broadcast_roles.of(pane_id), &self.ui_text)
-            {
-                node.set_description(description);
-            }
+            let mut node = terminal_pane_node(
+                label,
+                pane.read_only,
+                broadcast_roles.of(pane_id),
+                &self.ui_text,
+            );
             let text = pane.term.accessible_text().unwrap_or_default();
             let mut text_rows = ws.accessibility_text_rows.borrow_mut();
             let ids = text_rows
@@ -354,9 +351,6 @@ impl App {
                 }
             }
             node.set_children(pane_children);
-            if pane.read_only {
-                node.set_read_only();
-            }
             node.set_bounds(accesskit::Rect::new(
                 f64::from(x),
                 f64::from(y),
@@ -1190,8 +1184,6 @@ impl App {
         let broadcast_roles = self.broadcast_roles(ws);
         for (pane_id, partition) in layout {
             pane_id.hash(&mut hasher);
-            // A scope change re-describes the panes it reaches.
-            broadcast_roles.of(pane_id).hash(&mut hasher);
             let lane = partition
                 .lane
                 .and_then(crate::pane_partition::LaneShare::rect);
@@ -1202,15 +1194,7 @@ impl App {
                 }
             }
             if let Some(pane) = ws.mux.panes.get(&pane_id) {
-                pane.title.hash(&mut hasher);
-                pane.read_only.hash(&mut hasher);
-                pane.term.output_generation().hash(&mut hasher);
-                pane.term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|term| term.grid().display_offset())
-                    .hash(&mut hasher);
+                hash_terminal_pane(&mut hasher, pane, broadcast_roles.of(pane_id));
             }
         }
         hasher.finish()
@@ -1995,6 +1979,49 @@ fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::Sea
     kettle_render::SearchControl::ALL
         .into_iter()
         .find(|control| accessibility_search_control_id(*control) == id)
+}
+
+/// A terminal pane's AccessKit node before its children and bounds: its
+/// name, whether it is read-only and, while broadcast reaches it, what it
+/// does with broadcast input as the description (`BroadcastRoles`). A node
+/// is built fresh for every tree, so a pane broadcast stops reaching has no
+/// description.
+pub(crate) fn terminal_pane_node(
+    label: String,
+    read_only: bool,
+    broadcast: kettle_render::PaneBroadcast,
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Terminal);
+    node.set_label(label);
+    if let Some(description) = pane_broadcast_description(broadcast, tr) {
+        node.set_description(description);
+    }
+    if read_only {
+        node.set_read_only();
+    }
+    node
+}
+
+/// What a visible terminal pane adds to the accessibility key: everything
+/// its node shows (`terminal_pane_node` and its text rows), so a change to
+/// any of it, a broadcast scope change among them, republishes the tree.
+pub(crate) fn hash_terminal_pane(
+    hasher: &mut impl std::hash::Hasher,
+    pane: &Pane,
+    broadcast: kettle_render::PaneBroadcast,
+) {
+    use std::hash::Hash;
+    pane.title.hash(hasher);
+    pane.read_only.hash(hasher);
+    pane.term.output_generation().hash(hasher);
+    pane.term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.grid().display_offset())
+        .hash(hasher);
+    broadcast.hash(hasher);
 }
 
 /// What a screen reader hears for a preview lane: its name, with the item's
