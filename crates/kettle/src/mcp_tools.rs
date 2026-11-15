@@ -14,7 +14,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::exec::{ExecOpts, OutputMode, run_mcp_capture};
-use kettle_ctl::Client;
 use kettle_media::FailureCode;
 
 const MAX_TOOL_TEXT_BYTES: usize = 512 * 1024;
@@ -780,7 +779,7 @@ fn tool_kettle_show_with_source(
     };
     let mut client = match agent_client {
         Some(client) => client,
-        None => match Client::discover_display(None) {
+        None => match crate::ctl_discovery::discover_display(None) {
             Ok(client) => client,
             Err(error) => return show_failed(crate::show_cli::refusal(&error)),
         },
@@ -948,7 +947,7 @@ fn tool_kettle_card(
             else {
                 return false;
             };
-            let Ok(mut client) = Client::discover_display(None) else {
+            let Ok(mut client) = crate::ctl_discovery::discover_display(None) else {
                 return false;
             };
             client
@@ -1162,7 +1161,7 @@ fn ctl_call(
     cancelled: Option<&std::sync::atomic::AtomicBool>,
     fits: &dyn Fn(&Value) -> bool,
 ) -> Value {
-    let mut client = match Client::discover(None) {
+    let mut client = match crate::ctl_discovery::discover(None) {
         Ok(c) => c,
         Err(e) => return ctl_discovery_error(&e),
     };

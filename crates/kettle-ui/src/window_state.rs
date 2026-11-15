@@ -1336,7 +1336,12 @@ pub(crate) struct WindowState {
     /// Last title we emitted a `title_changed` Lua event for,
     /// keyed by pane id. Self-prunes (only live panes are iterated).
     pub(crate) last_emitted_titles: std::collections::HashMap<u64, String>,
+    /// The blink phase the scheduler holds: whether the cursor shows.
     pub(crate) blink_on: bool,
+    /// The edge the current phase counts from; the next edge falls one
+    /// `cursor-blink-interval` after it. A restart records it one interval
+    /// ahead of the clock (`cursor_blink::restart_edge`), so it can be later
+    /// than now while the cursor is held visible.
     pub(crate) last_blink: std::time::Instant,
     pub(crate) term_animation_active: bool,
     pub(crate) term_animation_tick_at: Option<std::time::Instant>,

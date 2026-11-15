@@ -919,12 +919,11 @@ impl App {
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
-        // autoscroll / the resize chip, the cursor-blink half-period deadline,
-        // or the pending coalesced output paint's deadline.
-        let blink_wait = blink_active.then(|| {
-            let remaining = blink_interval.saturating_sub(blink_elapsed);
-            remaining.max(std::time::Duration::from_millis(1))
-        });
+        // autoscroll / the resize chip, the cursor-blink edge (the end of the
+        // hold after a restart, a half-period after any other edge), or the
+        // pending coalesced output paint's deadline.
+        let blink_wait =
+            crate::cursor_blink::wait_for_edge(blink_active, ws.last_blink, blink_interval, now);
         let mut wait = animation_wait(
             bell_active || autoscroll_active || resize_chip_active,
             bg_anim_interval,

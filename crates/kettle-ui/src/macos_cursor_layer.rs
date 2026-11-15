@@ -327,10 +327,12 @@ mod imp {
             let (root, _stale, _main) = tree();
             let layer = Layer::install_on(root).expect("install");
             let now = Instant::now();
+            // The edge that ends a restart's hold, a whole period after the
+            // activity: the earliest edge the layer can take over at.
             let plan = layer_plan(
                 false,
                 now,
-                now - Duration::from_millis(530),
+                now - Duration::from_millis(1060),
                 Duration::from_millis(530),
                 Some(Duration::from_secs(10)),
             )
@@ -392,7 +394,8 @@ mod imp {
                 .collect();
             assert_eq!(key_times, [0.0, 0.5, 1.0]);
             assert!((blink.duration() - 1.06).abs() < 1e-9);
-            // Off edges from here before the 10 s stop, 530 ms after activity.
+            // Off edges from here before the 10 s stop, 1060 ms after
+            // activity: 1060, 2120, ..., 9540 ms.
             assert_eq!(blink.repeatCount(), 8.5);
             assert!(blink.isRemovedOnCompletion());
             CATransaction::commit();

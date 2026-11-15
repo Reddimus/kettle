@@ -1284,8 +1284,8 @@ fn this_shells_marker(name: &str) -> kettle_ui::codex_shell::AgentFunction {
 }
 
 fn print_status() {
-    let found =
-        kettle_ctl::Client::discover_display(None).and_then(|mut client| previews_on(&mut client));
+    let found = crate::ctl_discovery::discover_display(None)
+        .and_then(|mut client| previews_on(&mut client));
     println!("Kettle: {}", kettle_status(found.as_ref().copied()));
     let version = installed_version().map(|version| version.trim().to_owned());
     let codex = match &version {
