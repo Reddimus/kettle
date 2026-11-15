@@ -756,9 +756,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
   when it held control characters. A bare letter can be typed ahead of the
-  dialog, so `y` now only ever takes the sanitising choice, Paste without
-  controls. When the recommended choice is the plain Paste (multi-line text
-  with no control characters), `y` does nothing: press Enter on the focused
+  dialog, so `y` now only takes Paste without controls, and only when that
+  text cannot run a line: every receiving program has bracketed paste on, or
+  the cleaned text has no line break. Otherwise, and when the recommended
+  choice is the plain Paste, `y` does nothing: press Enter on the focused
   button, or use its access key.
 
 - An answer given in the Confirm paste dialog while every receiving program

@@ -5475,7 +5475,9 @@ Keys are decided by one function, `confirm_key_outcome`, over the dialog, the
 logical key, the modifiers and three flags (`vim-menu-nav`, stacked, macOS);
 `confirm_dialog_key` only carries the outcome out. Access keys need Alt and
 compare the logical key only. A bare letter never sends the text as it is:
-`y` activates only a sanitising recommended button. What a stop does is
+`y` activates only a sanitising recommended button, and only when its text
+cannot run a line (no recipient was unbracketed when Kettle asked, or the
+text has no line break). What a stop does is
 `confirm_stop_action`: Cancel, the Settings link, or the dialog's action for
 that button. `answer_confirm_stop` answers the question with a stop as far as
 the window goes and returns what the app still does: for the link it runs the

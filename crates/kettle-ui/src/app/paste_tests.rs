@@ -2475,36 +2475,79 @@ fn findings_list_each_kind_with_its_meaning_most_serious_first() {
 }
 
 #[test]
-fn vim_y_takes_the_recommended_paste_never_the_raw_one() {
+fn vim_y_never_chooses_a_paste_that_can_run_lines() {
     use super::{ConfirmButton, ConfirmKeyOutcome as O};
     use winit::keyboard::ModifiersState as M;
-    let text = "safe\x1b[201~; rm -rf ~\x03\n";
-    let mut dialog = paste_question(text);
-    let sanitised = dialog
-        .buttons
-        .iter()
-        .position(|button| matches!(button, ConfirmButton::PasteWithoutControls { .. }))
-        .unwrap();
-    // `y` answers with the sanitising choice whatever is focused, the raw
-    // Paste and the link included.
-    for focus in 0..dialog.stop_count() {
-        dialog.focus_idx = focus;
-        for key in ["y", "Y"] {
-            assert_eq!(
-                key_outcome(&dialog, key, M::empty(), false),
-                O::Activate(sanitised)
-            );
+    let question = |text: &str, unbracketed: bool| {
+        super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, unbracketed),
+            kettle_i18n::Translator::default(),
+        )
+    };
+    let sanitising = |dialog: &super::ConfirmDialogState| {
+        let index = dialog
+            .buttons
+            .iter()
+            .position(|button| matches!(button, ConfirmButton::PasteWithoutControls { .. }))
+            .unwrap();
+        assert_eq!(dialog.paste.as_ref().unwrap().recommended, index);
+        index
+    };
+    // What `y` and `Y` do on every focus, the link included.
+    let answers = |dialog: &mut super::ConfirmDialogState| {
+        let mut seen = Vec::new();
+        for focus in 0..dialog.stop_count() {
+            dialog.focus_idx = focus;
+            for key in ["y", "Y"] {
+                seen.push(key_outcome(dialog, key, M::empty(), false));
+            }
         }
-    }
+        seen
+    };
+
+    // A program without bracketed paste, and sanitised text that keeps its
+    // line break: a `y` typed ahead of the dialog would run the line. It
+    // does nothing, on every focus, and nothing reaches the pane.
+    let text = "safe\x1b[201~; rm -rf ~\x03\n";
+    let mut unbracketed = question(text, true);
+    let sanitised = sanitising(&unbracketed);
     assert_eq!(
-        stop_paste(&dialog, sanitised).as_deref(),
+        stop_paste(&unbracketed, sanitised).as_deref(),
         Some("safe; rm -rf ~\n")
     );
-    // What a pane receives for that `y`: the sanitised text, bracketed.
+    assert_eq!(unbracketed.yes_button(), None);
+    assert!(answers(&mut unbracketed).iter().all(|&o| o == O::Ignore));
+    assert!(key_bytes(&unbracketed, "y", false).is_empty());
+
+    // The same text with every recipient bracketed: the line break is pasted
+    // text, not Enter. `y` answers with the sanitising choice whatever is
+    // focused, and the pane receives it inside the brackets.
+    let mut dialog = question(text, false);
+    assert_eq!(sanitising(&dialog), sanitised);
+    assert!(
+        answers(&mut dialog)
+            .iter()
+            .all(|&o| o == O::Activate(sanitised))
+    );
     dialog.focus_idx = 3;
     assert_eq!(
         key_bytes(&dialog, "y", false),
         [b"\x1b[200~safe; rm -rf ~\n\x1b[201~".to_vec()]
+    );
+
+    // Without bracketed paste but on one line, the sanitised text has no
+    // Enter in it: `y` takes it.
+    let mut one_line = question("safe\x1b[201~; rm -rf ~\x03", true);
+    let index = sanitising(&one_line);
+    assert_eq!(stop_paste(&one_line, index).as_deref(), Some("safe; rm -rf ~"));
+    assert!(
+        answers(&mut one_line)
+            .iter()
+            .all(|&o| o == O::Activate(index))
     );
 
     // Without controls the recommended choice is the plain Paste, which is
@@ -2517,12 +2560,7 @@ fn vim_y_takes_the_recommended_paste_never_the_raw_one() {
         ConfirmButton::Confirm { .. }
     ));
     assert_eq!(plain.yes_button(), None);
-    for focus in 0..plain.stop_count() {
-        plain.focus_idx = focus;
-        for key in ["y", "Y"] {
-            assert_eq!(key_outcome(&plain, key, M::empty(), false), O::Ignore);
-        }
-    }
+    assert!(answers(&mut plain).iter().all(|&o| o == O::Ignore));
     assert!(key_bytes(&plain, "y", false).is_empty());
     // Enter on the focused button still chooses it.
     plain.focus_idx = 1;
@@ -2532,18 +2570,30 @@ fn vim_y_takes_the_recommended_paste_never_the_raw_one() {
     );
     assert_eq!(stop_paste(&plain, 1).as_deref(), Some(raw_lines));
 
-    // No bare key, on any focus, in either dialog, sends the text as it is.
-    for (dialog, raw) in [(&mut dialog, text), (&mut plain, raw_lines)] {
+    // No bare key, on any focus, in any of these dialogs, sends the text as
+    // it is. Where a recipient lacks bracketed paste, none sends a line
+    // break either.
+    for (dialog, raw, unbracketed) in [
+        (&mut unbracketed, text, true),
+        (&mut dialog, text, false),
+        (&mut one_line, "safe\x1b[201~; rm -rf ~\x03", true),
+        (&mut plain, raw_lines, true),
+    ] {
         for focus in 0..dialog.stop_count() {
             dialog.focus_idx = focus;
             for code in 0x21u8..0x7f {
                 let key = char::from(code).to_string();
                 for mods in [M::empty(), M::SHIFT] {
                     if let O::Activate(index) = key_outcome(dialog, &key, mods, false) {
+                        let sent = stop_paste(dialog, index);
                         assert_ne!(
-                            stop_paste(dialog, index).as_deref(),
+                            sent.as_deref(),
                             Some(raw),
                             "bare {key:?} on focus {focus} sends the raw text"
+                        );
+                        assert!(
+                            !(unbracketed && sent.is_some_and(|sent| sent.contains(['\n', '\r']))),
+                            "bare {key:?} on focus {focus} sends a line to an unbracketed program"
                         );
                     }
                 }

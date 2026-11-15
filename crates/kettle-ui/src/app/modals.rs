@@ -3774,24 +3774,35 @@ impl ConfirmDialogState {
     /// The button a bare `y` (`vim-menu-nav`) answers with, if any.
     ///
     /// A bare letter can be typed ahead of the dialog, so in a paste question
-    /// it must never send the text as it is. `y` takes the recommended choice
-    /// only when that choice is the sanitising one. When the recommended
-    /// choice is the plain Paste (multi-line text without controls), `y` does
-    /// nothing: Enter on the focused button or the access key chooses. Any
-    /// other confirmation keeps `y` on its affirmative button.
+    /// it must not choose anything that can run on its own. `y` takes the
+    /// recommended choice only when that is the sanitising one, and only when
+    /// the sanitised text cannot run a line: every recipient has bracketed
+    /// paste on, or the text has no line break left. Otherwise, and when the
+    /// recommended choice is the plain Paste, `y` does nothing: Enter on the
+    /// focused button or the access key chooses. Any other confirmation keeps
+    /// `y` on its affirmative button.
     pub(super) fn yes_button(&self) -> Option<usize> {
-        match &self.paste {
-            Some(paste) => Some(paste.recommended).filter(|&index| {
-                matches!(
-                    self.buttons.get(index),
-                    Some(ConfirmButton::PasteWithoutControls { .. })
-                )
-            }),
-            None => self
+        let Some(paste) = &self.paste else {
+            return self
                 .buttons
                 .iter()
-                .position(|button| matches!(button, ConfirmButton::Confirm { .. })),
+                .position(|button| matches!(button, ConfirmButton::Confirm { .. }));
+        };
+        let index = paste.recommended;
+        if !matches!(
+            self.buttons.get(index),
+            Some(ConfirmButton::PasteWithoutControls { .. })
+        ) {
+            return None;
         }
+        let ConfirmAction::Paste {
+            text, unbracketed, ..
+        } = confirmation_button_action(self, index)?
+        else {
+            return None;
+        };
+        // Outside bracketed paste each line break arrives as Enter.
+        (!unbracketed || !text.contains(['\n', '\r'])).then_some(index)
     }
 
     /// The stop whose access key is `letter`, compared without case.

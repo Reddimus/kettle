@@ -264,10 +264,12 @@ link and buttons stay in place. On Linux and Windows each control has an
 access key, underlined: Alt+C, Alt+W, Alt+O, Alt+P and, for the link, Alt+S
 (C, S, U, P and G in Spanish). Kettle matches the letter your keyboard layout
 types, never a key's position, and a bare letter does nothing. macOS has no
-access keys. With `vim-menu-nav`, N cancels and H/L move focus. Y chooses
-Paste without controls when that is the recommended choice, and does nothing
-when the recommended choice is the plain Paste: a bare letter can be typed
-ahead of the dialog and never sends the text as it is. The focus ring, like
+access keys. With `vim-menu-nav`, N cancels and H/L move focus. A bare
+letter can be typed ahead of the dialog, so Y chooses only what cannot run a
+command by itself: Paste without controls, when that is the recommended
+choice and either every receiving program has bracketed paste on or the
+cleaned text is a single line. Otherwise Y does nothing; press Enter on the
+focused choice or use its access key. The focus ring, like
 the recommended button, avoids the warning color when the window's accent is
 the theme's red. The confirmation has no editable field or IME
 caret. OSC 52 notices are polite screen-reader status announcements with a
