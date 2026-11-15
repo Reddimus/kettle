@@ -282,15 +282,19 @@ visible with one tab), or the macOS **Shell** menu:
   reads and writes and the `ssh-config-hosts = false` opt-out.
 
 The command palette (`Ctrl+Shift+K`) offers these actions, one launch entry per
-profile, and **Broadcast input…** actions for all panes in the tab, a group or the
-window. Broadcast sends input to multiple panes; choose **Stop broadcasting
-input** when finished. While it is on, the pane you type in has a solid yellow
-outline, each pane that receives its input a dashed one, and the tab is marked. The macOS **Shell** menu and the right-click menu have a
-**Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
+profile, and **Broadcast input…** actions for all panes in the tab, a group or
+the window. Broadcast sends input to multiple panes; choose **Stop broadcasting
+input** when finished. While it is on, the pane you type in has a solid outline
+in the broadcast colour (the theme's yellow), each pane that receives its input
+a dashed one, and the tab is marked when the tab bar is shown. A window you are
+not typing in keeps showing its own broadcast: it is armed and broadcasts as
+soon as it has the focus. The macOS **Shell** menu and the right-click menu have
+a **Broadcast Input** submenu: **Off**, **Panes in This Tab**, **Panes in This
 Window** and **Panes in This Group**, with the current one checked; choosing the
 checked row stops broadcasting. The broadcast chord (`Ctrl+Cmd+B` on macOS,
-`Ctrl+Shift+G` on Windows, `Super+G` elsewhere) shows on the row it turns on. Profiles and
-layouts can also be selected with `--profile NAME` and `--layout NAME`.
+`Ctrl+Shift+G` on Windows, `Super+G` elsewhere) shows on the row it turns on.
+Profiles and layouts can also be selected with `--profile NAME` and
+`--layout NAME`.
 See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.md).
 
 ## Features

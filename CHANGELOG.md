@@ -321,16 +321,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Broadcast input now outlines every pane it reaches, not only the one you
   type in. The sending pane keeps a solid outline in the theme's yellow;
   each pane that receives its input, under the tab, window or group scope,
-  gets a dashed outline in the same colour, and panes outside the scope
-  keep the normal divider. The yellow is lifted to 3:1 against the pane
-  background where a theme's own falls short (Catppuccin Latte's was about
-  2.2:1), and a receiving pane's outline is kept clear of the unfocused-pane
-  dim. A group broadcast also outlines its members in other windows. Per-pane
-  titlebars use the receive colours only on receiving panes, so a pane
-  outside a group no longer looks like a member. Screen readers describe the
-  sending pane as broadcasting and each receiving pane as receiving
-  broadcast input, and `kettle ctl ui_geometry` reports each pane's
-  `broadcast` role (`sending`, `receiving` or null).
+  gets a dashed outline in the same colour, and panes outside the scope, or
+  read-only or held panes it skips, keep the normal divider. A window you
+  are not typing in keeps showing its own scope, which is armed. The yellow
+  is lifted to 3:1 against the pane background where a theme's own falls
+  short (Catppuccin Latte's was about 2.2:1), and a receiving pane's
+  outline, rounded corners included, is kept clear of the unfocused-pane
+  dim. A group broadcast also outlines its members in other windows.
+  Per-pane titlebars use the receive colours only on receiving panes, so a
+  pane outside a group no longer looks like a member. Screen readers
+  describe the sending pane as broadcasting and each receiving pane as
+  receiving broadcast input, and `kettle ctl ui_geometry` reports each
+  pane's `broadcast` role (`sending`, `receiving` or null).
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
