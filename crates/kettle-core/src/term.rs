@@ -8992,6 +8992,23 @@ pub fn selection_text_bounded(
     selection_text_bounded_mode(term, cap, None)
 }
 
+/// Select All: select the whole buffer, from the oldest history line to the
+/// last cell of the screen, replacing any selection. The alternate screen
+/// keeps no history, so there it is the screen the program drew.
+pub fn select_whole_buffer(term: &mut Term<EventProxy>) {
+    use alacritty_terminal::index::{Column, Line, Point, Side};
+    use alacritty_terminal::selection::{Selection, SelectionType};
+    let grid = term.grid();
+    let top = Point::new(Line(-(grid.history_size() as i32)), Column(0));
+    let bottom = Point::new(
+        Line(grid.screen_lines().saturating_sub(1) as i32),
+        Column(grid.columns().saturating_sub(1)),
+    );
+    let mut selection = Selection::new(SelectionType::Simple, top, Side::Left);
+    selection.update(bottom, Side::Right);
+    term.selection = Some(selection);
+}
+
 /// Clipboard copy with an explicit policy for undrawn trailing cells.
 pub fn selection_text_for_copy(
     term: &Term<EventProxy>,

@@ -946,25 +946,10 @@ impl App {
                 }
             }
             Action::SelectAll => {
-                // Select the entire buffer (scrollback + screen). Mirrors
-                // `apply_smart_selection`'s Selection-building, spanning the
-                // grid-absolute buffer bounds.
                 if let Some(p) = ws.mux.focused()
                     && let Ok(mut t) = p.term.term.lock()
                 {
-                    use kettle_core::Dimensions;
-                    let (top, bottom) = selection_buffer_bounds(
-                        t.grid().history_size(),
-                        t.grid().screen_lines(),
-                        t.grid().columns(),
-                    );
-                    let mut sel = kettle_core::Selection::new(
-                        kettle_core::SelectionType::Simple,
-                        top,
-                        kettle_core::Side::Left,
-                    );
-                    sel.update(bottom, kettle_core::Side::Right);
-                    t.selection = Some(sel);
+                    kettle_core::select_whole_buffer(&mut t);
                 }
             }
             Action::SelectToTop | Action::SelectToBottom => {

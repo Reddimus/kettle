@@ -346,9 +346,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and previous tab, `Shift+Cmd+W` closes the window and `Cmd+A` selects all.
   Window › Next Tab and Previous Tab, Shell › Close Window and Edit › Select
   All show them, and so do the command palette and the keyboard-shortcut
-  list. `Ctrl+PageDown`/`Ctrl+PageUp` and `Ctrl+Shift+Q` still work. On
-  macOS a shortcut hint now always shows the Cmd chord when an action has
-  one, rather than whichever chord has the shorter name.
+  list. `Ctrl+PageDown`/`Ctrl+PageUp` and `Ctrl+Shift+Q` still work, and
+  Linux and Windows keep exactly their chords. The `}` and `{` that AppKit
+  reports for Shift+Cmd+] / [ are the same chord as the brackets, so
+  rebinding or unbinding either spelling replaces the whole chord, and no
+  list shows a brace. While a program owns the keyboard, Shift+Cmd+] / [
+  reach it only when there is one tab, as Cmd+1-9 do; Shift+Cmd+W and Cmd+A
+  stay Kettle's, as Cmd+W and Cmd+C do. Cmd+A selects the whole scrollback
+  and screen, or in the alternate screen the screen the program drew; with
+  Find or another text field open it selects that field's text. On macOS a
+  shortcut hint now always shows the Cmd chord when an action has one,
+  rather than whichever chord has the shorter name; checked against every
+  default action, this changes no hint other than the four above.
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's

@@ -1559,6 +1559,7 @@ fn every_program_key_rule_is_a_shipped_default() {
                 [format!("{cmd}+Up"), format!("{cmd}+Down")]
                     .into_iter()
                     .chain((1..=9).map(|n| format!("{cmd}+{n}")))
+                    .chain([format!("Shift+{cmd}+]"), format!("Shift+{cmd}+[")])
                     .chain(
                         [format!("{alt}+{cmd}"), format!("Ctrl+{cmd}")]
                             .into_iter()
@@ -2048,4 +2049,61 @@ fn menu_bar_keeps_a_yielded_command_chord_encodable_for_the_pane() {
     assert_eq!(crate::input::encode_key_press(
         &key, ModifiersState::SUPER, TermMode::DISAMBIGUATE_ESC_CODES,
     ), Some(b"\x1b[49;9u".to_vec()));
+}
+
+/// Shift+Cmd+] / [ yield to a program that owns the keyboard exactly as
+/// Cmd+1-9 do (only while Kettle's tab switch would do nothing), and only on
+/// macOS; Shift+Cmd+W and Cmd+A, like Cmd+W and Cmd+C, stay Kettle's.
+#[test]
+fn macos_tab_chords_yield_like_cmd_digits_and_window_and_select_all_do_not() {
+    use super::{ProgramKeyRule::*, program_key_rule};
+    use kettle_config::{Action, Key as KKey, Mods, Trigger};
+    let sus = Mods::SUPER | Mods::SHIFT;
+    let cmd_one = program_key_rule(Trigger::new(Mods::SUPER, KKey::Char('1')), &Action::GotoTab(0), true);
+    assert_eq!(cmd_one, Some(WhenKettleIdle));
+    for (key, action) in [('}', Action::NextTab), (']', Action::NextTab), ('{', Action::PrevTab), ('[', Action::PrevTab)] {
+        let trigger = Trigger::new(sus, KKey::Char(key));
+        assert_eq!(program_key_rule(trigger, &action, true), cmd_one, "{key}");
+        assert_eq!(program_key_rule(trigger, &action, false), None, "{key} off macOS");
+    }
+    assert_eq!(program_key_rule(Trigger::new(sus, KKey::Char('w')), &Action::CloseWindow, true), None);
+    assert_eq!(program_key_rule(Trigger::new(Mods::SUPER, KKey::Char('a')), &Action::SelectAll, true), None);
+    assert_eq!(program_key_rule(Trigger::new(Mods::SUPER, KKey::Char('w')), &Action::CloseTab, true), None);
+}
+
+/// One Shift+Cmd+] press runs one action: whatever the layout reports, the
+/// key event's candidates meet the default map in exactly one binding, and a
+/// user's rebind of either spelling takes that press.
+#[cfg(target_os = "macos")]
+#[test]
+fn shift_cmd_bracket_fires_one_binding_whatever_the_layout_reports() {
+    use super::{keybind_candidates, resolve_keybind_action};
+    use kettle_config::keybinds::Action;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
+    let mods = ModifiersState::SUPER | ModifiersState::SHIFT;
+    let defaults = kettle_config::keybinds::defaults();
+    // US: `}` from the `]` key. Dvorak: `}` from the US `=` position.
+    for (logical, physical) in [("}", KeyCode::BracketRight), ("}", KeyCode::Equal), ("]", KeyCode::BracketRight)] {
+        let logical = Key::Character(logical.into());
+        let physical = PhysicalKey::Code(physical);
+        let unshifted = Key::Character("]".into());
+        let bound: Vec<_> = keybind_candidates(Some(&logical), Some(&physical), mods, Some(&unshifted))
+            .into_iter()
+            .filter(|t| defaults.contains_key(t))
+            .collect();
+        assert_eq!(bound.len(), 1, "{logical:?} {physical:?}: {bound:?}");
+        assert_eq!(
+            resolve_keybind_action(&defaults, Some(&logical), Some(&physical), mods, Some(&unshifted)).map(|(_, a)| a),
+            Some(Action::NextTab)
+        );
+        for spelling in ["bracketright", "braceright"] {
+            let mut m = defaults.clone();
+            kettle_config::keybinds::apply_keybind(&mut m, &format!("cmd+shift+{spelling}=new_tab"));
+            assert_eq!(
+                resolve_keybind_action(&m, Some(&logical), Some(&physical), mods, Some(&unshifted)).map(|(_, a)| a),
+                Some(Action::NewTab),
+                "{spelling}"
+            );
+        }
+    }
 }
