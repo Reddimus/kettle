@@ -48,11 +48,12 @@ With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
-answer confirm dialogs. In the Confirm paste dialog `y` only ever takes Paste
-without controls; when the recommended choice is the plain Paste it does
-nothing, so a letter typed ahead cannot send the text as it is. Text-input overlays with a selection (palette, search,
-layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
-letters keep typing. Turn it off with `vim-menu-nav = false`.
+answer confirm dialogs. In the Confirm paste dialog `y` only takes Paste
+without controls, and only when that text cannot run a command by itself:
+every receiving program has bracketed paste on, or the text is one line.
+Otherwise `y` does nothing, so a letter typed ahead cannot run anything.
+Text-input overlays with a selection (palette, search, layout picker) step
+with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain letters keep typing. Turn it off with `vim-menu-nav = false`.
 
 Changes are written to your config file, shown by `kettle --config-path`. Most
 apply immediately. A failed save reports that the setting was not applied; an inline
