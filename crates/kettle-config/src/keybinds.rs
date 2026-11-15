@@ -145,6 +145,77 @@ impl Trigger {
         label.push_str(&key);
         label
     }
+
+    /// The shortcut in words, for a screen reader: `Shift Command right
+    /// bracket` where [`Self::ui_label`] paints `⇧⌘]`. Modifiers come in the
+    /// order the label shows them, named as the platform's keyboard names
+    /// them, then the key. A letter or digit is said as itself, and so is a
+    /// symbol with no word of its own.
+    pub fn spoken_label(&self, macos: bool, tr: &kettle_i18n::Translator) -> String {
+        use kettle_i18n::Text as T;
+        let modifiers: [(Mods, T); 4] = if macos {
+            [
+                (Mods::CTRL, T::A11yKeyControl),
+                (Mods::ALT, T::A11yKeyOption),
+                (Mods::SHIFT, T::A11yKeyShift),
+                (Mods::SUPER, T::A11yKeyCommand),
+            ]
+        } else {
+            [
+                (Mods::CTRL, T::A11yKeyControl),
+                (Mods::ALT, T::A11yKeyAlt),
+                (Mods::SHIFT, T::A11yKeyShift),
+                (Mods::SUPER, T::A11yKeySuper),
+            ]
+        };
+        let mut words: Vec<String> = modifiers
+            .into_iter()
+            .filter(|(modifier, _)| self.mods.contains(*modifier))
+            .map(|(_, word)| tr.text(word).to_string())
+            .collect();
+        let word = match self.key {
+            Key::Char(c) => Some(match c {
+                ']' => T::A11yKeyRightBracket,
+                '[' => T::A11yKeyLeftBracket,
+                ',' => T::A11yKeyComma,
+                '.' => T::A11yKeyPeriod,
+                '+' => T::A11yKeyPlus,
+                '-' => T::A11yKeyMinus,
+                '=' => T::A11yKeyEquals,
+                '/' => T::A11yKeySlash,
+                '\\' => T::A11yKeyBackslash,
+                ';' => T::A11yKeySemicolon,
+                '\'' => T::A11yKeyApostrophe,
+                '`' => T::A11yKeyGrave,
+                ' ' => T::A11yKeySpace,
+                _ => {
+                    words.push(c.to_uppercase().collect());
+                    return words.join(" ");
+                }
+            }),
+            Key::Up => Some(T::A11yKeyUp),
+            Key::Down => Some(T::A11yKeyDown),
+            Key::Left => Some(T::A11yKeyLeft),
+            Key::Right => Some(T::A11yKeyRight),
+            Key::PageUp => Some(T::A11yKeyPageUp),
+            Key::PageDown => Some(T::A11yKeyPageDown),
+            Key::Home => Some(T::A11yKeyHome),
+            Key::End => Some(T::A11yKeyEnd),
+            Key::Enter => Some(T::A11yKeyEnter),
+            Key::Tab => Some(T::A11yKeyTab),
+            Key::Escape => Some(T::A11yKeyEscape),
+            Key::Backspace => Some(T::A11yKeyBackspace),
+            Key::Delete => Some(T::A11yKeyDelete),
+            Key::F(n) => {
+                words.push(format!("F{n}"));
+                None
+            }
+        };
+        if let Some(word) = word {
+            words.push(tr.text(word).to_string());
+        }
+        words.join(" ")
+    }
 }
 
 /// Maximum decoded payload for a `text:` binding. Keystroke-sized on purpose:
@@ -2340,6 +2411,69 @@ mod tests {
                  so a reader cannot find out how to move between panes"
             );
         }
+    }
+
+    /// A shortcut in words, as a screen reader reads it beside a palette
+    /// command: modifiers in the label's order, named for the platform, then
+    /// the key as a word, a letter or digit as itself.
+    #[test]
+    fn spoken_label_names_each_key_in_words() {
+        use kettle_i18n::{Language, Translator};
+        let en = Translator::new(Language::En);
+        let es = Translator::new(Language::Es);
+        let sus = Mods::SUPER | Mods::SHIFT;
+        let next = Trigger::new(sus, Key::Char(']'));
+        assert_eq!(next.spoken_label(true, &en), "Shift Command right bracket");
+        assert_eq!(next.spoken_label(false, &en), "Shift Super right bracket");
+        assert_eq!(
+            next.spoken_label(true, &es),
+            "Mayúsculas Comando corchete derecho"
+        );
+        for (trigger, macos, words) in [
+            (
+                Trigger::new(Mods::CTRL, Key::PageDown),
+                true,
+                "Control page down",
+            ),
+            (
+                Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('e')),
+                false,
+                "Control Shift E",
+            ),
+            (Trigger::new(Mods::SUPER, Key::Char('d')), true, "Command D"),
+            (Trigger::new(Mods::ALT, Key::Char('1')), true, "Option 1"),
+            (Trigger::new(Mods::ALT, Key::Char('1')), false, "Alt 1"),
+            (
+                Trigger::new(Mods::CTRL | Mods::ALT | Mods::SHIFT | Mods::SUPER, Key::Up),
+                true,
+                "Control Option Shift Command up arrow",
+            ),
+            (Trigger::new(Mods::empty(), Key::F(11)), false, "F11"),
+            (
+                Trigger::new(Mods::CTRL, Key::Char(',')),
+                false,
+                "Control comma",
+            ),
+            (
+                Trigger::new(Mods::CTRL, Key::Char('+')),
+                false,
+                "Control plus",
+            ),
+        ] {
+            assert_eq!(
+                trigger.spoken_label(macos, &en),
+                words,
+                "{}",
+                trigger.label()
+            );
+            // No glyph or `+` separator is ever read out.
+            let spoken = trigger.spoken_label(macos, &es);
+            assert!(!spoken.contains(['⌘', '⇧', '⌃', '⌥']), "{spoken}");
+        }
+        assert_eq!(
+            Trigger::new(Mods::CTRL, Key::PageDown).spoken_label(false, &es),
+            "Control avanzar página"
+        );
     }
 
     #[test]

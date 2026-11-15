@@ -1,7 +1,7 @@
 use super::{
-    begin_theme_picker, end_modal_composition, modal_accessibility_projection,
-    picker_overlay_context_menu, production_source, theme_picker_list, theme_picker_matches,
-    theme_picker_selection, theme_picker_start, theme_preview_change,
+    begin_theme_picker, end_modal_composition, modal_accessibility_projection, picker_context_menu,
+    production_source, theme_picker_list, theme_picker_matches, theme_picker_selection,
+    theme_picker_start, theme_preview_change,
 };
 use crate::mux::Mux;
 use crate::window_state::{ImePreeditOwner, ImePreeditSession, ThemePickerState, WindowState};
@@ -253,12 +253,7 @@ fn the_picker_reads_out_its_name_and_each_rows_appearance() {
         let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", tr);
         let overlay = kettle_render::Overlay {
             theme_picker_query: Some("tokyonight".into()),
-            context_menu: picker_overlay_context_menu(
-                [None, Some(list), None, None],
-                (800.0, 600.0),
-                (8.0, 16.0),
-                0.0,
-            ),
+            context_menu: picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), 0.0),
             ..kettle_render::Overlay::default()
         };
         modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
@@ -939,6 +934,7 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
             separator: false,
             enabled: true,
             hint: template.hint.clone(),
+            ..Default::default()
         };
         let full = kettle_render::menu_row_chars(&row());
         let bare = full - kettle_render::menu::swatch_columns();
@@ -972,8 +968,8 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
         ((640.0, 820.0), (10.0, 20.0)),
     ] {
         let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
-        let menu = picker_overlay_context_menu([None, Some(list), None, None], surface, cell, 0.0)
-            .expect("the window fits the picker");
+        let menu =
+            picker_context_menu(list, surface, cell, 0.0).expect("the window fits the picker");
         let columns = kettle_render::menu::panel_columns(menu.panel_w_clamped, cell.0);
         let all_fit = originals
             .rows
@@ -1028,12 +1024,7 @@ fn swatches_leave_the_accessible_rows_unchanged() {
             }
             let overlay = kettle_render::Overlay {
                 theme_picker_query: Some("tokyonight".into()),
-                context_menu: picker_overlay_context_menu(
-                    [None, Some(list), None, None],
-                    surface,
-                    (8.0, 16.0),
-                    0.0,
-                ),
+                context_menu: picker_context_menu(list, surface, (8.0, 16.0), 0.0),
                 ..kettle_render::Overlay::default()
             };
             modal_accessibility_projection(&overlay, surface, (8.0, 16.0), 1.0, &EN)
@@ -1110,7 +1101,7 @@ fn the_theme_picker_sample_follows_the_selection_with_overrides() {
 
 /// On a 1280x820 window at 1x and 2x, in English and Spanish, the theme
 /// picker shows its sample card and both status lines and still paints at
-/// least 12 whole rows, while the command palette keeps 8. The card's top
+/// least 12 whole rows, as the command palette now does. The card's top
 /// edge lies under the last painted row, and the whole card, footer
 /// included, is the picker's.
 #[test]
@@ -1167,7 +1158,7 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
         let (_, content_h) = kettle_render::menu::picker_scroll_content(palette.panel_h_clamped);
         assert_eq!(
             (content_h / row_h + 0.001).floor() as usize,
-            8,
+            12,
             "{scale}x palette"
         );
     }

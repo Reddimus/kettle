@@ -39,13 +39,22 @@ artifact `ui-states-43529693080-1`, in the same environment: the theme picker
 gains its sample card and footer, and Settings its Minimum contrast row. The PR
 description shows each before and after.
 
+The 16 `palette-empty` and `palette-query` captures were then replaced by PR
+#884 from the Linux CI job in
+[run 43673528850](https://github.com/Reddimus/kettle/actions/runs/43673528850),
+artifact `ui-states-43673528850-1`, in the same environment: the palette shows
+up to 12 rows, groups the empty list under headings with Tabs first, adds a
+short description where a label does not say it all (whole or hidden), and
+ranks commands with a shortcut first. The PR description shows each before and
+after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |
 | --- | --- |
 | `default` | Fixture text, prompt, and normal window |
-| `palette-empty` | Initial command rows and shortcut hints |
-| `palette-query` | Commands matching `split`: word-start and contiguous matches only, so scattered mid-word matches drop out while a stronger match exists |
+| `palette-empty` | Up to 12 rows grouped under headings, Tabs first, with shortcut hints and a description where it fits |
+| `palette-query` | Commands matching `split`: word-start and contiguous matches only, bound directions first, with descriptions where they fit |
 | `palette-nomatch` | Empty-result message with the query retained |
 | `settings` | Appearance controls, including Minimum contrast, with 3:1 control outlines, responsive navigation and a footer whose hint groups are separated by "·" |
 | `search-matches` | Match highlight, count and search controls |

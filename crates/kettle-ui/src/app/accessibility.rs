@@ -1000,6 +1000,8 @@ impl App {
             for row in &menu.rows {
                 row.label.hash(&mut hasher);
                 row.hint.hash(&mut hasher);
+                row.a11y_description.hash(&mut hasher);
+                row.heading.hash(&mut hasher);
                 row.separator.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
                 row.toggle.hash(&mut hasher);
@@ -2417,12 +2419,27 @@ fn push_picker_accessibility(
 
     let mut list_children = Vec::new();
     let mut selected = None;
+    // Only the painted rows are shown to a screen reader, so the list's own
+    // child count is the window, not the results. Every result says where it
+    // stands among all of them instead: "3 of 6" after `split`, and out of
+    // every command in the empty palette.
+    let results = menu.map_or(0, |menu| {
+        menu.rows
+            .iter()
+            .filter(|row| row.enabled && !row.heading && !row.separator)
+            .count()
+    });
+    let mut position = 0;
     if let Some(menu) = menu {
         for (index, row) in menu.rows.iter().enumerate() {
-            if row.separator {
+            // A heading is not an option: the list stays flat, and the
+            // group's name is read after its first command instead. Options
+            // are numbered past headings, so typing a query, which drops the
+            // headings, keeps the first option's id.
+            let Some(option_index) = kettle_render::menu_row_option(&menu.rows, index) else {
                 continue;
-            }
-            let id = accessibility_modal_id(kind, index + 3);
+            };
+            let id = accessibility_modal_id(kind, option_index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
             if let Some(rect) = menu.visible_row_rect(index) {
@@ -2430,11 +2447,25 @@ fn push_picker_accessibility(
             } else {
                 option.set_hidden();
             }
-            // The painted hint, such as a shortcut or a theme's appearance.
-            if !row.hint.is_empty() {
-                option.set_description(row.hint.trim().to_string());
+            // The painted hint, such as a shortcut or a theme's appearance,
+            // unless the row says what to read instead: a palette command's
+            // shortcut in words and its description, painted or not.
+            match &row.a11y_description {
+                Some(description) if !description.is_empty() => {
+                    option.set_description(description.clone());
+                }
+                Some(_) => {}
+                None if !row.hint.is_empty() => {
+                    option.set_description(row.hint.trim().to_string());
+                }
+                None => {}
             }
-            if !row.enabled {
+            if row.enabled {
+                // Zero-based, unlike ARIA: the AT-SPI adapter adds one.
+                option.set_position_in_set(position);
+                option.set_size_of_set(results);
+                position += 1;
+            } else {
                 option.set_disabled();
             }
             // A disabled placeholder is never the selected option: Enter does
@@ -2454,6 +2485,9 @@ fn push_picker_accessibility(
     }
     list.set_label(tr.picker_a11y_results(label));
     list.set_children(list_children);
+    if results > 0 {
+        list.set_size_of_set(results);
+    }
     projection.nodes.push((list_id, list));
 
     let mut dialog_children = vec![input_id, list_id];
@@ -3914,6 +3948,7 @@ mod context_menu_nesting_tests {
                 separator: false,
                 enabled: true,
                 hint: String::new(),
+                ..Default::default()
             }],
             highlight: 0,
             scroll_offset: 0,
@@ -4031,6 +4066,7 @@ mod context_menu_nesting_tests {
             separator: false,
             enabled: true,
             hint: "⌘V".into(),
+            ..Default::default()
         });
         let overlay = Overlay {
             context_menu: Some(menu),

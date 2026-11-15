@@ -21,6 +21,11 @@ fn every_static_message_has_clean_text_in_both_languages() {
             Text::SettingsGpuKindVirtual,
             Text::SettingsGpuKindSoftware,
             Text::MediaViewerKindVideo,
+            // Key names Spanish keyboards and screen readers share.
+            Text::A11yKeyControl,
+            Text::A11yKeyAlt,
+            Text::A11yKeyEscape,
+            Text::PaletteGroupTerminal,
             // One access-key letter; the Spanish labels share it.
             Text::ConfirmPasteKeyCancel,
             Text::ConfirmPasteKeyPaste,
@@ -204,6 +209,41 @@ fn every_spanish_message_has_a_review_status() {
                         // describes the live status.
                         | "notification_toast_show"
                         | "notification_toast_more"
+                        // Palette group headings are also read after the
+                        // first command under each.
+                        | "palette_group_tabs"
+                        | "palette_group_splits"
+                        | "palette_group_panes"
+                        | "palette_group_windows"
+                        | "palette_group_search_and_selection"
+                        | "palette_group_scrolling"
+                        | "palette_group_text_size"
+                        | "palette_group_appearance"
+                        | "palette_group_terminal"
+                        | "palette_group_broadcast_input"
+                        | "palette_group_previews"
+                        | "palette_group_layouts_profiles_ssh"
+                        | "palette_group_settings"
+                        | "palette_group_help"
+                        // Palette descriptions are read after their command,
+                        // and the relabelled entries are its name.
+                        | "palette_desc_split_right"
+                        | "palette_desc_split_down"
+                        | "palette_desc_split_auto"
+                        | "palette_desc_new_tab"
+                        | "palette_desc_undo_close_tab"
+                        | "palette_desc_duplicate_tab"
+                        | "palette_desc_duplicate_pane"
+                        | "palette_desc_needs_shell_integration"
+                        | "palette_desc_prompt_needs_shell_integration"
+                        | "palette_desc_show_help"
+                        | "palette_about"
+                        | "palette_show_help"
+                        | "palette_split_right"
+                        | "palette_split_down"
+                        | "palette_split_left"
+                        | "palette_split_up"
+                        | "palette_equalize_splits"
                         // The SSH launcher's status line is also a polite
                         // live region.
                         | "ssh_status_saved"
@@ -263,6 +303,11 @@ fn no_spanish_message_is_left_in_english() {
         "settings_gpu_kind_virtual",
         "media_lane_video_time",
         "media_viewer_kind_video",
+        // Key names Spanish keyboards and screen readers share.
+        "a11y_key_control",
+        "a11y_key_alt",
+        "a11y_key_escape",
+        "palette_group_terminal",
         // Punctuation and a counter, no words.
         "notification_toast_sourced",
         "notification_toast_repeats",

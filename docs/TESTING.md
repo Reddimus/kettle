@@ -3320,7 +3320,29 @@ The command palette's ranking runs on every platform with
 `long_inputs_fall_back_to_the_first_match` pin the best-alignment scorer and
 its bounded fallback, `weak_matches_drop_out_when_a_strong_one_exists` the
 weak-match cutoff, and `highlights_follow_the_ranking_alignment` the marked
-characters. For picker geometry, `kettle-ui`'s
+characters. `split_ranks_bound_directions_first` pins `split` in English and
+`dividir` in Spanish (bound directions, then Split automatically, before the
+unbound ones), `descriptions_match_only_after_labels` the description search,
+and `spoken_label_names_each_key_in_words` the spoken shortcut. In
+`kettle-render`, `palette_description_is_whole_or_hidden` holds a description
+two columns after its label and clear of the hint, or hidden; `kettle-ui`'s
+`every_description_fits_the_default_palette` shows every description whole at
+1280x820 in English, Spanish and the pseudo-locale with either hint notation
+at both default fonts (cells measured from the bundled font with
+`kettle_render::bundled_cell_size`), `palette_options_describe_shortcut_then_description`
+pins what screen readers hear and `palette_options_report_their_place_among_all_results`
+the set size and position. `the_restate_rule_catches_paraphrase` and
+`common_queries_rank_shortcut_commands_first` pin the description rule and
+ranking beyond `split`. Headings: `groups_are_contiguous_in_order_and_lead_with_the_common_commands`
+(kettle-config), `heading_rows_get_a_divider_above_and_are_not_options`
+(kettle-render), and in `kettle-ui`
+`empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings` and
+`selection_and_accessibility_skip_the_headings`.
+`palette_card_is_sized_in_points_and_other_pickers_keep_pixels` and
+`the_open_palette_is_sized_in_points_at_2x` hold the palette's card and header
+at 720 points (1440 pixels) at 2x, with descriptions in view, and the other
+pickers at their pixel limits. For picker geometry, `kettle-ui`'s
+`palette_shows_twelve_rows_at_1280x820`,
 `overflowing_picker_rows_start_at_the_header_and_fill_the_panel` and
 `picker_rows_and_wheel_scroll_all_four_modal_projections` hold painted rows,
 hit testing and accessibility to one layout, and `kettle-render`'s

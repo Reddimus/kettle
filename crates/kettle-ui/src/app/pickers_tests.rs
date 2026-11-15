@@ -53,7 +53,8 @@ fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
         menu.rows.len() > 20,
         "the projection must retain one row per ranked command instead of flattening matches"
     );
-    assert_eq!(menu.highlight, 20);
+    assert_eq!(kettle_render::menu_row_option(&menu.rows, menu.highlight), Some(20));
+    assert!(menu.highlight > 20, "headings above it");
     assert!(menu.scroll_offset > 0);
     let visible_rows =
         (menu.panel_h_clamped / kettle_render::menu::row_height(16.0)).floor() as usize;
@@ -232,7 +233,7 @@ fn picker_header_and_rows_share_geometry_below_top_chrome() {
     ] {
         for top in [0.0, 46.0] {
             for cell in [(8.0, 16.0), (16.0, 32.0)] {
-                let geometry = super::picker_card_geometry(surface, cell, top, 2).unwrap();
+                let geometry = super::picker_card_geometry(surface, cell, top, 2, 1.0).unwrap();
                 let (x, y, w, h) = geometry.header;
                 assert_eq!(geometry.rows, (x, y + h, w, 2.0 * kettle_render::menu::row_height(cell.1)));
                 assert!((2.0 * x + w - surface.0).abs() < 0.01);
@@ -243,7 +244,7 @@ fn picker_header_and_rows_share_geometry_below_top_chrome() {
         }
     }
     for surface in [(f32::NAN, 600.0), (800.0, 40.0), (20.0, 600.0)] {
-        assert!(super::picker_card_geometry(surface, (8.0, 16.0), 0.0, 2).is_none());
+        assert!(super::picker_card_geometry(surface, (8.0, 16.0), 0.0, 2, 1.0).is_none());
     }
 }
 
@@ -314,7 +315,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
     let ranked = kettle_config::palette::rank_matches("ct", &entries, &es);
     assert_eq!(list.rows.len(), ranked.len());
     for (row, entry) in list.rows.iter().zip(ranked) {
-        assert_eq!(row.label, entries[entry.index].0.shown(&es));
+        assert_eq!(row.label, entries[entry.index].label.shown(&es));
         assert_eq!(
             row.matched_chars,
             entry.matched_chars.map(|positions| {
@@ -333,6 +334,7 @@ fn palette_ranges_follow_translated_labels_and_truncation() {
         hint: String::new(),
         enabled: true,
         separator: false,
+        ..Default::default()
     };
     fit_context_menu_row(&mut row, 6);
     assert_eq!(row.label, "año a…");
@@ -384,21 +386,25 @@ fn short_picker_windows_keep_header_and_selected_result_visible() {
                 16.0,
                 super::PickerPointer::Press
             ));
-            assert_eq!(ws.palette_input.as_ref().unwrap().1, menu.highlight);
+            assert_eq!(ws.palette_input.as_ref().unwrap().1, 20);
+            assert_eq!(
+                kettle_render::menu_row_option(&menu.rows, menu.highlight),
+                Some(20)
+            );
         }
     }
 }
 
 /// A scrolling picker paints whole rows down to its bottom edge: it has no
 /// arrow strips, and its height is whole rows, so no blank part-row is left
-/// under the selection, and a long list paints all eight rows. The last
+/// under the selection, and a long list paints all twelve rows. The last
 /// painted row takes a click.
 #[test]
 fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
     let names: Vec<String> = (0..30).map(|i| format!("layout {i}")).collect();
     for surface in [(1280.0, 820.0), (800.0, 600.0), (640.0, 360.0), (800.0, 200.0)] {
         for cell in [(8.0, 16.0), (16.0, 34.0)] {
-            for total in [3, 8, 9, 30] {
+            for total in [3, 8, 12, 13, 30] {
                 let menu = picker_context_menu(
                     layout_picker_list("", 0, &names[..total], &EN_TEXT),
                     surface,
@@ -417,8 +423,8 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
                     content_h - painted * row_h
                 );
                 let room = surface.1 - menu.anchor.1 - 16.0;
-                if room >= 8.0 * row_h {
-                    assert!(painted as usize >= total.min(8), "{what}: {painted} painted");
+                if room >= 12.0 * row_h {
+                    assert!(painted as usize >= total.min(12), "{what}: {painted} painted");
                 }
                 let last = menu.scroll_offset + painted as usize - 1;
                 let rect = menu.visible_row_rect(last).expect("last painted row");
@@ -440,7 +446,7 @@ fn scrolling_pickers_paint_whole_rows_with_no_blank_strip() {
 }
 
 /// A long picker list fills its panel: the first row sits right under the
-/// query header, all eight rows are painted and hit, and paint, pointer and
+/// query header, all twelve rows are painted and hit, and paint, pointer and
 /// accessibility agree on every row. A short window still shows a row.
 #[test]
 fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
@@ -450,11 +456,11 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
     let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &profiles, false, kettle_config::BroadcastDefault::default());
     assert!(list.rows.len() >= 150, "{} rows", list.rows.len());
     let cell = (8.0, 16.0);
-    let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len()).unwrap();
+    let geometry = super::picker_card_geometry((800.0, 600.0), cell, 0.0, list.rows.len(), 1.0).unwrap();
     let menu = picker_context_menu(list, (800.0, 600.0), cell, 0.0).unwrap();
     let header_bottom = geometry.header.1 + geometry.header.3;
     let painted = kettle_render::context_menu_row_rects(&menu, cell);
-    assert_eq!(painted.len(), 8, "eight full rows");
+    assert_eq!(painted.len(), 12, "twelve full rows");
     assert_eq!(painted[0].1.1, header_bottom, "no gap under the header");
     let row_h = kettle_render::menu::row_height(cell.1);
     assert_eq!(
@@ -467,10 +473,13 @@ fn overflowing_picker_rows_start_at_the_header_and_fill_the_panel() {
         assert_eq!(menu.visible_row_rect(index), Some(rect), "row {index}");
         ws.cursor.x = f64::from(rect.0 + 10.0);
         ws.cursor.y = f64::from(rect.1 + rect.3 * 0.5);
+        // A press selects the command on the row; a heading takes none.
+        let before = ws.palette_input.as_ref().unwrap().1;
         apply_picker_pointer(&mut ws, &kettle_config::Config::default(), &menu, cell.1, PickerPointer::Press);
-        assert_eq!(ws.palette_input.as_ref().unwrap().1, index, "row {index}");
+        let expected = kettle_render::menu_row_option(&menu.rows, index).unwrap_or(before);
+        assert_eq!(ws.palette_input.as_ref().unwrap().1, expected, "row {index}");
     }
-    assert_eq!(menu.visible_row_rect(8), None);
+    assert_eq!(menu.visible_row_rect(12), None);
     // A window with room for one or two rows still paints and hits them.
     for height in [120.0, 150.0] {
         let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
@@ -512,7 +521,7 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
             let list = command_picker_list(query, 0, &bindings, &tr, None, &[], true, kettle_config::BroadcastDefault::default());
             assert_eq!(list.rows.len(), ranked.len().max(1), "{query:?}");
             for (row, index) in list.rows.iter().zip(&ranked) {
-                assert_eq!(row.label, entries[*index].0.shown(&tr), "{query:?}");
+                assert_eq!(row.label, entries[*index].label.shown(&tr), "{query:?}");
             }
         }
     }
@@ -523,8 +532,10 @@ fn bound_only_palette_lists_every_bound_command_with_its_shortcut() {
     assert!(source.contains("palette_view_entries("));
     assert!(source.contains("ws.palette_bound_only"));
     assert!(source.contains("palette_enter_action(q, *sel, &cmds, &self.ui_text)"));
+    // `open_picker_list` and the frame both take the palette from here
+    // (`the_painted_palette_takes_the_window_scale_like_presses`).
     let open = include_str!("pickers.rs")
-        .split("pub(super) fn open_picker_list(")
+        .split("pub(super) fn palette_picker_list(")
         .nth(1)
         .unwrap();
     assert!(open.split("fn ").next().unwrap().contains("ws.palette_bound_only"));
@@ -563,8 +574,8 @@ fn enter_in_the_shortcut_list_runs_the_selected_bound_row() {
                 assert_eq!(row.hint, hint, "{query:?} row {selected}");
                 let label = entries
                     .iter()
-                    .find(|(_, candidate)| *candidate == action)
-                    .map(|(label, _)| label.shown(&tr));
+                    .find(|candidate| candidate.action == action)
+                    .map(|candidate| candidate.label.shown(&tr));
                 assert_eq!(label, Some(row.label.as_str()), "{query:?} row {selected}");
             }
             assert_eq!(list.rows.len(), matched, "{query:?}");
@@ -842,10 +853,12 @@ fn picker_wheel_never_selects_a_disabled_row() {
         separator: false,
         enabled,
         hint: String::new(),
+        ..Default::default()
     };
     let mut rows: Vec<ContextMenuRow> = (0..40).map(|i| row(format!("row-{i}"), true)).collect();
     rows.push(row("disabled".into(), false));
     let list = PickerList {
+        card_scale: 1.0,
         rows,
         selected: 0,
         footer: None,
@@ -1547,4 +1560,207 @@ fn ssh_confirmed_replace_and_remove_report_refusals_in_the_launcher() {
     // The dispatch arms go through this function.
     let dispatch = finding_body(include_str!("modals.rs"), "dispatch_confirm_action_arms");
     assert!(dispatch.contains("self.run_ssh_host_confirm(ws, action);"));
+}
+
+/// The palette shows twelve rows at the 1280x820 window the panel captures,
+/// at the default 13 px font, under a 32 px tab bar: the Tabs and Splits
+/// headings and ten commands. The card ends at y = 95.04 + 30.25 + 12 x
+/// 28.25, and the painter, a press, the accessibility tree and
+/// `ctl ui_geometry` agree on every command row, numbering commands past the
+/// headings, which none of them selects.
+#[test]
+fn palette_shows_twelve_rows_at_1280x820() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let bindings = kettle_config::keybinds::defaults();
+    let cell = (7.8, 16.25);
+    let surface = (1280.0, 820.0);
+    let list = command_picker_list("", 0, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
+    let menu = picker_context_menu(list, surface, cell, 32.0).unwrap();
+    let (_, y, _, h) = menu.card_rect();
+    assert!((y - 95.04).abs() < 0.01, "card top {y}");
+    assert!((y + h - (95.04 + 30.25 + 12.0 * 28.25)).abs() < 0.01, "card bottom {}", y + h);
+    let painted = kettle_render::context_menu_row_rects(&menu, cell);
+    assert_eq!(painted.len(), 12, "twelve painted rows");
+    let headings: Vec<usize> = painted.iter().map(|(index, _)| *index).filter(|&index| menu.rows[index].heading).collect();
+    assert_eq!(headings, [0, 10], "Tabs, then Splits");
+    let overlay = kettle_render::Overlay {
+        palette_query: Some(String::new()),
+        context_menu: Some(menu),
+        ..Default::default()
+    };
+    let menu = overlay.context_menu.as_ref().unwrap();
+    let projection = super::modal_accessibility_projection(&overlay, surface, cell, 1.0, &EN_TEXT);
+    let diagnostic = super::ctl::picker_diagnostic_geometry(&overlay).unwrap();
+    let ctl_rows = diagnostic["rows"].as_array().unwrap();
+    assert_eq!(ctl_rows.len(), 10, "ctl lists the ten commands");
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    let mut ctl_rows = ctl_rows.iter();
+    for &(index, rect) in &painted {
+        assert_eq!(menu.visible_row_rect(index), Some(rect), "row {index}");
+        let (x, y, w, h) = rect;
+        ws.cursor.x = f64::from(x + 10.0);
+        ws.cursor.y = f64::from(y + h * 0.5);
+        let before = ws.palette_input.as_ref().unwrap().1;
+        let pressed = apply_picker_pointer(&mut ws, &kettle_config::Config::default(), menu, cell.1, PickerPointer::Press);
+        let Some(option) = kettle_render::menu_row_option(&menu.rows, index) else {
+            assert!(!pressed, "a heading takes no press");
+            assert_eq!(ws.palette_input.as_ref().unwrap().1, before);
+            continue;
+        };
+        assert!(pressed);
+        assert_eq!(ws.palette_input.as_ref().unwrap().1, option, "press on row {index}");
+        let node = projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3))
+            .unwrap();
+        assert_eq!(node.1.label(), Some(menu.rows[index].label.as_str()));
+        assert_eq!(
+            node.1.bounds(),
+            Some(accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)),
+            "accessibility row {index}"
+        );
+        let ctl_row = ctl_rows.next().unwrap();
+        assert_eq!(ctl_row["index"], index);
+        assert_eq!(ctl_row["option"], option, "ctl names the command index too");
+        assert_eq!(ctl_row["rect"]["y"].as_f64().unwrap() as f32, y, "ctl row {index}");
+    }
+    assert_eq!(menu.visible_row_rect(12), None);
+}
+
+/// On a 2x display the command palette is 360 to 720 points wide, as at 1x:
+/// a 1280x820-point window (2560x1640 pixels) gets the same 0.56 share of
+/// its width and the same columns as at 1x, where it was held to 720 pixels,
+/// 360 points. The header shares the card. The layout picker, like the theme
+/// and SSH pickers, keeps its pixel limits.
+#[test]
+fn palette_card_is_sized_in_points_and_other_pickers_keep_pixels() {
+    let cfg = kettle_config::Config::default();
+    let surface = (2560.0, 1640.0);
+    let cell = (15.6, 32.5);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.startup_scale = 2.0;
+    ws.palette_input = Some((Default::default(), 0));
+    let list = super::open_picker_list(&ws, &cfg, "TokyoNight Night", &EN_TEXT, None).unwrap();
+    assert_eq!(list.card_scale, 2.0);
+    let menu = picker_context_menu(list, surface, cell, 64.0).unwrap();
+    assert!((menu.panel_w_clamped - 1433.6).abs() < 0.01, "{}", menu.panel_w_clamped);
+    assert_eq!(kettle_render::menu::panel_columns(menu.panel_w_clamped, cell.0), 89);
+    let header = super::picker_card_geometry(surface, cell, 64.0, 1, 2.0).unwrap().header;
+    assert_eq!((header.0, header.2), (menu.anchor.0, menu.panel_w_clamped));
+    // The same window at 1x is unchanged.
+    ws.startup_scale = 1.0;
+    let list = super::open_picker_list(&ws, &cfg, "TokyoNight Night", &EN_TEXT, None).unwrap();
+    let menu = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+    assert!((menu.panel_w_clamped - 716.8).abs() < 0.01);
+    // Another picker at 2x keeps its 720-pixel limit.
+    ws.startup_scale = 2.0;
+    ws.palette_input = None;
+    ws.layout_picker_input = Some((Default::default(), 0));
+    ws.layout_picker_entries = vec!["one".into(), "two".into()];
+    let list = super::open_picker_list(&ws, &cfg, "TokyoNight Night", &EN_TEXT, None).unwrap();
+    assert_eq!(list.card_scale, 1.0);
+    let menu = picker_context_menu(list, surface, cell, 64.0).unwrap();
+    assert_eq!(menu.panel_w_clamped, 720.0);
+}
+
+/// At 2x, the open palette's one layout, the one the frame paints and
+/// presses, the header field, accessibility and ctl measure, gives a card
+/// and header 1440 pixels (720 points) wide where 1x caps it at 720 pixels,
+/// header and card share their x and width with no gap between them, the
+/// described rows in view show their descriptions whole, and the theme
+/// picker's card keeps its pixel limit.
+#[test]
+fn the_open_palette_is_sized_in_points_at_2x() {
+    let cfg = kettle_config::Config::default();
+    let surface = (2713.0, 1635.0);
+    let cell = kettle_render::bundled_cell_size(kettle_config::DEFAULT_FONT_SIZE, 2.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    let menu_at = |ws: &WindowState| {
+        super::open_picker_menu(ws, &cfg, "TokyoNight Night", &EN_TEXT, None, surface, cell, 64.0).unwrap()
+    };
+    ws.startup_scale = 2.0;
+    let menu = menu_at(&ws);
+    let (x, y, w, h) = menu.picker_header_rect();
+    assert!(menu.panel_w_clamped >= 1400.0, "card {} px", menu.panel_w_clamped);
+    assert_eq!((x, w), (menu.anchor.0, menu.panel_w_clamped));
+    assert_eq!(y + h, menu.anchor.1, "the header sits on the rows");
+    assert_eq!(menu.card_rect().1, y);
+    let painted = kettle_render::context_menu_row_rects(&menu, cell);
+    let described: Vec<&str> = painted
+        .iter()
+        .map(|&(index, _)| &menu.rows[index])
+        .filter(|row| !row.description.is_empty())
+        .map(|row| {
+            assert!(
+                kettle_render::menu_row_description_left(row, menu.anchor.0, menu.panel_w_clamped, cell.0).is_some(),
+                "{} hides its description at 2x",
+                row.label
+            );
+            row.label.as_str()
+        })
+        .collect();
+    assert!(described.len() >= 3, "{described:?}");
+    ws.startup_scale = 1.0;
+    assert_eq!(menu_at(&ws).panel_w_clamped, 720.0, "1x caps at 720 pixels");
+    ws.startup_scale = 2.0;
+    ws.palette_input = None;
+    ws.theme_picker_input = Some(crate::window_state::ThemePickerState {
+        query: Default::default(),
+        selected: 0,
+        opened_on: "TokyoNight Night".into(),
+        slot: None,
+    });
+    assert_eq!(menu_at(&ws).panel_w_clamped, 720.0, "the theme picker keeps its pixels");
+}
+
+/// One-row wheel steps scroll the whole empty palette, headings and all: a
+/// heading coming into view at the bottom does not hold the list in place,
+/// and no step selects a heading. Upward steps return to the top.
+#[test]
+fn wheel_steps_scroll_past_headings() {
+    use super::{PickerPointer, apply_picker_pointer};
+    let bindings = kettle_config::keybinds::defaults();
+    let cfg = kettle_config::Config::default();
+    let cell = (7.8, 16.25);
+    let surface = (1280.0, 820.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.palette_input = Some((Default::default(), 0));
+    let menu_for = |selected: usize| {
+        let list = command_picker_list("", selected, &bindings, &EN_TEXT, None, &[], false, kettle_config::BroadcastDefault::default());
+        picker_context_menu(list, surface, cell, 32.0).unwrap()
+    };
+    let first = menu_for(0);
+    let max_offset = first.rows.len() - 12;
+    ws.cursor.x = f64::from(first.anchor.0 + 20.0);
+    ws.cursor.y = f64::from(first.anchor.1 + 40.0);
+    for (delta, end) in [(1, max_offset), (-1, 0)] {
+        let mut offset = menu_for(ws.palette_input.as_ref().unwrap().1).scroll_offset;
+        let mut steps = 0;
+        while offset != end {
+            let menu = menu_for(ws.palette_input.as_ref().unwrap().1);
+            assert!(apply_picker_pointer(&mut ws, &cfg, &menu, cell.1, PickerPointer::Wheel(delta)));
+            let next = menu_for(ws.palette_input.as_ref().unwrap().1);
+            assert!(!next.rows[next.highlight].heading, "a wheel step selected a heading");
+            assert!(
+                if delta > 0 { next.scroll_offset > offset } else { next.scroll_offset < offset },
+                "a wheel step {delta} at offset {offset} did not scroll"
+            );
+            offset = next.scroll_offset;
+            steps += 1;
+            assert!(steps <= first.rows.len(), "the wheel never reached {end}");
+        }
+    }
+}
+
+/// An open picker keeps its query header even with no row to list: the
+/// header is laid out from the card's own layout, at least one row tall.
+#[test]
+fn an_empty_picker_list_keeps_its_header() {
+    let list = super::PickerList { rows: Vec::new(), selected: 0, footer: None, card_scale: 1.0 };
+    let menu = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).expect("a header and card");
+    let (_, _, w, h) = menu.picker_header_rect();
+    assert!(w > 0.0 && h > 0.0);
 }

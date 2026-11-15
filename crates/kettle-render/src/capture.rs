@@ -587,6 +587,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: false,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -596,6 +597,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -605,6 +607,7 @@ pub fn capture_png_with_annotation(
                     separator: true,
                     enabled: false,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -614,6 +617,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -623,6 +627,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -632,6 +637,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -641,6 +647,7 @@ pub fn capture_png_with_annotation(
                     separator: true,
                     enabled: false,
                     hint: String::new(),
+                    ..Default::default()
                 },
                 ContextMenuRow {
                     toggle: None,
@@ -650,6 +657,7 @@ pub fn capture_png_with_annotation(
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 },
             ];
             let menu = ContextMenu {

@@ -84,7 +84,9 @@ use completion::{
 pub use completion::{
     CompletionOverlay, CompletionOverlayRow, completion_overlay_rect, completion_overlay_row_rects,
 };
-pub use fonts::{PreparedFonts, StartupFonts, clamp_font_size, metrics_for, pane_metrics};
+pub use fonts::{
+    PreparedFonts, StartupFonts, bundled_cell_size, clamp_font_size, metrics_for, pane_metrics,
+};
 #[cfg(test)]
 use fonts::{TEXT_SYMBOL_PROBE, resolve_text_symbol_family};
 use fonts::{font_features, load_bundled_font, measure_cell, single_column_text_presentation};
@@ -134,10 +136,10 @@ pub use overlays::{
     NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
     UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
     context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
-    menu_row_chars, notification_geometry, notification_geometry_with_notices,
-    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
-    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
-    update_toast_geometry,
+    menu_option_row, menu_row_chars, menu_row_description_left, menu_row_option,
+    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
+    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
+    toast_text_rows, update_toast_columns, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -619,6 +621,11 @@ pub struct Renderer {
     context_menu_hint_buffers: Vec<TextBuffer>,
     /// Last text shaped into each `context_menu_hint_buffers` slot.
     context_menu_hint_texts: Vec<String>,
+    /// One buffer per row's description (a palette command's secondary
+    /// text after its label); rows without one shape nothing.
+    context_menu_description_buffers: Vec<TextBuffer>,
+    /// Last text shaped into each `context_menu_description_buffers` slot.
+    context_menu_description_texts: Vec<String>,
     /// The theme picker footer's lines, and what each was last shaped from.
     theme_footer_buffers: Vec<TextBuffer>,
     theme_footer_keys: Vec<u64>,
@@ -1023,6 +1030,7 @@ impl Renderer {
                 }
                 self.context_menu_texts.clear();
                 self.context_menu_hint_texts.clear();
+                self.context_menu_description_texts.clear();
                 self.settings_texts.clear();
                 self.completion_texts.clear();
                 self.completion_spans.clear();
@@ -3136,6 +3144,13 @@ impl Renderer {
             while self.context_menu_hint_texts.len() < row_count {
                 self.context_menu_hint_texts.push(String::new());
             }
+            while self.context_menu_description_buffers.len() < row_count {
+                let b = TextBuffer::new(&mut self.font_system, metrics);
+                self.context_menu_description_buffers.push(b);
+            }
+            while self.context_menu_description_texts.len() < row_count {
+                self.context_menu_description_texts.push(String::new());
+            }
             // Shrink to the current row count so a small menu after a large
             // one (common with dynamic Lua menus) doesn't keep the peak's worth
             // of shaped-glyph buffers.
@@ -3143,6 +3158,8 @@ impl Renderer {
             self.context_menu_texts.truncate(row_count);
             self.context_menu_hint_buffers.truncate(row_count);
             self.context_menu_hint_texts.truncate(row_count);
+            self.context_menu_description_buffers.truncate(row_count);
+            self.context_menu_description_texts.truncate(row_count);
             let mut row_base = 0;
             for menu in overlay
                 .context_menu_parents
@@ -3220,6 +3237,21 @@ impl Renderer {
                             self.context_menu_hint_texts[i].clone_from(&row.hint);
                         }
                         hb.shape_until_scroll(&mut self.font_system, false);
+                    }
+                    if !row.description.is_empty() {
+                        let db = &mut self.context_menu_description_buffers[i];
+                        db.set_metrics(metrics);
+                        db.set_size(Some(panel_w), Some(row_h));
+                        if self.context_menu_description_texts[i] != row.description {
+                            db.set_text(
+                                &row.description,
+                                &Attrs::new().family(Family::Name(&family)),
+                                Shaping::Advanced,
+                                None,
+                            );
+                            self.context_menu_description_texts[i].clone_from(&row.description);
+                        }
+                        db.shape_until_scroll(&mut self.font_system, false);
                     }
                 }
                 row_base += menu.rows.len();
@@ -5067,6 +5099,28 @@ impl Renderer {
                     default_color: GColor::rgb(fg.r, fg.g, fg.b),
                     custom_glyphs: &[],
                 });
+                // A description, whole or not at all, after the label in the
+                // hint's colour.
+                if let Some(left) = overlays::menu_row_description_left(row, ax, panel_w, cw) {
+                    let description_fg = if row.enabled {
+                        self.chrome_colors.secondary(theme.foreground, background)
+                    } else {
+                        self.chrome_colors.muted(theme.foreground, background)
+                    };
+                    areas.push(TextArea {
+                        buffer: &self.context_menu_description_buffers[menu_row_base + i],
+                        left,
+                        top: row_y + 6.0,
+                        scale: 1.0,
+                        bounds,
+                        default_color: GColor::rgb(
+                            description_fg.r,
+                            description_fg.g,
+                            description_fg.b,
+                        ),
+                        custom_glyphs: &[],
+                    });
+                }
                 // Dropdown-parity: the right-aligned shortcut hint, quieter
                 // than its label; a disabled row's hint dims with it.
                 if !row.hint.is_empty() {

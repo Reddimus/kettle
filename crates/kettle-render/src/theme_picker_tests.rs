@@ -332,6 +332,7 @@ fn picker_with_footer(f: ThemePickerFooter, (width, row_h): (f32, f32)) -> Conte
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         })
         .collect();
     let rows_h = rows.len() as f32 * row_h;
