@@ -1,6 +1,6 @@
 use super::{
     ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
-    menu_chrome_quads, menu_row_chars,
+    menu_chrome_quads, menu_row_chars, menu_row_description_left,
 };
 
 #[test]
@@ -20,6 +20,7 @@ fn row_budget_uses_display_columns() {
         separator: false,
         enabled: true,
         hint: "Ctrl+界".to_string(),
+        ..Default::default()
     };
     assert_eq!(
         menu_row_chars(&row),
@@ -39,6 +40,7 @@ fn app_clamped_width_is_authoritative_for_every_render_pass() {
         separator: false,
         enabled: true,
         hint: String::new(),
+        ..Default::default()
     };
     let menu = ContextMenu {
         anchor: (0.0, 0.0),
@@ -67,6 +69,7 @@ fn scroll_indicators_follow_the_remaining_suffix() {
             separator,
             enabled: !separator,
             hint: String::new(),
+            ..Default::default()
         })
         .collect::<Vec<_>>();
     let row_h = 24.0;
@@ -107,6 +110,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
             separator: true,
             enabled: false,
             hint: String::new(),
+            ..Default::default()
         }],
         highlight: 0,
         scroll_offset: 0,
@@ -198,6 +202,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
                 hint: String::new(),
                 separator: false,
                 enabled: true,
+                ..Default::default()
             })
             .collect(),
         highlight: 0,
@@ -247,6 +252,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 })
                 .collect(),
             highlight: usize::MAX,
@@ -292,6 +298,7 @@ fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
         separator: false,
         enabled: true,
         matched_chars: None,
+        ..Default::default()
     };
     assert_eq!(
         super::overlays::menu_label_spans(&row),
@@ -349,6 +356,7 @@ fn menu_and_picker_panels_are_rounded_and_keep_the_selection_inside() {
         enabled: true,
         hint: String::new(),
         matched_chars: None,
+        ..Default::default()
     };
     let level = |labels: &[&str], highlight, (w, h, header)| ContextMenu {
         anchor: (140.0, 100.0),
@@ -479,6 +487,7 @@ fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
         separator: false,
         enabled: true,
         hint: hint.into(),
+        ..Default::default()
     }
 }
 
@@ -573,6 +582,7 @@ fn only_visible_rows_with_swatches_paint_them() {
             separator: label.is_empty(),
             enabled: true,
             hint: "Ctrl+C".into(),
+            ..Default::default()
         })
         .collect();
     let menu = natural_menu(plain);
@@ -639,6 +649,7 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         enabled: true,
         hint: String::new(),
         matched_chars: Some(std::iter::once(0..5).collect()),
+        ..Default::default()
     };
     let menu = ContextMenu {
         anchor: (140.0, 100.0),
@@ -700,4 +711,84 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A row's description is painted whole or not at all: two columns after the
+/// label, and ending at least two columns before the right-aligned hint, at
+/// the 86 columns of the 1280x820 palette and the 41 of the 640x820 one, in
+/// English and in the expanded pseudo-locale. When it would not fit whole it
+/// is not painted, rather than ellipsized or run into the hint.
+#[test]
+fn palette_description_is_whole_or_hidden() {
+    use kettle_i18n::{Language, Text, Translator};
+    use unicode_width::UnicodeWidthStr as _;
+    let cw = 7.8;
+    let ax = 280.0;
+    let cases = [
+        (Text::PaletteSplitRight, Text::PaletteDescSplitRight, "⌘D"),
+        (Text::PaletteNewTab, Text::PaletteDescNewTab, "Ctrl+Shift+T"),
+        (
+            Text::PaletteJumpPrevPrompt,
+            Text::PaletteDescNeedsShellIntegration,
+            "Ctrl+Up",
+        ),
+        (
+            Text::PaletteSelectCommandOutput,
+            Text::PaletteDescNeedsShellIntegration,
+            "",
+        ),
+    ];
+    let mut shown = [0, 0];
+    for tr in [Translator::new(Language::En), Translator::pseudo()] {
+        for (columns_at, columns) in [86usize, 41].into_iter().enumerate() {
+            let panel_w = menu::panel_width(columns as f32, cw);
+            for (label, description, hint) in cases {
+                let row = ContextMenuRow {
+                    label: tr.text(label).to_string(),
+                    description: tr.text(description).to_string(),
+                    hint: hint.to_string(),
+                    enabled: true,
+                    ..Default::default()
+                };
+                let needed = row.label.width()
+                    + 2
+                    + row.description.width()
+                    + if hint.is_empty() { 0 } else { 2 + hint.width() };
+                let left = menu_row_description_left(&row, ax, panel_w, cw);
+                assert_eq!(
+                    left.is_some(),
+                    needed <= columns,
+                    "{} at {columns}",
+                    row.label
+                );
+                let Some(left) = left else { continue };
+                shown[columns_at] += 1;
+                assert_eq!(left, ax + 16.0 + (row.label.width() + 2) as f32 * cw);
+                let end = left + row.description.width() as f32 * cw;
+                let hint_left =
+                    super::overlays::menu_hint_left(ax, panel_w, hint.width() as f32 * cw);
+                if !hint.is_empty() {
+                    assert!(
+                        end + 2.0 * cw <= hint_left + 0.01,
+                        "{} runs into its hint",
+                        row.label
+                    );
+                }
+                assert!(
+                    end <= ax + panel_w - 16.0 + 0.01,
+                    "{} leaves the panel",
+                    row.label
+                );
+            }
+        }
+    }
+    // Every case shows at 86 columns; at 41 some do and some give way.
+    assert_eq!(shown[0], 2 * cases.len());
+    assert!(shown[1] > 0 && shown[1] < 2 * cases.len(), "{shown:?}");
+    // A row with no description, or a separator, paints none.
+    let plain = ContextMenuRow {
+        label: "Copy".into(),
+        ..Default::default()
+    };
+    assert_eq!(menu_row_description_left(&plain, ax, 1000.0, cw), None);
 }

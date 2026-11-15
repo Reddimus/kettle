@@ -48,6 +48,8 @@ pub(crate) fn context_menu_text_damage_key(
             row.separator.hash(&mut hash);
             row.enabled.hash(&mut hash);
             row.hint.hash(&mut hash);
+            row.description.hash(&mut hash);
+            row.heading.hash(&mut hash);
             row.matched_chars.hash(&mut hash);
         }
     }

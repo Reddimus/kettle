@@ -3934,7 +3934,10 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
     Some(serde_json::json!({
         "rect": rect_json(menu.card_rect()),
         "rows_rect": rect_json(menu.rows_rect()),
-        "rows": menu.rows.iter().enumerate().filter_map(|(index, row)| {
+        // Headings are not rows a probe can select or press: left out, so the
+        // indices listed are the rows' own, and an empty palette's first
+        // command is row 1.
+        "rows": menu.rows.iter().enumerate().filter(|(_, row)| !row.heading).filter_map(|(index, row)| {
             menu.visible_row_rect(index).map(|rect| serde_json::json!({
                 "index": index, "rect": rect_json(rect), "enabled": row.enabled,
                 "selected": index == menu.highlight,

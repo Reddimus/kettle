@@ -124,7 +124,7 @@ impl App {
         };
 
         let (palette_query, palette_hint, palette_picker) = match &ws.palette_input {
-            Some((query, selected)) => (
+            Some((query, _)) => (
                 Some(with_preedit(query)),
                 picker_hint(
                     tr,
@@ -134,16 +134,7 @@ impl App {
                         ("Esc", T::PickerHintCancel),
                     ],
                 ),
-                Some(command_picker_list(
-                    query,
-                    *selected,
-                    &self.cfg.keybinds,
-                    tr,
-                    self.update_notice().as_ref(),
-                    &ws.palette_profiles,
-                    ws.palette_bound_only,
-                    self.cfg.broadcast_default,
-                )),
+                palette_picker_list(ws, &self.cfg, tr, self.update_notice().as_ref()),
             ),
             None => (None, String::new(), None),
         };

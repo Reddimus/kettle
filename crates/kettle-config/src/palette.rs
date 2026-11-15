@@ -9,169 +9,293 @@ use crate::BroadcastDefault;
 use crate::fuzzy;
 use crate::keybinds::Action;
 
-/// The palette command registry: a catalogue label plus the [`Action`] it
-/// dispatches. Ordered roughly by how often it is reached for; this order
-/// is also the tie-break and the empty-query order.
-pub fn commands() -> Vec<(Text, Action)> {
+/// A heading of the empty palette. Groups come in the order people reach for
+/// them, tabs first, and a typed query ignores them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PaletteGroup {
+    Tabs,
+    Splits,
+    Panes,
+    Windows,
+    SearchAndSelection,
+    Scrolling,
+    TextSize,
+    Appearance,
+    Terminal,
+    BroadcastInput,
+    Previews,
+    /// The SSH launcher, saved layouts and profiles: other ways to start.
+    LayoutsProfilesSsh,
+    Settings,
+    Help,
+}
+
+impl PaletteGroup {
+    /// The heading's text.
+    pub fn text(self) -> Text {
+        match self {
+            Self::Tabs => Text::PaletteGroupTabs,
+            Self::Splits => Text::PaletteGroupSplits,
+            Self::Panes => Text::PaletteGroupPanes,
+            Self::Windows => Text::PaletteGroupWindows,
+            Self::SearchAndSelection => Text::PaletteGroupSearchAndSelection,
+            Self::Scrolling => Text::PaletteGroupScrolling,
+            Self::TextSize => Text::PaletteGroupTextSize,
+            Self::Appearance => Text::PaletteGroupAppearance,
+            Self::Terminal => Text::PaletteGroupTerminal,
+            Self::BroadcastInput => Text::PaletteGroupBroadcastInput,
+            Self::Previews => Text::PaletteGroupPreviews,
+            Self::LayoutsProfilesSsh => Text::PaletteGroupLayoutsProfilesSsh,
+            Self::Settings => Text::PaletteGroupSettings,
+            Self::Help => Text::PaletteGroupHelp,
+        }
+    }
+}
+
+/// The palette command registry: each command's group, its catalogue label
+/// and the [`Action`] it dispatches. Groups are contiguous and in
+/// [`PaletteGroup`] order, and inside each the commands people reach for most
+/// come first, bound split directions before unbound ones. This order is the
+/// empty palette's and the final tie-break of a query's.
+pub fn grouped_commands() -> Vec<(PaletteGroup, Text, Action)> {
     use Action::*;
+    use PaletteGroup as G;
     use Text as T;
     let mut commands = vec![
-        (T::PaletteNewTab, NewTab),
-        (T::PaletteCloseTab, CloseTab),
-        (T::PaletteUndoCloseTab, UndoCloseTab),
-        (T::PaletteDuplicateTab, DuplicateTab),
-        (T::PaletteDuplicatePane, DuplicatePane),
-        (T::PaletteNextTab, NextTab),
-        (T::PalettePrevTab, PrevTab),
-        (T::PaletteMoveTabLeft, MoveTabLeft),
-        (T::PaletteMoveTabRight, MoveTabRight),
-        (T::PaletteRenameTab, EditTabTitle),
-        (T::PaletteSplitRight, SplitRight),
-        (T::PaletteSplitDown, SplitDown),
-        (T::PaletteSplitAuto, SplitAuto),
-        (T::PaletteSplitLeft, SplitLeft),
-        (T::PaletteSplitUp, SplitUp),
-        (T::PaletteClosePane, ClosePane),
-        (T::PaletteEqualizeSplits, EqualizeSplits),
-        (T::PaletteToggleZoom, ToggleZoom),
-        (T::PaletteScaledZoom, ScaledZoom),
-        (T::PaletteShowHelp, ShowHelp),
-        (T::PaletteShowKeybinds, ShowKeybinds),
-        (T::PaletteSendNewline, SendNewline),
-        (T::MenuOpenLayout, OpenLayoutPicker),
-        (T::MenuSaveLayout, SaveLayout),
-        (T::PaletteOpenThemePicker, OpenThemePicker),
-        (T::PaletteOpenMediaShelf, OpenMediaShelf),
-        (T::PalettePreviewLink, PreviewLink),
-        (T::PalettePreviewClipboardPath, PreviewClipboardPath),
-        (T::PalettePreviewNext, PreviewNext),
-        (T::PalettePreviewPrevious, PreviewPrevious),
-        (T::PalettePreviewNextDiagram, PreviewNextDiagram),
-        (T::PalettePreviewPreviousDiagram, PreviewPreviousDiagram),
-        (T::PaletteClosePreview, ClosePreview),
-        (T::PalettePreviewSource, PreviewSource),
-        (T::PalettePreviewCanvas, PreviewCanvas),
-        (T::PalettePreviewCopy, PreviewCopy),
-        (T::PalettePreviewReload, PreviewReload),
-        (T::PalettePreviewPlay, PreviewPlay),
-        (T::PaletteVideoPlay, VideoPlay),
-        (T::PaletteVideoMute, VideoMute),
-        (T::PalettePreviewZoomIn, PreviewZoomIn),
-        (T::PalettePreviewZoomOut, PreviewZoomOut),
-        (T::PalettePreviewFit, PreviewFit),
-        (T::PaletteFocusPreview, FocusPreview),
-        (T::PaletteRenderClipboardAsDiagram, RenderClipboardAsDiagram),
-        (T::PaletteRenderSelectionAsDiagram, RenderSelectionAsDiagram),
-        (T::PaletteCopyAgentSetup, CopyAgentSetup),
-        (T::PaletteOpenSettings, OpenSettings),
-        (T::PaletteAbout, About),
-        (T::PaletteEditConfig, EditConfig),
-        (T::PaletteSetScrollbarAlways, SetScrollbarAlways),
-        (T::PaletteSetScrollbarAuto, SetScrollbarAuto),
-        (T::PaletteSetScrollbarNever, SetScrollbarNever),
+        (G::Tabs, T::PaletteNewTab, NewTab),
+        (G::Tabs, T::PaletteCloseTab, CloseTab),
+        (G::Tabs, T::PaletteNextTab, NextTab),
+        (G::Tabs, T::PalettePrevTab, PrevTab),
+        (G::Tabs, T::PaletteUndoCloseTab, UndoCloseTab),
+        (G::Tabs, T::PaletteDuplicateTab, DuplicateTab),
+        (G::Tabs, T::PaletteRenameTab, EditTabTitle),
+        (G::Tabs, T::PaletteMoveTabLeft, MoveTabLeft),
+        (G::Tabs, T::PaletteMoveTabRight, MoveTabRight),
+        (G::Splits, T::PaletteSplitRight, SplitRight),
+        (G::Splits, T::PaletteSplitDown, SplitDown),
+        (G::Splits, T::PaletteSplitAuto, SplitAuto),
+        (G::Splits, T::PaletteSplitLeft, SplitLeft),
+        (G::Splits, T::PaletteSplitUp, SplitUp),
+        (G::Panes, T::PaletteDuplicatePane, DuplicatePane),
+        (G::Panes, T::PaletteClosePane, ClosePane),
+        (G::Panes, T::PaletteEqualizeSplits, EqualizeSplits),
+        (G::Panes, T::PaletteToggleZoom, ToggleZoom),
+        (G::Panes, T::PaletteScaledZoom, ScaledZoom),
+        (G::Panes, T::PaletteFocusNext, FocusNext),
+        (G::Panes, T::PaletteFocusPrev, FocusPrev),
+        (G::Panes, T::PaletteMovePaneLeft, MovePaneLeft),
+        (G::Panes, T::PaletteMovePaneRight, MovePaneRight),
+        (G::Panes, T::PaletteMovePaneUp, MovePaneUp),
+        (G::Panes, T::PaletteMovePaneDown, MovePaneDown),
+        (G::Panes, T::PaletteRotateCw, RotateCw),
+        (G::Panes, T::PaletteRotateCcw, RotateCcw),
+        (G::Panes, T::PaletteTogglePaneReadOnly, TogglePaneReadOnly),
+        (G::Panes, T::PaletteSendNewline, SendNewline),
+        (G::Windows, T::PaletteNewWindow, NewWindow),
+        (G::Windows, T::PaletteCloseWindow, CloseWindow),
+        (G::Windows, T::PaletteMoveTabToNewWindow, MoveTabToNewWindow),
+        (G::Windows, T::PaletteMoveTabToWindow, MoveTabToWindow),
+        (G::Windows, T::PaletteToggleFullscreen, ToggleFullscreen),
+        (G::Windows, T::QuickTerminalToggle, ToggleQuickTerminal),
         (
+            G::Windows,
+            T::PaletteToggleWindowVisibility,
+            ToggleWindowVisibility,
+        ),
+        (G::SearchAndSelection, T::PaletteStartSearch, StartSearch),
+        (G::SearchAndSelection, T::PaletteHintMode, HintMode),
+        (G::SearchAndSelection, T::PaletteCopy, Copy),
+        (G::SearchAndSelection, T::PalettePaste, Paste),
+        (G::SearchAndSelection, T::PalettePastePrimary, PastePrimary),
+        (G::SearchAndSelection, T::PaletteSelectAll, SelectAll),
+        (G::SearchAndSelection, T::PaletteSelectToTop, SelectToTop),
+        (
+            G::SearchAndSelection,
+            T::PaletteSelectToBottom,
+            SelectToBottom,
+        ),
+        (
+            G::SearchAndSelection,
+            T::PaletteSelectCommandOutput,
+            SelectCommandOutput,
+        ),
+        (G::SearchAndSelection, T::PaletteToggleViMode, ToggleViMode),
+        (G::Scrolling, T::PaletteScrollPageUp, ScrollPageUp),
+        (G::Scrolling, T::PaletteScrollPageDown, ScrollPageDown),
+        (G::Scrolling, T::PaletteScrollPageUpHalf, ScrollPageUpHalf),
+        (
+            G::Scrolling,
+            T::PaletteScrollPageDownHalf,
+            ScrollPageDownHalf,
+        ),
+        (G::Scrolling, T::PaletteScrollLineUp, ScrollLineUp),
+        (G::Scrolling, T::PaletteScrollLineDown, ScrollLineDown),
+        (G::Scrolling, T::PaletteScrollToTop, ScrollToTop),
+        (G::Scrolling, T::PaletteScrollToBottom, ScrollToBottom),
+        (G::Scrolling, T::PaletteJumpPrevPrompt, JumpPrevPrompt),
+        (G::Scrolling, T::PaletteJumpNextPrompt, JumpNextPrompt),
+        (G::TextSize, T::PaletteIncreaseFontSize, IncreaseFontSize),
+        (G::TextSize, T::PaletteDecreaseFontSize, DecreaseFontSize),
+        (G::TextSize, T::PaletteResetFontSize, ResetFontSize),
+        (G::TextSize, T::PaletteZoomInAll, ZoomInAll),
+        (G::TextSize, T::PaletteZoomOutAll, ZoomOutAll),
+        (G::TextSize, T::PaletteZoomNormalAll, ZoomNormalAll),
+        (G::Appearance, T::PaletteOpenThemePicker, OpenThemePicker),
+        (G::Appearance, T::PaletteNextTheme, NextTheme),
+        (G::Appearance, T::PalettePrevTheme, PrevTheme),
+        (G::Appearance, T::PaletteToggleLightDark, ToggleLightDark),
+        (G::Appearance, T::PaletteToggleScrollbar, ToggleScrollbar),
+        (G::Terminal, T::PaletteClearHistory, ClearHistory),
+        (G::Terminal, T::PaletteReset, Reset),
+        (G::Terminal, T::PaletteResetAndClear, ResetAndClear),
+        (G::Terminal, T::PaletteToggleSessionLog, ToggleSessionLog),
+        (G::Terminal, T::PaletteTakeScreenshot, TakeScreenshot),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleBroadcastAll,
+            ToggleBroadcastAll,
+        ),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleBroadcastAll,
+            ToggleBroadcastPanesInTab,
+        ),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleBroadcastGroup,
+            ToggleBroadcastGroup,
+        ),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleBroadcastWindow,
+            ToggleBroadcastWindow,
+        ),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleBroadcastOff,
+            ToggleBroadcastOff,
+        ),
+        (G::BroadcastInput, T::PaletteCreateGroup, CreateGroup),
+        (G::BroadcastInput, T::PaletteEditPaneGroup, EditPaneGroup),
+        (G::BroadcastInput, T::PaletteGroupTab, GroupTab),
+        (G::BroadcastInput, T::PaletteGroupWindow, GroupWindow),
+        (G::BroadcastInput, T::PaletteUngroupTab, UngroupTab),
+        (G::BroadcastInput, T::PaletteUngroupWindow, UngroupWindow),
+        (G::BroadcastInput, T::PaletteGroupAll, GroupAll),
+        (G::BroadcastInput, T::PaletteUngroupAll, UngroupAll),
+        (G::BroadcastInput, T::PaletteToggleGroupAll, ToggleGroupAll),
+        (G::BroadcastInput, T::PaletteToggleGroupTab, ToggleGroupTab),
+        (
+            G::BroadcastInput,
+            T::PaletteToggleGroupWindow,
+            ToggleGroupWindow,
+        ),
+        (G::Previews, T::PaletteOpenMediaShelf, OpenMediaShelf),
+        (G::Previews, T::PalettePreviewLink, PreviewLink),
+        (
+            G::Previews,
+            T::PalettePreviewClipboardPath,
+            PreviewClipboardPath,
+        ),
+        (G::Previews, T::PalettePreviewNext, PreviewNext),
+        (G::Previews, T::PalettePreviewPrevious, PreviewPrevious),
+        (
+            G::Previews,
+            T::PalettePreviewNextDiagram,
+            PreviewNextDiagram,
+        ),
+        (
+            G::Previews,
+            T::PalettePreviewPreviousDiagram,
+            PreviewPreviousDiagram,
+        ),
+        (G::Previews, T::PaletteClosePreview, ClosePreview),
+        (G::Previews, T::PalettePreviewSource, PreviewSource),
+        (G::Previews, T::PalettePreviewCanvas, PreviewCanvas),
+        (G::Previews, T::PalettePreviewCopy, PreviewCopy),
+        (G::Previews, T::PalettePreviewReload, PreviewReload),
+        (G::Previews, T::PalettePreviewPlay, PreviewPlay),
+        (G::Previews, T::PaletteVideoPlay, VideoPlay),
+        (G::Previews, T::PaletteVideoMute, VideoMute),
+        (G::Previews, T::PalettePreviewZoomIn, PreviewZoomIn),
+        (G::Previews, T::PalettePreviewZoomOut, PreviewZoomOut),
+        (G::Previews, T::PalettePreviewFit, PreviewFit),
+        (G::Previews, T::PaletteFocusPreview, FocusPreview),
+        (
+            G::Previews,
+            T::PaletteRenderClipboardAsDiagram,
+            RenderClipboardAsDiagram,
+        ),
+        (
+            G::Previews,
+            T::PaletteRenderSelectionAsDiagram,
+            RenderSelectionAsDiagram,
+        ),
+        (G::LayoutsProfilesSsh, T::PaletteOpenSsh, OpenSsh),
+        (G::LayoutsProfilesSsh, T::MenuOpenLayout, OpenLayoutPicker),
+        (G::LayoutsProfilesSsh, T::MenuSaveLayout, SaveLayout),
+        (G::LayoutsProfilesSsh, T::PaletteNextProfile, NextProfile),
+        (G::LayoutsProfilesSsh, T::PalettePrevProfile, PrevProfile),
+        (G::Settings, T::PaletteOpenSettings, OpenSettings),
+        (G::Settings, T::PaletteEditConfig, EditConfig),
+        (G::Settings, T::PaletteReloadConfig, ReloadConfig),
+        (
+            G::Settings,
+            T::PaletteSetScrollbarAlways,
+            SetScrollbarAlways,
+        ),
+        (G::Settings, T::PaletteSetScrollbarAuto, SetScrollbarAuto),
+        (G::Settings, T::PaletteSetScrollbarNever, SetScrollbarNever),
+        (
+            G::Settings,
             T::PaletteSetAskBeforeClosingAlways,
             SetAskBeforeClosingAlways,
         ),
         (
+            G::Settings,
             T::PaletteSetAskBeforeClosingBusyOrMultiple,
             SetAskBeforeClosingBusyOrMultiple,
         ),
         (
+            G::Settings,
             T::PaletteSetAskBeforeClosingMultiple,
             SetAskBeforeClosingMultiple,
         ),
-        (T::PaletteSetAskBeforeClosingNever, SetAskBeforeClosingNever),
-        (T::PaletteToggleCursorBlink, ToggleCursorBlink),
-        (T::PaletteToggleCopyOnSelect, ToggleCopyOnSelect),
-        (T::PaletteSetBellOff, SetBellOff),
-        (T::PaletteSetBellVisual, SetBellVisual),
-        (T::PaletteSetBellAttention, SetBellAttention),
-        (T::PaletteSetBellBoth, SetBellBoth),
-        (T::PaletteToggleMouseHide, ToggleMouseHide),
-        (T::PaletteFocusNext, FocusNext),
-        (T::PaletteFocusPrev, FocusPrev),
-        (T::PaletteNewWindow, NewWindow),
-        (T::PaletteCloseWindow, CloseWindow),
-        (T::PaletteStartSearch, StartSearch),
-        (T::PaletteHintMode, HintMode),
-        (T::PaletteOpenSsh, OpenSsh),
-        (T::PaletteCopy, Copy),
-        (T::PalettePaste, Paste),
-        (T::PaletteSelectAll, SelectAll),
-        (T::PaletteSelectToTop, SelectToTop),
-        (T::PaletteSelectToBottom, SelectToBottom),
-        (T::PaletteIncreaseFontSize, IncreaseFontSize),
-        (T::PaletteDecreaseFontSize, DecreaseFontSize),
-        (T::PaletteResetFontSize, ResetFontSize),
-        (T::QuickTerminalToggle, ToggleQuickTerminal),
-        (T::PaletteToggleFullscreen, ToggleFullscreen),
-        (T::PaletteToggleBroadcastAll, ToggleBroadcastAll),
-        // The same tab scope, whatever `broadcast-default` says;
-        // `commands_for` lists one of the two.
-        (T::PaletteToggleBroadcastAll, ToggleBroadcastPanesInTab),
-        (T::PaletteToggleBroadcastGroup, ToggleBroadcastGroup),
-        (T::PaletteToggleBroadcastWindow, ToggleBroadcastWindow),
-        (T::PaletteToggleBroadcastOff, ToggleBroadcastOff),
-        (T::PaletteScrollLineUp, ScrollLineUp),
-        (T::PaletteScrollLineDown, ScrollLineDown),
-        (T::PaletteScrollPageUp, ScrollPageUp),
-        (T::PaletteScrollPageDown, ScrollPageDown),
-        (T::PaletteScrollToTop, ScrollToTop),
-        (T::PaletteScrollToBottom, ScrollToBottom),
-        (T::PaletteJumpPrevPrompt, JumpPrevPrompt),
-        (T::PaletteJumpNextPrompt, JumpNextPrompt),
-        (T::PaletteSelectCommandOutput, SelectCommandOutput),
-        (T::PaletteToggleViMode, ToggleViMode),
-        // Terminator-parity entries.
-        (T::PaletteRotateCw, RotateCw),
-        (T::PaletteRotateCcw, RotateCcw),
-        (T::PaletteMovePaneLeft, MovePaneLeft),
-        (T::PaletteMovePaneRight, MovePaneRight),
-        (T::PaletteMovePaneUp, MovePaneUp),
-        (T::PaletteMovePaneDown, MovePaneDown),
-        (T::PaletteToggleScrollbar, ToggleScrollbar),
-        (T::PaletteNextProfile, NextProfile),
-        (T::PalettePrevProfile, PrevProfile),
-        (T::PaletteZoomInAll, ZoomInAll),
-        (T::PaletteZoomOutAll, ZoomOutAll),
-        (T::PaletteZoomNormalAll, ZoomNormalAll),
-        (T::PaletteResetAndClear, ResetAndClear),
-        (T::PaletteScrollPageUpHalf, ScrollPageUpHalf),
-        (T::PaletteScrollPageDownHalf, ScrollPageDownHalf),
-        (T::PalettePastePrimary, PastePrimary),
-        (T::PaletteToggleWindowVisibility, ToggleWindowVisibility),
-        (T::PaletteMoveTabToWindow, MoveTabToWindow),
-        (T::PaletteMoveTabToNewWindow, MoveTabToNewWindow),
-        (T::PaletteEditPaneGroup, EditPaneGroup),
-        (T::PaletteNextTheme, NextTheme),
-        (T::PalettePrevTheme, PrevTheme),
-        (T::PaletteToggleLightDark, ToggleLightDark),
-        (T::PaletteToggleSessionLog, ToggleSessionLog),
-        // Terminator parity ("Read only"): drop user input to the
-        // focused pane while letting its output keep flowing.
-        (T::PaletteTogglePaneReadOnly, TogglePaneReadOnly),
-        (T::PaletteTakeScreenshot, TakeScreenshot),
-        (T::PaletteCreateGroup, CreateGroup),
-        (T::PaletteGroupTab, GroupTab),
-        (T::PaletteGroupWindow, GroupWindow),
-        (T::PaletteUngroupTab, UngroupTab),
-        (T::PaletteUngroupWindow, UngroupWindow),
-        (T::PaletteGroupAll, GroupAll),
-        (T::PaletteUngroupAll, UngroupAll),
-        (T::PaletteToggleGroupAll, ToggleGroupAll),
-        (T::PaletteToggleGroupTab, ToggleGroupTab),
-        (T::PaletteToggleGroupWindow, ToggleGroupWindow),
-        (T::PaletteReset, Reset),
-        (T::PaletteClearHistory, ClearHistory),
-        (T::PaletteReloadConfig, ReloadConfig),
+        (
+            G::Settings,
+            T::PaletteSetAskBeforeClosingNever,
+            SetAskBeforeClosingNever,
+        ),
+        (G::Settings, T::PaletteToggleCursorBlink, ToggleCursorBlink),
+        (
+            G::Settings,
+            T::PaletteToggleCopyOnSelect,
+            ToggleCopyOnSelect,
+        ),
+        (G::Settings, T::PaletteSetBellOff, SetBellOff),
+        (G::Settings, T::PaletteSetBellVisual, SetBellVisual),
+        (G::Settings, T::PaletteSetBellAttention, SetBellAttention),
+        (G::Settings, T::PaletteSetBellBoth, SetBellBoth),
+        (G::Settings, T::PaletteToggleMouseHide, ToggleMouseHide),
+        (G::Help, T::PaletteShowKeybinds, ShowKeybinds),
+        (G::Help, T::PaletteShowHelp, ShowHelp),
+        (G::Help, T::PaletteCopyAgentSetup, CopyAgentSetup),
+        (G::Help, T::PaletteAbout, About),
     ];
     // Only X11 and Wayland have a primary selection. Elsewhere the action
     // falls back to an ordinary paste, which the palette already offers.
     if !cfg!(target_os = "linux") {
-        commands.retain(|(_, action)| *action != PastePrimary);
+        commands.retain(|(_, _, action)| *action != PastePrimary);
     }
     commands
+}
+
+/// [`grouped_commands`] without the groups.
+pub fn commands() -> Vec<(Text, Action)> {
+    grouped_commands()
+        .into_iter()
+        .map(|(_, label, action)| (label, action))
+        .collect()
 }
 
 /// The palette's commands under `broadcast-default = default`. The tab and
@@ -180,7 +304,7 @@ pub fn commands() -> Vec<(Text, Action)> {
 /// chord's hint sits on the row it belongs to; the scope's own toggle is then
 /// left out. Under `off` the chord can only stop broadcasting, which "Stop
 /// broadcasting input" already offers, so it is left out instead.
-pub fn commands_for(default: BroadcastDefault) -> Vec<(Text, Action)> {
+pub fn grouped_commands_for(default: BroadcastDefault) -> Vec<(PaletteGroup, Text, Action)> {
     let (chord_label, replaced) = match default {
         BroadcastDefault::Group => (
             Some(Text::PaletteToggleBroadcastAll),
@@ -192,13 +316,21 @@ pub fn commands_for(default: BroadcastDefault) -> Vec<(Text, Action)> {
         ),
         BroadcastDefault::Off => (None, Action::ToggleBroadcastAll),
     };
-    commands()
+    grouped_commands()
         .into_iter()
-        .filter(|(_, action)| *action != replaced)
-        .filter_map(|(label, action)| match action {
-            Action::ToggleBroadcastAll => chord_label.map(|label| (label, action)),
-            _ => Some((label, action)),
+        .filter(|(_, _, action)| *action != replaced)
+        .filter_map(|(group, label, action)| match action {
+            Action::ToggleBroadcastAll => chord_label.map(|label| (group, label, action)),
+            _ => Some((group, label, action)),
         })
+        .collect()
+}
+
+/// [`grouped_commands_for`] without the groups.
+pub fn commands_for(default: BroadcastDefault) -> Vec<(Text, Action)> {
+    grouped_commands_for(default)
+        .into_iter()
+        .map(|(_, label, action)| (label, action))
         .collect()
 }
 
@@ -206,12 +338,39 @@ pub fn commands_for(default: BroadcastDefault) -> Vec<(Text, Action)> {
 /// language, best first. Outside English, the English label matches too, so a
 /// command name from the docs still finds its command. Ties (and an empty
 /// query) preserve registry order, so the palette is stable as you type.
+/// Every row counts as having no shortcut; the palette itself ranks
+/// [`PaletteEntry`] rows that say which do.
 pub fn rank(query: &str, cmds: &[(Text, Action)], tr: &Translator) -> Vec<usize> {
-    let entries: Vec<(PaletteLabel, Action)> = cmds
+    let entries: Vec<PaletteEntry> = cmds
         .iter()
-        .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+        .map(|(label, action)| PaletteEntry::new(PaletteLabel::Text(*label), action.clone()))
         .collect();
     rank_entries(query, &entries, tr)
+}
+
+/// The secondary text the palette paints after a command's label: only what
+/// the label cannot say, such as which way a split's divider runs or that a
+/// command needs shell integration. Most commands have none, and a profile or
+/// update row never has one.
+pub fn description(action: &Action) -> Option<Text> {
+    use Action::*;
+    use Text as T;
+    Some(match action {
+        SplitRight => T::PaletteDescSplitRight,
+        SplitDown => T::PaletteDescSplitDown,
+        SplitAuto => T::PaletteDescSplitAuto,
+        NewTab => T::PaletteDescNewTab,
+        UndoCloseTab => T::PaletteDescUndoCloseTab,
+        DuplicateTab => T::PaletteDescDuplicateTab,
+        DuplicatePane => T::PaletteDescDuplicatePane,
+        EqualizeSplits => T::PaletteDescEqualizeSplits,
+        SelectCommandOutput => T::PaletteDescNeedsShellIntegration,
+        // The prompt rows have their own message: their labels already name
+        // the shell, and in Spanish they are long.
+        JumpPrevPrompt | JumpNextPrompt => T::PaletteDescPromptNeedsShellIntegration,
+        ShowHelp => T::PaletteDescShowHelp,
+        _ => return None,
+    })
 }
 
 /// A palette row's label: catalogue text, or text built at run time, such
@@ -240,10 +399,38 @@ impl PaletteLabel {
     }
 }
 
+/// One row the palette ranks: its label, the action it runs, and whether
+/// that action has a shortcut to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub label: PaletteLabel,
+    pub action: Action,
+    /// Between two rows the query matches equally well, the one with a
+    /// shortcut ranks first, so `split` lists Split right and Split down,
+    /// which have one, above Split left and Split up, which do not.
+    pub bound: bool,
+    /// The heading the row sits under in the empty palette; `None` lists it
+    /// under no heading.
+    pub group: Option<PaletteGroup>,
+}
+
+impl PaletteEntry {
+    /// A row with no shortcut.
+    pub fn new(label: PaletteLabel, action: Action) -> Self {
+        Self {
+            label,
+            action,
+            bound: false,
+            group: None,
+        }
+    }
+}
+
 /// One row [`rank_matches`] keeps: its index and the positions of the
 /// matched chars in its displayed label, from the alignment that ranked it.
-/// `None` when only the English alias of a translated label matched, so a
-/// highlight never lands on chars of the wrong label.
+/// `None` when only the English alias of a translated label matched, or only
+/// the description did, so a highlight never lands on chars of the wrong
+/// text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RankedEntry {
     pub index: usize,
@@ -251,16 +438,20 @@ pub struct RankedEntry {
 }
 
 /// [`rank`] over rows that may carry run-time labels.
-pub fn rank_entries(
-    query: &str,
-    entries: &[(PaletteLabel, Action)],
-    tr: &Translator,
-) -> Vec<usize> {
+pub fn rank_entries(query: &str, entries: &[PaletteEntry], tr: &Translator) -> Vec<usize> {
     rank_matches(query, entries, tr)
         .into_iter()
         .map(|entry| entry.index)
         .collect()
 }
+
+/// A kept row: its index, its (bonus, score) and the positions it marks.
+type Scored = (usize, (i32, i32), Option<Vec<usize>>);
+
+/// Label rows below which a query also searches descriptions.
+const DESCRIPTION_PASS_BELOW: usize = 3;
+/// Shortest query, in chars, that searches descriptions.
+const DESCRIPTION_PASS_MIN_CHARS: usize = 4;
 
 /// [`rank_entries`] with each kept row's matched chars.
 ///
@@ -270,28 +461,41 @@ pub fn rank_entries(
 /// matches strongly, rows the query only lies scattered through are left out,
 /// so `font` lists the font-size commands and not `Focus next pane`; with no
 /// strong match every subsequence match is listed.
-pub fn rank_matches(
-    query: &str,
-    entries: &[(PaletteLabel, Action)],
-    tr: &Translator,
-) -> Vec<RankedEntry> {
+///
+/// Rows are ordered by how well the query lies in the label, then rows with a
+/// shortcut first, then shorter labels, then registry order. An empty query
+/// lists every row in registry order.
+///
+/// A query of four or more chars that matches fewer than three labels
+/// strongly also finds rows whose [`description`] it matches strongly,
+/// appended in registry order without highlights. Such a row counts as a
+/// strong match, so labels the query only lies scattered through drop out:
+/// `divider` lists Split right and Split down, and `split`, which six labels
+/// match, gains nothing.
+pub fn rank_matches(query: &str, entries: &[PaletteEntry], tr: &Translator) -> Vec<RankedEntry> {
+    if query.is_empty() {
+        return (0..entries.len())
+            .map(|index| RankedEntry {
+                index,
+                matched_chars: Some(Vec::new()),
+            })
+            .collect();
+    }
     let english = Translator::new(Language::En);
     let alias = tr.language() != Language::En;
-    // The best score over the shown label and its English alias, with the
-    // shown label's positions.
+    // The best (bonus, score) over the shown label and its English alias,
+    // with the shown label's positions.
     let best = |shown: Option<fuzzy::Alignment>, alias: Option<fuzzy::Alignment>| {
-        let score = shown
-            .as_ref()
-            .map(|a| a.score)
-            .max(alias.as_ref().map(|a| a.score))?;
-        Some((score, shown.map(|a| a.positions)))
+        let key = |a: &fuzzy::Alignment| (a.bonus, a.score);
+        let key = shown.as_ref().map(key).max(alias.as_ref().map(key))?;
+        Some((key, shown.map(|a| a.positions)))
     };
     let matches: Vec<_> = entries
         .iter()
         .enumerate()
-        .filter_map(|(index, (label, _))| {
-            let shown = label.shown(tr);
-            let alias = alias.then(|| label.english(&english));
+        .filter_map(|(index, entry)| {
+            let shown = entry.label.shown(tr);
+            let alias = alias.then(|| entry.label.english(&english));
             let any = best(
                 fuzzy::align(query, shown),
                 alias.and_then(|alias| fuzzy::align(query, alias)),
@@ -303,22 +507,58 @@ pub fn rank_matches(
             Some((index, strong, any))
         })
         .collect();
-    let strong_only = matches.iter().any(|(_, strong, _)| strong.is_some());
-    let mut scored: Vec<(usize, i32, Option<Vec<usize>>)> = matches
+    let strong_labels = matches
+        .iter()
+        .filter(|(_, strong, _)| strong.is_some())
+        .count();
+    // Rows found only through their description, when the labels leave few:
+    // each must match strongly, so it counts as a strong match below.
+    let described: Vec<usize> = if strong_labels < DESCRIPTION_PASS_BELOW
+        && query.chars().count() >= DESCRIPTION_PASS_MIN_CHARS
+    {
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| {
+                !matches
+                    .iter()
+                    .any(|(matched, strong, _)| matched == index && strong.is_some())
+                    && description(&entry.action).is_some_and(|text| {
+                        fuzzy::align_strong(query, tr.text(text)).is_some()
+                            || (alias && fuzzy::align_strong(query, english.text(text)).is_some())
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let strong_only = strong_labels > 0 || !described.is_empty();
+    let mut scored: Vec<Scored> = matches
         .into_iter()
         .filter_map(|(index, strong, any)| {
-            let (score, positions) = if strong_only { strong? } else { any };
-            Some((index, score, positions))
+            let (key, positions) = if strong_only { strong? } else { any };
+            Some((index, key, positions))
         })
         .collect();
-    // Sort by score desc, then original index asc (stable tie-break).
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored.sort_by(|a, b| {
+        let ((bonus_a, score_a), (bonus_b, score_b)) = (a.1, b.1);
+        bonus_b
+            .cmp(&bonus_a)
+            .then(entries[b.0].bound.cmp(&entries[a.0].bound))
+            .then(score_b.cmp(&score_a))
+            .then(a.0.cmp(&b.0))
+    });
     scored
         .into_iter()
         .map(|(index, _, matched_chars)| RankedEntry {
             index,
             matched_chars,
         })
+        .chain(described.into_iter().map(|index| RankedEntry {
+            index,
+            matched_chars: None,
+        }))
         .collect()
 }
 
@@ -1073,7 +1313,7 @@ mod tests {
         let cmds = commands();
         let entries: Vec<_> = cmds
             .iter()
-            .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+            .map(|(label, action)| PaletteEntry::new(PaletteLabel::Text(*label), action.clone()))
             .collect();
         let ranked = rank_matches("theme", &entries, &EN);
         let next = ranked
@@ -1105,12 +1345,174 @@ mod tests {
         let cmds = commands();
         let entries: Vec<_> = cmds
             .iter()
-            .map(|(label, action)| (PaletteLabel::Text(*label), action.clone()))
+            .map(|(label, action)| PaletteEntry::new(PaletteLabel::Text(*label), action.clone()))
             .collect();
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
             for query in ["", "split", "tab", "pane", "zzz"] {
                 assert_eq!(rank(query, &cmds, &tr), rank_entries(query, &entries, &tr));
+            }
+        }
+    }
+
+    /// The registry's rows with `bound` taken from the default keymap, as the
+    /// palette builds them.
+    fn default_entries() -> (Vec<(Text, Action)>, Vec<PaletteEntry>) {
+        let bindings = crate::keybinds::defaults();
+        let cmds = commands();
+        let entries = cmds
+            .iter()
+            .map(|(label, action)| PaletteEntry {
+                bound: crate::keybinds::ui_hint_label(&bindings, action).is_some(),
+                ..PaletteEntry::new(PaletteLabel::Text(*label), action.clone())
+            })
+            .collect();
+        (cmds, entries)
+    }
+
+    /// `split` lists the split directions that have a shortcut (right, down,
+    /// automatically) before the two that have none (left, up), in English
+    /// and in Spanish, however long each label is: Split automatically is
+    /// the longest label in both languages and must not fall under an
+    /// unbound row. Equalize splits, a weaker match, comes last, and no row
+    /// is found through its description.
+    #[test]
+    fn split_ranks_bound_directions_first() {
+        use Action::*;
+        let (cmds, entries) = default_entries();
+        let order = |query: &str, tr: &Translator| -> Vec<Action> {
+            rank_matches(query, &entries, tr)
+                .into_iter()
+                .map(|entry| cmds[entry.index].1.clone())
+                .collect()
+        };
+        assert_eq!(
+            order("split", &EN),
+            [
+                SplitRight,
+                SplitDown,
+                SplitAuto,
+                SplitUp,
+                SplitLeft,
+                EqualizeSplits
+            ]
+        );
+        assert_eq!(
+            order("dividir", &ES),
+            [SplitRight, SplitDown, SplitAuto, SplitLeft, SplitUp]
+        );
+        // The English name still finds them from a Spanish palette.
+        assert_eq!(order("split", &ES)[..3], [SplitRight, SplitDown, SplitAuto]);
+    }
+
+    /// Descriptions are searched only after labels, and only by a query of
+    /// four or more chars that leaves fewer than three label rows: `divider`
+    /// finds Split right and Split down through theirs, in either language,
+    /// with nothing highlighted; `split`, which six labels match, and the
+    /// three-char `div` find nothing that way.
+    #[test]
+    fn descriptions_match_only_after_labels() {
+        use Action::*;
+        let (cmds, entries) = default_entries();
+        let found = |query: &str, tr: &Translator| -> Vec<(Action, bool)> {
+            rank_matches(query, &entries, tr)
+                .into_iter()
+                .map(|entry| (cmds[entry.index].1.clone(), entry.matched_chars.is_some()))
+                .collect()
+        };
+        assert_eq!(
+            found("divider", &EN),
+            [(SplitRight, false), (SplitDown, false)]
+        );
+        assert_eq!(
+            found("divisor", &ES),
+            [(SplitRight, false), (SplitDown, false)]
+        );
+        // The English word from a Spanish palette: Split down through its
+        // English description, Split right through its own label, which
+        // "divider" spells out ("Divi…der…").
+        assert_eq!(
+            found("divider", &ES),
+            [(SplitRight, true), (SplitDown, false)]
+        );
+        let shell = found("shell integration", &EN);
+        for action in [SelectCommandOutput, JumpPrevPrompt, JumpNextPrompt] {
+            assert!(
+                shell.contains(&(action.clone(), false)),
+                "{action:?} in {shell:?}"
+            );
+        }
+        let split = found("split", &EN);
+        assert!(
+            split.iter().all(|(_, highlighted)| *highlighted),
+            "{split:?}"
+        );
+        assert!(!split.iter().any(|(action, _)| *action == DuplicatePane));
+        // Three chars are too few: whatever `div` finds, its label matched.
+        let div = found("div", &EN);
+        assert!(div.iter().all(|(_, highlighted)| *highlighted), "{div:?}");
+        assert!(
+            !div.iter().any(|(action, _)| *action == SplitRight),
+            "{div:?}"
+        );
+        // Every described command's description is its own text in both
+        // languages, and no description repeats its label.
+        for tr in [EN, ES] {
+            for (label, action) in &cmds {
+                if let Some(text) = description(action) {
+                    let (label, text) = (tr.text(*label), tr.text(text));
+                    assert!(!text.is_empty(), "{action:?}");
+                    assert!(
+                        !label.to_lowercase().contains(&text.to_lowercase()),
+                        "{action:?}: {text:?} repeats {label:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The registry is grouped: walking it never returns to a group it left,
+    /// groups come in [`PaletteGroup`] order, every group has commands, and
+    /// the first screen's commands lead their groups: the four tab commands
+    /// with chords, then the bound split directions.
+    #[test]
+    fn groups_are_contiguous_in_order_and_lead_with_the_common_commands() {
+        use Action::*;
+        let grouped = grouped_commands();
+        let mut seen: Vec<PaletteGroup> = Vec::new();
+        for (group, _, action) in &grouped {
+            if seen.last() != Some(group) {
+                assert!(!seen.contains(group), "{group:?} again at {action:?}");
+                assert!(
+                    seen.last().is_none_or(|last| last < group),
+                    "{group:?} out of order"
+                );
+                seen.push(*group);
+            }
+        }
+        assert_eq!(seen.len(), 14, "{seen:?}");
+        let first = |group: PaletteGroup, n: usize| -> Vec<Action> {
+            grouped
+                .iter()
+                .filter(|(g, _, _)| *g == group)
+                .take(n)
+                .map(|(_, _, action)| action.clone())
+                .collect()
+        };
+        assert_eq!(
+            first(PaletteGroup::Tabs, 4),
+            [NewTab, CloseTab, NextTab, PrevTab]
+        );
+        assert_eq!(
+            first(PaletteGroup::Splits, 5),
+            [SplitRight, SplitDown, SplitAuto, SplitLeft, SplitUp]
+        );
+        assert_eq!(seen[..2], [PaletteGroup::Tabs, PaletteGroup::Splits]);
+        // Every group has its own heading text in both languages.
+        for tr in [EN, ES] {
+            let mut names = std::collections::BTreeSet::new();
+            for group in &seen {
+                assert!(names.insert(tr.text(group.text())), "{group:?}");
             }
         }
     }

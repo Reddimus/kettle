@@ -25,6 +25,11 @@ const MIN_MIDWORD_RUN: usize = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alignment {
     pub score: i32,
+    /// The score before the length penalty: how well the pattern lies in the
+    /// candidate, whatever else the candidate says. The palette ranks on it
+    /// first, so a long label is not pushed under a short one it matches
+    /// equally well.
+    pub bonus: i32,
     pub positions: Vec<usize>,
 }
 
@@ -121,6 +126,7 @@ impl Matcher {
         let unmatched = (self.cand.len() as i32 - self.pat.len() as i32).max(0);
         Alignment {
             score: total - unmatched / 4,
+            bonus: total,
             positions,
         }
     }
@@ -135,6 +141,7 @@ impl Matcher {
         if self.pat.is_empty() {
             return Some(Alignment {
                 score: 0,
+                bonus: 0,
                 positions: Vec::new(),
             });
         }

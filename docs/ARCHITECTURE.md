@@ -337,7 +337,23 @@ Spanish beside its English; the CLI never takes a translator. Crates below the U
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,
 outside English, against the English label too, so a command name from the
-docs still finds its command. The search bar sizes each control from its
+docs still finds its command. Rows rank by how well the query lies in the
+label, then commands with a shortcut first, then shorter labels, then registry
+order. A command's optional description (`palette::description`) is painted
+after its label, whole or not at all (`kettle_render::menu_row_description_left`
+measures the painted text), and is searched only by a query of four or more
+characters that matches fewer than three labels strongly. Screen readers get
+the label as the option's name and the shortcut in words
+(`Trigger::spoken_label`) plus the description as its description. The empty
+palette lists the registry's groups (`palette::grouped_commands`, Tabs first)
+under heading rows (`ContextMenuRow::heading`); a query and the
+keyboard-shortcut list stay flat. The palette's selection counts commands, not
+rows: `kettle_render::menu_row_option` and `menu_option_row` convert between
+the two for the painter's highlight, a press, accessibility (one flat ListBox
+whose option ids skip headings, the group's name read after its first command)
+and `ctl ui_geometry`, which leaves headings out. The palette's card (and its
+header) is 360 to 720 points wide, scaled by the window's scale factor
+(`PickerList::card_scale`); the other pickers keep their pixel limits. The search bar sizes each control from its
 longest label in the UI's language, never narrower than in English, and paint
 and hit testing share that geometry. Control-protocol JSON (`ui_geometry`)
 keeps English labels in every language, and so do logs: where a notification

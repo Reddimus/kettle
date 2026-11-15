@@ -267,7 +267,14 @@ impl App {
             || ws.layout_picker_input.is_some()
             || ws.ssh_input.is_some();
         if picker {
-            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1)?.header;
+            // The palette's card is sized in points; the header shares it.
+            let scale = if ws.palette_input.is_some() {
+                palette_card_scale(ws)
+            } else {
+                1.0
+            };
+            rect = picker_card_geometry((sw, sh), (cw, ch), self.picker_top_chrome(ws), 1, scale)?
+                .header;
         }
         if ws.settings_text_edit.is_none()
             && !ws

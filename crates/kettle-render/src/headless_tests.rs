@@ -6251,6 +6251,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         separator: false,
         enabled,
         hint: hint.into(),
+        ..Default::default()
     };
     let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
     let overlay = Overlay {
@@ -6378,6 +6379,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
                 separator: false,
                 enabled: true,
                 hint: "dark".into(),
+                ..Default::default()
             })
             .collect(),
         highlight: 0,
@@ -6432,6 +6434,7 @@ fn menu_level(
                 separator: false,
                 enabled: true,
                 hint: String::new(),
+                ..Default::default()
             })
             .collect(),
         highlight,

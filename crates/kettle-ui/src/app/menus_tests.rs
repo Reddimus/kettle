@@ -678,7 +678,9 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
     .expect("an active command picker must install the shared vertical panel");
 
     assert!(menu.rows.len() > 3);
-    assert_eq!(menu.highlight, 3);
+    // The fourth command, one row below the Tabs heading.
+    assert_eq!(menu.highlight, 4);
+    assert_eq!(kettle_render::menu_row_option(&menu.rows, menu.highlight), Some(3));
     assert!(menu.rows.iter().all(|row| !row.separator));
 
     // The theme picker's rows use the same panel.
@@ -1211,6 +1213,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
         separator: false,
         enabled: true,
         hint: "Ctrl+".repeat(1000),
+        ..Default::default()
     };
     fit_context_menu_row(&mut row, 5);
     assert!(row.hint.is_empty());
@@ -1727,6 +1730,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
                 separator: matches!(item, ContextMenuItem::Separator),
                 enabled: !matches!(item, ContextMenuItem::Info { .. }),
                 hint: String::new(),
+                ..Default::default()
             })
             .collect(),
         highlight: 0,

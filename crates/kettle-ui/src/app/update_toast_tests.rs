@@ -33,7 +33,7 @@ fn update_rows_present_iff_notice_active() {
     let actions = |notice| {
         super::palette_entries(notice, &es, &[], kettle_config::BroadcastDefault::default())
             .into_iter()
-            .map(|(_, action)| action)
+            .map(|entry| entry.action)
             .collect::<Vec<_>>()
     };
     assert!(!actions(None).contains(&Action::OpenUpdate));
@@ -41,7 +41,7 @@ fn update_rows_present_iff_notice_active() {
     assert!(with.contains(&Action::OpenUpdate) && with.contains(&Action::DismissUpdate));
     let entries = super::palette_entries(Some(&notice), &es, &[], kettle_config::BroadcastDefault::default());
     let ranked = kettle_config::palette::rank_entries("release notes", &entries, &es);
-    assert_eq!(entries[ranked[0]].1, Action::OpenUpdate);
+    assert_eq!(entries[ranked[0]].action, Action::OpenUpdate);
 }
 
 #[test]

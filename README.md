@@ -96,7 +96,12 @@ bar opens Settings too. Run
 `kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
 the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
 command palette then lists only the commands that have a shortcut, with the
-shortcut beside each, and you can search it and press Enter to run one. The
+shortcut beside each, and you can search it and press Enter to run one.
+With nothing typed, the palette lists its commands under headings, most used
+first: Tabs, Splits, Panes, Windows and so on. Where a command's name leaves
+something out, the palette adds a short description after it, such as "Vertical divider" for Split right or "Needs
+shell integration" for the prompt jumps; a search of four or more characters
+that names few commands also searches these. The
 macOS Shell, Edit, View and Window menus expose common actions and show their
 current Cmd shortcuts, including config overrides. See
 [Getting started](docs/GETTING-STARTED.md) for more.

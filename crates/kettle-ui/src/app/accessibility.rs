@@ -981,6 +981,8 @@ impl App {
             for row in &menu.rows {
                 row.label.hash(&mut hasher);
                 row.hint.hash(&mut hasher);
+                row.a11y_description.hash(&mut hasher);
+                row.heading.hash(&mut hasher);
                 row.separator.hash(&mut hasher);
                 row.enabled.hash(&mut hasher);
                 row.toggle.hash(&mut hasher);
@@ -2364,10 +2366,14 @@ fn push_picker_accessibility(
     let mut selected = None;
     if let Some(menu) = menu {
         for (index, row) in menu.rows.iter().enumerate() {
-            if row.separator {
+            // A heading is not an option: the list stays flat, and the
+            // group's name is read after its first command instead. Options
+            // are numbered past headings, so typing a query, which drops the
+            // headings, keeps the first option's id.
+            let Some(option_index) = kettle_render::menu_row_option(&menu.rows, index) else {
                 continue;
-            }
-            let id = accessibility_modal_id(kind, index + 3);
+            };
+            let id = accessibility_modal_id(kind, option_index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
             if let Some(rect) = menu.visible_row_rect(index) {
@@ -2375,9 +2381,18 @@ fn push_picker_accessibility(
             } else {
                 option.set_hidden();
             }
-            // The painted hint, such as a shortcut or a theme's appearance.
-            if !row.hint.is_empty() {
-                option.set_description(row.hint.trim().to_string());
+            // The painted hint, such as a shortcut or a theme's appearance,
+            // unless the row says what to read instead: a palette command's
+            // shortcut in words and its description, painted or not.
+            match &row.a11y_description {
+                Some(description) if !description.is_empty() => {
+                    option.set_description(description.clone());
+                }
+                Some(_) => {}
+                None if !row.hint.is_empty() => {
+                    option.set_description(row.hint.trim().to_string());
+                }
+                None => {}
             }
             if !row.enabled {
                 option.set_disabled();
@@ -3725,6 +3740,7 @@ mod context_menu_nesting_tests {
                 separator: false,
                 enabled: true,
                 hint: String::new(),
+                ..Default::default()
             }],
             highlight: 0,
             scroll_offset: 0,
@@ -3842,6 +3858,7 @@ mod context_menu_nesting_tests {
             separator: false,
             enabled: true,
             hint: "⌘V".into(),
+            ..Default::default()
         });
         let overlay = Overlay {
             context_menu: Some(menu),

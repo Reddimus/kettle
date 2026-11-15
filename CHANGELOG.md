@@ -341,6 +341,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file managers put beside the list (on macOS, the file's name), or to an
   image of the file.
 
+- The command palette, the layout picker and the SSH launcher show up to 12
+  rows at a time instead of 8 when the window has room; the theme picker
+  keeps its 14.
+
+- On a HiDPI display the command palette is as wide, in points, as at 1x:
+  56% of the window, from 360 to 720 points. It was held to 720 pixels, so
+  on a 2x Retina display a 1280-point window got a 360-point palette, about
+  43 columns, too narrow for most command descriptions. The theme, layout
+  and SSH pickers keep their sizes.
+
+- Command palette rows can carry a short description after the label, in
+  secondary text, where the label leaves something out: which way a split's
+  divider runs, where a new or duplicated tab or pane starts, that the
+  prompt jumps and output selection need shell integration, and that help
+  opens in the browser. A description is shown whole or not at all. The
+  parenthetical notes that used to sit in five split labels moved there, or
+  were dropped where they only repeated the label, and "About kettle" and
+  "Open kettle help / README" read "About Kettle" and "Open Kettle help".
+  Between equally good matches, a command with a shortcut now ranks first,
+  so `split` lists Split right, Split down and Split automatically before
+  Split up and Split left, in English and Spanish. A search of four or more
+  characters that matches fewer than three labels also searches
+  descriptions. Screen readers hear each command's name, then its shortcut
+  in words ("Shift Command right bracket", never glyphs) and its
+  description.
+
+- With nothing typed, the command palette lists its commands under headings
+  in order of use: Tabs (New tab, Close tab, Next tab, Previous tab first),
+  Splits, Panes, Windows, Search and selection, Scrolling, Text size,
+  Appearance, Terminal, Broadcast input, Previews, Layouts, profiles and SSH,
+  Settings and Help. Profiles sit in their group and update rows under Help.
+  Typing shows the ranked list without headings, and so does the
+  keyboard-shortcut list. Arrows, Enter, the pointer and screen readers skip
+  the headings; screen readers keep one flat list and hear a group's name
+  after its first command. `ctl ui_geometry` leaves headings out of the
+  picker's `rows`, so the empty palette's first command is row 1.
+
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
   yellow lifted to 3:1 against its tab, with the lip, the gap under it and

@@ -939,6 +939,7 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
             separator: false,
             enabled: true,
             hint: template.hint.clone(),
+            ..Default::default()
         };
         let full = kettle_render::menu_row_chars(&row());
         let bare = full - kettle_render::menu::swatch_columns();
@@ -1110,7 +1111,7 @@ fn the_theme_picker_sample_follows_the_selection_with_overrides() {
 
 /// On a 1280x820 window at 1x and 2x, in English and Spanish, the theme
 /// picker shows its sample card and both status lines and still paints at
-/// least 12 whole rows, while the command palette keeps 8. The card's top
+/// least 12 whole rows, as the command palette now does. The card's top
 /// edge lies under the last painted row, and the whole card, footer
 /// included, is the picker's.
 #[test]
@@ -1167,7 +1168,7 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
         let (_, content_h) = kettle_render::menu::picker_scroll_content(palette.panel_h_clamped);
         assert_eq!(
             (content_h / row_h + 0.001).floor() as usize,
-            8,
+            12,
             "{scale}x palette"
         );
     }
