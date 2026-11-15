@@ -27,8 +27,10 @@ mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
 pub use scrollback::{
-    PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
-    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
+    HistoryView, KeptHistoryLabel, PaneScrollbar, ScrollbackPill, ScrollbackPillHint,
+    ScrollbackPillState, ScrollbarState, kept_history_label, pane_scrollbar_geometry,
+    scrollback_pill, scrollback_pill_hint, scrollbar_draw_width, scrollbar_hit_rect,
+    scrollbar_hit_width,
 };
 mod text_field;
 pub use text_field::{
@@ -128,16 +130,16 @@ use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
 use overlays::input_bar_colors;
 pub use overlays::{
-    ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
-    MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, MenuToggle, NotificationGeometry, Overlay, StatusBar, TabActivity,
-    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    WindowControl, WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
-    media_paste_receipt_geometry, menu, menu_option_row, menu_row_chars, menu_row_description_left,
-    menu_row_option, notification_geometry, notification_geometry_with_notices,
-    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
-    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
-    update_toast_geometry,
+    ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
+    ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
+    MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuToggle,
+    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
+    UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
+    context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
+    menu_option_row, menu_row_chars, menu_row_description_left, menu_row_option,
+    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
+    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
+    toast_text_rows, update_toast_columns, update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -226,7 +228,7 @@ mod color;
 
 mod confirm;
 
-pub use confirm::ConfirmDialogLayout;
+pub use confirm::{ConfirmDetailLayout, ConfirmDialogLayout, access_key_index};
 
 mod cursor_marks;
 
@@ -2895,32 +2897,73 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        let scrollback_pills: Vec<_> = panes
+        // Each scrolled-back pane's jump button, and the label at the top
+        // of a history that has lost its oldest lines. The pointer,
+        // AccessKit and `ui_geometry` lay both out with the same calls.
+        let scrollback_text_cell = (
+            self.overlay_text_cell_width(),
+            self.overlay_text_line_height(),
+        );
+        let scrollback_hint = panes
+            .iter()
+            .any(|pane| pane.snap.display_offset > 0)
+            .then(|| scrollback_pill_hint(&cfg.keybinds))
+            .flatten();
+        let scrollback_pills: Vec<(u64, ScrollbackPill)> = panes
             .iter()
             .filter_map(|pane| {
-                scrollback_pill(
+                let pill = scrollback_pill(
                     pane.terminal,
                     pane.snap.display_offset,
                     self.scale,
-                    (
-                        self.overlay_text_cell_width(),
-                        self.overlay_text_line_height(),
-                    ),
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    scrollback_hint.as_deref(),
+                    &pane.tr,
+                )?;
+                Some((pane.id, pill))
+            })
+            .collect();
+        let kept_history_labels: Vec<KeptHistoryLabel> = panes
+            .iter()
+            .filter_map(|pane| {
+                kept_history_label(
+                    pane.terminal,
+                    pane.snap.history_view(),
+                    self.scale,
+                    scrollback_text_cell,
                     cfg.scrollbar_width,
                     &pane.tr,
                 )
             })
             .collect();
-        while self.scrollback_buffers.len() < scrollback_pills.len() {
+        // One buffer per text, in paint order: each button's count and then
+        // its key, then each label.
+        let scrollback_texts: Vec<(&str, f32)> = scrollback_pills
+            .iter()
+            .flat_map(|(_, pill)| {
+                std::iter::once((pill.label.as_str(), pill.rect.3)).chain(
+                    pill.hint
+                        .as_ref()
+                        .map(|hint| (hint.text.as_str(), pill.rect.3)),
+                )
+            })
+            .chain(
+                kept_history_labels
+                    .iter()
+                    .map(|label| (label.label.as_str(), label.rect.3)),
+            )
+            .collect();
+        while self.scrollback_buffers.len() < scrollback_texts.len() {
             self.scrollback_buffers
                 .push(TextBuffer::new(&mut self.font_system, metrics));
         }
-        self.scrollback_buffers.truncate(scrollback_pills.len());
-        for (buffer, pill) in self.scrollback_buffers.iter_mut().zip(&scrollback_pills) {
+        self.scrollback_buffers.truncate(scrollback_texts.len());
+        for (buffer, (text, height)) in self.scrollback_buffers.iter_mut().zip(&scrollback_texts) {
             buffer.set_metrics(metrics);
-            buffer.set_size(None, Some(pill.rect.3));
+            buffer.set_size(None, Some(*height));
             buffer.set_text(
-                &pill.label,
+                text,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
@@ -3742,33 +3785,53 @@ impl Renderer {
                 });
             }
         }
-        for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
-            let (x, y, w, h) = pill.rect;
-            let (fill, ink) = self
-                .chrome_colors
-                .scrollback_pill(theme, self.config.format.is_srgb());
-            tab_strip::rounded_fill(
-                &mut menu_q,
-                (x, y, w, h),
-                h / 2.0,
-                (true, true),
-                (fill, 1.0),
-                None,
+        if !scrollback_texts.is_empty() {
+            // The button is opaque; its edge meets the terminal, which shows
+            // the desktop through a translucent window.
+            let terminal = color::Backing::translucent(
+                theme.background,
+                composed_bg_alpha(cfg),
+                color::PLATFORM_BACKDROP_LIFT,
             );
-            menu_areas.push(TextArea {
-                buffer,
-                left: pill.text_origin.0,
-                top: pill.text_origin.1,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: x as i32,
-                    top: y as i32,
-                    right: (x + w) as i32,
-                    bottom: (y + h) as i32,
-                },
-                default_color: GColor::rgb(ink.r, ink.g, ink.b),
-                custom_glyphs: &[],
-            });
+            let pill_colors =
+                self.chrome_colors
+                    .scrollback_pill(theme, self.config.format.is_srgb(), terminal);
+            let mut buffers = self.scrollback_buffers.iter();
+            let mut text = |origin: (f32, f32), (x, y, w, h): Rect4, ink: Rgb| {
+                if let Some(buffer) = buffers.next() {
+                    menu_areas.push(TextArea {
+                        buffer,
+                        left: origin.0,
+                        top: origin.1,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            };
+            for (pane, pill) in &scrollback_pills {
+                let surface = pill_colors.surface(ScrollbackPillState::of(
+                    *pane,
+                    overlay.scrollback_pill_hovered,
+                    overlay.scrollback_pill_pressed,
+                ));
+                scrollback::scrollback_pill_quads(&mut menu_q, pill, surface, self.scale);
+                text(pill.text_origin, pill.rect, surface.ink);
+                if let Some(hint) = &pill.hint {
+                    text(hint.text_origin, pill.rect, surface.ink);
+                }
+            }
+            for label in &kept_history_labels {
+                let rest = pill_colors.rest;
+                scrollback::kept_history_label_quads(&mut menu_q, label, rest.fill);
+                text(label.text_origin, label.rect, rest.ink);
+            }
         }
         if let Some(bounds) = tab_tooltip {
             let fill = theme.background;
@@ -5311,10 +5374,20 @@ impl Renderer {
         }
 
         let mut confirmation_surfaces = Vec::new();
-        let mut confirmation_colors = Vec::new();
+        let mut confirmation_colors = None;
         if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
-            self.confirmation_text
-                .prepare(&mut self.font_system, &family, layout, dialog);
+            // The recommended button, the link and the focus ring take an
+            // accent that cannot be mistaken for the warning colour beside
+            // them.
+            let window_accent = self.ui_accent(cfg, theme);
+            let accent = confirm::dialog_accent(theme, window_accent, dialog);
+            let detail_colors = confirm::detail_colors(theme, accent);
+            self.confirmation_text.prepare(
+                &mut self.font_system,
+                &family,
+                layout,
+                gc(detail_colors.warning),
+            );
             let rgba = |color: Rgb, alpha: f32| {
                 [
                     color.r as f32 / 255.0,
@@ -5352,25 +5425,67 @@ impl Renderer {
                 layout.unit,
             );
             let foreground = confirm_dialog_text_color(theme);
-            confirmation_colors.extend([GColor::rgb(foreground.r, foreground.g, foreground.b); 2]);
+            let mut colors = confirm::ConfirmTextColors {
+                text: gc(foreground),
+                link: gc(detail_colors.link),
+                buttons: Vec::with_capacity(layout.buttons.len()),
+            };
+            let focus = confirm::focus_ring_color(theme, window_accent, dialog);
+            let focus_ring = |rect: Rect4, grow: f32| {
+                confirm::intersect(
+                    (
+                        rect.0 - grow,
+                        rect.1 - grow,
+                        rect.2 + grow * 2.0,
+                        rect.3 + grow * 2.0,
+                    ),
+                    layout.rect,
+                )
+            };
+            if let Some(detail) = &layout.detail {
+                // The preview sits in an inset box, and each control token
+                // in a chip: an outline and a faint fill mark it apart from
+                // typed text without relying on its colour.
+                shape(
+                    detail.preview_rect,
+                    detail_colors.preview_fill,
+                    1.0,
+                    confirm_dialog_border_color(theme),
+                    1.0,
+                    4.0 * layout.unit,
+                    layout.unit,
+                );
+                for chip in self.confirmation_text.chips(layout) {
+                    shape(
+                        chip,
+                        detail_colors.chip_fill,
+                        1.0,
+                        detail_colors.warning,
+                        1.0,
+                        3.0 * layout.unit,
+                        layout.unit,
+                    );
+                }
+                let link = detail.link_rect;
+                if layout.link_stop() == Some(dialog.focus_idx) && link.2 > 0.0 && link.3 > 0.0 {
+                    shape(
+                        focus_ring(link, 3.0 * layout.unit),
+                        black,
+                        0.0,
+                        focus,
+                        1.0,
+                        5.0 * layout.unit,
+                        2.0 * layout.unit,
+                    );
+                }
+            }
             for (index, &rect) in layout.buttons.iter().enumerate() {
-                let (fill, label) =
-                    confirm::button_colors(theme, self.ui_accent(cfg, theme), dialog, index);
+                let (fill, label) = confirm::button_colors(theme, accent, dialog, index);
                 let stroke = color::with_min_contrast(fill, theme.background, 3.0);
                 shape(rect, fill, 1.0, stroke, 1.0, 6.0 * layout.unit, layout.unit);
                 if index == dialog.focus_idx && rect.2 > 0.0 && rect.3 > 0.0 {
-                    let focus = confirm::focus_color(theme, self.ui_accent(cfg, theme));
-                    let ring = confirm::intersect(
-                        (
-                            rect.0 - 4.0 * layout.unit,
-                            rect.1 - 4.0 * layout.unit,
-                            rect.2 + 8.0 * layout.unit,
-                            rect.3 + 8.0 * layout.unit,
-                        ),
-                        layout.rect,
-                    );
                     shape(
-                        ring,
+                        focus_ring(rect, 4.0 * layout.unit),
                         black,
                         0.0,
                         focus,
@@ -5379,8 +5494,24 @@ impl Renderer {
                         2.0 * layout.unit,
                     );
                 }
-                confirmation_colors.push(GColor::rgb(label.r, label.g, label.b));
+                colors.buttons.push(gc(label));
             }
+            for line in self.confirmation_text.underlines(layout, dialog) {
+                let ink = match line.role {
+                    confirm::TextRole::Button(index) => colors.buttons[index],
+                    _ => colors.link,
+                };
+                shape(
+                    line.rect,
+                    Rgb::new(ink.r(), ink.g(), ink.b()),
+                    1.0,
+                    black,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+            }
+            confirmation_colors = Some(colors);
             if layout.max_scroll > 0 {
                 let region = if layout.whole_scroll {
                     layout.rect
@@ -5428,10 +5559,9 @@ impl Renderer {
                 }
             }
         }
-        let confirmation_areas = if let Some(layout) = &confirmation_layout {
-            self.confirmation_text.areas(layout, &confirmation_colors)
-        } else {
-            Vec::new()
+        let confirmation_areas = match (&confirmation_layout, &confirmation_colors) {
+            (Some(layout), Some(colors)) => self.confirmation_text.areas(layout, colors),
+            _ => Vec::new(),
         };
 
         let label_count = self.card_scene.labels.len();
@@ -5535,8 +5665,9 @@ impl Renderer {
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
-            for pill in &scrollback_pills {
-                pill.label.hash(&mut h);
+            // Retained buffers keep their addresses: hash what they show.
+            for (text, _) in &scrollback_texts {
+                text.hash(&mut h);
             }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
@@ -6540,3 +6671,6 @@ mod emoji_shaping_tests;
 mod theme_picker_tests;
 #[cfg(test)]
 mod update_toast_tests;
+
+#[cfg(test)]
+mod scrollback_pill_tests;

@@ -756,6 +756,7 @@ impl App {
         ws.dragging_split = None;
         self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
+        ws.scrollback_pill_press = None;
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;

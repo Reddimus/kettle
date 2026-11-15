@@ -1871,6 +1871,7 @@ pub(super) fn ssh_remove_dialog(
         scroll: 0,
         armed_press: None,
         space_pressed: None,
+        paste: None,
     }
 }
 
@@ -1902,6 +1903,7 @@ pub(super) fn ssh_replace_dialog(
         scroll: 0,
         armed_press: None,
         space_pressed: None,
+        paste: None,
     }
 }
 

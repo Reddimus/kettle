@@ -565,6 +565,14 @@ impl App {
         match ev {
             TermEvent::PtyWrite(s) => Some(s),
             event @ (TermEvent::ClipboardStore(..) | TermEvent::ClipboardLoad(..)) => {
+                // Disjoint borrows of the pane: the notice state is written
+                // while the program is looked up.
+                let term = &pane.term;
+                let launch_argv = crate::mux::path_argv_with_default(
+                    &pane.argv,
+                    term.default_shell_program.as_ref(),
+                );
+                let configured_shell = self.cfg.shell.as_deref();
                 apply_osc52_event(
                     &mut PaneClipboard {
                         clipboard: self.clipboard.as_mut(),
@@ -572,6 +580,7 @@ impl App {
                         notify: self.cfg.osc52_notify,
                         notices: &mut pane.osc52_notice,
                         tr: &self.ui_text,
+                        program: &|| osc52_notice_program(term, launch_argv, configured_shell),
                     },
                     event,
                 )

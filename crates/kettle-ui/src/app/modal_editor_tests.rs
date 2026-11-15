@@ -55,6 +55,7 @@ fn field(kind: ModalKind) -> WindowState {
                 scroll: 0,
                 armed_press: None,
                 space_pressed: None,
+                paste: None,
             })
         }
     }

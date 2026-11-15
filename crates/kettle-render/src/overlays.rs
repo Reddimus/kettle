@@ -594,6 +594,11 @@ pub struct Overlay {
     pub scrollbar_active: bool,
     /// Pane whose scrollbar is under the native pointer, including unfocused panes.
     pub scrollbar_hovered_pane: Option<u64>,
+    /// Pane whose jump-to-bottom button is under the pointer, where a press
+    /// would reach it.
+    pub scrollback_pill_hovered: Option<u64>,
+    /// Pane whose jump-to-bottom button took a press not yet released.
+    pub scrollback_pill_pressed: Option<u64>,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
     /// `Some` while the right-click context menu is open. Rendered on
@@ -912,26 +917,81 @@ pub(crate) fn toast_buffer_text(
 
 /// Renderer-side projection of `WindowState::confirm_dialog`.
 /// Stripped of dispatch state — just the bits needed to paint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfirmDialogOverlay {
     /// Prompt text shown at the top of the modal.
     pub heading: String,
     pub body: String,
     /// Button labels in display order (Cancel typically first).
     pub buttons: Vec<ConfirmDialogButton>,
-    /// Which button has focus (idx into `buttons`).
+    /// Which focus stop has focus: an index into `buttons`, or
+    /// `buttons.len()` for the link of `detail`.
     pub focus_idx: usize,
+    /// The hovered and the pressed focus stop, numbered like `focus_idx`.
     pub hover_idx: Option<usize>,
     pub pressed_idx: Option<usize>,
     pub scroll: usize,
+    /// Structured content below the body: what a paste would send.
+    pub detail: Option<ConfirmDialogDetail>,
 }
 
 /// Paint-side button shape. Destructive buttons use a warning accent;
 /// the focused button also has a visible outline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfirmDialogButton {
     pub label: String,
     pub destructive: bool,
+    /// Take the first button's neutral fill instead of the accent: a choice
+    /// that is neither the recommended one nor destructive.
+    pub neutral: bool,
+    /// The letter of `label` underlined as the button's access key.
+    pub access_key: Option<char>,
+}
+
+/// What a paste confirmation shows between its reason and its buttons: a
+/// bounded preview with the control characters marked, what was found, and
+/// the policy that asked with a link to change it. All text arrives resolved;
+/// the renderer wraps and places it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmDialogDetail {
+    /// The preview, logical lines separated by `\n`.
+    pub preview: String,
+    /// Byte ranges of `preview` that spell a control character in ASCII.
+    /// Each is drawn as a chip: warning-coloured letters in an outlined box.
+    /// In order, not overlapping.
+    pub preview_tokens: Vec<std::ops::Range<usize>>,
+    /// What the text holds, one count per part ("2 lines", "1 escape
+    /// sequence"). The parts share a line, separated by a middle dot, while
+    /// they fit; where the line breaks, the dot is left out.
+    pub summary: Vec<String>,
+    /// What each kind of control found does, most serious first.
+    pub findings: Vec<ConfirmDialogFinding>,
+    /// A last row for the kinds `findings` leaves out; empty for none.
+    pub more: String,
+    /// The policy in force, shown above the buttons.
+    pub policy: String,
+    /// A link after the policy text; a focus stop after the last button.
+    /// Empty for none.
+    pub link: String,
+    /// The letter of `link` underlined as its access key.
+    pub link_access_key: Option<char>,
+    /// The whole question as assistive technology reads it, in place of
+    /// `body`: every control character of the preview is spelled as words, so
+    /// it cannot be mistaken for typed text. Never painted.
+    pub description: String,
+}
+
+/// One findings row: the control as the preview spells it, what it does, and
+/// how often it occurs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmDialogFinding {
+    pub token: String,
+    pub meaning: String,
+    pub count: String,
+    /// The control does not reach the program whichever choice is made, and
+    /// `meaning` says so. Its token is drawn as plain text, not in the
+    /// warning colour.
+    pub removed: bool,
 }
 
 /// Most lane images one frame draws: one per pane with a lane.

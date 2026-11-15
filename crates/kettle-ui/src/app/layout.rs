@@ -169,6 +169,15 @@ impl ContentBands {
     }
 }
 
+/// The panes' area: `content` with the search lane, `search_reserved` high
+/// while Find is open, kept off its bottom. The bar is painted at the bottom
+/// of the surface, so nothing a pane draws, a jump button included, lands
+/// under it.
+pub(super) fn pane_area(content: Rect, search_reserved: f32) -> Rect {
+    let (x, y, width, height) = content;
+    (x, y, width, (height - search_reserved).max(0.0))
+}
+
 /// Explicit strip-width variant, so callers with `cfg.tab_bar_width` in scope
 /// can pass it through. The non-`_with_strip` wrapper above keeps the same
 /// signature for code paths without a Config.
@@ -332,15 +341,14 @@ impl App {
         // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
-        let mut area = content_rect_for_with_strip(
+        let content = content_rect_for_with_strip(
             surface,
             bands,
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
         );
-        area.3 = (area.3 - self.search_bar_h(ws)).max(0.0);
-        area
+        pane_area(content, self.search_bar_h(ws))
     }
 
     /// The columns and rows that fit in `terminal`, a pane's terminal (or a

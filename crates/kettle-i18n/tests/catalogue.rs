@@ -26,6 +26,9 @@ fn every_static_message_has_clean_text_in_both_languages() {
             Text::A11yKeyAlt,
             Text::A11yKeyEscape,
             Text::PaletteGroupTerminal,
+            // One access-key letter; the Spanish labels share it.
+            Text::ConfirmPasteKeyCancel,
+            Text::ConfirmPasteKeyPaste,
         ];
         if !cognate.contains(key) {
             assert_ne!(en.text(*key), es.text(*key), "{key:?} is untranslated");
@@ -194,8 +197,11 @@ fn every_spanish_message_has_a_review_status() {
                         | "process_close"
                         | "notice_dismiss"
                         | "osc52_copied"
-                        | "osc52_denied_read"
-                        | "osc52_denied_write"
+                        | "osc52_copied_by"
+                        | "osc52_blocked_read"
+                        | "osc52_blocked_write"
+                        | "osc52_blocked_read_by"
+                        | "osc52_blocked_write_by"
                         | "mouse_override_hint"
                         | "font_size_chip"
                         // The notification toast's Show button is named by
@@ -244,6 +250,10 @@ fn every_spanish_message_has_a_review_status() {
                         | "ssh_status_removed"
                         | "ssh_status_not_saved"
                         | "ssh_status_not_removed"
+                        // The kept-history label is read by screen readers
+                        // as the text it shows.
+                        | "scrollback_kept"
+                        | "scrollback_kept_lines"
                 )
         })
         .cloned()
@@ -301,6 +311,9 @@ fn no_spanish_message_is_left_in_english() {
         // Punctuation and a counter, no words.
         "notification_toast_sourced",
         "notification_toast_repeats",
+        // One access-key letter; the Spanish labels share it.
+        "confirm_paste_key_cancel",
+        "confirm_paste_key_paste",
     ];
     for (key, text) in &english {
         if !cognates.contains(&key.as_str()) {
@@ -413,7 +426,192 @@ fn settings_descriptions_are_short_and_translated() {
         }
     }
     assert_eq!(
-        descriptions, 65,
+        descriptions, 67,
         "every curated field and keybind has its own description"
+    );
+}
+
+/// Each Confirm paste access key is one letter of the label it activates and
+/// belongs to one control only, in each language. The dialog matches the
+/// letter the keyboard layout produces, so a letter missing from its label
+/// could not be shown, and a shared one would pick a button by position.
+#[test]
+fn paste_access_keys_occur_in_their_labels_and_are_unique_per_language() {
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let pairs = [
+            (Text::ConfirmPasteKeyCancel, Text::ConfirmButtonCancel),
+            (
+                Text::ConfirmPasteKeyWithoutControls,
+                Text::ConfirmPasteWithoutControls,
+            ),
+            (Text::ConfirmPasteKeyOneLine, Text::ConfirmPasteOneLine),
+            (Text::ConfirmPasteKeyPaste, Text::MenuPaste),
+            (Text::ConfirmPasteKeySettings, Text::ConfirmPasteSettings),
+        ];
+        let mut seen = Vec::new();
+        for (key, label) in pairs {
+            let key = tr.text(key);
+            let label = tr.text(label);
+            let mut letters = key.chars();
+            let letter = letters.next().expect("an access key");
+            assert!(letters.next().is_none(), "{key:?} is not one character");
+            assert!(letter.is_alphabetic() && letter.is_uppercase(), "{key:?}");
+            assert!(
+                label.to_lowercase().contains(&key.to_lowercase()),
+                "{language:?}: {key:?} does not occur in {label:?}"
+            );
+            assert!(
+                !seen.contains(&key.to_lowercase()),
+                "{language:?}: {key:?} is used twice"
+            );
+            seen.push(key.to_lowercase());
+        }
+    }
+}
+
+/// The paste reasons name what was found and what Kettle does about it, in
+/// both languages, and every findings meaning is a short lower-case phrase.
+#[test]
+fn paste_reasons_and_findings_are_translated() {
+    let en = Translator::new(Language::En);
+    let es = Translator::new(Language::Es);
+    for marker in ["ESC[201~", "CSI 201~"] {
+        let reason = en.confirm_paste_reason_marker(marker);
+        assert!(reason.starts_with(&format!("This text contains {marker},")));
+        assert!(reason.contains("Kettle removes it"));
+        let reason = es.confirm_paste_reason_marker(marker);
+        assert!(reason.contains(marker) && reason.contains("Kettle lo quita"));
+    }
+    assert!(
+        en.text(Text::ConfirmPasteReasonLines)
+            .contains("each line break is sent as Enter")
+    );
+    assert!(
+        es.text(Text::ConfirmPasteReasonLines)
+            .contains("cada salto de línea se envía como Enter")
+    );
+    // A question asked again says first that the answer was not used.
+    assert!(
+        en.text(Text::ConfirmPasteReasonReasked)
+            .contains("after you answered")
+    );
+    assert!(
+        en.text(Text::ConfirmPasteReasonReasked)
+            .ends_with("nothing was pasted.")
+    );
+    assert!(
+        es.text(Text::ConfirmPasteReasonReasked)
+            .contains("después de que respondiste")
+    );
+    assert!(
+        es.text(Text::ConfirmPasteReasonReasked)
+            .ends_with("no se pegó nada.")
+    );
+    assert_eq!(en.text(Text::ConfirmPasteFindingQuit), "quit (Ctrl+\\)");
+    assert_eq!(es.text(Text::ConfirmPasteFindingQuit), "salir (Ctrl+\\)");
+    for finding in [
+        Text::ConfirmPasteFindingEndMarker,
+        Text::ConfirmPasteFindingEndMarkerC1,
+        Text::ConfirmPasteFindingInterrupt,
+        Text::ConfirmPasteFindingSuspend,
+        Text::ConfirmPasteFindingQuit,
+        Text::ConfirmPasteFindingEndOfInput,
+        Text::ConfirmPasteFindingEscape,
+        Text::ConfirmPasteFindingBidi,
+        Text::ConfirmPasteFindingBell,
+        Text::ConfirmPasteFindingBackspace,
+        Text::ConfirmPasteFindingDelete,
+        Text::ConfirmPasteFindingControl,
+        Text::ConfirmPasteFindingC1,
+    ] {
+        for text in [en.text(finding), es.text(finding)] {
+            assert!(!text.ends_with('.') && !text.contains('`'), "{text}");
+            assert!(
+                text.chars().next().is_some_and(|c| !c.is_uppercase()),
+                "{text}"
+            );
+        }
+    }
+    assert_eq!(en.confirm_paste_more_kinds(1), "and 1\u{a0}more kind");
+    assert_eq!(es.confirm_paste_more_kinds(3), "y 3\u{a0}tipos más");
+    assert_eq!(
+        en.confirm_paste_trailing_break("1\u{a0}line"),
+        "1\u{a0}line, ends with a line break"
+    );
+    assert_eq!(
+        es.confirm_paste_policy("Siempre"),
+        "Protección al pegar: Siempre"
+    );
+    assert_eq!(
+        en.confirm_paste_a11y_finding("^C", "interrupt (Ctrl+C)", 1),
+        "^C: interrupt (Ctrl+C), once"
+    );
+    assert_eq!(
+        es.confirm_paste_a11y_finding("^C", "interrupción (Ctrl+C)", 2),
+        "^C: interrupción (Ctrl+C), 2 veces"
+    );
+    assert_eq!(
+        en.confirm_paste_a11y_control("Ctrl+C"),
+        "control character Ctrl+C"
+    );
+    assert_eq!(
+        es.text(Text::ConfirmPasteA11yEscape),
+        "carácter de control escape"
+    );
+    // A notice names the foreground program without saying it sent the
+    // request: Kettle cannot tell which program in the pane did.
+    assert_eq!(
+        en.osc52_copied_by("vim", 1),
+        "A program copied 1 character to the clipboard while vim was in the foreground"
+    );
+    assert_eq!(
+        en.osc52_copied_by("vim", 42),
+        "A program copied 42 characters to the clipboard while vim was in the foreground"
+    );
+    for (count, noun) in [(1, "1 carácter"), (42, "42 caracteres")] {
+        assert!(
+            es.osc52_copied_by("vim", count).ends_with(&format!(
+                "{noun} al portapapeles mientras vim estaba en primer plano"
+            )),
+            "{count}"
+        );
+    }
+    // A refusal points at the Settings row, by its translated names, and
+    // keeps the config key for those who edit the file.
+    let (setting, category) = ("Clipboard access by programs", "Behavior");
+    for (read, text) in [
+        (true, en.osc52_blocked_read(setting, category)),
+        (false, en.osc52_blocked_write(setting, category)),
+        (true, en.osc52_blocked_read_by("vim", setting, category)),
+        (false, en.osc52_blocked_write_by("vim", setting, category)),
+    ] {
+        assert!(text.starts_with("A program was blocked from "), "{text}");
+        assert!(
+            text.contains(if read { "reading" } else { "copying" }),
+            "{text}"
+        );
+        assert!(
+            text.contains("change Clipboard access by programs in Settings > Behavior"),
+            "{text}"
+        );
+        assert!(text.contains("config key osc52"), "{text}");
+        assert!(!text.contains("osc52 ="), "{text}");
+    }
+    assert!(
+        en.osc52_blocked_read_by("vim", "x", "y")
+            .contains("while vim was in the foreground")
+    );
+    assert!(
+        es.osc52_blocked_write_by("vim", "x", "y")
+            .contains("mientras vim estaba en primer plano")
+    );
+    assert_eq!(
+        en.confirm_paste_finding_removed("interrupt (Ctrl+C)"),
+        "interrupt (Ctrl+C); Kettle removes it"
+    );
+    assert_eq!(
+        es.confirm_paste_finding_removed("campana"),
+        "campana; Kettle lo quita"
     );
 }

@@ -8,6 +8,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Scrolled to the very top of a history that has lost its oldest lines, a
+  pane shows **Start of kept history · 10,000 lines** at its top right: where
+  the history Kettle still holds begins and how many lines that is, so the
+  history limit (`scrollback`, or `scrollback-bytes` in a wide pane) is
+  visible where you run into it. It shows only there,
+  never at a live prompt after Clear Scrollback, and without the count in a
+  pane too narrow for it. Screen readers read it as text. No default changes:
+  `scrollback` stays 10,000 lines.
+
+- When the focused pane is scrolled back from its live output, screen
+  readers are given a polite **Viewing history** status. It carries no line
+  count, so scrolling further does not repeat it; the jump button beside it
+  still says how far back the view is. Orca on GNOME speaks it once each
+  time the pane leaves live output; VoiceOver and Narrator are not yet
+  checked.
+
 - Copied files and images paste in Wayland sessions without XWayland. Kettle
   reads `text/uri-list` (or GNOME's `x-special/gnome-copied-files`) and
   `image/png` through its own Wayland connection: it decides from the types
@@ -246,6 +262,45 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
   once per pane. The README now documents paste choices and accessibility.
 
+- The Confirm paste dialog says why it asked and what it found. Its first
+  sentence names the bracketed-paste end code in the text (`ESC[201~`, or
+  `CSI 201~` for the one-character form), says when a receiving program has
+  bracketed paste off and line breaks will arrive as Enter, or says that the
+  policy is Always. The preview spells each control character in ASCII inside
+  an outlined chip (`ESC`, `^C`, `CSI`) instead of a one-cell control picture,
+  shows a tab as plain space, and moves to the most serious control when that
+  lies beyond the first lines, so nothing before it (a harmless line, a run
+  of tabs or of direction overrides) can hide an end code below it. Up to
+  four findings say what each kind of control does in the current mode, with
+  backspace and delete on separate rows: one that Kettle removes whichever
+  button is chosen says so (the end code always; ESC and the signal keys
+  inside a bracketed paste). When the text holds more than four kinds, the
+  rows go to the end code and the ones that reach the program before the ones
+  a bracketed paste removes. Text-direction formatting
+  characters such as
+  U+202E are listed and counted, and Paste without controls removes them.
+  Counts of zero are gone. The
+  four choices share one row when the window is wide enough and stack edge to
+  edge otherwise; only the recommended one keeps the accent color. A policy
+  line shows the setting in force with a "Paste settings…" link, which pastes
+  nothing and opens Settings on the new Paste protection row. On Linux and
+  Windows each choice has an Alt+letter access key, matched by the letter the
+  keyboard layout types. Screen readers hear control characters as words
+  ("control character escape"). See [Pasting](README.md#pasting).
+
+- Settings > Behavior has rows for Paste protection (`paste-protection`) and
+  Clipboard access by programs (`osc52`: Off, Copy only, Read only, Copy and
+  read).
+
+- OSC 52 notices name the program in the pane's foreground when Kettle can
+  tell which it is, on macOS and Linux: "A program copied 42 characters to
+  the clipboard while vim was in the foreground". Kettle sees the pane, not
+  the sender, so the notice does not claim the foreground program sent the
+  request. Only the program's name is shown, sanitised and at most 32 columns
+  wide; a shell at its prompt is not named. A refused read or copy now points
+  at Settings > Behavior > Clipboard access by programs instead of listing
+  config values.
+
 - Links now highlight under the pointer and show their destination and opening
   gesture in a status pill. Quick-select hints include on-screen help, shorter
   labels that use nearby blank space, and entries in the Edit and terminal
@@ -330,6 +385,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   within the same 2048 retained commands.
 
 ### Changed
+
+- The **↓ N lines** pill of a scrolled-back pane now reads as the button it
+  is. It has an outline that is at least 3:1 against the terminal on every
+  bundled theme, in an opaque window and at the default 0.99 and 0.86
+  opacities, a hover and a pressed state, and after the count it shows
+  the key bound to `scroll_to_bottom` (Ctrl+End by default). The key follows
+  a rebind and is left out when the action is unbound or the pane is too
+  narrow; the count always shows. Like a native button it now acts when the
+  press is released over it; a release anywhere else, or the pointer
+  leaving the window, cancels it.
+  Screen readers get the key as the button's shortcut, and `kettle ctl
+  ui_geometry` reports the button's state and key hint.
 
 - Text wins over an image when the clipboard offers both, on every platform:
   cells copied from a spreadsheet paste as text instead of the path of a
@@ -777,6 +844,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
   even where bracketed paste is on, as such text was made to escape it. Kettle
   still removes the marker whichever choice is made.
+
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
@@ -792,6 +860,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- The one-character form of the bracketed-paste end marker (U+009B followed
+  by `201~`) opened the Confirm paste dialog and was then sent on by Paste
+  and by Paste as one line. Both markers are now removed in that form too, in
+  every mode.
+
+- Inside a bracketed paste Kettle now drops the bytes a terminal turns into a
+  signal before the program reads them: 0x03 (interrupt), 0x1A (suspend) and
+  0x1C (quit), and 0x19 (delayed suspend) on macOS. A shell interrupted in the
+  middle of a paste left bracketed mode and ran the rest as typed input.
+  Alacritty, Ghostty and VTE neutralize the interrupt byte in pasted text too.
+
+- With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
+  when it held control characters. A bare letter can be typed ahead of the
+  dialog, so `y` now only takes Paste without controls, and only when that
+  text cannot run a line: every receiving program has bracketed paste on, or
+  the cleaned text has no line break. Otherwise, and when the recommended
+  choice is the plain Paste, `y` does nothing: press Enter on the focused
+  button, or use its access key.
+
+- An answer given in the Confirm paste dialog while every receiving program
+  had bracketed paste on was used even when one of them turned it off before
+  the answer. The text then arrived outside bracketed paste: each line break
+  as Enter, with `ESC` and the signal keys intact. Kettle now sends nothing
+  in that case and asks again, describing the paste for the mode the program
+  is in. The new question opens by saying the program stopped using bracketed
+  paste after the answer, so nothing was pasted. A choice with no line break or control character left in it, such as
+  Paste as one line, is sent as before.
+
+- Up and Down in a confirmation whose buttons are stacked move focus from one
+  button to the next. They only scrolled the text, which did nothing visible
+  when it fit. A row of buttons keeps Up and Down for scrolling, except in the
+  Confirm paste dialog, where they reach the Paste settings link above the
+  row. PageUp, PageDown, Home and End scroll every confirmation.
 
 - A crash, `kill -9`, power loss or a logout that hangs no longer loses the
   last changes to a saved session. Kettle saved every tab, split and window

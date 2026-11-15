@@ -5667,7 +5667,10 @@ pub(crate) enum PaneShellKind {
     Cmd,
 }
 
-fn path_argv_with_default<'a>(argv: &'a [String], default: Option<&'a String>) -> &'a [String] {
+pub(crate) fn path_argv_with_default<'a>(
+    argv: &'a [String],
+    default: Option<&'a String>,
+) -> &'a [String] {
     if argv.is_empty()
         && let Some(program) = default
     {
