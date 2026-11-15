@@ -853,21 +853,37 @@ clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
 contents, PRIMARY routing with an injected clipboard-only provider and platform
-fallback, cap/deadline errors, stale-reply isolation, initialization failure and
-image/file fallback without arboard, and that the Wayland text path adds no
-dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
-and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
-tests do not exercise a compositor; the live check below does.
+fallback, PRIMARY support that appears and goes while the worker runs,
+cap/deadline errors, stale-reply isolation, initialization failure, the
+files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
+native files and images without arboard, and that the Wayland path adds no
+dependency. `wayland::offer::tests` drive the Wayland negotiation against a
+loopback source, a thread in the test process and no real clipboard: the type
+table (text and image, image alone, local, remote and malformed file lists,
+`x-special/gnome-copied-files`), `paste-files = off` against the text copy of
+the paths, each read's cap against a source that never ends, a stalled source
+against the deadline, and reading and writing a PRIMARY channel. They run on
+macOS too. `wayland::uri_list` tests cover the local, foreign and malformed
+classes; `paste_image::source_tests` cover the PNG header read, the decode
+limits against an oversize header and a decompression bomb, re-encoding, and
+the `0600` file in its `0700` directory. On Linux, `wayland::native::selection`
+tests cover a bridge without the primary-selection protocol. These tests do
+not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
 and paste in both directions with another native application, OSC 52 CLIPBOARD
-policy and ordering, and search/modal paste. Check large and stalled selections,
-and verify that image/file clipboard paste logs its limitation and falls through
-without a crash. Repeat on private X11 and XWayland to check automatic selection
-copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
-XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
-No live Wayland result can be inferred from a macOS suite pass.
+policy and ordering, and search/modal paste. Check large and stalled selections.
+With `DISPLAY` unset, so that arboard cannot start, set the session's clipboard
+with `wl-copy --type image/png` and `wl-copy --type text/uri-list` and paste
+each: the pane receives the quoted path of a `kettle-paste-*` PNG and the quoted
+file paths. Set PRIMARY with `wl-copy --primary` and middle-click, then select
+text in Kettle and read it back with `wl-paste --primary`. Repeat on private X11
+and XWayland to check automatic selection copy, middle-click PRIMARY, and OSC 52
+PRIMARY policy and ordering. On a compositor without the primary-selection
+protocol and without XWayland, direct PRIMARY requests are unavailable and must
+not alias CLIPBOARD. No live Wayland result can be inferred from a macOS suite
+pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.

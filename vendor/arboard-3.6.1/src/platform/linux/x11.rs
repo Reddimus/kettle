@@ -26,7 +26,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use crate::platform::x11_incr::{read_paste, IncrRead, PasteFormat};
+use crate::platform::x11_incr::{read_paste, IncrRead, PasteFormat, PASTE_IMAGE_MAX_BYTES};
 
 use log::{error, trace, warn};
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock};
@@ -46,7 +46,7 @@ use x11rb::{
 };
 
 #[cfg(feature = "image-data")]
-use super::encode_as_png;
+use super::{decode_pasted_png, encode_as_png};
 use super::{
 	into_unknown, paths_from_uri_list, paths_to_uri_list, LinuxClipboardKind, WaitConfig,
 	KDE_EXCLUSION_HINT, KDE_EXCLUSION_MIME,
@@ -1087,13 +1087,10 @@ impl Clipboard {
 		})?
 		.bytes;
 
-		let cursor = std::io::Cursor::new(&bytes);
-		let mut reader = image::ImageReader::new(cursor);
-		reader.set_format(image::ImageFormat::Png);
-		let image = match reader.decode() {
-			Ok(img) => img.into_rgba8(),
-			Err(_e) => return Err(Error::ConversionFailure),
-		};
+		if bytes.len() > PASTE_IMAGE_MAX_BYTES {
+			return Err(Error::LimitExceeded);
+		}
+		let image = decode_pasted_png(&bytes)?;
 		let (w, h) = image.dimensions();
 		let image_data =
 			ImageData { width: w as usize, height: h as usize, bytes: image.into_raw().into() };

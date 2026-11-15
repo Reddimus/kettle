@@ -519,19 +519,27 @@ app.rs and all production modules, or include the specific owning module.
 
 ### Clipboard backends
 
-`kettle-ui::clipboard` selects its text backend from the window's raw display
-handle: on Wayland, CLIPBOARD text goes through the native Wayland bridge
-(`wayland::native::selection`); X11, PRIMARY, images and file lists use arboard.
-The text worker reports whether its provider supports PRIMARY. The native
-Wayland provider does not, so PRIMARY bypasses that worker in both directions
-and uses arboard on XWayland. Missing arboard leaves PRIMARY unavailable;
-CLIPBOARD errors do not switch backends.
+`kettle-ui::clipboard` selects its backend from the window's raw display
+handle: on Wayland, CLIPBOARD text, file lists and PNG images, and PRIMARY
+text, go through the native Wayland bridge (`wayland::native::selection`);
+X11, macOS and Windows use arboard. The worker asks its provider whether it
+serves PRIMARY at each use, not once: a compositor announces
+`zwp_primary_selection_device_manager_v1` after the worker has started, and
+the bridge can close. Where the compositor has that protocol the bridge binds
+one primary-selection device per seat beside the data device
+(`wayland::native::primary`), reads it for a middle-click paste and writes it
+when text is selected. Where it has none, PRIMARY bypasses the worker in both
+directions and uses arboard on XWayland; missing arboard then leaves PRIMARY
+unavailable, and middle-click pastes CLIPBOARD. CLIPBOARD errors do not switch
+backends.
 A compositor reports the selection to one data device per client (Mutter sends
 it only to the first one created), and the bridge already owns that device for
 drag and drop, so the clipboard shares it instead of binding a second device
-that would never hear of a selection. The bridge records the current offer, its
-preferred text type and the latest input serial while it dispatches on the UI
-thread. Reads run on the clipboard worker: they send `receive` for the recorded
+that would never hear of a selection. The bridge records the current offer,
+the types it lists that Kettle reads (a flag each for `text/uri-list`,
+`x-special/gnome-copied-files` and `image/png`, and the preferred text type;
+no string from the source is stored) and the latest input serial while it
+dispatches on the UI thread. A selection is kept when it lists any of them. Reads run on the clipboard worker: they send `receive` for the recorded
 offer and read the pipe; Wayland proxies are safe to use from that thread. A
 selection Kettle owns is answered from memory, because its `send` event is
 dispatched on the UI thread that is waiting for the read. Writes create a data
@@ -554,14 +562,82 @@ deadline before every read; invalid UTF-8 is replaced after the cap. Local paste
 existing extra-byte acquisition allowance); policy, ordered journal, marker
 scrubbing, bracketed paste and paste protection stay in their existing layers.
 
-Images and file lists remain on arboard. This build enables its image support
-but not its optional Wayland data-control backend, so those formats require X11
-or XWayland on Linux. With only native Wayland text available, bitmap paste
-logs that it is unavailable and falls through to text without materializing a
-file. Preview image copies also retain their arboard worker. Native Wayland
-text requires focus; PRIMARY currently requires X11 or XWayland. Kettle does
-not implement the compositor's primary-selection protocol, and no data-control
-extension is required.
+A paste takes one thing from the clipboard, in one order on every platform: a
+file list, then text, then an image (`clipboard::PasteContent`). Text wins
+over an image because a source that offers both, such as spreadsheet cells,
+means the text. With `paste-files = off`, a clipboard that holds local files
+pastes nothing: not the list, and not the plain-text copy of the paths that
+file managers add beside it. arboard is asked one format at a time in that
+order. On Wayland the bridge is the authority for CLIPBOARD and arboard is not
+asked as well: an X11-owned selection reaches a focused Wayland client as an
+ordinary offer. There `wayland::offer` negotiates from the offer's type list,
+with no trial reads, and `receive` is only ever sent one of Kettle's constant
+type names:
+
+| The offer lists | Policy | A paste gives |
+|---|---|---|
+| a file list of local files | `paste-files = on` | their quoted paths |
+| a file list of local files | `paste-files = off` | nothing |
+| a file list that is not all local files | either | the offer's text, if any |
+| a malformed or oversize file list | `paste-files = on` | nothing, and a notice |
+| a malformed or oversize file list | `paste-files = off` | nothing, and no notice |
+| a text type | | the text, through paste protection |
+| `image/png` and no text type | `paste-images = on` | the path of a re-encoded PNG |
+
+`text/uri-list` is read in preference to `x-special/gnome-copied-files`, which
+is the same list after a `copy` or `cut` line. `wayland::uri_list` holds the
+one rule a drop and a paste share. A list is *malformed*, and refused whole,
+when it is not UTF-8, exceeds 1 MiB, has an entry over 16 KiB or one that is
+not a URI, has a local `file:` URI that is not exactly one absolute path (a
+bad escape, an encoded `/` or NUL, a `..` segment, a query, a fragment, user
+information or a port), or names more than 32 local files. A well-formed list
+with an entry that is not a local file (another scheme, or a `file:` URI on
+another host) is *foreign*: Kettle types no path from it, a drop refuses it,
+and a paste falls back to the offer's text. With `paste-files = off` a foreign
+list that also names a local file pastes nothing.
+
+| Read | Size cap | Then |
+|---|---|---|
+| text | 4 MiB, plus the extra byte that reports an oversize paste | paste protection |
+| file list | 1 MiB, 32 local files, 16 KiB a URI | shell quoting; a name that cannot be typed exactly pastes nothing |
+| PNG | 64 MiB, on Wayland and X11 | decode limits below |
+
+Where and for how long a paste reads depends on the backend:
+
+- **Wayland.** Every read of one paste runs on the clipboard worker under one
+  absolute two-second deadline. The worker waits on the selection pipe with
+  `poll` for no longer than the time left, then reads; it sets no receive
+  timeout, which some systems refuse once the writer has closed with data
+  still to read. A source that stalls costs the window thread that one
+  deadline and no more, and a result that arrives late is dropped.
+- **X11.** arboard is asked on the window thread, one format after another:
+  the file list, the text, then the image. Each read has its own two-second
+  deadline, and a text or image read that times out ends the paste, so a
+  stalling owner can hold the window for two of them, four seconds. A
+  file-list read that fails is treated as no list and the
+  paste goes on to the text, because on X11 a failure does not show a list
+  exists: xclip answers every request with its own type, and an owner may
+  leave a request it cannot serve unanswered.
+- **macOS and Windows.** arboard reads the system pasteboard synchronously on
+  the window thread, in the same order. There is no pipe and no deadline of
+  Kettle's to enforce; the text cap is checked once the read returns.
+
+A PNG from another program is untrusted. The window thread reads only the size
+its header declares, for `reserve_png_from`, which refuses a side over 16,384
+px or more than 256 MiB as RGBA8 before anything is decoded or written. The
+`PngEncoder` thread decodes it with `image::Limits` set before the decoder
+reads the header (the same side limit, and `max_alloc` of 256 MiB, which the
+decoded buffer is charged against before it is allocated) and re-encodes it,
+so every file in `kettle-paste-*` is a PNG Kettle encoded, with no ancillary
+chunk from the source. The room reserved for a waiting source is at least its
+own size, so the store's 256 MiB budget bounds the sources in the queue. The
+X11 route decodes in the vendored arboard under the same limits. An image that
+cannot be read, decoded or stored pastes nothing and shows one notice, on
+every backend: over the read cap or the decode limits, undecodable, or
+offered and never sent (the timeout notice). A clipboard with no image at all
+pastes nothing quietly. Preview
+image copies keep their arboard worker. Native Wayland selections require
+focus, and no data-control extension is required.
 
 ### Private clipboard images and video receipts
 

@@ -1,11 +1,14 @@
-//! CLIPBOARD text on Wayland through the native bridge's data device.
+//! CLIPBOARD and PRIMARY on Wayland through the native bridge's devices.
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
-use super::worker::{TextProvider, TextWorker};
+use super::worker::{PrimaryProbe, TextProvider, TextWorker};
+use super::{PasteContent, PasteWant};
 
 /// The worker that serializes reads and writes off the UI thread. The
-/// selection itself lives with the bridge (`crate::wayland::selection`), which
-/// owns the one data device the compositor reports the selection to.
+/// selections themselves live with the bridge (`crate::wayland::selection`),
+/// which owns the one data device the compositor reports the selection to.
 pub(super) fn clipboard() -> Option<TextWorker> {
     match TextWorker::start(|| Ok(Native)) {
         Ok(worker) => Some(worker),
@@ -19,8 +22,10 @@ pub(super) fn clipboard() -> Option<TextWorker> {
 struct Native;
 
 impl TextProvider for Native {
-    fn supports_primary(&self) -> bool {
-        false
+    /// PRIMARY is native only where the compositor has the primary-selection
+    /// protocol; elsewhere arboard covers it where XWayland exists.
+    fn primary_probe(&self) -> PrimaryProbe {
+        Arc::new(|| crate::wayland::selection().primary_available())
     }
 
     fn load(
@@ -29,19 +34,18 @@ impl TextProvider for Native {
         max: usize,
         deadline: Instant,
     ) -> Result<String, arboard::Error> {
-        if primary {
-            // PRIMARY needs the primary-selection protocol; arboard covers it
-            // where XWayland exists.
-            return Err(arboard::Error::ContentNotAvailable);
-        }
-        crate::wayland::selection()
-            .load(max, deadline)
-            .map_err(|error| {
-                // The kind maps to arboard's error; the message says which step
-                // failed (no bridge, no offer, cap or deadline) for diagnosis.
-                log::debug!("Wayland clipboard read failed: {error}");
-                map_error(error)
-            })
+        let selection = crate::wayland::selection();
+        let text = if primary {
+            selection.load_primary(max, deadline)
+        } else {
+            selection.load(max, deadline)
+        };
+        text.map_err(|error| {
+            // The kind maps to arboard's error; the message says which step
+            // failed (no bridge, no offer, cap or deadline) for diagnosis.
+            log::debug!("Wayland selection read failed: {error}");
+            crate::wayland::selection_error(&error)
+        })
     }
 
     fn store(
@@ -50,22 +54,23 @@ impl TextProvider for Native {
         text: String,
         _deadline: Instant,
     ) -> Result<(), arboard::Error> {
-        if primary {
-            return Err(arboard::Error::ClipboardNotSupported);
-        }
-        crate::wayland::selection().store(text).map_err(|error| {
-            log::debug!("Wayland clipboard write failed: {error}");
-            map_error(error)
+        let selection = crate::wayland::selection();
+        let stored = if primary {
+            selection.store_primary(text)
+        } else {
+            selection.store(text)
+        };
+        stored.map_err(|error| {
+            log::debug!("Wayland selection write failed: {error}");
+            crate::wayland::selection_error(&error)
         })
     }
-}
 
-fn map_error(error: std::io::Error) -> arboard::Error {
-    match error.kind() {
-        std::io::ErrorKind::TimedOut => arboard::Error::Timeout,
-        std::io::ErrorKind::FileTooLarge | std::io::ErrorKind::OutOfMemory => {
-            arboard::Error::LimitExceeded
-        }
-        _ => arboard::Error::ContentNotAvailable,
+    fn paste(&mut self, want: PasteWant, text_max: usize, deadline: Instant) -> PasteContent {
+        crate::wayland::selection().paste(want, text_max, deadline)
+    }
+
+    fn files(&mut self, deadline: Instant) -> Option<Vec<PathBuf>> {
+        crate::wayland::selection().files(deadline)
     }
 }

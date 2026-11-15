@@ -678,11 +678,17 @@ them.
   `master` reads segments the same old way (checked 2026-10-16). The drain of a
   refused transfer is bounded (four seconds and 4,096 segments, not renewed by
   each segment), so an owner that keeps sending cannot hold a read forever.
-- Patch: the X11 image and file-list acquisitions used before text in default
-  paste now share the bounded property/INCR reader. PNG transfers allow the
-  existing 256 MiB image-paste limit plus one byte; URI lists allow 1 MiB plus
-  one byte. Each acquisition has an absolute two-second deadline that correctly
-  typed, nonempty INCR chunks cannot renew.
+- Patch: the X11 image and file-list acquisitions of a default paste share the
+  bounded property/INCR reader. PNG transfers allow 64 MiB plus one sentinel
+  byte, the cap Kettle's Wayland route has, and an image that reaches the
+  sentinel is refused; URI lists allow 1 MiB plus one byte. Each acquisition has
+  an absolute two-second deadline that correctly typed, nonempty INCR chunks
+  cannot renew.
+- Patch: a pasted PNG is decoded under Kettle's pasted-image limits instead of
+  the `image` crate's defaults: 16,384 pixels a side and `max_alloc` of 256 MiB,
+  set before the decoder reads the header and charged for the decoded buffer
+  before it is allocated, with the RGBA8 copy held to the same 256 MiB. These
+  are Kettle's policy for an untrusted clipboard image, not an upstream defect.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream
@@ -692,12 +698,13 @@ them.
   from the normalized manifest; test dependencies and optional features remain.
 - Validation: `just vendor-clipboard-check` formats and lints on the current OS.
   macOS round-trips native image pixels without touching the clipboard.
-  Linux also runs the display-free CRLF/encoded-CR tests and the INCR regression
-  against real xclip under `xvfb-run` when both tools are installed (PR CI
+  Linux also runs the display-free CRLF/encoded-CR and pasted-PNG limit tests,
+  and the INCR regression against real xclip under `xvfb-run` when both tools are installed (PR CI
   installs them). Nautilus copy/paste remains a separate native GNOME check.
 
 Remove this copy and its root patch entry when a released arboard includes the
-CRLF decoder correction and reads INCR segments of any type.
+CRLF decoder correction and reads INCR segments of any type, and Kettle bounds
+the paste reads and the PNG decode on its own side.
 
 
 ### Extended OSC colours

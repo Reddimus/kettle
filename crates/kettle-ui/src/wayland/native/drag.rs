@@ -55,9 +55,8 @@ struct Active {
 struct Offer {
     proxy: wl_data_offer::WlDataOffer,
     internal: Option<u64>,
-    uri_list: bool,
-    /// The preferred text type the offer lists, for the clipboard.
-    text: Option<&'static str>,
+    /// The types it lists that Kettle reads, for a drop and for the clipboard.
+    kinds: crate::wayland::offer::Kinds,
     action: wl_data_device_manager::DndAction,
 }
 
@@ -375,8 +374,7 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                         Offer {
                             proxy: id,
                             internal: None,
-                            uri_list: false,
-                            text: None,
+                            kinds: Default::default(),
                             action: wl_data_device_manager::DndAction::None,
                         },
                     );
@@ -402,7 +400,7 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                             .as_ref()
                             .filter(|active| Some(active.id) == offer.internal)
                             .map(|active| active.mime.clone());
-                        let uri = mime.is_none() && offer.uri_list && point.is_some();
+                        let uri = mime.is_none() && offer.kinds.uri_list && point.is_some();
                         let accepted = mime
                             .clone()
                             .or_else(|| uri.then(|| super::files::URI_LIST.into()));
@@ -447,7 +445,7 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                         offer.proxy.finish();
                     }
                     if offer.internal.is_none()
-                        && offer.uri_list
+                        && offer.kinds.uri_list
                         && offer.action == wl_data_device_manager::DndAction::Copy
                         && let (Some(point), Some(wake)) = (entered.point, state.wake.clone())
                     {
@@ -457,15 +455,14 @@ impl Dispatch<wl_data_device::WlDataDevice, u32> for super::State {
                     }
                 }
             }
-            // The clipboard keeps a selection that offers text; this device is
-            // the one the compositor reports the selection to.
+            // The clipboard keeps a selection that offers anything a paste
+            // takes: text, a file list or a PNG. This device is the one the
+            // compositor reports the selection to.
             wl_data_device::Event::Selection { id: Some(id) } => {
                 match state.drag.offers.remove(&id.id().protocol_id()) {
-                    Some(Offer {
-                        proxy,
-                        text: Some(mime),
-                        ..
-                    }) => super::selection::shared().offer(Some((proxy, mime))),
+                    Some(Offer { proxy, kinds, .. }) if kinds.any() => {
+                        super::selection::shared().offer(Some((proxy, kinds)));
+                    }
                     Some(offer) => {
                         offer.proxy.destroy();
                         super::selection::shared().offer(None);
@@ -496,10 +493,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for super::State {
         };
         match event {
             wl_data_offer::Event::Offer { mime_type } => {
-                if mime_type == super::files::URI_LIST {
-                    offer.uri_list = true;
-                }
-                offer.text = super::selection::better_text_mime(offer.text, &mime_type);
+                offer.kinds.note(&mime_type);
                 if let Some(active) = &state.drag.active
                     && mime_type == active.mime
                 {
