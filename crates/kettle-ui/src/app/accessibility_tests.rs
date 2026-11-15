@@ -41,13 +41,16 @@ fn confirm_dialog_accessibility_focuses_the_selected_button() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".to_string(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close".to_string(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 1,
+            detail: None,
         }),
         ..kettle_render::Overlay::default()
     };
@@ -87,13 +90,16 @@ fn confirmation_accessibility_bounds_follow_chrome_metrics() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".into(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 0,
+            detail: None,
         }),
         ..Default::default()
     };
@@ -2022,13 +2028,16 @@ fn close_question_reads_the_cleaned_program_name() {
                 kettle_render::ConfirmDialogButton {
                     label: "Cancel".into(),
                     destructive: false,
+                    ..Default::default()
                 },
                 kettle_render::ConfirmDialogButton {
                     label: "Close pane".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
             focus_idx: 0,
+            detail: None,
         }),
         ..Default::default()
     };
@@ -2050,19 +2059,42 @@ fn close_question_reads_the_cleaned_program_name() {
 }
 
 /// ctl diagnostics for an open close question carry its geometry and button
-/// labels, never its body, which can name the program a pane is running.
+/// labels, never its heading or body, which can name the program a pane is
+/// running.
 #[test]
 fn ctl_close_question_geometry_never_carries_the_body() {
-    let src = production_source();
-    let block = src
-        .split_once("let confirmation = diagnostic_overlay.confirm_dialog")
-        .expect("ctl confirmation geometry")
-        .1
-        .split_once("let modal_name =")
-        .expect("ctl modal name follows")
-        .0;
-    assert!(block.contains("\"body_rect\""));
-    assert!(!block.contains("dialog.body"));
-    assert!(!block.contains("dialog.heading"));
-    assert!(!block.contains("program"));
+    let tr = kettle_i18n::Translator::default();
+    let body = super::close_dialog_body(
+        &tr,
+        &super::ConfirmAction::ClosePane(1),
+        1,
+        Some("zq-private-program"),
+    );
+    assert!(body.contains("zq-private-program"));
+    let overlay = kettle_render::ConfirmDialogOverlay {
+        heading: "Close zq-private-heading?".into(),
+        body,
+        buttons: vec![
+            kettle_render::ConfirmDialogButton {
+                label: "Cancel".into(),
+                ..Default::default()
+            },
+            kettle_render::ConfirmDialogButton {
+                label: "Close pane".into(),
+                destructive: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let layout = kettle_render::ConfirmDialogLayout::new((800.0, 600.0), (8.0, 16.0), 1.0, &overlay);
+    let json = super::confirmation_json(&overlay, &layout);
+    let text = serde_json::to_string(&json).unwrap();
+    assert!(!text.contains("zq-private"), "{text}");
+    assert!(!text.contains("still running"), "{text}");
+    assert!(json["body_rect"]["width"].as_f64().unwrap() > 0.0);
+    assert_eq!(json["buttons"][0]["label"], "Cancel");
+    assert_eq!(json["buttons"][1]["label"], "Close pane");
+    assert_eq!(json["buttons"][1]["destructive"], true);
+    assert!(json["detail"].is_null());
 }

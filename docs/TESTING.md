@@ -3347,7 +3347,28 @@ list acceptance.
 
 `cargo test -p kettle-config paste_protection` exercises every C0 byte and the
 three config policies; `cargo test -p kettle-ui paste` checks paste preview,
-flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+flattening and ESC neutralization, the C1 markers and each signal byte the
+encoder drops, the dialog's reason sentences, findings rows, preview anchoring
+on a late end marker, access keys (the typed letter only; none on macOS),
+focus order with the Settings link, `y` under `vim-menu-nav`, an answer given
+after a pane leaves bracketed paste (`text_paste_dispatch`, with a real pane
+whose mode is switched and whose input is captured), and the AccessKit tree
+against the layout. Keys are tested through `confirm_key_outcome` with
+real `Key` values, and what a key sends through a pane with captured input;
+`ui_geometry` privacy is tested by serialising a dialog whose every text
+field holds a canary. What a stop does to the window is `answer_confirm_stop`
+and what an answered paste does is `text_paste_dispatch`; both are tested
+directly. One source-order guard remains where no seam reaches `App`: the
+paste entry points.
+`every_paste_button_projects_its_own_flag_and_sends_its_own_text` is the
+detector for an AArch64 code-generation fault in rustc stable 1.99.1 and
+1.100.0, and nightly 1.102.0 (LLVM 23), at `opt-level = 1` (see
+`ConfirmButton::destructive`); it only detects on arm64 hosts.
+`cargo test -p kettle-render confirm` covers the row and stack arrangements
+at several widths and scales, the pinned policy line,
+the height cap, chips, access-key underlines and token contrast in every
+theme; one of its tests shapes text with the system fonts. `cargo test -p
+kettle-ui osc52` covers notices that name the program. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
 `cargo test -p kettle-ui menu_text_tests` builds the real Read only row and
