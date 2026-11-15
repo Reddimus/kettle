@@ -196,6 +196,7 @@ impl App {
         ws.accessibility_text_rows
             .borrow_mut()
             .retain(|pane, _| ws.mux.panes.contains_key(pane));
+        let broadcast_roles = self.broadcast_roles(ws);
         // A pane's terminal node covers its terminal, clear of its titlebar
         // and lane.
         for (pane_id, partition) in layout {
@@ -208,13 +209,17 @@ impl App {
             };
             let node_id = accessibility_pane_id(pane_id);
             children.push(node_id);
-            let mut node = Node::new(Role::Terminal);
             let label = if pane.title.trim().is_empty() {
                 self.ui_text.a11y_pane(pane_id)
             } else {
                 pane.title.clone()
             };
-            node.set_label(label);
+            let mut node = terminal_pane_node(
+                label,
+                pane.read_only,
+                broadcast_roles.of(pane_id),
+                &self.ui_text,
+            );
             let text = pane.term.accessible_text().unwrap_or_default();
             let mut text_rows = ws.accessibility_text_rows.borrow_mut();
             let ids = text_rows
@@ -237,21 +242,21 @@ impl App {
             );
             let mut pane_children: Vec<_> = text_nodes.iter().map(|(id, _)| *id).collect();
             nodes.extend(text_nodes);
-            if let Some(pill) = self.scrollback_pill_for(ws, pane_id, (x, y, width, height)) {
-                let id = accessibility_scrollback_id(pane_id);
-                let mut button = Node::new(Role::Button);
-                button.set_label(pill.accessible_label);
-                let (x, y, w, h) = pill.rect;
-                button.set_bounds(accesskit::Rect::new(
-                    x as f64,
-                    y as f64,
-                    (x + w) as f64,
-                    (y + h) as f64,
-                ));
-                button.add_action(AccessibilityAction::Click);
-                pane_children.push(id);
-                nodes.push((id, button));
-            }
+            // What the pane shows of its place in history: the jump
+            // button, the label at the start of kept history, and for the
+            // focused pane a status that it is viewing history at all.
+            let history = scrollback_accessibility_nodes(
+                pane_id,
+                partition.terminal,
+                self.scrollback_pill_for(ws, pane_id, partition.terminal)
+                    .as_ref(),
+                self.kept_history_label_for(ws, pane_id, partition.terminal)
+                    .as_ref(),
+                viewing_history_pane(ws) == Some(pane_id),
+                &self.ui_text,
+            );
+            pane_children.extend(history.iter().map(|(id, _)| *id));
+            nodes.extend(history);
             for (instance, card, item) in cards.iter().filter(|(_, card, _)| card.pane == pane_id) {
                 let id = accessibility_card_id(*instance);
                 pane_children.push(id);
@@ -346,9 +351,6 @@ impl App {
                 }
             }
             node.set_children(pane_children);
-            if pane.read_only {
-                node.set_read_only();
-            }
             node.set_bounds(accesskit::Rect::new(
                 f64::from(x),
                 f64::from(y),
@@ -879,11 +881,22 @@ impl App {
             if let Some(pill) = self.scrollback_pill_for(ws, pane, partition.terminal) {
                 pane.hash(&mut hasher);
                 pill.label.hash(&mut hasher);
+                pill.hint.as_ref().map(|hint| &hint.text).hash(&mut hasher);
                 [pill.rect.0, pill.rect.1, pill.rect.2, pill.rect.3]
                     .map(f32::to_bits)
                     .hash(&mut hasher);
             }
+            if let Some(label) = self.kept_history_label_for(ws, pane, partition.terminal) {
+                pane.hash(&mut hasher);
+                label.label.hash(&mut hasher);
+                [label.rect.0, label.rect.1, label.rect.2, label.rect.3]
+                    .map(f32::to_bits)
+                    .hash(&mut hasher);
+            }
         }
+        // The "Viewing history" status comes and goes with this, in a pane
+        // too small for a button as well.
+        viewing_history_pane(ws).hash(&mut hasher);
         ws.search.open.hash(&mut hasher);
         if ws.search.open {
             ws.search.query().hash(&mut hasher);
@@ -919,6 +932,12 @@ impl App {
             for button in &dialog.buttons {
                 button.label.hash(&mut hasher);
                 button.destructive.hash(&mut hasher);
+                button.access_key.hash(&mut hasher);
+            }
+            if let Some(detail) = dialog.detail.as_ref() {
+                detail.description.hash(&mut hasher);
+                detail.link.hash(&mut hasher);
+                detail.link_access_key.hash(&mut hasher);
             }
         }
         overlay.settings.is_some().hash(&mut hasher);
@@ -1179,6 +1198,7 @@ impl App {
         }
         let mut layout = self.pane_layout(ws, self.area(ws));
         layout.sort_by_key(|(pane_id, _)| *pane_id);
+        let broadcast_roles = self.broadcast_roles(ws);
         for (pane_id, partition) in layout {
             pane_id.hash(&mut hasher);
             let lane = partition
@@ -1191,15 +1211,7 @@ impl App {
                 }
             }
             if let Some(pane) = ws.mux.panes.get(&pane_id) {
-                pane.title.hash(&mut hasher);
-                pane.read_only.hash(&mut hasher);
-                pane.term.output_generation().hash(&mut hasher);
-                pane.term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|term| term.grid().display_offset())
-                    .hash(&mut hasher);
+                hash_terminal_pane(&mut hasher, pane, broadcast_roles.of(pane_id));
             }
         }
         hasher.finish()
@@ -1299,7 +1311,7 @@ impl App {
             match confirmation_accessibility_action(
                 request.target_node,
                 request.action,
-                dialog.buttons.len(),
+                dialog.stop_count(),
             ) {
                 Some(ConfirmAccessibilityAction::Focus(index)) => {
                     if let Some(dialog) = ws.confirm_dialog.as_mut() {
@@ -1986,6 +1998,49 @@ fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::Sea
         .find(|control| accessibility_search_control_id(*control) == id)
 }
 
+/// A terminal pane's AccessKit node before its children and bounds: its
+/// name, whether it is read-only and, while broadcast reaches it, what it
+/// does with broadcast input as the description (`BroadcastRoles`). A node
+/// is built fresh for every tree, so a pane broadcast stops reaching has no
+/// description.
+pub(crate) fn terminal_pane_node(
+    label: String,
+    read_only: bool,
+    broadcast: kettle_render::PaneBroadcast,
+    tr: &kettle_i18n::Translator,
+) -> Node {
+    let mut node = Node::new(Role::Terminal);
+    node.set_label(label);
+    if let Some(description) = pane_broadcast_description(broadcast, tr) {
+        node.set_description(description);
+    }
+    if read_only {
+        node.set_read_only();
+    }
+    node
+}
+
+/// What a visible terminal pane adds to the accessibility key: everything
+/// its node shows (`terminal_pane_node` and its text rows), so a change to
+/// any of it, a broadcast scope change among them, republishes the tree.
+pub(crate) fn hash_terminal_pane(
+    hasher: &mut impl std::hash::Hasher,
+    pane: &Pane,
+    broadcast: kettle_render::PaneBroadcast,
+) {
+    use std::hash::Hash;
+    pane.title.hash(hasher);
+    pane.read_only.hash(hasher);
+    pane.term.output_generation().hash(hasher);
+    pane.term
+        .term
+        .lock()
+        .ok()
+        .map(|term| term.grid().display_offset())
+        .hash(hasher);
+    broadcast.hash(hasher);
+}
+
 /// What a screen reader hears for a preview lane: its name, with the item's
 /// place on the shelf, title and detail line, and a description that says
 /// what the lane last did (`announced`), else when the pixels were released
@@ -2537,7 +2592,18 @@ pub(super) fn modal_accessibility_projection(
             accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
         };
         let container_id = accessibility_modal_id(1, 0);
-        let mut children = Vec::with_capacity(dialog.buttons.len());
+        // An access key is set on the node and also said in its description:
+        // the AT-SPI adapter does not export key bindings.
+        let access_key = |node: &mut Node, key: Option<char>, mut description: Vec<String>| {
+            if let Some(key) = key {
+                node.set_access_key(key.to_string());
+                description.push(tr.confirm_paste_a11y_access_key(&key.to_string()));
+            }
+            if !description.is_empty() {
+                node.set_description(description.join(". "));
+            }
+        };
+        let mut buttons = Vec::with_capacity(dialog.buttons.len());
         for (index, button) in dialog.buttons.iter().enumerate() {
             let id = accessibility_modal_id(1, index + 1);
             let mut node = Node::new(Role::Button);
@@ -2545,27 +2611,60 @@ pub(super) fn modal_accessibility_projection(
             if let Some(rect) = layout.buttons.get(index) {
                 node.set_bounds(bounds(*rect));
             }
+            access_key(&mut node, button.access_key, Vec::new());
             node.add_action(AccessibilityAction::Focus);
             node.add_action(AccessibilityAction::Click);
-            children.push(id);
+            buttons.push(id);
             projection.nodes.push((id, node));
         }
+        // The link is the stop after the last button and the first child:
+        // it is read, and reached with Tab, where it is painted.
+        let link = layout.link_stop().and_then(|stop| {
+            let detail = dialog.detail.as_ref()?;
+            let id = accessibility_modal_id(1, stop + 1);
+            let mut node = Node::new(Role::Link);
+            node.set_label(detail.link.clone());
+            node.set_bounds(bounds(layout.stop_rect(stop)?));
+            access_key(
+                &mut node,
+                detail.link_access_key,
+                vec![
+                    tr.text(kettle_i18n::Text::ConfirmPasteA11ySettings)
+                        .to_string(),
+                ],
+            );
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            projection.nodes.push((id, node));
+            Some(id)
+        });
         let mut node = Node::new(Role::AlertDialog);
         node.set_label(dialog.heading.clone());
-        node.set_description(dialog.body.clone());
+        node.set_description(match &dialog.detail {
+            Some(detail) => detail.description.clone(),
+            None => dialog.body.clone(),
+        });
         node.set_modal();
         if layout.max_scroll > 0 {
             node.add_action(AccessibilityAction::ScrollUp);
             node.add_action(AccessibilityAction::ScrollDown);
         }
-        node.set_children(children.clone());
+        node.set_children(
+            link.into_iter()
+                .chain(buttons.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         node.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));
-        projection.focus = children
-            .get(dialog.focus_idx.min(children.len().saturating_sub(1)))
-            .copied()
-            .or(Some(container_id));
+        projection.focus = if link.is_some() && layout.link_stop() == Some(dialog.focus_idx) {
+            link
+        } else {
+            buttons
+                .get(dialog.focus_idx.min(buttons.len().saturating_sub(1)))
+                .copied()
+                .or(Some(container_id))
+        };
         return projection;
     }
 
@@ -3307,6 +3406,92 @@ fn accessibility_scrollback_id(pane: u64) -> NodeId {
     NodeId((1 << 52) | pane)
 }
 
+/// The pane that carries the "Viewing history" status: the focused pane,
+/// while it shows its history instead of its live output. Whether the pane
+/// has room for a jump button does not come into it.
+pub(super) fn viewing_history_pane(ws: &WindowState) -> Option<u64> {
+    let pane = ws.mux.active_focus()?;
+    ws.mux
+        .panes
+        .get(&pane)?
+        .term
+        .term
+        .lock()
+        .ok()
+        .is_some_and(|term| term.grid().display_offset() > 0)
+        .then_some(pane)
+}
+
+/// A pane's "Start of kept history" label.
+fn accessibility_kept_history_id(pane: u64) -> NodeId {
+    NodeId((1 << 48) | (pane << 1))
+}
+
+/// A pane's "Viewing history" status. One id per pane whatever its offset,
+/// so scrolling further changes nothing a screen reader would speak.
+fn accessibility_viewing_history_id(pane: u64) -> NodeId {
+    NodeId((1 << 48) | (pane << 1) | 1)
+}
+
+/// The AccessKit nodes for a pane's place in its history:
+///
+/// - the jump button, bounded where it is painted, named for what it does
+///   and how far back the view is, with the key bound to the same action as
+///   its shortcut;
+/// - the "Start of kept history" label, bounded where it is painted and read
+///   as the text it shows;
+/// - while `viewing_history` (the focused pane is scrolled back), one polite
+///   status, "Viewing history". Its id, label and bounds do not depend on
+///   the offset, so it is spoken when the pane leaves live output and not
+///   again as the view scrolls. Its bounds are an empty rect at the
+///   terminal's corner, so exploring the pane by pointer or touch never
+///   lands on it in place of the text under it.
+pub(super) fn scrollback_accessibility_nodes(
+    pane: u64,
+    terminal: kettle_render::Rect4,
+    pill: Option<&kettle_render::ScrollbackPill>,
+    kept: Option<&kettle_render::KeptHistoryLabel>,
+    viewing_history: bool,
+    tr: &kettle_i18n::Translator,
+) -> Vec<(NodeId, Node)> {
+    let bounds = |(x, y, w, h): kettle_render::Rect4| {
+        accesskit::Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(x + w),
+            f64::from(y + h),
+        )
+    };
+    let mut nodes = Vec::with_capacity(3);
+    if let Some(pill) = pill {
+        let mut button = Node::new(Role::Button);
+        button.set_label(pill.accessible_label.clone());
+        if let Some(hint) = &pill.hint {
+            button.set_keyboard_shortcut(hint.text.clone());
+        }
+        button.set_bounds(bounds(pill.rect));
+        button.add_action(AccessibilityAction::Click);
+        nodes.push((accessibility_scrollback_id(pane), button));
+    }
+    if let Some(kept) = kept {
+        let mut label = static_text_node(kept.label.clone());
+        label.set_bounds(bounds(kept.rect));
+        nodes.push((accessibility_kept_history_id(pane), label));
+    }
+    if viewing_history {
+        let mut status = Node::new(Role::Status);
+        status.set_label(tr.text(kettle_i18n::Text::ScrollbackA11yViewing));
+        status.set_live(accesskit::Live::Polite);
+        // A point at the terminal's corner: the status is announced, not
+        // explored, so pointer and touch exploration over the pane find its
+        // text and controls, never this.
+        let (x, y, _, _) = terminal;
+        status.set_bounds(bounds((x, y, 0.0, 0.0)));
+        nodes.push((accessibility_viewing_history_id(pane), status));
+    }
+    nodes
+}
+
 fn accessibility_scrollbar_id(pane: u64) -> NodeId {
     NodeId((1 << 50) | pane)
 }
@@ -3707,6 +3892,10 @@ pub(super) fn persistent_notice_nodes(
     nodes.push((persistent_notice_id(pane, 0), status));
     nodes
 }
+
+#[cfg(test)]
+#[path = "accessibility_id_tests.rs"]
+mod id_tests;
 
 #[cfg(test)]
 mod context_menu_nesting_tests {

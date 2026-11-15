@@ -130,9 +130,9 @@ impl Renderer {
 ///
 /// Explicit `title-*-bg-color` config wins; otherwise every state derives from
 /// the theme. Focused falls back to `focused_split_color`, then the resolved
-/// accent, the same cascade as the pane border and screenshot accent. Broadcast
-/// falls back to the accent. Inactive falls back to the theme's surface
-/// `palette[8]`.
+/// accent, the same cascade as the pane border and screenshot accent. A pane
+/// that receives broadcast input falls back to the accent. Inactive falls back
+/// to the theme's surface `palette[8]`.
 ///
 /// Pure so the cascade is drift-guarded without standing up wgpu.
 pub(crate) fn pick_titlebar_bg(
@@ -143,16 +143,77 @@ pub(crate) fn pick_titlebar_bg(
     // `cfg.resolved_accent(theme)`).
     accent: Rgb,
     focused: bool,
-    broadcast: bool,
+    // This pane receives broadcast input (`PaneBroadcast::Receiving`), not
+    // merely "broadcast is on somewhere": under a group scope a pane outside
+    // the group keeps the inactive bar.
+    receiving: bool,
 ) -> Rgb {
     if focused {
         cfg.title_transmit_bg_color
             .or(cfg.focused_split_color)
             .unwrap_or(accent)
-    } else if broadcast {
+    } else if receiving {
         cfg.title_receive_bg_color.unwrap_or(accent)
     } else {
         cfg.title_inactive_bg_color.unwrap_or(theme.palette[8])
+    }
+}
+
+/// The colour broadcast outlines panes in: theme `palette[3]` (the yellow the
+/// tab bar's broadcast accent uses), moved in its own hue only as far as
+/// reaching 3:1 against the pane background takes, so the outline holds on
+/// light themes where the raw yellow nearly vanishes.
+pub(crate) fn broadcast_border_color(theme: &kettle_config::Theme, pane_bg: Rgb) -> Rgb {
+    color::with_min_contrast_same_hue(theme.palette[3], pane_bg, chrome::ICON_CONTRAST)
+}
+
+/// How one pane's outline is painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneBorderStyle {
+    pub(crate) color: Rgb,
+    /// Drawn as dashes ([`crate::geometry::dashed_outline_rects`]) instead of
+    /// four solid strips.
+    pub(crate) dashed: bool,
+}
+
+/// Resolve one pane's outline from its focus and broadcast role.
+///
+/// While broadcast is on, the pane that sends and the panes that receive share
+/// [`broadcast_border_color`]: the sender's outline is solid, the strongest
+/// mark, and a receiver's is dashed, so the two differ in shape and not only
+/// in colour. The broadcast colour overrides `focused-split-color` and
+/// `split-divider-color` the way the sender's yellow always has; a pane the
+/// broadcast does not reach keeps `split-divider-color` (else `palette[8]`).
+/// With broadcast off this is exactly the border Kettle drew before.
+pub(crate) fn pane_border_style(
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    // The window's resolved accent, as for `pick_titlebar_bg`.
+    accent: Rgb,
+    // The opaque colour of the pane background the outline sits on.
+    pane_bg: Rgb,
+    focused: bool,
+    broadcast: crate::PaneBroadcast,
+) -> PaneBorderStyle {
+    use crate::PaneBroadcast;
+    let solid = |color| PaneBorderStyle {
+        color,
+        dashed: false,
+    };
+    match broadcast {
+        PaneBroadcast::Sending => solid(broadcast_border_color(theme, pane_bg)),
+        PaneBroadcast::Receiving => PaneBorderStyle {
+            color: broadcast_border_color(theme, pane_bg),
+            dashed: true,
+        },
+        // Cascade order is
+        //   focused-split-color (explicit override)
+        //   → resolved accent (explicit accent-color → Peacock auto → the
+        //     theme's signature accent, Mocha mauve)
+        // Backward-compat: anyone who set `focused-split-color` keeps their
+        // pinned color.
+        PaneBroadcast::Off if focused => solid(cfg.focused_split_color.unwrap_or(accent)),
+        PaneBroadcast::Off => solid(cfg.split_divider_color.unwrap_or(theme.palette[8])),
     }
 }
 

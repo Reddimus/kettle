@@ -48,9 +48,12 @@ With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
-answer confirm dialogs. Text-input overlays with a selection (palette, search,
-layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
-letters keep typing. Turn it off with `vim-menu-nav = false`.
+answer confirm dialogs. In the Confirm paste dialog `y` only takes Paste
+without controls, and only when that text cannot run a command by itself:
+every receiving program has bracketed paste on, or the text is one line.
+Otherwise `y` does nothing, so a letter typed ahead cannot run anything.
+Text-input overlays with a selection (palette, search, layout picker) step
+with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain letters keep typing. Turn it off with `vim-menu-nav = false`.
 
 Changes are written to your config file, shown by `kettle --config-path`. Most
 apply immediately. A failed save reports that the setting was not applied; an inline
@@ -120,6 +123,8 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
 | Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |
 | Trim trailing spaces on copy | `copy-trim-whitespace` | On (default) drops trailing whitespace at each copied line's end. Off copies the selection exactly as displayed |
+| Paste protection | `paste-protection` | Automatic (default) · Always · Off: when Kettle asks before pasting text. The Confirm paste dialog's "Paste settings…" link opens Settings on this row |
+| Clipboard access by programs | `osc52` | Off · Copy only (default) · Read only · Copy and read: what OSC 52 lets a program in a pane do with the clipboard. Read only and Copy and read let a remote program read it |
 | Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
 | Focus mode | `focus` | Click to focus · Follows mouse · System default |
 | Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |

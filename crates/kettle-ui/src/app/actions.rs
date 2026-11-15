@@ -342,6 +342,38 @@ impl App {
         }
     }
 
+    /// Open the in-app Settings overlay on its first row, over nothing else.
+    pub(super) fn open_settings(&mut self, ws: &mut WindowState) {
+        self.close_all_modals(ws);
+        if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
+            self.gpu_choices = choices.clone();
+            self.gpu_discovery_pending = false;
+        } else {
+            self.gpu_discovery_pending = true;
+            let proxy = self.proxy.clone();
+            crate::gpu_discovery::GPU_DISCOVERY.request(
+                crate::gpu_discovery::detect_choices,
+                move |choices| {
+                    let _ = proxy.send_event(UserEvent::GpusDetected(choices));
+                },
+            );
+        }
+        ws.settings_restart_pending = false;
+        ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    }
+
+    /// Move an open Settings overlay to the row that edits config `key`.
+    pub(super) fn focus_settings_key(&mut self, ws: &mut WindowState, key: &str) {
+        let categories = crate::settings::categories(&self.gpu_choices);
+        if let Some(nav) = ws.settings_nav.as_mut() {
+            nav.focus_key(&categories, key);
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     pub(super) fn handle_action(
         &mut self,
         ws: &mut WindowState,
@@ -1019,24 +1051,7 @@ impl App {
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
-            Action::OpenSettings => {
-                self.close_all_modals(ws);
-                if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
-                    self.gpu_choices = choices.clone();
-                    self.gpu_discovery_pending = false;
-                } else {
-                    self.gpu_discovery_pending = true;
-                    let proxy = self.proxy.clone();
-                    crate::gpu_discovery::GPU_DISCOVERY.request(
-                        crate::gpu_discovery::detect_choices,
-                        move |choices| {
-                            let _ = proxy.send_event(UserEvent::GpusDetected(choices));
-                        },
-                    );
-                }
-                ws.settings_restart_pending = false;
-                ws.settings_nav = Some(crate::settings::SettingsNav::default());
-            }
+            Action::OpenSettings => self.open_settings(ws),
             Action::SaveLayout => {
                 self.close_all_modals(ws);
                 ws.editing_title = begin_title_edit(

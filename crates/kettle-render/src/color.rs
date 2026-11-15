@@ -61,6 +61,13 @@ fn named(n: NamedColor, theme: &Theme) -> Rgb {
 /// take precedence over the theme. Pure — no I/O, fully unit-tested — so the
 /// app event loop just plugs the result into the engine-supplied formatter
 /// and writes the bytes back to the PTY.
+/// The background a pane paints behind its cells and padding (its backdrop,
+/// `build_pane_cells`): the colour its program set with OSC 11, else the
+/// theme's. Its outline is measured against this.
+pub(crate) fn pane_background(theme: &Theme, term_colors: &TermColors) -> Rgb {
+    resolve_query(257, theme, term_colors).unwrap_or(theme.background)
+}
+
 pub fn resolve_query(idx: usize, theme: &Theme, term_colors: &TermColors) -> Option<Rgb> {
     // Reject out-of-range up front — `Colors` is fixed-size and OSC queries
     // beyond the documented slots aren't meaningful for any app.

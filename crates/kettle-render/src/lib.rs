@@ -27,8 +27,10 @@ mod search;
 #[cfg(test)]
 use labels::overlay_label_cols;
 pub use scrollback::{
-    PaneScrollbar, ScrollbackPill, ScrollbarState, pane_scrollbar_geometry, scrollback_pill,
-    scrollbar_draw_width, scrollbar_hit_rect, scrollbar_hit_width,
+    HistoryView, KeptHistoryLabel, PaneScrollbar, ScrollbackPill, ScrollbackPillHint,
+    ScrollbackPillState, ScrollbarState, kept_history_label, pane_scrollbar_geometry,
+    scrollback_pill, scrollback_pill_hint, scrollbar_draw_width, scrollbar_hit_rect,
+    scrollbar_hit_width,
 };
 mod text_field;
 pub use text_field::{
@@ -126,15 +128,16 @@ use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
 use overlays::input_bar_colors;
 pub use overlays::{
-    ConfirmDialogButton, ConfirmDialogOverlay, ContextMenu, ContextMenuRow, HintLabel, ImePreedit,
-    MediaPasteReceiptGeometry, MediaPasteReceiptHit, MediaPasteReceiptKind,
-    MediaPasteReceiptOverlay, MenuToggle, NotificationGeometry, Overlay, StatusBar, TabActivity,
-    TabBar, TabSeg, TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay,
-    WindowControl, WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
-    media_paste_receipt_geometry, menu, menu_row_chars, notification_geometry,
-    notification_geometry_with_notices, persistent_notice_geometry,
-    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_columns, update_toast_geometry,
+    ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
+    ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
+    MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuToggle,
+    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
+    UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
+    context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
+    menu_row_chars, notification_geometry, notification_geometry_with_notices,
+    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
+    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
+    update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -179,7 +182,7 @@ pub use settings::{
     settings_layout, settings_panel_geometry, settings_value_rect,
 };
 use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
-pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneView};
+pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
 };
@@ -192,9 +195,9 @@ use theme::{
     CellHighlight, CompletionPalette, MinimumContrastCache, background_has_wallpaper,
     completion_palette_with_colors, composed_bg_alpha, confirm_dialog_border_color,
     desired_alpha_mode, dim_blend, final_scene_is_uniformly_opaque, gc, inactive_pane_amount,
-    needs_postmultiplied_presentation, pane_inactive_amount, pick_titlebar_bg, resolve_chrome_bg,
-    resolved_cell_foreground_cached, resolved_highlight_foreground_cached, srgb, srgb_encode,
-    surface_clear_color,
+    needs_postmultiplied_presentation, pane_border_style, pane_inactive_amount, pick_titlebar_bg,
+    resolve_chrome_bg, resolved_cell_foreground_cached, resolved_highlight_foreground_cached, srgb,
+    srgb_encode, surface_clear_color,
 };
 #[cfg(test)]
 use theme::{attributed_foreground, completion_palette, resolved_cell_foreground};
@@ -223,7 +226,7 @@ mod color;
 
 mod confirm;
 
-pub use confirm::ConfirmDialogLayout;
+pub use confirm::{ConfirmDetailLayout, ConfirmDialogLayout, access_key_index};
 
 mod cursor_marks;
 
@@ -1456,9 +1459,9 @@ impl Renderer {
                     if s.active {
                         quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
                         // The same bar as a horizontal strip's: broadcast's
-                        // warning yellow (only the active tab broadcasts) or
-                        // the window's accent, grey while the window is
-                        // unfocused.
+                        // warning yellow (the active tab is the one typing
+                        // goes from) or the window's accent, grey while the
+                        // window is unfocused.
                         quads.push(rect(
                             x,
                             seg_y,
@@ -1919,41 +1922,43 @@ impl Renderer {
                 interacting,
             )
         };
+        // A lone pane is outlined while broadcast reaches it: this window
+        // broadcasts, or another window's group broadcast reaches one of its
+        // panes.
+        let broadcast_outlined =
+            tabbar.broadcast || panes.iter().any(|pv| pv.broadcast != PaneBroadcast::Off);
+        let broadcast_dash = geometry::broadcast_dash(self.scale, bw);
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
             // overridable: `split-divider-color` for inactive panes
             // (defaults to theme `palette[8]`, the dim color) and
             // `focused-split-color` for the focused pane (defaults to the
-            // resolved accent below).
+            // resolved accent).
             //
-            // When broadcast / group-input mode is on, the focused-pane border
-            // flips to theme palette[3] (yellow, the same warning slot the
-            // tab-bar accent uses). The tab-bar indicator alone is not enough,
-            // because with `tab-bar = auto` and one tab open (the default
-            // single-window case) the tab bar is hidden. Inactive panes keep
-            // their normal divider color, since broadcast is scoped to the
-            // active tab and the focused-pane border is the single most-visible
-            // chrome element on every layout.
-            let border = if pv.focused {
-                if tabbar.broadcast {
-                    theme.palette[3]
-                } else {
-                    // Cascade order is
-                    //   focused-split-color (explicit override)
-                    //   → resolved accent (explicit accent-color → Peacock
-                    //     auto → the theme's signature accent, Mocha mauve)
-                    // Backward-compat: anyone who set `focused-split-color`
-                    // keeps their pinned color.
-                    cfg.focused_split_color
-                        .unwrap_or_else(|| self.ui_accent(cfg, theme))
-                }
-            } else {
-                cfg.split_divider_color.unwrap_or(theme.palette[8])
-            };
+            // While broadcast / group-input mode is on, every visible pane the
+            // focused pane's input reaches is outlined in theme palette[3]
+            // (yellow, the warning slot the tab-bar accent uses), lifted to 3:1
+            // on that pane's own background: the sending pane solid, each receiving
+            // pane dashed (`pane_border_style`). The scope may be the tab, the
+            // window or a named group, so receivers are not simply "the other
+            // panes"; the UI resolves each pane's role from the scope's
+            // targets. The tab-bar indicator alone is not enough, because with
+            // `tab-bar = auto` and one tab open the tab bar is hidden. Panes
+            // outside the scope keep their normal divider color.
+            // Measured against the backdrop this pane paints inside its
+            // outline, which follows the pane's own OSC 11 colour.
+            let border = pane_border_style(
+                cfg,
+                theme,
+                self.ui_accent(cfg, theme),
+                color::pane_background(theme, &pv.snap.colors),
+                pv.focused,
+                pv.broadcast,
+            );
             let corner_mask =
                 pane_bottom_window_corner_mask(pv.rect, (sw, sh), self.rounded_window_corners);
-            if !geometry::pane_border_visible(panes.len(), tabbar.broadcast) {
+            if !geometry::pane_border_visible(panes.len(), broadcast_outlined) {
                 // A lone pane has nothing to be told apart from: no frame,
                 // as in other terminals. Its 1 px inset stays, so geometry
                 // and hit tests do not move when a split appears.
@@ -1961,19 +1966,29 @@ impl Renderer {
                 // A zero handle size means no pane border. Do not send a
                 // degenerate outline to the shader: derivative AA can otherwise
                 // give a mathematical zero-width centreline visible coverage.
+            } else if corner_mask == 0 && border.dashed {
+                quads.extend(
+                    geometry::dashed_outline_rects(pv.rect, bw, broadcast_dash)
+                        .map(|(x, y, w, h)| rect(x, y, w, h, border.color, 1.0)),
+                );
             } else if corner_mask == 0 {
+                let border = border.color;
                 quads.push(rect(rx, ry, rw, bw, border, 1.0));
                 quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
                 quads.push(rect(rx, ry, bw, rh, border, 1.0));
                 quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
             } else {
-                pane_outlines.push(pane_outline(
+                let mut outline = pane_outline(
                     pv.rect,
-                    border,
+                    border.color,
                     bw,
                     MACOS_WINDOW_CORNER_RADIUS_POINTS * self.scale,
                     corner_mask,
-                ));
+                );
+                if border.dashed {
+                    (outline.dash, outline.gap) = broadcast_dash;
+                }
+                pane_outlines.push(outline);
             }
 
             // Per-pane titlebar background quad. Drawn
@@ -1986,7 +2001,7 @@ impl Renderer {
                     theme,
                     self.ui_accent(cfg, theme),
                     pv.focused,
-                    tabbar.broadcast,
+                    pv.broadcast == PaneBroadcast::Receiving,
                 );
                 if let Some((x, y, w, h)) = pane_titlebar_rect(pv.rect, pv.titlebar, bw) {
                     quads.push(rect(x, y, w, h, bar_bg, 1.0));
@@ -2193,8 +2208,26 @@ impl Renderer {
             if !pv.focused && panes.len() > 1 {
                 let amount = inactive_pane_amount(cfg);
                 if amount > 0.0 {
-                    let (x, y, w, h) = pv.terminal;
-                    pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    if pv.broadcast == PaneBroadcast::Off || bw <= 0.0 {
+                        let (x, y, w, h) = pv.terminal;
+                        pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    } else {
+                        // A receiving pane recedes like any unfocused pane,
+                        // but its broadcast outline, rounded corners and all,
+                        // does not: dimmed, it would lose the 3:1 it was
+                        // lifted to.
+                        pane_dim.extend(
+                            geometry::dim_clear_of_outline(
+                                pv.terminal,
+                                pv.rect,
+                                bw,
+                                MACOS_WINDOW_CORNER_RADIUS_POINTS * self.scale,
+                                corner_mask,
+                            )
+                            .into_iter()
+                            .map(|(x, y, w, h)| rect(x, y, w, h, theme.background, amount)),
+                        );
+                    }
                     for lane in overlay.media_lanes.iter().filter(|lane| lane.pane == pv.id) {
                         let (x, y, w, h) = lane.rect;
                         over.push(rect(x, y, w, h, theme.background, amount));
@@ -2886,32 +2919,73 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        let scrollback_pills: Vec<_> = panes
+        // Each scrolled-back pane's jump button, and the label at the top
+        // of a history that has lost its oldest lines. The pointer,
+        // AccessKit and `ui_geometry` lay both out with the same calls.
+        let scrollback_text_cell = (
+            self.overlay_text_cell_width(),
+            self.overlay_text_line_height(),
+        );
+        let scrollback_hint = panes
+            .iter()
+            .any(|pane| pane.snap.display_offset > 0)
+            .then(|| scrollback_pill_hint(&cfg.keybinds))
+            .flatten();
+        let scrollback_pills: Vec<(u64, ScrollbackPill)> = panes
             .iter()
             .filter_map(|pane| {
-                scrollback_pill(
+                let pill = scrollback_pill(
                     pane.terminal,
                     pane.snap.display_offset,
                     self.scale,
-                    (
-                        self.overlay_text_cell_width(),
-                        self.overlay_text_line_height(),
-                    ),
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    scrollback_hint.as_deref(),
+                    &pane.tr,
+                )?;
+                Some((pane.id, pill))
+            })
+            .collect();
+        let kept_history_labels: Vec<KeptHistoryLabel> = panes
+            .iter()
+            .filter_map(|pane| {
+                kept_history_label(
+                    pane.terminal,
+                    pane.snap.history_view(),
+                    self.scale,
+                    scrollback_text_cell,
                     cfg.scrollbar_width,
                     &pane.tr,
                 )
             })
             .collect();
-        while self.scrollback_buffers.len() < scrollback_pills.len() {
+        // One buffer per text, in paint order: each button's count and then
+        // its key, then each label.
+        let scrollback_texts: Vec<(&str, f32)> = scrollback_pills
+            .iter()
+            .flat_map(|(_, pill)| {
+                std::iter::once((pill.label.as_str(), pill.rect.3)).chain(
+                    pill.hint
+                        .as_ref()
+                        .map(|hint| (hint.text.as_str(), pill.rect.3)),
+                )
+            })
+            .chain(
+                kept_history_labels
+                    .iter()
+                    .map(|label| (label.label.as_str(), label.rect.3)),
+            )
+            .collect();
+        while self.scrollback_buffers.len() < scrollback_texts.len() {
             self.scrollback_buffers
                 .push(TextBuffer::new(&mut self.font_system, metrics));
         }
-        self.scrollback_buffers.truncate(scrollback_pills.len());
-        for (buffer, pill) in self.scrollback_buffers.iter_mut().zip(&scrollback_pills) {
+        self.scrollback_buffers.truncate(scrollback_texts.len());
+        for (buffer, (text, height)) in self.scrollback_buffers.iter_mut().zip(&scrollback_texts) {
             buffer.set_metrics(metrics);
-            buffer.set_size(None, Some(pill.rect.3));
+            buffer.set_size(None, Some(*height));
             buffer.set_text(
-                &pill.label,
+                text,
                 &Attrs::new().family(Family::Name(&family)),
                 Shaping::Advanced,
                 None,
@@ -3709,33 +3783,53 @@ impl Renderer {
                 });
             }
         }
-        for (pill, buffer) in scrollback_pills.iter().zip(&self.scrollback_buffers) {
-            let (x, y, w, h) = pill.rect;
-            let (fill, ink) = self
-                .chrome_colors
-                .scrollback_pill(theme, self.config.format.is_srgb());
-            tab_strip::rounded_fill(
-                &mut menu_q,
-                (x, y, w, h),
-                h / 2.0,
-                (true, true),
-                (fill, 1.0),
-                None,
+        if !scrollback_texts.is_empty() {
+            // The button is opaque; its edge meets the terminal, which shows
+            // the desktop through a translucent window.
+            let terminal = color::Backing::translucent(
+                theme.background,
+                composed_bg_alpha(cfg),
+                color::PLATFORM_BACKDROP_LIFT,
             );
-            menu_areas.push(TextArea {
-                buffer,
-                left: pill.text_origin.0,
-                top: pill.text_origin.1,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: x as i32,
-                    top: y as i32,
-                    right: (x + w) as i32,
-                    bottom: (y + h) as i32,
-                },
-                default_color: GColor::rgb(ink.r, ink.g, ink.b),
-                custom_glyphs: &[],
-            });
+            let pill_colors =
+                self.chrome_colors
+                    .scrollback_pill(theme, self.config.format.is_srgb(), terminal);
+            let mut buffers = self.scrollback_buffers.iter();
+            let mut text = |origin: (f32, f32), (x, y, w, h): Rect4, ink: Rgb| {
+                if let Some(buffer) = buffers.next() {
+                    menu_areas.push(TextArea {
+                        buffer,
+                        left: origin.0,
+                        top: origin.1,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: GColor::rgb(ink.r, ink.g, ink.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            };
+            for (pane, pill) in &scrollback_pills {
+                let surface = pill_colors.surface(ScrollbackPillState::of(
+                    *pane,
+                    overlay.scrollback_pill_hovered,
+                    overlay.scrollback_pill_pressed,
+                ));
+                scrollback::scrollback_pill_quads(&mut menu_q, pill, surface, self.scale);
+                text(pill.text_origin, pill.rect, surface.ink);
+                if let Some(hint) = &pill.hint {
+                    text(hint.text_origin, pill.rect, surface.ink);
+                }
+            }
+            for label in &kept_history_labels {
+                let rest = pill_colors.rest;
+                scrollback::kept_history_label_quads(&mut menu_q, label, rest.fill);
+                text(label.text_origin, label.rect, rest.ink);
+            }
         }
         if let Some(bounds) = tab_tooltip {
             let fill = theme.background;
@@ -4389,9 +4483,10 @@ impl Renderer {
                 // `theme.cursor_text`; the inactive bar is the dark `palette[8]`
                 // surface, so its text is the light `theme.foreground`. Explicit
                 // `title-*-fg-color` config still overrides.
+                let receiving = pv.broadcast == PaneBroadcast::Receiving;
                 let fg = if pv.focused {
                     cfg.title_transmit_fg_color.unwrap_or(theme.cursor_text)
-                } else if tabbar.broadcast {
+                } else if receiving {
                     cfg.title_receive_fg_color.unwrap_or(theme.cursor_text)
                 } else {
                     cfg.title_inactive_fg_color.unwrap_or(theme.foreground)
@@ -4401,7 +4496,7 @@ impl Renderer {
                     theme,
                     self.ui_accent(cfg, theme),
                     pv.focused,
-                    tabbar.broadcast,
+                    receiving,
                 );
                 let fg = self.chrome_colors.text(fg, background);
                 let text_top = ry + 2.0;
@@ -5256,10 +5351,20 @@ impl Renderer {
         }
 
         let mut confirmation_surfaces = Vec::new();
-        let mut confirmation_colors = Vec::new();
+        let mut confirmation_colors = None;
         if let (Some(dialog), Some(layout)) = (&overlay.confirm_dialog, &confirmation_layout) {
-            self.confirmation_text
-                .prepare(&mut self.font_system, &family, layout, dialog);
+            // The recommended button, the link and the focus ring take an
+            // accent that cannot be mistaken for the warning colour beside
+            // them.
+            let window_accent = self.ui_accent(cfg, theme);
+            let accent = confirm::dialog_accent(theme, window_accent, dialog);
+            let detail_colors = confirm::detail_colors(theme, accent);
+            self.confirmation_text.prepare(
+                &mut self.font_system,
+                &family,
+                layout,
+                gc(detail_colors.warning),
+            );
             let rgba = |color: Rgb, alpha: f32| {
                 [
                     color.r as f32 / 255.0,
@@ -5297,25 +5402,67 @@ impl Renderer {
                 layout.unit,
             );
             let foreground = confirm_dialog_text_color(theme);
-            confirmation_colors.extend([GColor::rgb(foreground.r, foreground.g, foreground.b); 2]);
+            let mut colors = confirm::ConfirmTextColors {
+                text: gc(foreground),
+                link: gc(detail_colors.link),
+                buttons: Vec::with_capacity(layout.buttons.len()),
+            };
+            let focus = confirm::focus_ring_color(theme, window_accent, dialog);
+            let focus_ring = |rect: Rect4, grow: f32| {
+                confirm::intersect(
+                    (
+                        rect.0 - grow,
+                        rect.1 - grow,
+                        rect.2 + grow * 2.0,
+                        rect.3 + grow * 2.0,
+                    ),
+                    layout.rect,
+                )
+            };
+            if let Some(detail) = &layout.detail {
+                // The preview sits in an inset box, and each control token
+                // in a chip: an outline and a faint fill mark it apart from
+                // typed text without relying on its colour.
+                shape(
+                    detail.preview_rect,
+                    detail_colors.preview_fill,
+                    1.0,
+                    confirm_dialog_border_color(theme),
+                    1.0,
+                    4.0 * layout.unit,
+                    layout.unit,
+                );
+                for chip in self.confirmation_text.chips(layout) {
+                    shape(
+                        chip,
+                        detail_colors.chip_fill,
+                        1.0,
+                        detail_colors.warning,
+                        1.0,
+                        3.0 * layout.unit,
+                        layout.unit,
+                    );
+                }
+                let link = detail.link_rect;
+                if layout.link_stop() == Some(dialog.focus_idx) && link.2 > 0.0 && link.3 > 0.0 {
+                    shape(
+                        focus_ring(link, 3.0 * layout.unit),
+                        black,
+                        0.0,
+                        focus,
+                        1.0,
+                        5.0 * layout.unit,
+                        2.0 * layout.unit,
+                    );
+                }
+            }
             for (index, &rect) in layout.buttons.iter().enumerate() {
-                let (fill, label) =
-                    confirm::button_colors(theme, self.ui_accent(cfg, theme), dialog, index);
+                let (fill, label) = confirm::button_colors(theme, accent, dialog, index);
                 let stroke = color::with_min_contrast(fill, theme.background, 3.0);
                 shape(rect, fill, 1.0, stroke, 1.0, 6.0 * layout.unit, layout.unit);
                 if index == dialog.focus_idx && rect.2 > 0.0 && rect.3 > 0.0 {
-                    let focus = confirm::focus_color(theme, self.ui_accent(cfg, theme));
-                    let ring = confirm::intersect(
-                        (
-                            rect.0 - 4.0 * layout.unit,
-                            rect.1 - 4.0 * layout.unit,
-                            rect.2 + 8.0 * layout.unit,
-                            rect.3 + 8.0 * layout.unit,
-                        ),
-                        layout.rect,
-                    );
                     shape(
-                        ring,
+                        focus_ring(rect, 4.0 * layout.unit),
                         black,
                         0.0,
                         focus,
@@ -5324,8 +5471,24 @@ impl Renderer {
                         2.0 * layout.unit,
                     );
                 }
-                confirmation_colors.push(GColor::rgb(label.r, label.g, label.b));
+                colors.buttons.push(gc(label));
             }
+            for line in self.confirmation_text.underlines(layout, dialog) {
+                let ink = match line.role {
+                    confirm::TextRole::Button(index) => colors.buttons[index],
+                    _ => colors.link,
+                };
+                shape(
+                    line.rect,
+                    Rgb::new(ink.r(), ink.g(), ink.b()),
+                    1.0,
+                    black,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+            }
+            confirmation_colors = Some(colors);
             if layout.max_scroll > 0 {
                 let region = if layout.whole_scroll {
                     layout.rect
@@ -5373,10 +5536,9 @@ impl Renderer {
                 }
             }
         }
-        let confirmation_areas = if let Some(layout) = &confirmation_layout {
-            self.confirmation_text.areas(layout, &confirmation_colors)
-        } else {
-            Vec::new()
+        let confirmation_areas = match (&confirmation_layout, &confirmation_colors) {
+            (Some(layout), Some(colors)) => self.confirmation_text.areas(layout, colors),
+            _ => Vec::new(),
         };
 
         let label_count = self.card_scene.labels.len();
@@ -5480,8 +5642,9 @@ impl Renderer {
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
-            for pill in &scrollback_pills {
-                pill.label.hash(&mut h);
+            // Retained buffers keep their addresses: hash what they show.
+            for (text, _) in &scrollback_texts {
+                text.hash(&mut h);
             }
             self.update_toast_text.hash(&mut h);
             self.ime_text.hash(&mut h);
@@ -6268,6 +6431,9 @@ mod shaped_row_tests;
 #[cfg(test)]
 mod pane_window_corner_tests;
 
+#[cfg(test)]
+mod broadcast_border_tests;
+
 /// Underline styles must not render pixel-identical to a plain line. Pure
 /// functions, no GPU needed.
 #[cfg(test)]
@@ -6485,3 +6651,6 @@ mod emoji_shaping_tests;
 mod theme_picker_tests;
 #[cfg(test)]
 mod update_toast_tests;
+
+#[cfg(test)]
+mod scrollback_pill_tests;

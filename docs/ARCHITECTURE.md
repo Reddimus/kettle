@@ -5030,7 +5030,12 @@ window title). Layout:
 ```
 
 Three color variants based on broadcast state: transmit (focused
-source), receive (group member), inactive (idle). Click on the bar
+source), receive (a pane the broadcast reaches), inactive (idle). The
+pane outlines follow the same roles: the sending pane solid in the
+broadcast yellow, receivers dashed in it, the rest the divider colour.
+`app::broadcast::BroadcastRoles` resolves them each frame from the
+scope's targets for the outlines, the screen-reader descriptions and
+`ui_geometry`. Click on the bar
 focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
 action edits the broadcast-group label.
 
@@ -5521,18 +5526,99 @@ Text paste consent is a `kettle-ui` confirmation action carrying bounded text,
 the original pane, and the broadcast scope and recipient set. Consent fails
 closed if that scope changes. Queued input behind a paste cannot pass through
 an unanswered confirmation. `kettle-config` owns the `paste-protection` policy;
-`input::paste_payload` removes clipboard ESC bytes inside bracketed wrappers.
-`paste_safety` scans Unicode code points in linear time for the summary and
-control-removing alternative. It removes whole escape/control strings, retaining
-TAB/CR/LF even within malformed strings. Preview work is capped at 160 visible
-characters and three lines. The fourth action uses the same confirmation layout
-for painting, pointer input, AccessKit and `ui_geometry`; it adds no IME caret.
+`input::paste_payload` removes both bracketed-paste markers, in their 7-bit and
+C1 forms, in every mode, and inside bracketed wrappers every other ESC byte and
+the signal bytes 0x03, 0x1A and 0x1C (0x19 too on macOS). Marker removal is one
+stack pass to a fixpoint, run again after the byte removal, which can join the
+halves of a C1 marker.
+`paste_safety` scans Unicode code points in linear time for the summary, the
+findings and the control-removing alternative. It removes whole escape/control
+strings, retaining TAB/CR/LF even within malformed strings. `findings` returns
+at most one entry per kind of control, ranked by an enum's derived order with
+the end marker first; that order picks the control the preview is anchored on
+and the four rows shown. With more than four kinds, rows go first to the end
+markers and the kinds that reach the program, then to ESC and the signal bytes
+a bracketed paste removes, and the rows chosen stay in ranked order.
+
+Preview work is capped at 160 columns and three lines whatever the clipboard
+size. Columns count what is drawn: a tab is four (it is shown as spaces), a
+chip is as wide as its letters (`ESC` and `CSI` three, `^C` two, a
+direction-formatting character such as `U+202E` six), and any other
+character one, wide ones included. The window opens at the start of the text
+and moves, with at most 40 columns of lead-in, only when it ends before the
+anchor does.
+
+A paste question carries a `PasteQuestion` beside the generic dialog state: a
+`kettle_render::ConfirmDialogDetail` (preview with token ranges, summary,
+findings, policy text, link, and the description assistive technology reads),
+one access key per button, and the recommended button. `ConfirmDialogLayout`
+resolves all of it: buttons in one row of equal widths inside 480 units, else
+one row of natural widths in a dialog widened to at most 800 units, else one
+full-width stack; the preview box, a chip per token, the findings rows and the
+pinned policy line with its link. The link is the focus stop after the last
+button and the first in focus order. The same layout serves painting, pointer
+input, AccessKit and `ui_geometry`, which carries rectangles and the fixed
+labels only; the reason, preview and findings never leave the process. The
+painter refines each chip and access-key underline from the shaped glyphs, so
+a fallback face that leaves the cell grid moves them with the letters. The
+recommended button and the link use the window's accent unless its hue is the
+warning colour's (a window's accent can be the theme's red); then they take
+the first palette colour of another hue, so the recommended and the
+destructive choice never look alike. The summary's counts share a line while
+they fit, and like the policy line drop their separator where a line breaks.
+The dialog adds no IME caret.
+
+Keys are decided by one function, `confirm_key_outcome`, over the dialog, the
+logical key, the modifiers and three flags (`vim-menu-nav`, stacked, macOS);
+`confirm_dialog_key` only carries the outcome out. Access keys need Alt and
+compare the logical key only. A bare letter never sends the text as it is:
+`y` activates only a sanitising recommended button, and only when its text
+cannot run a line (no recipient was unbracketed when Kettle asked, or the
+text has no line break). What a stop does is
+`confirm_stop_action`: Cancel, the Settings link, or the dialog's action for
+that button. `answer_confirm_stop` answers the question with a stop as far as
+the window goes and returns what the app still does: for the link it runs the
+Cancel routine and returns Settings on the `paste-protection` row, which
+`resolve_confirm_button` opens. Cancel is `cancel_confirm_dialog_in`: it drops
+the dialog, and with it the pending text, target and broadcast consent. It
+does not touch the paste queue. Queued input that comes ready while any
+confirmation is open is discarded by `drain_queued_pastes`
+(`confirmation_refuses_queued_input`); what is still waiting afterwards is
+judged on its own. `close_all_modals` calls the same Cancel routine, so the
+link behaved this way before it was made explicit.
+
+Findings are mode-aware through the encoder's own predicate,
+`input::bracketed_paste_drops`: a row is marked removed when the encoder
+strips that kind for every recipient (the markers always; ESC and the signal
+bytes when no recipient is unbracketed), and the raw Paste is destructive
+when a control survives it or the text carries an end marker. Bidirectional
+formatting characters are a finding, counted with the controls and removed
+by `without_controls`; `PasteProtection::confirms` does not ask for them
+alone. `ui_geometry`'s confirmation object is built by `confirmation_json`.
+
+The action records whether the question was asked for an unbracketed
+recipient. When it is answered, `App::answer_text_paste` samples the broadcast
+scope, the recipients and their modes once, and `text_paste_dispatch` decides
+on that snapshot: nothing is sent when the scope or the recipient set changed;
+a question asked with every recipient bracketed does not cover a recipient
+that has since turned bracketed paste off, if the chosen text has a line
+break or a control in it (`paste_answer`), so Kettle sends nothing and returns
+the question again for the modes of now, its reason led by a sentence saying
+why (`PasteAsk::reasked`). Otherwise the same snapshot encodes
+the paste. A mode change between that sample and the write is not covered; the
+snapshot decides, as it does for a paste Kettle never asked about.
 Path pastes retain their stricter rejection of control characters in filenames.
 
 OSC 52 operations remain ordered in the terminal clipboard journal. The UI
 records successful platform clipboard writes in per-pane notice state, with a
 five-second successful-copy interval and separate lifetime read/write denial
-latches. The pane's dismissible notice uses the persistent notice painter and
+latches. A notice names the pane's foreground program through the close
+question's label (`argv[0]`'s base name, sanitised, at most 32 columns, `None`
+for an interactive shell), looked up only when a notice is about to show,
+after the throttle. The foreground program is not necessarily the sender (a
+background job in the pane can write OSC 52), so the text says "while NAME
+was in the foreground". A refusal names the Settings row by its translated
+label and category. The pane's dismissible notice uses the persistent notice painter and
 its shared word wrapper, geometry, hit tests and polite AccessKit status. Held
 process banners take precedence. Notice content contains counts and policy text,
 never clipboard contents, and never moves terminal or IME geometry.

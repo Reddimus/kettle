@@ -26,7 +26,12 @@ pub struct OutlineInstance {
     pub corner_radius: f32,
     /// Bits in top-left, top-right, bottom-right, bottom-left order.
     pub corner_mask: u32,
-    pub _pad: u32,
+    /// Dash length in physical pixels; 0 draws the outline solid. A
+    /// receiving pane's broadcast outline is dashed (`geometry::fitted_dashes`
+    /// on the four-quad path, the same fit here).
+    pub dash: f32,
+    /// Shortest gap between dashes in physical pixels.
+    pub gap: f32,
 }
 
 #[repr(C)]
@@ -48,6 +53,8 @@ struct VsOut {
     @location(3) border_width: f32,
     @location(4) corner_radius: f32,
     @location(5) @interpolate(flat) corner_mask: u32,
+    @location(6) @interpolate(flat) dash: f32,
+    @location(7) @interpolate(flat) gap: f32,
 };
 
 @vertex
@@ -59,6 +66,8 @@ fn vs(
     @location(3) border_width: f32,
     @location(4) corner_radius: f32,
     @location(5) corner_mask: u32,
+    @location(6) dash: f32,
+    @location(7) gap: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(0.0, 0.0),
@@ -80,6 +89,8 @@ fn vs(
     out.border_width = border_width;
     out.corner_radius = corner_radius;
     out.corner_mask = corner_mask;
+    out.dash = dash;
+    out.gap = gap;
     return out;
 }
 
@@ -103,6 +114,20 @@ fn selected_corner_radius(local: vec2<f32>, size: vec2<f32>, radius: f32, mask: 
         bit = 8u;
     }
     return select(0.0, radius, (mask & bit) != 0u);
+}
+
+// Whether `along`, a position on an edge `len` long, falls on a dash. The
+// first dash starts at 0 and the last ends at `len`, the gaps stretched to
+// fit and never shorter than `gap`: `geometry::fitted_dashes`, which the
+// four-quad outline uses, makes the same fit.
+fn fitted_dash_on(along: f32, len: f32, dash: f32, gap: f32) -> bool {
+    if dash <= 0.0 || gap <= 0.0 || len < 2.0 * dash + gap {
+        return true;
+    }
+    let count = floor((len + gap) / (dash + gap));
+    let step = (len - dash) / (count - 1.0);
+    let k = clamp(floor(along / step), 0.0, count - 1.0);
+    return along - k * step < dash;
 }
 
 fn rounded_rect_distance(local: vec2<f32>, size: vec2<f32>, radius: f32) -> f32 {
@@ -160,6 +185,21 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     );
     if coverage <= 0.0 {
         discard;
+    }
+    // A dashed outline measures each pixel along its nearest edge. A rounded
+    // corner's arc stays solid, the join the dashes start from.
+    let to_x = min(in.local.x, in.size.x - in.local.x);
+    let to_y = min(in.local.y, in.size.y - in.local.y);
+    let on_arc = radius > 0.0 && to_x < radius && to_y < radius;
+    if in.dash > 0.0 && !on_arc {
+        let on = select(
+            fitted_dash_on(in.local.y, in.size.y, in.dash, in.gap),
+            fitted_dash_on(in.local.x, in.size.x, in.dash, in.gap),
+            to_y <= to_x,
+        );
+        if !on {
+            discard;
+        }
     }
     let alpha = in.color.a * coverage;
     let linear = srgb_to_linear(in.color.rgb);
@@ -249,7 +289,9 @@ impl OutlinePipeline {
                         2 => Float32x4,
                         3 => Float32,
                         4 => Float32,
-                        5 => Uint32
+                        5 => Uint32,
+                        6 => Float32,
+                        7 => Float32
                     ],
                 })],
             },

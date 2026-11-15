@@ -1063,11 +1063,15 @@ confirms every multiline paste;
 .B off
 never asks. The dialog shows line and control counts and a bounded preview.
 Paste sends the text normally; Paste as one line replaces line breaks and ASCII
-controls other than TAB with spaces. Paste Without Controls removes controls
+controls other than TAB with spaces. Paste without controls removes controls
 and whole escape sequences while keeping TAB, CR and LF, and appears only when
-controls exist. Cancel is initially focused. Tab/Shift+Tab and arrows move,
-Enter activates, and Esc cancels. Screen readers receive the dialog, full
-message and each button. Bracketed paste strips embedded ESC bytes.
+controls exist; it is the recommended choice then. Cancel is initially focused.
+The dialog says why it asked, lists what each kind of control does, and has a
+Paste settings link that pastes nothing and opens Settings on the paste
+protection row. Tab/Shift+Tab and arrows move, Enter activates, Esc cancels,
+and Alt with an underlined letter activates a choice. Screen readers receive
+the dialog, its full message, the link and each button. Bracketed paste strips
+embedded ESC bytes and the signal bytes 0x03, 0x1A and 0x1C.
 .PP
 .B osc52 = copy
 allows program clipboard writes and denies reads by default.
@@ -1080,7 +1084,9 @@ allows both. A successful write shows a character-count notice at most once
 every five seconds per pane. Set
 .B osc52\-notify = false
 to silence successful-copy notices. Blocked reads and writes each explain the
-policy once per pane. Notices expose a polite screen-reader status and a
+policy once per pane and point at the Settings row. A notice names the program
+in the pane's foreground when it is known; that program is not necessarily the
+one that sent the request. Notices expose a polite screen-reader status and a
 Dismiss action.
 .
 .SH ENVIRONMENT

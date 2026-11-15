@@ -68,7 +68,9 @@ deletes the entry. Saving under a name that already exists asks before it replac
 host's target. Kettle never edits `~/.ssh/config` itself.
 
 Use the palette's broadcast actions to send input to all panes, a group or a
-window, and choose broadcast off to stop. See
+window, and choose broadcast off to stop. The pane you type in is outlined
+solid and the panes that receive are outlined dashed, so you can see where
+your typing goes. See
 [Sessions, profiles and layouts](../README.md#sessions-profiles-and-layouts)
 for restore behavior and [CONFIG.md](CONFIG.md) for configuration paths and SSH
 host entries.
@@ -153,13 +155,17 @@ opens it. Menus and the command palette show native shortcut symbols on macOS
 
 Pasting text that contains a newline or a control character other than tab
 asks for confirmation when the receiving program has not enabled bracketed
-paste. Cancel is selected initially. Choose Paste to send the original text,
-or Paste as one line to replace line breaks and other control characters with
-spaces (tabs stay tabs). A short preview escapes control characters so they
-are visible. Bracketed paste keeps multi-line text and strips embedded ESC
-bytes so pasted text cannot close the bracket early. Set `paste-protection =
-always` to confirm multi-line text even in editors, or `paste-protection = off`
-to disable confirmation. See [configuration](CONFIG.md).
+paste. The dialog says why it asked, and Cancel is selected initially. Choose
+Paste to send the original text, Paste without controls (offered and
+recommended when the text has control characters) to drop them, or Paste as
+one line to replace line breaks and other control characters with spaces
+(tabs stay tabs). A short preview spells control characters in ASCII (`ESC`,
+`^C`) so they are visible, and a list says what each one does. Bracketed paste
+keeps multi-line text and strips embedded ESC bytes so pasted text cannot
+close the bracket early. Set `paste-protection = always` to confirm multi-line
+text even in editors, or `paste-protection = off` to disable confirmation, in
+the config or under Settings > Behavior > Paste protection, which the dialog's
+"Paste settings…" link opens. See [configuration](CONFIG.md).
 
 ## 5. Search screen and scrollback
 
@@ -206,9 +212,11 @@ cap prevented an exact count or made ordering uncertain; Kettle will not claim a
 last, or miss. Ordinary work-budget pauses resume automatically. This keeps
 large or infinite scrollback responsive.
 
-When you scroll into history, click the **↓ 1,234 lines** pill at the pane's
-bottom-right to return to live output. The default history budget is 64 MB per
-pane with a 10,000-line cap. Settings shows **64 MB** under **Scrollback memory**;
+When you scroll into history, click the **↓ 1,234 lines** button at the pane's
+bottom-right to return to live output, or press the key it shows (Ctrl+End by
+default). The default history budget is 64 MB per pane with a 10,000-line cap;
+once output has gone past it, the top of the history says **Start of kept
+history · 10,000 lines**. Settings shows **64 MB** under **Scrollback memory**;
 `scrollback-bytes` and `scrollback` let you change the two limits independently.
 Selection and non-current search highlights are strengthened for visibility in
 faint themes, and the current search result has a distinct underline.

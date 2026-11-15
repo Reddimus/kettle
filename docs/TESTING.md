@@ -139,6 +139,41 @@ and independent panes and windows. Run
 `cargo test --locked --offline -j 2 -p kettle-ui --lib scrollback_receipt_hit`.
 These fixtures create no App, native window, renderer, clipboard or global UI
 services. Native and control event dispatch still require a live integration pass.
+The button acts on release: the same fixtures check that a press only arms it
+and that a release elsewhere, over another pane's button or under a receipt
+does nothing. `scrollback_receipt_hit_a_covered_jump_button_is_neither_hovered_nor_pressed`
+covers a real pane's button with a real persistent notice, the search bar's
+geometry, a receipt and a dialog, and checks the hover state, the press and
+the release under each: the hover, the hand, the press and the release all
+ask `scrollback_pill_reach`.
+
+`kettle-render`'s `scrollback_pill_tests` pin the button and the "Start of kept
+history" label as resolved geometry and colours, never glyph pixels: the key
+hint shown, dropped and rebound; each state's fill, edge and label floors on
+every bundled theme; the quads the painter emits at 1x and 2x; the label's
+condition, including a live prompt after Clear Scrollback and one line below
+the top, from a real terminal as well; its English and Spanish text; its
+clearance of the scrollbar and the button; the edge over a translucent window
+(opaque, 0.99, 0.86, 0.7 and 0.43, with and without macOS's backdrop lift);
+and the macOS and portable chords shaped in the bundled face, ending inside
+the button. `headless_tests::a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label`
+samples the fill, edge and rule in rendered frames, away from any glyph, and
+`headless_tests::the_painted_chord_ends_inside_the_jump_button` reads the chord
+the painter shaped. Both skip on a host with no GPU adapter unless
+`KETTLE_REQUIRE_GPU` is set, which turns the skip into a failure, as
+`KETTLE_REQUIRE_AUDIO` does for the sound tests.
+`kettle-ui`'s `scrollback_indicator_tests` check that the pointer, AccessKit
+and `ui_geometry` read those rects; that the "Viewing history" status is one
+node that does not change between offsets, and that AccessKit's own hit test
+over a scrolled-back pane never lands on it; that leaving the window ends a
+press; and, with `App::area`'s `pane_area`, that the button and the label
+stay out of the search bar at every window size and bar placement.
+`accessibility_id_tests` checks that no two AccessKit ids collide.
+Checked live with Orca in a private headless GNOME session on Tower
+(2026-11-14): Orca spoke "Viewing history" on the first Shift+PageUp from live
+output, not on the two that scrolled further, and again on the first
+Shift+PageUp after Ctrl+End returned to live output; AT-SPI showed one
+`object:announcement` each time. VoiceOver and Narrator were not checked.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
@@ -3312,7 +3347,28 @@ list acceptance.
 
 `cargo test -p kettle-config paste_protection` exercises every C0 byte and the
 three config policies; `cargo test -p kettle-ui paste` checks paste preview,
-flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+flattening and ESC neutralization, the C1 markers and each signal byte the
+encoder drops, the dialog's reason sentences, findings rows, preview anchoring
+on a late end marker, access keys (the typed letter only; none on macOS),
+focus order with the Settings link, `y` under `vim-menu-nav`, an answer given
+after a pane leaves bracketed paste (`text_paste_dispatch`, with a real pane
+whose mode is switched and whose input is captured), and the AccessKit tree
+against the layout. Keys are tested through `confirm_key_outcome` with
+real `Key` values, and what a key sends through a pane with captured input;
+`ui_geometry` privacy is tested by serialising a dialog whose every text
+field holds a canary. What a stop does to the window is `answer_confirm_stop`
+and what an answered paste does is `text_paste_dispatch`; both are tested
+directly. One source-order guard remains where no seam reaches `App`: the
+paste entry points.
+`every_paste_button_projects_its_own_flag_and_sends_its_own_text` is the
+detector for an AArch64 code-generation fault in rustc stable 1.99.1 and
+1.100.0, and nightly 1.102.0 (LLVM 23), at `opt-level = 1` (see
+`ConfirmButton::destructive`); it only detects on arm64 hosts.
+`cargo test -p kettle-render confirm` covers the row and stack arrangements
+at several widths and scales, the pinned policy line,
+the height cap, chips, access-key underlines and token contrast in every
+theme; one of its tests shapes text with the system fonts. `cargo test -p
+kettle-ui osc52` covers notices that name the program. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
 `cargo test -p kettle-ui menu_text_tests` builds the real Read only row and
