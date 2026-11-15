@@ -2202,17 +2202,26 @@ impl Renderer {
             }
             if !pv.focused && panes.len() > 1 {
                 let amount = inactive_pane_amount(cfg);
-                // A receiving pane recedes like any unfocused pane, but its
-                // broadcast outline does not: dimmed, the outline would lose
-                // the 3:1 it was lifted to.
-                let dimmed = if pv.broadcast == PaneBroadcast::Off {
-                    Some(pv.terminal)
-                } else {
-                    geometry::clear_of_outline(pv.terminal, pv.rect, bw)
-                };
                 if amount > 0.0 {
-                    if let Some((x, y, w, h)) = dimmed {
+                    if pv.broadcast == PaneBroadcast::Off || bw <= 0.0 {
+                        let (x, y, w, h) = pv.terminal;
                         pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    } else {
+                        // A receiving pane recedes like any unfocused pane,
+                        // but its broadcast outline, rounded corners and all,
+                        // does not: dimmed, it would lose the 3:1 it was
+                        // lifted to.
+                        pane_dim.extend(
+                            geometry::dim_clear_of_outline(
+                                pv.terminal,
+                                pv.rect,
+                                bw,
+                                MACOS_WINDOW_CORNER_RADIUS_POINTS * self.scale,
+                                corner_mask,
+                            )
+                            .into_iter()
+                            .map(|(x, y, w, h)| rect(x, y, w, h, theme.background, amount)),
+                        );
                     }
                     for lane in overlay.media_lanes.iter().filter(|lane| lane.pane == pv.id) {
                         let (x, y, w, h) = lane.rect;

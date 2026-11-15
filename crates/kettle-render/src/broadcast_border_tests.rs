@@ -390,3 +390,167 @@ fn rounded_outlines_dash_receivers_too() {
         "the receiver's is dashed"
     );
 }
+
+/// Pixels of `frame` on the top row, `x0..x1`, painted the outline colour.
+fn on_outline(frame: &image::RgbaImage, outline: Rgb, x0: u32, x1: u32) -> Vec<bool> {
+    (x0..x1)
+        .map(|x| {
+            let p = frame.get_pixel(x, 0);
+            [p[0], p[1], p[2]]
+                .iter()
+                .zip([outline.r, outline.g, outline.b])
+                .all(|(a, b)| a.abs_diff(b) <= 3)
+        })
+        .collect()
+}
+
+/// A receiving pane at a rounded window corner is dimmed like any unfocused
+/// pane, but the outline's arc there is not: every pixel of the arc's stroke
+/// comes out the same with the unfocused-pane dim on and off.
+#[test]
+fn a_dimmed_receivers_rounded_arc_keeps_its_colour() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer((3.0 * W) as u32, H as u32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    renderer.set_rounded_window_corners(true);
+    let snap = snapshot_of(20, 8, b"");
+    let panes = three_panes(
+        &snap,
+        [
+            PaneBroadcast::Sending,
+            PaneBroadcast::Off,
+            PaneBroadcast::Receiving,
+        ],
+        false,
+    );
+    assert!(
+        crate::theme::inactive_pane_amount(&cfg) > 0.0,
+        "unfocused panes dim"
+    );
+    let dimmed = capture(&mut renderer, &cfg, &panes, &focused(true));
+    let dims = renderer
+        .pane_dimming
+        .uploaded()
+        .expect("the retained copy")
+        .filter(|quad| inside(quad, leaf(2)))
+        .count();
+    assert!(dims > 1, "the receiver is dimmed row by row in its corner");
+    cfg.unfocused_split_opacity = 1.0;
+    assert_eq!(crate::theme::inactive_pane_amount(&cfg), 0.0);
+    let undimmed = capture(&mut renderer, &cfg, &panes, &focused(true));
+    // The bottom-right corner's arc: centred `radius` in from the corner,
+    // its stroke one border wide about `radius - border / 2`.
+    let radius = crate::geometry::MACOS_WINDOW_CORNER_RADIUS_POINTS;
+    let (x, y, w, h) = leaf(2);
+    let (cx, cy) = (x + w - radius, y + h - radius);
+    let mut checked = 0;
+    for py in (cy as u32)..((y + h) as u32) {
+        for px in (cx as u32)..((x + w) as u32) {
+            let d = ((px as f32 + 0.5 - cx).powi(2) + (py as f32 + 0.5 - cy).powi(2)).sqrt();
+            if (d - (radius - 0.5)).abs() <= 0.5 {
+                checked += 1;
+                assert_eq!(
+                    dimmed.get_pixel(px, py),
+                    undimmed.get_pixel(px, py),
+                    "the arc at ({px}, {py}) is dimmed"
+                );
+            }
+        }
+    }
+    assert!(checked >= 16, "{checked} arc pixels");
+}
+
+/// The four-quad path and the rounded outline shader dash an edge the same
+/// way, on a fractional edge too: the top edge of a receiver 200.6 pixels
+/// wide shows the same dashes drawn either way.
+#[test]
+fn quads_and_the_outline_shader_dash_a_fractional_edge_alike() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 8, b"");
+    let width = 200.6;
+    let mut receiver = pane(&snap, W as u32, H as u32);
+    receiver.id = 1;
+    receiver.rect = (0.0, 0.0, width, H);
+    receiver.terminal = receiver.rect;
+    receiver.focused = false;
+    receiver.broadcast = PaneBroadcast::Receiving;
+    let mut sender = pane(&snap, W as u32, H as u32);
+    sender.id = 2;
+    sender.rect = (width, 0.0, 3.0 * W - width, H);
+    sender.terminal = sender.rect;
+    sender.broadcast = PaneBroadcast::Sending;
+    let panes = [receiver, sender];
+    let outline = broadcast_border_color(&cfg.theme, cfg.theme.background);
+    // Clear of the corners, where the shader's antialiased side edges
+    // differ from the quads' hard ones.
+    let span = (3, width as u32 - 3);
+    let quads = capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert!(renderer.pane_outlines.uploaded().expect("retained").count() == 0);
+    let quad_row = on_outline(&quads, outline, span.0, span.1);
+    renderer.set_rounded_window_corners(true);
+    let shaded = capture(&mut renderer, &cfg, &panes, &focused(true));
+    let instance = renderer
+        .pane_outlines
+        .uploaded()
+        .expect("retained")
+        .find(|outline| outline.pos[0] == 0.0)
+        .expect("the receiver goes through the shader");
+    assert!(instance.dash > 0.0 && instance.size[0] == width);
+    let shader_row = on_outline(&shaded, outline, span.0, span.1);
+    assert_eq!(quad_row, shader_row);
+    assert!(quad_row.iter().filter(|on| !**on).count() >= 10, "dashed");
+}
+
+/// The outline is lifted against the background actually painted behind
+/// it: the frame's pane background, which a program sets with OSC 11 in
+/// the focused pane. TokyoNight Night's yellow passes on its own dark
+/// background and needs lifting on white.
+#[test]
+fn the_outline_is_lifted_against_the_background_a_program_sets() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let white = Rgb::new(255, 255, 255);
+    let painted = snapshot_of(20, 8, b"\x1b]11;#ffffff\x07");
+    assert_eq!(
+        color::resolve_query(257, &cfg.theme, &painted.colors),
+        Some(white),
+        "the program's background"
+    );
+    let plain = snapshot_of(20, 8, b"");
+    let mut panes = three_panes(
+        &plain,
+        [
+            PaneBroadcast::Sending,
+            PaneBroadcast::Receiving,
+            PaneBroadcast::Off,
+        ],
+        false,
+    );
+    panes[0].snap = &painted;
+    let on_white = broadcast_border_color(&cfg.theme, white);
+    let on_theme = broadcast_border_color(&cfg.theme, cfg.theme.background);
+    assert_ne!(
+        on_white, on_theme,
+        "the theme's yellow needs lifting on white"
+    );
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    let quads: Vec<QuadInstance> = renderer.quads.uploaded().expect("retained").collect();
+    let count = |color: Rgb, i: usize| {
+        quads
+            .iter()
+            .filter(|quad| quad.color == colored(color) && inside(quad, leaf(i)))
+            .count()
+    };
+    assert_eq!(count(on_white, 0), 4, "the sender");
+    assert!(count(on_white, 1) > 4, "the receiver's dashes");
+    assert_eq!(count(on_theme, 0) + count(on_theme, 1), 0);
+}
