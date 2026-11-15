@@ -726,7 +726,7 @@ impl App {
             self.send_key_releases(None, &key_releases);
             return;
         };
-        if ws.confirm_dialog.is_some() {
+        if confirmation_refuses_queued_input(&ws) {
             self.discard_queued_paste(content);
             self.send_key_releases(Some(&ws), &key_releases);
             self.finish_window_dispatch(el, window, ws);
@@ -909,24 +909,58 @@ impl App {
         text: &str,
         modes: &std::collections::HashMap<u64, bool>,
     ) -> bool {
-        let recipients = self.broadcast_recipients(ws);
         let needs_confirmation =
             text_paste_needs_confirmation(self.cfg.paste_protection, text, modes);
-        if !needs_confirmation {
-            return false;
+        if needs_confirmation {
+            let dialog = text_paste_confirmation(
+                target,
+                text,
+                ws.mux.broadcast.clone(),
+                self.broadcast_recipients(ws),
+                self.paste_ask(modes),
+                self.ui_text,
+            );
+            self.show_paste_question(ws, dialog);
         }
-        let dialog = text_paste_confirmation(
-            target,
-            text,
-            ws.mux.broadcast.clone(),
-            recipients,
-            self.ui_text,
-        );
+        needs_confirmation
+    }
+
+    /// The paste question as this platform and policy ask it, for `modes`.
+    fn paste_ask(&self, modes: &std::collections::HashMap<u64, bool>) -> PasteAsk {
+        PasteAsk {
+            policy: self.cfg.paste_protection,
+            unbracketed: modes.values().any(|bracketed| !bracketed),
+            access_keys: confirm_access_keys(cfg!(target_os = "macos")),
+            delayed_suspend: cfg!(target_os = "macos"),
+            reasked: false,
+        }
+    }
+
+    fn show_paste_question(&mut self, ws: &mut WindowState, dialog: ConfirmDialogState) {
         self.install_confirm_dialog(ws, dialog);
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
-        true
+    }
+
+    /// Carry out an answered paste question, as [`text_paste_dispatch`]
+    /// decides on the recipients as they are now.
+    pub(super) fn answer_text_paste(&mut self, ws: &mut WindowState, answer: ConfirmAction) {
+        let ConfirmAction::Paste { target, text, .. } = &answer else {
+            return;
+        };
+        let modes = self.text_paste_modes(ws, *target);
+        let now = PasteNow {
+            broadcast: ws.mux.broadcast.clone(),
+            recipients: self.broadcast_recipients(ws),
+            ask: self.paste_ask(&modes),
+            modes,
+        };
+        match text_paste_dispatch(&answer, now, self.ui_text) {
+            PasteDispatch::Drop => {}
+            PasteDispatch::Deliver(modes) => self.deliver_text_paste(ws, *target, text, &modes),
+            PasteDispatch::AskAgain(dialog) => self.show_paste_question(ws, *dialog),
+        }
     }
 
     pub(super) fn deliver_text_paste(
@@ -1760,40 +1794,259 @@ pub(super) fn clipboard_paste_result(
     }
 }
 
-/// Keep preview work and dialog size independent of clipboard size.
-pub(super) fn paste_preview(text: &str) -> String {
-    let mut preview = String::new();
-    let mut used = 0;
-    let mut lines = 1;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let visible = match c {
-            '\r' | '\n' => {
-                if c == '\r' && chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                lines += 1;
-                "\n".to_string()
-            }
-            '\x1b' => "\u{241b}".to_string(),
-            '\x07' => "\u{2407}".to_string(),
-            '\x7f' => "^?".to_string(),
-            c if c <= '\x1f' => format!("^{}", char::from(c as u8 + 64)),
+/// Queued input that comes ready while a confirmation is unanswered is
+/// discarded, never delivered behind the question. Once the question is
+/// gone, by any answer, later input is judged on its own.
+pub(super) fn confirmation_refuses_queued_input(ws: &WindowState) -> bool {
+    ws.confirm_dialog.is_some()
+}
+
+/// A bounded window of pasted text for the Confirm paste dialog.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct PastePreview {
+    /// The window as shown: each control character spelled in ASCII (`ESC`,
+    /// `^C`, `CSI`, `U+202E`), a line break as `\n`, a tab as spaces, and an
+    /// ellipsis where the text goes on.
+    pub text: String,
+    /// The bytes of `text` that spell a control character.
+    pub tokens: Vec<std::ops::Range<usize>>,
+    /// The same window with each control character as words a screen reader
+    /// says, so `ESC` in the paste cannot be mistaken for the typed word.
+    pub spoken: String,
+}
+
+/// Most columns, and most lines, of pasted text a preview shows. A column is
+/// one character of what is drawn: a tab is four, `ESC` three, `U+202E` six.
+const PREVIEW_CHARS: usize = 160;
+const PREVIEW_LINES: usize = 3;
+/// Most columns shown before the control a moved preview window is for.
+const PREVIEW_LEAD: usize = 40;
+
+/// How one character of pasted text is drawn in the preview.
+enum Shown {
+    /// CR or LF.
+    Break,
+    /// Text as it is; a tab as spaces.
+    Plain(String),
+    /// A control, spelled in ASCII and drawn as a chip.
+    Token(String),
+}
+
+impl Shown {
+    fn of(c: char) -> Self {
+        match c {
+            '\r' | '\n' => Self::Break,
+            // A tab is ordinary whitespace: no chip and no caret alarm.
+            '\t' => Self::Plain("    ".to_string()),
+            '\x1b' => Self::Token("ESC".to_string()),
+            '\x07' => Self::Token("BEL".to_string()),
+            '\x7f' => Self::Token("DEL".to_string()),
+            c if c <= '\x1f' => Self::Token(format!("^{}", char::from(c as u8 + 64))),
             c if c.is_control() || super::title::is_bidi_format_char(c) => {
-                c.escape_default().collect::<String>()
+                Self::Token(control_code_name(c))
             }
-            c => c.to_string(),
-        };
-        let width = visible.chars().count();
-        if used + width > 160 || lines > 3 {
-            preview.push('…');
+            c => Self::Plain(c.to_string()),
+        }
+    }
+
+    /// Columns the character takes in the window's budget.
+    fn width(&self) -> usize {
+        match self {
+            Self::Break => 0,
+            Self::Plain(text) | Self::Token(text) => text.chars().count(),
+        }
+    }
+}
+
+/// What a screen reader says for control `c`, drawn as `token`.
+fn spoken_control(c: char, token: &str, tr: &kettle_i18n::Translator) -> String {
+    use kettle_i18n::Text as T;
+    match c {
+        '\x1b' => tr.text(T::ConfirmPasteA11yEscape).to_string(),
+        '\x07' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBell)),
+        '\x7f' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingDelete)),
+        '\x08' => tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBackspace)),
+        c if c <= '\x1f' => {
+            tr.confirm_paste_a11y_control(&format!("Ctrl+{}", char::from(c as u8 + 64)))
+        }
+        _ => tr.confirm_paste_a11y_control(token),
+    }
+}
+
+/// Keep preview work and dialog size independent of clipboard size.
+///
+/// The window opens at the start of the text. `anchor` is the byte range of
+/// the most serious control in it; when the opening window ends before that
+/// control does, the window moves to it instead, so nothing that comes first
+/// can hide an end marker further down: not a harmless line break, and not a
+/// run of tabs or of characters that are drawn wide.
+pub(super) fn paste_preview(
+    text: &str,
+    anchor: Option<(usize, usize)>,
+    tr: &kettle_i18n::Translator,
+) -> PastePreview {
+    let (head, shown) = preview_window(text, 0, tr);
+    let Some((start, end)) = anchor.filter(|&(start, end)| {
+        start <= end && end <= text.len() && text.is_char_boundary(start) && shown < end
+    }) else {
+        return head;
+    };
+    // Lead in with the rest of the control's line, a bounded way back. The
+    // bound is in drawn columns, the unit the window is cut in: a lead
+    // counted in characters could fill the window with tabs or `U+202E`s and
+    // push the control out of it again.
+    let mut from = start;
+    let mut lead = 0;
+    for (index, c) in text[..start].char_indices().rev() {
+        let shown = Shown::of(c);
+        lead += shown.width();
+        if matches!(shown, Shown::Break) || lead > PREVIEW_LEAD {
             break;
         }
-        preview.push_str(&visible);
-        used += width;
+        from = index;
     }
-    preview
+    let (moved, shown) = preview_window(text, from, tr);
+    if shown >= end {
+        return moved;
+    }
+    // Whatever the lead was, the control itself is shown: it opens the window.
+    preview_window(text, start, tr).0
 }
+
+/// The preview of `text` from byte `from`, and the byte it reached.
+fn preview_window(text: &str, from: usize, tr: &kettle_i18n::Translator) -> (PastePreview, usize) {
+    let mut preview = PastePreview::default();
+    if from > 0 {
+        preview.text.push('…');
+        preview.spoken.push('…');
+    }
+    let mut used = 0;
+    let mut lines = 1;
+    let mut shown = from;
+    let mut chars = text[from..].char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        let mut end = from + offset + c.len_utf8();
+        let piece = Shown::of(c);
+        if matches!(piece, Shown::Break) {
+            if c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n') {
+                chars.next();
+                end += 1;
+            }
+            // A line break that ends the text ends its last line. It draws
+            // no empty line and is no fourth line to cut at; the summary says
+            // the text ends with one.
+            if end == text.len() {
+                shown = end;
+                break;
+            }
+            lines += 1;
+        }
+        let width = piece.width();
+        if used + width > PREVIEW_CHARS || lines > PREVIEW_LINES {
+            preview.text.push('…');
+            preview.spoken.push('…');
+            break;
+        }
+        match piece {
+            Shown::Break => {
+                preview.text.push('\n');
+                preview.spoken.push('\n');
+            }
+            Shown::Plain(visible) => {
+                preview.text.push_str(&visible);
+                preview.spoken.push_str(&visible);
+            }
+            Shown::Token(token) => {
+                let start = preview.text.len();
+                preview.text.push_str(&token);
+                preview.tokens.push(start..preview.text.len());
+                if !preview.spoken.is_empty() && !preview.spoken.ends_with([' ', '\n']) {
+                    preview.spoken.push(' ');
+                }
+                preview.spoken.push_str(&spoken_control(c, &token, tr));
+                preview.spoken.push(' ');
+            }
+        }
+        used += width;
+        shown = end;
+    }
+    let spoken = preview.spoken.trim_end().len();
+    preview.spoken.truncate(spoken);
+    (preview, shown)
+}
+
+/// How a C1 control or a text-direction character is spelled: the standard
+/// short name of the common C1 codes, else its code point.
+fn control_code_name(c: char) -> String {
+    match c {
+        '\u{9b}' => "CSI".to_string(),
+        '\u{9d}' => "OSC".to_string(),
+        '\u{90}' => "DCS".to_string(),
+        '\u{9c}' => "ST".to_string(),
+        c => format!("U+{:04X}", u32::from(c)),
+    }
+}
+
+/// How the findings list spells a kind of control, matching the preview, and
+/// what the kind does.
+fn finding_text(
+    kind: crate::paste_safety::Kind,
+    tr: &kettle_i18n::Translator,
+) -> (String, &'static str) {
+    use crate::paste_safety::Kind;
+    use kettle_i18n::Text as T;
+    let (token, meaning) = match kind {
+        Kind::EndMarker => (END_MARKER_NAME.to_string(), T::ConfirmPasteFindingEndMarker),
+        Kind::EndMarkerC1 => (
+            END_MARKER_C1_NAME.to_string(),
+            T::ConfirmPasteFindingEndMarkerC1,
+        ),
+        Kind::Interrupt => ("^C".to_string(), T::ConfirmPasteFindingInterrupt),
+        Kind::Suspend => ("^Z".to_string(), T::ConfirmPasteFindingSuspend),
+        Kind::Quit => ("^\\".to_string(), T::ConfirmPasteFindingQuit),
+        Kind::EndOfInput => ("^D".to_string(), T::ConfirmPasteFindingEndOfInput),
+        Kind::Escape => ("ESC".to_string(), T::ConfirmPasteFindingEscape),
+        Kind::Bidi(c) => (control_code_name(c), T::ConfirmPasteFindingBidi),
+        Kind::C1(c) => (control_code_name(c), T::ConfirmPasteFindingC1),
+        Kind::Backspace => ("^H".to_string(), T::ConfirmPasteFindingBackspace),
+        Kind::Delete => ("DEL".to_string(), T::ConfirmPasteFindingDelete),
+        Kind::Bell => ("BEL".to_string(), T::ConfirmPasteFindingBell),
+        Kind::Control(c) => (
+            format!("^{}", char::from(c as u8 + 64)),
+            T::ConfirmPasteFindingControl,
+        ),
+    };
+    (token, tr.text(meaning))
+}
+
+/// Whether the paste encoder removes this kind of control whichever button
+/// is chosen, so it never reaches a program.
+///
+/// The end marker goes in every mode. ESC and the signal bytes go only
+/// inside a bracketed paste, and the dialog may say so only when every
+/// recipient is bracketed: under broadcast, one program without bracketed
+/// paste still receives them. Which bytes those are is the encoder's own
+/// rule, not a second list here.
+fn encoder_removes(kind: crate::paste_safety::Kind, ask: PasteAsk) -> bool {
+    use crate::paste_safety::Kind;
+    match kind {
+        Kind::EndMarker | Kind::EndMarkerC1 => true,
+        kind => {
+            !ask.unbracketed
+                && kind
+                    .byte()
+                    .is_some_and(|byte| input::bracketed_paste_drops(byte, ask.delayed_suspend))
+        }
+    }
+}
+
+/// The end marker as the dialog names it, in its 7-bit and its C1 form. The
+/// preview shows the same letters: a chip for the introducer, then the rest.
+const END_MARKER_NAME: &str = "ESC[201~";
+const END_MARKER_C1_NAME: &str = "CSI 201~";
+
+/// Most findings rows; the kinds beyond them are counted in one last row.
+const FINDING_ROWS: usize = 4;
 
 pub(super) fn paste_as_one_line(text: &str) -> String {
     text.replace("\r\n", " ")
@@ -1808,18 +2061,49 @@ pub(super) fn paste_as_one_line(text: &str) -> String {
         .collect()
 }
 
+/// Why a paste question is asked, sampled with the modes that decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PasteAsk {
+    pub policy: kettle_config::PasteProtection,
+    /// A program receiving the paste has bracketed paste off.
+    pub unbracketed: bool,
+    /// Show and answer access keys. Never on macOS.
+    pub access_keys: bool,
+    /// The platform has a delayed-suspend byte (0x19) that a bracketed paste
+    /// drops: macOS.
+    pub delayed_suspend: bool,
+    /// Kettle asks again because a recipient left bracketed paste after the
+    /// question was answered, and the answer was not used.
+    pub reasked: bool,
+}
+
 pub(super) fn text_paste_confirmation(
     target: Option<u64>,
     text: &str,
     broadcast: BroadcastScope,
     recipients: Vec<u64>,
+    ask: PasteAsk,
     tr: kettle_i18n::Translator,
 ) -> ConfirmDialogState {
+    use crate::paste_safety::Kind;
     use kettle_i18n::Text as T;
     let found = crate::paste_safety::analyse(text);
+    let kinds = crate::paste_safety::findings(text);
     // With controls in the text, the sanitised paste is the recommended
-    // choice after Cancel, and a raw paste carries the warning colour.
-    let controls = found.escapes + found.controls > 0;
+    // choice after Cancel.
+    let controls = !kinds.is_empty();
+    // The raw paste carries the warning colour when it would hand the
+    // program a control: one the encoder does not remove in this mode. Text
+    // with an end marker keeps it too. Kettle removes the marker, but such
+    // text was written to break out of a paste, and the raw choice is the
+    // one that sends everything else in it untouched.
+    let marked = kinds
+        .iter()
+        .any(|finding| matches!(finding.kind, Kind::EndMarker | Kind::EndMarkerC1));
+    let raw_is_risky = marked
+        || kinds
+            .iter()
+            .any(|finding| !encoder_removes(finding.kind, ask));
     let mut buttons = vec![ConfirmButton::Cancel];
     if controls {
         buttons.push(ConfirmButton::PasteWithoutControls {
@@ -1828,7 +2112,7 @@ pub(super) fn text_paste_confirmation(
     }
     let paste = ConfirmButton::Confirm {
         label: tr.text(T::MenuPaste).to_string(),
-        destructive: controls,
+        destructive: raw_is_risky,
     };
     let one_line = ConfirmButton::PasteOneLine {
         label: tr.text(T::ConfirmPasteOneLine).to_string(),
@@ -1838,14 +2122,131 @@ pub(super) fn text_paste_confirmation(
     } else {
         buttons.extend([paste, one_line]);
     }
+    let key = |message: T| tr.text(message).chars().next().filter(|_| ask.access_keys);
+    let access_keys = buttons
+        .iter()
+        .map(|button| {
+            key(match button {
+                ConfirmButton::Cancel => T::ConfirmPasteKeyCancel,
+                ConfirmButton::PasteWithoutControls { .. } => T::ConfirmPasteKeyWithoutControls,
+                ConfirmButton::PasteOneLine { .. } => T::ConfirmPasteKeyOneLine,
+                ConfirmButton::Confirm { .. } => T::ConfirmPasteKeyPaste,
+            })
+        })
+        .collect();
+
+    // The first sentence says why Kettle asked, naming the marker it found.
+    // Its 7-bit form ranks first, so that is the one named when both occur.
+    let marker = kinds.iter().find_map(|finding| match finding.kind {
+        Kind::EndMarker => Some(END_MARKER_NAME),
+        Kind::EndMarkerC1 => Some(END_MARKER_C1_NAME),
+        _ => None,
+    });
+    let breaks = text.contains(['\n', '\r']);
+    let lines_reason = || tr.text(T::ConfirmPasteReasonLines).to_string();
+    let mut reason = Vec::new();
+    // A question asked again says first why the answer was not used: the
+    // dialog may otherwise look like the one just answered.
+    if ask.reasked {
+        reason.push(tr.text(T::ConfirmPasteReasonReasked).to_string());
+    }
+    if let Some(marker) = marker {
+        reason.push(tr.confirm_paste_reason_marker(marker));
+        // Removing the marker does not make the line breaks safe where
+        // bracketed paste is off: each still arrives as Enter.
+        if ask.unbracketed && breaks {
+            reason.push(lines_reason());
+        }
+    } else if ask.unbracketed && breaks {
+        reason.push(lines_reason());
+    } else if ask.unbracketed || ask.policy != kettle_config::PasteProtection::Always {
+        reason.push(tr.text(T::ConfirmPasteReasonControls).to_string());
+    } else {
+        reason.push(tr.text(T::ConfirmPasteReasonAlways).to_string());
+    }
+    let body = reason.join("\n");
+
+    // A final line break ends the last line; it does not start another.
+    let trailing = text.ends_with(['\n', '\r']);
+    let lines = tr.confirm_paste_lines(found.lines - u64::from(trailing));
+    let mut summary = vec![if trailing {
+        tr.confirm_paste_trailing_break(&lines)
+    } else {
+        lines
+    }];
+    if found.escapes > 0 {
+        summary.push(tr.confirm_paste_escapes(found.escapes));
+    }
+    if found.controls > 0 {
+        summary.push(tr.confirm_paste_controls(found.controls));
+    }
+
+    let preview = paste_preview(text, kinds.first().map(|finding| finding.first), &tr);
+    let more = match kinds.len().saturating_sub(FINDING_ROWS) {
+        0 => String::new(),
+        rest => tr.confirm_paste_more_kinds(rest as u64),
+    };
+    let policy = tr.confirm_paste_policy(tr.text(match ask.policy {
+        kettle_config::PasteProtection::Auto => T::SettingsValueAutomatic,
+        kettle_config::PasteProtection::Always => T::SettingsValueAlways,
+        kettle_config::PasteProtection::Off => T::SettingsValueOff,
+    }));
+    let mut description = vec![body.clone(), summary.join(" \u{b7} ")];
+    // With more kinds than rows, the rows go first to the end marker, which
+    // is why Kettle asked, and to the controls that reach the program. ESC
+    // and the signal bytes that a bracketed paste removes never push a live
+    // control into the count of further kinds. The rows chosen keep their
+    // order of severity.
+    let (first, removed): (Vec<_>, Vec<_>) = kinds.iter().enumerate().partition(|(_, finding)| {
+        matches!(finding.kind, Kind::EndMarker | Kind::EndMarkerC1)
+            || !encoder_removes(finding.kind, ask)
+    });
+    let mut rows: Vec<_> = first
+        .into_iter()
+        .chain(removed)
+        .take(FINDING_ROWS)
+        .collect();
+    rows.sort_by_key(|&(rank, _)| rank);
+    let findings = rows
+        .into_iter()
+        .map(|(_, finding)| finding)
+        .map(|finding| {
+            let (token, meaning) = finding_text(finding.kind, &tr);
+            // A row says what happens to the control in this mode: one the
+            // encoder removes is not presented as a live risk.
+            let removed = encoder_removes(finding.kind, ask);
+            let meaning = if removed {
+                tr.confirm_paste_finding_removed(meaning)
+            } else {
+                meaning.to_string()
+            };
+            description.push(tr.confirm_paste_a11y_finding(&token, &meaning, finding.count));
+            kettle_render::ConfirmDialogFinding {
+                token,
+                meaning,
+                count: format!("\u{d7}{}", finding.count),
+                removed,
+            }
+        })
+        .collect();
+    if !more.is_empty() {
+        description.push(more.clone());
+    }
+    description.push(policy.clone());
+    description.push(tr.confirm_paste_a11y_preview(&preview.spoken));
+    let recommended = buttons
+        .iter()
+        .position(|button| {
+            if controls {
+                matches!(button, ConfirmButton::PasteWithoutControls { .. })
+            } else {
+                matches!(button, ConfirmButton::Confirm { .. })
+            }
+        })
+        .unwrap_or(0);
     ConfirmDialogState {
         heading: tr.text(T::ConfirmPasteHeading).to_string(),
-        body: tr.confirm_paste_body(
-            &tr.confirm_paste_lines(found.lines),
-            &tr.confirm_paste_escapes(found.escapes),
-            &tr.confirm_paste_controls(found.controls),
-            &paste_preview(text),
-        ),
+        body,
         buttons,
         focus_idx: 0,
         on_confirm: ConfirmAction::Paste {
@@ -1853,10 +2254,26 @@ pub(super) fn text_paste_confirmation(
             text: text.to_string(),
             broadcast,
             recipients,
+            unbracketed: ask.unbracketed,
         },
         scroll: 0,
         armed_press: None,
         space_pressed: None,
+        paste: Some(Box::new(PasteQuestion {
+            detail: kettle_render::ConfirmDialogDetail {
+                preview: preview.text,
+                preview_tokens: preview.tokens,
+                summary,
+                findings,
+                more,
+                policy,
+                link: tr.text(T::ConfirmPasteSettings).to_string(),
+                link_access_key: key(T::ConfirmPasteKeySettings),
+                description: description.join("\n"),
+            },
+            access_keys,
+            recommended,
+        })),
     }
 }
 
@@ -1874,6 +2291,110 @@ pub(super) fn text_paste_modes<'a>(
             (id, bracketed)
         })
         .collect()
+}
+
+/// What an answered paste question does with its recipients' modes as they
+/// are when the answer arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PasteAnswer {
+    Deliver,
+    AskAgain,
+}
+
+/// The recipients of a paste as they are when its question is answered.
+pub(super) struct PasteNow {
+    pub broadcast: BroadcastScope,
+    /// The broadcast recipients, sorted; empty when broadcast is off.
+    pub recipients: Vec<u64>,
+    /// Bracketed paste on or off, per writable recipient, sampled once.
+    pub modes: std::collections::HashMap<u64, bool>,
+    /// The question as Kettle would ask it for these modes.
+    pub ask: PasteAsk,
+}
+
+/// What answering a paste question does.
+#[derive(Debug)]
+pub(super) enum PasteDispatch {
+    /// The broadcast scope or its recipients changed since the question:
+    /// the answer covered other panes, and nothing is sent.
+    Drop,
+    /// Send the text, encoded for these modes: the snapshot that judged it.
+    Deliver(std::collections::HashMap<u64, bool>),
+    /// A recipient left bracketed paste after the question was asked. Nothing
+    /// is sent, and this question, asked for the modes of now, replaces it.
+    AskAgain(Box<ConfirmDialogState>),
+}
+
+/// Decide what the answer `answered` (a paste action) does for the
+/// recipients as they are `now`. The handler only carries the result out.
+pub(super) fn text_paste_dispatch(
+    answered: &ConfirmAction,
+    now: PasteNow,
+    tr: kettle_i18n::Translator,
+) -> PasteDispatch {
+    let ConfirmAction::Paste {
+        target,
+        text,
+        broadcast,
+        recipients,
+        unbracketed,
+    } = answered
+    else {
+        return PasteDispatch::Drop;
+    };
+    // Consent covers the original pane or the unchanged broadcast scope and
+    // recipient set, nothing else.
+    if now.broadcast != *broadcast || now.recipients != *recipients {
+        return PasteDispatch::Drop;
+    }
+    match paste_answer(*unbracketed, now.ask.policy, text, &now.modes) {
+        PasteAnswer::Deliver => PasteDispatch::Deliver(now.modes),
+        PasteAnswer::AskAgain => PasteDispatch::AskAgain(Box::new(text_paste_confirmation(
+            *target,
+            text,
+            now.broadcast,
+            now.recipients,
+            PasteAsk {
+                reasked: true,
+                ..now.ask
+            },
+            tr,
+        ))),
+    }
+}
+
+/// Whether the answer to a paste question still covers the paste.
+///
+/// A question asked while every recipient had bracketed paste on said that
+/// Kettle removes ESC and the signal bytes, and its line breaks were not
+/// going to run anything. A program can turn bracketed paste off while the
+/// question is open. The same answer would then send those controls and run
+/// those lines, so it is not carried over: Kettle asks again, for the modes
+/// of now.
+///
+/// That holds for any text with a line break or a control in it, whichever
+/// policy asked: it is the default policy's own rule for a program without
+/// bracketed paste. Text with neither reads the same in both modes and goes
+/// through, as does everything once the policy is `off`. A question asked
+/// with bracketed paste already off described the worst case, and its
+/// answer stands in any mode.
+pub(super) fn paste_answer(
+    asked_unbracketed: bool,
+    protection: kettle_config::PasteProtection,
+    text: &str,
+    modes: &std::collections::HashMap<u64, bool>,
+) -> PasteAnswer {
+    use kettle_config::PasteProtection;
+    let now_unbracketed = modes.values().any(|bracketed| !bracketed);
+    if protection != PasteProtection::Off
+        && !asked_unbracketed
+        && now_unbracketed
+        && PasteProtection::Auto.confirms(text, false)
+    {
+        PasteAnswer::AskAgain
+    } else {
+        PasteAnswer::Deliver
+    }
 }
 
 pub(super) fn text_paste_needs_confirmation(

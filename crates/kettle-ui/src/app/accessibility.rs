@@ -932,6 +932,12 @@ impl App {
             for button in &dialog.buttons {
                 button.label.hash(&mut hasher);
                 button.destructive.hash(&mut hasher);
+                button.access_key.hash(&mut hasher);
+            }
+            if let Some(detail) = dialog.detail.as_ref() {
+                detail.description.hash(&mut hasher);
+                detail.link.hash(&mut hasher);
+                detail.link_access_key.hash(&mut hasher);
             }
         }
         overlay.settings.is_some().hash(&mut hasher);
@@ -1305,7 +1311,7 @@ impl App {
             match confirmation_accessibility_action(
                 request.target_node,
                 request.action,
-                dialog.buttons.len(),
+                dialog.stop_count(),
             ) {
                 Some(ConfirmAccessibilityAction::Focus(index)) => {
                     if let Some(dialog) = ws.confirm_dialog.as_mut() {
@@ -2586,7 +2592,18 @@ pub(super) fn modal_accessibility_projection(
             accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
         };
         let container_id = accessibility_modal_id(1, 0);
-        let mut children = Vec::with_capacity(dialog.buttons.len());
+        // An access key is set on the node and also said in its description:
+        // the AT-SPI adapter does not export key bindings.
+        let access_key = |node: &mut Node, key: Option<char>, mut description: Vec<String>| {
+            if let Some(key) = key {
+                node.set_access_key(key.to_string());
+                description.push(tr.confirm_paste_a11y_access_key(&key.to_string()));
+            }
+            if !description.is_empty() {
+                node.set_description(description.join(". "));
+            }
+        };
+        let mut buttons = Vec::with_capacity(dialog.buttons.len());
         for (index, button) in dialog.buttons.iter().enumerate() {
             let id = accessibility_modal_id(1, index + 1);
             let mut node = Node::new(Role::Button);
@@ -2594,27 +2611,60 @@ pub(super) fn modal_accessibility_projection(
             if let Some(rect) = layout.buttons.get(index) {
                 node.set_bounds(bounds(*rect));
             }
+            access_key(&mut node, button.access_key, Vec::new());
             node.add_action(AccessibilityAction::Focus);
             node.add_action(AccessibilityAction::Click);
-            children.push(id);
+            buttons.push(id);
             projection.nodes.push((id, node));
         }
+        // The link is the stop after the last button and the first child:
+        // it is read, and reached with Tab, where it is painted.
+        let link = layout.link_stop().and_then(|stop| {
+            let detail = dialog.detail.as_ref()?;
+            let id = accessibility_modal_id(1, stop + 1);
+            let mut node = Node::new(Role::Link);
+            node.set_label(detail.link.clone());
+            node.set_bounds(bounds(layout.stop_rect(stop)?));
+            access_key(
+                &mut node,
+                detail.link_access_key,
+                vec![
+                    tr.text(kettle_i18n::Text::ConfirmPasteA11ySettings)
+                        .to_string(),
+                ],
+            );
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            projection.nodes.push((id, node));
+            Some(id)
+        });
         let mut node = Node::new(Role::AlertDialog);
         node.set_label(dialog.heading.clone());
-        node.set_description(dialog.body.clone());
+        node.set_description(match &dialog.detail {
+            Some(detail) => detail.description.clone(),
+            None => dialog.body.clone(),
+        });
         node.set_modal();
         if layout.max_scroll > 0 {
             node.add_action(AccessibilityAction::ScrollUp);
             node.add_action(AccessibilityAction::ScrollDown);
         }
-        node.set_children(children.clone());
+        node.set_children(
+            link.into_iter()
+                .chain(buttons.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         node.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));
-        projection.focus = children
-            .get(dialog.focus_idx.min(children.len().saturating_sub(1)))
-            .copied()
-            .or(Some(container_id));
+        projection.focus = if link.is_some() && layout.link_stop() == Some(dialog.focus_idx) {
+            link
+        } else {
+            buttons
+                .get(dialog.focus_idx.min(buttons.len().saturating_sub(1)))
+                .copied()
+                .or(Some(container_id))
+        };
         return projection;
     }
 

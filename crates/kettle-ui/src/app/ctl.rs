@@ -1421,18 +1421,17 @@ impl App {
         let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
             let geometry = kettle_render::ConfirmDialogLayout::new(
                 (surface.0 as f32, surface.1 as f32),
-                (self.overlay_text_cell_width(target), self.overlay_text_line_height(target)),
-                target.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32), dialog,
+                (
+                    self.overlay_text_cell_width(target),
+                    self.overlay_text_line_height(target),
+                ),
+                target
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor() as f32),
+                dialog,
             );
-            serde_json::json!({
-                "rect": rect_json(geometry.rect),
-                "heading_rect": rect_json(geometry.heading_rect),
-                "body_rect": rect_json(geometry.body_rect),
-                "max_scroll": geometry.max_scroll,
-                "scroll_offset": geometry.scroll_offset,
-                "whole_scroll": geometry.whole_scroll,
-                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
-            })
+            confirmation_json(dialog, &geometry)
         });
         let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {
             Some("confirm_dialog")

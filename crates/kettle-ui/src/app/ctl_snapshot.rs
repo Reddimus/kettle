@@ -233,6 +233,56 @@ pub(super) fn ctl_page_values_with_page(
     Response::ok(req.id, serde_json::Value::Object(result))
 }
 
+/// A confirmation as `ui_geometry` reports it: rectangles, flags and the
+/// fixed labels of its buttons and link. The heading, the body, and a paste
+/// question's preview, counts, findings and policy text are derived from
+/// private text (what is being pasted, which program is running) and are
+/// never part of control output.
+pub(super) fn confirmation_json(
+    dialog: &kettle_render::ConfirmDialogOverlay,
+    geometry: &kettle_render::ConfirmDialogLayout,
+) -> serde_json::Value {
+    let rects = |rects: &[kettle_render::Rect4]| {
+        rects
+            .iter()
+            .map(|rect| rect_json(*rect))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "rect": rect_json(geometry.rect),
+        "heading_rect": rect_json(geometry.heading_rect),
+        "body_rect": rect_json(geometry.body_rect),
+        "max_scroll": geometry.max_scroll,
+        "scroll_offset": geometry.scroll_offset,
+        "whole_scroll": geometry.whole_scroll,
+        "stacked": geometry.stacked,
+        "buttons": geometry.buttons.iter().zip(&dialog.buttons).enumerate().map(|(index, (rect, button))| serde_json::json!({
+            "rect": rect_json(*rect),
+            "label": button.label,
+            "focused": index == dialog.focus_idx,
+            "destructive": button.destructive,
+            "neutral": button.neutral,
+            "access_key": button.access_key,
+            "hovered": dialog.hover_idx == Some(index),
+            "pressed": dialog.pressed_idx == Some(index),
+        })).collect::<Vec<_>>(),
+        "detail": geometry.detail.as_ref().zip(dialog.detail.as_ref()).map(|(placed, detail)| serde_json::json!({
+            "preview_rect": rect_json(placed.preview_rect),
+            "token_rects": rects(&placed.tokens),
+            "summary_rect": rect_json(placed.summary_rect),
+            "finding_rects": rects(&placed.finding_rects),
+            "policy_rect": rect_json(placed.policy_rect),
+            "link": {
+                "rect": rect_json(placed.link_rect),
+                "label": detail.link,
+                "wrapped": placed.link_wrapped,
+                "focused": geometry.link_stop() == Some(dialog.focus_idx),
+                "access_key": detail.link_access_key,
+            },
+        })),
+    })
+}
+
 /// A jump-to-bottom button in `ui_geometry`: the rect the painter fills,
 /// the pointer hits and AccessKit bounds, its state, and its key hint when
 /// it shows one. The hint is a chord from the keymap; the count stays out.

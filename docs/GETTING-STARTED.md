@@ -155,13 +155,17 @@ opens it. Menus and the command palette show native shortcut symbols on macOS
 
 Pasting text that contains a newline or a control character other than tab
 asks for confirmation when the receiving program has not enabled bracketed
-paste. Cancel is selected initially. Choose Paste to send the original text,
-or Paste as one line to replace line breaks and other control characters with
-spaces (tabs stay tabs). A short preview escapes control characters so they
-are visible. Bracketed paste keeps multi-line text and strips embedded ESC
-bytes so pasted text cannot close the bracket early. Set `paste-protection =
-always` to confirm multi-line text even in editors, or `paste-protection = off`
-to disable confirmation. See [configuration](CONFIG.md).
+paste. The dialog says why it asked, and Cancel is selected initially. Choose
+Paste to send the original text, Paste without controls (offered and
+recommended when the text has control characters) to drop them, or Paste as
+one line to replace line breaks and other control characters with spaces
+(tabs stay tabs). A short preview spells control characters in ASCII (`ESC`,
+`^C`) so they are visible, and a list says what each one does. Bracketed paste
+keeps multi-line text and strips embedded ESC bytes so pasted text cannot
+close the bracket early. Set `paste-protection = always` to confirm multi-line
+text even in editors, or `paste-protection = off` to disable confirmation, in
+the config or under Settings > Behavior > Paste protection, which the dialog's
+"Paste settings…" link opens. See [configuration](CONFIG.md).
 
 ## 5. Search screen and scrollback
 

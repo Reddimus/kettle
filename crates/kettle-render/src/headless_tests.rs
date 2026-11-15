@@ -1467,17 +1467,15 @@ fn confirmation_overlay() -> Overlay {
             buttons: vec![
                 ConfirmDialogButton {
                     label: "Cancel".into(),
-                    destructive: false,
+                    ..Default::default()
                 },
                 ConfirmDialogButton {
                     label: "Close window".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
-            focus_idx: 0,
-            hover_idx: None,
-            pressed_idx: None,
-            scroll: 0,
+            ..Default::default()
         }),
         ..focused(true)
     }
