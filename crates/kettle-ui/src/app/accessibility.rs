@@ -3345,16 +3345,19 @@ fn accessibility_viewing_history_id(pane: u64) -> NodeId {
     NodeId((1 << 48) | (pane << 1) | 1)
 }
 
-/// The AccessKit nodes for a pane's place in its history, each bounded
-/// where it is painted:
+/// The AccessKit nodes for a pane's place in its history:
 ///
-/// - the jump button, named for what it does and how far back the view is,
-///   with the key bound to the same action as its shortcut;
-/// - the "Start of kept history" label, read as the text it shows;
+/// - the jump button, bounded where it is painted, named for what it does
+///   and how far back the view is, with the key bound to the same action as
+///   its shortcut;
+/// - the "Start of kept history" label, bounded where it is painted and read
+///   as the text it shows;
 /// - while `viewing_history` (the focused pane is scrolled back), one polite
-///   status, "Viewing history". It carries no count and keeps the terminal's
-///   bounds, so it is spoken when the pane leaves live output and not again
-///   as the view scrolls.
+///   status, "Viewing history". Its id, label and bounds do not depend on
+///   the offset, so it is spoken when the pane leaves live output and not
+///   again as the view scrolls. Its bounds are an empty rect at the
+///   terminal's corner, so exploring the pane by pointer or touch never
+///   lands on it in place of the text under it.
 pub(super) fn scrollback_accessibility_nodes(
     pane: u64,
     terminal: kettle_render::Rect4,
@@ -3391,7 +3394,11 @@ pub(super) fn scrollback_accessibility_nodes(
         let mut status = Node::new(Role::Status);
         status.set_label(tr.text(kettle_i18n::Text::ScrollbackA11yViewing));
         status.set_live(accesskit::Live::Polite);
-        status.set_bounds(bounds(terminal));
+        // A point at the terminal's corner: the status is announced, not
+        // explored, so pointer and touch exploration over the pane find its
+        // text and controls, never this.
+        let (x, y, _, _) = terminal;
+        status.set_bounds(bounds((x, y, 0.0, 0.0)));
         nodes.push((accessibility_viewing_history_id(pane), status));
     }
     nodes

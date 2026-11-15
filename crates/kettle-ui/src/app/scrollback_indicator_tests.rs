@@ -199,10 +199,11 @@ fn accessibility_and_ctl_read_the_painted_kept_history_label() {
 }
 
 /// One polite "Viewing history" status while the pane is the focused one
-/// and scrolled back, and none otherwise. It carries no count and keeps the
-/// terminal's bounds, so the node is identical from one offset to the next,
-/// across a change in the count's digits and with or without the button
-/// and the label beside it: scrolling further announces nothing again.
+/// and scrolled back, and none otherwise. It carries no count, and its rect
+/// is an empty one at the terminal's corner, so the node is identical from
+/// one offset to the next, across a change in the count's digits and with
+/// or without the button and the label beside it: scrolling further
+/// announces nothing again.
 #[test]
 fn the_viewing_history_status_does_not_change_as_the_view_scrolls() {
     for (tr, text) in [
@@ -231,7 +232,8 @@ fn the_viewing_history_status_does_not_change_as_the_view_scrolls() {
         let (id, node) = status(Some(360), true).expect("a status");
         assert_eq!(node.label(), Some(text));
         assert_eq!(node.live(), Some(Live::Polite));
-        assert_eq!(rect_of(&node), terminal(1.0));
+        let (x, y, _, _) = terminal(1.0);
+        assert_eq!(rect_of(&node), (x, y, 0.0, 0.0));
         assert!(!text.chars().any(|c| c.is_ascii_digit()));
         for offset in [1, 361, 999, 1_000, 10_000] {
             assert_eq!(
@@ -348,6 +350,86 @@ fn only_the_focused_scrolled_back_pane_is_viewing_history() {
     // Focus moves to the pane that is still scrolled back.
     assert!(panes.ws.mux.focus_pane(other));
     assert_eq!(viewing_history_pane(&panes.ws), Some(other));
+}
+
+/// Exploring a scrolled-back pane by pointer or touch finds its text, its
+/// button and its label, never the "Viewing history" status, wherever in
+/// the terminal it points: AccessKit's own hit test, over the tree the
+/// window hands the platform, the status after the terminal text as the
+/// window orders it.
+#[test]
+fn exploring_a_scrolled_back_pane_never_lands_on_the_status() {
+    use accesskit::{NodeId, Point, TreeId, TreeInfo, TreeUpdate};
+    let tr = Translator::default();
+    let terminal = terminal(1.0);
+    let (x, y, w, h) = terminal;
+    let pill = pill(1.0, 10_000, Some("Ctrl+End"), &tr);
+    let label = kept(1.0, &tr);
+    let history =
+        scrollback_accessibility_nodes(PANE, terminal, Some(&pill), Some(&label), true, &tr);
+    let status = history
+        .iter()
+        .find(|(_, node)| node.role() == Role::Status)
+        .map(|(id, _)| *id)
+        .expect("a status");
+    // The pane's text, one row node across the text area, as the tree lays
+    // its rows.
+    let (root, pane, text) = (NodeId(0), NodeId(1), NodeId(2));
+    let mut row = Node::new(Role::Label);
+    row.set_value("history");
+    row.set_bounds(accesskit::Rect::new(
+        f64::from(x + 12.0),
+        f64::from(y + 12.0),
+        f64::from(x + w - 12.0),
+        f64::from(y + h - 12.0),
+    ));
+    let mut terminal_node = Node::new(Role::Terminal);
+    terminal_node.set_bounds(accesskit::Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(x + w),
+        f64::from(y + h),
+    ));
+    let mut children = vec![text];
+    children.extend(history.iter().map(|(id, _)| *id));
+    terminal_node.set_children(children);
+    let mut window = Node::new(Role::Window);
+    window.set_children(vec![pane]);
+    let mut nodes = vec![(root, window), (pane, terminal_node), (text, row)];
+    nodes.extend(history);
+    let tree = accesskit_consumer::Tree::new(
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeInfo::new(root)),
+            tree_id: TreeId::ROOT,
+            focus: root,
+        },
+        true,
+    );
+    let state = tree.state();
+    let top = state.root();
+    let mut checked = 0;
+    for step_y in 0..=20 {
+        for step_x in 0..=20 {
+            let point = Point::new(
+                f64::from(x) + f64::from(w) * f64::from(step_x) / 20.0,
+                f64::from(y) + f64::from(h) * f64::from(step_y) / 20.0,
+            );
+            if let Some(found) = top.node_at_point(point, &accesskit_consumer::common_filter) {
+                assert_ne!(found.locate().0, status, "{point:?} lands on the status");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked >= 400);
+    // The button and the label are still found where they are painted.
+    let centre = |(x, y, w, h): Rect4| Point::new(f64::from(x + w / 2.0), f64::from(y + h / 2.0));
+    for (rect, role) in [(pill.rect, Role::Button), (label.rect, Role::Label)] {
+        let found = top
+            .node_at_point(centre(rect), &accesskit_consumer::common_filter)
+            .expect("a node");
+        assert_eq!(found.role(), role);
+    }
 }
 
 /// When the pointer leaves the window a jump button is no longer hovered,
