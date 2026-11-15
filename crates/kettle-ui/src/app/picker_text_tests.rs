@@ -870,7 +870,8 @@ fn palette_options_report_their_place_among_all_results() {
                 .collect();
             assert_eq!(options.len(), total, "{query:?}");
             for (n, (_, node)) in options.iter().enumerate() {
-                assert_eq!(node.position_in_set(), Some(n + 1), "{query:?}");
+                // AccessKit counts from zero; AT-SPI shows `posinset` n + 1.
+                assert_eq!(node.position_in_set(), Some(n), "{query:?}");
                 assert_eq!(node.size_of_set(), Some(total), "{query:?}");
             }
             let list = projection

@@ -2406,9 +2406,10 @@ fn push_picker_accessibility(
                 None => {}
             }
             if row.enabled {
-                position += 1;
+                // Zero-based, unlike ARIA: the AT-SPI adapter adds one.
                 option.set_position_in_set(position);
                 option.set_size_of_set(results);
+                position += 1;
             } else {
                 option.set_disabled();
             }
