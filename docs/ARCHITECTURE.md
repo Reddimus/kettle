@@ -5446,10 +5446,15 @@ at most one entry per kind of control, ranked by an enum's derived order with
 the end marker first; that order picks the control the preview is anchored on
 and the four rows shown. With more than four kinds, rows go first to the end
 markers and the kinds that reach the program, then to ESC and the signal bytes
-a bracketed paste removes, and the rows chosen stay in ranked order. Preview work is capped at 160 visible characters and
-three lines whatever the clipboard size: the window opens at the start of the
-text and moves, with at most 40 characters of lead-in, only when it ends before
-the anchor does.
+a bracketed paste removes, and the rows chosen stay in ranked order.
+
+Preview work is capped at 160 columns and three lines whatever the clipboard
+size. Columns count what is drawn: a tab is four (it is shown as spaces), a
+chip is as wide as its letters (`ESC` and `CSI` three, `^C` two, a
+direction-formatting character such as `U+202E` six), and any other
+character one, wide ones included. The window opens at the start of the text
+and moves, with at most 40 columns of lead-in, only when it ends before the
+anchor does.
 
 A paste question carries a `PasteQuestion` beside the generic dialog state: a
 `kettle_render::ConfirmDialogDetail` (preview with token ranges, summary,

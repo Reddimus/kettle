@@ -146,7 +146,7 @@ found (`ESC[201~` or `CSI 201~`), says when a receiving program has not turned
 on bracketed paste, so each line break arrives as Enter, or says that the
 policy is Always. Below that it shows:
 
-- A preview of at most three lines and 160 characters. Each control character
+- A preview of at most three lines and 160 columns. Each control character
   is spelled in ASCII inside an outlined chip: `ESC`, `BEL`, `DEL`, `^C`,
   `CSI`, `U+202E`. A tab is shown as spaces and is not flagged. When the most
   serious control lies further down than the preview reaches, the preview
