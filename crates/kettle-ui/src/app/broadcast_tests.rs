@@ -771,8 +771,9 @@ fn ui_geometry_reports_each_panes_broadcast_role() {
 }
 
 /// A group broadcast outlines receivers in other windows, which read the
-/// focused window's scope: a group scope set or cleared, and focus moving
-/// between windows while any window broadcasts to a group, redraw them.
+/// focused window's scope: a group scope set or cleared, focus moving
+/// between windows while any window broadcasts to a group, and a window that
+/// broadcast to a group closing, redraw them.
 #[test]
 fn group_broadcasts_redraw_the_other_windows_they_reach() {
     let source = production_source();
@@ -798,4 +799,15 @@ fn group_broadcasts_redraw_the_other_windows_they_reach() {
     let focused = &focused[..focused.find("if self.quick_terminal").expect("arm body")];
     assert!(focused.contains("self.focused_seq = ws.seq;"));
     assert!(focused.contains("self.broadcast_focus_moved(ws);"));
+    let close = source
+        .split("if take_window_close_request(&mut self.pending_window_closes, seq) {")
+        .nth(1)
+        .expect("the close branch");
+    let close = &close[..close.find("\n            return;\n").expect("its end")];
+    let read = close
+        .find("let broadcast_crossed = crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast);")
+        .expect("the closing window's scope is read");
+    let dropped = close.find("drop(ws);").expect("the window is dropped");
+    assert!(read < dropped, "read before the window is dropped");
+    assert!(close.contains("if broadcast_crossed {\n                self.redraw_other_windows();"));
 }
