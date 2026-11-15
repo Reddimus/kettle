@@ -1936,18 +1936,20 @@ impl Renderer {
             // While broadcast / group-input mode is on, every visible pane the
             // focused pane's input reaches is outlined in theme palette[3]
             // (yellow, the warning slot the tab-bar accent uses), lifted to 3:1
-            // on the pane background: the sending pane solid, each receiving
+            // on that pane's own background: the sending pane solid, each receiving
             // pane dashed (`pane_border_style`). The scope may be the tab, the
             // window or a named group, so receivers are not simply "the other
             // panes"; the UI resolves each pane's role from the scope's
             // targets. The tab-bar indicator alone is not enough, because with
             // `tab-bar = auto` and one tab open the tab bar is hidden. Panes
             // outside the scope keep their normal divider color.
+            // Measured against the backdrop this pane paints inside its
+            // outline, which follows the pane's own OSC 11 colour.
             let border = pane_border_style(
                 cfg,
                 theme,
                 self.ui_accent(cfg, theme),
-                default_bg,
+                color::pane_background(theme, &pv.snap.colors),
                 pv.focused,
                 pv.broadcast,
             );

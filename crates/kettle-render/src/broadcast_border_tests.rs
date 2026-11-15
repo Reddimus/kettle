@@ -507,10 +507,10 @@ fn quads_and_the_outline_shader_dash_a_fractional_edge_alike() {
     assert!(quad_row.iter().filter(|on| !**on).count() >= 10, "dashed");
 }
 
-/// The outline is lifted against the background actually painted behind
-/// it: the frame's pane background, which a program sets with OSC 11 in
-/// the focused pane. TokyoNight Night's yellow passes on its own dark
-/// background and needs lifting on white.
+/// Each outline is lifted against the background its own pane paints inside
+/// it: the colour the pane's program set with OSC 11, else the theme's,
+/// whichever pane has focus. TokyoNight Night's yellow passes on its own
+/// dark background and needs lifting on white.
 #[test]
 fn the_outline_is_lifted_against_the_background_a_program_sets() {
     let _serialized = gpu_test_guard();
@@ -526,6 +526,12 @@ fn the_outline_is_lifted_against_the_background_a_program_sets() {
         "the program's background"
     );
     let plain = snapshot_of(20, 8, b"");
+    let on_white = broadcast_border_color(&cfg.theme, white);
+    let on_theme = broadcast_border_color(&cfg.theme, cfg.theme.background);
+    assert_ne!(
+        on_white, on_theme,
+        "the theme's yellow needs lifting on white"
+    );
     let mut panes = three_panes(
         &plain,
         [
@@ -535,22 +541,27 @@ fn the_outline_is_lifted_against_the_background_a_program_sets() {
         ],
         false,
     );
-    panes[0].snap = &painted;
-    let on_white = broadcast_border_color(&cfg.theme, white);
-    let on_theme = broadcast_border_color(&cfg.theme, cfg.theme.background);
-    assert_ne!(
-        on_white, on_theme,
-        "the theme's yellow needs lifting on white"
-    );
-    capture(&mut renderer, &cfg, &panes, &focused(true));
-    let quads: Vec<QuadInstance> = renderer.quads.uploaded().expect("retained").collect();
-    let count = |color: Rgb, i: usize| {
-        quads
-            .iter()
+    let count = |renderer: &crate::Renderer, color: Rgb, i: usize| {
+        renderer
+            .quads
+            .uploaded()
+            .expect("retained")
             .filter(|quad| quad.color == colored(color) && inside(quad, leaf(i)))
             .count()
     };
-    assert_eq!(count(on_white, 0), 4, "the sender");
-    assert!(count(on_white, 1) > 4, "the receiver's dashes");
-    assert_eq!(count(on_theme, 0) + count(on_theme, 1), 0);
+    // An unfocused receiver whose program paints it white.
+    panes[1].snap = &painted;
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert!(count(&renderer, on_white, 1) > 4, "the receiver's dashes");
+    assert_eq!(count(&renderer, on_theme, 1), 0);
+    assert_eq!(count(&renderer, on_theme, 0), 4, "the sender keeps its own");
+    // The focused sender painted white instead.
+    panes[0].snap = &painted;
+    panes[1].snap = &plain;
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert_eq!(count(&renderer, on_white, 0), 4, "the sender");
+    assert!(
+        count(&renderer, on_theme, 1) > 4,
+        "the receiver keeps its own"
+    );
 }

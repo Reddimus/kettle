@@ -511,7 +511,7 @@ impl Renderer {
         // not scrolled (display_offset == 0).
         let display_off = snap.display_offset as i32;
         let screen_rows = snap.screen_lines as i32;
-        let default_bg = color::resolve_query(257, theme, term_colors).unwrap_or(theme.background);
+        let default_bg = color::pane_background(theme, term_colors);
         // A dimmed split's cell backgrounds show through the pane dimmer, while
         // its highlight fills are painted above it: highlights resolve against
         // the background as shown.
