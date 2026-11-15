@@ -3234,8 +3234,10 @@ three config policies; `cargo test -p kettle-ui paste` checks paste preview,
 flattening and ESC neutralization, the C1 markers and each signal byte the
 encoder drops, the dialog's reason sentences, findings rows, preview anchoring
 on a late end marker, access keys (the typed letter only; none on macOS),
-focus order with the Settings link, `y` under `vim-menu-nav`, and the AccessKit
-tree against the layout. Keys are tested through `confirm_key_outcome` with
+focus order with the Settings link, `y` under `vim-menu-nav`, an answer given
+after a pane leaves bracketed paste (`paste_answer`, with a real pane whose
+mode is switched and whose input is captured), and the AccessKit tree against
+the layout. Keys are tested through `confirm_key_outcome` with
 real `Key` values, and what a key sends through a pane with captured input;
 `ui_geometry` privacy is tested by serialising a dialog whose every text
 field holds a canary. Two source-order guards remain where no seam reaches

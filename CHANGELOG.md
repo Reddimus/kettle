@@ -245,7 +245,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   four findings say what each kind of control does in the current mode, with
   backspace and delete on separate rows: one that Kettle removes whichever
   button is chosen says so (the end code always; ESC and the signal keys
-  inside a bracketed paste). Text-direction formatting characters such as
+  inside a bracketed paste). When the text holds more than four kinds, the
+  rows go to the end code and the ones that reach the program before the ones
+  a bracketed paste removes. Text-direction formatting
+  characters such as
   U+202E are listed and counted, and Paste without controls removes them.
   Counts of zero are gone. The
   four choices share one row when the window is wide enough and stack edge to
@@ -757,6 +760,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   controls. When the recommended choice is the plain Paste (multi-line text
   with no control characters), `y` does nothing: press Enter on the focused
   button, or use its access key.
+
+- A program that turned bracketed paste off while the Confirm paste dialog
+  was open received the answer given for the other mode: the dialog had said
+  Kettle removes `ESC` and the signal keys, and Paste then sent them and ran
+  each line. Kettle now sends nothing in that case and asks again, describing
+  the paste for the mode the program is in.
 
 - Up and Down in a confirmation whose buttons are stacked move focus from one
   button to the next. They only scrolled the text, which did nothing visible

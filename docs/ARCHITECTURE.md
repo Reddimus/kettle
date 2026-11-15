@@ -5443,8 +5443,10 @@ halves of a C1 marker.
 findings and the control-removing alternative. It removes whole escape/control
 strings, retaining TAB/CR/LF even within malformed strings. `findings` returns
 at most one entry per kind of control, ranked by an enum's derived order with
-the end marker first; that order picks the four rows shown and the control the
-preview is anchored on. Preview work is capped at 160 visible characters and
+the end marker first; that order picks the control the preview is anchored on
+and the four rows shown. With more than four kinds, rows go first to the end
+markers and the kinds that reach the program, then to ESC and the signal bytes
+a bracketed paste removes, and the rows chosen stay in ranked order. Preview work is capped at 160 visible characters and
 three lines whatever the clipboard size: the window opens at the start of the
 text and moves, with at most 40 characters of lead-in, only when it ends before
 the anchor does.
@@ -5492,6 +5494,16 @@ when a control survives it or the text carries an end marker. Bidirectional
 formatting characters are a finding, counted with the controls and removed
 by `without_controls`; `PasteProtection::confirms` does not ask for them
 alone. `ui_geometry`'s confirmation object is built by `confirmation_json`.
+
+The action records whether the question was asked for an unbracketed
+recipient. When it is answered, the dispatch arm samples the recipients'
+modes once and `paste_answer` judges the answer on that snapshot: a question
+asked with every recipient bracketed does not cover a recipient that has
+since turned bracketed paste off, if the chosen text has a line break or a
+control in it. Kettle then sends nothing and opens the question again for the
+modes of now (`ask_text_paste`). Otherwise the same snapshot encodes the
+paste. A mode change between that sample and the write is not covered; the
+snapshot decides, as it does for a paste Kettle never asked about.
 Path pastes retain their stricter rejection of control characters in filenames.
 
 OSC 52 operations remain ordered in the terminal clipboard journal. The UI

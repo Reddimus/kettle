@@ -866,12 +866,23 @@ impl App {
         text: &str,
         modes: &std::collections::HashMap<u64, bool>,
     ) -> bool {
-        let recipients = self.broadcast_recipients(ws);
         let needs_confirmation =
             text_paste_needs_confirmation(self.cfg.paste_protection, text, modes);
-        if !needs_confirmation {
-            return false;
+        if needs_confirmation {
+            self.ask_text_paste(ws, target, text, modes);
         }
+        needs_confirmation
+    }
+
+    /// Open the paste question for `text`, described for `modes`.
+    pub(super) fn ask_text_paste(
+        &mut self,
+        ws: &mut WindowState,
+        target: Option<u64>,
+        text: &str,
+        modes: &std::collections::HashMap<u64, bool>,
+    ) {
+        let recipients = self.broadcast_recipients(ws);
         let dialog = text_paste_confirmation(
             target,
             text,
@@ -889,7 +900,6 @@ impl App {
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
-        true
     }
 
     pub(super) fn deliver_text_paste(
@@ -2112,9 +2122,24 @@ pub(super) fn text_paste_confirmation(
         kettle_config::PasteProtection::Off => T::SettingsValueOff,
     }));
     let mut description = vec![body.clone(), summary.join(" \u{b7} ")];
-    let findings = kinds
-        .iter()
+    // With more kinds than rows, the rows go first to the end marker, which
+    // is why Kettle asked, and to the controls that reach the program. ESC
+    // and the signal bytes that a bracketed paste removes never push a live
+    // control into the count of further kinds. The rows chosen keep their
+    // order of severity.
+    let (first, removed): (Vec<_>, Vec<_>) = kinds.iter().enumerate().partition(|(_, finding)| {
+        matches!(finding.kind, Kind::EndMarker | Kind::EndMarkerC1)
+            || !encoder_removes(finding.kind, ask)
+    });
+    let mut rows: Vec<_> = first
+        .into_iter()
+        .chain(removed)
         .take(FINDING_ROWS)
+        .collect();
+    rows.sort_by_key(|&(rank, _)| rank);
+    let findings = rows
+        .into_iter()
+        .map(|(_, finding)| finding)
         .map(|finding| {
             let (token, meaning) = finding_text(finding.kind, &tr);
             // A row says what happens to the control in this mode: one the
@@ -2159,6 +2184,7 @@ pub(super) fn text_paste_confirmation(
             text: text.to_string(),
             broadcast,
             recipients,
+            unbracketed: ask.unbracketed,
         },
         scroll: 0,
         armed_press: None,
@@ -2195,6 +2221,48 @@ pub(super) fn text_paste_modes<'a>(
             (id, bracketed)
         })
         .collect()
+}
+
+/// What an answered paste question does with its recipients' modes as they
+/// are when the answer arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PasteAnswer {
+    Deliver,
+    AskAgain,
+}
+
+/// Whether the answer to a paste question still covers the paste.
+///
+/// A question asked while every recipient had bracketed paste on said that
+/// Kettle removes ESC and the signal bytes, and its line breaks were not
+/// going to run anything. A program can turn bracketed paste off while the
+/// question is open. The same answer would then send those controls and run
+/// those lines, so it is not carried over: Kettle asks again, for the modes
+/// of now.
+///
+/// That holds for any text with a line break or a control in it, whichever
+/// policy asked: it is the default policy's own rule for a program without
+/// bracketed paste. Text with neither reads the same in both modes and goes
+/// through, as does everything once the policy is `off`. A question asked
+/// with bracketed paste already off described the worst case, and its
+/// answer stands in any mode.
+pub(super) fn paste_answer(
+    asked_unbracketed: bool,
+    protection: kettle_config::PasteProtection,
+    text: &str,
+    modes: &std::collections::HashMap<u64, bool>,
+) -> PasteAnswer {
+    use kettle_config::PasteProtection;
+    let now_unbracketed = modes.values().any(|bracketed| !bracketed);
+    if protection != PasteProtection::Off
+        && !asked_unbracketed
+        && now_unbracketed
+        && PasteProtection::Auto.confirms(text, false)
+    {
+        PasteAnswer::AskAgain
+    } else {
+        PasteAnswer::Deliver
+    }
 }
 
 pub(super) fn text_paste_needs_confirmation(

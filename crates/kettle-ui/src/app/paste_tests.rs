@@ -1598,9 +1598,214 @@ fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
             "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
         )
     );
-    assert!(dispatch.contains(
-        "self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target))"
-    ));
+    // One snapshot of the modes judges the answer and encodes the paste.
+    let answered = dispatch
+        .split("unbracketed,\n            } => {")
+        .nth(1)
+        .unwrap()
+        .split("ConfirmAction::RebindKeybind")
+        .next()
+        .unwrap();
+    assert_eq!(answered.matches("self.text_paste_modes(ws, target)").count(), 1);
+    let judged = answered.find("paste_answer(unbracketed, self.cfg.paste_protection, &text, &modes)");
+    let sent = answered.find("self.deliver_text_paste(ws, target, &text, &modes)");
+    let asked = answered.find("self.ask_text_paste(ws, target, &text, &modes)");
+    assert!(judged.unwrap() < sent.unwrap() && sent.unwrap() < asked.unwrap());
+}
+
+/// A pane with bracketed paste on and its input captured, the question Kettle
+/// asks it about `text`, and the modes that question was asked for.
+fn bracketed_question(
+    text: &str,
+    policy: kettle_config::PasteProtection,
+) -> (
+    Mux,
+    u64,
+    impl Fn() -> Vec<Vec<u8>>,
+    super::ConfirmDialogState,
+) {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    let (mut mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let captured = mux.panes.get_mut(&pane).unwrap().capture_input_for_test();
+    mux.panes[&pane]
+        .term
+        .term
+        .lock()
+        .unwrap()
+        .set_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let dialog = super::text_paste_confirmation(
+        Some(pane),
+        text,
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(policy, modes.values().any(|bracketed| !bracketed)),
+        kettle_i18n::Translator::default(),
+    );
+    (mux, pane, captured, dialog)
+}
+
+#[test]
+fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
+    use super::paste::{PasteAnswer, paste_answer, paste_text_into_target, text_paste_modes};
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    use kettle_config::PasteProtection::{Always, Auto, Off};
+    let mode = PrivateMode::Named(NamedPrivateMode::BracketedPaste);
+    let text = "echo one\x03\necho \x1b[31mtwo\n";
+    // What the dispatch arm does with an activated stop: judge the answer on
+    // one snapshot of the modes, and send on that snapshot only if it holds.
+    let answer = |mux: &mut Mux, dialog: &super::ConfirmDialogState, index: usize, policy| {
+        let Some(super::ConfirmStopAction::Dispatch(super::ConfirmAction::Paste {
+            target,
+            text,
+            unbracketed,
+            ..
+        })) = super::confirm_stop_action(dialog, index)
+        else {
+            panic!("paste action")
+        };
+        let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+        let answer = paste_answer(unbracketed, policy, &text, &modes);
+        if answer == PasteAnswer::Deliver {
+            paste_text_into_target(mux, target, &text, &modes);
+        }
+        answer
+    };
+
+    // Asked with bracketed paste on: both controls are rows Kettle removes,
+    // and the raw Paste is the last button, not a warning.
+    let (mut mux, pane, captured, dialog) = bracketed_question(text, Always);
+    let detail = &dialog.paste.as_ref().unwrap().detail;
+    assert!(detail.findings.iter().all(|row| row.removed));
+    let raw = dialog.buttons.len() - 1;
+    assert!(!dialog.buttons[raw].destructive());
+
+    // Answered in the mode it was asked for, the raw Paste arrives as the
+    // rows said: bracketed, without ^C and ESC.
+    assert_eq!(answer(&mut mux, &dialog, raw, Always), PasteAnswer::Deliver);
+    assert_eq!(
+        captured().concat(),
+        b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
+    );
+
+    // The program turns bracketed paste off while the question is open. The
+    // same answer would now send ^C and ESC and run both lines, so nothing
+    // is sent and Kettle asks again.
+    mux.panes[&pane].term.term.lock().unwrap().unset_private_mode(mode);
+    assert_eq!(answer(&mut mux, &dialog, raw, Always), PasteAnswer::AskAgain);
+    assert_eq!(answer(&mut mux, &dialog, raw, Auto), PasteAnswer::AskAgain);
+    // The sanitised choice still has two lines to run: asked again too.
+    assert_eq!(answer(&mut mux, &dialog, 1, Auto), PasteAnswer::AskAgain);
+    assert!(captured().is_empty());
+    // A single line that keeps a control is refused under either policy,
+    // though `always` by its own rule asks only about line breaks.
+    let modes = text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    for policy in [Auto, Always] {
+        assert_eq!(
+            paste_answer(false, policy, "echo one\x03", &modes),
+            PasteAnswer::AskAgain
+        );
+    }
+    // Paste as one line has neither a line break nor a control left: it
+    // reads the same in both modes and goes through.
+    let one_line = (0..dialog.buttons.len())
+        .find(|&index| {
+            matches!(
+                dialog.buttons[index],
+                super::ConfirmButton::PasteOneLine { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!(answer(&mut mux, &dialog, one_line, Always), PasteAnswer::Deliver);
+    assert_eq!(captured().concat(), b"echo one  echo  [31mtwo ");
+    // With the policy `off` Kettle does not ask at all.
+    assert_eq!(answer(&mut mux, &dialog, raw, Off), PasteAnswer::Deliver);
+    assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
+
+    // The second question is asked for the modes of now: every control is a
+    // live row and the raw Paste carries the warning colour. Its answer
+    // stands, in this mode and after a return to bracketed paste.
+    let again = super::text_paste_confirmation(
+        Some(pane),
+        text,
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(Always, modes.values().any(|bracketed| !bracketed)),
+        kettle_i18n::Translator::default(),
+    );
+    let detail = &again.paste.as_ref().unwrap().detail;
+    assert!(detail.findings.iter().all(|row| !row.removed));
+    assert!(again.buttons[raw].destructive());
+    assert_eq!(answer(&mut mux, &again, raw, Always), PasteAnswer::Deliver);
+    assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
+    mux.panes[&pane].term.term.lock().unwrap().set_private_mode(mode);
+    assert_eq!(answer(&mut mux, &again, raw, Always), PasteAnswer::Deliver);
+    assert_eq!(
+        captured().concat(),
+        b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
+    );
+    mux.kill_children();
+}
+
+#[test]
+fn a_removed_kind_never_takes_a_row_from_a_live_one() {
+    use kettle_i18n::Text as T;
+    let tr = kettle_i18n::Translator::default();
+    // Six kinds, most serious first: the end marker, ^C, ^Z, ESC, U+202E and
+    // BEL. A bracketed paste removes the first four.
+    let text = "a\x1b[201~b\x03c\x1ad\x1b[31me\x07f\u{202e}g\n";
+    let rows = |unbracketed: bool| {
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, unbracketed),
+            tr,
+        );
+        let detail = dialog.paste.unwrap().detail;
+        let rows: Vec<_> = detail
+            .findings
+            .iter()
+            .map(|row| (row.meaning.clone(), row.removed))
+            .collect();
+        (rows, detail.more, detail.description)
+    };
+    let removed = |meaning: T| (tr.confirm_paste_finding_removed(tr.text(meaning)), true);
+    let live = |meaning: T| (tr.text(meaning).to_string(), false);
+
+    // Bracketed: U+202E and BEL still reach the program and each has a row,
+    // in order of severity among the rows shown. ^Z and ESC, which Kettle
+    // removes, are the two counted instead.
+    let (shown, more, spoken) = rows(false);
+    assert_eq!(
+        shown,
+        [
+            removed(T::ConfirmPasteFindingEndMarker),
+            removed(T::ConfirmPasteFindingInterrupt),
+            live(T::ConfirmPasteFindingBidi),
+            live(T::ConfirmPasteFindingBell),
+        ]
+    );
+    assert_eq!(more, tr.confirm_paste_more_kinds(2));
+    for (meaning, _) in &shown {
+        assert!(spoken.contains(meaning.as_str()));
+    }
+
+    // Without bracketed paste only the marker is removed. It is why Kettle
+    // asked and keeps its row; the rest are the most serious live kinds.
+    let (shown, more, _) = rows(true);
+    assert_eq!(
+        shown,
+        [
+            removed(T::ConfirmPasteFindingEndMarker),
+            live(T::ConfirmPasteFindingInterrupt),
+            live(T::ConfirmPasteFindingSuspend),
+            live(T::ConfirmPasteFindingEscape),
+        ]
+    );
+    assert_eq!(more, tr.confirm_paste_more_kinds(2));
 }
 
 #[test]
@@ -1625,6 +1830,7 @@ fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
                 text,
                 broadcast,
                 recipients,
+                unbracketed: _,
             } = super::confirmation_button_action(&dialog, index).unwrap()
             else {
                 panic!("paste action");

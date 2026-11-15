@@ -1252,9 +1252,20 @@ impl App {
                 text,
                 broadcast,
                 recipients,
+                unbracketed,
             } => {
                 if ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients {
-                    self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target));
+                    // One snapshot of the recipients' modes judges the
+                    // answer and encodes the paste. The answer does not
+                    // cover a program that left bracketed paste while the
+                    // question was open: Kettle asks again, for these modes.
+                    let modes = self.text_paste_modes(ws, target);
+                    match paste_answer(unbracketed, self.cfg.paste_protection, &text, &modes) {
+                        PasteAnswer::Deliver => {
+                            self.deliver_text_paste(ws, target, &text, &modes);
+                        }
+                        PasteAnswer::AskAgain => self.ask_text_paste(ws, target, &text, &modes),
+                    }
                 }
             }
             ConfirmAction::RebindKeybind {
@@ -3621,6 +3632,9 @@ pub enum ConfirmAction {
         text: String,
         broadcast: crate::mux::BroadcastScope,
         recipients: Vec<u64>,
+        /// The question was asked for a recipient with bracketed paste off,
+        /// so it described every control as reaching the program.
+        unbracketed: bool,
     },
     /// Close the entire window (every tab + every pane).
     ///

@@ -160,11 +160,13 @@ policy is Always. Below that it shows:
   `^Z` suspend, `^\` quit, `^D` end of input, `ESC`, text-direction
   formatting such as `U+202E`, 8-bit control codes, `^H` backspace, `DEL`
   delete, `BEL` bell and any other control character. A last row counts the
-  kinds left out. A row describes the current mode: a control that Kettle
+  kinds left out; the end code and controls that reach the program get a row
+  before `ESC` and signal keys that a bracketed paste removes. A row describes the current mode: a control that Kettle
   removes whichever button you choose reads "…; Kettle removes it" and is not
   drawn in the warning color. That is the end code in every mode, and `ESC`
   and the signal keys when every program receiving the paste has bracketed
-  paste on.
+  paste on. If such a program turns bracketed paste off before you answer,
+  Kettle does not act on the answer: it asks again for the new mode.
 - The policy in force and a **Paste settings…** link. The link pastes nothing,
   closes the dialog and opens Settings on the Paste protection row. There is
   no "don't ask again" box: the policy changes only in Settings or the config.
