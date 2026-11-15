@@ -98,11 +98,15 @@ fn the_jump_button_shows_its_key_only_where_the_count_still_fits() {
         assert!((dx - (label_end + pad)).abs() <= 0.5, "scale {scale}");
         assert_eq!(dw, scale, "scale {scale}: a 1 logical px rule");
         assert!(dy > y && dy + dh < y + h, "scale {scale}: rule inside");
-        assert_eq!(hint.text_origin.0, dx + dw + pad, "scale {scale}");
+        assert!(
+            (hint.text_origin.0 - (dx + dw + pad)).abs() <= 0.5,
+            "scale {scale}: a pad after the rule"
+        );
         assert_eq!(hint.text_origin.1, wide.text_origin.1, "scale {scale}");
         let hint_end = hint.text_origin.0 + 8.0 * cell(scale).0;
-        assert!(
-            (hint_end + pad - (x + w)).abs() <= 0.5,
+        assert_eq!(
+            hint_end + pad,
+            x + w,
             "scale {scale}: the chord ends a pad inside the button"
         );
         // The right edge and the height are the count-only button's.
@@ -851,4 +855,78 @@ fn the_jump_button_edge_holds_over_a_translucent_window() {
     );
     // Below the defaults some themes do run out of greys.
     assert!(short > 0);
+}
+
+/// The chord bound to `scroll_to_bottom` with all four modifiers, spelled
+/// for macOS (`⌃⌥⇧⌘End`) or elsewhere (`Ctrl+Alt+Shift+Super+End`), and
+/// with one modifier.
+fn chords(macos: bool) -> Vec<String> {
+    [
+        "keybind = ctrl+end=unbind\nkeybind = ctrl+alt+shift+super+end=scroll_to_bottom\n",
+        "keybind = ctrl+end=unbind\nkeybind = super+end=scroll_to_bottom\n",
+        "",
+    ]
+    .into_iter()
+    .map(|config| {
+        hint_label_for_platform(
+            &Config::parse_text(config).keybinds,
+            &Action::ScrollToBottom,
+            macos,
+        )
+        .expect("bound")
+    })
+    .collect()
+}
+
+/// The layout gives the chord one cell per column of `display_width`; the
+/// bundled overlay face has every glyph a chord can hold (the macOS ⌃ ⌥ ⇧ ⌘
+/// as well as ASCII) at one cell, so the shaped chord ends inside the
+/// painted button, a pad short of its right edge, in either spelling. Shaped
+/// here with only the bundled face, as every host has it, so a missing
+/// glyph cannot hide behind a host font.
+#[test]
+fn the_shaped_chord_ends_inside_the_button_in_either_spelling() {
+    use crate::{Attrs, Family, FontSystem, Metrics, Shaping, TextBuffer, Wrap, fontdb};
+    let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
+    crate::fonts::load_bundled_font(&mut fonts, kettle_config::font::REGULAR);
+    let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    let tr = Translator::default();
+    for scale in SCALES {
+        let metrics = Metrics::new(13.0 * scale, 17.0 * scale);
+        let mut shape = |text: &str| {
+            let mut buffer = TextBuffer::new(&mut fonts, metrics);
+            buffer.set_size(None, Some(64.0 * scale));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_text(text, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut fonts, false);
+            let run = buffer.layout_runs().next().expect("one line");
+            let missing = run.glyphs.iter().any(|glyph| glyph.glyph_id == 0);
+            (run.line_w, missing)
+        };
+        let (cell, _) = shape("M");
+        for macos in [true, false] {
+            for chord in chords(macos) {
+                let (shaped, missing) = shape(&chord);
+                let context = format!("{chord:?} scale {scale}");
+                assert!(!missing, "{context}: a glyph the bundled face lacks");
+                let pill = scrollback_pill(
+                    terminal(800.0, scale),
+                    SCROLLED_BACK,
+                    scale,
+                    (cell, 17.0 * scale),
+                    6.0,
+                    Some(&chord),
+                    &tr,
+                )
+                .expect("a button");
+                let hint = pill.hint.as_ref().expect("room for the chord");
+                assert!(
+                    hint.text_origin.0 + shaped <= right(pill.rect) - 6.0 * scale + 0.01,
+                    "{context}: the chord ends at {} past the button's pad at {}",
+                    hint.text_origin.0 + shaped,
+                    right(pill.rect) - 6.0 * scale
+                );
+            }
+        }
+    }
 }

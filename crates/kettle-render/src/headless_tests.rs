@@ -165,6 +165,35 @@ fn label_rects(renderer: &Renderer, kind: crate::card_scene::CardLabelKind) -> V
 }
 
 /// A headless renderer and its config, or `None` on a host with no GPU.
+/// A GPU test found no adapter on this host: skipped, saying so, unless
+/// `KETTLE_REQUIRE_GPU` is set, which makes it a failure, as
+/// `KETTLE_REQUIRE_AUDIO` does for the sound tests. Set it where a GPU, or a
+/// software one such as lavapipe or WARP, is known to be present.
+pub(crate) fn no_gpu_adapter() {
+    no_gpu_adapter_where(std::env::var_os("KETTLE_REQUIRE_GPU").is_some());
+}
+
+fn no_gpu_adapter_where(required: bool) {
+    assert!(
+        !required,
+        "no GPU adapter on this host, and KETTLE_REQUIRE_GPU is set"
+    );
+    eprintln!("no GPU adapter on this host; skipped");
+}
+
+/// With `KETTLE_REQUIRE_GPU` set a missing adapter fails the test.
+#[test]
+#[should_panic(expected = "KETTLE_REQUIRE_GPU is set")]
+fn a_missing_adapter_fails_where_a_gpu_is_required() {
+    no_gpu_adapter_where(true);
+}
+
+/// Without it the test is skipped.
+#[test]
+fn a_missing_adapter_is_skipped_where_none_is_required() {
+    no_gpu_adapter_where(false);
+}
+
 pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
     let cfg = gpu_test_config();
     let renderer =
@@ -8007,7 +8036,7 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
     let _serialized = gpu_test_guard();
     let (width, height) = (640_u32, 400_u32);
     let Some((mut renderer, base)) = renderer(width, height) else {
-        eprintln!("no GPU adapter on this host; skipped");
+        no_gpu_adapter();
         return;
     };
     // The top of history, with older lines gone.
@@ -8129,6 +8158,63 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
         }
     }
     eprintln!("SCROLLBACK_BUTTON_GPU_PASS");
+}
+
+/// The chord the painter shapes for a scrolled-back pane ends inside the
+/// button it paints, a pad short of its right edge, with one modifier and
+/// with all four, at 1x and 2x. The chord is spelled as this host spells
+/// it: on macOS `⌃⌥⇧⌘End`, in the renderer's own fonts.
+#[test]
+fn the_painted_chord_ends_inside_the_jump_button() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        no_gpu_adapter();
+        return;
+    };
+    let snap = history_snapshot(20, 10, 300, 100);
+    for scale in [1.0_f32, 2.0] {
+        renderer.set_scale(scale);
+        for binding in [
+            "keybind = ctrl+end=unbind\nkeybind = ctrl+alt+shift+super+end=scroll_to_bottom\n",
+            "keybind = ctrl+end=unbind\nkeybind = super+end=scroll_to_bottom\n",
+        ] {
+            let cfg = Config {
+                keybinds: Config::parse_text(binding).keybinds,
+                ..base.clone()
+            };
+            let panes = [pane(&snap, width, height)];
+            capture(&mut renderer, &cfg, &panes, &focused(false));
+            let chord = scrollback_pill_hint(&cfg.keybinds).expect("bound");
+            let pill = scrollback_pill(
+                panes[0].terminal,
+                snap.display_offset,
+                scale,
+                (
+                    renderer.overlay_text_cell_width(),
+                    renderer.overlay_text_line_height(),
+                ),
+                cfg.scrollbar_width,
+                Some(&chord),
+                &panes[0].tr,
+            )
+            .expect("a button");
+            let hint = pill.hint.as_ref().expect("room for the chord");
+            // The painter shapes the count, then the chord.
+            let shaped: f32 = renderer.scrollback_buffers[1]
+                .layout_runs()
+                .map(|run| run.line_w)
+                .sum();
+            assert!(shaped > 0.0, "{chord:?}: nothing shaped");
+            let end = hint.text_origin.0 + shaped;
+            let limit = pill.rect.0 + pill.rect.2 - 6.0 * scale;
+            assert!(
+                end <= limit + 0.5,
+                "{chord:?} scale {scale}: the chord ends at {end} past the pad at {limit}"
+            );
+        }
+    }
+    eprintln!("SCROLLBACK_CHORD_GPU_PASS");
 }
 
 /// A pane with history paints its thumb in a full-height channel as wide as

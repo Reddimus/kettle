@@ -137,11 +137,14 @@ pub fn scrollback_pill(
         .filter(|(_, hint_w)| fits(w + rule + hint_w + 2.0 * pad));
     let w = hint.map_or(w, |(_, hint_w)| w + rule + hint_w + 2.0 * pad);
     let left = x + width - gutter - w;
-    let hint = hint.map(|(text, _)| {
+    let hint = hint.map(|(text, hint_w)| {
+        // The rule sits on whole pixels, and the chord is set from the
+        // button's right edge, so rounding the rule never pushes the chord
+        // into the right pad.
         let rule_x = (left + 2.0 * pad + label_w).round();
         ScrollbackPillHint {
             text: text.to_owned(),
-            text_origin: (rule_x + rule + pad, top + pad / 2.0),
+            text_origin: (left + w - pad - hint_w, top + pad / 2.0),
             divider: (rule_x, top + pad / 2.0, rule, h - pad),
         }
     });
