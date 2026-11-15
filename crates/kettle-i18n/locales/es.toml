@@ -1051,8 +1051,8 @@ notification_toast_show = "Mostrar"
 notification_toast_show_a11y = "Mostrar {source}"
 notification_toast_a11y = "Notificación de {source}: {message}"
 notification_toast_a11y_unsourced = "Notificación: {message}"
-pane_a11y_broadcast_sending = "Envía la entrada a varios paneles"
-pane_a11y_broadcast_receiving = "Recibe la entrada enviada a varios paneles"
+pane_a11y_broadcast_sending = "Enviando la entrada a varios paneles"
+pane_a11y_broadcast_receiving = "Recibiendo la entrada de otro panel"
 
 [completion_matches]
 one = "{count} coincidencia"
