@@ -39,6 +39,8 @@
 # "Sigue al mouse" and "Abrir el panel multimedia"); each was shown again in
 # the same session and accepted by the same reviewer. The shelf notification
 # was revised too and stays draft, not rendered.
+# 2026-11-14: palette_paste_primary dropped its "(X11)" suffix, since Wayland
+# has a primary selection too; the remaining words are the accepted text.
 
 [status]
 a11y_window_minimize = "accepted"
