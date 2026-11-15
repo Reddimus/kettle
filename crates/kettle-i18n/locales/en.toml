@@ -1050,6 +1050,8 @@ notification_toast_show = "Show"
 notification_toast_show_a11y = "Show {source}"
 notification_toast_a11y = "Notification from {source}: {message}"
 notification_toast_a11y_unsourced = "Notification: {message}"
+pane_a11y_broadcast_sending = "Broadcasting input"
+pane_a11y_broadcast_receiving = "Receiving broadcast input"
 
 [completion_matches]
 one = "{count} match"
