@@ -182,6 +182,10 @@ def launch(home, language):
                XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".state"),
                XDG_DATA_HOME=str(home / ".data"), XDG_CACHE_HOME=str(home / ".cache"),
                XDG_RUNTIME_DIR=str(home / "run"))
+    # ctl runs in this same environment (ENV), so it meets Kettle in this
+    # registry and needs no alias: keep the run out of the control registry
+    # directory the OS names for this account (docs/TESTING.md).
+    env.setdefault("KETTLE_TEST_OS_CTL_DIR", "none")
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("WAYLAND_SOCKET", None)
     for name in (".config", ".state", ".data", ".cache", "run"):
