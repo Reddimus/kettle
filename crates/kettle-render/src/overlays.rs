@@ -529,6 +529,11 @@ pub struct Overlay {
     pub scrollbar_active: bool,
     /// Pane whose scrollbar is under the native pointer, including unfocused panes.
     pub scrollbar_hovered_pane: Option<u64>,
+    /// Pane whose jump-to-bottom button is under the pointer, where a press
+    /// would reach it.
+    pub scrollback_pill_hovered: Option<u64>,
+    /// Pane whose jump-to-bottom button took a press not yet released.
+    pub scrollback_pill_pressed: Option<u64>,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
     /// `Some` while the right-click context menu is open. Rendered on

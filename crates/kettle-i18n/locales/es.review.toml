@@ -1049,6 +1049,10 @@ notification_toast_a11y_unsourced = "draft"
 notification_toast_more = "draft"
 notification_toast_a11y_repeats = "draft"
 
+scrollback_kept = "draft"
+scrollback_a11y_viewing = "draft"
+scrollback_kept_lines = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1213,4 +1217,7 @@ keys = [
     "notification_toast_a11y_unsourced",
     "notification_toast_more",
     "notification_toast_a11y_repeats",
+    "scrollback_a11y_viewing",
+    "scrollback_kept",
+    "scrollback_kept_lines",
 ]

@@ -425,7 +425,12 @@ fn pill_clears_the_scrolled_back_bar() {
     for width in 2..=40 {
         let cfg = config(ScrollbarMode::Auto, width as f32);
         for scale in [1.0, 2.0] {
-            for interacting in [false, true] {
+            for (interacting, hint) in [
+                (false, None),
+                (true, None),
+                (false, Some("Ctrl+End")),
+                (true, Some("Ctrl+End")),
+            ] {
                 let bar = bar(&cfg, scale, HISTORY, SCROLLED_BACK, interacting);
                 let pill = scrollback_pill(
                     terminal(scale),
@@ -433,9 +438,11 @@ fn pill_clears_the_scrolled_back_bar() {
                     scale,
                     (8.0 * scale, 16.0 * scale),
                     width as f32,
+                    hint,
                     &tr,
                 )
                 .expect("a pill");
+                assert_eq!(pill.hint.is_some(), hint.is_some());
                 assert!(
                     pill.rect.0 + pill.rect.2 <= bar.track_rect.0,
                     "width {width} scale {scale}: pill ends at {} past the bar at {}",

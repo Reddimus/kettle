@@ -208,6 +208,15 @@ impl PaneSnapshot {
             .any(|cell| cell.flags.contains(Flags::GRAPHEME))
     }
 
+    /// Where the view sits in the pane's history.
+    pub fn history_view(&self) -> crate::HistoryView {
+        crate::HistoryView {
+            offset: self.display_offset,
+            size: self.history_size,
+            origin: self.history_origin,
+        }
+    }
+
     pub fn captures_card_marks(&self) -> bool {
         self.card_marks_collected
     }
