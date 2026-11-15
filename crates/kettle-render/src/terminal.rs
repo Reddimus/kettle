@@ -184,6 +184,20 @@ pub(crate) fn ime_cursor_shape(
     }
 }
 
+/// What a pane does with broadcast input this frame. The UI derives it from
+/// the window's broadcast scope (`compute_broadcast_targets`), so the renderer
+/// never re-derives a scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PaneBroadcast {
+    /// Broadcast input does not reach this pane: it keeps its normal border.
+    #[default]
+    Off,
+    /// The focused pane while broadcast is on: what is typed here is sent.
+    Sending,
+    /// A pane that receives what is typed in the sending pane.
+    Receiving,
+}
+
 /// One tiled pane to draw this frame.
 pub struct PaneView<'a> {
     /// Process-global pane id. Used to keep renderer caches attached to the
@@ -246,6 +260,9 @@ pub struct PaneView<'a> {
     /// label in brackets) before the pane title. Borrowed from
     /// `metas`.
     pub group_name: Option<&'a str>,
+    /// Whether this pane sends or receives broadcast input; drives its
+    /// border and per-pane titlebar colours.
+    pub broadcast: PaneBroadcast,
 }
 
 /// The foreground glyph drawn on top of a focused solid block cursor this

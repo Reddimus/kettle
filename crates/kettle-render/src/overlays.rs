@@ -1442,11 +1442,12 @@ pub struct TabBar {
     /// Find is open in this window, so the Find button shows as toggled on.
     pub search_open: bool,
     /// Visual indicator that broadcast / group-input mode is
-    /// on. Without this, the user can forget broadcast is enabled and
-    /// type to one pane expecting it to stay local — every keystroke
-    /// goes to every pane in the active tab silently. The renderer
-    /// tints the active tab segment with a warning accent when set;
-    /// inactive tabs (which aren't affected by broadcast) stay normal.
+    /// on in this window. Without this, the user can forget broadcast is
+    /// enabled and type to one pane expecting it to stay local — every
+    /// keystroke goes to every pane in the scope (the tab, the window or a
+    /// named group) silently. The renderer tints the active tab segment with
+    /// a warning accent when set; the panes the input reaches are outlined
+    /// from each `PaneView::broadcast`.
     pub broadcast: bool,
     /// Index of the segment whose `✕` close button is currently
     /// hovered by the mouse — used to draw a hover background so the

@@ -179,7 +179,7 @@ pub use settings::{
     settings_layout, settings_panel_geometry, settings_value_rect,
 };
 use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
-pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneView};
+pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
 };
@@ -192,9 +192,9 @@ use theme::{
     CellHighlight, CompletionPalette, MinimumContrastCache, background_has_wallpaper,
     completion_palette_with_colors, composed_bg_alpha, confirm_dialog_border_color,
     desired_alpha_mode, dim_blend, final_scene_is_uniformly_opaque, gc, inactive_pane_amount,
-    needs_postmultiplied_presentation, pane_inactive_amount, pick_titlebar_bg, resolve_chrome_bg,
-    resolved_cell_foreground_cached, resolved_highlight_foreground_cached, srgb, srgb_encode,
-    surface_clear_color,
+    needs_postmultiplied_presentation, pane_border_style, pane_inactive_amount, pick_titlebar_bg,
+    resolve_chrome_bg, resolved_cell_foreground_cached, resolved_highlight_foreground_cached, srgb,
+    srgb_encode, surface_clear_color,
 };
 #[cfg(test)]
 use theme::{attributed_foreground, completion_palette, resolved_cell_foreground};
@@ -1456,9 +1456,9 @@ impl Renderer {
                     if s.active {
                         quads.push(rect(x, seg_y, w, seg_h, default_bg, 1.0));
                         // The same bar as a horizontal strip's: broadcast's
-                        // warning yellow (only the active tab broadcasts) or
-                        // the window's accent, grey while the window is
-                        // unfocused.
+                        // warning yellow (the active tab is the one typing
+                        // goes from) or the window's accent, grey while the
+                        // window is unfocused.
                         quads.push(rect(
                             x,
                             seg_y,
@@ -1919,41 +1919,41 @@ impl Renderer {
                 interacting,
             )
         };
+        // A lone pane is outlined while broadcast reaches it: this window
+        // broadcasts, or another window's group broadcast reaches one of its
+        // panes.
+        let broadcast_outlined =
+            tabbar.broadcast || panes.iter().any(|pv| pv.broadcast != PaneBroadcast::Off);
+        let broadcast_dash = geometry::broadcast_dash(self.scale, bw);
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
             // Pane separators / focus border. Both colors are config-
             // overridable: `split-divider-color` for inactive panes
             // (defaults to theme `palette[8]`, the dim color) and
             // `focused-split-color` for the focused pane (defaults to the
-            // resolved accent below).
+            // resolved accent).
             //
-            // When broadcast / group-input mode is on, the focused-pane border
-            // flips to theme palette[3] (yellow, the same warning slot the
-            // tab-bar accent uses). The tab-bar indicator alone is not enough,
-            // because with `tab-bar = auto` and one tab open (the default
-            // single-window case) the tab bar is hidden. Inactive panes keep
-            // their normal divider color, since broadcast is scoped to the
-            // active tab and the focused-pane border is the single most-visible
-            // chrome element on every layout.
-            let border = if pv.focused {
-                if tabbar.broadcast {
-                    theme.palette[3]
-                } else {
-                    // Cascade order is
-                    //   focused-split-color (explicit override)
-                    //   → resolved accent (explicit accent-color → Peacock
-                    //     auto → the theme's signature accent, Mocha mauve)
-                    // Backward-compat: anyone who set `focused-split-color`
-                    // keeps their pinned color.
-                    cfg.focused_split_color
-                        .unwrap_or_else(|| self.ui_accent(cfg, theme))
-                }
-            } else {
-                cfg.split_divider_color.unwrap_or(theme.palette[8])
-            };
+            // While broadcast / group-input mode is on, every visible pane the
+            // focused pane's input reaches is outlined in theme palette[3]
+            // (yellow, the warning slot the tab-bar accent uses), lifted to 3:1
+            // on the pane background: the sending pane solid, each receiving
+            // pane dashed (`pane_border_style`). The scope may be the tab, the
+            // window or a named group, so receivers are not simply "the other
+            // panes"; the UI resolves each pane's role from the scope's
+            // targets. The tab-bar indicator alone is not enough, because with
+            // `tab-bar = auto` and one tab open the tab bar is hidden. Panes
+            // outside the scope keep their normal divider color.
+            let border = pane_border_style(
+                cfg,
+                theme,
+                self.ui_accent(cfg, theme),
+                default_bg,
+                pv.focused,
+                pv.broadcast,
+            );
             let corner_mask =
                 pane_bottom_window_corner_mask(pv.rect, (sw, sh), self.rounded_window_corners);
-            if !geometry::pane_border_visible(panes.len(), tabbar.broadcast) {
+            if !geometry::pane_border_visible(panes.len(), broadcast_outlined) {
                 // A lone pane has nothing to be told apart from: no frame,
                 // as in other terminals. Its 1 px inset stays, so geometry
                 // and hit tests do not move when a split appears.
@@ -1961,19 +1961,29 @@ impl Renderer {
                 // A zero handle size means no pane border. Do not send a
                 // degenerate outline to the shader: derivative AA can otherwise
                 // give a mathematical zero-width centreline visible coverage.
+            } else if corner_mask == 0 && border.dashed {
+                quads.extend(
+                    geometry::dashed_outline_rects(pv.rect, bw, broadcast_dash)
+                        .map(|(x, y, w, h)| rect(x, y, w, h, border.color, 1.0)),
+                );
             } else if corner_mask == 0 {
+                let border = border.color;
                 quads.push(rect(rx, ry, rw, bw, border, 1.0));
                 quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
                 quads.push(rect(rx, ry, bw, rh, border, 1.0));
                 quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
             } else {
-                pane_outlines.push(pane_outline(
+                let mut outline = pane_outline(
                     pv.rect,
-                    border,
+                    border.color,
                     bw,
                     MACOS_WINDOW_CORNER_RADIUS_POINTS * self.scale,
                     corner_mask,
-                ));
+                );
+                if border.dashed {
+                    (outline.dash, outline.gap) = broadcast_dash;
+                }
+                pane_outlines.push(outline);
             }
 
             // Per-pane titlebar background quad. Drawn
@@ -1986,7 +1996,7 @@ impl Renderer {
                     theme,
                     self.ui_accent(cfg, theme),
                     pv.focused,
-                    tabbar.broadcast,
+                    pv.broadcast == PaneBroadcast::Receiving,
                 );
                 if let Some((x, y, w, h)) = pane_titlebar_rect(pv.rect, pv.titlebar, bw) {
                     quads.push(rect(x, y, w, h, bar_bg, 1.0));
@@ -2192,9 +2202,18 @@ impl Renderer {
             }
             if !pv.focused && panes.len() > 1 {
                 let amount = inactive_pane_amount(cfg);
+                // A receiving pane recedes like any unfocused pane, but its
+                // broadcast outline does not: dimmed, the outline would lose
+                // the 3:1 it was lifted to.
+                let dimmed = if pv.broadcast == PaneBroadcast::Off {
+                    Some(pv.terminal)
+                } else {
+                    geometry::clear_of_outline(pv.terminal, pv.rect, bw)
+                };
                 if amount > 0.0 {
-                    let (x, y, w, h) = pv.terminal;
-                    pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    if let Some((x, y, w, h)) = dimmed {
+                        pane_dim.push(rect(x, y, w, h, theme.background, amount));
+                    }
                     for lane in overlay.media_lanes.iter().filter(|lane| lane.pane == pv.id) {
                         let (x, y, w, h) = lane.rect;
                         over.push(rect(x, y, w, h, theme.background, amount));
@@ -4389,9 +4408,10 @@ impl Renderer {
                 // `theme.cursor_text`; the inactive bar is the dark `palette[8]`
                 // surface, so its text is the light `theme.foreground`. Explicit
                 // `title-*-fg-color` config still overrides.
+                let receiving = pv.broadcast == PaneBroadcast::Receiving;
                 let fg = if pv.focused {
                     cfg.title_transmit_fg_color.unwrap_or(theme.cursor_text)
-                } else if tabbar.broadcast {
+                } else if receiving {
                     cfg.title_receive_fg_color.unwrap_or(theme.cursor_text)
                 } else {
                     cfg.title_inactive_fg_color.unwrap_or(theme.foreground)
@@ -4401,7 +4421,7 @@ impl Renderer {
                     theme,
                     self.ui_accent(cfg, theme),
                     pv.focused,
-                    tabbar.broadcast,
+                    receiving,
                 );
                 let fg = self.chrome_colors.text(fg, background);
                 let text_top = ry + 2.0;
@@ -6267,6 +6287,9 @@ mod shaped_row_tests;
 
 #[cfg(test)]
 mod pane_window_corner_tests;
+
+#[cfg(test)]
+mod broadcast_border_tests;
 
 /// Underline styles must not render pixel-identical to a plain line. Pure
 /// functions, no GPU needed.

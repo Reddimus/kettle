@@ -57,6 +57,7 @@ fn pane_rect_shift_invalidates_layout_key() {
         bell: false,
         bell_flash: 0.0,
         group_name: None,
+        broadcast: crate::PaneBroadcast::Off,
     };
     let surface = (800.0, 600.0);
     let cell = (8.0, 16.0);

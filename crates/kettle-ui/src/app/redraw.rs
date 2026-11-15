@@ -1035,6 +1035,7 @@ impl App {
                         bell: *bell,
                         bell_flash: *bell_flash,
                         group_name: group_name.as_deref(),
+                        broadcast: kettle_render::PaneBroadcast::Off,
                     }
                 },
             )
