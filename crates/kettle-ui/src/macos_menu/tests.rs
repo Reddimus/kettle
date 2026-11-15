@@ -1180,3 +1180,59 @@ fn broadcast_submenu_reaches_every_scope_under_every_default() {
         }
     }
 }
+
+/// Window › Next Tab and Previous Tab, Shell › Close Window and Edit › Select
+/// All carry the standard macOS key equivalents from the default keymap, and
+/// the tab rows show the bracket, not the brace AppKit reports with Shift.
+#[cfg(target_os = "macos")]
+#[test]
+fn default_menus_show_the_standard_tab_window_and_select_all_chords() {
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = Translator::new(Language::En);
+    let model = empty_menu_model(&tr, &bindings, ready());
+    let shortcut = |wanted: Action| {
+        model
+            .iter()
+            .flat_map(|menu| menu.rows.iter().map(move |row| (menu.title, row)))
+            .find_map(|(menu, row)| match row {
+                Row::Item {
+                    command: Command::Kettle(action),
+                    shortcut,
+                    shortcut_label,
+                    enabled,
+                    ..
+                } if *action == wanted => Some((menu, *shortcut, shortcut_label.clone(), *enabled)),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let sus = Mods::SUPER | Mods::SHIFT;
+    for (action, menu, trigger) in [
+        (
+            Action::NextTab,
+            T::MacosMenuWindow,
+            Trigger::new(sus, Key::Char(']')),
+        ),
+        (
+            Action::PrevTab,
+            T::MacosMenuWindow,
+            Trigger::new(sus, Key::Char('[')),
+        ),
+        (
+            Action::CloseWindow,
+            T::MacosMenuShell,
+            Trigger::new(sus, Key::Char('w')),
+        ),
+        (
+            Action::SelectAll,
+            T::MacosMenuEdit,
+            Trigger::new(Mods::SUPER, Key::Char('a')),
+        ),
+    ] {
+        assert_eq!(
+            shortcut(action.clone()),
+            (tr.text(menu), Some(trigger), Some(trigger.label()), true),
+            "{action:?}"
+        );
+    }
+}

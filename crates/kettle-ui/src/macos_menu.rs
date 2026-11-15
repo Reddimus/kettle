@@ -8,7 +8,7 @@
 //! screen, Minimize and Zoom), whether chosen or typed.
 
 #[cfg(any(target_os = "macos", test))]
-use kettle_config::keybinds::{Action, Bindings, Key, Mods, Trigger, hint_label};
+use kettle_config::keybinds::{Action, Bindings, Key, Mods, Trigger, hint_trigger};
 #[cfg(any(target_os = "macos", test))]
 use kettle_i18n::{Text as T, Translator};
 
@@ -238,13 +238,13 @@ impl Context {
     }
 }
 
-/// Use the same ranking and formatting as every other shortcut hint, but
-/// consider only Command chords. A shorter Ctrl chord must not hide a Cmd one.
+/// Use the same ranking as every other macOS shortcut hint, which puts a
+/// Command chord first, and consider only Command chords besides. A shorter
+/// Ctrl chord must not hide a Cmd one.
 #[cfg(any(target_os = "macos", test))]
 fn command_shortcut(bindings: &Bindings, action: &Action) -> Option<(Trigger, String)> {
-    let label = hint_label(bindings, action)?;
-    let trigger = bindings.keys().find(|trigger| trigger.label() == label)?;
-    Some((*trigger, label))
+    let trigger = hint_trigger(bindings, action, true)?;
+    Some((trigger, trigger.label()))
 }
 
 /// Pure, platform-independent menu construction. Native app commands retain
