@@ -587,6 +587,12 @@ context = "Clipboard paste rejected before delivery because text exceeded the sa
 [messages.notify_body_clipboard_timeout]
 context = "Clipboard paste rejected before delivery because its transfer deadline expired. Desktop notification body."
 
+[messages.notify_body_clipboard_files_unreadable]
+context = "crates/kettle-ui/src/app/paste.rs: desktop notification body when a paste found copied files on the clipboard but their list was damaged, too long or held more than 32 files. Nothing was pasted."
+
+[messages.notify_body_clipboard_image_unreadable]
+context = "crates/kettle-ui/src/app/paste.rs: desktop notification body when a paste found only a picture on the clipboard and it could not be read, decoded or stored (damaged, too large, or no room left for pasted images). Nothing was pasted."
+
 [messages.notify_body_input_oversize]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warning."
 

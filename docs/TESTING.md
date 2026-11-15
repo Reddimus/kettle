@@ -593,6 +593,71 @@ tests report a skip when Windows does not grant the required privilege; the
 junction test still runs without that privilege. The supplementary-group query
 test simulates 257 groups without changing the process credentials.
 
+### The account's control registry
+
+A Kettle with its control server on registers in the directory its
+environment names (`$XDG_RUNTIME_DIR/kettle/ctl` first on Unix). It also
+publishes a `<pid>.alias.json` pointer, prunes dead ones, and lets clients
+look for servers in the directory the OS names for the account: the user
+database's home `~/.local/state/kettle/ctl`, `/run/user/<uid>/kettle/ctl` on
+Linux, the Local AppData known folder on Windows. A private `XDG_RUNTIME_DIR`
+moves only the first. `KETTLE_TEST_OS_CTL_DIR` moves the second: an absolute
+path stands in for every directory the OS names, and any other value (empty,
+relative, `none`) leaves none. On Windows the two are one directory, and the
+only variable that moves it, `LOCALAPPDATA`, moves everything else kept there,
+so an absolute value moves the registry as well. It exists for tests and
+smokes, and every build reads it, since smokes drive release builds.
+
+- Integration tests start `kettle` through
+  `kettle_test_support::isolate_ctl_registry(&mut command, root)`, which sets
+  it to `root/os-ctl` and, on Unix, `XDG_RUNTIME_DIR` to `root/run`. On
+  Windows the registry is then `root/os-ctl` itself; `LOCALAPPDATA` stays the
+  account's, and with it Kettle's presence claims. Call it after any
+  `env_clear`. `tests_isolate_every_kettle_that_reaches_the_control_registry`
+  refuses a test file that runs `kettle mcp`, `ctl`, `show` or `agent-setup`
+  and starts a `kettle` without isolating that launch; each launch in a
+  function needs its own call.
+- The `kettle` crate's unit tests run in the developer's environment, so the
+  crate looks for a running Kettle only through `ctl_discovery`, which finds
+  none under `cfg(test)`. `only_this_module_looks_for_a_running_kettle`
+  refuses a direct lookup anywhere else. `kettle-ui` tests start a control
+  server through `ctl_server::start_private_for_tests`, which passes both
+  directories in.
+- Smokes that start Kettle with its control server on set it too. The live
+  harness (`LiveKettle` in `check-live-ui-smoke.py`) points it at one private
+  directory per run, removed at exit: its `kettle ctl` calls run in the
+  harness's own environment and reach a Kettle given private XDG directories
+  through the alias there. Scripts whose Kettle and `kettle ctl` share one
+  environment set it to `none`. `test-script-regressions.py` refuses a script
+  that starts a control server without the variable or the harness. A smoke
+  that keeps the developer's `HOME` and XDG directories still registers in
+  the account's registry, as before; the variable moves only the directory
+  the OS names.
+
+To confirm on macOS that no test reaches the account's registry, run the
+suites under a sandbox that kills any process touching it and denies the rest
+of Kettle's state directory. `ps` is set-user-id, which a sandboxed process
+may not run, so it runs outside the sandbox:
+
+```sh
+profile="$TMPDIR/kettle-ctl-tripwire.sb"
+cat > "$profile" <<EOF
+(version 1)
+(allow default)
+(allow process-exec (literal "/bin/ps") (with no-sandbox))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle"))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle/ctl")
+  (with send-signal SIGKILL))
+EOF
+sandbox-exec -f "$profile" cargo test --no-fail-fast \
+  -p kettle-ctl -p kettle-ui -p kettle -p kettle-test-support
+```
+
+A test binary that ends with `SIGKILL`, or a test whose `kettle` child died
+that way, reached the registry. The sandbox also refuses set-user-id bits, so
+`media_platform::tests::files::unsafe_worker_files_are_refused` fails there,
+and only there.
+
 Report the exact command, revision, host, and skipped coverage in a PR.
 Distinguish an offscreen render from a native window, and a fixture from an
 installed-package check. Do not claim another platform passed from compilation.
@@ -823,21 +888,37 @@ clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
 contents, PRIMARY routing with an injected clipboard-only provider and platform
-fallback, cap/deadline errors, stale-reply isolation, initialization failure and
-image/file fallback without arboard, and that the Wayland text path adds no
-dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
-and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
-tests do not exercise a compositor; the live check below does.
+fallback, PRIMARY support that appears and goes while the worker runs,
+cap/deadline errors, stale-reply isolation, initialization failure, the
+files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
+native files and images without arboard, and that the Wayland path adds no
+dependency. `wayland::offer::tests` drive the Wayland negotiation against a
+loopback source, a thread in the test process and no real clipboard: the type
+table (text and image, image alone, local, remote and malformed file lists,
+`x-special/gnome-copied-files`), `paste-files = off` against the text copy of
+the paths, each read's cap against a source that never ends, a stalled source
+against the deadline, and reading and writing a PRIMARY channel. They run on
+macOS too. `wayland::uri_list` tests cover the local, foreign and malformed
+classes; `paste_image::source_tests` cover the PNG header read, the decode
+limits against an oversize header and a decompression bomb, re-encoding, and
+the `0600` file in its `0700` directory. On Linux, `wayland::native::selection`
+tests cover a bridge without the primary-selection protocol. These tests do
+not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
 and paste in both directions with another native application, OSC 52 CLIPBOARD
-policy and ordering, and search/modal paste. Check large and stalled selections,
-and verify that image/file clipboard paste logs its limitation and falls through
-without a crash. Repeat on private X11 and XWayland to check automatic selection
-copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
-XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
-No live Wayland result can be inferred from a macOS suite pass.
+policy and ordering, and search/modal paste. Check large and stalled selections.
+With `DISPLAY` unset, so that arboard cannot start, set the session's clipboard
+with `wl-copy --type image/png` and `wl-copy --type text/uri-list` and paste
+each: the pane receives the quoted path of a `kettle-paste-*` PNG and the quoted
+file paths. Set PRIMARY with `wl-copy --primary` and middle-click, then select
+text in Kettle and read it back with `wl-paste --primary`. Repeat on private X11
+and XWayland to check automatic selection copy, middle-click PRIMARY, and OSC 52
+PRIMARY policy and ordering. On a compositor without the primary-selection
+protocol and without XWayland, direct PRIMARY requests are unavailable and must
+not alias CLIPBOARD. No live Wayland result can be inferred from a macOS suite
+pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.

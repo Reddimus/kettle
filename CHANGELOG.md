@@ -24,6 +24,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   time the pane leaves live output; VoiceOver and Narrator are not yet
   checked.
 
+- Copied files and images paste in Wayland sessions without XWayland. Kettle
+  reads `text/uri-list` (or GNOME's `x-special/gnome-copied-files`) and
+  `image/png` through its own Wayland connection: it decides from the types
+  the clipboard lists and reads what it chose once, within one two-second
+  deadline, so a source that stops sending cannot hold the window. A copied
+  link or remote file pastes its text; a damaged or oversize file list, or an
+  image that cannot be read, pastes nothing and a notification says so.
+
+- Middle-click pastes PRIMARY, and selecting text sets it, natively on Wayland
+  where the compositor has the primary-selection protocol
+  (`zwp_primary_selection_device_manager_v1`). Elsewhere PRIMARY still uses
+  XWayland when it is running.
+
 - A bell in the pane you are looking at now marks the active tab with the
   same bell a background tab gets, until you answer it: the next key, IME
   commit or paste in that pane, a click in it, or moving to another pane or
@@ -345,6 +358,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leaving the window, cancels it.
   Screen readers get the key as the button's shortcut, and `kettle ctl
   ui_geometry` reports the button's state and key hint.
+
+- Text wins over an image when the clipboard offers both, on every platform:
+  cells copied from a spreadsheet paste as text instead of the path of a
+  picture of them. Before, the image won on macOS, Windows and X11. A paste
+  reads copied files first, then text, then an image.
+
+- `paste-files = off` pastes nothing for copied files, on every platform.
+  Before, the paste fell through to the plain-text copy of the paths that
+  file managers put beside the list (on macOS, the file's name), or to an
+  image of the file.
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
@@ -713,6 +736,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
+  allowed 256 MiB) and decoded with limits set before any pixel memory is
+  allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults
+  had no side limit and allowed 512 MiB. On Wayland the image is decoded off
+  the window thread and re-encoded, so the temporary file never carries the
+  source's own bytes or metadata.
+
 - Notification text from programs and scripts is stripped of Unicode bidi
   formatting characters, which could reorder what a notification says, as
   well as control characters, before it reaches the desktop, the toast or
@@ -809,6 +839,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   time, so a process that later gets the same pid does not keep one alive;
   one written by an earlier release goes once the entry it names is gone or
   belongs to a process that is gone. A running server's pointer stays.
+
+- On macOS, quitting Kettle with ⌘Q, Quit in the app or Dock menu, or by
+  logging out no longer leaves its control server's files behind. These
+  quits end in AppKit's `exit()`, which ran none of the server's shutdown,
+  so each left `<pid>.json` and `ctl-<pid>.sock` in the registry, and a
+  `<pid>.alias.json` pointer for a Kettle whose registry is elsewhere, until
+  a later Kettle's cleanup found them. Quitting, on every platform, now
+  removes them first, before Kettle waits for the session write, so a client
+  no longer finds a Kettle that is quitting. A Kettle stopped by a signal, or
+  ended by Windows at logoff or shutdown, still leaves them to that cleanup.
+
+- Kettle's own tests and smokes no longer read, prune or add to the control
+  registry directory the OS names for the account that runs them. A Kettle
+  under test with a private `XDG_RUNTIME_DIR` still published its pointer
+  in, and pruned, `~/.local/state/kettle/ctl`, and `kettle mcp` and the
+  `kettle` crate's unit tests looked for servers there, so a suite run inside
+  Kettle could reach the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for
+  tests and smokes only, names the directory to use instead of every one the
+  OS names; a value that is not an absolute path names none. On Windows,
+  where the registry is that directory, it moves the registry too. The test
+  suites and smokes set it, and the `kettle` crate's unit tests no longer
+  look for a running Kettle at all.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
@@ -967,8 +1019,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   symbol font could claim first.
 
 - Copy and paste of text work in Wayland sessions without XWayland, including
-  GNOME, OSC 52 copies included. Middle-click PRIMARY and image or file paste
-  still use XWayland where it is available.
+  GNOME, OSC 52 copies included.
 
 - With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
   spacing vowels now reserve two cells, VS15 text variants of default emoji

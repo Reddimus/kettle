@@ -1236,8 +1236,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// calls `exit()` right after, so this is the last code that runs: no
     /// destructor does, and `run_app` never returns. Hand a running
     /// recording its tail, save the session once more, then run the exit
-    /// teardown (`exit.rs`), which deletes the private copies and waits for
-    /// the session write. Closing the last window reaches here too, with
+    /// teardown (`exit.rs`), which withdraws the control server, deletes the
+    /// private copies and waits for the session write. Closing the last
+    /// window reaches here too, with
     /// nothing left to save.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         let runtime_tracker = self.runtime_tracker.clone();

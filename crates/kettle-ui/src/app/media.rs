@@ -126,9 +126,7 @@ impl App {
                 // Display is a new grant, so it earns one more start attempt
                 // even if an earlier one failed. The latch makes this happen
                 // at most once per process.
-                if self.ctl_start == CtlStart::Attempted {
-                    self.ctl_start = CtlStart::Ready;
-                }
+                self.ctl_start.display_granted();
                 self.ensure_ctl_started();
             }
         }

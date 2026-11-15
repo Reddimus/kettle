@@ -874,6 +874,10 @@ def main() -> int:
     if args.command == "run":
         if not 1 <= args.runs <= 20:
             parser.error("--runs takes 1 to 20")
+        # Kettle and every `kettle ctl` here share one environment, so they meet
+        # in its registry and need no alias: keep the run out of the control
+        # registry directory the OS names for this account (docs/TESTING.md).
+        os.environ.setdefault("KETTLE_TEST_OS_CTL_DIR", "none")
         return run(args)
     capture = load(Path(args.dir))
     result = judge(capture, args.play_ns if args.play_ns is not None else capture.run.get("click_ns"),

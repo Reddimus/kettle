@@ -12,13 +12,17 @@ pub(super) enum PasteFormat {
 	Files,
 }
 
+/// Most encoded PNG bytes a paste reads. Kettle's Wayland route has the same
+/// cap. The decoded bitmap has its own limits (`decode_pasted_png`).
+pub(super) const PASTE_IMAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 pub(super) fn read_paste<T>(
 	format: PasteFormat,
 	read: impl FnOnce(Option<crate::common::ReadBounds>) -> Result<T, Error>,
 ) -> Result<T, Error> {
 	let max_bytes = match format {
-		// Match Kettle's existing pasted-image source limit, plus one sentinel byte.
-		PasteFormat::Image => 256 * 1024 * 1024 + 1,
+		// One sentinel byte past the cap: an image that reaches it is refused.
+		PasteFormat::Image => PASTE_IMAGE_MAX_BYTES + 1,
 		PasteFormat::Files => 1024 * 1024 + 1,
 	};
 	read(Some(crate::common::ReadBounds {
@@ -194,7 +198,7 @@ mod paste_tests {
 			} else {
 				// Reach the exact ceiling, then refuse the next chunk before appending.
 				let limit = match format {
-					PasteFormat::Image => 256 * 1024 * 1024 + 1,
+					PasteFormat::Image => PASTE_IMAGE_MAX_BYTES + 1,
 					PasteFormat::Files => 1024 * 1024 + 1,
 				};
 				let mut sent = 0;

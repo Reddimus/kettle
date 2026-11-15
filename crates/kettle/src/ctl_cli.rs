@@ -18,7 +18,7 @@ pub fn run_ctl(args: CtlArgs) -> i32 {
         print!("{}", kettle_ctl::schema::CONTROL_V1);
         return 0;
     }
-    let mut client = match Client::discover(args.pid) {
+    let mut client = match crate::ctl_discovery::discover(args.pid) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("kettle ctl: {e}");

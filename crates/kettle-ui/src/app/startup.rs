@@ -1599,9 +1599,7 @@ impl App {
         // cache. The server only needs the pid + a live proxy for its waker, so
         // binding it here makes the agent surface available as soon as the
         // window comes up. A re-resume does not start it again.
-        if self.ctl_start == CtlStart::NotReady {
-            self.ctl_start = CtlStart::Ready;
-        }
+        self.ctl_start.first_pane_exists();
         self.ensure_ctl_started();
         // Terminator plugin parity: fire
         // LuaEvent::Startup the first time we have an alive window
