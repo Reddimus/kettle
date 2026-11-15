@@ -48,7 +48,10 @@ impl Trigger {
         // chord, one binding, whichever spelling a config, a key event or
         // Settings uses.
         let key = match key {
-            Key::Char(c @ ('{' | '}')) if mods.contains(Mods::SUPER | Mods::SHIFT) => {
+            // Exactly Shift+Cmd: with Option or Ctrl as well, a brace can sit
+            // on its own key (German macOS types `{` with Option+8 and `[`
+            // with Option+5), so those chords keep their own spelling.
+            Key::Char(c @ ('{' | '}')) if mods == Mods::SUPER | Mods::SHIFT => {
                 Key::Char(if c == '{' { '[' } else { ']' })
             }
             Key::Char(c) if mods.contains(Mods::CTRL | Mods::SHIFT) => Key::Char(match c {
@@ -3154,6 +3157,13 @@ mod tests {
             Trigger::new(Mods::SUPER, Key::Char('}')).key,
             Key::Char('}')
         );
+        for extra in [Mods::ALT, Mods::CTRL] {
+            assert_eq!(
+                Trigger::new(sus | extra, Key::Char('{')).key,
+                Key::Char('{'),
+                "{extra:?}"
+            );
+        }
     }
 
     /// A user's rebind or unbind of either spelling of Shift+Cmd+] / [ takes

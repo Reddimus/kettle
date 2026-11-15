@@ -442,13 +442,23 @@ fn select_all_in_find_or_a_text_field_selects_the_field() {
             "{kind:?}"
         );
     }
-    for editor_focused in [true, false] {
-        assert!(super::search::search_bar_claims(
-            &Key::Character("a".into()),
-            ModifiersState::SUPER,
-            true,
-            editor_focused,
-            false
-        ));
+    // Find keeps the platform's select-all chord on both platforms: Cmd+A on
+    // macOS and Ctrl+A elsewhere (the bar's own select_all then takes it).
+    for (mods, macos) in [
+        (ModifiersState::SUPER, true),
+        (ModifiersState::CONTROL, false),
+    ] {
+        for editor_focused in [true, false] {
+            assert!(
+                super::search::search_bar_claims(
+                    &Key::Character("a".into()),
+                    mods,
+                    macos,
+                    editor_focused,
+                    false
+                ),
+                "{mods:?} macos={macos} focused={editor_focused}"
+            );
+        }
     }
 }
