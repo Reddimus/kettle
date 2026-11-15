@@ -553,7 +553,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   goes to a program that reads the mouse or opens the context menu. While
   you drag a selection the cursor stays solid, and it starts blinking again,
   visible, when you let go. Moving the pointer and scrolling leave the blink
-  alone, and its timing is unchanged.
+  alone.
+
+- The cursor stays visible for one whole blink period, 1.06 s at the default
+  `cursor-blink-interval = 530`, after anything that restarts its blink: a
+  key, a paste, a click in the terminal, focus, Reset, closing an overlay, a
+  setting change, or a program switching the blink on or off (DEC mode 12).
+  It used to go dark half a period (0.53 s) after any of them, so a glance
+  or a screenshot just after touching the terminal could find no cursor.
+  After the hold it blinks on and off with the same half-period as before,
+  and typing keeps it solid. It still stops, visible, after
+  `cursor-blink-timeout`, and `cursor-blink = false` is unchanged. On macOS
+  the window server takes over an idle window's blink at the end of the hold
+  at the earliest and shows the same timing. GTK text views hold their
+  cursor for about one blink period after a key or a click in the same way.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
