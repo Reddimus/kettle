@@ -61,6 +61,7 @@ pub(crate) fn pane<'a>(snap: &'a PaneSnapshot, width: u32, height: u32) -> PaneV
         bell: false,
         bell_flash: 0.0,
         group_name: None,
+        broadcast: crate::PaneBroadcast::Off,
     }
 }
 
@@ -75,7 +76,7 @@ pub(crate) fn capture(
     capture_with_tabs(renderer, cfg, panes, overlay, &TabBar::hidden())
 }
 
-fn capture_with_tabs(
+pub(crate) fn capture_with_tabs(
     renderer: &mut Renderer,
     cfg: &Config,
     panes: &[PaneView<'_>],
@@ -1049,7 +1050,8 @@ fn every_pipeline_skips_an_unchanged_upload() {
         border_width: 1.0,
         corner_radius: 2.0,
         corner_mask: 0b1100,
-        _pad: 0,
+        dash: 0.0,
+        gap: 0.0,
     }];
     outlines.upload(&device, &queue, screen, &outline);
     let first = writes(outlines.upload_counts());

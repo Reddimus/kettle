@@ -68,7 +68,9 @@ deletes the entry. Saving under a name that already exists asks before it replac
 host's target. Kettle never edits `~/.ssh/config` itself.
 
 Use the palette's broadcast actions to send input to all panes, a group or a
-window, and choose broadcast off to stop. See
+window, and choose broadcast off to stop. The pane you type in is outlined
+solid and the panes that receive are outlined dashed, so you can see where
+your typing goes. See
 [Sessions, profiles and layouts](../README.md#sessions-profiles-and-layouts)
 for restore behavior and [CONFIG.md](CONFIG.md) for configuration paths and SSH
 host entries.

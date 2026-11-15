@@ -3281,6 +3281,12 @@ context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of 
 [messages.palette_desc_prompt_needs_shell_integration]
 context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entries palette_jump_prev_prompt and palette_jump_next_prompt and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: the labels already name the shell, and with Linux shortcut hints at the default 14 px font a 1280-pixel window leaves about 25 columns for it in Spanish. Prompt jumps find prompts through the marks shell integration writes (OSC 133). Sentence case, no final period."
 
+[messages.pane_a11y_broadcast_sending]
+context = "crates/kettle-ui/src/app/broadcast.rs and accessibility.rs: screen-reader description of the focused terminal pane while broadcast input is on: what is typed in it is also sent to other panes (the panes in the tab, in the window or in a broadcast group). Its outline is drawn solid in the broadcast colour. Read after the pane's name; a state, not an action. The progressive form of the Broadcast Input menu's wording (menu_broadcast_input), as the English is. Needs screen-reader second pass."
+
+[messages.pane_a11y_broadcast_receiving]
+context = "crates/kettle-ui/src/app/broadcast.rs and accessibility.rs: screen-reader description of a terminal pane that receives what is typed in the broadcasting pane (pane_a11y_broadcast_sending); its outline is drawn dashed in the broadcast colour. Read after the pane's name; a state, not an action. Kept short: screen readers read it on every visit to the pane. Needs screen-reader second pass."
+
 [messages.confirm_paste_reason_lines]
 context = "crates/kettle-ui/src/app/paste.rs: first sentence of the Confirm paste dialog when the text has line breaks and a receiving program (one pane, or several under broadcast) has bracketed paste off. Also read by screen readers. Bracketed paste is the terminal mode that marks pasted text; Enter is the key."
 

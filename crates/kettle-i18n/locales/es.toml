@@ -1108,6 +1108,9 @@ palette_group_layouts_profiles_ssh = "Diseños, perfiles y SSH"
 palette_group_settings = "Configuración"
 palette_group_help = "Ayuda"
 
+pane_a11y_broadcast_sending = "Enviando la entrada a varios paneles"
+pane_a11y_broadcast_receiving = "Recibiendo la entrada de otro panel"
+
 confirm_paste_reason_lines = "Un programa que recibe este pegado no activó el pegado entre corchetes, así que cada salto de línea se envía como Enter y las líneas pegadas pueden ejecutarse como comandos."
 confirm_paste_reason_controls = "Este texto contiene caracteres de control, y un programa que recibe este pegado no activó el pegado entre corchetes."
 confirm_paste_reason_always = "La protección al pegar está en Siempre, así que Kettle pregunta antes de cada pegado de varias líneas."

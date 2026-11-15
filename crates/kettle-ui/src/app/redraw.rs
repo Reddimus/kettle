@@ -976,6 +976,9 @@ impl App {
             && overlay.ime_preedit.is_none()
             && Self::pane_cursor_layer_eligible(ws)
             && Self::ensure_cursor_layer(ws);
+        // Which panes broadcast input reaches, read fresh each frame so
+        // scope, focus, split, close and zoom changes outline at once.
+        let broadcast_roles = self.broadcast_roles(ws);
         let panes: Vec<PaneView> = metas
             .iter()
             .zip(snaps.iter())
@@ -1002,6 +1005,7 @@ impl App {
                         bell: *bell,
                         bell_flash: *bell_flash,
                         group_name: group_name.as_deref(),
+                        broadcast: broadcast_roles.of(*id),
                     }
                 },
             )

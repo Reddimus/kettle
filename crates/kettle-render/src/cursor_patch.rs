@@ -1482,7 +1482,8 @@ mod tests {
             border_width: 1.0,
             corner_radius: 8.0,
             corner_mask: 0b1100,
-            _pad: 0,
+            dash: 0.0,
+            gap: 0.0,
         };
         let inside = PixelBox {
             x0: 100,

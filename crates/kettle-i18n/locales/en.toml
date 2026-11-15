@@ -1107,6 +1107,9 @@ palette_group_layouts_profiles_ssh = "Layouts, profiles and SSH"
 palette_group_settings = "Settings"
 palette_group_help = "Help"
 
+pane_a11y_broadcast_sending = "Broadcasting input"
+pane_a11y_broadcast_receiving = "Receiving broadcast input"
+
 confirm_paste_reason_lines = "A program receiving this paste has not turned on bracketed paste, so each line break is sent as Enter and pasted lines can run as commands."
 confirm_paste_reason_controls = "This text contains control characters, and a program receiving this paste has not turned on bracketed paste."
 confirm_paste_reason_always = "Paste protection is set to Always, so Kettle asks before every multi-line paste."

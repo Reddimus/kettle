@@ -1103,6 +1103,9 @@ palette_group_layouts_profiles_ssh = "draft"
 palette_group_settings = "draft"
 palette_group_help = "draft"
 
+pane_a11y_broadcast_sending = "draft"
+pane_a11y_broadcast_receiving = "draft"
+
 # 2026-11-14: the C14 paste-safety messages below (Confirm paste reasons,
 # findings, access keys, policy line, the Paste protection and Clipboard
 # access rows, and the named OSC 52 notices) are model drafts. They await
@@ -1390,6 +1393,9 @@ keys = [
     "palette_split_left",
     "palette_split_up",
     "palette_equalize_splits",
+
+    "pane_a11y_broadcast_sending",
+    "pane_a11y_broadcast_receiving",
 
     "confirm_paste_reason_lines",
     "confirm_paste_reason_controls",
