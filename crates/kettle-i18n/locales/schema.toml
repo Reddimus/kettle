@@ -3267,3 +3267,14 @@ args = [{ name = "program", type = "str" }, { name = "setting", type = "str" }, 
 [messages.osc52_blocked_write_by]
 context = "crates/kettle-ui/src/app/clipboard.rs: pane clipboard-policy notice when a program's OSC 52 request is refused. setting is the Settings row settings_field_osc52 and category the Settings page settings_category_behavior, both already translated; keep the config key osc52 literal. Also a screen-reader live region. program is the name of the program in the pane's foreground, shown verbatim, at most 32 columns. Kettle cannot tell which program in the pane sent the request, so do not say that program was blocked."
 args = [{ name = "program", type = "str" }, { name = "setting", type = "str" }, { name = "category", type = "str" }]
+
+[messages.scrollback_kept]
+context = "crates/kettle-render/src/scrollback.rs kept_history_label: small label at the top right of a pane scrolled to the very top of its history, shown only when older lines are gone (the scrollback limit dropped them, or the history was cleared). It marks where the history Kettle still holds begins; also read by screen readers. Not a button. Used alone when the pane is too narrow for the line count. History is masculine in Spanish (el historial)."
+
+[messages.scrollback_kept_lines]
+context = "crates/kettle-render/src/scrollback.rs kept_history_label: the same label with how much history the pane holds. lines is that number of lines, already grouped; Kettle groups thousands with a comma in every language for now (10,000), a known limit in Spanish. count selects plural. Keep the middle dot between the two parts."
+args = [{ name = "lines", type = "str" }, { name = "count", type = "u64" }]
+plural = "count"
+
+[messages.scrollback_a11y_viewing]
+context = "crates/kettle-ui/src/app/accessibility.rs scrollback_accessibility_nodes: polite status a screen reader speaks once when the focused pane is scrolled back into its history, away from live output. It carries no line count on purpose, so further scrolling is not announced again."

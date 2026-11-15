@@ -1095,6 +1095,9 @@ osc52_blocked_write = "A program was blocked from copying to the clipboard. To a
 osc52_blocked_read_by = "A program was blocked from reading the clipboard while {program} was in the foreground. To allow it, change {setting} in Settings > {category} (config key osc52)."
 osc52_blocked_write_by = "A program was blocked from copying to the clipboard while {program} was in the foreground. To allow it, change {setting} in Settings > {category} (config key osc52)."
 
+scrollback_kept = "Start of kept history"
+scrollback_a11y_viewing = "Viewing history"
+
 [completion_matches]
 one = "{count} match"
 other = "{count} matches"
@@ -1174,3 +1177,7 @@ other = "{token}: {meaning}, {count} times"
 [osc52_copied_by]
 one = "A program copied {count} character to the clipboard while {program} was in the foreground"
 other = "A program copied {count} characters to the clipboard while {program} was in the foreground"
+
+[scrollback_kept_lines]
+one = "Start of kept history · {lines} line"
+other = "Start of kept history · {lines} lines"

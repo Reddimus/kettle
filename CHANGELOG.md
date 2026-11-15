@@ -8,6 +8,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Scrolled to the very top of a history that has lost its oldest lines, a
+  pane shows **Start of kept history · 10,000 lines** at its top right: where
+  the history Kettle still holds begins and how many lines that is, so the
+  history limit (`scrollback`, or `scrollback-bytes` in a wide pane) is
+  visible where you run into it. It shows only there,
+  never at a live prompt after Clear Scrollback, and without the count in a
+  pane too narrow for it. Screen readers read it as text. No default changes:
+  `scrollback` stays 10,000 lines.
+
+- When the focused pane is scrolled back from its live output, screen
+  readers are given a polite **Viewing history** status. It carries no line
+  count, so scrolling further does not repeat it; the jump button beside it
+  still says how far back the view is. Orca on GNOME speaks it once each
+  time the pane leaves live output; VoiceOver and Narrator are not yet
+  checked.
+
 - Copied files and images paste in Wayland sessions without XWayland. Kettle
   reads `text/uri-list` (or GNOME's `x-special/gnome-copied-files`) and
   `image/png` through its own Wayland connection: it decides from the types
@@ -369,6 +385,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   within the same 2048 retained commands.
 
 ### Changed
+
+- The **↓ N lines** pill of a scrolled-back pane now reads as the button it
+  is. It has an outline that is at least 3:1 against the terminal on every
+  bundled theme, in an opaque window and at the default 0.99 and 0.86
+  opacities, a hover and a pressed state, and after the count it shows
+  the key bound to `scroll_to_bottom` (Ctrl+End by default). The key follows
+  a rebind and is left out when the action is unbound or the pane is too
+  narrow; the count always shows. Like a native button it now acts when the
+  press is released over it; a release anywhere else, or the pointer
+  leaving the window, cancels it.
+  Screen readers get the key as the button's shortcut, and `kettle ctl
+  ui_geometry` reports the button's state and key hint.
 
 - Text wins over an image when the clipboard offers both, on every platform:
   cells copied from a spreadsheet paste as text instead of the path of a

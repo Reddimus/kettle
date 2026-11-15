@@ -210,6 +210,10 @@ fn every_spanish_message_has_a_review_status() {
                         | "ssh_status_removed"
                         | "ssh_status_not_saved"
                         | "ssh_status_not_removed"
+                        // The kept-history label is read by screen readers
+                        // as the text it shows.
+                        | "scrollback_kept"
+                        | "scrollback_kept_lines"
                 )
         })
         .cloned()

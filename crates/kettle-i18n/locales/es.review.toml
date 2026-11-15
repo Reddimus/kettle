@@ -1105,6 +1105,10 @@ osc52_blocked_write = "draft"
 osc52_blocked_read_by = "draft"
 osc52_blocked_write_by = "draft"
 
+scrollback_kept = "draft"
+scrollback_a11y_viewing = "draft"
+scrollback_kept_lines = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1306,4 +1310,8 @@ keys = [
     "osc52_blocked_write",
     "osc52_blocked_read_by",
     "osc52_blocked_write_by",
+
+    "scrollback_a11y_viewing",
+    "scrollback_kept",
+    "scrollback_kept_lines",
 ]

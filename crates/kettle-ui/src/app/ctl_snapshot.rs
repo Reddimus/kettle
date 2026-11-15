@@ -283,6 +283,38 @@ pub(super) fn confirmation_json(
     })
 }
 
+/// A jump-to-bottom button in `ui_geometry`: the rect the painter fills,
+/// the pointer hits and AccessKit bounds, its state, and its key hint when
+/// it shows one. The hint is a chord from the keymap; the count stays out.
+pub(super) fn scrollback_pill_json(
+    pane: u64,
+    pill: &kettle_render::ScrollbackPill,
+    state: kettle_render::ScrollbackPillState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pane": pane,
+        "rect": rect_json(pill.rect),
+        "state": state.name(),
+        "hint": pill.hint.as_ref().map(|hint| serde_json::json!({
+            "text": hint.text,
+            "divider": rect_json(hint.divider),
+        })),
+    })
+}
+
+/// A "Start of kept history" label in `ui_geometry`: where it is, and
+/// whether it had room to say how many lines the pane holds.
+pub(super) fn kept_history_label_json(
+    pane: u64,
+    label: &kettle_render::KeptHistoryLabel,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pane": pane,
+        "rect": rect_json(label.rect),
+        "counted": label.counted,
+    })
+}
+
 pub(super) fn rect_json(rect: kettle_render::Rect4) -> serde_json::Value {
     serde_json::json!({
         "x": rect.0,

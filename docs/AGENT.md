@@ -250,6 +250,16 @@ includes them. Negative coordinates are valid on monitors left of or above
 the primary display. Use the reported scale factor when converting screenshot
 or logical coordinates, and sample each target window independently.
 
+`ui_geometry.scrollback_pills` lists each scrolled-back pane's jump-to-bottom
+button: its `pane`, the `rect` that is painted, hit and given to AccessKit, its
+`state` (`rest`, `hovered` or `pressed`; only the physical pointer hovers it),
+and `hint`, the chord shown after the count with the `divider` rule before it,
+or `null` when no key is bound or the pane is too narrow. The button acts on
+the release of a primary press over it. `ui_geometry.kept_history_labels`
+lists each "Start of kept history" label by `pane` and `rect`, with `counted`
+false where the pane had no room for the line count. Both carry geometry and
+the keymap's chord only, never terminal text.
+
 When Settings is open, `ui_geometry.settings` reports the panel, optional
 sidebar, content and search rectangles, visible category rectangles, and each
 visible row's index, row, label, description and chip rectangles. It also

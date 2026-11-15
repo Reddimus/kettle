@@ -625,6 +625,7 @@ impl App {
         // silently lost.
         self.finish_selection_gesture(ws);
         ws.card_press = None;
+        ws.scrollback_pill_press = None;
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The press that opens a question also owns its later release.
@@ -4127,6 +4128,7 @@ impl App {
         // A card held under a modal that opened is not clicked, even if the
         // modal is gone by the release.
         ws.card_press = None;
+        ws.scrollback_pill_press = None;
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The modal that opens takes the keyboard from a preview lane, even

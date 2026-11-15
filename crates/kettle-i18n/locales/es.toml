@@ -1096,6 +1096,9 @@ osc52_blocked_write = "Se impidió que un programa copiara al portapapeles. Para
 osc52_blocked_read_by = "Se impidió que un programa leyera el portapapeles mientras {program} estaba en primer plano. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
 osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mientras {program} estaba en primer plano. Para permitirlo, cambia {setting} en Configuración > {category} (clave de configuración osc52)."
 
+scrollback_kept = "Inicio del historial conservado"
+scrollback_a11y_viewing = "Viendo el historial"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -1175,3 +1178,7 @@ other = "{token}: {meaning}, {count} veces"
 [osc52_copied_by]
 one = "Un programa copió {count} carácter al portapapeles mientras {program} estaba en primer plano"
 other = "Un programa copió {count} caracteres al portapapeles mientras {program} estaba en primer plano"
+
+[scrollback_kept_lines]
+one = "Inicio del historial conservado · {lines} línea"
+other = "Inicio del historial conservado · {lines} líneas"
