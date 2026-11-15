@@ -460,15 +460,15 @@ fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
 }
 
 /// The described rows the palette shows, in `tr`'s language, as the painter
-/// receives them at 1280x820 under a 32 px tab bar, at the `font_px` default
-/// font (13 px on macOS, 14 elsewhere; the cell measured from the bundled
+/// receives them at 1280x820 under a 32 px tab bar, in `cell`, the default
+/// font's cell (13 px on macOS, 14 elsewhere, measured from the bundled
 /// font), with
 /// each row's hint in either notation: `macos` glyphs or `Ctrl+Shift` text. A
 /// row's action is read from the same view entries the rows are ranked from.
 fn described_palette_rows(
     tr: &Translator,
     macos: bool,
-    font_px: f32,
+    cell: (f32, f32),
 ) -> Vec<(
     kettle_config::keybinds::Action,
     kettle_render::ContextMenuRow,
@@ -517,7 +517,6 @@ fn described_palette_rows(
             selected: 0,
             footer: None,
         };
-        let cell = kettle_render::bundled_cell_size(font_px, 1.0);
         let mut menu = super::picker_context_menu(list, (1280.0, 820.0), cell, 32.0).unwrap();
         let row = menu.rows.remove(0);
         out.push((entry.action.clone(), row, menu));
@@ -533,13 +532,15 @@ fn described_palette_rows(
 #[test]
 fn every_description_fits_the_default_palette() {
     for font_px in [13.0, 14.0] {
+        // Measured once per font: shaping is not free, and this test shares
+        // the machine with timing-sensitive ones.
+        let cell = kettle_render::bundled_cell_size(font_px, 1.0);
         for tr in [EN, ES, Translator::pseudo()] {
             for macos in [true, false] {
-                let rows = described_palette_rows(&tr, macos, font_px);
+                let rows = described_palette_rows(&tr, macos, cell);
                 assert_eq!(rows.len(), 11, "described commands");
                 for (action, row, menu) in rows {
                     assert!(!row.description.is_empty(), "{action:?}");
-                    let cell = kettle_render::bundled_cell_size(font_px, 1.0);
                     let painted = kettle_render::menu_row_description_left(
                         &row,
                         menu.anchor.0,
