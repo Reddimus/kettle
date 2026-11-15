@@ -10,18 +10,9 @@ impl App {
         if !ws.search.open {
             return 0.0;
         }
-        let Some(renderer) = ws.renderer.as_ref() else {
-            return 26.0;
-        };
-        let (width, height) = renderer.surface_size();
-        kettle_render::search_bar_geometry(
-            width as f32,
-            height as f32,
-            renderer.overlay_text_cell_width(),
-            renderer.cell_h,
-            &self.ui_text,
-        )
-        .reserved_height
+        // The same geometry the bar is painted and hit-tested with.
+        self.search_geometry(ws)
+            .map_or(26.0, |geometry| geometry.reserved_height)
     }
 
     pub(super) fn update_search(&mut self, ws: &mut WindowState) {

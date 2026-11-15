@@ -14,7 +14,7 @@ use crate::scrollback::{
 };
 use crate::{
     HistoryView, QuadInstance, Rect4, ScrollbackPillState, kept_history_label, scrollback_pill,
-    scrollback_pill_hint, search_bar_geometry,
+    scrollback_pill_hint,
 };
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
@@ -753,42 +753,6 @@ fn the_kept_history_label_clears_the_scrollbar_and_the_button() {
             }
         }
         assert!(both > 0 && button_only > 0, "scale {scale}");
-    }
-}
-
-/// The search bar is a lane reserved under the panes, so a pane's terminal
-/// ends where the bar begins: the label at its top and the button at its
-/// bottom stay out of the bar at every window size, in every language,
-/// however many rows the bar wraps to.
-#[test]
-fn the_label_and_the_button_stay_out_of_the_search_bar() {
-    for tr in [Translator::default(), Translator::new(Language::Es)] {
-        for (width, height) in [
-            (1280.0, 820.0),
-            (640.0, 400.0),
-            (360.0, 300.0),
-            (240.0, 200.0),
-        ] {
-            let bar = search_bar_geometry(width, height, CELL.0, 18.0, &tr);
-            assert!(bar.reserved_height > 0.0);
-            // What `App::area` leaves the panes while the bar is open.
-            let pane = (0.0, 0.0, width, height - bar.reserved_height);
-            let pill = scrollback_pill(pane, HISTORY, 1.0, CELL, 6.0, Some("Ctrl+End"), &tr);
-            let label = kept_history_label(pane, top_of(HISTORY), 1.0, CELL, 6.0, &tr);
-            let context = format!("{width}x{height} {:?}", tr.language());
-            for rect in pill
-                .iter()
-                .map(|p| p.rect)
-                .chain(label.iter().map(|l| l.rect))
-            {
-                assert!(inside(rect, pane), "{context}");
-                assert!(!overlaps(rect, bar.rect), "{context}");
-                assert!(bottom(rect) <= bar.rect.1, "{context}");
-            }
-            if width >= 640.0 {
-                assert!(pill.is_some() && label.is_some(), "{context}");
-            }
-        }
     }
 }
 

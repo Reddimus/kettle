@@ -5,8 +5,8 @@
 
 use super::accessibility::{scrollback_accessibility_nodes, viewing_history_pane};
 use super::{
-    kept_history_label_json, production_source, rect_contains, scrollback_pill_hit,
-    scrollback_pill_json,
+    ContentBands, content_rect_for_with_strip, kept_history_label_json, pane_area,
+    production_source, rect_contains, scrollback_pill_hit, scrollback_pill_json,
 };
 use crate::window_state::WindowState;
 use accesskit::{Action, Live, Node, Role};
@@ -432,6 +432,105 @@ fn exploring_a_scrolled_back_pane_never_lands_on_the_status() {
     }
 }
 
+/// The search bar is painted across the bottom of the window, and the
+/// panes' area while Find is open is the content rect with the bar's
+/// reserved height kept off its bottom: `App::area` is `pane_area` over
+/// `content_rect_for_with_strip`, with the reservation from the geometry
+/// the bar is painted and hit-tested with. Laid out in that area, the jump
+/// button and the kept-history label stay out of the bar, at every window
+/// size, tab-bar side and status-bar place, in English and Spanish, however
+/// many rows the bar wraps to. Without the reservation the button would sit
+/// on the bar.
+#[test]
+fn with_find_open_the_button_and_label_stay_out_of_the_search_bar() {
+    use kettle_config::{StatusBarMode, TabBarPos};
+    let bands = ContentBands {
+        tab_bar_h: 30.0,
+        status_bar_h: 22.0,
+        vertical_title_edit_h: 0.0,
+    };
+    let overlaps = |a: Rect4, b: Rect4| {
+        a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    };
+    let mut would_overlap = 0;
+    for tr in [Translator::default(), Translator::new(Language::Es)] {
+        for surface in [(1280_u32, 820_u32), (640, 400), (360, 300), (2560, 1640)] {
+            for pos in [
+                TabBarPos::Top,
+                TabBarPos::Bottom,
+                TabBarPos::Left,
+                TabBarPos::Right,
+            ] {
+                for status in [
+                    StatusBarMode::Off,
+                    StatusBarMode::Top,
+                    StatusBarMode::Bottom,
+                ] {
+                    let context = format!("{surface:?} {pos:?} {status:?} {:?}", tr.language());
+                    let bar = kettle_render::search_bar_geometry(
+                        surface.0 as f32,
+                        surface.1 as f32,
+                        8.0,
+                        18.0,
+                        &tr,
+                    );
+                    let content = content_rect_for_with_strip(surface, bands, pos, status, 200.0);
+                    let area = pane_area(content, bar.reserved_height);
+                    assert!(bar.reserved_height > 0.0, "{context}");
+                    assert!(area.1 + area.3 <= bar.rect.1, "{context}");
+                    assert!(!overlaps(area, bar.rect), "{context}");
+                    let pill = kettle_render::scrollback_pill(
+                        area,
+                        10_000,
+                        1.0,
+                        (8.0, 16.0),
+                        6.0,
+                        Some("Ctrl+End"),
+                        &tr,
+                    );
+                    let label = kettle_render::kept_history_label(
+                        area,
+                        HistoryView {
+                            offset: 10_000,
+                            size: 10_000,
+                            origin: 90_000,
+                        },
+                        1.0,
+                        (8.0, 16.0),
+                        6.0,
+                        &tr,
+                    );
+                    if surface.0 >= 640 {
+                        assert!(pill.is_some() && label.is_some(), "{context}");
+                    }
+                    for rect in pill
+                        .iter()
+                        .map(|pill| pill.rect)
+                        .chain(label.iter().map(|label| label.rect))
+                    {
+                        assert!(!overlaps(rect, bar.rect), "{context}: {rect:?}");
+                    }
+                    // The same button in the area without the lane kept
+                    // off it would lie on the bar.
+                    if let Some(unreserved) = kettle_render::scrollback_pill(
+                        content,
+                        10_000,
+                        1.0,
+                        (8.0, 16.0),
+                        6.0,
+                        Some("Ctrl+End"),
+                        &tr,
+                    ) && overlaps(unreserved.rect, bar.rect)
+                    {
+                        would_overlap += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(would_overlap > 0);
+}
+
 /// When the pointer leaves the window a jump button is no longer hovered,
 /// and a press it took is over, so a release the window never hears of
 /// cannot leave it painted pressed when the pointer comes back.
@@ -492,6 +591,10 @@ fn the_jump_button_and_label_are_wired_to_the_painted_geometry() {
         "scrollback_pill_reach(Some(hit),&self.scrollback_pill_covers(ws,px,py),(px,py),)",
         // Leaving the window ends the hover and the press.
         "ifws.leave_scrollback_pill()&&letSome(window)=&ws.window",
+        // The panes' area keeps the search lane off its bottom, sized by the
+        // geometry the bar is painted with.
+        "pane_area(content,self.search_bar_h(ws))",
+        "self.search_geometry(ws).map_or(26.0,|geometry|geometry.reserved_height)",
     ] {
         assert!(source.contains(needle), "missing: {needle}");
     }
