@@ -1056,6 +1056,9 @@ notification_toast_a11y_unsourced = "Notificación: {message}"
 pane_a11y_broadcast_sending = "Enviando la entrada a varios paneles"
 pane_a11y_broadcast_receiving = "Recibiendo la entrada de otro panel"
 
+scrollback_kept = "Inicio del historial conservado"
+scrollback_a11y_viewing = "Viendo el historial"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"
@@ -1123,3 +1126,7 @@ other = "{count} notificaciones más"
 [notification_toast_a11y_repeats]
 one = "Enviada una vez"
 other = "Enviada {count} veces"
+
+[scrollback_kept_lines]
+one = "Inicio del historial conservado · {lines} línea"
+other = "Inicio del historial conservado · {lines} líneas"

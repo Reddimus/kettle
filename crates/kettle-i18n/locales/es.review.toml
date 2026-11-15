@@ -1051,6 +1051,10 @@ notification_toast_a11y_repeats = "draft"
 pane_a11y_broadcast_sending = "draft"
 pane_a11y_broadcast_receiving = "draft"
 
+scrollback_kept = "draft"
+scrollback_a11y_viewing = "draft"
+scrollback_kept_lines = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1217,4 +1221,8 @@ keys = [
     "notification_toast_a11y_repeats",
     "pane_a11y_broadcast_sending",
     "pane_a11y_broadcast_receiving",
+
+    "scrollback_a11y_viewing",
+    "scrollback_kept",
+    "scrollback_kept_lines",
 ]

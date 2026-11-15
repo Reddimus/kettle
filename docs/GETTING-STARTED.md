@@ -208,9 +208,11 @@ cap prevented an exact count or made ordering uncertain; Kettle will not claim a
 last, or miss. Ordinary work-budget pauses resume automatically. This keeps
 large or infinite scrollback responsive.
 
-When you scroll into history, click the **↓ 1,234 lines** pill at the pane's
-bottom-right to return to live output. The default history budget is 64 MB per
-pane with a 10,000-line cap. Settings shows **64 MB** under **Scrollback memory**;
+When you scroll into history, click the **↓ 1,234 lines** button at the pane's
+bottom-right to return to live output, or press the key it shows (Ctrl+End by
+default). The default history budget is 64 MB per pane with a 10,000-line cap;
+once output has gone past it, the top of the history says **Start of kept
+history · 10,000 lines**. Settings shows **64 MB** under **Scrollback memory**;
 `scrollback-bytes` and `scrollback` let you change the two limits independently.
 Selection and non-current search highlights are strengthened for visibility in
 faint themes, and the current search result has a distinct underline.
