@@ -238,9 +238,10 @@ impl Context {
     }
 }
 
-/// Use the same ranking as every other macOS shortcut hint, which puts a
-/// Command chord first, and consider only Command chords besides. A shorter
-/// Ctrl chord must not hide a Cmd one.
+/// The menu shortcut for `action` from `bindings`, ranked as every macOS
+/// shortcut hint is, a Command chord first, so a shorter Ctrl chord never
+/// hides a Cmd one. Callers pass only the Command chords, except for Quick
+/// Select, which falls back to its Ctrl chord when it has no Command one.
 #[cfg(any(target_os = "macos", test))]
 fn command_shortcut(bindings: &Bindings, action: &Action) -> Option<(Trigger, String)> {
     let trigger = hint_trigger(bindings, action, true)?;

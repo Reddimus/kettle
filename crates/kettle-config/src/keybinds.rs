@@ -43,8 +43,14 @@ pub struct Trigger {
 impl Trigger {
     pub fn new(mods: Mods, key: Key) -> Self {
         // The Ctrl+Shift+1..9 defaults and their US-shifted symbols share
-        // a trigger so overrides and unbinds apply to either spelling.
+        // a trigger so overrides and unbinds apply to either spelling. So do
+        // Shift+Cmd+] / [ and the `}` / `{` AppKit reports for them: one
+        // chord, one binding, whichever spelling a config, a key event or
+        // Settings uses.
         let key = match key {
+            Key::Char(c @ ('{' | '}')) if mods.contains(Mods::SUPER | Mods::SHIFT) => {
+                Key::Char(if c == '{' { '[' } else { ']' })
+            }
             Key::Char(c) if mods.contains(Mods::CTRL | Mods::SHIFT) => Key::Char(match c {
                 '!' => '1',
                 '@' => '2',
@@ -1791,13 +1797,11 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         bind(sus, Char('p'), CommandPalette);
         // The tab, window and select-all chords of Terminal, Safari, iTerm2
         // and Ghostty. With Shift held, AppKit reports the shifted glyph (`}`
-        // and `{` on a US layout); the bracket spelling matches there only
-        // through the US physical-key alias, so both are bound, as the font
-        // chords bind `+` and `=`. Hints and menus show the bracket.
+        // and `{` on a US layout); `Trigger::new` folds that into the
+        // bracket, so each chord is one binding a user can rebind or unbind
+        // whole.
         bind(sus, Char(']'), NextTab);
-        bind(sus, Char('}'), NextTab);
         bind(sus, Char('['), PrevTab);
-        bind(sus, Char('{'), PrevTab);
         bind(sus, Char('w'), CloseWindow);
         bind(su, Char('a'), SelectAll);
         bind(su, Char(','), OpenSettings);
@@ -3040,9 +3044,10 @@ mod tests {
     }
 
     /// Shift+Cmd+] / [ change tabs, Shift+Cmd+W closes the window and Cmd+A
-    /// selects all, as in Terminal, Safari, iTerm2 and Ghostty. AppKit reports
-    /// the shifted glyph with Shift held, so the brace spellings are bound too,
-    /// and the hint shows the bracket.
+    /// selects all, as in Terminal, Safari, iTerm2 and Ghostty. The brace
+    /// AppKit reports with Shift held is the same trigger, and the hint shows
+    /// the bracket. These assertions pin the bindings; the Cmd-first hint
+    /// rule is pinned by `macos_hint_prefers_the_command_chord_over_a_shorter_one`.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_standard_tab_window_and_select_all_chords_are_bound() {
@@ -3117,6 +3122,147 @@ mod tests {
             hint_label_for_platform(&close, &Action::CloseWindow, false).as_deref(),
             Some("Ctrl+Q")
         );
+    }
+
+    /// Shift+Cmd+] and the `}` AppKit reports for it are one trigger, from a
+    /// config line, a key event or Settings alike; so are `[` and `{`. A
+    /// brace with other modifiers keeps its own spelling.
+    #[test]
+    fn shift_cmd_brace_and_bracket_are_one_trigger() {
+        let sus = Mods::SUPER | Mods::SHIFT;
+        assert_eq!(
+            Trigger::new(sus, Key::Char('}')),
+            Trigger::new(sus, Key::Char(']'))
+        );
+        assert_eq!(
+            Trigger::new(sus, Key::Char('{')),
+            Trigger::new(sus, Key::Char('['))
+        );
+        assert_eq!(
+            parse_trigger("cmd+shift+braceright"),
+            parse_trigger("cmd+shift+bracketright")
+        );
+        assert_eq!(
+            parse_trigger("super+shift+{"),
+            parse_trigger("super+shift+[")
+        );
+        assert_eq!(
+            Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('}')).key,
+            Key::Char('}')
+        );
+        assert_eq!(
+            Trigger::new(Mods::SUPER, Key::Char('}')).key,
+            Key::Char('}')
+        );
+    }
+
+    /// A user's rebind or unbind of either spelling of Shift+Cmd+] / [ takes
+    /// the whole chord: no brace twin keeps the default action alive, the
+    /// action's hint falls back to its Ctrl chord, and neither the hint nor
+    /// `--list-keybinds` ever shows a brace.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_user_rebind_or_unbind_of_either_bracket_spelling_wins() {
+        let sus = Mods::SUPER | Mods::SHIFT;
+        for line in describe_defaults() {
+            assert!(!line.contains('}') && !line.contains('{'), "{line}");
+        }
+        for (bracket, brace, action, ctrl_hint) in [
+            ("bracketright", "braceright", Action::NextTab, "⌃PageDown"),
+            ("bracketleft", "braceleft", Action::PrevTab, "⌃PageUp"),
+        ] {
+            for spelling in [bracket, brace] {
+                for (value, now) in [("new_tab", Some(Action::NewTab)), ("unbind", None)] {
+                    let mut m = defaults();
+                    apply_keybind(&mut m, &format!("cmd+shift+{spelling}={value}"));
+                    let chord = parse_trigger(&format!("cmd+shift+{bracket}")).unwrap();
+                    assert_eq!(m.get(&chord), now.as_ref(), "{spelling}={value}");
+                    assert!(
+                        !m.iter().any(|(t, a)| *a == action && t.mods == sus),
+                        "{spelling}={value}: a Shift+Cmd twin still runs {action:?}"
+                    );
+                    assert_eq!(ui_hint_label(&m, &action).as_deref(), Some(ctrl_hint));
+                    assert!(
+                        describe(&m)
+                            .iter()
+                            .all(|l| !l.contains('}') && !l.contains('{'))
+                    );
+                }
+            }
+        }
+    }
+
+    /// The Cmd-first hint rule changes no default macOS hint: against the old
+    /// rule (bare alphanumeric key, then shortest label) on the map without
+    /// the new chords, the only hints that differ are the four the new chords
+    /// add.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_hints_change_only_for_the_new_chords() {
+        let new = defaults();
+        let sus = Mods::SUPER | Mods::SHIFT;
+        let mut old = new.clone();
+        for t in [
+            Trigger::new(sus, Key::Char(']')),
+            Trigger::new(sus, Key::Char('[')),
+            Trigger::new(sus, Key::Char('w')),
+            Trigger::new(Mods::SUPER, Key::Char('a')),
+        ] {
+            old.remove(&t);
+        }
+        let old_rule = |m: &Bindings, action: &Action| {
+            m.iter()
+                .filter(|(_, a)| *a == action)
+                .map(|(t, _)| (t, t.label()))
+                .min_by_key(|(_, l)| {
+                    let alnum = l.rsplit('+').next().is_some_and(|k| {
+                        k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric())
+                    });
+                    (!alnum, l.len(), l.clone())
+                })
+                .map(|(t, _)| t.ui_label(true))
+        };
+        let mut actions: Vec<Action> = new.values().cloned().collect();
+        actions.push(Action::SelectAll);
+        actions.sort_by_key(|a| format!("{a:?}"));
+        actions.dedup();
+        let changed: Vec<(String, Option<String>, Option<String>)> = actions
+            .iter()
+            .filter_map(|action| {
+                let (before, after) = (old_rule(&old, action), ui_hint_label(&new, action));
+                (before != after).then(|| (format!("{action:?}"), before, after))
+            })
+            .collect();
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(
+            changed,
+            [
+                ("CloseWindow".to_string(), s("⌃⇧Q"), s("⇧⌘W")),
+                ("NextTab".to_string(), s("⌃PageDown"), s("⇧⌘]")),
+                ("PrevTab".to_string(), s("⌃PageUp"), s("⇧⌘[")),
+                ("SelectAll".to_string(), None, s("⌘A")),
+            ]
+        );
+    }
+
+    /// Off macOS, Next tab, Previous tab and Close window keep exactly their
+    /// old chords: the new ones are macOS-only.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_tab_and_window_chords_are_unchanged() {
+        let d = defaults();
+        let triggers = |action: Action| {
+            let mut t: Vec<String> = d
+                .iter()
+                .filter(|(_, a)| **a == action)
+                .map(|(t, _)| t.label())
+                .collect();
+            t.sort();
+            t
+        };
+        assert_eq!(triggers(Action::NextTab), ["Ctrl+PageDown"]);
+        assert_eq!(triggers(Action::PrevTab), ["Ctrl+PageUp"]);
+        assert_eq!(triggers(Action::CloseWindow), ["Ctrl+Shift+Q"]);
     }
 
     #[cfg(target_os = "macos")]
