@@ -208,6 +208,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
                     separator,
                     enabled,
                     hint: String::new(),
+                    ..Default::default()
                 },
             )
             .collect(),

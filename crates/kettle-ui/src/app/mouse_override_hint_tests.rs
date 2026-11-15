@@ -226,6 +226,7 @@ fn painted_labels(menu: &[ContextMenuItem], surface_w: f32, cell_w: f32) -> (Vec
                     separator: false,
                     enabled: false,
                     hint: String::new(),
+                    ..Default::default()
                 };
                 fit_context_menu_row(&mut row, columns);
                 Some(row.label)
@@ -375,6 +376,7 @@ fn painted_panel(items: &[ContextMenuItem], anchor: (f32, f32)) -> ContextMenu {
                 separator: matches!(item, ContextMenuItem::Separator),
                 enabled,
                 hint: hint.to_string(),
+                ..Default::default()
             }
         })
         .collect();

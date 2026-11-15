@@ -661,7 +661,7 @@ notify_title_update_failed = "accepted"
 notify_title_update_installed = "accepted"
 notify_title_update_recovery = "accepted"
 notify_title_update_staged = "accepted"
-palette_about = "accepted"
+palette_about = "draft"
 palette_clear_history = "accepted"
 palette_close_pane = "accepted"
 palette_close_tab = "accepted"
@@ -673,7 +673,7 @@ palette_duplicate_pane = "accepted"
 palette_duplicate_tab = "accepted"
 palette_edit_config = "accepted"
 palette_edit_pane_group = "accepted"
-palette_equalize_splits = "accepted"
+palette_equalize_splits = "draft"
 palette_focus_next = "accepted"
 palette_focus_prev = "accepted"
 palette_group_all = "accepted"
@@ -737,13 +737,13 @@ palette_set_bell_visual = "accepted"
 palette_set_scrollbar_always = "accepted"
 palette_set_scrollbar_auto = "accepted"
 palette_set_scrollbar_never = "accepted"
-palette_show_help = "accepted"
+palette_show_help = "draft"
 palette_show_keybinds = "accepted"
 palette_split_auto = "accepted"
-palette_split_down = "accepted"
-palette_split_left = "accepted"
-palette_split_right = "accepted"
-palette_split_up = "accepted"
+palette_split_down = "draft"
+palette_split_left = "draft"
+palette_split_right = "draft"
+palette_split_up = "draft"
 palette_start_search = "accepted"
 palette_take_screenshot = "accepted"
 palette_toggle_broadcast_all = "accepted"
@@ -1046,6 +1046,63 @@ notification_toast_a11y = "draft"
 notification_toast_a11y_unsourced = "draft"
 notification_toast_more = "draft"
 notification_toast_a11y_repeats = "draft"
+palette_desc_split_right = "draft"
+palette_desc_split_down = "draft"
+palette_desc_split_auto = "draft"
+palette_desc_new_tab = "draft"
+palette_desc_undo_close_tab = "draft"
+palette_desc_duplicate_tab = "draft"
+palette_desc_duplicate_pane = "draft"
+palette_desc_needs_shell_integration = "draft"
+palette_desc_prompt_needs_shell_integration = "draft"
+palette_desc_show_help = "draft"
+a11y_key_control = "draft"
+a11y_key_option = "draft"
+a11y_key_alt = "draft"
+a11y_key_shift = "draft"
+a11y_key_command = "draft"
+a11y_key_super = "draft"
+a11y_key_up = "draft"
+a11y_key_down = "draft"
+a11y_key_left = "draft"
+a11y_key_right = "draft"
+a11y_key_page_up = "draft"
+a11y_key_page_down = "draft"
+a11y_key_home = "draft"
+a11y_key_end = "draft"
+a11y_key_enter = "draft"
+a11y_key_tab = "draft"
+a11y_key_escape = "draft"
+a11y_key_backspace = "draft"
+a11y_key_delete = "draft"
+a11y_key_space = "draft"
+a11y_key_right_bracket = "draft"
+a11y_key_left_bracket = "draft"
+a11y_key_comma = "draft"
+a11y_key_period = "draft"
+a11y_key_plus = "draft"
+a11y_key_minus = "draft"
+a11y_key_equals = "draft"
+a11y_key_slash = "draft"
+a11y_key_backslash = "draft"
+a11y_key_semicolon = "draft"
+a11y_key_apostrophe = "draft"
+a11y_key_grave = "draft"
+palette_group_tabs = "draft"
+palette_group_splits = "draft"
+palette_group_panes = "draft"
+palette_group_windows = "draft"
+palette_group_search_and_selection = "draft"
+palette_group_scrolling = "draft"
+palette_group_text_size = "draft"
+palette_group_appearance = "draft"
+palette_group_terminal = "draft"
+palette_group_broadcast_input = "draft"
+palette_group_previews = "draft"
+palette_group_layouts_profiles_ssh = "draft"
+palette_group_settings = "draft"
+palette_group_help = "draft"
+
 pane_a11y_broadcast_sending = "draft"
 pane_a11y_broadcast_receiving = "draft"
 
@@ -1273,6 +1330,70 @@ keys = [
     "notification_toast_a11y_unsourced",
     "notification_toast_more",
     "notification_toast_a11y_repeats",
+    "a11y_key_control",
+    "a11y_key_option",
+    "a11y_key_alt",
+    "a11y_key_shift",
+    "a11y_key_command",
+    "a11y_key_super",
+    "a11y_key_up",
+    "a11y_key_down",
+    "a11y_key_left",
+    "a11y_key_right",
+    "a11y_key_page_up",
+    "a11y_key_page_down",
+    "a11y_key_home",
+    "a11y_key_end",
+    "a11y_key_enter",
+    "a11y_key_tab",
+    "a11y_key_escape",
+    "a11y_key_backspace",
+    "a11y_key_delete",
+    "a11y_key_space",
+    "a11y_key_right_bracket",
+    "a11y_key_left_bracket",
+    "a11y_key_comma",
+    "a11y_key_period",
+    "a11y_key_plus",
+    "a11y_key_minus",
+    "a11y_key_equals",
+    "a11y_key_slash",
+    "a11y_key_backslash",
+    "a11y_key_semicolon",
+    "a11y_key_apostrophe",
+    "a11y_key_grave",
+    "palette_group_tabs",
+    "palette_group_splits",
+    "palette_group_panes",
+    "palette_group_windows",
+    "palette_group_search_and_selection",
+    "palette_group_scrolling",
+    "palette_group_text_size",
+    "palette_group_appearance",
+    "palette_group_terminal",
+    "palette_group_broadcast_input",
+    "palette_group_previews",
+    "palette_group_layouts_profiles_ssh",
+    "palette_group_settings",
+    "palette_group_help",
+    "palette_desc_split_right",
+    "palette_desc_split_down",
+    "palette_desc_split_auto",
+    "palette_desc_new_tab",
+    "palette_desc_undo_close_tab",
+    "palette_desc_duplicate_tab",
+    "palette_desc_duplicate_pane",
+    "palette_desc_needs_shell_integration",
+    "palette_desc_prompt_needs_shell_integration",
+    "palette_desc_show_help",
+    "palette_about",
+    "palette_show_help",
+    "palette_split_right",
+    "palette_split_down",
+    "palette_split_left",
+    "palette_split_up",
+    "palette_equalize_splits",
+
     "pane_a11y_broadcast_sending",
     "pane_a11y_broadcast_receiving",
 

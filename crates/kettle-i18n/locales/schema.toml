@@ -3113,6 +3113,174 @@ context = "crates/kettle-ui/src/app/notification_toast.rs: screen-reader descrip
 args = [{ name = "count", type = "u64" }]
 plural = "count"
 
+[messages.palette_desc_split_right]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_split_right and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new pane opens to the right, so the divider between the panes runs top to bottom."
+
+[messages.palette_desc_split_down]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_split_down and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new pane opens below, so the divider runs left to right."
+
+[messages.palette_desc_split_auto]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_split_auto and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The focused pane is cut across its longer side: a wide pane gets a pane beside it, a tall one a pane below."
+
+[messages.palette_desc_new_tab]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_new_tab and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new tab's shell starts in the working folder of the focused pane."
+
+[messages.palette_desc_undo_close_tab]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_undo_close_tab and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. Reopens the most recently closed tab, restarting its program in the folder it had. The subject is the tab (feminine in Spanish)."
+
+[messages.palette_desc_duplicate_tab]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_duplicate_tab and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new tab runs the focused pane's program in its folder."
+
+[messages.palette_desc_duplicate_pane]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_duplicate_pane and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The new pane runs the focused pane's program in its folder, to the right of it."
+
+[messages.palette_desc_needs_shell_integration]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_select_command_output and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. These commands find commands and prompts through the marks shell integration writes (OSC 133). Shell is feminine, as in the prompt entries."
+
+[messages.palette_desc_show_help]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entry palette_show_help and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: at most 28 columns in English. Sentence case, no final period. The help is the project README, opened in the system web browser."
+
+[messages.a11y_key_control]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Control modifier in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_option]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the macOS Option modifier in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_alt]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Alt modifier (Linux and Windows) in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_shift]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Shift modifier in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_command]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the macOS Command modifier in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_super]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Super modifier (the Windows or logo key; Linux and Windows) in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_up]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the up arrow key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_down]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the down arrow key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_left]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the left arrow key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_right]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the right arrow key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_page_up]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Page Up key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_page_down]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Page Down key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_home]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Home key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_end]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the End key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_enter]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Enter (Return) key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_tab]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Tab key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_escape]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Escape key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_backspace]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Backspace key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_delete]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Delete (forward delete) key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_space]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the space bar in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_right_bracket]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the ] key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_left_bracket]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the [ key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_comma]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the , key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_period]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the . key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_plus]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the + key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_minus]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the - key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_equals]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the = key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_slash]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the / key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_backslash]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the \\ key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_semicolon]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the ; key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_apostrophe]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the ' key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.a11y_key_grave]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the ` key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
+[messages.palette_group_tabs]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (new, close, next and previous tab). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_splits]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (split the pane right, down, automatically, left or up). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_panes]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (duplicate, close, zoom, focus and move panes). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_windows]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (new and close window, full screen, quick terminal). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_search_and_selection]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (search, quick-select hints, copy, paste and selecting text). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_scrolling]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (scroll by page, half page or line, and jump between prompts). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_text_size]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (font size of the pane and of all panes). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_appearance]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (theme and scrollbar). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_terminal]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (clear scrollback, reset, session log, screenshot). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_broadcast_input]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (send typing to several panes at once, and pane groups). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_previews]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (image, video and diagram previews). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_layouts_profiles_ssh]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (the SSH launcher, saved layouts and profiles). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_settings]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (Settings, the config file and preferences). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_group_help]
+context = "crates/kettle-config/src/palette.rs PaletteGroup::text: a heading of the empty command palette, over the commands it groups (keyboard shortcuts, help and About). Screen readers also hear it after the first command under it. Sentence case, a short noun phrase; at most 20 columns in English."
+
+[messages.palette_desc_prompt_needs_shell_integration]
+context = "crates/kettle-config/src/palette.rs description(): secondary text painted after the command palette entries palette_jump_prev_prompt and palette_jump_next_prompt and read by screen readers; says what the label cannot. Shown whole or not at all, so keep it short: the labels already name the shell, and with Linux shortcut hints at the default 14 px font a 1280-pixel window leaves about 25 columns for it in Spanish. Prompt jumps find prompts through the marks shell integration writes (OSC 133). Sentence case, no final period."
+
 [messages.pane_a11y_broadcast_sending]
 context = "crates/kettle-ui/src/app/broadcast.rs and accessibility.rs: screen-reader description of the focused terminal pane while broadcast input is on: what is typed in it is also sent to other panes (the panes in the tab, in the window or in a broadcast group). Its outline is drawn solid in the broadcast colour. Read after the pane's name; a state, not an action. The progressive form of the Broadcast Input menu's wording (menu_broadcast_input), as the English is. Needs screen-reader second pass."
 

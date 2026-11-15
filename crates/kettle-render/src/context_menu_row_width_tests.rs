@@ -1,6 +1,6 @@
 use super::{
     ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
-    menu_chrome_quads, menu_row_chars,
+    menu_chrome_quads, menu_row_chars, menu_row_description_left,
 };
 
 #[test]
@@ -20,6 +20,7 @@ fn row_budget_uses_display_columns() {
         separator: false,
         enabled: true,
         hint: "Ctrl+界".to_string(),
+        ..Default::default()
     };
     assert_eq!(
         menu_row_chars(&row),
@@ -39,6 +40,7 @@ fn app_clamped_width_is_authoritative_for_every_render_pass() {
         separator: false,
         enabled: true,
         hint: String::new(),
+        ..Default::default()
     };
     let menu = ContextMenu {
         anchor: (0.0, 0.0),
@@ -67,6 +69,7 @@ fn scroll_indicators_follow_the_remaining_suffix() {
             separator,
             enabled: !separator,
             hint: String::new(),
+            ..Default::default()
         })
         .collect::<Vec<_>>();
     let row_h = 24.0;
@@ -107,6 +110,7 @@ fn tiny_or_invalid_menu_never_emits_negative_or_nonfinite_quads() {
             separator: true,
             enabled: false,
             hint: String::new(),
+            ..Default::default()
         }],
         highlight: 0,
         scroll_offset: 0,
@@ -198,6 +202,7 @@ fn cut_menu_paints_arrow_inside_reserved_strip() {
                 hint: String::new(),
                 separator: false,
                 enabled: true,
+                ..Default::default()
             })
             .collect(),
         highlight: 0,
@@ -247,6 +252,7 @@ fn regression_scroll_arrows_stay_inside_short_reserved_strips() {
                     separator: false,
                     enabled: true,
                     hint: String::new(),
+                    ..Default::default()
                 })
                 .collect(),
             highlight: usize::MAX,
@@ -292,6 +298,7 @@ fn ordinary_menu_spans_keep_default_color_and_unicode_matches_use_scalars() {
         separator: false,
         enabled: true,
         matched_chars: None,
+        ..Default::default()
     };
     assert_eq!(
         super::overlays::menu_label_spans(&row),
@@ -349,6 +356,7 @@ fn menu_and_picker_panels_are_rounded_and_keep_the_selection_inside() {
         enabled: true,
         hint: String::new(),
         matched_chars: None,
+        ..Default::default()
     };
     let level = |labels: &[&str], highlight, (w, h, header)| ContextMenu {
         anchor: (140.0, 100.0),
@@ -479,6 +487,7 @@ fn swatch_row(label: &str, hint: &str) -> ContextMenuRow {
         separator: false,
         enabled: true,
         hint: hint.into(),
+        ..Default::default()
     }
 }
 
@@ -573,6 +582,7 @@ fn only_visible_rows_with_swatches_paint_them() {
             separator: label.is_empty(),
             enabled: true,
             hint: "Ctrl+C".into(),
+            ..Default::default()
         })
         .collect();
     let menu = natural_menu(plain);
@@ -639,6 +649,7 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         enabled: true,
         hint: String::new(),
         matched_chars: Some(std::iter::once(0..5).collect()),
+        ..Default::default()
     };
     let menu = ContextMenu {
         anchor: (140.0, 100.0),
@@ -700,4 +711,122 @@ fn picker_match_color_meets_text_contrast_on_the_selected_row_in_every_theme() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A row's description is painted whole or not at all: two columns after the
+/// label, ending at least two columns before the right-aligned hint and
+/// inside the panel. Checked in English, Spanish and the expanded
+/// pseudo-locale, at both platforms' default fonts (13 and 14 px, the cell
+/// measured from the bundled font), in the palette of a 1280x820 window,
+/// where every case shows, and of a 640x820 one, where some give way.
+#[test]
+fn palette_description_is_whole_or_hidden() {
+    use kettle_i18n::{Language, Text, Translator};
+    use unicode_width::UnicodeWidthStr as _;
+    let ax = 40.0;
+    let cases = [
+        (
+            Text::PaletteSplitRight,
+            Text::PaletteDescSplitRight,
+            ["⌘D", "Ctrl+Shift+E"],
+        ),
+        (
+            Text::PaletteNewTab,
+            Text::PaletteDescNewTab,
+            ["⌘T", "Ctrl+Shift+T"],
+        ),
+        (
+            Text::PaletteUndoCloseTab,
+            Text::PaletteDescUndoCloseTab,
+            ["", ""],
+        ),
+        (
+            Text::PaletteJumpNextPrompt,
+            Text::PaletteDescPromptNeedsShellIntegration,
+            ["⌘Down", "Ctrl+Down"],
+        ),
+        (
+            Text::PaletteSelectCommandOutput,
+            Text::PaletteDescNeedsShellIntegration,
+            ["", ""],
+        ),
+    ];
+    for font_px in [13.0, 14.0] {
+        let (cw, _) = crate::bundled_cell_size(font_px, 1.0);
+        for tr in [
+            Translator::new(Language::En),
+            Translator::new(Language::Es),
+            Translator::pseudo(),
+        ] {
+            for window in [1280.0_f32, 640.0] {
+                // The palette card's width rule at 1x.
+                let panel_w = (window * 0.56).clamp(360.0, 720.0);
+                let columns = menu::panel_columns(panel_w, cw);
+                let mut shown = 0;
+                for (label, description, hints) in cases {
+                    for hint in hints {
+                        let row = ContextMenuRow {
+                            label: tr.text(label).to_string(),
+                            description: tr.text(description).to_string(),
+                            hint: hint.to_string(),
+                            enabled: true,
+                            ..Default::default()
+                        };
+                        let what = format!(
+                            "{font_px} px {:?} {window} {} {hint:?}",
+                            tr.language(),
+                            row.label
+                        );
+                        let needed = row.label.width()
+                            + 2
+                            + row.description.width()
+                            + if hint.is_empty() { 0 } else { 2 + hint.width() };
+                        let left = menu_row_description_left(&row, ax, panel_w, cw);
+                        assert_eq!(left.is_some(), needed <= columns, "{what}");
+                        let Some(left) = left else { continue };
+                        shown += 1;
+                        assert_eq!(
+                            left,
+                            ax + 16.0 + (row.label.width() + 2) as f32 * cw,
+                            "{what}"
+                        );
+                        let end = left + row.description.width() as f32 * cw;
+                        let hint_left =
+                            super::overlays::menu_hint_left(ax, panel_w, hint.width() as f32 * cw);
+                        if !hint.is_empty() {
+                            assert!(
+                                end + 2.0 * cw <= hint_left + 0.01,
+                                "{what}: runs into its hint"
+                            );
+                        }
+                        assert!(
+                            end <= ax + panel_w - 16.0 + 0.01,
+                            "{what}: leaves the panel"
+                        );
+                    }
+                }
+                let all = cases.len() * 2;
+                if window == 1280.0 {
+                    assert_eq!(
+                        shown,
+                        all,
+                        "{font_px} px {:?}: all show at 1280",
+                        tr.language()
+                    );
+                } else {
+                    assert!(
+                        shown < all,
+                        "{font_px} px {:?}: some give way at 640",
+                        tr.language()
+                    );
+                }
+            }
+        }
+    }
+    // A row with no description, or a separator, paints none.
+    let plain = ContextMenuRow {
+        label: "Copy".into(),
+        ..Default::default()
+    };
+    assert_eq!(menu_row_description_left(&plain, ax, 1000.0, 7.8), None);
 }

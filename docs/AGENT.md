@@ -268,6 +268,16 @@ and `visible_lines` keys now describe the first visible result row and visible
 row count. These bounds use the same layout as rendering and mouse input;
 queries and config values are omitted.
 
+When a picker is open, `ui_geometry.picker` reports its card and rows
+rectangles and each fully painted row's `index`, `option`, `rect`, `enabled`
+and `selected`, without labels. The empty command palette lists its commands
+under group headings (Tabs, Splits, Panes, …). Headings are rows of the card,
+but `rows` leaves them out. `index` is the row's place in the card, headings
+counted, so the empty palette's first command has `index` 1; `option` is the
+command's place with headings skipped, the index selection, Enter and the
+accessibility tree use, so that command has `option` 0. A typed query shows no
+headings, so there the two are equal.
+
 When a confirmation is open, `ui_geometry.confirmation` reports its centered
 panel, heading, and body rectangles; scroll offset and limit; and each button's
 label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.

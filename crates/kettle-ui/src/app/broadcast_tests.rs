@@ -281,8 +281,8 @@ fn the_palette_labels_the_chord_with_the_scope_it_turns_on() {
             let label = |action: &Action| {
                 entries
                     .iter()
-                    .find(|(_, a)| a == action)
-                    .map(|(label, _)| label.shown(&tr).to_owned())
+                    .find(|entry| entry.action == *action)
+                    .map(|entry| entry.label.shown(&tr).to_owned())
             };
             assert_eq!(
                 label(&Action::ToggleBroadcastAll),
@@ -294,7 +294,7 @@ fn the_palette_labels_the_chord_with_the_scope_it_turns_on() {
                 Some(tr.text(Text::PaletteToggleBroadcastAll).to_owned()),
                 "{default:?}"
             );
-            let shown: Vec<_> = entries.iter().map(|(label, _)| label.shown(&tr)).collect();
+            let shown: Vec<_> = entries.iter().map(|entry| entry.label.shown(&tr)).collect();
             for text in [
                 Text::PaletteToggleBroadcastAll,
                 Text::PaletteToggleBroadcastWindow,

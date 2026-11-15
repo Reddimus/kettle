@@ -226,9 +226,11 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
             false,
             kettle_config::BroadcastDefault::default(),
         )
-        .rows[0]
-            .label,
-        "Nueva pestaña"
+        .rows[..2]
+            .iter()
+            .map(|row| (row.label.as_str(), row.heading))
+            .collect::<Vec<_>>(),
+        [("Pestañas", true), ("Nueva pestaña", false)]
     );
     let none = command_picker_list(
         "zzzqqq",
@@ -370,7 +372,9 @@ fn the_shortcut_list_shows_its_placeholder_in_a_standard_window() {
         let placeholder = picker_placeholder(&ws, &tr);
         assert_eq!(placeholder, tr.text(Text::PickerPlaceholderShortcuts));
         for surface in [(1285.0, 841.0), (1024.0, 768.0)] {
-            let header = picker_card_geometry(surface, cell, 46.0, 1).unwrap().header;
+            let header = picker_card_geometry(surface, cell, 46.0, 1, 1.0)
+                .unwrap()
+                .header;
             let field = |text: &str| kettle_render::TextFieldOverlay {
                 picker_header: true,
                 placeholder: placeholder.clone(),
@@ -453,4 +457,433 @@ fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
         Some(true),
         "a disabled row is never selected"
     );
+}
+
+/// The described rows the palette shows, in `tr`'s language, as the painter
+/// receives them at 1280x820 under a 32 px tab bar, in `cell`, the default
+/// font's cell (13 px on macOS, 14 elsewhere, measured from the bundled
+/// font), with
+/// each row's hint in either notation: `macos` glyphs or `Ctrl+Shift` text. A
+/// row's action is read from the same view entries the rows are ranked from.
+fn described_palette_rows(
+    tr: &Translator,
+    macos: bool,
+    cell: (f32, f32),
+) -> Vec<(
+    kettle_config::keybinds::Action,
+    kettle_render::ContextMenuRow,
+    kettle_render::ContextMenu,
+)> {
+    let bindings = kettle_config::keybinds::defaults();
+    let entries = super::palette_view_entries(
+        None,
+        tr,
+        &[],
+        kettle_config::BroadcastDefault::default(),
+        &bindings,
+        false,
+    );
+    let list = command_picker_list(
+        "",
+        0,
+        &bindings,
+        tr,
+        None,
+        &[],
+        false,
+        kettle_config::BroadcastDefault::default(),
+    );
+    // The empty palette's commands, past its group headings.
+    let mut rows: Vec<Option<kettle_render::ContextMenuRow>> = list
+        .rows
+        .into_iter()
+        .filter(|row| !row.heading)
+        .map(Some)
+        .collect();
+    assert_eq!(rows.len(), entries.len());
+    let mut out = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if kettle_config::palette::description(&entry.action).is_none() {
+            continue;
+        }
+        let mut row = rows[index].take().unwrap();
+        assert_eq!(row.label, entry.label.shown(tr));
+        row.hint =
+            kettle_config::keybinds::hint_label_for_platform(&bindings, &entry.action, macos)
+                .unwrap_or_default();
+        let list = super::PickerList {
+            card_scale: 1.0,
+            rows: vec![row],
+            selected: 0,
+            footer: None,
+        };
+        let mut menu = super::picker_context_menu(list, (1280.0, 820.0), cell, 32.0).unwrap();
+        let row = menu.rows.remove(0);
+        out.push((entry.action.clone(), row, menu));
+    }
+    out
+}
+
+/// Every described command shows its description whole in the 1280x820
+/// palette at either platform's default font, in English, Spanish and the
+/// expanded pseudo-locale, with either notation of the platform's default
+/// shortcuts beside it. The width is
+/// measured by the painter's own function on the text it paints.
+#[test]
+fn every_description_fits_the_default_palette() {
+    for font_px in [13.0, 14.0] {
+        // Measured once per font: shaping is not free, and this test shares
+        // the machine with timing-sensitive ones.
+        let cell = kettle_render::bundled_cell_size(font_px, 1.0);
+        for tr in [EN, ES, Translator::pseudo()] {
+            for macos in [true, false] {
+                let rows = described_palette_rows(&tr, macos, cell);
+                assert_eq!(rows.len(), 11, "described commands");
+                for (action, row, menu) in rows {
+                    assert!(!row.description.is_empty(), "{action:?}");
+                    let painted = kettle_render::menu_row_description_left(
+                        &row,
+                        menu.anchor.0,
+                        menu.panel_w_clamped,
+                        cell.0,
+                    );
+                    assert!(
+                        painted.is_some(),
+                        "{font_px} px {:?} {action:?} (macos hints {macos}): {} | {} | {}",
+                        tr.language(),
+                        row.label,
+                        row.description,
+                        row.hint
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A palette option's accessible name is its label. Its description is the
+/// shortcut in words, then the description, even where the row is too narrow
+/// to paint either; a row with neither has none, and glyphs are never read.
+#[test]
+fn palette_options_describe_shortcut_then_description() {
+    use kettle_config::keybinds::Action;
+    let bindings = kettle_config::keybinds::defaults();
+    let macos = cfg!(target_os = "macos");
+    let spoken = |action: &Action, tr: &Translator| {
+        let hint = kettle_config::keybinds::ui_hint_label(&bindings, action).unwrap();
+        bindings
+            .iter()
+            .find(|(trigger, bound)| *bound == action && trigger.ui_label(macos) == hint)
+            .map(|(trigger, _)| trigger.spoken_label(macos, tr))
+            .unwrap()
+    };
+    for tr in [EN, ES] {
+        for surface in [(1280.0, 820.0), (640.0, 820.0)] {
+            let list = command_picker_list(
+                "",
+                0,
+                &bindings,
+                &tr,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            let menu = super::picker_context_menu(list, surface, (7.8, 16.25), 32.0).unwrap();
+            let overlay = kettle_render::Overlay {
+                palette_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            };
+            let projection =
+                modal_accessibility_projection(&overlay, surface, (7.8, 16.25), 1.0, &tr);
+            let option = |label: &str| {
+                projection
+                    .nodes
+                    .iter()
+                    .map(|(_, node)| node)
+                    .find(|node| {
+                        node.role() == accesskit::Role::ListBoxOption && node.label() == Some(label)
+                    })
+                    .unwrap_or_else(|| panic!("{label}"))
+            };
+            // Split right is the first command under its heading, so the
+            // group's name follows.
+            let split_right = option(tr.text(Text::PaletteSplitRight));
+            assert_eq!(
+                split_right.description(),
+                Some(
+                    format!(
+                        "{}. {}. {}",
+                        spoken(&Action::SplitRight, &tr),
+                        tr.text(Text::PaletteDescSplitRight),
+                        tr.text(Text::PaletteGroupSplits)
+                    )
+                    .as_str()
+                ),
+                "{surface:?}"
+            );
+            let next = option(tr.text(Text::PaletteNextTab));
+            assert_eq!(
+                next.description(),
+                Some(spoken(&Action::NextTab, &tr).as_str())
+            );
+            let left = option(tr.text(Text::PaletteSplitLeft));
+            assert_eq!(left.description(), None);
+            for (_, node) in &projection.nodes {
+                if let Some(description) = node.description() {
+                    assert!(!description.contains(['⌘', '⇧', '⌃', '⌥']), "{description}");
+                }
+            }
+        }
+    }
+}
+
+/// The empty palette opens on the Tabs heading over New tab, Close tab, Next
+/// tab and Previous tab, each with its chord, then the Splits heading over
+/// Split right with its own, all inside the twelve rows a 1280x820 window
+/// shows, in English and Spanish. A typed query and the keyboard-shortcut
+/// list show the flat list, with no heading.
+#[test]
+fn empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN, ES] {
+        let list = command_picker_list(
+            "",
+            0,
+            &bindings,
+            &tr,
+            None,
+            &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
+        );
+        let rows: Vec<(&str, bool, bool)> = list.rows[..12]
+            .iter()
+            .map(|row| (row.label.as_str(), row.heading, !row.hint.is_empty()))
+            .collect();
+        let text = |text| tr.text(text);
+        assert_eq!(rows[0], (text(Text::PaletteGroupTabs), true, false));
+        // Each shows its chord where the keymap binds one: all four on
+        // macOS, all but Close tab (Ctrl+Shift+W closes a pane) elsewhere.
+        for (row, (label, action)) in rows[1..5].iter().zip([
+            (Text::PaletteNewTab, kettle_config::keybinds::Action::NewTab),
+            (
+                Text::PaletteCloseTab,
+                kettle_config::keybinds::Action::CloseTab,
+            ),
+            (
+                Text::PaletteNextTab,
+                kettle_config::keybinds::Action::NextTab,
+            ),
+            (
+                Text::PalettePrevTab,
+                kettle_config::keybinds::Action::PrevTab,
+            ),
+        ]) {
+            let bound = kettle_config::keybinds::ui_hint_label(&bindings, &action).is_some();
+            assert_eq!(*row, (text(label), false, bound), "{:?}", tr.language());
+            assert!(bound || action == kettle_config::keybinds::Action::CloseTab);
+        }
+        assert_eq!(rows[10], (text(Text::PaletteGroupSplits), true, false));
+        assert_eq!(rows[11], (text(Text::PaletteSplitRight), false, true));
+        assert_eq!(list.selected, 1, "opening selects New tab, not the heading");
+        for query in ["tab", "split", "a"] {
+            let list = command_picker_list(
+                query,
+                0,
+                &bindings,
+                &tr,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            assert!(list.rows.iter().all(|row| !row.heading), "{query:?}");
+        }
+        let shortcuts = command_picker_list(
+            "",
+            0,
+            &bindings,
+            &tr,
+            None,
+            &[],
+            true,
+            kettle_config::BroadcastDefault::default(),
+        );
+        assert!(shortcuts.rows.iter().all(|row| !row.heading));
+    }
+}
+
+/// Every command selection of the empty palette lands on a command row below
+/// the headings, the one Enter runs; the accessibility tree is one flat list
+/// with an option per command and none per heading, numbered past the
+/// headings, with the selected command selected; and the first command under
+/// each heading ends its description with the group's name.
+#[test]
+fn selection_and_accessibility_skip_the_headings() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN, ES] {
+        let entries = super::palette_view_entries(
+            None,
+            &tr,
+            &[],
+            kettle_config::BroadcastDefault::default(),
+            &bindings,
+            false,
+        );
+        for selected in 0..entries.len() {
+            let list = command_picker_list(
+                "",
+                selected,
+                &bindings,
+                &tr,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            let row = &list.rows[list.selected];
+            assert!(!row.heading, "selection {selected}");
+            assert_eq!(
+                kettle_render::menu_row_option(&list.rows, list.selected),
+                Some(selected)
+            );
+            let action = super::palette_enter_action("", selected, &entries, &tr).unwrap();
+            assert_eq!(
+                row.label,
+                entries
+                    .iter()
+                    .find(|e| e.action == action)
+                    .unwrap()
+                    .label
+                    .shown(&tr)
+            );
+        }
+        let list = command_picker_list(
+            "",
+            3,
+            &bindings,
+            &tr,
+            None,
+            &[],
+            false,
+            kettle_config::BroadcastDefault::default(),
+        );
+        let headings: Vec<(usize, String)> = list
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.heading)
+            .map(|(index, row)| (index, row.label.clone()))
+            .collect();
+        assert_eq!(headings.len(), 14);
+        let menu = super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+        let overlay = kettle_render::Overlay {
+            palette_query: Some(String::new()),
+            context_menu: Some(menu),
+            ..Default::default()
+        };
+        let projection =
+            modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &tr);
+        let options: Vec<_> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::ListBoxOption)
+            .collect();
+        assert_eq!(options.len(), entries.len(), "one option per command");
+        assert!(
+            !projection
+                .nodes
+                .iter()
+                .any(|(_, node)| node.role() == accesskit::Role::Group)
+        );
+        let menu = overlay.context_menu.as_ref().unwrap();
+        for (option, (id, node)) in options.iter().enumerate() {
+            assert_eq!(
+                *id,
+                super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3)
+            );
+            assert_eq!(node.is_selected(), Some(option == 3), "option {option}");
+            let row = kettle_render::menu_option_row(&menu.rows, option).unwrap();
+            assert_eq!(node.label(), Some(menu.rows[row].label.as_str()));
+            match headings.iter().find(|(index, _)| index + 1 == row) {
+                Some((_, group)) => assert!(
+                    node.description()
+                        .is_some_and(|d| d.ends_with(group.as_str())),
+                    "{:?} under {group}",
+                    node.label()
+                ),
+                None => assert!(
+                    !headings.iter().any(|(_, group)| node
+                        .description()
+                        .is_some_and(|d| d.ends_with(group.as_str()))),
+                    "{:?}",
+                    node.label()
+                ),
+            }
+        }
+    }
+}
+
+/// A screen reader hears each result's place among all of them, not among
+/// the rows in view: every command of the empty palette is "n of" the whole
+/// registry, and after `split` "n of 6". The no-match message is no result.
+#[test]
+fn palette_options_report_their_place_among_all_results() {
+    let bindings = kettle_config::keybinds::defaults();
+    for tr in [EN, ES] {
+        let entries = super::palette_view_entries(
+            None,
+            &tr,
+            &[],
+            kettle_config::BroadcastDefault::default(),
+            &bindings,
+            false,
+        );
+        for (query, total) in [("", entries.len()), ("split", 6), ("zzqx", 0)] {
+            let list = command_picker_list(
+                query,
+                0,
+                &bindings,
+                &tr,
+                None,
+                &[],
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            let menu =
+                super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+            let overlay = kettle_render::Overlay {
+                palette_query: Some(query.into()),
+                context_menu: Some(menu),
+                ..Default::default()
+            };
+            let projection =
+                modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &tr);
+            let options: Vec<_> = projection
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == accesskit::Role::ListBoxOption && !node.is_disabled()
+                })
+                .collect();
+            assert_eq!(options.len(), total, "{query:?}");
+            for (n, (_, node)) in options.iter().enumerate() {
+                // AccessKit counts from zero; AT-SPI shows `posinset` n + 1.
+                assert_eq!(node.position_in_set(), Some(n), "{query:?}");
+                assert_eq!(node.size_of_set(), Some(total), "{query:?}");
+            }
+            let list = projection
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == accesskit::Role::ListBox)
+                .unwrap();
+            assert_eq!(
+                list.1.size_of_set(),
+                (total > 0).then_some(total),
+                "{query:?}"
+            );
+        }
+    }
 }
