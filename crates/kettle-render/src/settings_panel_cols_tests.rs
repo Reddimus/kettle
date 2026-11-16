@@ -62,9 +62,10 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
     }
 }
 
-/// A switch's label starts after the knob when it is off (the knob sits at
-/// the left) and at the chip's inset when on (the knob is at the right), and
-/// it fits beside the knob in both languages' longest words.
+/// A switch's label is centred in the room beside its knob: after the knob
+/// when it is off (the knob sits at the left), before it when on (the knob
+/// is at the right), and it fits beside the knob in both languages' longest
+/// words.
 #[test]
 fn switch_labels_clear_the_knob() {
     use super::{SettingsControl, SettingsTextKind};
@@ -95,16 +96,18 @@ fn switch_labels_clear_the_knob() {
             .find(|item| item.kind == SettingsTextKind::Value(index))
             .unwrap()
             .rect;
-        let (start, room_end) = if on {
-            (chip.0 + 4.0, chip.0 + chip.2 - knob - 3.0)
+        let (start, end) = if on {
+            (chip.0 + 4.0, chip.0 + chip.2 - 4.0 - knob - 2.0)
         } else {
-            (chip.0 + 4.0 + knob + 2.0, chip.0 + chip.2)
+            (chip.0 + 4.0 + knob + 2.0, chip.0 + chip.2 - 4.0)
         };
-        assert_eq!(value.0, start, "{text} {on}");
+        let width = text.chars().count() as f32 * 8.0;
+        assert!((value.2 - width).abs() < 0.01, "{text} {on}: {value:?}");
         assert!(
-            value.0 + text.len() as f32 * 8.0 <= room_end,
-            "{text} {on}: {value:?} in {chip:?}"
+            (value.0 + value.2 * 0.5 - (start + end) * 0.5).abs() < 0.01,
+            "{text} {on}: {value:?} not centred in {start}..{end}"
         );
+        assert!(value.0 >= start && value.0 + value.2 <= end, "{text} {on}");
     }
 }
 
@@ -183,7 +186,7 @@ fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
                     }
                     if surface.0 == 360.0 && language == Language::Es && on && !disabled {
                         assert!((chip.2 - 145.92).abs() < 0.01);
-                        assert_eq!(diameter, 50.0);
+                        assert!((diameter - 57.6).abs() < 0.01, "{diameter}");
                         assert!(
                             !value.text.is_empty(),
                             "a clamped switch must retain a fitted label"

@@ -1604,7 +1604,8 @@ context = "crates/kettle-ui/src/app/media.rs agent_previews_note: footer note on
 context = "crates/kettle-ui/src/app/settings_text.rs settings_footer_note: shown on the Window blur and Background opacity rows, except while this session cannot blur (then settings_note_blur_unavailable is shown under the Window blur row instead)."
 
 [messages.settings_note_blur_unavailable]
-context = "crates/kettle-ui/src/settings.rs row_description: shown in place of the Window blur row's description (under its label, not in the footer) while blur is on but this session cannot blur: GNOME and other Wayland compositors without KWin's blur protocol, X11 (KDE Plasma on X11 included, where KWin could blur but Kettle's X11 backend cannot ask), and Windows without its system backdrop, such as Windows 10. Say the session, not the desktop, lacks it. Background opacity still works there. One line; English budget 70 characters. Ellipsized in narrow panels."
+context = "crates/kettle-ui/src/settings.rs row_description: shown in place of the Window blur row's description (under its label, not in the footer) while blur is on but this session cannot blur: GNOME and other Wayland compositors without KWin's blur protocol, X11 (KDE Plasma on X11 included, where KWin could blur but Kettle's X11 backend cannot ask), and Windows without its system backdrop, such as Windows 10. The switch beside it then reads settings_value_unavailable, so do not repeat that word here. Say the session, not the desktop, lacks it. saved is the saved setting as the switch would show it (settings_value_on). Background opacity still works there. One line; English budget 75 characters. Ellipsized in narrow panels; screen readers read it whole."
+args = [{ name = "saved", type = "str" }]
 
 [messages.settings_note_claude_code_forbidden]
 context = "crates/kettle-ui/src/app.rs claude_code_note: footer note on the Claude Code previews row when the organization's Claude Code policy (disableSideloadFlags) forbids plugins that the environment names, so new panes get none."
@@ -1738,6 +1739,19 @@ context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-o
 
 [messages.settings_value_on]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-on toggle."
+
+[messages.settings_value_unavailable]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: the Window blur switch's label, in place of settings_value_on, while this session cannot blur windows (see settings_note_blur_unavailable). An adjective for the effect; short, the switch is about 12 columns wide."
+
+[messages.settings_value_checking]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: the Window blur switch's label, in place of settings_value_on, for the moment (at most half a second) while Kettle asks a Wayland compositor whether it can blur. Then it reads settings_value_on or settings_value_unavailable. Short; keep the ellipsis character."
+
+[messages.settings_reset_button]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: the Reset chip beside a Settings row's value, which puts the setting back to its default (as Del does). A verb on a button, one word. Shown on every changed row, and dimmed on the selected row when it already holds its default. Narrow panels show an icon instead."
+
+[messages.settings_a11y_reset]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the Reset button for the selected Settings row. setting is the row's label, value the default it would restore, as the row shows values (for example 14 px, Off). The button is marked unavailable while the row already holds that default."
+args = [{ name = "setting", type = "str" }, { name = "value", type = "str" }]
 
 [messages.settings_value_right]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position set in the config file."

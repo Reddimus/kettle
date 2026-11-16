@@ -386,6 +386,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Settings is easier to read and to use with the pointer. Descriptions,
+  footer hints and notes reach 7:1 against the panel where the theme allows,
+  and never less than four fifths of their label's contrast (TokyoNight Night
+  7.0:1 and Kettle Day 5.7:1, up from 4.5:1). Control outlines reach 4.5:1
+  and the panel's outline and sidebar divider 3:1. The highlighted row and
+  category carry a bar at their left edge, at least 3:1 against the panel
+  and their fill, so the fill can stay light and their text keeps its
+  contrast (TokyoNight Night's highlighted label under GNOME's purple accent
+  7.0:1, up from 4.9:1).
+  Every control is one height, at least 24 points at 1x and 2x with the
+  default font, and keeps one width while its value changes; a choice's
+  arrows stay at its ends. A changed setting shows a **Reset** button beside
+  its value, and the highlighted row shows it dimmed when it already holds
+  its default; on a narrow row it becomes an icon, and on the narrowest it
+  is left out (Delete still resets). Screen readers get one Reset button for
+  the highlighted row, named for the default it restores ("Reset Font size
+  to 14 px"), and `kettle ctl ui_geometry` reports each row's Reset chip.
+
+- Where the session cannot blur windows (GNOME, X11, Windows without its
+  backdrop), the Window blur switch reads **Unavailable** instead of On,
+  without the accent fill and with a hollow knob, and its description names
+  the saved setting: "This session cannot blur; saved setting: On. Opacity
+  still applies." It still turns blur off. On Wayland, while Kettle asks the
+  compositor (at most half a second), it reads **Checking…**, so it never
+  shows On before Unavailable.
+
 - Broadcast input now outlines every pane it reaches, not only the one you
   type in. The sending pane keeps a solid outline in the theme's yellow;
   each pane that receives its input, under the tab, window or group scope,

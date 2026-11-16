@@ -234,14 +234,76 @@ pub fn description(field: &Field) -> Text {
     }
 }
 
+/// What this window can do with Window blur, as Settings shows it. Blur is
+/// only asked for while it is on, so `Checking` and `Unavailable` always
+/// describe a saved On.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlurState {
+    /// Blur is off, shows, or this window system never says it cannot.
+    #[default]
+    Available,
+    /// A Wayland compositor is being asked; the answer comes within half a
+    /// second. Settings shows neither On nor Unavailable until it does.
+    Checking,
+    /// This session cannot blur windows.
+    Unavailable,
+}
+
 /// What a row shows under its label. While the window system cannot blur
-/// (`blur_unavailable`), the Window blur row says so instead of describing
-/// an effect the window will not show. Search still matches the field's own
-/// description.
-pub fn row_description(field: &Field, blur_unavailable: bool) -> Text {
+/// (`BlurState::Unavailable`), the Window blur row says so, and names the
+/// saved setting, instead of describing an effect the window will not show.
+/// Search still matches the field's own description.
+pub fn row_description(field: &Field, blur: BlurState, cfg: &Config, tr: &Translator) -> String {
     match field.key {
-        "window-blur" if blur_unavailable => Text::SettingsNoteBlurUnavailable,
-        _ => description(field),
+        "window-blur" if blur == BlurState::Unavailable => {
+            tr.settings_note_blur_unavailable(&read(cfg, field, tr))
+        }
+        _ => tr.text(description(field)).to_string(),
+    }
+}
+
+/// What a row's control shows: its value, except that a Window blur switch
+/// whose effect this session cannot show (or has not yet decided) says so
+/// instead of On.
+pub fn row_value(field: &Field, blur: BlurState, cfg: &Config, tr: &Translator) -> String {
+    match (field.key, blur) {
+        ("window-blur", BlurState::Unavailable) => {
+            tr.text(Text::SettingsValueUnavailable).to_string()
+        }
+        ("window-blur", BlurState::Checking) => tr.text(Text::SettingsValueChecking).to_string(),
+        _ => read(cfg, field, tr),
+    }
+}
+
+/// Whether Reset covers `field` (`None` where it does not: the theme, the
+/// GPU pin, shortcuts, free text, and a row that does not apply now), and if
+/// so whether it would change anything.
+pub fn reset_state(cfg: &Config, field: &Field) -> Option<bool> {
+    if field_disabled(cfg, field.key) {
+        return None;
+    }
+    default_value(field).map(|_| !holds_default(cfg, field))
+}
+
+/// The value a row's Reset restores, as the row shows values.
+pub fn default_display(field: &Field, tr: &Translator) -> Option<String> {
+    default_value(field).map(|_| read(&Config::default(), field, tr))
+}
+
+/// What a pointer event on a row's Reset chip does. Only a primary click
+/// resets; a secondary click or a wheel notch acts on the row as it would
+/// anywhere else on it, so the chip never takes a step meant for the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetPointer {
+    Reset,
+    Row,
+}
+
+pub fn reset_pointer(is_click: bool, dir: i32) -> ResetPointer {
+    if is_click && dir > 0 {
+        ResetPointer::Reset
+    } else {
+        ResetPointer::Row
     }
 }
 
@@ -324,7 +386,7 @@ impl SettingsNav {
                 self.field = self.field.min(cats[index].fields.len().saturating_sub(1));
                 self.capturing = false;
             }
-            kettle_render::SettingsHit::Field(index) => {
+            kettle_render::SettingsHit::Field(index) | kettle_render::SettingsHit::Reset(index) => {
                 return self.focus_result(cats, cfg, tr, index);
             }
             _ => {}
@@ -1201,39 +1263,69 @@ fn format_number(value: i64, suffix: &str) -> String {
 /// Stable column widths from every category, including unselected choices,
 /// measured in `tr`'s language.
 pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize, usize) {
-    use unicode_width::UnicodeWidthChar;
-    let width = |text: &str| text.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    use kettle_render::display_width as width;
     let mut label_cols = 0;
     let mut value_cols = width(tr.text(Text::SettingsPressChord));
     for field in cats.iter().flat_map(|cat| &cat.fields) {
         label_cols = label_cols.max(width(tr.text(field.label)));
-        value_cols = value_cols.max(width(&read(cfg, field, tr)));
-        match &field.kind {
-            FieldKind::Choice { values, labels } => match labels {
-                Some(labels) => {
-                    for label in *labels {
-                        value_cols = value_cols.max(width(label.show(tr)));
-                    }
-                }
-                None => {
-                    for value in *values {
-                        value_cols = value_cols.max(width(value));
-                    }
-                }
-            },
-            FieldKind::ChoiceOwned { labels, .. } => {
-                for label in labels {
-                    value_cols = value_cols.max(width(label.show(tr)));
-                }
-            }
-            FieldKind::Number { max, suffix, .. } => {
-                value_cols = value_cols.max(width(&format_number(*max, suffix)));
-            }
-            _ => {}
-        }
+        value_cols = value_cols.max(field_value_cols(cfg, field, tr));
     }
     (label_cols, value_cols)
 }
+
+/// Columns of the widest value `field` can show in `tr`'s language: its
+/// current value, every choice, a number's limits, both switch states. The
+/// renderer sizes the row's control for it, so the control keeps one width
+/// while the value changes; it measures with the renderer's own
+/// `display_width`.
+pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
+    use kettle_render::display_width as width;
+    let mut cols = width(&read(cfg, field, tr));
+    match &field.kind {
+        FieldKind::Toggle => {
+            for value in [Text::SettingsValueOn, Text::SettingsValueOff] {
+                cols = cols.max(width(tr.text(value)));
+            }
+        }
+        FieldKind::Choice { values, labels } => match labels {
+            Some(labels) => {
+                for label in *labels {
+                    cols = cols.max(width(label.show(tr)));
+                }
+            }
+            None => {
+                for value in *values {
+                    cols = cols.max(width(value));
+                }
+            }
+        },
+        FieldKind::ChoiceOwned { labels, .. } => {
+            for label in labels {
+                cols = cols.max(width(label.show(tr)));
+            }
+        }
+        FieldKind::Number {
+            min, max, suffix, ..
+        } => {
+            cols = cols
+                .max(width(&format_number(*min, suffix)))
+                .max(width(&format_number(*max, suffix)));
+            // The words `read` shows for a sentinel instead of a quantity.
+            let words: &[&str] = match field.key {
+                "scrollback" => &[tr.text(Text::SettingsValueInfinite)],
+                "cursor-blink-timeout" => &[tr.text(Text::SettingsValueNever)],
+                "scrollback-bytes" => &[tr.text(Text::SettingsValueNoCap), "<1 MB"],
+                _ => &[],
+            };
+            for word in words {
+                cols = cols.max(width(word));
+            }
+        }
+        _ => {}
+    }
+    cols
+}
+
 /// Compute the new on-disk value when the user nudges `field` by `dir`
 /// (`+1` = right/increase, `-1` = left/decrease, `0` = toggle/activate).
 /// Returns the string to hand to `persist_pref(field.key, _)`.
@@ -3302,34 +3394,234 @@ mod search_tests {
     }
 
     /// Some sessions cannot blur a window: GNOME, X11 (KDE Plasma's
-    /// included) and Windows without its backdrop. The Window blur row says
-    /// so beside its switch, naming the session rather than the desktop, and
-    /// that opacity still works, while every other row keeps its own
-    /// description.
+    /// included) and Windows without its backdrop. The Window blur switch
+    /// then reads Unavailable instead of On, and its description says why
+    /// and names the saved setting, so neither the switch nor the screen
+    /// reader claims an effect the window does not show. While a Wayland
+    /// compositor is still being asked it reads Checking, never On first.
+    /// Every other row keeps its own value and description.
     #[test]
     fn unavailable_blur_is_explained_beside_its_switch() {
         let cats = categories(&[]);
         let fields: Vec<&Field> = cats.iter().flat_map(|c| &c.fields).collect();
         let blur = fields.iter().find(|f| f.key == "window-blur").unwrap();
-        assert_eq!(row_description(blur, false), description(blur));
-        let note = row_description(blur, true);
-        assert_ne!(note, description(blur));
-        assert_eq!(
-            EN.text(note),
-            "Not available in this session; opacity still applies."
+        let cfg = Config::default();
+        assert!(
+            cfg.window_blur,
+            "Checking and Unavailable describe a saved On"
         );
-        assert_eq!(
-            ES.text(note),
-            "No está disponible en esta sesión; la opacidad se sigue aplicando."
-        );
-        assert!(EN.text(note).chars().count() <= 70);
-        for field in fields.iter().filter(|f| f.key != "window-blur") {
+        for tr in [EN, ES] {
             assert_eq!(
-                row_description(field, true),
-                description(field),
-                "{}",
-                field.key
+                row_description(blur, BlurState::Available, &cfg, &tr),
+                tr.text(description(blur))
             );
+            assert_eq!(
+                row_description(blur, BlurState::Checking, &cfg, &tr),
+                tr.text(description(blur))
+            );
+            assert_eq!(
+                row_value(blur, BlurState::Available, &cfg, &tr),
+                tr.text(Text::SettingsValueOn)
+            );
+        }
+        assert_eq!(
+            row_description(blur, BlurState::Unavailable, &cfg, &EN),
+            "This session cannot blur; saved setting: On. Opacity still applies."
+        );
+        assert_eq!(
+            row_description(blur, BlurState::Unavailable, &cfg, &ES),
+            "Esta sesión no puede desenfocar; ajuste guardado: Activado. La opacidad se sigue aplicando."
+        );
+        assert!(
+            row_description(blur, BlurState::Unavailable, &cfg, &EN)
+                .chars()
+                .count()
+                <= 75
+        );
+        assert_eq!(
+            row_value(blur, BlurState::Unavailable, &cfg, &EN),
+            "Unavailable"
+        );
+        assert_eq!(
+            row_value(blur, BlurState::Unavailable, &cfg, &ES),
+            "No disponible"
+        );
+        assert_eq!(row_value(blur, BlurState::Checking, &cfg, &EN), "Checking…");
+        assert_eq!(
+            row_value(blur, BlurState::Checking, &cfg, &ES),
+            "Comprobando…"
+        );
+        for field in fields.iter().filter(|f| f.key != "window-blur") {
+            for state in [BlurState::Checking, BlurState::Unavailable] {
+                assert_eq!(
+                    row_description(field, state, &cfg, &EN),
+                    EN.text(description(field)),
+                    "{}",
+                    field.key
+                );
+                assert_eq!(
+                    row_value(field, state, &cfg, &EN),
+                    read(&cfg, field, &EN),
+                    "{}",
+                    field.key
+                );
+            }
+        }
+    }
+
+    /// Reset covers a row only where `default_value` does and the row
+    /// applies now; it can act only where the value differs from the
+    /// default, and it names that default as the row shows values.
+    #[test]
+    fn reset_state_follows_the_rows_default_and_applicability() {
+        let cats = categories(&[]);
+        let field = |key: &str| {
+            cats.iter()
+                .flat_map(|c| &c.fields)
+                .find(|f| f.key == key)
+                .unwrap()
+                .clone()
+        };
+        let font = field("font-size");
+        let mut cfg = Config::default();
+        assert_eq!(reset_state(&cfg, &font), Some(false));
+        cfg.font_size += 2.0;
+        assert_eq!(reset_state(&cfg, &font), Some(true));
+        assert_eq!(
+            default_display(&font, &EN).as_deref(),
+            Some(read(&Config::default(), &font, &EN).as_str())
+        );
+        assert_eq!(reset_state(&cfg, &field("theme")), None);
+        assert_eq!(default_display(&field("theme"), &EN), None);
+        // The blink timeout does not apply while the cursor does not blink.
+        let timeout = field("cursor-blink-timeout");
+        cfg.cursor_blink_timeout += 5;
+        assert_eq!(reset_state(&cfg, &timeout), Some(true));
+        cfg.cursor_blink = false;
+        assert_eq!(reset_state(&cfg, &timeout), None);
+    }
+
+    /// Only a primary click on Reset resets. A secondary click or a wheel
+    /// notch over the chip acts on its row as anywhere else on it.
+    #[test]
+    fn only_a_primary_click_on_reset_resets() {
+        assert_eq!(reset_pointer(true, 1), ResetPointer::Reset);
+        assert_eq!(reset_pointer(true, -1), ResetPointer::Row);
+        assert_eq!(reset_pointer(false, 1), ResetPointer::Row);
+        assert_eq!(reset_pointer(false, -1), ResetPointer::Row);
+    }
+
+    /// A row's control is sized for the widest value it can show in the
+    /// UI's language, so stepping it never resizes it.
+    #[test]
+    fn value_columns_cover_every_value_a_row_can_show() {
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        for tr in [EN, ES] {
+            for field in cats.iter().flat_map(|c| &c.fields) {
+                let cols = field_value_cols(&cfg, field, &tr);
+                for dir in [1, -1] {
+                    let mut seen = cfg.clone();
+                    for _ in 0..40 {
+                        let next = next_value(&seen, field, dir);
+                        if next.is_empty() {
+                            break;
+                        }
+                        seen = Config::parse_text(&format!("{} = {next}", field.key));
+                        assert!(
+                            kettle_render::display_width(&read(&seen, field, &tr)) <= cols,
+                            "{:?} {}: {:?} wider than {cols}",
+                            tr.language(),
+                            field.key,
+                            read(&seen, field, &tr)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_size_tests {
+    use super::*;
+    use kettle_i18n::Language;
+
+    /// Each row as the projection builds it, showing its widest value.
+    fn widest_rows(cfg: &Config, tr: &Translator) -> Vec<(String, kettle_render::SettingsRow)> {
+        categories(&[])
+            .iter()
+            .flat_map(|c| c.fields.iter())
+            .filter(|f| !is_keybind(f) && !is_text(f))
+            .map(|f| {
+                let cols = field_value_cols(cfg, f, tr);
+                let control = match f.kind {
+                    FieldKind::Toggle => kettle_render::SettingsControl::Toggle(true),
+                    FieldKind::Choice { .. } | FieldKind::ChoiceOwned { .. } => {
+                        kettle_render::SettingsControl::Choice
+                    }
+                    _ => kettle_render::SettingsControl::Value,
+                };
+                (
+                    f.key.to_string(),
+                    kettle_render::SettingsRow {
+                        label: tr.text(f.label).into(),
+                        value: "x".repeat(cols),
+                        control,
+                        value_cols: cols,
+                        reset: Some(true),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Every row's widest value, in English and Spanish, shows whole in the
+    /// default window (1280x820 at the 14 px font's 8.4x17.5 cell). In the
+    /// narrow one (640x820) it does wherever it fits beside the whole label,
+    /// and elsewhere keeps about half the row. Every changed row keeps a
+    /// Reset chip in both, its word or its icon.
+    #[test]
+    fn longest_values_stay_whole_where_they_fit() {
+        let cfg = Config::default();
+        let (cw, line) = (8.4_f32, 17.5_f32);
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            for (surface, all_fit) in [((1280.0, 820.0), true), ((640.0, 820.0), false)] {
+                for (key, row) in widest_rows(&cfg, &tr) {
+                    let set = kettle_render::SettingsOverlay {
+                        rows: vec![row.clone()],
+                        reset_label: tr.text(Text::SettingsResetButton).into(),
+                        ..Default::default()
+                    };
+                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw);
+                    let geometry = &layout.rows[0];
+                    let chip = geometry.chip_rect;
+                    let knob = match row.control {
+                        kettle_render::SettingsControl::Toggle(_) => {
+                            kettle_render::settings_control_height(line) - 4.0
+                        }
+                        _ => 0.0,
+                    };
+                    let arrows = if row.control == kettle_render::SettingsControl::Choice {
+                        4
+                    } else {
+                        0
+                    };
+                    let need = (row.value_cols + arrows) as f32 * cw;
+                    let fits = need <= chip.2 - 8.0 - knob + 0.01;
+                    let inner = geometry.rect.2;
+                    let label = kettle_render::display_width(&row.label) as f32 * cw;
+                    let context = format!("{language:?} {surface:?} {key}");
+                    if all_fit || label + 18.0 + need + 20.0 + knob <= inner {
+                        assert!(fits, "{context}: {need} in {chip:?}");
+                    } else {
+                        assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
+                    }
+                    assert!(geometry.reset.is_some(), "{context}: no Reset");
+                }
+            }
         }
     }
 }
