@@ -290,7 +290,8 @@ def geometry_fixture(name, scale=1, narrow=False):
         g["settings"] = dict(rect=rect(20, 40, width - 40, 700),
                              content_rect=rect(30, 100, width - 60, 600),
                              search_rect=rect(30, 50, width - 60, 30),
-                             rows=[dict(rect=rect(30, 100, width - 60, 30))])
+                             rows=[dict(rect=rect(30, 100, width - 60, 30),
+                                        reset_rect=rect(width - 200, 102, 60, 26))])
     if modal == "search":
         g["search"] = dict(rect=rect(0, 790, width, 30), has_match=name == "search-matches",
                            controls=[dict(name=key, rect=rect(i * 40, 790, 40, 30))
@@ -363,6 +364,8 @@ class GeometryTests(unittest.TestCase):
             ("palette-empty", lambda g: g["picker"].update(rows=[])),
             ("palette-nomatch", lambda g: g["picker"]["rows"][0].update(enabled=True)),
             ("settings", lambda g: g["settings"]["search_rect"].update(y=800)),
+            ("settings", lambda g: g["settings"]["rows"][0]["reset_rect"].update(x=-10)),
+            ("settings", lambda g: g["settings"]["rows"][0].update(reset_rect=None)),
             ("search-matches", lambda g: g["search"].update(has_match=False)),
             ("search-nomatch", lambda g: g["search"].update(has_match=True)),
             ("search-matches", lambda g: g["search"]["controls"].pop()),

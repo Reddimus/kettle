@@ -190,6 +190,11 @@ def assert_geometry(geometry, name: str) -> None:
         assert settings["rows"], "settings has no visible rows"
         for row in settings["rows"]:
             inside(row["rect"], settings["content_rect"], "settings row")
+            if row.get("reset_rect"):
+                inside(row["reset_rect"], row["rect"], "settings reset")
+        # The fixture's theme line changes the focused Appearance row, so it
+        # shows a Reset chip.
+        assert any(row.get("reset_rect") for row in settings["rows"]), "settings has no Reset"
     elif expected == "search":
         search = geometry["search"]
         inside(search["rect"], surface, "search")

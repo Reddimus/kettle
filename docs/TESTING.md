@@ -1060,11 +1060,13 @@ dark/light and default/narrow sizes, saving `*.geometry.json` and
 `ui-states.json` under `target/ui-state-geometry`. It asserts positive in-bounds
 content and terminal rectangles, pane count/focus and split separation, tab
 count/active state and titlebar clearance, the expected modal, picker rows and
-no-match state, Settings rows/search bounds, and Search controls, match state
-and reserved space. Geometry failures return nonzero and retain the offending
-JSON. This mode needs a native graphical session and the built Kettle, but
-does not capture PNGs or require Pillow. It cannot use `--compare`. The existing
-native caption/fullscreen and other UI smoke assertions remain separate gates.
+no-match state, Settings rows/search bounds and a Reset chip inside its row
+(the fixture's theme line changes the focused Appearance row), and Search
+controls, match state and reserved space. Geometry failures return nonzero
+and retain the offending JSON. This mode needs a native graphical session and
+the built Kettle, but does not capture PNGs or require Pillow. It cannot use
+`--compare`. The existing native caption/fullscreen and other UI smoke
+assertions remain separate gates.
 
 Linux CI calls `scripts/run-ui-states-wayland.py` for the same 80-state matrix.
 The hosted Linux dependency step installs Weston, Fontconfig and Mesa through
