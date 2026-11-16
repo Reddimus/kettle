@@ -552,6 +552,7 @@ pub fn capture_png_with_annotation(
                     &device,
                     &queue,
                     &mut char_starts,
+                    &mut Vec::new(),
                 );
                 grid_clips.push(GlyphClip {
                     rect: clip,

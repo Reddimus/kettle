@@ -301,6 +301,29 @@ pub(crate) struct PendingCursorGlyph {
     /// same mask as the pane, so this pass prepares no glyphon text for it;
     /// `ch` and `text` name it for the damage key.
     pub(crate) builtin: Option<BuiltinCell>,
+    /// The cell's emoji cluster, which the glyph pipeline draws from the
+    /// pane's own images, so the cursor cannot change its size or crop.
+    pub(crate) emoji: Option<EmojiCursorCell>,
+}
+
+/// An emoji cluster's images in the uploaded pane instances: the pane's
+/// terminal rect, the cluster's buffer line (viewport row) and grid column,
+/// and the instance range.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PaneEmojiCell {
+    pub(crate) pane: [f32; 4],
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+    pub(crate) instances: std::ops::Range<u32>,
+}
+
+/// The emoji cluster under a block cursor, by the same address as
+/// [`PaneEmojiCell`] (without the instances, which the upload decides).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct EmojiCursorCell {
+    pub(crate) pane: [f32; 4],
+    pub(crate) line: usize,
+    pub(crate) column: usize,
 }
 
 pub(crate) fn invalidate_pane_titlebar_texts(texts: &mut [String]) {
@@ -672,7 +695,7 @@ impl Renderer {
         // row's shaping cache every blink and force a whole-viewport
         // re-prepare. This way the buffer stays byte-identical across a blink,
         // so the prepare is skipped.
-        let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned)> = None;
+        let mut cursor_glyph_capture: Option<(char, Rgb, &[char], AttrsOwned, bool)> = None;
         let mut cursor_builtin: Option<BuiltinCell> = None;
         // This pane's built-in glyph cells, refilled every frame into last
         // frame's allocation.
@@ -933,7 +956,11 @@ impl Renderer {
                     attrs = attrs.family(Family::Name(emoji_family));
                 }
                 if cursor_focused {
-                    cursor_glyph_capture = Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs)));
+                    let emoji = builtin.is_none()
+                        && !text_presentation
+                        && super::fonts::emoji_presentation(dc, marks);
+                    cursor_glyph_capture =
+                        Some((dc, cursor_fg, marks, AttrsOwned::new(&attrs), emoji));
                     cursor_builtin =
                         builtin.map(|(glyph, edges)| BuiltinCell::new(glyph, edges, cursor_fg));
                 } else {
@@ -1274,7 +1301,7 @@ impl Renderer {
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
                 if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor, gmarks, gattrs)) = cursor_glyph_capture
+                    && let Some((gch, gcolor, gmarks, gattrs, gemoji)) = cursor_glyph_capture
                 {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
@@ -1297,6 +1324,14 @@ impl Renderer {
                         },
                         marks: Vec::new(),
                         builtin: cursor_builtin,
+                        emoji: (gemoji && cursor_builtin.is_none())
+                            .then(|| usize::try_from(cvrow).ok())
+                            .flatten()
+                            .map(|line| EmojiCursorCell {
+                                pane: [pv.terminal.0, pv.terminal.1, pv.terminal.2, pv.terminal.3],
+                                line,
+                                column: vis(cvrow, bcol),
+                            }),
                     });
                 }
             }
@@ -1673,6 +1708,7 @@ impl Renderer {
             font_system,
             pane_buffers,
             glyph_char_starts,
+            emoji_cells,
             gpu,
             cell_w,
             pane_bidi,
@@ -1685,6 +1721,8 @@ impl Renderer {
         let cw = *cell_w;
         let device = &gpu.device;
         let queue = &gpu.queue;
+        emoji_cells.clear();
+        let mut pane_emoji = Vec::new();
 
         for (i, pv) in panes.iter().enumerate() {
             let inactive = pane_inactive_amount(pv, panes.len(), cfg);
@@ -1744,7 +1782,14 @@ impl Renderer {
                     device,
                     queue,
                     glyph_char_starts,
+                    &mut pane_emoji,
                 );
+                emoji_cells.extend(pane_emoji.drain(..).map(|cell| PaneEmojiCell {
+                    pane: [rx, ry, rw, rh],
+                    line: cell.line,
+                    column: cell.column,
+                    instances: cell.instances.start as u32..cell.instances.end as u32,
+                }));
             }
             for cell in builtins {
                 if let Some(glyph) = builtin_glyph_instance(

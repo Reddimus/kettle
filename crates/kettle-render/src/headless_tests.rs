@@ -4226,22 +4226,24 @@ fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
                 } else {
                     1
                 };
-                let expected = super::fonts::fit_emoji(
-                    (
-                        cfg.padding_x,
-                        cfg.padding_y,
-                        columns as f32 * renderer.cell_w,
-                        renderer.cell_h,
-                    ),
-                    (glyph.uv_size[0], glyph.uv_size[1]),
-                );
-                assert!(
-                    (glyph.pos[0] - expected.0).abs() < 0.01,
+                // Drawn 1:1, in whole pixels, as large as the cell's emoji
+                // box allows at the image's aspect ratio.
+                let area = super::fonts::emoji_box((
+                    cfg.padding_x,
+                    cfg.padding_y,
+                    columns as f32 * renderer.cell_w,
+                    renderer.cell_h,
+                ));
+                let [x, y, w, h] =
+                    super::fonts::fit_emoji_pixels(area, (glyph.size[0], glyph.size[1]))
+                        .expect("the emoji fits its cell");
+                assert_eq!(glyph.uv_size, glyph.size, "{mode:?} {clustered} {emoji:?}");
+                assert_eq!(
+                    glyph.pos,
+                    [x as f32, y as f32],
                     "{mode:?} {clustered} {emoji:?}"
                 );
-                assert!((glyph.pos[1] - expected.1).abs() < 0.01);
-                assert!((glyph.size[0] - expected.2).abs() < 0.01);
-                assert!((glyph.size[1] - expected.3).abs() < 0.01);
+                assert_eq!(glyph.size, [w as f32, h as f32]);
                 assert_eq!(snap.cells.iter().find(|c| c.c == 'X').unwrap().col, columns);
                 let baseline = renderer.pane_buffers[0]
                     .layout_runs()

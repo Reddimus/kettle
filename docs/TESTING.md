@@ -2012,6 +2012,24 @@ test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
 
+`emoji_fit_tests` pin how an emoji reaches the screen at 13, 14 and 17 px and
+1x, 1.5x and 2x. Without a GPU or any emoji font, they check that the fitted
+rectangle is whole pixels inside the row less its margin and fills it in one
+dimension, and that the grid emit draws each image of a cluster (lightning, and
+lightning plus a combining acute) 1:1 from an image of exactly that size,
+through a synthetic glyph source. `emoji_raster`'s unit tests check the area
+resampler on integer and fractional ratios, upsampling and a transparent pixel
+whose colour must not tint its neighbour. With a colour emoji face (Apple Color
+Emoji on macOS, Noto Color Emoji on the Ubuntu runner image),
+`a_colour_bitmap_emoji_is_an_area_average_of_its_largest_strike` compares 😀,
+❤️ and 👩‍💻 against an independent per-pixel integration of the largest strike;
+it reports `EMOJI_FONT_SKIP` without one. The GPU tests draw lightning and a
+colour 😀 in a real frame (1:1, inside the row), compare an emoji cell with the
+block cursor on and off it in an opaque window (no pixel may change), and
+check that one glyph fitted at two widths keeps two images and that a font-size
+change drops every image and placement of the old size; they report
+`EMOJI_FIT_GPU_SKIP` or `EMOJI_CURSOR_GPU_SKIP` without an adapter.
+
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that
 never rise, above marks that sink halfway, aligned and double classes), whole

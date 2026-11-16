@@ -41,11 +41,17 @@ use crate::upload::{
 
 /// What an atlas slot holds: a font glyph, or a mask Kettle drew itself for
 /// a box-drawing, block, Powerline or braille cell (see `builtin_glyphs`).
-/// Both share the atlases, the slot cache and its eviction.
+/// All share the atlases, the slot cache and its eviction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SlotKey {
     Font(CacheKey),
     Builtin(BuiltinKey),
+    /// An emoji glyph resampled to exactly `size` physical pixels, the size
+    /// its cell draws it at (see `emoji_raster`). `key` is the shaped glyph.
+    Emoji {
+        key: CacheKey,
+        size: [u16; 2],
+    },
 }
 
 impl From<CacheKey> for SlotKey {
@@ -197,7 +203,7 @@ pub(crate) fn scissors_without(
 }
 
 /// Where a glyph lives in the atlas + the bearings needed to place its quad.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphSlot {
     pub kind: u32,
     pub atlas_x: f32,
@@ -901,11 +907,24 @@ pub struct GlyphPipeline {
     /// phase. Uploaded only when it changes.
     cursor: wgpu::Buffer,
     cursor_held: RetainedBytes,
+    cursor_count: u32,
     pub(crate) cursor_clip: Option<[f32; 4]>,
-    cursor_pane_index: Option<u32>,
+    cursor_pane_range: Option<std::ops::Range<u32>>,
     cursor_bounds: Option<[f32; 4]>,
     _cursor_gpu: GraphicsReservation,
+    /// Raster placements of shaped emoji glyphs, which size their fitted
+    /// images (see [`Self::placement`]). Nothing is uploaded for them.
+    placements: HashMap<CacheKey, Option<GlyphSlot>>,
 }
+
+/// The most instances the cursor pass draws: a built-in glyph is one, an
+/// emoji cluster drawn from the pane's own images is usually one and rarely a
+/// few. A larger cluster keeps its pane copy instead.
+pub(crate) const MAX_CURSOR_GLYPHS: usize = 8;
+
+/// Placements cached at once. Each is a few words; at the cap the map is
+/// emptied and refilled from the swash cache on demand.
+const MAX_PLACEMENTS: usize = 16_384;
 
 impl GlyphPipeline {
     #[cfg(test)]
@@ -1070,10 +1089,11 @@ impl GlyphPipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let cursor_gpu = budget.reserve_gpu(std::mem::size_of::<GlyphInstance>())?;
+        let cursor_bytes = MAX_CURSOR_GLYPHS * std::mem::size_of::<GlyphInstance>();
+        let cursor_gpu = budget.reserve_gpu(cursor_bytes)?;
         let cursor = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-glyph-cursor"),
-            size: std::mem::size_of::<GlyphInstance>() as u64,
+            size: cursor_bytes as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1102,10 +1122,12 @@ impl GlyphPipeline {
             counters: UploadCounters::default(),
             cursor,
             cursor_held: RetainedBytes::default(),
+            cursor_count: 0,
             cursor_clip: None,
-            cursor_pane_index: None,
+            cursor_pane_range: None,
             cursor_bounds: None,
             _cursor_gpu: cursor_gpu,
+            placements: HashMap::new(),
         })
     }
 
@@ -1207,6 +1229,47 @@ impl GlyphPipeline {
     /// atlas pixels to this lookup.
     pub fn resident(&self, key: impl Into<SlotKey>) -> Option<GlyphSlot> {
         self.slots.get(&key.into())?.slot
+    }
+
+    /// The raster placement of `key` at its shaped size (`kind`, size and
+    /// bearings; no atlas position), computed by `place` on a miss. An emoji
+    /// cluster is sized from these before its fitted images are rasterized,
+    /// so the shaped-size images themselves never reach the atlas.
+    pub fn placement(
+        &mut self,
+        key: CacheKey,
+        place: impl FnOnce() -> Option<GlyphSlot>,
+    ) -> Option<GlyphSlot> {
+        if let Some(placement) = self.placements.get(&key) {
+            return *placement;
+        }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            self.placements.clear();
+        }
+        let placement = place();
+        self.placements.insert(key, placement);
+        placement
+    }
+
+    /// The font size of each cached placement, for tests of invalidation.
+    #[cfg(test)]
+    pub(crate) fn placement_font_sizes(&self) -> Vec<f32> {
+        self.placements
+            .keys()
+            .map(|key| f32::from_bits(key.font_size_bits))
+            .collect()
+    }
+
+    /// The fitted emoji slots held, for tests of their invalidation.
+    #[cfg(test)]
+    pub(crate) fn emoji_slot_sizes(&self) -> Vec<[u16; 2]> {
+        self.slots
+            .keys()
+            .filter_map(|key| match key {
+                SlotKey::Emoji { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Evict the `n` coldest slots (smallest `last_used` epoch), returning
@@ -1446,28 +1509,49 @@ impl GlyphPipeline {
         }
     }
 
-    /// Set the built-in glyph drawn over the block cursor, clipped to the
-    /// pane rect `clip` (`[x, y, w, h]`), or none. Call after this frame's
-    /// pane glyphs were resolved: the instance points at a slot that the
-    /// same frame's `ensure_glyph` returned. Writes the GPU buffer only when
-    /// the instance changed.
+    /// Set the glyph images drawn over the block cursor, clipped to the pane
+    /// rect `clip` (`[x, y, w, h]`), or none: a built-in glyph, or an emoji
+    /// cluster's own pane images. `pane` is the range of uploaded pane
+    /// instances they replace, which the pane pass then skips. Call after
+    /// this frame's pane glyphs were resolved: the instances point at slots
+    /// that the same frame's `ensure_glyph` returned. At most
+    /// [`MAX_CURSOR_GLYPHS`] instances; more set none. Writes the GPU buffer
+    /// only when the instances changed.
     pub fn set_cursor(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        glyph: Option<(GlyphInstance, [f32; 4], u32)>,
+        glyphs: Option<(&[GlyphInstance], [f32; 4], std::ops::Range<u32>)>,
     ) {
+        let glyphs = glyphs.filter(|(instances, _, pane)| {
+            !instances.is_empty()
+                && instances.len() <= MAX_CURSOR_GLYPHS
+                && pane.len() == instances.len()
+        });
         // Resolving the cursor's slot can itself grow an atlas.
         self.refresh_bind_group(device);
-        self.cursor_bounds = glyph.map(|(g, _, _)| [g.pos[0], g.pos[1], g.size[0], g.size[1]]);
-        self.cursor_clip = glyph.map(|(_, clip, _)| clip);
-        self.cursor_pane_index = glyph.map(|(_, _, index)| index);
-        if let Some((instance, _, _)) = glyph {
+        self.cursor_bounds = glyphs.as_ref().map(|(instances, _, _)| {
+            let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+            let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            for g in *instances {
+                x0 = x0.min(g.pos[0]);
+                y0 = y0.min(g.pos[1]);
+                x1 = x1.max(g.pos[0] + g.size[0]);
+                y1 = y1.max(g.pos[1] + g.size[1]);
+            }
+            [x0, y0, x1 - x0, y1 - y0]
+        });
+        self.cursor_clip = glyphs.as_ref().map(|(_, clip, _)| *clip);
+        self.cursor_pane_range = glyphs.as_ref().map(|(_, _, pane)| pane.clone());
+        self.cursor_count = glyphs
+            .as_ref()
+            .map_or(0, |(instances, _, _)| instances.len() as u32);
+        if let Some((instances, _, _)) = glyphs {
             write_buffer_if_changed(
                 queue,
                 &self.cursor,
                 &mut self.cursor_held,
-                bytemuck::bytes_of(&instance),
+                bytemuck::cast_slice(instances),
                 &self.counters,
             );
         }
@@ -1507,7 +1591,7 @@ impl GlyphPipeline {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.cursor.slice(..));
         pass.set_scissor_rect(x, y, w, h);
-        pass.draw(0..4, 0..1);
+        pass.draw(0..4, 0..self.cursor_count);
         pass.set_scissor_rect(0, 0, window[2], window[3]);
     }
 
@@ -1550,14 +1634,21 @@ impl GlyphPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, instances.slice(..));
-        let hidden = self.cursor_pane_index.filter(|_| hide_cursor);
+        let hidden = self.cursor_pane_range.clone().filter(|_| hide_cursor);
         let excluded = hide_cursor
             .then(|| self.cursor_exclusion(target_size, window))
             .flatten();
         let draw_range = |pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>| {
-            if let Some(index) = hidden.filter(|index| range.contains(index)) {
-                pass.draw(0..4, range.start..index);
-                pass.draw(0..4, index + 1..range.end);
+            if let Some(skip) = hidden
+                .clone()
+                .filter(|skip| range.start <= skip.start && skip.end <= range.end)
+            {
+                if range.start < skip.start {
+                    pass.draw(0..4, range.start..skip.start);
+                }
+                if skip.end < range.end {
+                    pass.draw(0..4, skip.end..range.end);
+                }
             } else {
                 pass.draw(0..4, range);
             }
@@ -1611,9 +1702,12 @@ impl GlyphPipeline {
         self.exhausted_kinds = [false; 2];
         // The cursor instance points into the atlas too.
         self.cursor_clip = None;
-        self.cursor_pane_index = None;
+        self.cursor_pane_range = None;
         self.cursor_bounds = None;
+        self.cursor_count = 0;
         self.cursor_held.invalidate();
+        // Placements bake in the font size and scale as well.
+        self.placements.clear();
     }
 }
 

@@ -3738,11 +3738,29 @@ matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
 so antialiasing, gamma and theme colors are identical. Ordinary glyphs differ
 only in X position. Emoji presentation fits its ink to the cell rectangle
-while preserving aspect ratio. All images in an emoji cluster share one fit
-of their combined ink bounds, preserving shaped combining-mark offsets;
-separate destination and atlas-source sizes scale the bitmaps without changing
-shaped advances or neighboring baselines.
-The block-cursor glyph uses the same fit. This prevents glyph drift. Without
+less a margin of 1/16 of the row (at least one pixel) above and below
+(`fonts::emoji_box`), preserving aspect ratio. All images in an emoji cluster
+share one fit of their combined ink bounds, preserving shaped combining-mark
+offsets, and the fit lands on whole pixels (`fonts::fit_emoji_pixels`): each
+image's edges are the union's scaled edges rounded, so touching images still
+touch. Each image is then rasterized at exactly that size (`emoji_raster`):
+a colour bitmap face's largest strike up to 256 ppem, read unscaled, or an
+outline drawn at four times the target, averaged down by area in
+premultiplied alpha. The atlas keys it as `SlotKey::Emoji { key, size }`
+with the subpixel bins cleared; the shaped-size image is never uploaded, only
+its placement, from a cache of at most 16,384 entries. The instance draws it
+1:1, so the nearest-neighbour atlas sampler is exact. Both caches are dropped
+with the rest of the glyph cache on any font size, scale or family change; the
+fitted slots share the slot map's 131,072-entry LRU bound and the colour
+atlas's growth and eviction. When a fitted image is unavailable the cluster
+falls back to its shaped-size images scaled into the same place.
+The emit records each emoji cluster's instance range by buffer line and grid
+column. A block cursor on that cell redraws those very instances through the
+glyph pipeline's cursor buffer (up to eight; a monochrome image takes the
+cursor text colour) and hides the pane's copy, as it does for a built-in glyph,
+so moving the cursor cannot change an emoji's size, crop or baseline. A cell
+the pane did not draw as an emoji cluster, such as a replacement character,
+keeps the glyphon cursor pass. This prevents glyph drift. Without
 pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following

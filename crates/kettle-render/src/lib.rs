@@ -13,6 +13,7 @@ mod background;
 mod batching;
 mod capture;
 mod completion;
+mod emoji_raster;
 mod fonts;
 mod geometry;
 mod gpu;
@@ -412,6 +413,12 @@ pub struct Renderer {
     /// pane's text is clipped to its own rect at draw time (persists across idle
     /// frames alongside the instance buffer).
     glyph_clips: Vec<GlyphClip>,
+    /// The emoji clusters in `glyph_instances`, so the block cursor draws a
+    /// cluster from the pane's own images (see `PaneEmojiCell`).
+    emoji_cells: Vec<terminal::PaneEmojiCell>,
+    /// Where the block cursor redraws an emoji cluster from the pane's own
+    /// images (`[x, y, w, h]`), or `None` when glyphon draws its glyph.
+    cursor_emoji_bounds: Option<[f32; 4]>,
     /// Pooled per-run scratch: byte offset of each cell's base scalar.
     /// Attached zero-width marks share their base cell's column. Reused
     /// across runs/frames to keep the glyph-emit walk allocation-free.
@@ -6009,10 +6016,67 @@ impl Renderer {
                     && glyph.uv == instance.uv
                     && glyph.kind == instance.kind
             })?;
-            Some((instance, rect, index))
+            Some((vec![instance], rect, index..index + 1))
         });
-        self.glyph_pipeline
-            .set_cursor(&self.gpu.device, &self.gpu.queue, cursor_glyph);
+        // An emoji cluster under the block cursor: the very instances the
+        // pane uploaded, so the cursor cannot resize, crop or move it. A
+        // monochrome image in it takes the cursor's text colour. A cell the
+        // pane did not draw as an emoji cluster (a replacement character, a
+        // missing glyph) keeps the glyphon cursor pass.
+        let emoji_cursor = cursor_glyph.is_none().then(|| {
+            let cursor = self.pending_cursor_glyph.as_ref()?;
+            let (cell, color) = (cursor.emoji?, cursor.color);
+            let images = self.emoji_cells.iter().find(|images| {
+                images.pane == cell.pane && images.line == cell.line && images.column == cell.column
+            })?;
+            let range = images.instances.clone();
+            let mut glyphs = self
+                .glyph_instances
+                .get(range.start as usize..range.end as usize)?
+                .to_vec();
+            for glyph in &mut glyphs {
+                if glyph.kind == 1 {
+                    glyph.color = [
+                        f32::from(color.r) / 255.0,
+                        f32::from(color.g) / 255.0,
+                        f32::from(color.b) / 255.0,
+                        1.0,
+                    ];
+                }
+            }
+            Some((glyphs, cell.pane, range))
+        });
+        let emoji_cursor = emoji_cursor.flatten();
+        self.cursor_emoji_bounds = emoji_cursor.as_ref().and_then(|(glyphs, _, _)| {
+            let x0 = glyphs.iter().map(|g| g.pos[0]).reduce(f32::min)?;
+            let y0 = glyphs.iter().map(|g| g.pos[1]).reduce(f32::min)?;
+            let x1 = glyphs
+                .iter()
+                .map(|g| g.pos[0] + g.size[0])
+                .reduce(f32::max)?;
+            let y1 = glyphs
+                .iter()
+                .map(|g| g.pos[1] + g.size[1])
+                .reduce(f32::max)?;
+            Some([x0, y0, x1 - x0, y1 - y0])
+        });
+        if self.cursor_emoji_bounds.is_some() {
+            // Glyphon draws no cursor glyph this frame, so its vertices are
+            // stale for the next one.
+            self.last_cursor_glyph_key = None;
+            self.cursor_mark_images.clear();
+            if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
+        }
+        let cursor_glyph = cursor_glyph.or(emoji_cursor);
+        self.glyph_pipeline.set_cursor(
+            &self.gpu.device,
+            &self.gpu.queue,
+            cursor_glyph
+                .as_ref()
+                .map(|(glyphs, rect, range)| (glyphs.as_slice(), *rect, range.clone())),
+        );
         // Prepare the focused solid-block cursor's inverted glyph only when its
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
@@ -6032,7 +6096,7 @@ impl Renderer {
                     c.marks.as_slice(),
                 )
             })
-            .filter(|_| need_cursor_prepare)
+            .filter(|_| need_cursor_prepare && self.cursor_emoji_bounds.is_none())
         {
             self.cursor_glyph_buffer.set_metrics(cursor_metrics);
             // The cursor draws its own glyph last, over the pane's, so it has
@@ -6700,6 +6764,9 @@ mod fallback_walk_tests;
 
 #[cfg(test)]
 mod emoji_shaping_tests;
+
+#[cfg(test)]
+mod emoji_fit_tests;
 
 #[cfg(test)]
 mod theme_picker_tests;

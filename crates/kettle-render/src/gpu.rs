@@ -837,6 +837,8 @@ impl Renderer {
             glyph_pipeline,
             glyph_instances: Vec::new(),
             glyph_clips: Vec::new(),
+            emoji_cells: Vec::new(),
+            cursor_emoji_bounds: None,
             glyph_char_starts: Vec::new(),
             grid_glyphs_dirty: true,
             last_text_layout_key: None,

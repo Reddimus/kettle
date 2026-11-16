@@ -361,7 +361,8 @@ impl Renderer {
         let builtin_cursor = self
             .pending_cursor_glyph
             .as_ref()
-            .is_some_and(|cursor| cursor.builtin.is_some());
+            .is_some_and(|cursor| cursor.builtin.is_some())
+            || self.cursor_emoji_bounds.is_some();
         if cursor_on && self.pending_cursor_glyph.is_some() && !self.ime_prepared && !builtin_cursor
         {
             self.cursor_glyph_renderer
@@ -530,6 +531,8 @@ pub(crate) enum GlyphPositioning {
 /// `marks` holds each buffer line's fallback mark placements
 /// (`mark_fallback::line_shifts`); only `Grid` applies them, since Legacy
 /// text that glyphon draws cannot follow them.
+/// `emoji_cells` receives each emoji cluster drawn: its buffer line, grid
+/// column and range of `out`, so the block cursor can draw those same images.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_cell_locked_glyphs(
     out: &mut Vec<GlyphInstance>,
@@ -545,6 +548,7 @@ pub(crate) fn emit_cell_locked_glyphs(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     char_starts: &mut Vec<u32>,
+    emoji_cells: &mut Vec<EmojiCellImages>,
 ) {
     emit_positioned_glyphs(
         out,
@@ -556,14 +560,175 @@ pub(crate) fn emit_cell_locked_glyphs(
         None,
         default_color,
         char_starts,
-        |key| {
-            let mut image = None;
-            glyph_pipeline.ensure_glyph(device, queue, key, || {
-                image = swash.get_image_uncached(font_system, key);
-                RasterGlyph::from_swash(image.as_ref()?)
-            })
+        AtlasGlyphs {
+            glyph_pipeline,
+            swash,
+            font_system,
+            device,
+            queue,
+            emoji_cells,
         },
     );
+}
+
+/// One emoji cluster the grid emit drew: buffer `line`, grid `column`, and
+/// the range of the emit's output holding its images.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EmojiCellImages {
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+    pub(crate) instances: std::ops::Range<usize>,
+}
+
+/// Where the grid emit gets its glyph images. A closure over cache keys is a
+/// source of shaped-size images only; its emoji are scaled on the GPU.
+pub(crate) trait GlyphSource {
+    /// The image of a glyph at its shaped size.
+    fn slot(&mut self, key: glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>;
+
+    /// The raster placement of an emoji glyph at its shaped size, which sizes
+    /// its cluster's fitted images. Only the kind, size and bearings are read.
+    fn placement(
+        &mut self,
+        key: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        self.slot(key)
+    }
+
+    /// The emoji glyph `key`, whose shaped-size image was `natural`,
+    /// rasterized at exactly `size` pixels. `None` draws the cluster from
+    /// its shaped-size images instead, scaled to the same place.
+    fn fitted(
+        &mut self,
+        _key: glyphon::cosmic_text::CacheKey,
+        _natural: super::glyphpipe::GlyphSlot,
+        _size: [u32; 2],
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        None
+    }
+
+    /// The emit drew an emoji cluster.
+    fn emoji_cell(&mut self, _cell: EmojiCellImages) {}
+}
+
+impl<F> GlyphSource for F
+where
+    F: FnMut(glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>,
+{
+    fn slot(&mut self, key: glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot> {
+        self(key)
+    }
+}
+
+/// The live source: images rasterized into the glyph pipeline's atlases.
+struct AtlasGlyphs<'a> {
+    glyph_pipeline: &'a mut GlyphPipeline,
+    swash: &'a mut SwashCache,
+    font_system: &'a mut FontSystem,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    emoji_cells: &'a mut Vec<EmojiCellImages>,
+}
+
+impl GlyphSource for AtlasGlyphs<'_> {
+    fn slot(&mut self, key: glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot> {
+        let Self {
+            glyph_pipeline,
+            swash,
+            font_system,
+            device,
+            queue,
+            ..
+        } = self;
+        let mut image = None;
+        glyph_pipeline.ensure_glyph(device, queue, key, || {
+            image = swash.get_image_uncached(font_system, key);
+            RasterGlyph::from_swash(image.as_ref()?)
+        })
+    }
+
+    fn placement(
+        &mut self,
+        key: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        let Self {
+            glyph_pipeline,
+            swash,
+            font_system,
+            ..
+        } = self;
+        glyph_pipeline.placement(key, || {
+            let image = swash.get_image_uncached(font_system, key)?;
+            let kind = match image.content {
+                glyphon::SwashContent::Color => 0,
+                glyphon::SwashContent::Mask => 1,
+                glyphon::SwashContent::SubpixelMask => return None,
+            };
+            let placement = image.placement;
+            (placement.width > 0 && placement.height > 0).then_some(super::glyphpipe::GlyphSlot {
+                kind,
+                atlas_x: 0.0,
+                atlas_y: 0.0,
+                w: placement.width as f32,
+                h: placement.height as f32,
+                left: placement.left,
+                top: placement.top,
+            })
+        })
+    }
+
+    fn fitted(
+        &mut self,
+        key: glyphon::cosmic_text::CacheKey,
+        natural: super::glyphpipe::GlyphSlot,
+        size: [u32; 2],
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        let Self {
+            glyph_pipeline,
+            swash,
+            font_system,
+            device,
+            queue,
+            ..
+        } = self;
+        let slot_size = [u16::try_from(size[0]).ok()?, u16::try_from(size[1]).ok()?];
+        // The fitted image is resampled from an unshifted source and drawn on
+        // whole pixels, so every subpixel position shares one.
+        let mut unshifted = key;
+        unshifted.x_bin = glyphon::cosmic_text::SubpixelBin::Zero;
+        unshifted.y_bin = glyphon::cosmic_text::SubpixelBin::Zero;
+        let mut raster = None;
+        glyph_pipeline.ensure_glyph(
+            device,
+            queue,
+            super::glyphpipe::SlotKey::Emoji {
+                key: unshifted,
+                size: slot_size,
+            },
+            || {
+                raster = super::emoji_raster::fitted_emoji_raster(
+                    font_system,
+                    swash,
+                    key,
+                    natural,
+                    size,
+                );
+                let raster = raster.as_ref()?;
+                Some(RasterGlyph {
+                    color: raster.color,
+                    width: raster.width,
+                    height: raster.height,
+                    left: 0,
+                    top: 0,
+                    data: &raster.data,
+                })
+            },
+        )
+    }
+
+    fn emoji_cell(&mut self, cell: EmojiCellImages) {
+        self.emoji_cells.push(cell);
+    }
 }
 
 /// The glyph instance for one cell Kettle draws itself, its mask rasterized
@@ -631,8 +796,9 @@ pub(crate) fn emit_positioned_glyphs(
     only: Option<(usize, usize)>,
     default_color: GColor,
     char_starts: &mut Vec<u32>,
-    mut glyph_slot: impl FnMut(glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot>,
+    mut glyph_source: impl GlyphSource,
 ) {
+    let mut emoji_keys = Vec::new();
     for run in buf.layout_runs() {
         if only.is_some_and(|(line, _)| line != run.line_i) {
             continue;
@@ -707,6 +873,10 @@ pub(crate) fn emit_positioned_glyphs(
         }) {
             let first = &glyphs[0];
             let cluster = emoji_cluster(first);
+            // A cluster with a missing glyph draws its tofu as text does.
+            let fitted_cluster =
+                cluster.is_some() && glyphs.iter().all(|glyph| glyph.glyph_id != 0);
+            emoji_keys.clear();
             let start = out.len();
             for glyph in glyphs {
                 let shift = shift_for(shifts, &mut next_shift, index, glyph.glyph_id);
@@ -749,9 +919,17 @@ pub(crate) fn emit_positioned_glyphs(
                     cell_locked_glyph_offset(cell_left, glyph, cluster_x)
                 });
                 let phys = glyph.physical((off_x, origin.1), 1.0);
-                let Some(slot) = glyph_slot(phys.cache_key) else {
+                let slot = if fitted_cluster {
+                    glyph_source.placement(phys.cache_key)
+                } else {
+                    glyph_source.slot(phys.cache_key)
+                };
+                let Some(slot) = slot else {
                     continue;
                 };
+                if fitted_cluster {
+                    emoji_keys.push((phys.cache_key, slot));
+                }
                 let color = glyph.color_opt.unwrap_or(default_color);
                 out.push(GlyphInstance {
                     pos: [
@@ -772,8 +950,9 @@ pub(crate) fn emit_positioned_glyphs(
                 });
             }
             let cell = super::geometry::GridGlyphCell::from_metadata(first.metadata);
+            let mut emoji_column = None;
             if let Some(index) = cluster
-                && glyphs.iter().all(|glyph| glyph.glyph_id != 0)
+                && fitted_cluster
             {
                 let text = &run.text[emoji_clusters[index].clone()];
                 let columns = cell.map_or_else(
@@ -793,15 +972,29 @@ pub(crate) fn emit_positioned_glyphs(
                     first.metadata,
                 );
                 let x = cell_w.map_or(origin.0 + first.x, |cw| origin.0 + col as f32 * cw);
-                fit_emoji_glyphs(
-                    &mut out[start..],
-                    (
-                        x,
-                        origin.1 + run.line_top,
-                        columns as f32 * cell_width,
-                        run.line_height,
-                    ),
+                let cell_box = (
+                    x,
+                    origin.1 + run.line_top,
+                    columns as f32 * cell_width,
+                    run.line_height,
                 );
+                if !fit_emoji_images(&mut out[start..], &emoji_keys, cell_box, &mut glyph_source) {
+                    // Draw the shaped-size images, scaled into the same place.
+                    let mut kept = start;
+                    for (index, &(key, _)) in emoji_keys.iter().enumerate() {
+                        let Some(slot) = glyph_source.slot(key) else {
+                            continue;
+                        };
+                        let mut glyph = out[start + index];
+                        glyph.uv = [slot.atlas_x, slot.atlas_y];
+                        glyph.kind = slot.kind;
+                        out[kept] = glyph;
+                        kept += 1;
+                    }
+                    out.truncate(kept);
+                    fit_emoji_glyphs(&mut out[start..], super::fonts::emoji_box(cell_box));
+                }
+                emoji_column = Some(col);
             }
             if cluster.is_some()
                 && let Some(cw) = cell_w
@@ -827,6 +1020,15 @@ pub(crate) fn emit_positioned_glyphs(
                     kept += 1;
                 }
                 out.truncate(kept);
+            }
+            if let Some(column) = emoji_column
+                && out.len() > start
+            {
+                glyph_source.emoji_cell(EmojiCellImages {
+                    line: run.line_i,
+                    column,
+                    instances: start..out.len(),
+                });
             }
         }
     }
@@ -935,6 +1137,67 @@ pub(crate) fn moved_cell_images(
             mask,
         })
         .collect()
+}
+
+/// Place an emoji cluster's images, emitted at their shaped size and
+/// position, in whole pixels inside `cell`'s emoji box
+/// (`fonts::fit_emoji_pixels`) and replace each with an image rasterized at
+/// exactly the size it is drawn. The cluster's union keeps its aspect ratio;
+/// each image's edges are the union's scaled edges rounded to whole pixels,
+/// so images that touch still touch. `keys` holds each image's cache key and
+/// shaped-size placement. Returns `false`, changing nothing, when any fitted
+/// image is unavailable.
+fn fit_emoji_images(
+    glyphs: &mut [GlyphInstance],
+    keys: &[(glyphon::cosmic_text::CacheKey, super::glyphpipe::GlyphSlot)],
+    cell: Rect4,
+    source: &mut impl GlyphSource,
+) -> bool {
+    if glyphs.is_empty() || glyphs.len() != keys.len() {
+        return false;
+    }
+    let mut bounds = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for glyph in glyphs.iter() {
+        bounds.0 = bounds.0.min(glyph.pos[0]);
+        bounds.1 = bounds.1.min(glyph.pos[1]);
+        bounds.2 = bounds.2.max(glyph.pos[0] + glyph.size[0]);
+        bounds.3 = bounds.3.max(glyph.pos[1] + glyph.size[1]);
+    }
+    let (width, height) = (bounds.2 - bounds.0, bounds.3 - bounds.1);
+    let Some([x, y, w, h]) =
+        super::fonts::fit_emoji_pixels(super::fonts::emoji_box(cell), (width, height))
+    else {
+        return false;
+    };
+    let (sx, sy) = (w as f32 / width, h as f32 / height);
+    let mut fitted = Vec::with_capacity(glyphs.len());
+    for (glyph, &(key, natural)) in glyphs.iter().zip(keys) {
+        let left = x + ((glyph.pos[0] - bounds.0) * sx).round() as i32;
+        let top = y + ((glyph.pos[1] - bounds.1) * sy).round() as i32;
+        let right = x + ((glyph.pos[0] + glyph.size[0] - bounds.0) * sx).round() as i32;
+        let bottom = y + ((glyph.pos[1] + glyph.size[1] - bounds.1) * sy).round() as i32;
+        let size = [(right - left).max(1) as u32, (bottom - top).max(1) as u32];
+        let Some(slot) = source.fitted(key, natural, size) else {
+            return false;
+        };
+        if slot.w != size[0] as f32 || slot.h != size[1] as f32 {
+            return false;
+        }
+        fitted.push((left, top, size, slot));
+    }
+    for (glyph, (left, top, size, slot)) in glyphs.iter_mut().zip(fitted) {
+        glyph.pos = [left as f32, top as f32];
+        glyph.size = [size[0] as f32, size[1] as f32];
+        glyph.uv = [slot.atlas_x, slot.atlas_y];
+        glyph.uv_size = glyph.size;
+        glyph.kind = slot.kind;
+    }
+    true
 }
 
 fn fit_emoji_glyphs(glyphs: &mut [GlyphInstance], cell: Rect4) {
