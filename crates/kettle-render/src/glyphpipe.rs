@@ -104,7 +104,8 @@ impl GlyphInstance {
 /// keeping `FontSystem` / `SwashCache` out of this module entirely) lets the
 /// caller hold the disjoint field borrows it needs while emitting.
 pub struct RasterGlyph<'a> {
-    /// true => 4-channel straight RGBA color glyph; false => 1-channel coverage.
+    /// true => Swash RGBA bytes (PNG straight, COLR premultiplied);
+    /// false => 1-channel coverage.
     pub color: bool,
     pub width: u32,
     pub height: u32,

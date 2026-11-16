@@ -878,7 +878,7 @@ impl Renderer {
             cursor_glyph_renderer,
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
-            last_cursor_glyph_key: None,
+            cursor_glyph_cache: crate::terminal::CursorGlyphCache::default(),
             cursor_mark_images: Vec::new(),
             cursor_marks: None,
             glyphon_cache: cache,

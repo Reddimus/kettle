@@ -355,6 +355,103 @@ fn the_block_cursor_draws_the_emoji_the_pane_draws() {
     }
 }
 
+#[test]
+fn emoji_cursor_cache_retains_keys_and_invalidates_when_switching_renderers() {
+    let mut cache = terminal::CursorGlyphCache::default();
+    assert!(cache.changed(Some(7), true));
+    cache.record(Some(7), true);
+    for _ in 0..3 {
+        assert!(
+            !cache.changed(Some(7), true),
+            "identical emoji frames reuse preparation"
+        );
+    }
+    assert!(
+        cache.changed(Some(8), true),
+        "another emoji invalidates the key"
+    );
+    assert!(
+        cache.changed(Some(7), false),
+        "glyphon vertices are stale even with the same key"
+    );
+    cache.record(Some(7), false);
+    assert!(!cache.changed(Some(7), false));
+    assert!(cache.changed(Some(7), true));
+    assert!(
+        cache.changed(Some(9), false),
+        "changed cell content invalidates the key"
+    );
+    cache.clear();
+    assert!(cache.changed(Some(7), true));
+    assert!(cache.changed(Some(7), false));
+}
+
+/// Retain unchanged emoji cursors, and refresh glyphon when leaving them.
+#[test]
+fn an_emoji_cursor_retains_prepares_and_refreshes_after_moving_off() {
+    let _serial = gpu_test_guard();
+    let text = "\x1b[?2027h\u{26a1}X\u{a9}\u{fe0f}\x1b[1;1H";
+    let Some((mut renderer, cfg, _)) = frame(13.0, 1.0, false, text, &focused(true)) else {
+        eprintln!("EMOJI_CURSOR_RETAIN_GPU_SKIP: no GPU adapter on this host");
+        return;
+    };
+    let counts = |renderer: &Renderer| (renderer.chrome_prepares, renderer.text_prepares);
+    let snap = snapshot_of(20, 4, text.as_bytes());
+    assert!(renderer.cursor_emoji_bounds.is_some());
+    assert!(renderer.cursor_glyph_cache.pane_emoji);
+    let first = counts(&renderer);
+    for _ in 0..3 {
+        capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&snap, 400, 120)],
+            &focused(true),
+        );
+        assert_eq!(
+            counts(&renderer),
+            first,
+            "an unchanged emoji cursor prepares nothing"
+        );
+    }
+    // The next cell is ordinary text. Its glyphon vertices must be prepared.
+    let off = snapshot_of(20, 4, format!("{text}\x1b[1;3H").as_bytes());
+    capture(&mut renderer, &cfg, &[pane(&off, 400, 120)], &focused(true));
+    assert!(renderer.cursor_emoji_bounds.is_none());
+    assert!(!renderer.cursor_glyph_cache.pane_emoji);
+    assert!(renderer.chrome_prepares > first.0 && renderer.text_prepares > first.1);
+    assert_eq!(renderer.cursor_glyph_buffer.lines[0].text(), "X");
+    let after = counts(&renderer);
+    capture(&mut renderer, &cfg, &[pane(&off, 400, 120)], &focused(true));
+    assert_eq!(counts(&renderer), after);
+    // Another emoji, followed by replacing the glyph beneath the cursor.
+    let other = snapshot_of(20, 4, format!("{text}\x1b[1;4H").as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&other, 400, 120)],
+        &focused(true),
+    );
+    assert!(renderer.cursor_emoji_bounds.is_some());
+    let after = counts(&renderer);
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&other, 400, 120)],
+        &focused(true),
+    );
+    assert_eq!(counts(&renderer), after);
+    let replaced = snapshot_of(20, 4, format!("{text}\x1b[1;4HY\x1b[1;4H").as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&replaced, 400, 120)],
+        &focused(true),
+    );
+    assert!(renderer.cursor_emoji_bounds.is_none());
+    assert!(renderer.chrome_prepares > after.0 && renderer.text_prepares > after.1);
+    assert_eq!(renderer.cursor_glyph_buffer.lines[0].text(), "Y");
+}
+
 /// Fitted emoji images are keyed by their pixel size: one glyph fitted to one
 /// and to two columns in the same frame keeps both images, and a font-size
 /// change drops every image and placement of the old size.
@@ -423,10 +520,9 @@ fn host_emoji(
     (glyph.glyph_id != 0).then_some(glyph)
 }
 
-/// An sRGB byte as linear light in `0..=1`, written out here rather than
+/// An encoded sRGB channel as linear light in `0..=1`, written out here rather than
 /// shared with the production resampler.
-fn linear(byte: u8) -> f64 {
-    let v = byte as f64 / 255.0;
+fn linear(v: f64) -> f64 {
     if v <= 0.04045 {
         v / 12.92
     } else {
@@ -435,18 +531,21 @@ fn linear(byte: u8) -> f64 {
 }
 
 /// `src` (`w` x `h`, `channels` 1 or 4) as premultiplied linear light per
-/// pixel, `0..=255`: straight sRGB RGBA, or linear coverage.
-fn premultiplied_linear(src: &[u8], channels: usize) -> Vec<[f64; 4]> {
+/// pixel, `0..=255`: either sRGB RGBA alpha encoding, or linear coverage.
+fn premultiplied_linear(src: &[u8], channels: usize, premultiplied: bool) -> Vec<[f64; 4]> {
     src.chunks(channels)
         .map(|p| {
             if channels == 4 {
                 let a = p[3] as f64 / 255.0;
-                [
-                    linear(p[0]) * a * 255.0,
-                    linear(p[1]) * a * 255.0,
-                    linear(p[2]) * a * 255.0,
-                    p[3] as f64,
-                ]
+                let decode = |byte: u8| {
+                    let divisor = if premultiplied { p[3] as f64 } else { 255.0 };
+                    if divisor == 0.0 {
+                        0.0
+                    } else {
+                        linear((byte as f64 / divisor).min(1.0)) * a * 255.0
+                    }
+                };
+                [decode(p[0]), decode(p[1]), decode(p[2]), p[3] as f64]
             } else {
                 [p[0] as f64, 0.0, 0.0, 0.0]
             }
@@ -462,8 +561,9 @@ fn reference_resample(
     (w, h): (u32, u32),
     channels: usize,
     to: [u32; 2],
+    premultiplied: bool,
 ) -> Vec<[f64; 4]> {
-    let source = premultiplied_linear(src, channels);
+    let source = premultiplied_linear(src, channels, premultiplied);
     let (sx, sy) = (w as f64 / to[0] as f64, h as f64 / to[1] as f64);
     let mut out = Vec::new();
     for ty in 0..to[1] {
@@ -549,13 +649,15 @@ fn check_fitted_raster(
     );
     let image = swash.get_image_uncached(fonts, source).expect("source");
     let channels = if raster.color { 4 } else { 1 };
+    let premultiplied = matches!(image.source, swash::scale::Source::ColorOutline(_));
     let expected = reference_resample(
         &image.data,
         (image.placement.width, image.placement.height),
         channels,
         size,
+        premultiplied,
     );
-    let actual = premultiplied_linear(&raster.data, channels);
+    let actual = premultiplied_linear(&raster.data, channels, premultiplied);
     for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
         for c in 0..channels {
             // Half an sRGB step, in linear light, near white.

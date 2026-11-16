@@ -1409,7 +1409,7 @@ fn block_cursor_uses_the_pane_baseline_with_scaled_rows() {
             .line_y;
         assert_eq!(cursor_y, pane_y);
         assert_eq!(
-            renderer.last_cursor_glyph_key,
+            renderer.cursor_glyph_cache.key,
             cursor_glyph_damage_key(
                 renderer.pending_cursor_glyph.as_ref(),
                 pane_metrics(renderer.metrics.font_size, renderer.cell_h),
@@ -1451,9 +1451,9 @@ fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
         assert_eq!(attrs.family, expected.family);
         assert_eq!(attrs.font_features, expected.font_features);
         if previous_key.is_some() {
-            assert_ne!(renderer.last_cursor_glyph_key, previous_key);
+            assert_ne!(renderer.cursor_glyph_cache.key, previous_key);
         }
-        previous_key = renderer.last_cursor_glyph_key;
+        previous_key = renderer.cursor_glyph_cache.key;
     }
 }
 

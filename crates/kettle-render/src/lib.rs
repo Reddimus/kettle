@@ -536,7 +536,7 @@ pub struct Renderer {
     /// cursor frames (including menu hover) can render its retained vertices;
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
-    last_cursor_glyph_key: Option<u64>,
+    cursor_glyph_cache: terminal::CursorGlyphCache,
     /// The surface rectangles of the cursor glyph's images when its cluster
     /// has fallback-placed marks (`mark_fallback::cursor_images`) and they
     /// are drawn as glyphon custom glyphs; empty when glyphon draws the
@@ -3753,6 +3753,40 @@ impl Renderer {
         // Theme foreground — used by tab bar text and other chrome below
         // (where there's no specific pane to take an OSC 10 override from).
         let fg = theme.foreground;
+        let text_layout_key =
+            text_layout_damage_key(panes, cfg, (sw, sh), (cw, ch), pane_titlebar_h);
+        let text_layout_changed = self.last_text_layout_key != Some(text_layout_key);
+        self.last_text_layout_key = Some(text_layout_key);
+        let builtin_cursor = self
+            .pending_cursor_glyph
+            .as_ref()
+            .and_then(|cursor| cursor.builtin);
+        // A mapped instance buffer becomes writable again only through a poll
+        // (or a submit) after the frames that drew from it have finished.
+        if self.gpu.mapped_uploads() {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        }
+        // Cell-locked pane text has its OWN damage gate. A cursor blink
+        // can force `need_prepare` via `cursor_char_changed` for the separate
+        // cursor glyph pass, but it must not clear/re-upload pane glyph
+        // instances. Only pane text changes and layout/style damage refresh the
+        // glyph pipeline. Legacy panes use it only while dimmed, preserving
+        // their continuous layout. The same gate clears unused instances.
+        let grid_upload_needed =
+            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
+        if grid_upload_needed {
+            let mut gi = std::mem::take(&mut self.glyph_instances);
+            let mut gc = std::mem::take(&mut self.glyph_clips);
+            gi.clear();
+            gc.clear();
+            self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
+            self.grid_glyphs_dirty =
+                !self
+                    .glyph_pipeline
+                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
+            self.glyph_instances = gi;
+            self.glyph_clips = gc;
+        }
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
         // Menu text lives in its own areas vec, prepared by a dedicated
         // `menu_text_renderer.prepare(...)` after the main
@@ -5781,10 +5815,73 @@ impl Renderer {
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
         self.last_chrome_hash = chrome_hash;
-        let text_layout_key =
-            text_layout_damage_key(panes, cfg, (sw, sh), (cw, ch), pane_titlebar_h);
-        let text_layout_changed = self.last_text_layout_key != Some(text_layout_key);
-        self.last_text_layout_key = Some(text_layout_key);
+        // A built-in glyph under the block cursor. The pane emits the same
+        // cell with the same mask, so the cursor only looks up the slot the
+        // pane resolved and never allocates: an allocation here, after the
+        // upload, could evict a slot the uploaded pane instances still draw.
+        let cursor_glyph = builtin_cursor.and_then(|cell| {
+            let clip = self.pending_cursor_glyph.as_ref()?.clip;
+            let slot = self
+                .glyph_pipeline
+                .resident(cell.key(self.builtin_strokes)?)?;
+            let instance = builtin_glyph_at(&cell, slot);
+            let rect = [clip.0, clip.1, clip.2, clip.3];
+            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
+            // Retain the uploaded index across visibility changes and cursor moves;
+            // only the pane's copy is omitted while its cursor copy draws.
+            let index = (pane.start..pane.start + pane.count).find(|&index| {
+                let glyph = &self.glyph_instances[index as usize];
+                glyph.pos == instance.pos
+                    && glyph.size == instance.size
+                    && glyph.uv == instance.uv
+                    && glyph.kind == instance.kind
+            })?;
+            Some((vec![instance], rect, index..index + 1))
+        });
+        // An emoji cluster under the block cursor: the very instances the
+        // pane uploaded, so the cursor cannot resize, crop or move it. A
+        // monochrome image in it takes the cursor's text colour. A cell the
+        // pane did not draw as an emoji cluster (a replacement character, a
+        // missing glyph) keeps the glyphon cursor pass.
+        let emoji_cursor = cursor_glyph
+            .is_none()
+            .then(|| {
+                let cursor = self.pending_cursor_glyph.as_ref()?;
+                terminal::emoji_cursor_images(
+                    &self.emoji_cells,
+                    &self.glyph_instances,
+                    cursor.emoji?,
+                    cursor.color,
+                )
+            })
+            .flatten();
+        self.cursor_emoji_bounds = emoji_cursor.as_ref().and_then(|(glyphs, _, _)| {
+            let x0 = glyphs.iter().map(|g| g.pos[0]).reduce(f32::min)?;
+            let y0 = glyphs.iter().map(|g| g.pos[1]).reduce(f32::min)?;
+            let x1 = glyphs
+                .iter()
+                .map(|g| g.pos[0] + g.size[0])
+                .reduce(f32::max)?;
+            let y1 = glyphs
+                .iter()
+                .map(|g| g.pos[1] + g.size[1])
+                .reduce(f32::max)?;
+            Some([x0, y0, x1 - x0, y1 - y0])
+        });
+        if self.cursor_emoji_bounds.is_some() {
+            self.cursor_mark_images.clear();
+            if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
+        }
+        let cursor_glyph = cursor_glyph.or(emoji_cursor);
+        self.glyph_pipeline.set_cursor(
+            &self.gpu.device,
+            &self.gpu.queue,
+            cursor_glyph
+                .as_ref()
+                .map(|(glyphs, rect, range)| (glyphs.as_slice(), *rect, range.clone())),
+        );
         // When the cursor moves to a DIFFERENT glyph, force the main prepare so
         // that glyph is freshly resident in the atlas before the cursor pass
         // reuses its bitmap (otherwise the 1-glyph cursor prepare could be the
@@ -5804,7 +5901,10 @@ impl Renderer {
         let cursor_metrics = pane_metrics(self.metrics.font_size, self.cell_h);
         let cursor_glyph_key =
             cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), cursor_metrics, &family);
-        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        let pane_emoji_cursor = self.cursor_emoji_bounds.is_some();
+        let cursor_glyph_changed = self
+            .cursor_glyph_cache
+            .changed(cursor_glyph_key, pane_emoji_cursor);
         // A built-in cursor glyph is drawn from the glyph pipeline's atlas,
         // so it cannot grow glyphon's.
         let cursor_char_changed = cursor_glyph_changed
@@ -5831,17 +5931,13 @@ impl Renderer {
             || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
-        let builtin_cursor = self
-            .pending_cursor_glyph
-            .as_ref()
-            .and_then(|cursor| cursor.builtin);
         let need_cursor_prepare = self.pending_cursor_glyph.is_some()
             && builtin_cursor.is_none()
             && (need_prepare || cursor_glyph_changed);
         // The glyphon cursor vertices are not refreshed while the cursor sits
         // on a built-in glyph, so they must not be trusted afterwards.
         if cursor_glyph_key.is_none() || builtin_cursor.is_some() {
-            self.last_cursor_glyph_key = None;
+            self.cursor_glyph_cache.clear();
             self.cursor_mark_images.clear();
             if let Some(marks) = self.cursor_marks.as_mut() {
                 marks.hide();
@@ -5969,102 +6065,6 @@ impl Renderer {
                 )?;
             }
         }
-        // A mapped instance buffer becomes writable again only through a poll
-        // (or a submit) after the frames that drew from it have finished.
-        if self.gpu.mapped_uploads() {
-            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
-        }
-        // Cell-locked pane text has its OWN damage gate. A cursor blink
-        // can force `need_prepare` via `cursor_char_changed` for the separate
-        // cursor glyph pass, but it must not clear/re-upload pane glyph
-        // instances. Only pane text changes and layout/style damage refresh the
-        // glyph pipeline. Legacy panes use it only while dimmed, preserving
-        // their continuous layout. The same gate clears unused instances.
-        let grid_upload_needed =
-            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
-        if grid_upload_needed {
-            let mut gi = std::mem::take(&mut self.glyph_instances);
-            let mut gc = std::mem::take(&mut self.glyph_clips);
-            gi.clear();
-            gc.clear();
-            self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
-            self.grid_glyphs_dirty =
-                !self
-                    .glyph_pipeline
-                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
-            self.glyph_instances = gi;
-            self.glyph_clips = gc;
-        }
-        // A built-in glyph under the block cursor. The pane emits the same
-        // cell with the same mask, so the cursor only looks up the slot the
-        // pane resolved and never allocates: an allocation here, after the
-        // upload, could evict a slot the uploaded pane instances still draw.
-        let cursor_glyph = builtin_cursor.and_then(|cell| {
-            let clip = self.pending_cursor_glyph.as_ref()?.clip;
-            let slot = self
-                .glyph_pipeline
-                .resident(cell.key(self.builtin_strokes)?)?;
-            let instance = builtin_glyph_at(&cell, slot);
-            let rect = [clip.0, clip.1, clip.2, clip.3];
-            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
-            // Retain the uploaded index across visibility changes and cursor moves;
-            // only the pane's copy is omitted while its cursor copy draws.
-            let index = (pane.start..pane.start + pane.count).find(|&index| {
-                let glyph = &self.glyph_instances[index as usize];
-                glyph.pos == instance.pos
-                    && glyph.size == instance.size
-                    && glyph.uv == instance.uv
-                    && glyph.kind == instance.kind
-            })?;
-            Some((vec![instance], rect, index..index + 1))
-        });
-        // An emoji cluster under the block cursor: the very instances the
-        // pane uploaded, so the cursor cannot resize, crop or move it. A
-        // monochrome image in it takes the cursor's text colour. A cell the
-        // pane did not draw as an emoji cluster (a replacement character, a
-        // missing glyph) keeps the glyphon cursor pass.
-        let emoji_cursor = cursor_glyph
-            .is_none()
-            .then(|| {
-                let cursor = self.pending_cursor_glyph.as_ref()?;
-                terminal::emoji_cursor_images(
-                    &self.emoji_cells,
-                    &self.glyph_instances,
-                    cursor.emoji?,
-                    cursor.color,
-                )
-            })
-            .flatten();
-        self.cursor_emoji_bounds = emoji_cursor.as_ref().and_then(|(glyphs, _, _)| {
-            let x0 = glyphs.iter().map(|g| g.pos[0]).reduce(f32::min)?;
-            let y0 = glyphs.iter().map(|g| g.pos[1]).reduce(f32::min)?;
-            let x1 = glyphs
-                .iter()
-                .map(|g| g.pos[0] + g.size[0])
-                .reduce(f32::max)?;
-            let y1 = glyphs
-                .iter()
-                .map(|g| g.pos[1] + g.size[1])
-                .reduce(f32::max)?;
-            Some([x0, y0, x1 - x0, y1 - y0])
-        });
-        if self.cursor_emoji_bounds.is_some() {
-            // Glyphon draws no cursor glyph this frame, so its vertices are
-            // stale for the next one.
-            self.last_cursor_glyph_key = None;
-            self.cursor_mark_images.clear();
-            if let Some(marks) = self.cursor_marks.as_mut() {
-                marks.hide();
-            }
-        }
-        let cursor_glyph = cursor_glyph.or(emoji_cursor);
-        self.glyph_pipeline.set_cursor(
-            &self.gpu.device,
-            &self.gpu.queue,
-            cursor_glyph
-                .as_ref()
-                .map(|(glyphs, rect, range)| (glyphs.as_slice(), *rect, range.clone())),
-        );
         // Prepare the focused solid-block cursor's inverted glyph only when its
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
@@ -6179,7 +6179,12 @@ impl Renderer {
             // Commit the retained-vertex key only after prepare succeeds. A
             // transient atlas/device error must retry rather than treating
             // stale vertices as current on the next frame.
-            self.last_cursor_glyph_key = cursor_glyph_key;
+            self.cursor_glyph_cache.record(cursor_glyph_key, false);
+        }
+        if pane_emoji_cursor {
+            // This key describes the pane images, not glyphon vertices. The
+            // backend comparison above forces a prepare when switching back.
+            self.cursor_glyph_cache.record(cursor_glyph_key, true);
         }
         if preparing_text {
             self.text_prepare_dirty = false;

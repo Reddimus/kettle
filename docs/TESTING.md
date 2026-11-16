@@ -2024,7 +2024,10 @@ GPU. `emoji_raster`'s unit tests check the area resampler on integer and
 fractional ratios, upsampling, linear-light averaging of colour (black beside
 white is sRGB 188) and a transparent pixel whose colour must not tint its
 neighbour, and that sources stay bounded: no strike above 256 ppem, and no
-outline above 512 ppem for any font size.
+outline above 512 ppem for any font size. Header-only fixtures reject oversized
+bitmap dimensions before decoding. Synthetic COLR fixtures retain partial-alpha
+colour and the normal upload's premultiplied encoding; straight-alpha fixtures
+retain their existing results.
 `an_outline_emoji_is_an_area_average_of_its_larger_outline` checks the outline
 path with the bundled lightning on every host. With a colour emoji face (Apple
 Color Emoji on macOS, Noto Color Emoji on the Ubuntu runner image, Segoe UI
@@ -2038,6 +2041,11 @@ block cursor on and off it in an opaque window (no pixel may change), and
 check that one glyph fitted at two widths keeps two images and that a font-size
 change drops every image and placement of the old size; they report
 `EMOJI_FIT_GPU_SKIP` or `EMOJI_CURSOR_GPU_SKIP` without an adapter.
+The portable cursor-cache test checks retained keys and renderer transitions.
+`an_emoji_cursor_retains_prepares_and_refreshes_after_moving_off` checks unchanged
+frames' `chrome_prepares` and `text_prepares`, moving onto text and another emoji,
+and replacing the cursor cell. It reports `EMOJI_CURSOR_RETAIN_GPU_SKIP` without
+an adapter.
 
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that

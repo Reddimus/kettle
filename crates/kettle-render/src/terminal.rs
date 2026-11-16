@@ -369,6 +369,28 @@ pub(crate) fn cursor_glyph_top(cell_top: f32, row_baseline: f32, buffer: &TextBu
     cell_top + row_baseline - own_baseline
 }
 
+/// The last successfully prepared cursor, including which renderer owns it.
+#[derive(Default)]
+pub(crate) struct CursorGlyphCache {
+    pub(crate) key: Option<u64>,
+    pub(crate) pane_emoji: bool,
+}
+
+impl CursorGlyphCache {
+    pub(crate) fn changed(&self, key: Option<u64>, pane_emoji: bool) -> bool {
+        self.key != key || self.pane_emoji != pane_emoji
+    }
+
+    pub(crate) fn record(&mut self, key: Option<u64>, pane_emoji: bool) {
+        self.key = key;
+        self.pane_emoji = pane_emoji;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub(crate) fn cursor_glyph_damage_key(
     cursor: Option<&PendingCursorGlyph>,
     metrics: Metrics,
