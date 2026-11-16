@@ -1720,6 +1720,16 @@ and `INLINE_CARD_GPU_SKIPPED` when the adapter cannot exercise it.
 Require acceptance for both Grid and Legacy cases you claim to have tested.
 Headless readbacks still do not prove native input or installed-package behavior.
 
+The `c09_` selection tests sweep every bundled theme, ANSI ink and sampled
+program background at opaque and translucent alpha values. They require 7:1
+text and 1.3:1 focus separation, and pin the original explicit-user colours.
+The outline check compares exposed union edges at 1x and 2x without fonts or
+per-cell seams. Hint checks cover the held drag, eight-second release tail,
+once-per-process suppression, cancellation, localized physical modifiers and
+the single polite Status whose full text matches the painted projection.
+Native Linux, macOS and Windows input and assistive-technology runs remain
+necessary to validate actual event delivery and announcements.
+
 The `regression_` tests in `kettle-render` and `kettle-ui` cover close-chip
 contrast with an overridden chrome background, pane and lane dimming order,
 single dimming of terminal decorations, inactive color emoji dimming with an

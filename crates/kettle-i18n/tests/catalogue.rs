@@ -254,6 +254,7 @@ fn every_spanish_message_has_a_review_status() {
                         // as the text it shows.
                         | "scrollback_kept"
                         | "scrollback_kept_lines"
+                        | "selection_gesture_hint"
                 )
         })
         .cloned()

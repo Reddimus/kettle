@@ -386,6 +386,7 @@ pub(crate) struct MinimumContrastCache {
     highlight_ink: std::collections::HashMap<[u32; 6], Rgb>,
     active_fills: std::collections::HashMap<[u32; 6], Rgb>,
     inactive_fills: std::collections::HashMap<[u32; 6], Rgb>,
+    selection_pairs: std::collections::HashMap<[u32; 6], (Rgb, Rgb)>,
 }
 
 impl MinimumContrastCache {
@@ -412,6 +413,7 @@ impl MinimumContrastCache {
         self.highlight_ink.clear();
         self.active_fills.clear();
         self.inactive_fills.clear();
+        self.selection_pairs.clear();
         self.misses = 0;
     }
 
@@ -442,24 +444,21 @@ pub(crate) fn selection_colors(theme: &kettle_config::Theme, background: Rgb) ->
     )
 }
 
-/// The contrast a focused selection keeps against the cell background: WCAG's
-/// 3:1 for a state a reader must tell apart from its surroundings.
-///
-/// Against a see-through window's background, as the desktop behind it shows,
-/// the fill strengthens only as far as its text stays at least 4.5:1 and keeps
-/// its light or dark ink. With the default dark theme at 86% opacity over a
-/// white page that stops at 2.42:1. That is accepted: the selected text
-/// carries the information at 4.5:1, the fill still reaches 3:1 against the
-/// theme's own background, and it is stronger than the 1.95:1 an unadjusted
-/// fill shows there.
+/// Selection separation, supplied by the fill or an exposed-edge outline.
+/// Explicit user colours retain the legacy fill-only translucency tradeoffs.
 pub(crate) const SELECTION_CONTRAST: f64 = 3.0;
 
 /// The contrast an unfocused window's selection keeps against the background:
 /// quieter than the focused fill's 3:1, yet still plainly a selection.
 pub(crate) const INACTIVE_SELECTION_CONTRAST: f64 = 2.0;
 
-/// The contrast text keeps on any selection fill.
+/// Explicit user selections and search retain their existing text floor.
 const SELECTION_TEXT_CONTRAST: f64 = 4.5;
+const THEME_SELECTION_TEXT_CONTRAST: f64 = 7.0;
+
+pub(crate) fn user_selection_colors(theme: &kettle_config::Theme) -> bool {
+    theme.selection_foreground_user || theme.selection_background_user
+}
 
 /// The colour a pane's default `background` shows on screen when the window
 /// lets the desktop through at `alpha` (`1.0` for an opaque window). The
@@ -490,11 +489,8 @@ pub(crate) fn selection_contrast_target(background: Rgb, selection: Rgb, alpha: 
     }
 }
 
-/// The theme's selection colour where it stands out from `background`;
-/// otherwise a stronger tint of the same hue that does. Blending toward white
-/// or black instead reached 3:1 by greying the tint, which left a muted fill.
-/// The unfocused fill is a neutral grey 2:1 from the background, so losing
-/// focus changes the selection's hue as well as its strength, as macOS does.
+/// Jointly resolve theme selection fills for 7:1 text, retaining the active
+/// hue and a quieter inactive grey. User overrides keep the legacy policy.
 pub(crate) fn selection_fill(
     theme: &kettle_config::Theme,
     background: Rgb,
@@ -507,6 +503,78 @@ pub(crate) fn selection_fill(
 /// [`selection_fill`] for a pane whose default `background` shows as `target`
 /// on screen. Equal colours give [`selection_fill`]'s result.
 pub(crate) fn selection_fill_against(
+    theme: &kettle_config::Theme,
+    background: Rgb,
+    target: Rgb,
+    focused: bool,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    if user_selection_colors(theme) {
+        return legacy_selection_fill_against(theme, background, target, focused, cache);
+    }
+    let key = [
+        MinimumContrastCache::color_key(theme.selection_background),
+        MinimumContrastCache::color_key(background),
+        MinimumContrastCache::color_key(target),
+        MinimumContrastCache::color_key(theme.foreground),
+        MinimumContrastCache::color_key(theme.selection_foreground),
+        MinimumContrastCache::color_key(theme.background),
+    ];
+    let (active, inactive) = if let Some(pair) = cache.selection_pairs.get(&key) {
+        *pair
+    } else {
+        let old_active = legacy_selection_fill_against(theme, background, target, true, cache);
+        let old_inactive = legacy_selection_fill_against(theme, background, target, false, cache);
+        let ink = selection_ink(theme, old_active);
+        let light_ink = color::relative_luminance(ink) > color::relative_luminance(old_active);
+        let lighter =
+            color::relative_luminance(old_active) >= color::relative_luminance(background);
+        let neutral = if light_ink {
+            Rgb::new(255, 255, 255)
+        } else {
+            Rgb::new(0, 0, 0)
+        };
+        // Leave room for a quieter grey with the same ink polarity. The small
+        // margin allows both the grey and hue-preserving fill to round to u8.
+        let minimum = if lighter == light_ink {
+            THEME_SELECTION_TEXT_CONTRAST
+        } else {
+            THEME_SELECTION_TEXT_CONTRAST * SELECTION_FOCUS_SEPARATION + 0.05
+        };
+        let active =
+            color::selection_tint(old_active, theme.selection_background, neutral, minimum);
+        let valid = |grey: Rgb| {
+            color::contrast_ratio(neutral, grey) >= THEME_SELECTION_TEXT_CONTRAST
+                && color::contrast_ratio(active, grey) >= SELECTION_FOCUS_SEPARATION
+        };
+        let between = |grey: Rgb| {
+            let l = color::relative_luminance(grey);
+            let a = color::relative_luminance(active);
+            let b = color::relative_luminance(background);
+            l >= a.min(b) && l <= a.max(b)
+        };
+        let nearest = |only_between: bool| {
+            (0..=255)
+                .map(|v| Rgb::new(v, v, v))
+                .filter(|grey| valid(*grey) && (!only_between || between(*grey)))
+                .min_by(|a, b| {
+                    let distance = |grey| {
+                        (color::relative_luminance(grey) - color::relative_luminance(old_inactive))
+                            .abs()
+                    };
+                    distance(*a).total_cmp(&distance(*b))
+                })
+        };
+        let inactive = nearest(true)
+            .or_else(|| nearest(false))
+            .unwrap_or(old_inactive);
+        cache.selection_pairs.insert(key, (active, inactive));
+        (active, inactive)
+    };
+    if focused { active } else { inactive }
+}
+
+fn legacy_selection_fill_against(
     theme: &kettle_config::Theme,
     background: Rgb,
     target: Rgb,
@@ -706,6 +774,7 @@ pub(crate) struct PaneSelectionFills {
     background: Rgb,
     active: Rgb,
     inactive: Rgb,
+    target: Rgb,
 }
 
 impl PaneSelectionFills {
@@ -725,6 +794,7 @@ impl PaneSelectionFills {
         let target = selection_contrast_target(background, base, backdrop_alpha);
         Self {
             background,
+            target,
             active: selection_fill_against(theme, background, target, true, cache),
             inactive: selection_fill_against(theme, background, target, false, cache),
         }
@@ -733,6 +803,24 @@ impl PaneSelectionFills {
     /// The fill a selection row paints, for a focused or unfocused window.
     pub(crate) fn row(&self, focused: bool) -> Rgb {
         if focused { self.active } else { self.inactive }
+    }
+
+    pub(crate) fn outline(&self, theme: &kettle_config::Theme, focused: bool) -> Option<Rgb> {
+        if user_selection_colors(theme) {
+            return None;
+        }
+        let minimum = if focused {
+            SELECTION_CONTRAST
+        } else {
+            INACTIVE_SELECTION_CONTRAST
+        };
+        let fill = self.row(focused);
+        (color::contrast_ratio(fill, self.target) < minimum)
+            .then(|| color::with_min_contrast_same_hue(fill, self.target, minimum))
+    }
+
+    pub(crate) fn outline_backdrop(&self) -> Rgb {
+        self.target
     }
 
     /// The fill under a `highlight`ed cell whose background shows as
@@ -748,7 +836,18 @@ impl PaneSelectionFills {
         let focused = match highlight {
             CellHighlight::None => return background,
             CellHighlight::Search(true) => return search_fill(cfg, theme),
-            CellHighlight::Search(false) | CellHighlight::Selection => true,
+            CellHighlight::Search(false) => {
+                let row =
+                    legacy_selection_fill_against(theme, self.background, self.target, true, cache);
+                return if background == self.background
+                    || color::contrast_ratio(row, background) >= SELECTION_CONTRAST
+                {
+                    row
+                } else {
+                    legacy_selection_fill_against(theme, background, background, true, cache)
+                };
+            }
+            CellHighlight::Selection => true,
             CellHighlight::InactiveSelection => false,
         };
         let row = self.row(focused);
@@ -782,6 +881,9 @@ pub(crate) fn highlight_colors_cached(
 ) -> (Rgb, Rgb) {
     let bg = match highlight {
         CellHighlight::Search(true) => search_fill(cfg, theme),
+        CellHighlight::Search(false) => {
+            legacy_selection_fill_against(theme, background, background, true, cache)
+        }
         _ => selection_fill(
             theme,
             background,
@@ -811,8 +913,18 @@ pub(crate) fn highlight_ink_cached(
             .selection_foreground_user
             .then_some(theme.selection_foreground),
     };
+    let minimum = if matches!(
+        highlight,
+        CellHighlight::Selection | CellHighlight::InactiveSelection
+    ) && !user_selection_colors(theme)
+    {
+        THEME_SELECTION_TEXT_CONTRAST
+    } else {
+        SELECTION_TEXT_CONTRAST
+    };
     let key = [
-        MinimumContrastCache::color_key(foreground),
+        MinimumContrastCache::color_key(foreground)
+            | (u32::from(minimum > SELECTION_TEXT_CONTRAST) << 24),
         MinimumContrastCache::color_key(bg),
         explicit
             .map(MinimumContrastCache::color_key)
@@ -824,7 +936,7 @@ pub(crate) fn highlight_ink_cached(
     if let Some(fg) = cache.highlight_ink.get(&key) {
         return *fg;
     }
-    let fg = highlight_ink(explicit, theme, foreground, bg);
+    let fg = highlight_ink_with_minimum(explicit, theme, foreground, bg, minimum);
     cache.highlight_ink.insert(key, fg);
     fg
 }
@@ -837,8 +949,18 @@ fn highlight_ink(
     foreground: Rgb,
     bg: Rgb,
 ) -> Rgb {
+    highlight_ink_with_minimum(explicit, theme, foreground, bg, SELECTION_TEXT_CONTRAST)
+}
+
+fn highlight_ink_with_minimum(
+    explicit: Option<Rgb>,
+    theme: &kettle_config::Theme,
+    foreground: Rgb,
+    bg: Rgb,
+    minimum: f64,
+) -> Rgb {
     for fg in explicit.into_iter().chain([foreground]) {
-        if color::contrast_ratio(fg, bg) >= SELECTION_TEXT_CONTRAST {
+        if color::contrast_ratio(fg, bg) >= minimum {
             return fg;
         }
     }
@@ -1114,6 +1236,7 @@ mod selection_contrast_tests {
             selection_foreground: Rgb::new(220, 220, 220),
             selection_foreground_explicit: false,
             selection_foreground_user: false,
+            selection_background_user: true,
             ..kettle_config::Theme::default()
         };
         let (fg, bg) = selection_colors(&theme, theme.background);

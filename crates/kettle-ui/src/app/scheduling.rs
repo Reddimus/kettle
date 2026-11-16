@@ -929,6 +929,12 @@ impl App {
             bg_anim_interval,
             blink_wait,
         );
+        if let Some(until) = self.sync_selection_hint(ws, now) {
+            let next = until
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let crate::typed_echo::SettlePoll::Wait(next) = echo_settle {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }

@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- The first plain text drag in each run shows selection gestures during the
+  drag and for eight seconds afterward: Alt-drag for a rectangle (Option on
+  macOS), and Shift-click to extend. The English and Spanish hint is a polite
+  screen-reader status and leaves when focus, pane, selection or input changes.
+
 - Scrolled to the very top of a history that has lost its oldest lines, a
   pane shows **Start of kept history · 10,000 lines** at its top right: where
   the history Kettle still holds begins and how many lines that is, so the
@@ -385,6 +390,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   within the same 2048 retained commands.
 
 ### Changed
+
+- Theme and default selections keep selected text at 7:1 in both focus
+  states, including ANSI colours. A clean perimeter preserves selection
+  visibility where the fill alone cannot. Explicit user selection colours
+  retain the existing 4.5:1 policy and `minimum-contrast` handling.
 
 - Settings is easier to read and to use with the pointer. Descriptions,
   footer hints and notes reach 7:1 against the panel where the theme allows,

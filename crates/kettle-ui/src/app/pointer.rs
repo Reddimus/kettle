@@ -79,6 +79,7 @@ impl App {
     /// every modern terminal does this so a stale highlight doesn't
     /// confuse the next copy/paste). No-op when nothing is selected.
     pub(super) fn clear_selection_on_input(&mut self, ws: &mut WindowState) {
+        self.dismiss_selection_hint(ws);
         if let Some(p) = ws.mux.focused()
             && let Ok(mut t) = p.term.term.lock()
             && t.selection.is_some()
@@ -419,6 +420,7 @@ impl App {
             self.reset_blink_phase(ws);
         }
         clear_selection_gesture(ws);
+        self.sync_selection_hint(ws, std::time::Instant::now());
     }
 
     pub(super) fn update_selection(&mut self, ws: &mut WindowState, area: Rect) {
@@ -454,9 +456,11 @@ impl App {
                 sel.update(p, side);
             }
         }
+        self.sync_selection_hint(ws, std::time::Instant::now());
     }
 
     pub(super) fn begin_or_extend_mouse_selection(&mut self, ws: &mut WindowState, area: Rect) {
+        ws.selection_hint_plain = false;
         // The grid press is the newer gesture: drop any editor selection so
         // the search bar's Copy shortcut reaches the grid selection instead.
         if ws.search.open {
@@ -484,6 +488,8 @@ impl App {
         if !smart_selected {
             self.begin_selection(ws, area, kind);
         }
+        ws.selection_hint_plain =
+            super::selection_hint::plain_selection_hint_gesture(clicks, held, ws.selecting);
         if self.cfg.copy_on_select
             && (smart_selected
                 || matches!(
@@ -1493,6 +1499,7 @@ pub(super) fn selection_leave_edge(
 }
 
 pub(super) fn arm_selection_gesture(ws: &mut WindowState, pane_id: u64, button: u8) {
+    ws.selection_hint_plain = false;
     // A fresh grid gesture owns Copy, including Shift+right-click extension.
     if ws.search.open {
         ws.search.editor.clear_selection();
@@ -1514,6 +1521,7 @@ pub(super) fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Opt
 }
 
 pub(super) fn clear_selection_gesture(ws: &mut WindowState) {
+    ws.selection_hint_plain = false;
     ws.selecting = false;
     ws.selecting_pane = None;
     ws.selection_autoscroll_edge = 0;

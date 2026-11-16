@@ -2913,6 +2913,10 @@ context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hov
 [messages.link_open_control_click]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Opening gesture in hovered link status on Linux/Windows, modifier click required."
 
+[messages.selection_gesture_hint]
+context = "crates/kettle-ui/src/app/selection_hint.rs: passive status shown once during the first plain text drag and eight seconds after release. modifier is the physical key name Alt (Linux/Windows) or Option (macOS). These describe gestures begun with those keys held; they do not change the current drag. Also the full polite screen-reader Status label."
+args = [{ name = "modifier", type = "str" }]
+
 [messages.hint_action_open_url]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint legend action for a URL, typed label without Shift."
 

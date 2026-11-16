@@ -1458,6 +1458,9 @@ impl ThemeOverrides {
             theme.selection_foreground_explicit = true;
             theme.selection_foreground_user = true;
         }
+        if self.selection_background.is_some() {
+            theme.selection_background_user = true;
+        }
     }
 }
 
