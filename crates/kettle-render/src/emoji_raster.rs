@@ -86,10 +86,19 @@ pub(crate) fn pick_strike(sizes: &[u16]) -> Option<u16> {
 /// the font size alone exceeds it.
 pub(crate) fn outline_source_ppem(font_size: f32, natural_height: u32, target_height: u32) -> f32 {
     let scale = target_height.max(1) as f32 / natural_height.max(1) as f32;
-    (font_size * scale * OUTLINE_SUPERSAMPLE)
-        .max(font_size)
-        .min(MAX_OUTLINE_PPEM)
-        .max(1.0)
+    // The floor is bounded first, so the clamp's minimum is a number no
+    // larger than its maximum (otherwise it panics), whatever the font size.
+    let floor = if font_size.is_finite() {
+        font_size.clamp(1.0, MAX_OUTLINE_PPEM)
+    } else {
+        MAX_OUTLINE_PPEM
+    };
+    let wanted = font_size * scale * OUTLINE_SUPERSAMPLE;
+    if wanted.is_finite() {
+        wanted.clamp(floor, MAX_OUTLINE_PPEM)
+    } else {
+        MAX_OUTLINE_PPEM
+    }
 }
 
 /// `key`'s image resampled to exactly `size` pixels, its shaped-size image
@@ -316,7 +325,20 @@ mod tests {
 
     #[test]
     fn an_outline_source_is_bounded_for_any_font_size() {
-        for font_size in [1.0f32, 13.0, 100.0, 511.0, 512.0, 600.0, 4096.0, f32::MAX] {
+        let sizes = [
+            0.0f32,
+            1.0,
+            13.0,
+            100.0,
+            511.0,
+            512.0,
+            600.0,
+            4096.0,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NAN,
+        ];
+        for font_size in sizes {
             for (natural, target) in [(0, 0), (13, 14), (13, 13), (600, 600), (1, 4096)] {
                 let ppem = outline_source_ppem(font_size, natural, target);
                 assert!(
