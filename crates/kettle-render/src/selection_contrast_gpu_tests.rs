@@ -5,7 +5,7 @@ use alacritty_terminal::selection::SelectionRange;
 use kettle_core::{Column, Line, Point};
 
 #[test]
-fn c09_gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
+fn gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
     let _serial = gpu_test_guard();
     for scale in [1.0, 2.0] {
         for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -18,7 +18,7 @@ fn c09_gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
                 Renderer::headless_for_tests_with(&cfg, width, height, scale, true)
                     .expect("renderer builds")
             else {
-                eprintln!("C09_GPU_SKIPPED: no adapter");
+                eprintln!("SELECTION_GPU_SKIPPED: no adapter");
                 return;
             };
             for (name, program_background) in [
@@ -140,7 +140,7 @@ fn c09_gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
                         assert_eq!(at(x, edge - 1), actual, "no bottom seam");
                         assert_eq!(at(x, edge), actual, "no top seam");
                     }
-                    if let Ok(directory) = std::env::var("KETTLE_C09_CAPTURE_DIR") {
+                    if let Ok(directory) = std::env::var("KETTLE_SELECTION_CAPTURE_DIR") {
                         frame
                             .save(
                                 std::path::Path::new(&directory)
@@ -153,6 +153,6 @@ fn c09_gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
         }
     }
     eprintln!(
-        "C09_GPU_ACCEPTED: Grid/Legacy, 1x/2x, dark/light, active/inactive, exposed perimeter and no row seams"
+        "SELECTION_GPU_ACCEPTED: Grid/Legacy, 1x/2x, dark/light, active/inactive, exposed perimeter and no row seams"
     );
 }

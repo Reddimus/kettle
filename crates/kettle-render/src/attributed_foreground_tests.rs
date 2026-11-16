@@ -6,7 +6,7 @@ use alacritty_terminal::vte::ansi::Color as AnsiColor;
 use kettle_config::{Config, Theme};
 
 #[test]
-fn c09_theme_selection_contrast_and_user_color_precedence() {
+fn theme_selection_contrast_and_user_color_precedence() {
     use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
     let cfg = Config::default();
     let mut sweep_minimum = f64::INFINITY;
@@ -88,6 +88,60 @@ fn c09_theme_selection_contrast_and_user_color_precedence() {
             &mut cache,
         );
         assert_eq!(ink, Rgb::new(192, 202, 245));
+    }
+}
+
+#[test]
+fn cell_selection_keeps_focus_separation_with_local_fallback() {
+    use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
+    let cfg = Config::default();
+    let theme = cfg.theme_by_name("Kanagawa Lotus");
+    let background = Rgb::new(0, 0, 0);
+    let mut cache = MinimumContrastCache::default();
+    let fills = PaneSelectionFills::new(&theme, theme.background, 1.0, &mut cache);
+    assert!(
+        color::contrast_ratio(fills.row(true), background) < 3.0,
+        "the active pane fill must need a local fallback"
+    );
+    assert!(
+        color::contrast_ratio(fills.row(false), background) >= 2.0,
+        "the inactive pane fill must already separate from the cell background"
+    );
+    let active = fills.cell(
+        CellHighlight::Selection,
+        &cfg,
+        &theme,
+        background,
+        &mut cache,
+    );
+    let inactive = fills.cell(
+        CellHighlight::InactiveSelection,
+        &cfg,
+        &theme,
+        background,
+        &mut cache,
+    );
+    assert!(
+        color::contrast_ratio(active, inactive) >= 1.3,
+        "the final cell fills must keep focus separation: {active:?} / {inactive:?}"
+    );
+    for (highlight, fill) in [
+        (CellHighlight::Selection, active),
+        (CellHighlight::InactiveSelection, inactive),
+    ] {
+        for ink in std::iter::once(theme.foreground).chain(theme.palette) {
+            let drawn = resolved_highlight_foreground_cached(
+                ink, fill, highlight, &cfg, &theme, &mut cache,
+            );
+            assert!(color::contrast_ratio(drawn, fill) >= 7.0);
+        }
+        for background in [theme.background, Rgb::new(255, 255, 255)] {
+            assert_eq!(
+                fills.cell(highlight, &cfg, &theme, background, &mut cache),
+                fills.row(matches!(highlight, CellHighlight::Selection)),
+                "keep the pane pair when neither state needs a local fallback"
+            );
+        }
     }
 }
 

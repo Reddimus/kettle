@@ -851,12 +851,11 @@ impl PaneSelectionFills {
             CellHighlight::InactiveSelection => false,
         };
         let row = self.row(focused);
-        let minimum = if focused {
-            SELECTION_CONTRAST
-        } else {
-            INACTIVE_SELECTION_CONTRAST
-        };
-        if background == self.background || color::contrast_ratio(row, background) >= minimum {
+        // Keep both focus states from the same pair, including local fallbacks.
+        if background == self.background
+            || (color::contrast_ratio(self.active, background) >= SELECTION_CONTRAST
+                && color::contrast_ratio(self.inactive, background) >= INACTIVE_SELECTION_CONTRAST)
+        {
             row
         } else {
             selection_fill(theme, background, focused, cache)

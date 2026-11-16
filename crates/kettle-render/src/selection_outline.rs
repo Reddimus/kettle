@@ -62,7 +62,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn c09_outline_follows_exposed_union_edges_at_native_scales() {
+    fn outline_follows_exposed_union_edges_at_native_scales() {
         let runs = [
             SelectionRun {
                 row: 0,
