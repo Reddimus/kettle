@@ -18,6 +18,10 @@
 set -euo pipefail
 
 KETTLE="${KETTLE_BIN:-kettle}"
+# Kettle and every `kettle ctl` here share one environment, so they meet in
+# its registry and need no alias: keep the run out of the control registry
+# directory the OS names for this account (docs/TESTING.md).
+export KETTLE_TEST_OS_CTL_DIR="${KETTLE_TEST_OS_CTL_DIR:-none}"
 TIMEOUT="${KETTLE_TEAROFF_TIMEOUT:-25}"
 
 if [ -z "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then

@@ -808,6 +808,7 @@ impl App {
             windows,
             accent_registry: crate::window_accent::AccentRegistry::default(),
             focused_seq: 1,
+            foreign_broadcast_reach: None,
             window_focus_order: VecDeque::from([1]),
             next_window_seq: 2,
             gpu: None,
@@ -1600,9 +1601,7 @@ impl App {
         // cache. The server only needs the pid + a live proxy for its waker, so
         // binding it here makes the agent surface available as soon as the
         // window comes up. A re-resume does not start it again.
-        if self.ctl_start == CtlStart::NotReady {
-            self.ctl_start = CtlStart::Ready;
-        }
+        self.ctl_start.first_pane_exists();
         self.ensure_ctl_started();
         // Terminator plugin parity: fire
         // LuaEvent::Startup the first time we have an alive window

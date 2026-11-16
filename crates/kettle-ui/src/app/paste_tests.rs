@@ -491,7 +491,7 @@ fn clipboard_images_encode_off_the_window_thread_in_paste_order() {
     let image = body("paste_clipboard_image");
     assert!(
         image.contains("self.pasted_images.reserve_png(")
-            && image.contains("encoder.submit(id, png, rgba)")
+            && image.contains("encoder.submit(id, png, pixels)")
             && !image.contains("save_rgba"),
         "the window thread reserves the PNG and hands the encode to the encoder"
     );
@@ -1426,19 +1426,126 @@ fn bounded_clipboard_extra_byte_rejects_instead_of_truncating() {
     );
 }
 
+/// A paste question as `confirm_text_paste` asks it, with access keys.
+fn paste_ask(policy: kettle_config::PasteProtection, unbracketed: bool) -> super::paste::PasteAsk {
+    super::paste::PasteAsk {
+        policy,
+        unbracketed,
+        access_keys: true,
+        delayed_suspend: false,
+        reasked: false,
+    }
+}
+
+/// What a key press does to a dialog, as `confirm_dialog_key` computes it:
+/// the handler only carries the outcome out.
+fn key_outcome(
+    dialog: &super::ConfirmDialogState,
+    key: &str,
+    mods: winit::keyboard::ModifiersState,
+    stacked: bool,
+) -> super::ConfirmKeyOutcome {
+    use winit::keyboard::{Key, NamedKey};
+    let key = match key {
+        "Enter" => Key::Named(NamedKey::Enter),
+        "Escape" => Key::Named(NamedKey::Escape),
+        "Tab" => Key::Named(NamedKey::Tab),
+        "Up" => Key::Named(NamedKey::ArrowUp),
+        "Down" => Key::Named(NamedKey::ArrowDown),
+        "Left" => Key::Named(NamedKey::ArrowLeft),
+        "Right" => Key::Named(NamedKey::ArrowRight),
+        "PageUp" => Key::Named(NamedKey::PageUp),
+        "PageDown" => Key::Named(NamedKey::PageDown),
+        "Home" => Key::Named(NamedKey::Home),
+        "End" => Key::Named(NamedKey::End),
+        "Space" => Key::Named(NamedKey::Space),
+        letter => Key::Character(letter.into()),
+    };
+    super::confirm_key_outcome(
+        dialog,
+        &key,
+        mods,
+        super::ConfirmKeyContext {
+            vim_menu_nav: true,
+            stacked,
+            macos: false,
+        },
+    )
+}
+
+/// The text activating a stop would paste, or `None` when it pastes nothing.
+fn stop_paste(dialog: &super::ConfirmDialogState, index: usize) -> Option<String> {
+    match super::confirm_stop_action(dialog, index)? {
+        super::ConfirmStopAction::Dispatch(super::ConfirmAction::Paste { text, .. }) => Some(text),
+        _ => None,
+    }
+}
+
+/// The bytes a key press makes a pane receive: the outcome is carried out the
+/// way the handler does, against a real pane with bracketed paste on.
+fn key_bytes(dialog: &super::ConfirmDialogState, key: &str, stacked: bool) -> Vec<Vec<u8>> {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    let (mut mux, ids) = title_test_tab_mux(1);
+    let captured = mux.panes.get_mut(&ids[0]).unwrap().capture_input_for_test();
+    mux.panes[&ids[0]]
+        .term
+        .term
+        .lock()
+        .unwrap()
+        .set_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let outcome = key_outcome(
+        dialog,
+        key,
+        winit::keyboard::ModifiersState::empty(),
+        stacked,
+    );
+    if let super::ConfirmKeyOutcome::Activate(index) = outcome
+        && let Some(text) = stop_paste(dialog, index)
+    {
+        super::paste::paste_text_into_target(&mut mux, Some(ids[0]), &text, &modes);
+    }
+    let bytes = captured();
+    mux.kill_children();
+    bytes
+}
+
+/// The question for `text` under the default policy, in English, as a
+/// program without bracketed paste gets it.
+fn paste_question(text: &str) -> super::ConfirmDialogState {
+    super::text_paste_confirmation(
+        Some(7),
+        text,
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(kettle_config::PasteProtection::Auto, true),
+        kettle_i18n::Translator::default(),
+    )
+}
+
+fn preview_of(text: &str) -> super::paste::PastePreview {
+    let anchor = crate::paste_safety::findings(text)
+        .first()
+        .map(|finding| finding.first);
+    super::paste_preview(text, anchor, &kettle_i18n::Translator::default())
+}
+
 #[test]
 fn paste_preview_is_short_and_cannot_interpret_controls() {
     assert_eq!(
-        super::paste_preview("echo hola\n\x1b[201~"),
-        "echo hola\n\u{241b}[201~"
+        preview_of("echo hola\n\x1b[201~").text,
+        "echo hola\nESC[201~"
     );
-    assert_eq!(super::paste_preview("español 界"), "español 界");
-    let preview = super::paste_preview(&"x".repeat(LOCAL_PREVIEW_TEST_LEN));
+    assert_eq!(preview_of("español 界").text, "español 界");
+    let preview = preview_of(&"x".repeat(LOCAL_PREVIEW_TEST_LEN)).text;
     assert_eq!(preview.chars().count(), 161);
     assert!(preview.ends_with('…'));
-    let controls = super::paste_preview(&"\x1b".repeat(1000));
-    assert!(controls.chars().count() <= 161);
-    assert!(!super::paste_preview("safe\u{202e}evil").contains('\u{202e}'));
+    let controls = preview_of(&"\x1b".repeat(1000));
+    assert!(controls.text.chars().count() <= 161);
+    // A token is never cut by the bound: 53 whole ESC, then the ellipsis.
+    assert_eq!(controls.tokens.len(), 53);
+    assert!(controls.text.ends_with("ESC…"));
+    assert!(!preview_of("safe\u{202e}evil").text.contains('\u{202e}'));
 }
 const LOCAL_PREVIEW_TEST_LEN: usize = 1000;
 
@@ -1486,23 +1593,307 @@ fn text_paste_confirmation_covers_all_entry_points_and_stays_targeted() {
     assert!(submit.contains("let modes = self.text_paste_modes(ws, target)"));
     assert!(submit.contains("confirm_text_paste(ws, target, text, &modes)"));
     assert!(submit.contains("deliver_text_paste(ws, target, text, &modes)"));
-    let dispatch = include_str!("modals.rs");
-    assert!(
-        dispatch.contains(
-            "ws.mux.broadcast == broadcast && self.broadcast_recipients(ws) == recipients"
-        )
+    // What an answer does is `text_paste_dispatch`, tested in
+    // `an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile`.
+}
+
+/// A pane with bracketed paste on and its input captured, the question Kettle
+/// asks it about `text`, and the modes that question was asked for.
+fn bracketed_question(
+    text: &str,
+    policy: kettle_config::PasteProtection,
+) -> (
+    Mux,
+    u64,
+    impl Fn() -> Vec<Vec<u8>>,
+    super::ConfirmDialogState,
+) {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    let (mut mux, ids) = title_test_tab_mux(1);
+    let pane = ids[0];
+    let captured = mux.panes.get_mut(&pane).unwrap().capture_input_for_test();
+    mux.panes[&pane]
+        .term
+        .term
+        .lock()
+        .unwrap()
+        .set_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let dialog = super::text_paste_confirmation(
+        Some(pane),
+        text,
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(policy, modes.values().any(|bracketed| !bracketed)),
+        kettle_i18n::Translator::default(),
     );
-    assert!(dispatch.contains(
-        "self.deliver_text_paste(ws, target, &text, &self.text_paste_modes(ws, target))"
+    (mux, pane, captured, dialog)
+}
+
+/// The recipients of a paste in `mux` as they are now, as the handler
+/// samples them before it asks `text_paste_dispatch`.
+fn paste_now(mux: &Mux, policy: kettle_config::PasteProtection) -> super::paste::PasteNow {
+    let modes = super::paste::text_paste_modes(mux.panes.iter().map(|(&id, pane)| (id, pane)));
+    let mut recipients = if mux.is_broadcast_on() {
+        mux.broadcast_target_ids()
+    } else {
+        Vec::new()
+    };
+    recipients.sort_unstable();
+    super::paste::PasteNow {
+        broadcast: mux.broadcast.clone(),
+        recipients,
+        ask: paste_ask(policy, modes.values().any(|bracketed| !bracketed)),
+        modes,
+    }
+}
+
+#[test]
+fn an_answer_does_not_cover_a_program_that_left_bracketed_paste_meanwhile() {
+    use super::paste::{PasteAnswer, PasteDispatch, paste_answer, paste_text_into_target};
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    use kettle_config::PasteProtection::{Always, Auto, Off};
+    let mode = PrivateMode::Named(NamedPrivateMode::BracketedPaste);
+    let tr = kettle_i18n::Translator::default();
+    let text = "echo one\x03\necho \x1b[31mtwo\n";
+    // Activate stop `index` and carry out what `text_paste_dispatch` decides
+    // as the handler does: a delivery reaches the pane through its encoder,
+    // a second question is returned.
+    let answer = |mux: &mut Mux, dialog: &super::ConfirmDialogState, index: usize, policy| {
+        let Some(super::ConfirmStopAction::Dispatch(answered)) =
+            super::confirm_stop_action(dialog, index)
+        else {
+            panic!("paste action")
+        };
+        let super::ConfirmAction::Paste { target, text, .. } = &answered else {
+            panic!("paste action")
+        };
+        match super::paste::text_paste_dispatch(&answered, paste_now(mux, policy), tr) {
+            PasteDispatch::Deliver(modes) => {
+                paste_text_into_target(mux, *target, text, &modes);
+                None
+            }
+            PasteDispatch::AskAgain(question) => Some(*question),
+            PasteDispatch::Drop => panic!("the scope is unchanged"),
+        }
+    };
+
+    // Asked with bracketed paste on: both controls are rows Kettle removes,
+    // and the raw Paste is the last button, not a warning.
+    let (mut mux, pane, captured, dialog) = bracketed_question(text, Always);
+    let detail = &dialog.paste.as_ref().unwrap().detail;
+    assert!(detail.findings.iter().all(|row| row.removed));
+    let raw = dialog.buttons.len() - 1;
+    assert!(!dialog.buttons[raw].destructive());
+
+    // Answered in the mode it was asked for, the raw Paste arrives as the
+    // rows said: bracketed, without ^C and ESC.
+    assert!(answer(&mut mux, &dialog, raw, Always).is_none());
+    assert_eq!(
+        captured().concat(),
+        b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
+    );
+
+    // Broadcast turned on while the question was open: the answer covered
+    // one pane, not a scope, and nothing is sent.
+    mux.broadcast = BroadcastScope::Tab;
+    let Some(super::ConfirmStopAction::Dispatch(answered)) =
+        super::confirm_stop_action(&dialog, raw)
+    else {
+        panic!("paste action")
+    };
+    assert!(matches!(
+        super::paste::text_paste_dispatch(&answered, paste_now(&mux, Always), tr),
+        PasteDispatch::Drop
     ));
+    mux.broadcast = BroadcastScope::Off;
+    // Either half of the consent alone is enough to drop it: the same scope
+    // with another recipient set, and the same recipients under another
+    // scope.
+    let other_recipients = super::paste::PasteNow {
+        recipients: vec![pane],
+        ..paste_now(&mux, Always)
+    };
+    let other_scope = super::paste::PasteNow {
+        broadcast: BroadcastScope::Tab,
+        ..paste_now(&mux, Always)
+    };
+    for now in [other_recipients, other_scope] {
+        assert!(matches!(
+            super::paste::text_paste_dispatch(&answered, now, tr),
+            PasteDispatch::Drop
+        ));
+    }
+    assert!(captured().is_empty());
+
+    // The program turns bracketed paste off while the question is open. The
+    // same answer would now send ^C and ESC and run both lines, so nothing
+    // is sent and Kettle asks again.
+    mux.panes[&pane].term.term.lock().unwrap().unset_private_mode(mode);
+    for policy in [Always, Auto] {
+        assert!(answer(&mut mux, &dialog, raw, policy).is_some());
+    }
+    // The sanitised choice still has two lines to run: asked again too.
+    assert!(answer(&mut mux, &dialog, 1, Auto).is_some());
+    assert!(captured().is_empty());
+    // A single line that keeps a control is refused under either policy,
+    // though `always` by its own rule asks only about line breaks.
+    let modes = paste_now(&mux, Auto).modes;
+    for policy in [Auto, Always] {
+        assert_eq!(
+            paste_answer(false, policy, "echo one\x03", &modes),
+            PasteAnswer::AskAgain
+        );
+    }
+    // Paste as one line has neither a line break nor a control left: it
+    // reads the same in both modes and goes through.
+    let one_line = (0..dialog.buttons.len())
+        .find(|&index| {
+            matches!(
+                dialog.buttons[index],
+                super::ConfirmButton::PasteOneLine { .. }
+            )
+        })
+        .unwrap();
+    assert!(answer(&mut mux, &dialog, one_line, Always).is_none());
+    assert_eq!(captured().concat(), b"echo one  echo  [31mtwo ");
+    // With the policy `off` Kettle does not ask at all.
+    assert!(answer(&mut mux, &dialog, raw, Off).is_none());
+    assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
+
+    // The second question is asked for the modes of now: every control is a
+    // live row and the raw Paste carries the warning colour. Its answer
+    // stands, in this mode and after a return to bracketed paste.
+    let again = answer(&mut mux, &dialog, raw, Always).unwrap();
+    let detail = &again.paste.as_ref().unwrap().detail;
+    assert!(!detail.findings.is_empty());
+    assert!(detail.findings.iter().all(|row| !row.removed));
+    assert!(again.buttons[raw].destructive());
+    assert_eq!(stop_paste(&again, raw).as_deref(), Some(text));
+    assert!(answer(&mut mux, &again, raw, Always).is_none());
+    assert_eq!(captured().concat(), b"echo one\x03\recho \x1b[31mtwo\r");
+    mux.panes[&pane].term.term.lock().unwrap().set_private_mode(mode);
+    assert!(answer(&mut mux, &again, raw, Always).is_none());
+    assert_eq!(
+        captured().concat(),
+        b"\x1b[200~echo one\necho [31mtwo\n\x1b[201~"
+    );
+    mux.kill_children();
+}
+
+#[test]
+fn a_question_asked_again_says_first_that_the_answer_was_not_used() {
+    use alacritty_terminal::vte::ansi::{Handler, NamedPrivateMode, PrivateMode};
+    use kettle_i18n::{Language, Text as T, Translator};
+    let text = "echo one\x03\necho two\n";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let (mux, pane, captured, dialog) =
+            bracketed_question(text, kettle_config::PasteProtection::Auto);
+        let reasked = tr.text(T::ConfirmPasteReasonReasked);
+        // The first question has no such sentence.
+        assert!(!dialog.body.contains(reasked));
+        mux.panes[&pane]
+            .term
+            .term
+            .lock()
+            .unwrap()
+            .unset_private_mode(PrivateMode::Named(NamedPrivateMode::BracketedPaste));
+        let Some(super::ConfirmStopAction::Dispatch(answered)) =
+            super::confirm_stop_action(&dialog, dialog.buttons.len() - 1)
+        else {
+            panic!("paste action")
+        };
+        let super::paste::PasteDispatch::AskAgain(again) = super::paste::text_paste_dispatch(
+            &answered,
+            paste_now(&mux, kettle_config::PasteProtection::Auto),
+            tr,
+        ) else {
+            panic!("asked again")
+        };
+        // The second one opens with why the answer was not used, then gives
+        // the reason that holds now. A screen reader hears it first too.
+        let lines: Vec<_> = again.body.lines().collect();
+        assert_eq!(lines, [reasked, tr.text(T::ConfirmPasteReasonLines)]);
+        let detail = &again.paste.as_ref().unwrap().detail;
+        assert!(detail.description.starts_with(reasked));
+        assert!(captured().is_empty());
+        mux.kill_children();
+    }
+}
+
+#[test]
+fn a_removed_kind_never_takes_a_row_from_a_live_one() {
+    use kettle_i18n::Text as T;
+    let tr = kettle_i18n::Translator::default();
+    // Six kinds, most serious first: the end marker, ^C, ^Z, ESC, U+202E and
+    // BEL. A bracketed paste removes the first four.
+    let text = "a\x1b[201~b\x03c\x1ad\x1b[31me\x07f\u{202e}g\n";
+    let rows = |unbracketed: bool| {
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, unbracketed),
+            tr,
+        );
+        let detail = dialog.paste.unwrap().detail;
+        let rows: Vec<_> = detail
+            .findings
+            .iter()
+            .map(|row| (row.meaning.clone(), row.removed))
+            .collect();
+        (rows, detail.more, detail.description)
+    };
+    let removed = |meaning: T| (tr.confirm_paste_finding_removed(tr.text(meaning)), true);
+    let live = |meaning: T| (tr.text(meaning).to_string(), false);
+
+    // Bracketed: U+202E and BEL still reach the program and each has a row,
+    // in order of severity among the rows shown. ^Z and ESC, which Kettle
+    // removes, are the two counted instead.
+    let (shown, more, spoken) = rows(false);
+    assert_eq!(
+        shown,
+        [
+            removed(T::ConfirmPasteFindingEndMarker),
+            removed(T::ConfirmPasteFindingInterrupt),
+            live(T::ConfirmPasteFindingBidi),
+            live(T::ConfirmPasteFindingBell),
+        ]
+    );
+    assert_eq!(more, tr.confirm_paste_more_kinds(2));
+    for (meaning, _) in &shown {
+        assert!(spoken.contains(meaning.as_str()));
+    }
+
+    // Without bracketed paste only the marker is removed. It is why Kettle
+    // asked and keeps its row; the rest are the most serious live kinds.
+    let (shown, more, _) = rows(true);
+    assert_eq!(
+        shown,
+        [
+            removed(T::ConfirmPasteFindingEndMarker),
+            live(T::ConfirmPasteFindingInterrupt),
+            live(T::ConfirmPasteFindingSuspend),
+            live(T::ConfirmPasteFindingEscape),
+        ]
+    );
+    assert_eq!(more, tr.confirm_paste_more_kinds(2));
 }
 
 #[test]
 fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
         let tr = kettle_i18n::Translator::new(language);
-        let dialog =
-            super::text_paste_confirmation(Some(7), "one\ntwo", BroadcastScope::Off, vec![], tr);
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            "one\ntwo",
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            tr,
+        );
         assert_eq!(dialog.focus_idx, 0);
         assert_eq!(dialog.buttons.len(), 3);
         assert!(super::confirmation_button_action(&dialog, 0).is_none());
@@ -1513,6 +1904,7 @@ fn paste_confirmation_buttons_keep_consent_targeted_in_each_language() {
                 text,
                 broadcast,
                 recipients,
+                unbracketed: _,
             } = super::confirmation_button_action(&dialog, index).unwrap()
             else {
                 panic!("paste action");
@@ -1607,14 +1999,21 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
     let text = "one\r\ntwo\x1b[31mred\x1b[0m\x07";
     for language in [Language::En, Language::Es] {
         let tr = Translator::new(language);
-        let mut dialog =
-            super::text_paste_confirmation(Some(7), text, BroadcastScope::Off, vec![], tr);
+        let mut dialog = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            tr,
+        );
         assert_eq!(dialog.buttons.len(), 4);
         assert_eq!(dialog.focus_idx, 0);
-        assert!(dialog.body.contains(&tr.confirm_paste_lines(2)));
-        assert!(dialog.body.contains(&tr.confirm_paste_escapes(2)));
-        assert!(dialog.body.contains(&tr.confirm_paste_controls(1)));
-        assert!(dialog.body.contains("\u{241b}[31mred\u{241b}[0m\u{2407}"));
+        let detail = dialog.paste.as_ref().unwrap().detail.clone();
+        assert!(detail.summary.contains(&tr.confirm_paste_lines(2)));
+        assert!(detail.summary.contains(&tr.confirm_paste_escapes(2)));
+        assert!(detail.summary.contains(&tr.confirm_paste_controls(1)));
+        assert!(detail.preview.contains("ESC[31mredESC[0mBEL"));
         // The sanitised paste is the first choice after Cancel; the raw
         // paste comes last, in the warning colour.
         let super::ConfirmAction::Paste {
@@ -1698,7 +2097,7 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
                         .nodes
                         .iter()
                         .any(|(_, n)| n.role() == accesskit::Role::AlertDialog
-                            && n.description() == Some(dialog.body.as_str()))
+                            && n.description() == Some(detail.description.as_str()))
                 );
             }
         }
@@ -1715,6 +2114,7 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
                 text,
                 BroadcastScope::Off,
                 vec![],
+                paste_ask(kettle_config::PasteProtection::Auto, true),
                 Translator::default()
             )
             .buttons
@@ -1729,6 +2129,7 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
                 text,
                 BroadcastScope::Off,
                 vec![],
+                paste_ask(kettle_config::PasteProtection::Auto, true),
                 Translator::default()
             )
             .buttons
@@ -1739,10 +2140,1650 @@ fn paste_controls_dialog_summarises_and_keeps_all_choices_accessible() {
 }
 
 #[test]
-fn paste_preview_shows_controls_and_only_the_first_three_lines() {
-    assert_eq!(
-        super::paste_preview("a\x1b\x07\x18\x7f\u{85}\t"),
-        "a\u{241b}\u{2407}^X^?\\u{85}^I"
+fn paste_preview_spells_controls_in_ascii_and_shows_only_three_lines() {
+    let preview = preview_of("a\x1b\x07\x18\x7f\u{85}\u{9b}\x08");
+    assert_eq!(preview.text, "aESCBEL^XDELU+0085CSI^H");
+    let tokens: Vec<_> = preview
+        .tokens
+        .iter()
+        .map(|range| &preview.text[range.clone()])
+        .collect();
+    assert_eq!(tokens, ["ESC", "BEL", "^X", "DEL", "U+0085", "CSI", "^H"]);
+    // No control picture: the U+2400 block draws as tiny letters that overlap.
+    let preview = preview_of("a\x1bb\x07\x03");
+    assert_eq!(preview.text, "aESCbBEL^C");
+    assert!(
+        !preview
+            .text
+            .chars()
+            .any(|c| ('\u{2400}'..='\u{243f}').contains(&c))
     );
-    assert_eq!(super::paste_preview("1\r\n2\r3\n4secret"), "1\n2\n3…");
+    assert_eq!(preview_of("1\r\n2\r3\n4secret").text, "1\n2\n3…");
+    // The line break that ends the text draws no empty line of its own.
+    assert_eq!(preview_of("echo a\n").text, "echo a");
+    assert_eq!(preview_of("echo a\r\n").text, "echo a");
+    assert_eq!(preview_of("a\n\nb\n").text, "a\n\nb");
+    assert_eq!(preview_of("a\n\n").text, "a\n");
+    assert_eq!(preview_of("safe\u{202e}evil").text, "safeU+202Eevil");
+    assert_eq!(preview_of("\u{9d}0;t\u{9c}\u{90}").text, "OSC0;tSTDCS");
+}
+
+#[test]
+fn a_tab_is_whitespace_in_the_preview_and_never_a_finding() {
+    let preview = preview_of("a\tb\x03");
+    // No caret alarm and no chip for the tab; the real control keeps both.
+    assert_eq!(preview.text, "a    b^C");
+    assert_eq!(preview.tokens.len(), 1);
+    assert_eq!(preview.tokens[0], 6..8);
+    assert!(!preview.text.contains("^I"));
+    let tabs = preview_of("col1\tcol2\tcol3");
+    assert_eq!(tabs.text, "col1    col2    col3");
+    assert!(tabs.tokens.is_empty());
+    assert_eq!(tabs.spoken, tabs.text);
+    // A paste of tabs and line breaks alone has nothing to list.
+    let dialog = paste_question("a\tb\nc\td");
+    let detail = &dialog.paste.as_ref().unwrap().detail;
+    assert!(detail.findings.is_empty() && detail.preview_tokens.is_empty());
+    assert_eq!(dialog.buttons.len(), 3);
+    assert!(
+        !detail.description.contains("^I")
+            && !detail.summary.iter().any(|part| part.contains("control"))
+    );
+}
+
+#[test]
+fn the_preview_window_moves_to_the_most_dangerous_control() {
+    let marker = "\x1b[201~";
+    // The capture's shape: a harmless line break first, the end marker far
+    // below it. The opening window would stop long before the marker.
+    for text in [
+        format!("echo ok\n{}{marker}; rm -rf ~\n", "x".repeat(5000)),
+        format!("{}{marker}tail", "x".repeat(5000)),
+        format!("1\n2\n3\n4\n5\nsix{marker}"),
+        format!("\x07{}\n{marker}", "y".repeat(400)),
+        format!("\x03\x1a{}{marker}", "z".repeat(170)),
+    ] {
+        let preview = preview_of(&text);
+        assert!(preview.text.starts_with('…'), "{:?}", preview.text);
+        assert!(preview.text.contains("ESC[201~"), "{:?}", preview.text);
+        assert!(preview.text.chars().count() <= 162);
+        assert!(preview.text.matches('\n').count() <= 2);
+        // The marker's introducer is a token of the moved window.
+        assert!(
+            preview
+                .tokens
+                .iter()
+                .any(|range| &preview.text[range.clone()] == "ESC"
+                    && preview.text[range.end..].starts_with("[201~"))
+        );
+    }
+    // Forty characters of the marker's own line lead in, no more.
+    let preview = preview_of(&format!("{}{marker}", "x".repeat(5000)));
+    assert_eq!(preview.text, format!("…{}ESC[201~", "x".repeat(40)));
+    // A line that starts closer than that starts the window.
+    let preview = preview_of(&format!("{}\nab{marker}cd", "x".repeat(400)));
+    assert_eq!(preview.text, "…abESC[201~cd");
+    // The C1 form moves the window too, and reads "CSI 201~" in its chip.
+    let preview = preview_of(&format!("{}\u{9b}201~", "x".repeat(5000)));
+    assert!(preview.text.ends_with("CSI201~"), "{:?}", preview.text);
+    // A less serious control that comes first does not hold the window.
+    let preview = preview_of(&format!("\x07{}\x03", "x".repeat(300)));
+    assert!(preview.text.ends_with("^C") && !preview.text.contains("BEL"));
+    // A marker the opening window already shows whole leaves it at the top.
+    let preview = preview_of(&format!("ab{marker}{}", "x".repeat(500)));
+    assert!(preview.text.starts_with("abESC[201~xxx"));
+    // One that the 160-character bound would cut moves it.
+    let preview = preview_of(&format!("{}{marker}", "x".repeat(156)));
+    assert!(preview.text.starts_with('…') && preview.text.ends_with("ESC[201~"));
+    // Work is bounded however large the clipboard.
+    let huge = format!("{}{marker}", "界".repeat(1 << 20));
+    let preview = preview_of(&huge);
+    assert_eq!(preview.text, format!("…{}ESC[201~", "界".repeat(40)));
+    // A bad anchor is ignored, not sliced.
+    let tr = kettle_i18n::Translator::default();
+    for anchor in [(9999, 10000), (1, 2), (3, 2)] {
+        assert_eq!(super::paste_preview("é\x03", Some(anchor), &tr).text, "é^C");
+    }
+}
+
+#[test]
+fn the_dialog_shows_a_late_end_marker_after_a_harmless_newline() {
+    let text = format!("echo ok\n{}\x1b[201~; echo injected\n", "x".repeat(5000));
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        // Bracketed paste is on: the marker alone asked.
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            &text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, false),
+            tr,
+        );
+        let detail = &dialog.paste.as_ref().unwrap().detail;
+        assert!(detail.preview.contains("ESC[201~; echo injected"));
+        assert_eq!(detail.findings[0].token, "ESC[201~");
+        // Kettle removes the marker whichever button is chosen; the row
+        // says so and is not drawn as a live risk.
+        assert_eq!(
+            detail.findings[0].meaning,
+            tr.confirm_paste_finding_removed(
+                tr.text(kettle_i18n::Text::ConfirmPasteFindingEndMarker)
+            )
+        );
+        assert!(detail.findings[0].removed);
+        assert_eq!(dialog.body, tr.confirm_paste_reason_marker("ESC[201~"));
+        // The chip survives layout at both widths.
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        for surface in [(1280.0, 800.0), (520.0, 700.0)] {
+            let layout =
+                kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+            let detail = layout.detail.as_ref().unwrap();
+            assert_eq!(detail.tokens.len(), 1);
+            assert!(detail.preview_lines.concat().contains(" ESC [201~"));
+        }
+    }
+}
+
+#[test]
+fn the_first_sentence_says_why_kettle_asked() {
+    use kettle_config::PasteProtection::{Always, Auto};
+    use kettle_i18n::{Language, Text as T, Translator};
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let body = |text: &str, policy, unbracketed| {
+            super::text_paste_confirmation(
+                None,
+                text,
+                BroadcastScope::Off,
+                vec![],
+                paste_ask(policy, unbracketed),
+                tr,
+            )
+            .body
+        };
+        let lines = tr.text(T::ConfirmPasteReasonLines);
+        // The 7-bit marker, bracketed paste on: that sentence alone.
+        assert_eq!(
+            body("x\x1b[201~y", Auto, false),
+            tr.confirm_paste_reason_marker("ESC[201~")
+        );
+        // The C1 form is named as what it is, not as ESC[201~.
+        let c1 = body("x\u{9b}201~y", Auto, false);
+        assert_eq!(c1, tr.confirm_paste_reason_marker("CSI 201~"));
+        assert!(c1.contains("CSI 201~") && !c1.contains("ESC[201~"));
+        // Both forms: the one that ranks first.
+        assert!(body("\u{9b}201~\x1b[201~", Auto, false).contains("ESC[201~"));
+        // Bracketed paste off and line breaks: removing the marker does not
+        // make the line breaks safe, and the dialog says so.
+        for marker in ["\x1b[201~", "\u{9b}201~"] {
+            let both = body(&format!("a\n{marker}b"), Auto, true);
+            let (first, second) = both.split_once('\n').expect("two sentences");
+            assert!(first.contains("201~"), "{first}");
+            assert_eq!(second, lines);
+            // Off, but nothing to run as Enter: the marker sentence alone.
+            assert!(!body(&format!("a{marker}b"), Auto, true).contains('\n'));
+            // On: the line breaks stay inside the bracket.
+            assert!(!body(&format!("a\n{marker}b"), Always, false).contains('\n'));
+        }
+        // No marker.
+        assert_eq!(body("one\ntwo", Auto, true), lines);
+        assert_eq!(body("one\ntwo\x03", Always, true), lines);
+        assert_eq!(
+            body("one\x03two", Auto, true),
+            tr.text(T::ConfirmPasteReasonControls)
+        );
+        assert_eq!(
+            body("one\ntwo", Always, false),
+            tr.text(T::ConfirmPasteReasonAlways)
+        );
+        assert!(body("one\ntwo", Always, false).contains(tr.text(T::SettingsValueAlways)));
+    }
+    let en = Translator::new(Language::En);
+    assert!(
+        en.confirm_paste_reason_marker("ESC[201~")
+            .starts_with("This text contains ESC[201~, the code that ends a bracketed paste.")
+    );
+    assert!(
+        Translator::new(Language::Es)
+            .confirm_paste_reason_marker("CSI 201~")
+            .starts_with("Este texto contiene CSI 201~, el código que termina")
+    );
+}
+
+#[test]
+fn the_summary_drops_zero_counts_and_names_a_trailing_line_break() {
+    // The parts as one wide line shows them.
+    let summary = |text: &str| {
+        paste_question(text)
+            .paste
+            .unwrap()
+            .detail
+            .summary
+            .join(" \u{b7} ")
+    };
+    // The captured command: one line that ends with a line break.
+    assert_eq!(
+        summary("printf 'x'\x1b[201~; echo injected\n"),
+        "1\u{a0}line, ends with a line break \u{b7} 1\u{a0}escape sequence"
+    );
+    assert_eq!(summary("one\ntwo"), "2\u{a0}lines");
+    assert_eq!(
+        summary("one\r\ntwo\r\n"),
+        "2\u{a0}lines, ends with a line break"
+    );
+    assert_eq!(
+        summary("a\x03b"),
+        "1\u{a0}line \u{b7} 1\u{a0}other control character"
+    );
+    assert_eq!(
+        summary("a\x1b[31m\x1b[0m\x07\x07\n\n"),
+        "2\u{a0}lines, ends with a line break \u{b7} 2\u{a0}escape sequences \u{b7} \
+         2\u{a0}other control characters"
+    );
+    for text in ["one\ntwo", "a\x03b", "x\x1b[201~\n"] {
+        let summary = summary(text);
+        assert!(
+            !summary.split(" \u{b7} ").any(|part| part.starts_with('0')),
+            "{summary}"
+        );
+    }
+    let es = super::text_paste_confirmation(
+        None,
+        "uno\n",
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(kettle_config::PasteProtection::Auto, true),
+        kettle_i18n::Translator::new(kettle_i18n::Language::Es),
+    );
+    assert_eq!(
+        es.paste.unwrap().detail.summary.join(" \u{b7} "),
+        "1\u{a0}línea, termina con un salto de línea"
+    );
+}
+
+#[test]
+fn findings_list_each_kind_with_its_meaning_most_serious_first() {
+    use kettle_i18n::{Language, Text as T, Translator};
+    let text = "\x07\x08\x7f\x1b[0m\x04\x1c\x1a\x03\x03\u{9b}201~\x1b[201~\x01\u{85}";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let dialog = super::text_paste_confirmation(
+            None,
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            tr,
+        );
+        let detail = &dialog.paste.as_ref().unwrap().detail;
+        let rows: Vec<_> = detail
+            .findings
+            .iter()
+            .map(|row| (row.token.as_str(), row.meaning.as_str(), row.count.as_str()))
+            .collect();
+        // Four rows at most, then how many kinds are left.
+        assert_eq!(
+            rows,
+            [
+                (
+                    "ESC[201~",
+                    tr.confirm_paste_finding_removed(tr.text(T::ConfirmPasteFindingEndMarker))
+                        .as_str(),
+                    "\u{d7}1"
+                ),
+                (
+                    "CSI 201~",
+                    tr.confirm_paste_finding_removed(tr.text(T::ConfirmPasteFindingEndMarkerC1))
+                        .as_str(),
+                    "\u{d7}1"
+                ),
+                // Bracketed paste is off here, so these reach the program.
+                ("^C", tr.text(T::ConfirmPasteFindingInterrupt), "\u{d7}2"),
+                ("^Z", tr.text(T::ConfirmPasteFindingSuspend), "\u{d7}1"),
+            ]
+        );
+        assert_eq!(
+            detail
+                .findings
+                .iter()
+                .map(|row| row.removed)
+                .collect::<Vec<_>>(),
+            [true, true, false, false]
+        );
+        assert_eq!(detail.more, tr.confirm_paste_more_kinds(8));
+    }
+    let rows = |text: &str| {
+        paste_question(text)
+            .paste
+            .unwrap()
+            .detail
+            .findings
+            .into_iter()
+            .map(|row| (row.token, row.meaning))
+            .collect::<Vec<_>>()
+    };
+    let row = |token: &str, meaning: &str| (token.to_string(), meaning.to_string());
+    // Backspace and delete are separate rows.
+    assert_eq!(
+        rows("a\x08b\x7f"),
+        [row("^H", "backspace"), row("DEL", "delete")]
+    );
+    assert_eq!(
+        rows("\x1c\x04\x1b\x07"),
+        [
+            row("^\\", "quit (Ctrl+\\)"),
+            row("^D", "end of input (Ctrl+D)"),
+            row("ESC", "read as the Esc key or the start of a key sequence"),
+            row("BEL", "bell"),
+        ]
+    );
+    assert_eq!(
+        rows("\x01\u{9d}\u{85}"),
+        [
+            // Kinds of one rank are listed by code point.
+            row("U+0085", "8-bit control code"),
+            row("OSC", "8-bit control code"),
+            row("^A", "control character"),
+        ]
+    );
+    assert!(paste_question("\x01").paste.unwrap().detail.more.is_empty());
+    // A line break is a reason to ask, not a finding.
+    assert!(rows("one\ntwo").is_empty());
+}
+
+#[test]
+fn vim_y_never_chooses_a_paste_that_can_run_lines() {
+    use super::{ConfirmButton, ConfirmKeyOutcome as O};
+    use winit::keyboard::ModifiersState as M;
+    let question = |text: &str, unbracketed: bool| {
+        super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, unbracketed),
+            kettle_i18n::Translator::default(),
+        )
+    };
+    let sanitising = |dialog: &super::ConfirmDialogState| {
+        let index = dialog
+            .buttons
+            .iter()
+            .position(|button| matches!(button, ConfirmButton::PasteWithoutControls { .. }))
+            .unwrap();
+        assert_eq!(dialog.paste.as_ref().unwrap().recommended, index);
+        index
+    };
+    // What `y` and `Y` do on every focus, the link included.
+    let answers = |dialog: &mut super::ConfirmDialogState| {
+        let mut seen = Vec::new();
+        for focus in 0..dialog.stop_count() {
+            dialog.focus_idx = focus;
+            for key in ["y", "Y"] {
+                seen.push(key_outcome(dialog, key, M::empty(), false));
+            }
+        }
+        seen
+    };
+
+    // A program without bracketed paste, and sanitised text that keeps its
+    // line break: a `y` typed ahead of the dialog would run the line. It
+    // does nothing, on every focus, and nothing reaches the pane.
+    let text = "safe\x1b[201~; rm -rf ~\x03\n";
+    let mut unbracketed = question(text, true);
+    let sanitised = sanitising(&unbracketed);
+    assert_eq!(
+        stop_paste(&unbracketed, sanitised).as_deref(),
+        Some("safe; rm -rf ~\n")
+    );
+    assert_eq!(unbracketed.yes_button(), None);
+    assert!(answers(&mut unbracketed).iter().all(|&o| o == O::Ignore));
+    assert!(key_bytes(&unbracketed, "y", false).is_empty());
+
+    // The same text with every recipient bracketed: the line break is pasted
+    // text, not Enter. `y` answers with the sanitising choice whatever is
+    // focused, and the pane receives it inside the brackets.
+    let mut dialog = question(text, false);
+    assert_eq!(sanitising(&dialog), sanitised);
+    assert!(
+        answers(&mut dialog)
+            .iter()
+            .all(|&o| o == O::Activate(sanitised))
+    );
+    dialog.focus_idx = 3;
+    assert_eq!(
+        key_bytes(&dialog, "y", false),
+        [b"\x1b[200~safe; rm -rf ~\n\x1b[201~".to_vec()]
+    );
+
+    // Without bracketed paste but on one line, the sanitised text has no
+    // Enter in it: `y` takes it.
+    let mut one_line = question("safe\x1b[201~; rm -rf ~\x03", true);
+    let index = sanitising(&one_line);
+    assert_eq!(stop_paste(&one_line, index).as_deref(), Some("safe; rm -rf ~"));
+    assert!(
+        answers(&mut one_line)
+            .iter()
+            .all(|&o| o == O::Activate(index))
+    );
+
+    // Without controls the recommended choice is the plain Paste, which is
+    // the text as it is. A bare `y` must not send that: it does nothing, on
+    // every focus, and nothing reaches the pane.
+    let raw_lines = "echo one\necho two\n";
+    let mut plain = paste_question(raw_lines);
+    assert!(matches!(
+        plain.buttons[plain.paste.as_ref().unwrap().recommended],
+        ConfirmButton::Confirm { .. }
+    ));
+    assert_eq!(plain.yes_button(), None);
+    assert!(answers(&mut plain).iter().all(|&o| o == O::Ignore));
+    assert!(key_bytes(&plain, "y", false).is_empty());
+    // Enter on the focused button still chooses it.
+    plain.focus_idx = 1;
+    assert_eq!(
+        key_outcome(&plain, "Enter", M::empty(), false),
+        O::Activate(1)
+    );
+    assert_eq!(stop_paste(&plain, 1).as_deref(), Some(raw_lines));
+
+    // No bare key, on any focus, in any of these dialogs, sends the text as
+    // it is. Where a recipient lacks bracketed paste, none sends a line
+    // break either.
+    for (dialog, raw, unbracketed) in [
+        (&mut unbracketed, text, true),
+        (&mut dialog, text, false),
+        (&mut one_line, "safe\x1b[201~; rm -rf ~\x03", true),
+        (&mut plain, raw_lines, true),
+    ] {
+        for focus in 0..dialog.stop_count() {
+            dialog.focus_idx = focus;
+            for code in 0x21u8..0x7f {
+                let key = char::from(code).to_string();
+                for mods in [M::empty(), M::SHIFT] {
+                    if let O::Activate(index) = key_outcome(dialog, &key, mods, false) {
+                        let sent = stop_paste(dialog, index);
+                        assert_ne!(
+                            sent.as_deref(),
+                            Some(raw),
+                            "bare {key:?} on focus {focus} sends the raw text"
+                        );
+                        assert!(
+                            !(unbracketed && sent.is_some_and(|sent| sent.contains(['\n', '\r']))),
+                            "bare {key:?} on focus {focus} sends a line to an unbracketed program"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // `n` cancels; `h` and `l` only move focus.
+    dialog.focus_idx = 1;
+    assert_eq!(key_outcome(&dialog, "n", M::empty(), false), O::Cancel);
+    assert_eq!(key_outcome(&dialog, "l", M::empty(), false), O::Focus(2));
+    assert_eq!(key_outcome(&dialog, "h", M::empty(), false), O::Focus(0));
+    // With `vim-menu-nav` off none of the letters does anything.
+    for key in ["y", "n", "h", "l"] {
+        let off = super::confirm_key_outcome(
+            &dialog,
+            &winit::keyboard::Key::Character(key.into()),
+            M::empty(),
+            super::ConfirmKeyContext {
+                vim_menu_nav: false,
+                stacked: false,
+                macos: false,
+            },
+        );
+        assert_eq!(off, O::Ignore, "{key}");
+    }
+    // Any other confirmation keeps `y` on its affirmative button.
+    let close = super::ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![
+            ConfirmButton::Cancel,
+            ConfirmButton::Confirm {
+                label: "Close".into(),
+                destructive: true,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: super::ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    };
+    assert_eq!(key_outcome(&close, "y", M::empty(), false), O::Activate(1));
+}
+
+#[test]
+fn one_button_is_recommended_and_cancel_keeps_focus() {
+    for (text, styles) in [
+        // (destructive, neutral) per button.
+        (
+            "a\x1b[201~b",
+            vec![(false, true), (false, false), (false, true), (true, false)],
+        ),
+        (
+            "one\ntwo",
+            vec![(false, true), (false, false), (false, true)],
+        ),
+    ] {
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let dialog = super::text_paste_confirmation(
+                None,
+                text,
+                BroadcastScope::Off,
+                vec![],
+                paste_ask(kettle_config::PasteProtection::Auto, true),
+                tr,
+            );
+            assert_eq!(dialog.focus_idx, 0);
+            assert!(matches!(dialog.buttons[0], super::ConfirmButton::Cancel));
+            let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+            assert_eq!(overlay.focus_idx, 0);
+            assert_eq!(
+                overlay
+                    .buttons
+                    .iter()
+                    .map(|button| (button.destructive, button.neutral))
+                    .collect::<Vec<_>>(),
+                styles
+            );
+            // Exactly one button is neither neutral nor destructive: the
+            // accent one. (An invalid flag would fail the comparison above:
+            // one toolchain read the label's length for it.)
+            let accent: Vec<_> = (0..overlay.buttons.len())
+                .filter(|&index| {
+                    !overlay.buttons[index].neutral && !overlay.buttons[index].destructive
+                })
+                .collect();
+            assert_eq!(accent, [dialog.paste.as_ref().unwrap().recommended]);
+        }
+    }
+    // A close question has no recommended button and keeps its colours.
+    let close = confirmation_test_overlay();
+    assert!(close.buttons.iter().all(|button| !button.neutral));
+}
+
+#[test]
+fn access_keys_match_the_typed_letter_with_alt_and_do_not_exist_on_macos() {
+    use winit::keyboard::{Key, ModifiersState as M, NamedKey};
+    let target = super::confirm_access_key_target;
+    let key = |letter: &str| Key::Character(letter.into());
+    let text = "a\x1b[201~b";
+    let dialog = paste_question(text);
+    let paste = dialog.paste.as_ref().unwrap();
+    assert_eq!(
+        paste.access_keys,
+        [Some('C'), Some('W'), Some('O'), Some('P')]
+    );
+    assert_eq!(paste.detail.link_access_key, Some('S'));
+    // Alt and the letter the layout produced, in either case.
+    for (letter, stop) in [("c", 0), ("w", 1), ("W", 1), ("o", 2), ("p", 3), ("s", 4)] {
+        assert_eq!(target(&dialog, &key(letter), M::ALT, false), Some(stop));
+        assert_eq!(
+            target(&dialog, &key(letter), M::ALT | M::SHIFT, false),
+            Some(stop)
+        );
+        // A bare letter does nothing: a key typed ahead cannot choose.
+        assert_eq!(target(&dialog, &key(letter), M::empty(), false), None);
+        assert_eq!(target(&dialog, &key(letter), M::SHIFT, false), None);
+        // AltGr (Ctrl+Alt on Windows) and Super chords are not access keys.
+        assert_eq!(
+            target(&dialog, &key(letter), M::ALT | M::CONTROL, false),
+            None
+        );
+        assert_eq!(
+            target(&dialog, &key(letter), M::ALT | M::SUPER, false),
+            None
+        );
+        // macOS has no access keys.
+        assert_eq!(target(&dialog, &key(letter), M::ALT, true), None);
+    }
+    // Only the character counts. On AZERTY the key in the US W position
+    // types z, and Alt+z must not reach "Paste without controls"; a layout
+    // with no Latin letter on the key types something else entirely.
+    for other in ["z", "q", "x", "ц", "ω", "1", "ww", ""] {
+        assert_eq!(target(&dialog, &key(other), M::ALT, false), None, "{other}");
+    }
+    assert_eq!(
+        target(&dialog, &Key::Named(NamedKey::Enter), M::ALT, false),
+        None
+    );
+    // The same through the whole key map the handler runs: Alt+W is the
+    // sanitised paste; a bare letter is nothing and reaches no pane. The map
+    // takes a logical key and modifiers, and has no position to read.
+    use super::ConfirmKeyOutcome as O;
+    assert_eq!(key_outcome(&dialog, "w", M::ALT, false), O::Activate(1));
+    assert_eq!(
+        key_outcome(&dialog, "W", M::ALT | M::SHIFT, true),
+        O::Activate(1)
+    );
+    assert_eq!(key_outcome(&dialog, "s", M::ALT, false), O::Activate(4));
+    assert_eq!(stop_paste(&dialog, 1).as_deref(), Some("ab"));
+    assert_eq!(stop_paste(&dialog, 4), None);
+    for letter in ["w", "o", "p", "c", "s", "z"] {
+        assert_eq!(
+            key_outcome(&dialog, letter, M::empty(), false),
+            O::Ignore,
+            "{letter}"
+        );
+        assert!(key_bytes(&dialog, letter, false).is_empty(), "{letter}");
+    }
+    assert_eq!(key_outcome(&dialog, "z", M::ALT, false), O::Ignore);
+    assert_eq!(
+        key_outcome(&dialog, "w", M::ALT | M::CONTROL, false),
+        O::Ignore
+    );
+    let on_macos = super::confirm_key_outcome(
+        &dialog,
+        &key("w"),
+        M::ALT,
+        super::ConfirmKeyContext {
+            vim_menu_nav: true,
+            stacked: false,
+            macos: true,
+        },
+    );
+    assert_eq!(on_macos, O::Ignore);
+
+    // Spanish letters, each in its own label.
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    let es = super::text_paste_confirmation(
+        None,
+        text,
+        BroadcastScope::Off,
+        vec![],
+        paste_ask(kettle_config::PasteProtection::Auto, true),
+        tr,
+    );
+    for (letter, stop) in [("c", 0), ("s", 1), ("u", 2), ("p", 3), ("g", 4)] {
+        assert_eq!(target(&es, &key(letter), M::ALT, false), Some(stop));
+    }
+    assert_eq!(target(&es, &key("w"), M::ALT, false), None);
+    let overlay = super::confirm_dialog_overlay(&es, &tr);
+    for button in &overlay.buttons {
+        let key = button.access_key.expect("an access key");
+        assert!(kettle_render::access_key_index(&button.label, key).is_some());
+    }
+    // Without access keys (macOS) nothing is drawn or answered.
+    let mac = super::text_paste_confirmation(
+        None,
+        text,
+        BroadcastScope::Off,
+        vec![],
+        super::paste::PasteAsk {
+            access_keys: super::confirm_access_keys(true),
+            ..paste_ask(kettle_config::PasteProtection::Auto, true)
+        },
+        kettle_i18n::Translator::default(),
+    );
+    let paste = mac.paste.as_ref().unwrap();
+    assert!(paste.access_keys.iter().all(Option::is_none));
+    assert_eq!(paste.detail.link_access_key, None);
+    let overlay = super::confirm_dialog_overlay(&mac, &kettle_i18n::Translator::default());
+    assert!(
+        overlay
+            .buttons
+            .iter()
+            .all(|button| button.access_key.is_none())
+    );
+    assert_eq!(target(&mac, &key("w"), M::ALT, false), None);
+    assert!(super::confirm_access_keys(false) && !super::confirm_access_keys(true));
+}
+
+#[test]
+fn focus_walks_the_link_then_the_buttons_and_arrows_follow_the_layout() {
+    use super::{ConfirmKey as K, ConfirmKeyResult as R, ConfirmStops, confirm_stop_keypress};
+    let dialog = paste_question("a\x1b[201~b");
+    assert_eq!(dialog.link_stop(), Some(4));
+    assert_eq!(dialog.stop_count(), 5);
+    let stops = |stacked| ConfirmStops {
+        buttons: 4,
+        link: true,
+        stacked,
+    };
+    const LINK: usize = 4;
+    for stacked in [false, true] {
+        let press = |focus, key| confirm_stop_keypress(focus, stops(stacked), key);
+        // Tab: the link, Cancel, the three pastes, and round again.
+        let mut focus = LINK;
+        let mut order = Vec::new();
+        for _ in 0..5 {
+            let R::Move(next) = press(focus, K::Tab) else {
+                panic!("Tab moves")
+            };
+            order.push(next);
+            focus = next;
+        }
+        assert_eq!(order, [0, 1, 2, 3, LINK]);
+        assert_eq!(press(0, K::ShiftTab), R::Move(LINK));
+        assert_eq!(press(LINK, K::ShiftTab), R::Move(3));
+        // Left and Right walk the same order and stop at its ends.
+        assert_eq!(press(LINK, K::Left), R::Ignore);
+        assert_eq!(press(LINK, K::Right), R::Move(0));
+        assert_eq!(press(0, K::Left), R::Move(LINK));
+        assert_eq!(press(2, K::Right), R::Move(3));
+        assert_eq!(press(3, K::Right), R::Ignore);
+        assert_eq!(press(LINK, K::Enter), R::Activate(LINK));
+        assert_eq!(press(0, K::Enter), R::Activate(0));
+        assert_eq!(press(LINK, K::Escape), R::Cancel);
+    }
+    // Stacked: Up and Down move one stop, whether or not the body scrolls.
+    let press = |focus, key| confirm_stop_keypress(focus, stops(true), key);
+    assert_eq!(press(0, K::Down), R::Move(1));
+    assert_eq!(press(1, K::Down), R::Move(2));
+    assert_eq!(press(2, K::Up), R::Move(1));
+    assert_eq!(press(0, K::Up), R::Move(LINK));
+    assert_eq!(press(LINK, K::Down), R::Move(0));
+    assert_eq!(press(LINK, K::Up), R::Ignore);
+    assert_eq!(press(3, K::Down), R::Ignore);
+    // A row under the link: Up reaches the link, Down returns to Cancel.
+    let press = |focus, key| confirm_stop_keypress(focus, stops(false), key);
+    for button in 0..4 {
+        assert_eq!(press(button, K::Up), R::Move(LINK));
+        assert_eq!(press(button, K::Down), R::Ignore);
+    }
+    assert_eq!(press(LINK, K::Down), R::Move(0));
+    assert_eq!(press(LINK, K::Up), R::Ignore);
+    // A plain row of buttons has nothing above it: Up and Down scroll, as
+    // they always did. A plain stack moves focus.
+    let plain = |stacked| ConfirmStops {
+        buttons: 2,
+        link: false,
+        stacked,
+    };
+    assert_eq!(confirm_stop_keypress(0, plain(false), K::Up), R::Scroll(-1));
+    assert_eq!(
+        confirm_stop_keypress(1, plain(false), K::Down),
+        R::Scroll(1)
+    );
+    assert_eq!(confirm_stop_keypress(0, plain(true), K::Down), R::Move(1));
+    assert_eq!(confirm_stop_keypress(1, plain(true), K::Up), R::Move(0));
+    assert_eq!(confirm_stop_keypress(0, plain(true), K::Up), R::Ignore);
+    // The same from real keys through the handler's key map, with the
+    // layout's own answer to "are the buttons stacked".
+    use super::{ConfirmKeyOutcome as O, ConfirmScroll};
+    use winit::keyboard::ModifiersState as M;
+    let tr = kettle_i18n::Translator::default();
+    let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+    let mut dialog = dialog;
+    for (surface, expect_stacked) in [((1280.0, 800.0), false), ((520.0, 700.0), true)] {
+        let stacked =
+            kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay).stacked;
+        assert_eq!(stacked, expect_stacked);
+        dialog.focus_idx = 0;
+        assert_eq!(
+            key_outcome(&dialog, "Up", M::empty(), stacked),
+            O::Focus(LINK)
+        );
+        assert_eq!(
+            key_outcome(&dialog, "Down", M::empty(), stacked),
+            if stacked { O::Focus(1) } else { O::Ignore }
+        );
+        dialog.focus_idx = LINK;
+        assert_eq!(
+            key_outcome(&dialog, "Down", M::empty(), stacked),
+            O::Focus(0)
+        );
+        assert_eq!(
+            key_outcome(&dialog, "Tab", M::empty(), stacked),
+            O::Focus(0)
+        );
+        assert_eq!(key_outcome(&dialog, "Tab", M::SHIFT, stacked), O::Focus(3));
+        assert_eq!(
+            key_outcome(&dialog, "Enter", M::empty(), stacked),
+            O::Activate(LINK)
+        );
+        // Scrolling keeps its own keys in every layout.
+        for (key, scroll) in [
+            ("PageUp", ConfirmScroll::Pages(-1)),
+            ("PageDown", ConfirmScroll::Pages(1)),
+            ("Home", ConfirmScroll::Start),
+            ("End", ConfirmScroll::End),
+        ] {
+            assert_eq!(
+                key_outcome(&dialog, key, M::empty(), stacked),
+                O::Scroll(scroll)
+            );
+        }
+        assert_eq!(
+            key_outcome(&dialog, "Escape", M::empty(), stacked),
+            O::Cancel
+        );
+        assert_eq!(key_outcome(&dialog, "Space", M::empty(), stacked), O::Arm);
+        assert_eq!(key_outcome(&dialog, "Space", M::ALT, stacked), O::Ignore);
+    }
+    // A plain row of buttons keeps Up and Down for scrolling.
+    let close = super::ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![
+            super::ConfirmButton::Cancel,
+            super::ConfirmButton::Confirm {
+                label: "Close".into(),
+                destructive: true,
+            },
+        ],
+        focus_idx: 0,
+        on_confirm: super::ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    };
+    assert_eq!(
+        key_outcome(&close, "Down", M::empty(), false),
+        O::Scroll(ConfirmScroll::Lines(1))
+    );
+    assert_eq!(key_outcome(&close, "Down", M::empty(), true), O::Focus(1));
+}
+
+#[test]
+fn the_settings_link_sends_nothing_and_opens_settings_at_paste_protection() {
+    use kettle_i18n::{Language, Text as T, Translator};
+    for (language, policy, value) in [
+        (
+            Language::En,
+            kettle_config::PasteProtection::Auto,
+            "Paste protection: Automatic",
+        ),
+        (
+            Language::Es,
+            kettle_config::PasteProtection::Always,
+            "Protección al pegar: Siempre",
+        ),
+    ] {
+        let tr = Translator::new(language);
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            "a\x1b[201~b\n",
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(policy, false),
+            tr,
+        );
+        let detail = &dialog.paste.as_ref().unwrap().detail;
+        assert_eq!(detail.policy, value);
+        assert_eq!(detail.link, tr.text(T::ConfirmPasteSettings));
+        // The link is a focus stop that never starts focused and has no
+        // paste action: activating it delivers no bytes.
+        let link = dialog.link_stop().unwrap();
+        assert_eq!(link, dialog.buttons.len());
+        assert_ne!(dialog.focus_idx, link);
+        assert!(super::confirmation_button_action(&dialog, link).is_none());
+        assert_eq!(stop_paste(&dialog, link), None);
+        assert!(matches!(
+            super::confirm_stop_action(&dialog, link),
+            Some(super::ConfirmStopAction::PasteSettings)
+        ));
+        // The pointer reaches it where it is painted.
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        for surface in [(1280.0, 800.0), (520.0, 700.0)] {
+            let layout =
+                kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+            let (x, y, w, h) = layout.stop_rect(link).unwrap();
+            assert!(w > 0.0 && h > 0.0);
+            assert_eq!(
+                super::confirm_dialog_button_hit(&layout, x + w / 2.0, y + h / 2.0),
+                Some(link)
+            );
+            let armed = Some((link, (x, y, w, h)));
+            assert_eq!(
+                super::confirm_release_target(armed, &layout, x + 1.0, y + 1.0),
+                Some(link)
+            );
+        }
+    }
+    // Settings opens on the Paste protection row of Behavior.
+    let categories = crate::settings::categories(&[]);
+    let mut nav = crate::settings::SettingsNav {
+        category: 3,
+        field: 1,
+        capturing: true,
+        search_focused: true,
+        ..Default::default()
+    };
+    assert!(nav.focus_key(&categories, "paste-protection"));
+    let field = &categories[nav.category].fields[nav.field];
+    assert_eq!(field.key, "paste-protection");
+    assert_eq!(field.label, T::SettingsFieldPasteProtection);
+    assert_eq!(categories[nav.category].name, T::SettingsCategoryBehavior);
+    assert!(!nav.capturing && !nav.search_focused);
+    assert!(!nav.focus_key(&categories, "no-such-key"));
+    assert_eq!(
+        categories[nav.category].fields[nav.field].key,
+        "paste-protection"
+    );
+}
+
+#[test]
+fn the_settings_link_is_cancel_then_settings_for_queued_input_and_broadcast() {
+    use super::{ConfirmFollowUp, ConfirmStopAction, answer_confirm_stop, confirm_stop_action};
+    // A paste question over a tab that broadcasts to two panes, each with
+    // its input captured, as it stands when the user reaches for the link.
+    let window = || {
+        let (mut mux, ids) = title_test_tab_mux(2);
+        mux.broadcast = BroadcastScope::Tab;
+        let captures: Vec<_> = ids
+            .iter()
+            .map(|id| mux.panes.get_mut(id).unwrap().capture_input_for_test())
+            .collect();
+        let mut ws = super::WindowState::new(0, mux);
+        ws.confirm_dialog = Some(super::text_paste_confirmation(
+            None,
+            "echo secret\x1b[201~; rm -rf ~\n",
+            BroadcastScope::Tab,
+            ids.clone(),
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            kettle_i18n::Translator::default(),
+        ));
+        (ws, captures)
+    };
+    let categories = crate::settings::categories(&[]);
+
+    // While the question is unanswered, input that comes ready behind it is
+    // refused, not delivered.
+    let (mut by_link, link_captures) = window();
+    let (mut by_cancel, cancel_captures) = window();
+    assert!(super::paste::confirmation_refuses_queued_input(&by_link));
+
+    // The link's action carries no paste and no consent to dispatch.
+    let dialog = by_link.confirm_dialog.as_ref().unwrap();
+    let link = dialog.link_stop().unwrap();
+    assert!(matches!(
+        confirm_stop_action(dialog, link),
+        Some(ConfirmStopAction::PasteSettings)
+    ));
+    assert!(matches!(
+        confirm_stop_action(dialog, 0),
+        Some(ConfirmStopAction::Cancel)
+    ));
+    assert!(confirm_stop_action(dialog, link + 1).is_none());
+
+    // The link answers as Cancel does, and leaves only Settings to open, on
+    // the Paste protection row. The app then opens it as `open_settings`
+    // and `focus_settings_key` do.
+    let Some(ConfirmFollowUp::Settings(key)) = answer_confirm_stop(&mut by_link, link) else {
+        panic!("the link opens Settings")
+    };
+    assert_eq!(key, "paste-protection");
+    let mut nav = crate::settings::SettingsNav::default();
+    assert!(nav.focus_key(&categories, key));
+    by_link.settings_nav = Some(nav);
+    assert!(answer_confirm_stop(&mut by_cancel, 0).is_none());
+    // With the question gone, a second press answers nothing.
+    assert!(answer_confirm_stop(&mut by_cancel, 0).is_none());
+
+    for (ws, captures) in [(&by_link, &link_captures), (&by_cancel, &cancel_captures)] {
+        // The question is gone with its text, target and broadcast consent.
+        assert!(ws.confirm_dialog.is_none());
+        // No pane of the broadcast received a byte.
+        for captured in captures {
+            assert!(captured().is_empty());
+        }
+        // Later input is judged on its own again, the same after either.
+        assert!(!super::paste::confirmation_refuses_queued_input(ws));
+        // The broadcast scope itself is the user's and is left alone.
+        assert_eq!(ws.mux.broadcast, BroadcastScope::Tab);
+    }
+    // Only Settings differs between the two windows.
+    assert!(by_cancel.settings_nav.is_none());
+    let nav = by_link.settings_nav.as_ref().unwrap();
+    assert_eq!(
+        categories[nav.category].fields[nav.field].key,
+        "paste-protection"
+    );
+    by_link.mux.kill_children();
+    by_cancel.mux.kill_children();
+}
+
+#[test]
+fn the_accessibility_tree_names_what_the_dialog_paints() {
+    use accesskit::Role;
+    use kettle_i18n::{Language, Text as T, Translator};
+    let text = "echo ok\n\x1b[201~\x03 rm\x07 -rf ~\n";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        for access_keys in [true, false] {
+            let mut dialog = super::text_paste_confirmation(
+                Some(7),
+                text,
+                BroadcastScope::Off,
+                vec![],
+                super::paste::PasteAsk {
+                    access_keys,
+                    ..paste_ask(kettle_config::PasteProtection::Auto, true)
+                },
+                tr,
+            );
+            let link_stop = dialog.link_stop().unwrap();
+            for (surface, focus) in [
+                ((1280.0, 800.0), 0),
+                ((1280.0, 800.0), link_stop),
+                ((520.0, 700.0), 2),
+                ((520.0, 700.0), link_stop),
+            ] {
+                dialog.focus_idx = focus;
+                let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+                let layout =
+                    kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+                let projection = super::modal_accessibility_projection(
+                    &kettle_render::Overlay {
+                        confirm_dialog: Some(overlay.clone()),
+                        ..Default::default()
+                    },
+                    surface,
+                    (8.0, 16.0),
+                    1.0,
+                    &tr,
+                );
+                let node = |id| {
+                    &projection
+                        .nodes
+                        .iter()
+                        .find(|(node, _)| *node == id)
+                        .expect("a node for the id")
+                        .1
+                };
+                let rect = |(x, y, w, h): (f32, f32, f32, f32)| {
+                    accesskit::Rect::new(
+                        f64::from(x),
+                        f64::from(y),
+                        f64::from(x + w),
+                        f64::from(y + h),
+                    )
+                };
+                let dialog_node = node(projection.roots[0]);
+                assert_eq!(dialog_node.role(), Role::AlertDialog);
+                assert_eq!(dialog_node.label(), Some(tr.text(T::ConfirmPasteHeading)));
+                assert_eq!(dialog_node.bounds(), Some(rect(layout.rect)));
+                // What is read is the paste question's own description, not
+                // the reason alone.
+                let read = dialog.paste.as_ref().unwrap().detail.description.as_str();
+                assert_eq!(dialog_node.description(), Some(read));
+                assert_ne!(read, dialog.body);
+                // Children in painted order: the link, then the four buttons.
+                let children = dialog_node.children();
+                assert_eq!(children.len(), 5);
+                let link = node(children[0]);
+                assert_eq!(link.role(), Role::Link);
+                assert_eq!(link.label(), Some(tr.text(T::ConfirmPasteSettings)));
+                assert_eq!(
+                    link.bounds(),
+                    Some(rect(layout.stop_rect(link_stop).unwrap()))
+                );
+                let said = link.description().unwrap();
+                assert!(said.starts_with(tr.text(T::ConfirmPasteA11ySettings)));
+                for (index, id) in children[1..].iter().enumerate() {
+                    let button = node(*id);
+                    assert_eq!(button.role(), Role::Button);
+                    assert_eq!(button.label(), Some(overlay.buttons[index].label.as_str()));
+                    assert_eq!(button.bounds(), Some(rect(layout.buttons[index])));
+                    // The access key is on the node and in what is read, or
+                    // on neither where the platform has none.
+                    match overlay.buttons[index].access_key {
+                        Some(key) => {
+                            assert!(access_keys);
+                            assert_eq!(button.access_key(), Some(key.to_string().as_str()));
+                            assert_eq!(
+                                button.description(),
+                                Some(tr.confirm_paste_a11y_access_key(&key.to_string()).as_str())
+                            );
+                        }
+                        None => {
+                            assert!(!access_keys);
+                            assert_eq!(button.access_key(), None);
+                            assert_eq!(button.description(), None);
+                        }
+                    }
+                }
+                assert_eq!(link.access_key().is_some(), access_keys);
+                assert_eq!(said.contains("Alt+"), access_keys);
+                // Focus is the painted focus, the link included.
+                let focused = if focus == link_stop {
+                    children[0]
+                } else {
+                    children[focus + 1]
+                };
+                assert_eq!(projection.focus, Some(focused));
+                // Its actions reach the same stop.
+                assert_eq!(
+                    super::confirmation_accessibility_action(
+                        children[0],
+                        accesskit::Action::Click,
+                        dialog.stop_count()
+                    ),
+                    Some(super::ConfirmAccessibilityAction::Activate(link_stop))
+                );
+                assert_eq!(
+                    super::confirmation_accessibility_action(
+                        children[0],
+                        accesskit::Action::Click,
+                        dialog.buttons.len()
+                    ),
+                    None
+                );
+            }
+        }
+        // What is read: the reason, the summary, each finding, the policy,
+        // then the preview, with every control as words.
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            tr,
+        );
+        let detail = &dialog.paste.as_ref().unwrap().detail;
+        let said = &detail.description;
+        let order = [
+            dialog.body.clone(),
+            detail.summary.join(" \u{b7} "),
+            tr.confirm_paste_a11y_finding(
+                "ESC[201~",
+                &tr.confirm_paste_finding_removed(tr.text(T::ConfirmPasteFindingEndMarker)),
+                1,
+            ),
+            tr.confirm_paste_a11y_finding("^C", tr.text(T::ConfirmPasteFindingInterrupt), 1),
+            tr.confirm_paste_a11y_finding("BEL", tr.text(T::ConfirmPasteFindingBell), 1),
+            detail.policy.clone(),
+            tr.confirm_paste_a11y_preview("echo ok"),
+        ];
+        let mut from = 0;
+        for part in &order {
+            let at = said[from..]
+                .find(part.as_str())
+                .unwrap_or_else(|| panic!("{part:?} is missing or out of order in {said:?}"));
+            from += at + part.len();
+        }
+        // A control is said as a control, never as the bare word or picture.
+        let preview = &said[from..];
+        let escape = tr.text(T::ConfirmPasteA11yEscape);
+        assert!(preview.contains(&format!("{escape} [201~")), "{preview}");
+        assert!(preview.contains(&tr.confirm_paste_a11y_control("Ctrl+C")));
+        assert!(
+            preview.contains(&tr.confirm_paste_a11y_control(tr.text(T::ConfirmPasteFindingBell)))
+        );
+        assert!(!preview.contains("ESC") && !preview.contains('\x1b'));
+        assert!(!said.chars().any(|c| c.is_control() && c != '\n'));
+    }
+    let en = Translator::new(Language::En);
+    assert_eq!(
+        en.text(T::ConfirmPasteA11yEscape),
+        "control character escape"
+    );
+    let spoken = preview_of("a\x1bb\x08\x7f\u{9b}c\x01").spoken;
+    assert_eq!(
+        spoken,
+        "a control character escape b control character backspace control character delete \
+         control character CSI c control character Ctrl+A"
+    );
+}
+
+#[test]
+fn control_output_carries_rectangles_and_fixed_labels_never_the_pasted_text() {
+    // Every piece of text a paste question derives from the clipboard, or
+    // from who is asked, carries a canary. None may reach `ui_geometry`.
+    let canary = |name: &str| format!("CANARY-{name}-7f3a");
+    let button = |label: &str, key: char| kettle_render::ConfirmDialogButton {
+        label: label.into(),
+        access_key: Some(key),
+        ..Default::default()
+    };
+    let preview = format!("{} ESC[201~", canary("preview"));
+    let token = preview.len() - 8..preview.len() - 5;
+    let overlay = kettle_render::ConfirmDialogOverlay {
+        heading: canary("heading"),
+        body: canary("body"),
+        buttons: vec![button("Cancel", 'C'), button("Paste without controls", 'W')],
+        detail: Some(kettle_render::ConfirmDialogDetail {
+            preview,
+            preview_tokens: vec![token],
+            summary: vec![canary("summary-lines"), canary("summary-controls")],
+            findings: vec![kettle_render::ConfirmDialogFinding {
+                token: canary("finding-token"),
+                meaning: canary("finding-meaning"),
+                count: canary("finding-count"),
+                removed: false,
+            }],
+            more: canary("more"),
+            policy: canary("policy"),
+            link: "Paste settings…".into(),
+            link_access_key: Some('S'),
+            description: canary("description"),
+        }),
+        ..Default::default()
+    };
+    for surface in [(1280.0, 800.0), (420.0, 300.0)] {
+        let layout = kettle_render::ConfirmDialogLayout::new(surface, (8.0, 16.0), 1.0, &overlay);
+        let json = super::confirmation_json(&overlay, &layout);
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains("CANARY"), "{text}");
+        assert!(!text.contains("7f3a") && !text.contains("201~"), "{text}");
+        // What it does carry: rectangles, flags and the fixed labels.
+        assert_eq!(json["buttons"][0]["label"], "Cancel");
+        assert_eq!(json["buttons"][1]["label"], "Paste without controls");
+        assert_eq!(json["buttons"][1]["access_key"], "W");
+        assert_eq!(json["detail"]["link"]["label"], "Paste settings…");
+        assert_eq!(json["detail"]["link"]["access_key"], "S");
+        assert_eq!(json["detail"]["token_rects"].as_array().unwrap().len(), 1);
+        assert_eq!(json["detail"]["finding_rects"].as_array().unwrap().len(), 2);
+        assert!(json["detail"]["preview_rect"]["width"].is_number());
+        // Every string in the output is one of those labels or keys.
+        fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(text) => out.push(text.clone()),
+                serde_json::Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+                serde_json::Value::Object(map) => map.values().for_each(|item| strings(item, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        strings(&json, &mut found);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "C",
+                "Cancel",
+                "Paste settings…",
+                "Paste without controls",
+                "S",
+                "W"
+            ]
+        );
+    }
+    // The real projection of a real paste question, the same way.
+    let secret = "printf 'zq-secret-zq'\x1b[201~; echo zq-injected-zq\n";
+    let tr = kettle_i18n::Translator::default();
+    let overlay = super::confirm_dialog_overlay(&paste_question(secret), &tr);
+    let layout =
+        kettle_render::ConfirmDialogLayout::new((1280.0, 800.0), (8.0, 16.0), 1.0, &overlay);
+    let text = serde_json::to_string(&super::confirmation_json(&overlay, &layout)).unwrap();
+    for private in [
+        "zq-",
+        "printf",
+        "201~",
+        "bracketed",
+        "escape sequence",
+        "Automatic",
+    ] {
+        assert!(!text.contains(private), "{private} reaches ctl: {text}");
+    }
+}
+
+#[test]
+fn nothing_before_the_marker_can_push_it_out_of_the_preview() {
+    // The lead-in is bounded in drawn columns, the unit the window is cut
+    // in. A tab draws four columns and a direction or 8-bit control six, so
+    // a lead counted in characters could fill the window and cut the marker
+    // off again. Every run length, each filler, both forms of the marker.
+    for (marker, shown) in [("\x1b[201~", "ESC[201~"), ("\u{9b}201~", "CSI201~")] {
+        for filler in [
+            '\t', '\u{202e}', '\u{85}', '\u{2067}', 'x', '界', '\x01', ' ',
+        ] {
+            for run in (0..=200).chain([400, 5000]) {
+                let fill: String = std::iter::repeat_n(filler, run).collect();
+                // On the first line, and below a harmless one.
+                for text in [
+                    format!("{fill}{marker}; rm -rf ~"),
+                    format!("echo ok\n{fill}{marker}; rm -rf ~\n"),
+                    format!("a\nb\nc\nd\n{fill}{marker}"),
+                ] {
+                    // The dialog's own anchor: the most serious finding.
+                    let anchor = crate::paste_safety::findings(&text)[0];
+                    assert!(matches!(
+                        anchor.kind,
+                        crate::paste_safety::Kind::EndMarker
+                            | crate::paste_safety::Kind::EndMarkerC1
+                    ));
+                    let preview = super::paste_preview(
+                        &text,
+                        Some(anchor.first),
+                        &kettle_i18n::Translator::default(),
+                    );
+                    assert!(
+                        preview.text.contains(shown),
+                        "{run} x {filler:?} hides {shown}: {:?}",
+                        preview.text
+                    );
+                    // The bounds still hold: 160 columns and the two
+                    // ellipses, three lines.
+                    assert!(preview.text.chars().count() <= 162, "{run} x {filler:?}");
+                    assert!(preview.text.matches('\n').count() <= 2);
+                    // The marker's introducer is one of the chips.
+                    let chip = &shown[..3];
+                    assert!(
+                        preview
+                            .tokens
+                            .iter()
+                            .any(|range| &preview.text[range.clone()] == chip
+                                && preview.text[range.end..].starts_with(&shown[3..])),
+                        "{run} x {filler:?}: no chip for {chip}"
+                    );
+                }
+            }
+        }
+    }
+    // The lead is forty columns, not forty characters: ten tabs, or six
+    // direction overrides, and no more.
+    let marker = "\x1b[201~";
+    let tabs = preview_of(&format!("{}{marker}", "\t".repeat(300))).text;
+    assert_eq!(tabs, format!("…{}ESC[201~", " ".repeat(40)));
+    let bidi = preview_of(&format!("{}{marker}", "\u{202e}".repeat(300)));
+    assert_eq!(bidi.text, format!("…{}ESC[201~", "U+202E".repeat(6)));
+    assert_eq!(bidi.tokens.len(), 7);
+}
+
+#[test]
+fn findings_and_the_raw_button_say_what_happens_in_this_mode() {
+    use kettle_config::PasteProtection::{Always, Auto};
+    use kettle_i18n::{Language, Text as T, Translator};
+    let ask = |policy, unbracketed, delayed_suspend| super::paste::PasteAsk {
+        delayed_suspend,
+        ..paste_ask(policy, unbracketed)
+    };
+    let question = |text: &str, ask| {
+        super::text_paste_confirmation(
+            None,
+            text,
+            BroadcastScope::Off,
+            vec![],
+            ask,
+            Translator::default(),
+        )
+    };
+    let rows = |dialog: &super::ConfirmDialogState| {
+        dialog
+            .paste
+            .as_ref()
+            .unwrap()
+            .detail
+            .findings
+            .iter()
+            .map(|row| (row.token.clone(), row.meaning.clone(), row.removed))
+            .collect::<Vec<_>>()
+    };
+    let raw_is_red = |dialog: &super::ConfirmDialogState| {
+        let overlay = super::confirm_dialog_overlay(dialog, &Translator::default());
+        overlay.buttons.last().unwrap().destructive
+    };
+    let row = |token: &str, meaning: &str, removed: bool| {
+        (token.to_string(), meaning.to_string(), removed)
+    };
+    let text = "echo a\x1b[31m\x03\x1a\x1c\necho b\n";
+
+    // Every recipient has bracketed paste on (the Always policy asked): the
+    // encoder drops ESC and the three signal bytes, each row says so, and
+    // the raw Paste is not the warning colour, since nothing it sends is a
+    // control. The sanitised paste is still the recommended one.
+    let bracketed = question(text, ask(Always, false, false));
+    assert_eq!(
+        rows(&bracketed),
+        [
+            row("^C", "interrupt (Ctrl+C); Kettle removes it", true),
+            row("^Z", "suspend (Ctrl+Z); Kettle removes it", true),
+            row("^\\", "quit (Ctrl+\\); Kettle removes it", true),
+            row(
+                "ESC",
+                "read as the Esc key or the start of a key sequence; Kettle removes it",
+                true
+            ),
+        ]
+    );
+    assert!(!raw_is_red(&bracketed));
+    assert_eq!(bracketed.buttons.len(), 4);
+    assert!(matches!(
+        bracketed.buttons[bracketed.paste.as_ref().unwrap().recommended],
+        super::ConfirmButton::PasteWithoutControls { .. }
+    ));
+
+    // A recipient without bracketed paste gets every one of them: the rows
+    // are plain and the raw Paste is red. One such recipient under broadcast
+    // is enough, which is what `unbracketed` means.
+    let open = question(text, ask(Auto, true, false));
+    assert_eq!(
+        rows(&open),
+        [
+            row("^C", "interrupt (Ctrl+C)", false),
+            row("^Z", "suspend (Ctrl+Z)", false),
+            row("^\\", "quit (Ctrl+\\)", false),
+            row(
+                "ESC",
+                "read as the Esc key or the start of a key sequence",
+                false
+            ),
+        ]
+    );
+    assert!(raw_is_red(&open));
+
+    // A control the encoder keeps in a bracketed paste stays a live row and
+    // keeps the raw Paste red.
+    let bell = question("a\x07\x1b\nb", ask(Always, false, false));
+    assert_eq!(
+        rows(&bell),
+        [
+            row(
+                "ESC",
+                "read as the Esc key or the start of a key sequence; Kettle removes it",
+                true
+            ),
+            row("BEL", "bell", false),
+        ]
+    );
+    assert!(raw_is_red(&bell));
+
+    // The end marker is removed in every mode. Text that carries one was
+    // written to break out of a paste, so its raw choice stays red even
+    // when nothing else in it is a control.
+    for unbracketed in [false, true] {
+        let marked = question("x\x1b[201~y", ask(Auto, unbracketed, false));
+        assert_eq!(
+            rows(&marked),
+            [row(
+                "ESC[201~",
+                "ends bracketed paste; Kettle removes it",
+                true
+            )]
+        );
+        assert!(raw_is_red(&marked));
+    }
+
+    // 0x19 is dropped only where it is the delayed-suspend byte.
+    for delayed_suspend in [false, true] {
+        let dialog = question("a\x19\nb", ask(Always, false, delayed_suspend));
+        assert_eq!(rows(&dialog)[0].2, delayed_suspend);
+        assert_eq!(raw_is_red(&dialog), !delayed_suspend);
+    }
+
+    // The rows agree with the encoder byte for byte: a kind is marked
+    // removed exactly when a bracketed paste of it arrives without it.
+    for byte in (0u8..0x20).chain([0x7f]) {
+        if matches!(byte, b'\t' | b'\n' | b'\r') {
+            continue;
+        }
+        for delayed_suspend in [false, true] {
+            let text = format!("a{}\nb", char::from(byte));
+            let dialog = question(&text, ask(Always, false, delayed_suspend));
+            let sent = crate::input::paste_payload_for(&text, true, delayed_suspend);
+            let survives = sent[6..sent.len() - 6].contains(&byte);
+            assert_eq!(rows(&dialog)[0].2, !survives, "byte {byte:#04x}");
+            assert_eq!(raw_is_red(&dialog), survives, "byte {byte:#04x}");
+        }
+    }
+
+    // The screen reader hears the same rows.
+    let said = &bracketed.paste.as_ref().unwrap().detail.description;
+    assert!(said.contains("^C: interrupt (Ctrl+C); Kettle removes it, once"));
+    let es = super::text_paste_confirmation(
+        None,
+        text,
+        BroadcastScope::Off,
+        vec![],
+        ask(Always, false, false),
+        Translator::new(Language::Es),
+    );
+    let es_tr = Translator::new(Language::Es);
+    assert_eq!(
+        es.paste.as_ref().unwrap().detail.findings[0].meaning,
+        es_tr.confirm_paste_finding_removed(es_tr.text(T::ConfirmPasteFindingInterrupt))
+    );
+}
+
+#[test]
+fn direction_formatting_is_a_finding_that_the_sanitised_paste_removes() {
+    use kettle_i18n::{Language, Text as T, Translator};
+    // An override that shows `rm -rf ~ # ...` as something harmless.
+    let text = "echo hi \u{202e}~ fr- mr\u{202c}\n";
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let dialog = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Auto, true),
+            tr,
+        );
+        let detail = &dialog.paste.as_ref().unwrap().detail;
+        // The preview's chips, the findings and the count agree.
+        let chips: Vec<_> = detail
+            .preview_tokens
+            .iter()
+            .map(|range| &detail.preview[range.clone()])
+            .collect();
+        assert_eq!(chips, ["U+202E", "U+202C"]);
+        let rows: Vec<_> = detail
+            .findings
+            .iter()
+            .map(|row| (row.token.as_str(), row.meaning.as_str(), row.removed))
+            .collect();
+        let meaning = tr.text(T::ConfirmPasteFindingBidi);
+        assert_eq!(
+            rows,
+            [("U+202C", meaning, false), ("U+202E", meaning, false)]
+        );
+        assert!(detail.summary.contains(&tr.confirm_paste_controls(2)));
+        // So the sanitising choice is offered, recommended, and removes
+        // them; the raw Paste keeps them and is red.
+        assert_eq!(dialog.buttons.len(), 4);
+        let sanitised = dialog.paste.as_ref().unwrap().recommended;
+        assert_eq!(
+            stop_paste(&dialog, sanitised).as_deref(),
+            Some("echo hi ~ fr- mr\n")
+        );
+        assert_eq!(stop_paste(&dialog, 3).as_deref(), Some(text));
+        let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+        assert!(overlay.buttons[3].destructive);
+        // Inside a bracketed paste too: the encoder does not touch them.
+        let bracketed = super::text_paste_confirmation(
+            Some(7),
+            text,
+            BroadcastScope::Off,
+            vec![],
+            paste_ask(kettle_config::PasteProtection::Always, false),
+            tr,
+        );
+        assert!(!bracketed.paste.as_ref().unwrap().detail.findings[0].removed);
+    }
+    // The policy itself is unchanged: direction formatting alone does not
+    // make Kettle ask. It is reported when something else did.
+    let modes = std::collections::HashMap::from([(1u64, false)]);
+    assert!(!super::paste::text_paste_needs_confirmation(
+        kettle_config::PasteProtection::Auto,
+        "echo \u{202e}hi",
+        &modes
+    ));
+}
+
+#[test]
+fn every_paste_button_projects_its_own_flag_and_sends_its_own_text() {
+    // rustc stable 1.99.1 and 1.100.0, and nightly 1.102.0 (LLVM 23), on
+    // AArch64 at opt-level 1, the level tests and debug builds use, compiled
+    // the projection's `matches!` on the `destructive` payload into a read of
+    // that byte for every variant: a paste button's flag came back as its
+    // label's length (see `ConfirmButton::destructive`). The variant
+    // matches that choose what is pasted are checked here beside the flags,
+    // for every button of both dialog shapes, as values and as raw bytes.
+    for (text, kinds, flags, sends) in [
+        (
+            "one\r\ntwo\x1b[31mred\x1b[0m\x07",
+            ["Cancel", "WithoutControls", "OneLine", "Confirm"].as_slice(),
+            [false, false, false, true].as_slice(),
+            [
+                None,
+                Some("one\r\ntwored"),
+                Some("one two [31mred [0m "),
+                Some("one\r\ntwo\x1b[31mred\x1b[0m\x07"),
+            ]
+            .as_slice(),
+        ),
+        (
+            "one\ntwo",
+            ["Cancel", "Confirm", "OneLine"].as_slice(),
+            [false, false, false].as_slice(),
+            [None, Some("one\ntwo"), Some("one two")].as_slice(),
+        ),
+    ] {
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let dialog = super::text_paste_confirmation(
+                Some(7),
+                text,
+                BroadcastScope::Off,
+                vec![],
+                paste_ask(kettle_config::PasteProtection::Auto, true),
+                tr,
+            );
+            let names: Vec<_> = dialog
+                .buttons
+                .iter()
+                .map(|button| match button {
+                    super::ConfirmButton::Cancel => "Cancel",
+                    super::ConfirmButton::PasteWithoutControls { .. } => "WithoutControls",
+                    super::ConfirmButton::PasteOneLine { .. } => "OneLine",
+                    super::ConfirmButton::Confirm { .. } => "Confirm",
+                })
+                .collect();
+            assert_eq!(names, kinds);
+            let overlay = super::confirm_dialog_overlay(&dialog, &tr);
+            // As bools and as bytes: an invalid bool prints as `true` or
+            // `false` and still compares unequal to both.
+            let projected: Vec<bool> = overlay.buttons.iter().map(|b| b.destructive).collect();
+            assert_eq!(projected, flags);
+            let bytes: Vec<u8> = projected.iter().map(|&flag| u8::from(flag)).collect();
+            assert_eq!(
+                bytes,
+                flags.iter().map(|&flag| u8::from(flag)).collect::<Vec<_>>()
+            );
+            for button in &overlay.buttons {
+                assert!(u8::from(button.neutral) <= 1 && u8::from(button.destructive) <= 1);
+            }
+            assert_eq!(
+                dialog
+                    .buttons
+                    .iter()
+                    .map(|b| b.destructive())
+                    .collect::<Vec<_>>(),
+                flags
+            );
+            // What each button sends, through the same matches the handler
+            // uses.
+            for (index, expected) in sends.iter().enumerate() {
+                assert_eq!(
+                    stop_paste(&dialog, index).as_deref(),
+                    *expected,
+                    "button {index} ({})",
+                    names[index]
+                );
+            }
+            assert_eq!(stop_paste(&dialog, dialog.buttons.len()), None);
+        }
+    }
 }

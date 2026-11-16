@@ -38,6 +38,15 @@ pub(super) fn tab_bar_geometry_json(
     })
 }
 
+/// A pane's broadcast role in `ui_geometry.panes[].broadcast`.
+pub(super) fn broadcast_role_json(role: kettle_render::PaneBroadcast) -> serde_json::Value {
+    match role {
+        kettle_render::PaneBroadcast::Off => serde_json::Value::Null,
+        kettle_render::PaneBroadcast::Sending => "sending".into(),
+        kettle_render::PaneBroadcast::Receiving => "receiving".into(),
+    }
+}
+
 pub(super) fn diagnostic_titlebar_bell(icon_enabled: bool, bell: bool) -> Option<&'static str> {
     (icon_enabled && bell).then_some("\u{1f514}")
 }
@@ -196,26 +205,25 @@ impl App {
     /// exists, and no start has been tried. A failed start is logged and not
     /// retried by unrelated reloads.
     pub(super) fn ensure_ctl_started(&mut self) {
-        if self.ctl_start != CtlStart::Ready || self.ctl.is_some() || !self.ctl_policy.runs_server()
-        {
-            return;
-        }
-        self.ctl_start = CtlStart::Attempted;
-        let proxy = self.proxy.clone();
-        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-            let _ = proxy.send_event(UserEvent::Ctl);
+        let policy = self.ctl_policy;
+        let proxy = &self.proxy;
+        start_ctl_once(&mut self.ctl_start, &mut self.ctl, policy, || {
+            let proxy = proxy.clone();
+            let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                let _ = proxy.send_event(UserEvent::Ctl);
+            });
+            let started_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            crate::ctl_server::CtlServer::start(
+                policy,
+                std::process::id(),
+                env!("CARGO_PKG_VERSION"),
+                started_unix,
+                wake,
+            )
         });
-        let started_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.ctl = crate::ctl_server::CtlServer::start(
-            self.ctl_policy,
-            std::process::id(),
-            env!("CARGO_PKG_VERSION"),
-            started_unix,
-            wake,
-        );
     }
 
     /// Scan every pane's recent output for configured
@@ -1068,6 +1076,8 @@ impl App {
             })
             .collect();
         let pane_layout = self.pane_layout(target, self.area(target));
+        // `target` may be another window than the one in hand (`ws`).
+        let broadcast_roles = self.broadcast_roles_beside(target, ws);
         let active_search_match_rects: Vec<serde_json::Value> = target
             .search
             .target_pane
@@ -1107,7 +1117,19 @@ impl App {
             .iter()
             .filter_map(|(pane, partition)| {
                 let pill = self.scrollback_pill_for(target, *pane, partition.terminal)?;
-                Some(serde_json::json!({"pane": pane, "rect": rect_json(pill.rect)}))
+                let state = kettle_render::ScrollbackPillState::of(
+                    *pane,
+                    target.scrollback_pill_hover,
+                    target.scrollback_pill_press,
+                );
+                Some(scrollback_pill_json(*pane, &pill, state))
+            })
+            .collect();
+        let kept_history_labels: Vec<_> = pane_layout
+            .iter()
+            .filter_map(|(pane, partition)| {
+                let label = self.kept_history_label_for(target, *pane, partition.terminal)?;
+                Some(kept_history_label_json(*pane, &label))
             })
             .collect();
         let preview_lanes: Vec<serde_json::Value> = pane_layout
@@ -1399,18 +1421,17 @@ impl App {
         let confirmation = diagnostic_overlay.confirm_dialog.as_ref().map(|dialog| {
             let geometry = kettle_render::ConfirmDialogLayout::new(
                 (surface.0 as f32, surface.1 as f32),
-                (self.overlay_text_cell_width(target), self.overlay_text_line_height(target)),
-                target.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32), dialog,
+                (
+                    self.overlay_text_cell_width(target),
+                    self.overlay_text_line_height(target),
+                ),
+                target
+                    .window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor() as f32),
+                dialog,
             );
-            serde_json::json!({
-                "rect": rect_json(geometry.rect),
-                "heading_rect": rect_json(geometry.heading_rect),
-                "body_rect": rect_json(geometry.body_rect),
-                "max_scroll": geometry.max_scroll,
-                "scroll_offset": geometry.scroll_offset,
-                "whole_scroll": geometry.whole_scroll,
-                "buttons": geometry.buttons.iter().enumerate().map(|(index, rect)| serde_json::json!({"rect":rect_json(*rect), "label": dialog.buttons[index].label, "focused":index == dialog.focus_idx, "destructive":dialog.buttons[index].destructive, "hovered":dialog.hover_idx == Some(index), "pressed":dialog.pressed_idx == Some(index)})).collect::<Vec<_>>(),
-            })
+            confirmation_json(dialog, &geometry)
         });
         let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {
             Some("confirm_dialog")
@@ -1600,6 +1621,9 @@ impl App {
                             }).collect::<Vec<_>>()
                         }).unwrap_or_default(),
                         "focused": target.mux.active_focus() == Some(*id),
+                        // What broadcast does here: "sending", "receiving"
+                        // or null, as the pane's outline shows it.
+                        "broadcast": broadcast_role_json(broadcast_roles.of(*id)),
                     }))
                     .collect::<Vec<_>>(),
                 "modals": {
@@ -1756,6 +1780,10 @@ impl App {
                 serde_json::Value::Array(scrollback_pills),
             );
             fields.insert(
+                "kept_history_labels".into(),
+                serde_json::Value::Array(kept_history_labels),
+            );
+            fields.insert(
                 "preview_lanes".into(),
                 serde_json::Value::Array(preview_lanes),
             );
@@ -1780,49 +1808,21 @@ impl App {
     pub(super) fn cursor_blink_diagnostics(&self, ws: &WindowState) -> serde_json::Value {
         let now = std::time::Instant::now();
         let layer = &ws.blink_layer;
-        let (phase_on, next_edge) = match layer.active() {
-            Some((anchor, plan, _)) if ws.last_blink == anchor => {
-                let (on, edge) = crate::cursor_blink::materialize(
-                    ws.blink_on,
-                    ws.last_blink,
-                    plan.activity,
-                    plan.interval,
-                    plan.timeout,
-                    now,
-                );
-                let next = crate::cursor_blink::next_edge(
-                    on,
-                    edge,
-                    plan.activity,
-                    plan.interval,
-                    plan.timeout,
-                    now,
-                );
-                (on, next)
-            }
-            _ => {
-                let running = ws.window_focused
+        let (phase_on, next_edge) = shown_blink_phase(
+            ws,
+            || {
+                ws.window_focused
                     && !window_is_render_hidden(ws)
                     && cursor_blink_active(
                         self.cfg.cursor_blink,
                         self.pane_cursor_blinking(ws, false),
                         ws.window_focused,
-                    );
-                let next = running
-                    .then(|| {
-                        crate::cursor_blink::next_edge(
-                            ws.blink_on,
-                            ws.last_blink,
-                            ws.last_blink_activity,
-                            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
-                            self.cfg.cursor_blink_timeout(),
-                            now,
-                        )
-                    })
-                    .flatten();
-                (ws.blink_on, next)
-            }
-        };
+                    )
+            },
+            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+            self.cfg.cursor_blink_timeout(),
+            now,
+        );
         let exit_frames = &layer.exit_frames;
         serde_json::json!({
             "renderer": if layer.is_active() { "layer" } else { "gpu" },
@@ -2441,6 +2441,11 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
+        // A new primary press ends a jump button's press whose release never
+        // came.
+        if bcode == 0 {
+            ws.scrollback_pill_press = None;
+        }
         // As natively: a card press whose release never came is over, as is
         // a lane's drag, a program still holding this button gets its
         // release, and the press is Kettle's own gesture until a program
@@ -2724,6 +2729,9 @@ impl App {
             return true;
         }
         let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if self.release_scrollback_pill(ws, px, py, bcode) {
+            return true;
+        }
         if self.release_card(ws, px, py, bcode) {
             return true;
         }
@@ -3791,6 +3799,44 @@ pub(super) enum CtlStart {
     NotReady,
     Ready,
     Attempted,
+    /// The app is quitting: the server was withdrawn, or never started, and
+    /// never starts now.
+    Closed,
+}
+
+impl CtlStart {
+    /// The first pane exists, so a start that was waiting for it is ready.
+    /// One already tried, or closed by a quit, stays as it is.
+    pub(super) fn first_pane_exists(&mut self) {
+        if *self == Self::NotReady {
+            *self = Self::Ready;
+        }
+    }
+
+    /// Display was newly granted, which earns a start that was tried and
+    /// failed one more attempt. One closed by a quit stays closed.
+    pub(super) fn display_granted(&mut self) {
+        if *self == Self::Attempted {
+            *self = Self::Ready;
+        }
+    }
+}
+
+/// Start the control server through `start`, at most once: only while
+/// `state` is ready, no server runs and `policy` runs one. The attempt is
+/// recorded before `start` runs, so a failed start is not retried by
+/// unrelated reloads, and nothing starts once a quit has closed `state`.
+pub(super) fn start_ctl_once(
+    state: &mut CtlStart,
+    ctl: &mut Option<crate::ctl_server::CtlServer>,
+    policy: kettle_ctl::CtlPolicy,
+    start: impl FnOnce() -> Option<crate::ctl_server::CtlServer>,
+) {
+    if *state != CtlStart::Ready || ctl.is_some() || !policy.runs_server() {
+        return;
+    }
+    *state = CtlStart::Attempted;
+    *ctl = start();
 }
 
 pub(super) fn ctl_method_is_pure_read(method: kettle_ctl::protocol::Method) -> bool {
@@ -3927,9 +3973,15 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
         "rect": rect_json(menu.card_rect()),
         "rows_rect": rect_json(menu.rows_rect()),
         "status_rect": menu.status_rect().map(rect_json),
+        // Headings are not rows a probe can select or press, so they are
+        // left out. `index` is the painted row (an empty palette's first
+        // command is row 1, under the Tabs heading); `option` is the command
+        // index that selection, Enter and accessibility count, headings
+        // skipped.
         "rows": menu.rows.iter().enumerate().filter_map(|(index, row)| {
+            let option = kettle_render::menu_row_option(&menu.rows, index)?;
             menu.visible_row_rect(index).map(|rect| serde_json::json!({
-                "index": index, "rect": rect_json(rect), "enabled": row.enabled,
+                "index": index, "option": option, "rect": rect_json(rect), "enabled": row.enabled,
                 "selected": index == menu.highlight,
             }))
         }).collect::<Vec<_>>(),

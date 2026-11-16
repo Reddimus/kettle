@@ -218,8 +218,8 @@ legacy-xterm or negotiated Kitty keyboard encoding, but that proves input
 transport only; it does not prove that a client attached clipboard image data.
 
 For Kettle's stable, client-independent path, focus the agent pane and press
-`Ctrl+Shift+V`. When the clipboard contains a bitmap and `paste-images` is on
-(the default), Kettle writes a bounded owner-only temporary PNG and pastes its
+`Ctrl+Shift+V`. When the clipboard contains a bitmap with no text and
+`paste-images` is on (the default), Kettle writes a bounded owner-only temporary PNG and pastes its
 shell-quoted path. The running agent can read that path without needing native
 clipboard-bitmap support. A short-lived thumbnail confirms the image dimensions
 and says the path is on the command line without claiming the client attached
@@ -316,7 +316,8 @@ raw bytes):
 
 - **Copy a file** in Explorer/Finder, then paste (`Ctrl+Shift+V`). When the
   clipboard holds a file list instead of text, Kettle pastes the path(s).
-  Controlled by `paste-files` (on by default; `paste-files = off` disables it).
+  Controlled by `paste-files` (on by default; with `paste-files = off` copied
+  files paste nothing). On Linux this works on native Wayland and X11.
 - **Copy a screenshot** (Win+Shift+S, Snipping Tool, macOS Cmd+Shift+4, GNOME
   Screenshot), then paste. A capture puts a raw *bitmap* on the clipboard with
   no file and no text behind it, so Kettle writes it to a temporary PNG and
@@ -525,8 +526,8 @@ keyboard:
   no program has the keyboard. Drag the divider meanwhile, or bind resizing to
   a chord of your own (`keybind = ctrl+alt+left=resize_left`).
 - Jump to prompt (`Ctrl+Up/Down`, and `Cmd+Up/Down` on macOS), the scroll
-  chords, `Shift+Home/End`, tab switching and `Alt+1`-`9` (and `Cmd+1`-`9` on
-  macOS) go to the program only when Kettle's action would do nothing: no
+  chords, `Shift+Home/End`, tab switching and `Alt+1`-`9` (and `Cmd+1`-`9` and
+  `Shift+Cmd+]/[` on macOS) go to the program only when Kettle's action would do nothing: no
   prompt to jump to, nothing to scroll, one tab, no selection to extend. While
   the view is scrolled back into history they stay Kettle's, because a key
   sent to the program would snap the view to the bottom.
@@ -543,7 +544,8 @@ keyboard:
   On a tab with one pane it does nothing.
 - Copy stays Kettle's: Codex reads `Ctrl+Shift+C` as `Ctrl+C`, which would
   discard its draft.
-- Every other chord stays Kettle's, and so do all of them while broadcast
+- Every other chord stays Kettle's, among them `Shift+Cmd+W` (close window)
+  and `Cmd+A` (select all) on macOS, and so do all of them while broadcast
   input is on, since the other panes may not own their keyboards.
 
 A chord you bind yourself is always Kettle's, even when your line restates the

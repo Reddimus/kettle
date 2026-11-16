@@ -658,22 +658,15 @@ fn hover_updates_menu_highlight_skipping_separators() {
 
 #[test]
 fn picker_overlay_projection_installs_the_vertical_context_menu() {
-    let menu = picker_overlay_context_menu(
-        [
-            Some(command_picker_list(
-                "",
-                3,
-                &kettle_config::keybinds::defaults(),
-                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
-                None,
-                Some(&[]),
-                false,
-                kettle_config::BroadcastDefault::default(),
-            )),
+    let menu = picker_context_menu(
+        command_picker_list(
+            "",
+            3,
+            &kettle_config::keybinds::defaults(),
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
             None,
-            None,
-            None,
-        ],
+            Some(&[]), false, kettle_config::BroadcastDefault::default(),
+        ),
         (480.0, 240.0),
         (8.0, 16.0),
         (8.0, 16.0),
@@ -682,14 +675,16 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
     .expect("an active command picker must install the shared vertical panel");
 
     assert!(menu.rows.len() > 3);
-    assert_eq!(menu.highlight, 3);
+    // The fourth command, one row below the Tabs heading.
+    assert_eq!(menu.highlight, 4);
+    assert_eq!(kettle_render::menu_row_option(&menu.rows, menu.highlight), Some(3));
     assert!(menu.rows.iter().all(|row| !row.separator));
 
     // The theme picker's rows use the same panel.
     let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
     let themes = super::theme_picker_list("", 2, "TokyoNight Night", &tr);
-    let menu = picker_overlay_context_menu(
-        [None, Some(themes), None, None],
+    let menu = picker_context_menu(
+        themes,
         (480.0, 240.0),
         (8.0, 16.0),
         (8.0, 16.0),
@@ -1216,6 +1211,7 @@ fn oversized_menu_hint_is_removed_before_label_ellipsis() {
         separator: false,
         enabled: true,
         hint: "Ctrl+".repeat(1000),
+        ..Default::default()
     };
     fit_context_menu_row(&mut row, 5);
     assert!(row.hint.is_empty());
@@ -1733,6 +1729,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
                 separator: matches!(item, ContextMenuItem::Separator),
                 enabled: !matches!(item, ContextMenuItem::Info { .. }),
                 hint: String::new(),
+                ..Default::default()
             })
             .collect(),
         highlight: 0,

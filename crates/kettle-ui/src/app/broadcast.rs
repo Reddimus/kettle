@@ -10,7 +10,169 @@
 //! [`broadcast_rows`] is the Broadcast Input submenu both the macOS menu bar
 //! and the right-click menu show: Off, Panes in This Tab, Panes in This
 //! Window and Panes in This Group, with the current scope checked.
+//!
+//! [`BroadcastRoles`] says which visible panes the input reaches: the frame's
+//! outlines, the screen-reader descriptions and `ui_geometry` all read it.
 use super::*;
+
+/// The panes broadcast input reaches in one window: its sending pane and the
+/// panes that receive. Derived from the scope's targets
+/// (`Mux::broadcast_target_ids`, `compute_broadcast_targets`) each time it
+/// is read, so focus moves, splits, closes, zoom and scope changes need no
+/// bookkeeping of their own. A target that refuses input
+/// (`Pane::input_refusal`: read-only, held after its shell exited, or its PTY
+/// input failed) is not a receiver, since delivery skips it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct BroadcastRoles {
+    sender: Option<u64>,
+    receivers: HashSet<u64>,
+}
+
+impl BroadcastRoles {
+    /// `ws`'s roles. While its own scope is on, its focused pane sends and
+    /// every other target that takes input receives, whether or not `ws` is
+    /// the focused window: its scope is armed, and typing there broadcasts as
+    /// soon as it has the focus. `focused_window_scope` is the scope of the
+    /// window the user types in, when that is another window. Only a named
+    /// group crosses windows (`App::broadcast_input`), so only then do this
+    /// window's members of that group receive too.
+    pub(crate) fn of_window(
+        ws: &WindowState,
+        focused_window_scope: Option<&BroadcastScope>,
+    ) -> Self {
+        let mut roles = Self::default();
+        if ws.mux.is_broadcast_on() {
+            roles.sender = ws.mux.active_focus();
+            roles
+                .receivers
+                .extend(accepting(ws, ws.mux.broadcast_target_ids()));
+        }
+        if let Some(scope) = focused_window_scope {
+            roles.receivers.extend(foreign_receivers(ws, scope));
+        }
+        if let Some(sender) = roles.sender {
+            roles.receivers.remove(&sender);
+        }
+        roles
+    }
+
+    pub(crate) fn of(&self, pane: u64) -> kettle_render::PaneBroadcast {
+        if self.sender == Some(pane) {
+            kettle_render::PaneBroadcast::Sending
+        } else if self.receivers.contains(&pane) {
+            kettle_render::PaneBroadcast::Receiving
+        } else {
+            kettle_render::PaneBroadcast::Off
+        }
+    }
+}
+
+/// The panes of `ids` in `ws` that take user input.
+fn accepting(ws: &WindowState, ids: Vec<u64>) -> impl Iterator<Item = u64> + '_ {
+    ids.into_iter().filter(|id| {
+        ws.mux
+            .panes
+            .get(id)
+            .is_some_and(|pane| pane.input_refusal().is_none())
+    })
+}
+
+/// The panes of `ws` that input typed in another window under `scope`
+/// reaches: the members of a named group that take input. Nothing for a
+/// scope that stays inside its window.
+fn foreign_receivers<'a>(
+    ws: &'a WindowState,
+    scope: &BroadcastScope,
+) -> impl Iterator<Item = u64> + 'a {
+    let ids = if crate::mux::Mux::scope_crosses_windows(scope) {
+        ws.mux.foreign_target_ids(scope)
+    } else {
+        Vec::new()
+    };
+    accepting(ws, ids)
+}
+
+/// What the focused window's group broadcast reaches in the other windows,
+/// as a fingerprint: the focused window, its group, and each other window's
+/// receiving panes. `None` while the focused window's scope stays inside it,
+/// which costs one lookup. Any change to it (a group scope set or cleared,
+/// the focus moving to another window, a pane joining or leaving the group,
+/// a member closing, exiting, turning read-only or moving to another
+/// window, a window closing) leaves the other windows' outlines stale, so
+/// `App::sync_foreign_broadcast_reach` redraws them.
+pub(crate) fn foreign_broadcast_reach(
+    focused_seq: u64,
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let scope = &windows.get(&focused_seq)?.mux.broadcast;
+    // Only a named group crosses windows (`Mux::scope_crosses_windows`).
+    let BroadcastScope::Group(group) = scope else {
+        return None;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    focused_seq.hash(&mut hasher);
+    group.hash(&mut hasher);
+    for (seq, window) in windows.iter().filter(|(seq, _)| **seq != focused_seq) {
+        let mut members: Vec<u64> = foreign_receivers(window, scope).collect();
+        members.sort_unstable();
+        (seq, members).hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// The scope of the window the user types in, for drawing `target_seq`'s
+/// panes; `None` when that is `target_seq` itself. The window being
+/// dispatched, `in_hand`, is out of `App::windows` while it is, so it is
+/// asked first: a `ui_geometry` read of another window runs while the
+/// focused window is in hand. `others` looks up the rest.
+pub(crate) fn focused_window_scope<'a>(
+    focused_seq: u64,
+    target_seq: u64,
+    in_hand: &'a WindowState,
+    others: impl FnOnce(u64) -> Option<&'a WindowState>,
+) -> Option<&'a BroadcastScope> {
+    if focused_seq == target_seq {
+        return None;
+    }
+    let focused = if in_hand.seq == focused_seq {
+        Some(in_hand)
+    } else {
+        others(focused_seq)
+    };
+    focused.map(|window| &window.mux.broadcast)
+}
+
+/// `target`'s roles while `in_hand` is the window being dispatched and
+/// `windows` holds the rest: what [`App::broadcast_roles_beside`] reads, for
+/// the frame, the AccessKit tree and `ui_geometry`.
+pub(crate) fn roles_beside(
+    target: &WindowState,
+    in_hand: &WindowState,
+    focused_seq: u64,
+    windows: &std::collections::BTreeMap<u64, WindowState>,
+) -> BroadcastRoles {
+    let scope = focused_window_scope(focused_seq, target.seq, in_hand, |seq| windows.get(&seq));
+    BroadcastRoles::of_window(target, scope)
+}
+
+/// What a screen reader adds after a terminal pane's name while broadcast
+/// reaches it; nothing otherwise. A description, not a live region, so a
+/// scope change re-describes the panes without announcing each one.
+pub(crate) fn pane_broadcast_description(
+    role: kettle_render::PaneBroadcast,
+    tr: &kettle_i18n::Translator,
+) -> Option<&'static str> {
+    match role {
+        kettle_render::PaneBroadcast::Off => None,
+        kettle_render::PaneBroadcast::Sending => {
+            Some(tr.text(kettle_i18n::Text::PaneA11yBroadcastSending))
+        }
+        kettle_render::PaneBroadcast::Receiving => {
+            Some(tr.text(kettle_i18n::Text::PaneA11yBroadcastReceiving))
+        }
+    }
+}
 
 /// What a window broadcasts to, seen from its focused pane. It holds no group
 /// name, so the menu bar's snapshot stays `Copy`.
@@ -205,6 +367,43 @@ impl App {
             self.sync_macos_menu(Some(ws));
         }
         true
+    }
+
+    /// `ws`'s [`BroadcastRoles`] while it is the window in hand, with the
+    /// scope of the focused window when that is another one.
+    pub(super) fn broadcast_roles(&self, ws: &WindowState) -> BroadcastRoles {
+        self.broadcast_roles_beside(ws, ws)
+    }
+
+    /// `target`'s [`BroadcastRoles`] while `in_hand` is the window being
+    /// dispatched; `target` may be another window, read from `self.windows`.
+    pub(super) fn broadcast_roles_beside(
+        &self,
+        target: &WindowState,
+        in_hand: &WindowState,
+    ) -> BroadcastRoles {
+        roles_beside(target, in_hand, self.focused_seq, &self.windows)
+    }
+
+    /// Request a frame from every window not in hand.
+    pub(super) fn redraw_other_windows(&self) {
+        for other in self.windows.values() {
+            if let Some(window) = &other.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Redraw every window when what the focused window's group broadcast
+    /// reaches in the other windows changed ([`foreign_broadcast_reach`]).
+    /// Run once per event-loop turn with every window back in
+    /// `self.windows`, so one check covers each way the reach can change.
+    pub(super) fn sync_foreign_broadcast_reach(&mut self) {
+        let reach = foreign_broadcast_reach(self.focused_seq, &self.windows);
+        if reach != self.foreign_broadcast_reach {
+            self.foreign_broadcast_reach = reach;
+            self.redraw_other_windows();
+        }
     }
 
     /// [`Self::set_broadcast_scope`] for a window that is not in hand.

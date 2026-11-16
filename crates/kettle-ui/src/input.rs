@@ -1232,19 +1232,49 @@ fn is_control_character(text: &str) -> bool {
 /// would submit a line). This CR normalization is correct ONLY here; it must
 /// never touch the bracketed body above.
 pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
-    // Strip *both* bracketed-paste markers from a body. The closing marker is
-    // the well-known injection target (close the bracket early to make the
-    // shell auto-run the remainder); the opening marker is the same class of
-    // bug going the other way — a paste containing `\x1b[200~` can confuse some
-    // shells into treating our genuine closer as "still pasted text" and never
-    // leaving paste mode, swallowing further input. Alacritty/iTerm2/WezTerm all
-    // strip both.
-    // A stack-style single pass reaches the same fixpoint without repeatedly
-    // rescanning and reallocating the entire clipboard. Truncation can expose a
-    // marker across a splice seam, so recheck the bounded six-byte suffix; each
-    // successful check removes six bytes and total work remains linear.
-    const START: &[u8] = b"\x1b[200~";
-    const END: &[u8] = b"\x1b[201~";
+    paste_payload_for(text, bracketed, cfg!(target_os = "macos"))
+}
+
+/// Both bracketed-paste markers, in their 7-bit form and in the C1 form whose
+/// introducer is U+009B (CSI) encoded as UTF-8. All four are six bytes long.
+const PASTE_MARKERS: [&[u8]; 4] = [b"\x1b[200~", b"\x1b[201~", b"\xc2\x9b200~", b"\xc2\x9b201~"];
+
+/// Push `byte`, then drop every bracketed-paste marker the push completed.
+///
+/// A stack-style single pass reaches the same fixpoint as repeated whole-text
+/// replacement without rescanning and reallocating the entire clipboard.
+/// Truncation can expose a marker across a splice seam, so recheck the bounded
+/// six-byte suffix; each successful check removes six bytes and total work
+/// remains linear. A marker is a run of whole code points, so removing one
+/// keeps the buffer valid UTF-8.
+fn push_without_paste_markers(safe: &mut Vec<u8>, byte: u8) {
+    safe.push(byte);
+    while PASTE_MARKERS.iter().any(|marker| safe.ends_with(marker)) {
+        safe.truncate(safe.len() - PASTE_MARKERS[0].len());
+    }
+}
+
+/// Whether the encoder drops `byte` from the body of a bracketed paste: ESC,
+/// and the bytes the kernel's terminal layer turns into a signal before the
+/// program reads them. 0x03 (interrupt), 0x1A (suspend) and 0x1C (quit)
+/// everywhere, and 0x19 where the platform has a delayed suspend (macOS).
+/// The Confirm paste dialog asks this same function which findings a
+/// bracketed paste removes.
+pub(crate) fn bracketed_paste_drops(byte: u8, delayed_suspend: bool) -> bool {
+    matches!(byte, 0x1b | 0x03 | 0x1a | 0x1c) || (delayed_suspend && byte == 0x19)
+}
+
+/// [`paste_payload`] with the platform's delayed-suspend byte made explicit,
+/// so every platform's encoding is tested on every platform.
+pub(crate) fn paste_payload_for(text: &str, bracketed: bool, delayed_suspend: bool) -> Vec<u8> {
+    // Strip *both* bracketed-paste markers from a body, in every mode. The
+    // closing marker is the well-known injection target (close the bracket
+    // early to make the shell auto-run the remainder); the opening marker is
+    // the same class of bug going the other way — a paste containing
+    // `\x1b[200~` can confuse some shells into treating our genuine closer as
+    // "still pasted text" and never leaving paste mode, swallowing further
+    // input. Alacritty/iTerm2/WezTerm all strip both. The C1 forms go too: a
+    // program that accepts 8-bit controls would read them as the same marker.
     let mut safe = Vec::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut index = 0;
@@ -1261,24 +1291,36 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
                 byte
             }
         };
-        safe.push(byte);
-        while safe.ends_with(START) || safe.ends_with(END) {
-            safe.truncate(safe.len() - START.len());
-        }
+        push_without_paste_markers(&mut safe, byte);
     }
     if bracketed {
         // No ESC from the clipboard may reach the bracketed body, including
-        // sequences other than the two markers removed above.
-        safe.retain(|byte| *byte != 0x1b);
-        // Preserve `\n` line endings; only normalize CRLF->LF for consistency.
-        let mut v = Vec::with_capacity(safe.len() + 12);
-        v.extend_from_slice(b"\x1b[200~");
-        v.extend_from_slice(&safe);
-        v.extend_from_slice(b"\x1b[201~");
-        v
+        // sequences other than the markers removed above. Neither may the
+        // bytes the kernel's terminal layer turns into a signal before the
+        // program reads them: 0x03 (interrupt), 0x1A (suspend), 0x1C (quit)
+        // and, where the platform has a delayed suspend (macOS), 0x19. A
+        // shell that is interrupted mid-paste leaves bracketed mode and runs
+        // the rest as typed input. Alacritty removes ESC and 0x03 in bracketed
+        // mode for this reason, Ghostty replaces these and other termios
+        // characters with spaces in every mode, and VTE replaces every C0
+        // control but NUL, HT, CR and LF with a control picture. All four are
+        // single bytes below 0x80, so no UTF-8 sequence is split.
+        // Dropping a byte can join the halves of a C1 marker (an ESC marker
+        // cannot survive: every ESC is gone), so strip markers once more.
+        // Preserve `\n` line endings; only CRLF was normalized, to LF.
+        let mut body = Vec::with_capacity(safe.len() + 12);
+        body.extend_from_slice(b"\x1b[200~");
+        for byte in safe
+            .into_iter()
+            .filter(|byte| !bracketed_paste_drops(*byte, delayed_suspend))
+        {
+            push_without_paste_markers(&mut body, byte);
+        }
+        body.extend_from_slice(b"\x1b[201~");
+        body
     } else {
-        // Normalize every newline to CR so a trailing/interior newline can't
-        // auto-run a command via the shell's line discipline.
+        // Every newline was normalized to CR so a trailing/interior newline
+        // can't auto-run a command via the shell's line discipline.
         safe
     }
 }
@@ -2264,6 +2306,119 @@ mod tests {
             std::str::from_utf8(&p).unwrap().contains("evilrm -rf /"),
             "body after strip: {}",
             String::from_utf8_lossy(&p)
+        );
+    }
+
+    #[test]
+    fn paste_strips_the_c1_end_and_start_markers_in_every_mode() {
+        for marker in ["\u{9b}201~", "\u{9b}200~"] {
+            for bracketed in [false, true] {
+                let payload = paste_payload(&format!("a{marker}b"), bracketed);
+                let text = std::str::from_utf8(&payload).expect("valid UTF-8");
+                assert!(!text.contains('\u{9b}'), "{marker:?} bracketed={bracketed}");
+                assert_eq!(
+                    text,
+                    if bracketed {
+                        "\x1b[200~ab\x1b[201~"
+                    } else {
+                        "ab"
+                    },
+                    "{marker:?}"
+                );
+            }
+        }
+        // Other C1 text is not a marker and is not the encoder's to remove.
+        assert_eq!(
+            paste_payload("a\u{9b}31mb", false),
+            "a\u{9b}31mb".as_bytes()
+        );
+    }
+
+    #[test]
+    fn paste_strips_c1_markers_rebuilt_across_a_removed_byte() {
+        // Removing the inner marker, an ESC or a signal byte joins the halves
+        // of an outer C1 marker; only Kettle's own wrapper may remain.
+        for text in [
+            "a\u{9b}20\u{9b}201~1~b",
+            "a\u{9b}20\x1b[201~1~b",
+            "a\u{9b}20\x1b1~b",
+            "a\u{9b}20\x031~b",
+            "a\u{9b}2\x1a0\x1c1~b",
+            "a\u{9b}20\u{9b}20\x030~1~b",
+        ] {
+            assert_eq!(
+                paste_payload(text, true),
+                b"\x1b[200~ab\x1b[201~",
+                "{text:?}"
+            );
+        }
+        assert_eq!(paste_payload("a\u{9b}20\u{9b}201~1~b", false), b"ab");
+        let depth = 50_000;
+        let mut nested = String::new();
+        for _ in 0..depth {
+            nested.push_str("\u{9b}20");
+        }
+        nested.push_str("\u{9b}201~");
+        for _ in 0..depth {
+            nested.push_str("1~");
+        }
+        assert_eq!(paste_payload(&nested, false), b"");
+        assert_eq!(paste_payload(&nested, true), b"\x1b[200~\x1b[201~");
+    }
+
+    #[test]
+    fn bracketed_paste_drops_each_signal_byte() {
+        // 0x03 interrupt, 0x1A suspend, 0x1C quit: the terminal layer turns
+        // each into a signal before the program reads the paste.
+        for (byte, name) in [(0x03u8, "interrupt"), (0x1a, "suspend"), (0x1c, "quit")] {
+            let text = format!("a{}b", char::from(byte));
+            for delayed_suspend in [false, true] {
+                assert_eq!(
+                    paste_payload_for(&text, true, delayed_suspend),
+                    b"\x1b[200~ab\x1b[201~",
+                    "{name}"
+                );
+                // Outside bracketed paste the dialog asks first; the encoder
+                // sends what the user confirmed.
+                assert_eq!(
+                    paste_payload_for(&text, false, delayed_suspend),
+                    text.as_bytes(),
+                    "{name}"
+                );
+            }
+        }
+        assert_eq!(
+            paste_payload_for("a\x03b\x1a\x1c", true, false),
+            b"\x1b[200~ab\x1b[201~"
+        );
+        // Tab, line breaks and the other C0 controls are the program's to read.
+        assert_eq!(
+            paste_payload_for("a\tb\nc\x04d\x15e", true, true),
+            b"\x1b[200~a\tb\nc\x04d\x15e\x1b[201~"
+        );
+        // Multi-byte text around a dropped byte stays whole.
+        assert_eq!(
+            paste_payload_for("é\x03界", true, false),
+            "\x1b[200~é界\x1b[201~".as_bytes()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_drops_the_delayed_suspend_byte_only_where_it_exists() {
+        // 0x19 (Ctrl+Y) is the delayed-suspend character on macOS. Elsewhere
+        // it is an ordinary byte (readline's yank) and is kept.
+        assert_eq!(
+            paste_payload_for("a\x19b", true, true),
+            b"\x1b[200~ab\x1b[201~"
+        );
+        assert_eq!(
+            paste_payload_for("a\x19b", true, false),
+            b"\x1b[200~a\x19b\x1b[201~"
+        );
+        assert_eq!(paste_payload_for("a\x19b", false, true), b"a\x19b");
+        assert_eq!(
+            paste_payload("a\x19b", true),
+            paste_payload_for("a\x19b", true, cfg!(target_os = "macos"))
         );
     }
 

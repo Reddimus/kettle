@@ -55,6 +55,7 @@ fn field(kind: ModalKind) -> WindowState {
                 scroll: 0,
                 armed_press: None,
                 space_pressed: None,
+                paste: None,
             })
         }
     }
@@ -410,4 +411,55 @@ fn settings_search_focus_transition_ends_composition_and_enter_repeat() {
         !take_ime_commit(&mut ws),
         "the old search commit must be rejected"
     );
+}
+
+/// The platform's select-all chord (Cmd+A on macOS, Ctrl+A elsewhere) in a
+/// text field selects that field's text, so a bound Select All never reaches
+/// the terminal while one is open; the Find bar claims it whichever of its
+/// controls has focus.
+#[test]
+fn select_all_in_find_or_a_text_field_selects_the_field() {
+    let shortcut = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    for kind in [
+        ModalKind::Palette,
+        ModalKind::Layout,
+        ModalKind::Ssh,
+        ModalKind::Title,
+    ] {
+        let mut ws = field(kind);
+        ws.mods = shortcut;
+        let len = modal_editor(&ws).unwrap().text().len();
+        assert!(
+            modals::edit_modal_text(&mut ws, &Key::Character("a".into()), || None, |_| false),
+            "{kind:?}"
+        );
+        assert_eq!(
+            modal_editor(&ws).unwrap().selection(),
+            Some(0..len),
+            "{kind:?}"
+        );
+    }
+    // Find keeps the platform's select-all chord on both platforms: Cmd+A on
+    // macOS and Ctrl+A elsewhere (the bar's own select_all then takes it).
+    for (mods, macos) in [
+        (ModifiersState::SUPER, true),
+        (ModifiersState::CONTROL, false),
+    ] {
+        for editor_focused in [true, false] {
+            assert!(
+                super::search::search_bar_claims(
+                    &Key::Character("a".into()),
+                    mods,
+                    macos,
+                    editor_focused,
+                    false
+                ),
+                "{mods:?} macos={macos} focused={editor_focused}"
+            );
+        }
+    }
 }

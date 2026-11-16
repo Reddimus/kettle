@@ -114,7 +114,7 @@ fn session_routes_follow_profiles_in_both_languages() {
                 Action::OpenLayoutPicker,
                 Action::OpenSsh,
             ] {
-                assert!(commands.iter().any(|(_, a)| *a == action));
+                assert!(commands.iter().any(|entry| entry.action == action));
                 assert!(menu.iter().any(|row| matches!(row, ContextMenuItem::Item { action: a, enabled: true, .. } if *a == action)));
             }
             let submenu = menu
@@ -129,7 +129,8 @@ fn session_routes_follow_profiles_in_both_languages() {
                 assert!(
                     commands
                         .iter()
-                        .any(|row| row.1 == entry.1 && row.0.shown(&tr) == entry.0.shown(&tr))
+                        .any(|row| row.action == entry.1
+                            && row.label.shown(&tr) == entry.0.shown(&tr))
                 );
             }
             assert_eq!(submenu.len(), names.len().max(1));
@@ -231,7 +232,7 @@ fn saved_layout_is_listed_by_picker_in_an_isolated_config_directory() {
         );
         let launches: Vec<_> = entries
             .iter()
-            .filter_map(|(_, action)| match action {
+            .filter_map(|entry| match &entry.action {
                 Action::LaunchProfile(name) => Some(name.as_str()),
                 _ => None,
             })
@@ -676,9 +677,9 @@ fn palette_offers_renaming_and_moving_the_tab() {
             let label = tr.text(text);
             let row = entries
                 .iter()
-                .position(|(_, a)| *a == action)
+                .position(|entry| entry.action == action)
                 .unwrap_or_else(|| panic!("{action:?} is not in the palette"));
-            assert_eq!(entries[row].0.shown(&tr), label);
+            assert_eq!(entries[row].label.shown(&tr), label);
             let ranked = kettle_config::palette::rank_entries(label, &entries, &tr);
             assert_eq!(ranked.first(), Some(&row), "{label}");
         }

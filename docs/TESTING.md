@@ -165,6 +165,41 @@ and independent panes and windows. Run
 `cargo test --locked --offline -j 2 -p kettle-ui --lib scrollback_receipt_hit`.
 These fixtures create no App, native window, renderer, clipboard or global UI
 services. Native and control event dispatch still require a live integration pass.
+The button acts on release: the same fixtures check that a press only arms it
+and that a release elsewhere, over another pane's button or under a receipt
+does nothing. `scrollback_receipt_hit_a_covered_jump_button_is_neither_hovered_nor_pressed`
+covers a real pane's button with a real persistent notice, the search bar's
+geometry, a receipt and a dialog, and checks the hover state, the press and
+the release under each: the hover, the hand, the press and the release all
+ask `scrollback_pill_reach`.
+
+`kettle-render`'s `scrollback_pill_tests` pin the button and the "Start of kept
+history" label as resolved geometry and colours, never glyph pixels: the key
+hint shown, dropped and rebound; each state's fill, edge and label floors on
+every bundled theme; the quads the painter emits at 1x and 2x; the label's
+condition, including a live prompt after Clear Scrollback and one line below
+the top, from a real terminal as well; its English and Spanish text; its
+clearance of the scrollbar and the button; the edge over a translucent window
+(opaque, 0.99, 0.86, 0.7 and 0.43, with and without macOS's backdrop lift);
+and the macOS and portable chords shaped in the bundled face, ending inside
+the button. `headless_tests::a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label`
+samples the fill, edge and rule in rendered frames, away from any glyph, and
+`headless_tests::the_painted_chord_ends_inside_the_jump_button` reads the chord
+the painter shaped. Both skip on a host with no GPU adapter unless
+`KETTLE_REQUIRE_GPU` is set, which turns the skip into a failure, as
+`KETTLE_REQUIRE_AUDIO` does for the sound tests.
+`kettle-ui`'s `scrollback_indicator_tests` check that the pointer, AccessKit
+and `ui_geometry` read those rects; that the "Viewing history" status is one
+node that does not change between offsets, and that AccessKit's own hit test
+over a scrolled-back pane never lands on it; that leaving the window ends a
+press; and, with `App::area`'s `pane_area`, that the button and the label
+stay out of the search bar at every window size and bar placement.
+`accessibility_id_tests` checks that no two AccessKit ids collide.
+Checked live with Orca in a private headless GNOME session on Tower
+(2026-11-14): Orca spoke "Viewing history" on the first Shift+PageUp from live
+output, not on the two that scrolled further, and again on the first
+Shift+PageUp after Ctrl+End returned to live output; AT-SPI showed one
+`object:announcement` each time. VoiceOver and Narrator were not checked.
 
 The renderer recovery tests include successful device creation on a backend
 that failed while drawing, checking that another backend is tried first.
@@ -594,6 +629,71 @@ tests report a skip when Windows does not grant the required privilege; the
 junction test still runs without that privilege. The supplementary-group query
 test simulates 257 groups without changing the process credentials.
 
+### The account's control registry
+
+A Kettle with its control server on registers in the directory its
+environment names (`$XDG_RUNTIME_DIR/kettle/ctl` first on Unix). It also
+publishes a `<pid>.alias.json` pointer, prunes dead ones, and lets clients
+look for servers in the directory the OS names for the account: the user
+database's home `~/.local/state/kettle/ctl`, `/run/user/<uid>/kettle/ctl` on
+Linux, the Local AppData known folder on Windows. A private `XDG_RUNTIME_DIR`
+moves only the first. `KETTLE_TEST_OS_CTL_DIR` moves the second: an absolute
+path stands in for every directory the OS names, and any other value (empty,
+relative, `none`) leaves none. On Windows the two are one directory, and the
+only variable that moves it, `LOCALAPPDATA`, moves everything else kept there,
+so an absolute value moves the registry as well. It exists for tests and
+smokes, and every build reads it, since smokes drive release builds.
+
+- Integration tests start `kettle` through
+  `kettle_test_support::isolate_ctl_registry(&mut command, root)`, which sets
+  it to `root/os-ctl` and, on Unix, `XDG_RUNTIME_DIR` to `root/run`. On
+  Windows the registry is then `root/os-ctl` itself; `LOCALAPPDATA` stays the
+  account's, and with it Kettle's presence claims. Call it after any
+  `env_clear`. `tests_isolate_every_kettle_that_reaches_the_control_registry`
+  refuses a test file that runs `kettle mcp`, `ctl`, `show` or `agent-setup`
+  and starts a `kettle` without isolating that launch; each launch in a
+  function needs its own call.
+- The `kettle` crate's unit tests run in the developer's environment, so the
+  crate looks for a running Kettle only through `ctl_discovery`, which finds
+  none under `cfg(test)`. `only_this_module_looks_for_a_running_kettle`
+  refuses a direct lookup anywhere else. `kettle-ui` tests start a control
+  server through `ctl_server::start_private_for_tests`, which passes both
+  directories in.
+- Smokes that start Kettle with its control server on set it too. The live
+  harness (`LiveKettle` in `check-live-ui-smoke.py`) points it at one private
+  directory per run, removed at exit: its `kettle ctl` calls run in the
+  harness's own environment and reach a Kettle given private XDG directories
+  through the alias there. Scripts whose Kettle and `kettle ctl` share one
+  environment set it to `none`. `test-script-regressions.py` refuses a script
+  that starts a control server without the variable or the harness. A smoke
+  that keeps the developer's `HOME` and XDG directories still registers in
+  the account's registry, as before; the variable moves only the directory
+  the OS names.
+
+To confirm on macOS that no test reaches the account's registry, run the
+suites under a sandbox that kills any process touching it and denies the rest
+of Kettle's state directory. `ps` is set-user-id, which a sandboxed process
+may not run, so it runs outside the sandbox:
+
+```sh
+profile="$TMPDIR/kettle-ctl-tripwire.sb"
+cat > "$profile" <<EOF
+(version 1)
+(allow default)
+(allow process-exec (literal "/bin/ps") (with no-sandbox))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle"))
+(deny file-read* file-write* (subpath "$HOME/.local/state/kettle/ctl")
+  (with send-signal SIGKILL))
+EOF
+sandbox-exec -f "$profile" cargo test --no-fail-fast \
+  -p kettle-ctl -p kettle-ui -p kettle -p kettle-test-support
+```
+
+A test binary that ends with `SIGKILL`, or a test whose `kettle` child died
+that way, reached the registry. The sandbox also refuses set-user-id bits, so
+`media_platform::tests::files::unsafe_worker_files_are_refused` fails there,
+and only there.
+
 Report the exact command, revision, host, and skipped coverage in a PR.
 Distinguish an offscreen render from a native window, and a fixture from an
 installed-package check. Do not claim another platform passed from compilation.
@@ -827,21 +927,37 @@ clipboard gate runs it under `xvfb-run`; macOS and Windows cannot execute it.
 `cargo test --locked --offline -p kettle-ui clipboard::tests` covers display
 backend selection, off-thread native operations, distinct CLIPBOARD/PRIMARY
 contents, PRIMARY routing with an injected clipboard-only provider and platform
-fallback, cap/deadline errors, stale-reply isolation, initialization failure and
-image/file fallback without arboard, and that the Wayland text path adds no
-dependency. On Linux, `wayland::native::selection` tests cover text-type ranking
-and the bounded pipe read (cap, deadline, end of file, invalid UTF-8). These
-tests do not exercise a compositor; the live check below does.
+fallback, PRIMARY support that appears and goes while the worker runs,
+cap/deadline errors, stale-reply isolation, initialization failure, the
+files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
+native files and images without arboard, and that the Wayland path adds no
+dependency. `wayland::offer::tests` drive the Wayland negotiation against a
+loopback source, a thread in the test process and no real clipboard: the type
+table (text and image, image alone, local, remote and malformed file lists,
+`x-special/gnome-copied-files`), `paste-files = off` against the text copy of
+the paths, each read's cap against a source that never ends, a stalled source
+against the deadline, and reading and writing a PRIMARY channel. They run on
+macOS too. `wayland::uri_list` tests cover the local, foreign and malformed
+classes; `paste_image::source_tests` cover the PNG header read, the decode
+limits against an oversize header and a decompression bomb, re-encoding, and
+the `0600` file in its `0700` directory. On Linux, `wayland::native::selection`
+tests cover a bridge without the primary-selection protocol. These tests do
+not exercise a compositor; the live check below does.
 
 On a Linux native runner, build and run the full `kettle-ui` suite and clippy.
 In a disposable GNOME Wayland session with XWayland disabled, verify text copy
 and paste in both directions with another native application, OSC 52 CLIPBOARD
-policy and ordering, and search/modal paste. Check large and stalled selections,
-and verify that image/file clipboard paste logs its limitation and falls through
-without a crash. Repeat on private X11 and XWayland to check automatic selection
-copy, middle-click PRIMARY, and OSC 52 PRIMARY policy and ordering. Without
-XWayland, direct PRIMARY requests are unavailable and must not alias CLIPBOARD.
-No live Wayland result can be inferred from a macOS suite pass.
+policy and ordering, and search/modal paste. Check large and stalled selections.
+With `DISPLAY` unset, so that arboard cannot start, set the session's clipboard
+with `wl-copy --type image/png` and `wl-copy --type text/uri-list` and paste
+each: the pane receives the quoted path of a `kettle-paste-*` PNG and the quoted
+file paths. Set PRIMARY with `wl-copy --primary` and middle-click, then select
+text in Kettle and read it back with `wl-paste --primary`. Repeat on private X11
+and XWayland to check automatic selection copy, middle-click PRIMARY, and OSC 52
+PRIMARY policy and ordering. On a compositor without the primary-selection
+protocol and without XWayland, direct PRIMARY requests are unavailable and must
+not alias CLIPBOARD. No live Wayland result can be inferred from a macOS suite
+pass.
 
 The trigger tests include DECSTBM rows 2-5, upward and downward retained-row
 movement, and eligibility after an old match scrolls out.
@@ -3270,7 +3386,29 @@ The command palette's ranking runs on every platform with
 `long_inputs_fall_back_to_the_first_match` pin the best-alignment scorer and
 its bounded fallback, `weak_matches_drop_out_when_a_strong_one_exists` the
 weak-match cutoff, and `highlights_follow_the_ranking_alignment` the marked
-characters. For picker geometry, `kettle-ui`'s
+characters. `split_ranks_bound_directions_first` pins `split` in English and
+`dividir` in Spanish (bound directions, then Split automatically, before the
+unbound ones), `descriptions_match_only_after_labels` the description search,
+and `spoken_label_names_each_key_in_words` the spoken shortcut. In
+`kettle-render`, `palette_description_is_whole_or_hidden` holds a description
+two columns after its label and clear of the hint, or hidden; `kettle-ui`'s
+`every_description_fits_the_default_palette` shows every description whole at
+1280x820 in English, Spanish and the pseudo-locale with either hint notation
+at both default fonts (cells measured from the bundled font with
+`kettle_render::bundled_cell_size`), `palette_options_describe_shortcut_then_description`
+pins what screen readers hear and `palette_options_report_their_place_among_all_results`
+the set size and position. `the_restate_rule_catches_paraphrase` and
+`common_queries_rank_shortcut_commands_first` pin the description rule and
+ranking beyond `split`. Headings: `groups_are_contiguous_in_order_and_lead_with_the_common_commands`
+(kettle-config), `heading_rows_get_a_divider_above_and_are_not_options`
+(kettle-render), and in `kettle-ui`
+`empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings` and
+`selection_and_accessibility_skip_the_headings`.
+`palette_card_is_sized_in_points_and_other_pickers_keep_pixels` and
+`the_open_palette_is_sized_in_points_at_2x` hold the palette's card and header
+at 720 points (1440 pixels) at 2x, with descriptions in view, and the other
+pickers at their pixel limits. For picker geometry, `kettle-ui`'s
+`palette_shows_twelve_rows_at_1280x820`,
 `overflowing_picker_rows_start_at_the_header_and_fill_the_panel` and
 `picker_rows_and_wheel_scroll_all_four_modal_projections` hold painted rows,
 hit testing and accessibility to one layout, and `kettle-render`'s
@@ -3297,7 +3435,28 @@ list acceptance.
 
 `cargo test -p kettle-config paste_protection` exercises every C0 byte and the
 three config policies; `cargo test -p kettle-ui paste` checks paste preview,
-flattening and ESC neutralization. `cargo test -p kettle-ui context_menu` and
+flattening and ESC neutralization, the C1 markers and each signal byte the
+encoder drops, the dialog's reason sentences, findings rows, preview anchoring
+on a late end marker, access keys (the typed letter only; none on macOS),
+focus order with the Settings link, `y` under `vim-menu-nav`, an answer given
+after a pane leaves bracketed paste (`text_paste_dispatch`, with a real pane
+whose mode is switched and whose input is captured), and the AccessKit tree
+against the layout. Keys are tested through `confirm_key_outcome` with
+real `Key` values, and what a key sends through a pane with captured input;
+`ui_geometry` privacy is tested by serialising a dialog whose every text
+field holds a canary. What a stop does to the window is `answer_confirm_stop`
+and what an answered paste does is `text_paste_dispatch`; both are tested
+directly. One source-order guard remains where no seam reaches `App`: the
+paste entry points.
+`every_paste_button_projects_its_own_flag_and_sends_its_own_text` is the
+detector for an AArch64 code-generation fault in rustc stable 1.99.1 and
+1.100.0, and nightly 1.102.0 (LLVM 23), at `opt-level = 1` (see
+`ConfirmButton::destructive`); it only detects on arm64 hosts.
+`cargo test -p kettle-render confirm` covers the row and stack arrangements
+at several widths and scales, the pinned policy line,
+the height cap, chips, access-key underlines and token contrast in every
+theme; one of its tests shapes text with the system fonts. `cargo test -p
+kettle-ui osc52` covers notices that name the program. `cargo test -p kettle-ui context_menu` and
 `cargo test -p kettle-render menu` cover menu grouping, nested accessibility,
 shared geometry, panel flipping and clipping ancestor text under submenus.
 `cargo test -p kettle-ui menu_text_tests` builds the real Read only row and

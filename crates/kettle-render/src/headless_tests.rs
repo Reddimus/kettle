@@ -61,6 +61,7 @@ pub(crate) fn pane<'a>(snap: &'a PaneSnapshot, width: u32, height: u32) -> PaneV
         bell: false,
         bell_flash: 0.0,
         group_name: None,
+        broadcast: crate::PaneBroadcast::Off,
     }
 }
 
@@ -75,7 +76,7 @@ pub(crate) fn capture(
     capture_with_tabs(renderer, cfg, panes, overlay, &TabBar::hidden())
 }
 
-fn capture_with_tabs(
+pub(crate) fn capture_with_tabs(
     renderer: &mut Renderer,
     cfg: &Config,
     panes: &[PaneView<'_>],
@@ -165,6 +166,35 @@ fn label_rects(renderer: &Renderer, kind: crate::card_scene::CardLabelKind) -> V
 }
 
 /// A headless renderer and its config, or `None` on a host with no GPU.
+/// A GPU test found no adapter on this host: skipped, saying so, unless
+/// `KETTLE_REQUIRE_GPU` is set, which makes it a failure, as
+/// `KETTLE_REQUIRE_AUDIO` does for the sound tests. Set it where a GPU, or a
+/// software one such as lavapipe or WARP, is known to be present.
+pub(crate) fn no_gpu_adapter() {
+    no_gpu_adapter_where(std::env::var_os("KETTLE_REQUIRE_GPU").is_some());
+}
+
+fn no_gpu_adapter_where(required: bool) {
+    assert!(
+        !required,
+        "no GPU adapter on this host, and KETTLE_REQUIRE_GPU is set"
+    );
+    eprintln!("no GPU adapter on this host; skipped");
+}
+
+/// With `KETTLE_REQUIRE_GPU` set a missing adapter fails the test.
+#[test]
+#[should_panic(expected = "KETTLE_REQUIRE_GPU is set")]
+fn a_missing_adapter_fails_where_a_gpu_is_required() {
+    no_gpu_adapter_where(true);
+}
+
+/// Without it the test is skipped.
+#[test]
+fn a_missing_adapter_is_skipped_where_none_is_required() {
+    no_gpu_adapter_where(false);
+}
+
 pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
     let cfg = gpu_test_config();
     let renderer =
@@ -1020,7 +1050,8 @@ fn every_pipeline_skips_an_unchanged_upload() {
         border_width: 1.0,
         corner_radius: 2.0,
         corner_mask: 0b1100,
-        _pad: 0,
+        dash: 0.0,
+        gap: 0.0,
     }];
     outlines.upload(&device, &queue, screen, &outline);
     let first = writes(outlines.upload_counts());
@@ -1436,17 +1467,15 @@ fn confirmation_overlay() -> Overlay {
             buttons: vec![
                 ConfirmDialogButton {
                     label: "Cancel".into(),
-                    destructive: false,
+                    ..Default::default()
                 },
                 ConfirmDialogButton {
                     label: "Close window".into(),
                     destructive: true,
+                    ..Default::default()
                 },
             ],
-            focus_idx: 0,
-            hover_idx: None,
-            pressed_idx: None,
-            scroll: 0,
+            ..Default::default()
         }),
         ..focused(true)
     }
@@ -6251,6 +6280,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         separator: false,
         enabled,
         hint: hint.into(),
+        ..Default::default()
     };
     let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
     let overlay = Overlay {
@@ -6380,6 +6410,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
                 separator: false,
                 enabled: true,
                 hint: "dark".into(),
+                ..Default::default()
             })
             .collect(),
         highlight: 0,
@@ -6435,6 +6466,7 @@ fn menu_level(
                 separator: false,
                 enabled: true,
                 hint: String::new(),
+                ..Default::default()
             })
             .collect(),
         highlight,
@@ -8092,6 +8124,199 @@ fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSn
         });
     }
     snap
+}
+
+/// A scrolled-back pane paints its jump button where the pointer hits it,
+/// in the resolved colours of its state: the edge around it, the fill
+/// inside, the rule before its key. At the top of a history that has lost
+/// lines it also paints the kept-history label in the button's rest fill.
+/// On TokyoNight Night and Kettle Day, at 1x and 2x, at rest, hovered and
+/// pressed. The colours are sampled in the button's padding and on its
+/// edge, where no glyph is, so the fonts on the host do not matter.
+#[test]
+fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        no_gpu_adapter();
+        return;
+    };
+    // The top of history, with older lines gone.
+    let mut snap = history_snapshot(20, 10, 300, i32::MAX);
+    snap.command_marks.clear();
+    snap.history_origin = 500;
+    assert!(snap.display_offset > 0 && snap.display_offset == snap.history_size);
+    let linear = renderer.config.format.is_srgb();
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    // The button's top lands on any fraction of a pixel, as line heights
+    // do: each quarter is painted and sampled.
+    for (name, nudge) in ["TokyoNight Night", "Kettle Day"]
+        .into_iter()
+        .flat_map(|name| [0.0_f32, 0.25, 0.5, 0.75].map(|nudge| (name, nudge)))
+    {
+        for scale in [1.0_f32, 2.0] {
+            renderer.set_scale(scale);
+            let cfg = Config {
+                theme: kettle_config::Theme::by_name(name),
+                background_opacity: 1.0,
+                ..base.clone()
+            };
+            let mut panes = [pane(&snap, width, height)];
+            panes[0].terminal.3 -= nudge;
+            let text_cell = (
+                renderer.overlay_text_cell_width(),
+                renderer.overlay_text_line_height(),
+            );
+            let hint = scrollback_pill_hint(&cfg.keybinds);
+            let pill = scrollback_pill(
+                panes[0].terminal,
+                snap.display_offset,
+                scale,
+                text_cell,
+                cfg.scrollbar_width,
+                hint.as_deref(),
+                &panes[0].tr,
+            )
+            .expect("a button");
+            let rule = pill.hint.as_ref().expect("room for the key").divider;
+            let label = kept_history_label(
+                panes[0].terminal,
+                snap.history_view(),
+                scale,
+                text_cell,
+                cfg.scrollbar_width,
+                &panes[0].tr,
+            )
+            .expect("a label");
+            let colors = crate::scrollback::scrollback_button_colors(
+                &cfg.theme,
+                linear,
+                crate::color::Backing::opaque(cfg.theme.background),
+            );
+            let (x, y, w, h) = pill.rect;
+            for (hovered, pressed, state) in [
+                (None, None, ScrollbackPillState::Rest),
+                (Some(1), None, ScrollbackPillState::Hovered),
+                (Some(1), Some(1), ScrollbackPillState::Pressed),
+                (None, Some(1), ScrollbackPillState::Rest),
+            ] {
+                let overlay = Overlay {
+                    scrollback_pill_hovered: hovered,
+                    scrollback_pill_pressed: pressed,
+                    ..focused(false)
+                };
+                let frame = capture(&mut renderer, &cfg, &panes, &overlay);
+                let surface = colors.surface(state);
+                let context = format!("{name} scale {scale} top {y} {state:?}");
+                let at = |px: f32, py: f32| frame.get_pixel(px as u32, py as u32);
+                let middle = y + h / 2.0;
+                // In the left padding, inside the edge.
+                let fill = at(x + 3.0 * scale, middle);
+                assert!(near(fill, surface.fill), "{context}: fill {fill:?}");
+                // On the top edge, clear of the rounded corners: the first
+                // row whose centre is inside it, wherever the button's
+                // fractional top falls.
+                let edge = at(x + w / 2.0, (y - 0.5).ceil());
+                assert!(near(edge, surface.edge), "{context}: edge {edge:?}");
+                let ruled = at(rule.0 + rule.2 / 2.0, rule.1 + rule.3 / 2.0);
+                assert!(near(ruled, surface.edge), "{context}: rule {ruled:?}");
+                // Just outside the button the terminal shows.
+                let outside = at(x - 3.0 * scale, middle);
+                assert!(
+                    near(outside, cfg.theme.background),
+                    "{context}: outside {outside:?}"
+                );
+                // The label keeps the rest fill whatever the button's state.
+                let (lx, ly, _, lh) = label.rect;
+                let kept = at(lx + 3.0 * scale, ly + lh / 2.0);
+                assert!(near(kept, colors.rest.fill), "{context}: label {kept:?}");
+            }
+            // At the live bottom neither is painted.
+            let live = history_snapshot(20, 10, 300, 0);
+            let frame = capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&live, width, height)],
+                &focused(false),
+            );
+            for (px, py) in [
+                (x + 3.0 * scale, y + h / 2.0),
+                (
+                    label.rect.0 + 3.0 * scale,
+                    label.rect.1 + label.rect.3 / 2.0,
+                ),
+            ] {
+                let got = frame.get_pixel(px as u32, py as u32);
+                assert!(
+                    near(got, cfg.theme.background),
+                    "{name} scale {scale}: live output shows {got:?}"
+                );
+            }
+        }
+    }
+    eprintln!("SCROLLBACK_BUTTON_GPU_PASS");
+}
+
+/// The chord the painter shapes for a scrolled-back pane ends inside the
+/// button it paints, a pad short of its right edge, with one modifier and
+/// with all four, at 1x and 2x. The chord is spelled as this host spells
+/// it: on macOS `⌃⌥⇧⌘End`, in the renderer's own fonts.
+#[test]
+fn the_painted_chord_ends_inside_the_jump_button() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        no_gpu_adapter();
+        return;
+    };
+    let snap = history_snapshot(20, 10, 300, 100);
+    for scale in [1.0_f32, 2.0] {
+        renderer.set_scale(scale);
+        for binding in [
+            "keybind = ctrl+end=unbind\nkeybind = ctrl+alt+shift+super+end=scroll_to_bottom\n",
+            "keybind = ctrl+end=unbind\nkeybind = super+end=scroll_to_bottom\n",
+        ] {
+            let cfg = Config {
+                keybinds: Config::parse_text(binding).keybinds,
+                ..base.clone()
+            };
+            let panes = [pane(&snap, width, height)];
+            capture(&mut renderer, &cfg, &panes, &focused(false));
+            let chord = scrollback_pill_hint(&cfg.keybinds).expect("bound");
+            let pill = scrollback_pill(
+                panes[0].terminal,
+                snap.display_offset,
+                scale,
+                (
+                    renderer.overlay_text_cell_width(),
+                    renderer.overlay_text_line_height(),
+                ),
+                cfg.scrollbar_width,
+                Some(&chord),
+                &panes[0].tr,
+            )
+            .expect("a button");
+            let hint = pill.hint.as_ref().expect("room for the chord");
+            // The painter shapes the count, then the chord.
+            let shaped: f32 = renderer.scrollback_buffers[1]
+                .layout_runs()
+                .map(|run| run.line_w)
+                .sum();
+            assert!(shaped > 0.0, "{chord:?}: nothing shaped");
+            let end = hint.text_origin.0 + shaped;
+            let limit = pill.rect.0 + pill.rect.2 - 6.0 * scale;
+            assert!(
+                end <= limit + 0.5,
+                "{chord:?} scale {scale}: the chord ends at {end} past the pad at {limit}"
+            );
+        }
+    }
+    eprintln!("SCROLLBACK_CHORD_GPU_PASS");
 }
 
 /// A pane with history paints its thumb in a full-height channel as wide as

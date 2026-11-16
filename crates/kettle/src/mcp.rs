@@ -766,7 +766,7 @@ fn instructions(selection: ToolSelection) -> String {
     }
     let here = placement(
         |name| std::env::var(name).ok(),
-        || kettle_ctl::client::display_target().is_some(),
+        || crate::ctl_discovery::display_target().is_some(),
     );
     instructions_for(selection, here)
 }

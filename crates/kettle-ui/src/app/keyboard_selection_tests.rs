@@ -30,12 +30,13 @@ fn buffer_bounds_are_saturating() {
 #[test]
 fn selection_actions_and_shift_click_are_wired() {
     let src = production_source();
-    // SelectAll arm builds a full-buffer selection.
+    // SelectAll arm builds a full-buffer selection, through the function
+    // `select_all_takes_the_whole_buffer_or_the_alternate_screen` exercises.
     let all = src
         .find("Action::SelectAll =>")
         .expect("SelectAll arm present");
     assert!(
-        src[all..all + 1100].contains("t.selection = Some(sel);"),
+        src[all..all + 300].contains("kettle_core::select_whole_buffer(&mut t);"),
         "SelectAll must set the term selection"
     );
     // SelectToTop/Bottom arm extends/sets the selection and scrolls.
@@ -191,4 +192,44 @@ fn vi_line_and_block_visual_yank_whole_lines_and_column_slices() {
     assert_eq!(copied(&term), "v");
     term.vi_goto_point(Point::new(Line(0), Column(4)));
     assert_eq!(copied(&term), "ef\nmn\nuv");
+}
+
+/// Select All (Cmd+A on macOS) selects the whole buffer, scrollback and
+/// screen, with or without a selection already there. In the alternate
+/// screen, which keeps no scrollback, it selects the screen the program drew
+/// and none of the normal screen's history.
+#[test]
+fn select_all_takes_the_whole_buffer_or_the_alternate_screen() {
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+    use kettle_core::select_whole_buffer;
+    use kettle_core::{Column, Line, Point, Selection, SelectionType, Side};
+
+    let size = kettle_core::term::TermSize::new(6, 2);
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let proxy = kettle_core::EventProxy::new(tx, std::sync::Arc::new(|| {}));
+    let mut term =
+        alacritty_terminal::Term::new(alacritty_terminal::term::Config::default(), &size, proxy);
+    let mut parser = Processor::<StdSyncHandler>::new();
+    parser.advance(&mut term, b"one\r\ntwo\r\nthree\r\nfour");
+    let copied = |term: &alacritty_terminal::Term<kettle_core::EventProxy>| {
+        kettle_core::selection_text_for_copy(term, 1 << 20, true)
+            .unwrap()
+            .unwrap_or_default()
+    };
+    // No selection: everything, history first.
+    assert!(term.selection.is_none());
+    select_whole_buffer(&mut term);
+    assert_eq!(copied(&term), "one\ntwo\nthree\nfour");
+    // A selection already there is replaced, not extended.
+    term.selection = Some(Selection::new(
+        SelectionType::Simple,
+        Point::new(Line(0), Column(1)),
+        Side::Left,
+    ));
+    select_whole_buffer(&mut term);
+    assert_eq!(copied(&term), "one\ntwo\nthree\nfour");
+    // The alternate screen: just what the program drew there.
+    parser.advance(&mut term, b"\x1b[?1049h\x1b[Hfull\r\nscreen");
+    select_whole_buffer(&mut term);
+    assert_eq!(copied(&term), "full\nscreen");
 }

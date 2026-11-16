@@ -85,7 +85,11 @@ impl Gestures {
 mod native;
 #[cfg(target_os = "linux")]
 pub(crate) use native::{Bridge, FileUpdate, Point, Update, selection};
+#[cfg(target_os = "linux")]
+pub(crate) use offer::selection_error;
 
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod offer;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod uri_list;
 #[cfg(any(target_os = "linux", all(test, unix)))]

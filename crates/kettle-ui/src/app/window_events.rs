@@ -270,6 +270,12 @@ impl App {
                 // Pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = None;
+                // Likewise a jump button's hover fill, and a press it took.
+                if ws.leave_scrollback_pill()
+                    && let Some(window) = &ws.window
+                {
+                    window.request_redraw();
+                }
                 ws.leave_tab_bar();
                 self.track_titlebar_pointer(ws, TitlebarPointer::Leave);
                 ws.search.hovered_control = None;
@@ -623,6 +629,10 @@ impl App {
                 if bcode == 0 {
                     ws.card_press = None;
                 }
+                // And a jump button's: a new primary press starts over.
+                if bcode == 0 {
+                    ws.scrollback_pill_press = None;
+                }
                 // Likewise a program still noted as holding this button gets
                 // the release it missed, and the press is Kettle's own
                 // gesture until a program receives it.
@@ -743,6 +753,9 @@ impl App {
                 // An inline card takes a primary press before anything else
                 // in the window does; its release opens the card's item.
                 if self.press_scrollback_pill(ws, px, py, bcode) {
+                    // The button may have appeared under a pointer that has
+                    // not moved since: it is hovered now, so its press shows.
+                    self.sync_cursor_icon(ws);
                     return;
                 }
                 if self.press_card(ws, px, py, bcode) {
@@ -1164,6 +1177,14 @@ impl App {
                 }
                 // The release of a press a card took is the card's too.
                 let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                // A jump button acts on the release of the press it took.
+                if self.release_scrollback_pill(ws, px, py, bcode) {
+                    self.sync_cursor_icon(ws);
+                    if let Some(w) = &ws.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 if self.release_card(ws, px, py, bcode) {
                     if let Some(w) = &ws.window {
                         w.request_redraw();
@@ -1521,6 +1542,7 @@ impl App {
                     self.release_held_buttons(ws, |_| true);
                     // And a card's press: its release may land elsewhere.
                     ws.card_press = None;
+                    ws.scrollback_pill_press = None;
                     // A focus loss also cancels an in-flight tab tear-off
                     // (the release will land on whatever window took focus).
                     ws.detach_drag = crate::detach::DragState::default();
@@ -1552,10 +1574,9 @@ impl App {
                     w.set_visible(false);
                 }
                 // Route through the shared helper so all
-                // user-driven blink-reset paths share one implementation. The
-                // CursorBlinkingChange handler still inlines the body
-                // because it runs inside `ws.mux.panes.values_mut()`
-                // and can't borrow `self` again — that one's documented.
+                // user-driven blink-reset paths share one implementation. A
+                // CursorBlinkingChange restarts the phase through the same
+                // `restart_blink`, after the pane drain that reports it.
                 self.reset_blink_phase(ws);
                 // Focus-event reporting (DEC private mode ?1004) follows
                 // `window_focused` in `sync_pane_focus_reports`, which runs

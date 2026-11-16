@@ -114,17 +114,16 @@ impl App {
         use kettle_i18n::Text as T;
         let tr = &self.ui_text;
         let ssh_status = ssh_status_line(ws).map(str::to_string);
-        let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
+        let (ssh_query, ssh_hint) = match &ws.ssh_input {
             Some((query, _)) => (
                 Some(with_preedit(query)),
                 ssh_picker_hint(ssh_status.as_deref(), tr),
-                ssh_picker_list_for(ws, &self.cfg, tr),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
 
-        let (palette_query, palette_hint, palette_picker) = match &ws.palette_input {
-            Some((query, selected)) => (
+        let (palette_query, palette_hint) = match &ws.palette_input {
+            Some((query, _)) => (
                 Some(with_preedit(query)),
                 picker_hint(
                     tr,
@@ -134,27 +133,16 @@ impl App {
                         ("Esc", T::PickerHintCancel),
                     ],
                 ),
-                Some(command_picker_list(
-                    query,
-                    *selected,
-                    &self.cfg.keybinds,
-                    tr,
-                    self.update_notice().as_ref(),
-                    ws.palette_profiles.as_deref(),
-                    ws.palette_bound_only,
-                    self.cfg.broadcast_default,
-                )),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
 
         // Terminator parity (layoutlauncher.py): build the layout picker's
         // query and hint the same way as the command palette. An empty
         // layouts dir is fine; the picker shows a "No saved layouts" row
         // hinting `kettle --layout NAME`.
-        let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
-        {
-            Some((query, selected)) => (
+        let (layout_picker_query, layout_picker_hint) = match &ws.layout_picker_input {
+            Some((query, _)) => (
                 Some(with_preedit(query)),
                 picker_hint(
                     tr,
@@ -164,30 +152,18 @@ impl App {
                         ("Esc", T::PickerHintCancel),
                     ],
                 ),
-                Some(layout_picker_list(
-                    query,
-                    *selected,
-                    &ws.layout_picker_entries,
-                    tr,
-                )),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
-        let (theme_picker_query, theme_picker_hint, theme_picker) = match &ws.theme_picker_input {
+        let (theme_picker_query, theme_picker_hint) = match &ws.theme_picker_input {
             Some(state) => (
                 Some(with_preedit(&state.query)),
                 picker_hint(
                     tr,
                     &theme_picker_hints(self.theme_picker_key_for(ws), self.theme_pick_key(), true),
                 ),
-                Some(theme_picker_list_with_footer(
-                    state,
-                    &self.cfg,
-                    self.theme_picker_key_for(ws),
-                    tr,
-                )),
             ),
-            None => (None, String::new(), None),
+            None => (None, String::new()),
         };
         let hint_labels: Vec<HintLabel> = match &ws.hint_state {
             Some((targets, typed)) => targets
@@ -325,26 +301,9 @@ impl App {
             .resize_overlay
             .and_then(|(c, r, t)| (t.elapsed() < RESIZE_OVERLAY_DURATION).then_some((c, r)));
 
-        let context_menu = self.context_menu_overlay(ws).or_else(|| {
-            let surface = ws
-                .renderer
-                .as_ref()
-                .map(|renderer| {
-                    let (width, height) = renderer.surface_size();
-                    (width as f32, height as f32)
-                })
-                .unwrap_or((800.0, 600.0));
-            picker_overlay_context_menu(
-                [palette_picker, theme_picker, layout_picker, ssh_picker],
-                surface,
-                self.menu_cell(ws),
-                (
-                    self.overlay_text_cell_width(ws),
-                    self.overlay_text_line_height(ws),
-                ),
-                self.picker_top_chrome(ws),
-            )
-        });
+        let context_menu = self
+            .context_menu_overlay(ws)
+            .or_else(|| self.picker_menu(ws));
         // Marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing. The
         // title-edit rect is app chrome, never a bottom overlay over terminal
@@ -433,6 +392,8 @@ impl App {
                 window_opaque,
                 scrollbar_active,
                 scrollbar_hovered_pane: ws.scrollbar_hover,
+                scrollback_pill_hovered: ws.scrollback_pill_hover,
+                scrollback_pill_pressed: ws.scrollback_pill_press,
                 cursor_visible,
                 resize_overlay,
                 resize_overlay_text: resize_overlay.and(ws.resize_overlay_label.clone()),
@@ -590,6 +551,8 @@ impl App {
             window_opaque,
             scrollbar_active,
             scrollbar_hovered_pane: ws.scrollbar_hover,
+            scrollback_pill_hovered: ws.scrollback_pill_hover,
+            scrollback_pill_pressed: ws.scrollback_pill_press,
             cursor_visible,
             resize_overlay,
             resize_overlay_text: resize_overlay.and(ws.resize_overlay_label.clone()),
@@ -1013,6 +976,9 @@ impl App {
             && overlay.ime_preedit.is_none()
             && Self::pane_cursor_layer_eligible(ws)
             && Self::ensure_cursor_layer(ws);
+        // Which panes broadcast input reaches, read fresh each frame so
+        // scope, focus, split, close and zoom changes outline at once.
+        let broadcast_roles = self.broadcast_roles(ws);
         let panes: Vec<PaneView> = metas
             .iter()
             .zip(snaps.iter())
@@ -1039,6 +1005,7 @@ impl App {
                         bell: *bell,
                         bell_flash: *bell_flash,
                         group_name: group_name.as_deref(),
+                        broadcast: broadcast_roles.of(*id),
                     }
                 },
             )

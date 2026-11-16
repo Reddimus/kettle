@@ -909,6 +909,8 @@ impl Renderer {
             context_menu_match_keys: Vec::new(),
             context_menu_hint_buffers: Vec::new(),
             context_menu_hint_texts: Vec::new(),
+            context_menu_description_buffers: Vec::new(),
+            context_menu_description_texts: Vec::new(),
             theme_footer_buffers: Vec::new(),
             theme_footer_keys: Vec::new(),
             theme_footer_key: 0,

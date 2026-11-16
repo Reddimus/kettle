@@ -335,6 +335,24 @@ pub(super) struct PickerList {
     pub(super) selected: usize,
     /// The theme picker's footer; `None` for every other picker.
     pub(super) footer: Option<kettle_render::ThemePickerFooter>,
+    /// What the card's width limits and margin are multiplied by: the
+    /// window's scale factor for the command palette, so it is 360 to 720
+    /// points wide on a HiDPI display as at 1x, and 1 for every other picker.
+    pub(super) card_scale: f32,
+}
+
+/// The command palette card's scale: the window's scale factor, or 1 when
+/// it is not a usable one.
+pub(super) fn palette_card_scale(ws: &WindowState) -> f32 {
+    let scale = ws
+        .window
+        .as_ref()
+        .map_or(ws.startup_scale, |window| window.scale_factor() as f32);
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
 }
 
 pub(super) struct PickerStatus {
@@ -357,7 +375,7 @@ pub(super) fn picker_hint(
 }
 
 /// Rows a picker paints whole, at most.
-const PICKER_MAX_VISIBLE_ROWS: usize = 8;
+const PICKER_MAX_VISIBLE_ROWS: usize = 12;
 
 /// The height of a picker list of `total` rows that paints as many whole rows
 /// as fit in `available`, at most `cap`, and always at least one. Pickers have
@@ -400,41 +418,58 @@ pub(crate) fn profile_launch_entries(
 }
 
 /// Commands, with the broadcast rows `broadcast-default` picks, and the
-/// palette's opening profile snapshot, followed by release notes and Dismiss
-/// while an update notice is active.
+/// palette's opening profile snapshot at the end of their group, followed by
+/// release notes and Dismiss while an update notice is active, in the last
+/// group, Help, beside About. Every row has its group.
 pub(super) fn palette_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
     profiles: Option<&[String]>,
     broadcast_default: kettle_config::BroadcastDefault,
-) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
-    use kettle_config::palette::PaletteLabel;
-    let mut entries: Vec<_> = kettle_config::palette::commands_for(broadcast_default)
+) -> Vec<kettle_config::palette::PaletteEntry> {
+    use kettle_config::palette::{PaletteEntry, PaletteGroup, PaletteLabel};
+    let entry = |label, action, group| PaletteEntry {
+        group: Some(group),
+        ..PaletteEntry::new(label, action)
+    };
+    let mut entries: Vec<_> = kettle_config::palette::grouped_commands_for(broadcast_default)
         .into_iter()
-        .map(|(label, action)| (PaletteLabel::Text(label), action))
+        .map(|(group, label, action)| entry(PaletteLabel::Text(label), action, group))
         .collect();
-    entries.extend(profile_launch_entries(profiles, tr));
+    let profiles_at = entries
+        .iter()
+        .rposition(|entry| entry.group == Some(PaletteGroup::LayoutsProfilesSsh))
+        .map_or(entries.len(), |last| last + 1);
+    entries.splice(
+        profiles_at..profiles_at,
+        profile_launch_entries(profiles, tr)
+            .into_iter()
+            .map(|(label, action)| entry(label, action, PaletteGroup::LayoutsProfilesSsh)),
+    );
     if let Some(notice) = notice {
         let english = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-        entries.push((
+        entries.push(entry(
             PaletteLabel::Dynamic {
                 shown: tr.palette_open_update(&notice.tag),
                 english: english.palette_open_update(&notice.tag),
             },
             Action::OpenUpdate,
+            PaletteGroup::Help,
         ));
-        entries.push((
+        entries.push(entry(
             PaletteLabel::Text(kettle_i18n::Text::PaletteDismissUpdate),
             Action::DismissUpdate,
+            PaletteGroup::Help,
         ));
     }
     entries
 }
 
 /// The rows the open palette ranks: every entry, or with `bound_only` (the
-/// keyboard-shortcut list) only those that have a shortcut to show. The
-/// painter, key handling, pointer, accessibility and control paths all take
-/// their rows from here, so a selection index means the same row in each.
+/// keyboard-shortcut list) only those that have a shortcut to show, each
+/// marked with whether it has one. The painter, key handling, pointer,
+/// accessibility and control paths all take their rows from here, so a
+/// selection index means the same row in each.
 pub(super) fn palette_view_entries(
     notice: Option<&crate::update_notice::Notice>,
     tr: &kettle_i18n::Translator,
@@ -442,13 +477,14 @@ pub(super) fn palette_view_entries(
     broadcast_default: kettle_config::BroadcastDefault,
     bindings: &Bindings,
     bound_only: bool,
-) -> Vec<(kettle_config::palette::PaletteLabel, Action)> {
+) -> Vec<kettle_config::palette::PaletteEntry> {
     let mut entries = palette_entries(notice, tr, profiles, broadcast_default);
+    for entry in &mut entries {
+        entry.bound = kettle_config::keybinds::ui_hint_label(bindings, &entry.action)
+            .is_some_and(|hint| !hint.is_empty());
+    }
     if bound_only {
-        entries.retain(|(_, action)| {
-            kettle_config::keybinds::ui_hint_label(bindings, action)
-                .is_some_and(|hint| !hint.is_empty())
-        });
+        entries.retain(|entry| entry.bound);
     }
     entries
 }
@@ -458,12 +494,35 @@ pub(super) fn palette_view_entries(
 pub(super) fn palette_enter_action(
     query: &str,
     selected: usize,
-    entries: &[(kettle_config::palette::PaletteLabel, Action)],
+    entries: &[kettle_config::palette::PaletteEntry],
     tr: &kettle_i18n::Translator,
 ) -> Option<Action> {
     kettle_config::palette::rank_entries(query, entries, tr)
         .get(selected)
-        .map(|&index| entries[index].1.clone())
+        .map(|&index| entries[index].action.clone())
+}
+
+/// What a screen reader hears after a palette command's name: its shortcut
+/// in words, then its description, whether or not the row has room to paint
+/// it. `None` when it has neither.
+pub(super) fn palette_a11y_description(
+    bindings: &Bindings,
+    action: &Action,
+    hint: &str,
+    tr: &kettle_i18n::Translator,
+) -> Option<String> {
+    let macos = cfg!(target_os = "macos");
+    let spoken = (!hint.is_empty())
+        .then(|| {
+            bindings
+                .iter()
+                .find(|(trigger, bound)| *bound == action && trigger.ui_label(macos) == hint)
+                .map(|(trigger, _)| trigger.spoken_label(macos, tr))
+        })
+        .flatten();
+    let description = kettle_config::palette::description(action).map(|text| tr.text(text));
+    let parts: Vec<&str> = spoken.as_deref().into_iter().chain(description).collect();
+    (!parts.is_empty()).then(|| parts.join(". "))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -486,11 +545,17 @@ pub(super) fn command_picker_list(
         bound_only,
     );
     let ranked = kettle_config::palette::rank_matches(query, &commands, tr);
+    // The empty palette lists its commands under group headings; a query, and
+    // the keyboard-shortcut list, show the flat ranked list.
+    let headings = query.is_empty() && !bound_only;
+    let mut group = None;
     let rows = ranked
         .into_iter()
-        .map(|entry| {
-            let (label, action) = &commands[entry.index];
-            ContextMenuRow {
+        .flat_map(|entry| {
+            let command = &commands[entry.index];
+            let hint = kettle_config::keybinds::ui_hint_label(bindings, &command.action)
+                .unwrap_or_default();
+            let mut row = ContextMenuRow {
                 toggle: None,
                 swatches: None,
                 matched_chars: entry.matched_chars.map(|positions| {
@@ -499,11 +564,41 @@ pub(super) fn command_picker_list(
                         .map(|index| index..index + 1)
                         .collect()
                 }),
-                label: label.shown(tr).to_string(),
+                label: command.label.shown(tr).to_string(),
                 separator: false,
                 enabled: true,
-                hint: kettle_config::keybinds::ui_hint_label(bindings, action).unwrap_or_default(),
-            }
+                description: kettle_config::palette::description(&command.action)
+                    .map(|text| tr.text(text).to_string())
+                    .unwrap_or_default(),
+                a11y_description: Some(
+                    palette_a11y_description(bindings, &command.action, &hint, tr)
+                        .unwrap_or_default(),
+                ),
+                hint,
+                ..Default::default()
+            };
+            let heading = (headings && command.group != group)
+                .then_some(command.group)
+                .flatten()
+                .map(|next| {
+                    // A screen reader hears the group after the first command
+                    // under its heading, as VS Code reads a separator's label.
+                    let name = tr.text(next.text());
+                    let spoken = row.a11y_description.get_or_insert_default();
+                    *spoken = if spoken.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{spoken}. {name}")
+                    };
+                    ContextMenuRow {
+                        label: name.to_string(),
+                        enabled: false,
+                        heading: true,
+                        ..Default::default()
+                    }
+                });
+            group = command.group;
+            heading.into_iter().chain([row])
         })
         .collect::<Vec<_>>();
     let status = profiles::palette_profile_status(profiles, tr).map(|message| PickerStatus {
@@ -521,6 +616,7 @@ pub(super) fn command_picker_list(
     if rows.is_empty() {
         PickerList {
             status,
+            card_scale: 1.0,
             rows: vec![ContextMenuRow {
                 toggle: None,
                 swatches: None,
@@ -531,14 +627,20 @@ pub(super) fn command_picker_list(
                 separator: false,
                 enabled: false,
                 hint: String::new(),
+                ..Default::default()
             }],
             selected: 0,
             footer: None,
         }
     } else {
+        // `selected` counts commands; the highlight is the row it is
+        // painted on, below any heading.
+        let options = rows.iter().filter(|row| !row.heading).count();
         PickerList {
             status,
-            selected: selected.min(rows.len() - 1),
+            card_scale: 1.0,
+            selected: kettle_render::menu_option_row(&rows, selected.min(options - 1))
+                .unwrap_or_default(),
             rows,
             footer: None,
         }
@@ -562,6 +664,7 @@ pub(super) fn layout_picker_list(
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -572,6 +675,7 @@ pub(super) fn layout_picker_list(
         };
         PickerList {
             status: None,
+            card_scale: 1.0,
             rows: vec![ContextMenuRow {
                 toggle: None,
                 swatches: None,
@@ -585,6 +689,7 @@ pub(super) fn layout_picker_list(
                 } else {
                     String::new()
                 },
+                ..Default::default()
             }],
             selected: 0,
             footer: None,
@@ -592,6 +697,7 @@ pub(super) fn layout_picker_list(
     } else {
         PickerList {
             status: None,
+            card_scale: 1.0,
             selected: selected.min(rows.len() - 1),
             rows,
             footer: None,
@@ -714,6 +820,7 @@ pub(super) fn theme_picker_list(
                 separator: false,
                 enabled: true,
                 hint: format!("{tick}{appearance}"),
+                ..Default::default()
             }
         })
         .collect();
@@ -730,6 +837,7 @@ pub(super) fn theme_picker_list(
     if rows.is_empty() {
         return PickerList {
             status: None,
+            card_scale: 1.0,
             rows: vec![ContextMenuRow {
                 toggle: None,
                 swatches: None,
@@ -738,6 +846,7 @@ pub(super) fn theme_picker_list(
                 separator: false,
                 enabled: false,
                 hint: String::new(),
+                ..Default::default()
             }],
             selected: 0,
             footer: None,
@@ -746,6 +855,7 @@ pub(super) fn theme_picker_list(
     let selected = selected.min(rows.len() - 1);
     PickerList {
         status: None,
+        card_scale: 1.0,
         rows,
         selected,
         footer: None,
@@ -1044,6 +1154,7 @@ pub(super) fn ssh_picker_list(
         separator: false,
         enabled,
         hint,
+        ..Default::default()
     };
     let rows = rows
         .iter()
@@ -1079,6 +1190,7 @@ pub(super) fn ssh_picker_list(
         .collect();
     PickerList {
         status: None,
+        card_scale: 1.0,
         rows,
         selected,
         footer: None,
@@ -1173,13 +1285,16 @@ fn painted_rows(total: usize, rows_h: f32, row_h: f32) -> usize {
 
 /// Physical menu pixels: fixed padding follows the menu painter, while cell
 /// metrics and top chrome already include the window's scale.
+/// `scale` multiplies the card's width limits and side margin
+/// ([`PickerList::card_scale`]).
 pub(super) fn picker_card_geometry(
     surface: (f32, f32),
     cell: (f32, f32),
     top_chrome: f32,
     row_count: usize,
+    scale: f32,
 ) -> Option<PickerGeometry> {
-    picker_card_geometry_with(surface, cell, top_chrome, row_count, 0.0, None)
+    picker_card_geometry_with(surface, cell, top_chrome, row_count, scale, 0.0, None)
 }
 
 /// [`picker_card_geometry`] with a pinned status band of `status_height`
@@ -1189,9 +1304,18 @@ fn picker_card_geometry_with_status(
     cell: (f32, f32),
     top_chrome: f32,
     row_count: usize,
+    scale: f32,
     status_height: f32,
 ) -> Option<PickerGeometry> {
-    picker_card_geometry_with(surface, cell, top_chrome, row_count, status_height, None)
+    picker_card_geometry_with(
+        surface,
+        cell,
+        top_chrome,
+        row_count,
+        scale,
+        status_height,
+        None,
+    )
 }
 
 /// [`picker_card_geometry`] for the theme picker: up to 14 rows, then its
@@ -1214,6 +1338,7 @@ pub(super) fn theme_picker_card_geometry(
         cell,
         top_chrome,
         row_count,
+        1.0,
         status_height,
         Some(&fits),
     )
@@ -1224,6 +1349,7 @@ fn picker_card_geometry_with(
     cell: (f32, f32),
     top_chrome: f32,
     row_count: usize,
+    scale: f32,
     status_height: f32,
     theme_footer: Option<&dyn Fn(f32) -> (bool, bool)>,
 ) -> Option<PickerGeometry> {
@@ -1239,8 +1365,16 @@ fn picker_card_geometry_with(
     {
         return None;
     }
-    let max_width = (sw - 32.0).max(0.0);
-    let width = (sw * 0.56).clamp(360.0_f32.min(max_width), 720.0_f32.min(max_width));
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let max_width = (sw - 32.0 * scale).max(0.0);
+    let width = (sw * 0.56).clamp(
+        (360.0 * scale).min(max_width),
+        (720.0 * scale).min(max_width),
+    );
     let x = (sw - width) * 0.5;
     let remaining = (sh - top_chrome).max(0.0);
     let header_h = ch + kettle_render::menu::PICKER_HEADER_PAD;
@@ -1357,7 +1491,10 @@ pub(super) fn picker_context_menu(
     text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    let base = picker_card_geometry(surface, cell, top_chrome, list.rows.len())?;
+    // At least one row: the query header comes from this layout, and an
+    // open picker keeps its field even with nothing listed.
+    let rows = list.rows.len().max(1);
+    let base = picker_card_geometry(surface, cell, top_chrome, rows, list.card_scale)?;
     // Status is supplementary to the query and selected action. Try complete
     // guidance, then the explanation, then a truthful compact message; never
     // hide the whole picker just because a restored window cannot fit a band.
@@ -1374,7 +1511,8 @@ pub(super) fn picker_context_menu(
                 surface,
                 cell,
                 top_chrome,
-                list.rows.len(),
+                rows,
+                list.card_scale,
                 status.height(),
             )
             .is_some()
@@ -1393,7 +1531,14 @@ pub(super) fn picker_context_menu(
             |width| footer.fits(width, cell.0),
         )?
     } else {
-        picker_card_geometry_with_status(surface, cell, top_chrome, list.rows.len(), status_height)?
+        picker_card_geometry_with_status(
+            surface,
+            cell,
+            top_chrome,
+            rows,
+            list.card_scale,
+            status_height,
+        )?
     };
     let footer = list.footer.take().and_then(|mut footer| {
         let (sample, lines, height) = geometry.footer?;
@@ -1439,20 +1584,30 @@ pub(super) fn picker_context_menu(
     })
 }
 
-/// The open picker's rows as a menu panel: the first of `pickers` that is
-/// open, in key-routing order.
-pub(super) fn picker_overlay_context_menu(
-    pickers: [Option<PickerList>; 4],
+/// The open picker laid out once: its card, its rows and its header (see
+/// `ContextMenu::picker_header_rect`). The frame paints this, and presses,
+/// the header's text field, accessibility and `ctl ui_geometry` measure it,
+/// so the command palette's card and header have one size, in points, at
+/// every scale. `None` when no picker is open or the window has no room.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn open_picker_menu(
+    ws: &WindowState,
+    cfg: &Config,
+    theme_key: &str,
+    tr: &kettle_i18n::Translator,
+    notice: Option<&crate::update_notice::Notice>,
     surface: (f32, f32),
     cell: (f32, f32),
     text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    pickers
-        .into_iter()
-        .flatten()
-        .next()
-        .and_then(|list| picker_context_menu(list, surface, cell, text_cell, top_chrome))
+    picker_context_menu(
+        open_picker_list(ws, cfg, theme_key, tr, notice)?,
+        surface,
+        cell,
+        text_cell,
+        top_chrome,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1462,15 +1617,19 @@ pub(super) enum PickerPointer {
     Wheel(isize),
 }
 
-pub(super) fn open_picker_list(
+/// The open command palette's list, sized for the window's scale. The
+/// painter, presses, accessibility and ctl all take the palette from here, so
+/// the card they measure is the card that is drawn.
+pub(super) fn palette_picker_list(
     ws: &WindowState,
     cfg: &Config,
-    theme_key: &str,
     tr: &kettle_i18n::Translator,
     notice: Option<&crate::update_notice::Notice>,
 ) -> Option<PickerList> {
-    if let Some((query, selected)) = &ws.palette_input {
-        Some(command_picker_list(
+    let (query, selected) = ws.palette_input.as_ref()?;
+    Some(PickerList {
+        card_scale: palette_card_scale(ws),
+        ..command_picker_list(
             query,
             *selected,
             &cfg.keybinds,
@@ -1479,7 +1638,19 @@ pub(super) fn open_picker_list(
             ws.palette_profiles.as_deref(),
             ws.palette_bound_only,
             cfg.broadcast_default,
-        ))
+        )
+    })
+}
+
+pub(super) fn open_picker_list(
+    ws: &WindowState,
+    cfg: &Config,
+    theme_key: &str,
+    tr: &kettle_i18n::Translator,
+    notice: Option<&crate::update_notice::Notice>,
+) -> Option<PickerList> {
+    if ws.palette_input.is_some() {
+        palette_picker_list(ws, cfg, tr, notice)
     } else if let Some(state) = &ws.theme_picker_input {
         Some(theme_picker_list_with_footer(state, cfg, theme_key, tr))
     } else if let Some((query, selected)) = &ws.layout_picker_input {
@@ -1601,17 +1772,30 @@ pub(super) fn apply_picker_pointer(
             menu.highlight
         } else {
             let exposed = offset + visible - 1;
-            (offset..=exposed)
-                .rev()
-                .find(|&index| {
-                    index < wheel_rows
-                        && menu
-                            .rows
-                            .get(index)
-                            .is_some_and(|row| row.enabled && !row.separator)
-                })
+            let selectable = |index: usize| {
+                index < wheel_rows
+                    && menu
+                        .rows
+                        .get(index)
+                        .is_some_and(|row| row.enabled && !row.separator)
+            };
+            // Scrolling down, a heading (or another row nothing selects) at
+            // the bottom would leave the last selectable row where it was,
+            // and the viewport, which follows the selection, with it: take
+            // the first selectable row from the exposed one on instead.
+            (delta > 0)
+                .then(|| (exposed..menu.rows.len()).find(|&index| selectable(index)))
+                .flatten()
+                .or_else(|| (offset..=exposed).rev().find(|&index| selectable(index)))
                 .unwrap_or(menu.highlight)
         }
+    };
+    // The palette stores the command, not the row: a row below a heading is
+    // the command one fewer heading up.
+    let selected = if ws.palette_input.is_some() {
+        kettle_render::menu_row_option(&menu.rows, selected).unwrap_or(selected)
+    } else {
+        selected
     };
     let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {
         selected
@@ -1649,6 +1833,32 @@ impl App {
         }
     }
 
+    /// [`open_picker_menu`] for this window: its surface, cell and chrome.
+    pub(super) fn picker_menu(&self, ws: &WindowState) -> Option<ContextMenu> {
+        let surface = ws
+            .renderer
+            .as_ref()
+            .map(|renderer| {
+                let (w, h) = renderer.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        open_picker_menu(
+            ws,
+            &self.cfg,
+            self.theme_picker_key_for(ws),
+            &self.ui_text,
+            self.update_notice().as_ref(),
+            surface,
+            self.menu_cell(ws),
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            self.picker_top_chrome(ws),
+        )
+    }
+
     pub(super) fn picker_pointer(
         &mut self,
         ws: &mut WindowState,
@@ -1658,34 +1868,8 @@ impl App {
         if ws.context_menu.is_some() {
             return false;
         }
-        let Some(list) = open_picker_list(
-            ws,
-            &self.cfg,
-            self.theme_picker_key_for(ws),
-            &self.ui_text,
-            self.update_notice().as_ref(),
-        ) else {
-            return false;
-        };
-        let surface = ws
-            .renderer
-            .as_ref()
-            .map(|renderer| {
-                let (w, h) = renderer.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
         let cell = self.menu_cell(ws);
-        let Some(menu) = picker_context_menu(
-            list,
-            surface,
-            cell,
-            (
-                self.overlay_text_cell_width(ws),
-                self.overlay_text_line_height(ws),
-            ),
-            self.picker_top_chrome(ws),
-        ) else {
+        let Some(menu) = self.picker_menu(ws) else {
             return false;
         };
         // The theme picker's footer takes its own presses: its contrast
@@ -1795,6 +1979,7 @@ pub(super) fn ssh_remove_dialog(
         scroll: 0,
         armed_press: None,
         space_pressed: None,
+        paste: None,
     }
 }
 
@@ -1826,6 +2011,7 @@ pub(super) fn ssh_replace_dialog(
         scroll: 0,
         armed_press: None,
         space_pressed: None,
+        paste: None,
     }
 }
 

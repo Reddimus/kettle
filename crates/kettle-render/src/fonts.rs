@@ -845,6 +845,20 @@ pub(crate) fn underline_em(font_system: &mut FontSystem, family: &str) -> Option
     (metrics.units_per_em > 0).then(|| underline.thickness / f32::from(metrics.units_per_em))
 }
 
+/// The terminal cell of the bundled JetBrains Mono, the default font, at
+/// `font_px` logical pixels and `scale`, measured as the renderer measures
+/// it: no GPU and no system fonts. For layout checks of text-sized surfaces.
+pub fn bundled_cell_size(font_px: f32, scale: f32) -> (f32, f32) {
+    let mut db = fontdb::Database::new();
+    for face in kettle_config::font::all() {
+        db.load_font_source(fontdb::Source::Binary(Arc::new(face)));
+    }
+    let mut fs = FontSystem::new_with_locale_and_db("en-US".into(), db);
+    let metrics = metrics_for(font_px, scale);
+    let mut buf = TextBuffer::new(&mut fs, metrics);
+    measure_cell(&mut fs, &mut buf, "JetBrains Mono", metrics)
+}
+
 pub(crate) fn measure_cell(
     fs: &mut FontSystem,
     buf: &mut TextBuffer,

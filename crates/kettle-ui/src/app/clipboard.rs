@@ -116,6 +116,40 @@ pub(super) struct PaneClipboard<'a, C> {
     pub notify: bool,
     pub notices: &'a mut crate::mux::Osc52NoticeState,
     pub tr: &'a kettle_i18n::Translator,
+    /// Names the pane's foreground program for a notice: its name only,
+    /// sanitised and bounded, or `None` when it is a shell or cannot be
+    /// told. The foreground program is not necessarily the sender: a
+    /// background job in the same pane can write OSC 52 too, and Kettle sees
+    /// only the pane. The notices say "while NAME was in the foreground" for
+    /// that reason. Asked only when a notice is about to be shown, after the
+    /// throttle, so a flood of requests costs no process lookups.
+    pub program: &'a dyn Fn() -> Option<String>,
+}
+
+/// The foreground program of a pane, for an OSC 52 notice: the same private,
+/// bounded label the close question shows (`argv[0]`'s base name, never an
+/// argument), and `None` for an interactive shell, where the request may have
+/// come from a command that has already exited. Unix only.
+pub(super) fn osc52_notice_program(
+    term: &kettle_core::Terminal,
+    launch_argv: &[String],
+    configured_shell: Option<&str>,
+) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let (_, pid) = sample_lone_pane_job(term, launch_argv, configured_shell);
+        busy_program_label(
+            pid?,
+            kettle_remote::process_argv,
+            &read_etc_shells(),
+            configured_shell,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (term, launch_argv, configured_shell);
+        None
+    }
 }
 
 impl crate::mux::Osc52NoticeState {
@@ -124,11 +158,13 @@ impl crate::mux::Osc52NoticeState {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// `program` names who copied; it is asked only when the notice shows.
     pub(super) fn copied(
         &mut self,
         now: std::time::Instant,
         enabled: bool,
         count: usize,
+        program: impl FnOnce() -> Option<String>,
         tr: &kettle_i18n::Translator,
     ) {
         if enabled
@@ -137,11 +173,21 @@ impl crate::mux::Osc52NoticeState {
             })
         {
             self.last_copy = Some(now);
-            self.show(tr.osc52_copied(count as u64));
+            self.show(match program() {
+                Some(program) => tr.osc52_copied_by(&program, count as u64),
+                None => tr.osc52_copied(count as u64),
+            });
         }
     }
 
-    pub(super) fn denied(&mut self, read: bool, tr: &kettle_i18n::Translator) {
+    /// `program` names who was refused; it is asked only when the notice
+    /// shows, once per direction per pane.
+    pub(super) fn denied(
+        &mut self,
+        read: bool,
+        program: impl FnOnce() -> Option<String>,
+        tr: &kettle_i18n::Translator,
+    ) {
         let seen = if read {
             &mut self.denied_read
         } else {
@@ -149,14 +195,16 @@ impl crate::mux::Osc52NoticeState {
         };
         if !*seen {
             *seen = true;
-            self.show(
-                tr.text(if read {
-                    kettle_i18n::Text::Osc52DeniedRead
-                } else {
-                    kettle_i18n::Text::Osc52DeniedWrite
-                })
-                .to_string(),
-            );
+            // The notice points at the Settings row by the names Settings
+            // shows, in the running language.
+            let setting = tr.text(kettle_i18n::Text::SettingsFieldOsc52);
+            let category = tr.text(kettle_i18n::Text::SettingsCategoryBehavior);
+            self.show(match (program(), read) {
+                (Some(program), true) => tr.osc52_blocked_read_by(&program, setting, category),
+                (Some(program), false) => tr.osc52_blocked_write_by(&program, setting, category),
+                (None, true) => tr.osc52_blocked_read(setting, category),
+                (None, false) => tr.osc52_blocked_write(setting, category),
+            });
         }
     }
 }
@@ -164,7 +212,7 @@ impl crate::mux::Osc52NoticeState {
 impl<C: Osc52Backend> Osc52Clipboard for PaneClipboard<'_, C> {
     fn store(&mut self, target: ClipboardType, text: String) {
         if !self.policy.can_copy() {
-            self.notices.denied(false, self.tr);
+            self.notices.denied(false, self.program, self.tr);
             return;
         }
         if let Some(cb) = &mut self.clipboard {
@@ -176,6 +224,7 @@ impl<C: Osc52Backend> Osc52Clipboard for PaneClipboard<'_, C> {
                             std::time::Instant::now(),
                             self.notify,
                             count,
+                            self.program,
                             self.tr,
                         ),
                         Err(error) => {
@@ -196,7 +245,7 @@ impl<C: Osc52Backend> Osc52Clipboard for PaneClipboard<'_, C> {
                 .map(|c| osc52_read_result(c.get(target)))
                 .unwrap_or_default()
         } else {
-            self.notices.denied(true, self.tr);
+            self.notices.denied(true, self.program, self.tr);
             String::new()
         }
     }

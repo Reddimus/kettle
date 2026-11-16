@@ -4,7 +4,10 @@ use super::overlays::{
     picker_header_secondary_color, picker_scroll_thumb, picker_scroll_thumb_color,
     text_field_slot_color,
 };
-use super::{ContextMenu, ContextMenuRow, chrome::Colors, context_menu_row_rects, menu};
+use super::{
+    ContextMenu, ContextMenuRow, chrome::Colors, context_menu_row_rects, menu, menu_option_row,
+    menu_row_option,
+};
 use kettle_config::{Rgb, Theme};
 
 const CELL: (f32, f32) = (8.0, 16.0);
@@ -24,6 +27,7 @@ fn row(index: usize) -> ContextMenuRow {
         } else {
             String::new()
         },
+        ..Default::default()
     }
 }
 
@@ -159,6 +163,7 @@ fn picker_hint_and_empty_state_read_as_secondary_text() {
         separator: false,
         enabled: false,
         hint: String::new(),
+        ..Default::default()
     };
     let mut list = picker(1, 0);
     list.rows = vec![message()];
@@ -222,4 +227,61 @@ fn picker_key_hint_slot_is_secondary_text() {
             );
         }
     }
+}
+
+/// A group heading is a whole row in secondary text that is never selected,
+/// with a 1 px divider on its top edge, inset like a separator's, unless it
+/// is the first row. Options are numbered past headings, both ways.
+#[test]
+fn heading_rows_get_a_divider_above_and_are_not_options() {
+    let theme = Theme::default();
+    let mut menu = picker(8, 0);
+    for index in [0, 4] {
+        menu.rows[index] = ContextMenuRow {
+            label: format!("Group {index}"),
+            heading: true,
+            ..Default::default()
+        };
+    }
+    menu.highlight = 4;
+    assert!(
+        !menu_row_selected(&menu, 4),
+        "a heading is never painted selected"
+    );
+    let quads = super::overlays::menu_chrome_quads(
+        &menu,
+        &theme,
+        theme.palette[4],
+        CELL.0,
+        CELL.1,
+        &mut Colors::default(),
+    );
+    let rects = context_menu_row_rects(&menu, CELL);
+    let divider_at = |row: usize| {
+        let (ax, y, w, _) = rects[row].1;
+        quads.iter().any(|q| {
+            (q.pos[0] - (ax + 12.0)).abs() < 0.01
+                && (q.pos[1] - y).abs() < 0.01
+                && (q.size[0] - (w - 24.0)).abs() < 0.01
+                && (q.size[1] - 1.0).abs() < 0.01
+        })
+    };
+    assert!(divider_at(4), "a divider above the second heading");
+    assert!(!divider_at(0), "none above the first row");
+    assert!(!divider_at(2), "none above a command");
+    // The heading reads in secondary text, like a picker's message row.
+    let mut colors = Colors::default();
+    assert_eq!(
+        menu_row_text_color(&menu, &menu.rows[4], &theme, theme.background, &mut colors),
+        colors.secondary(theme.foreground, theme.background)
+    );
+    assert_eq!(menu_row_option(&menu.rows, 0), None);
+    assert_eq!(menu_row_option(&menu.rows, 1), Some(0));
+    assert_eq!(menu_row_option(&menu.rows, 4), None);
+    assert_eq!(menu_row_option(&menu.rows, 5), Some(3));
+    for option in 0..6 {
+        let row = menu_option_row(&menu.rows, option).unwrap();
+        assert_eq!(menu_row_option(&menu.rows, row), Some(option));
+    }
+    assert_eq!(menu_option_row(&menu.rows, 6), None);
 }

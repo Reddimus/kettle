@@ -738,6 +738,7 @@ impl App {
         ws.dragging_split = None;
         self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
+        ws.scrollback_pill_press = None;
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;
@@ -3190,6 +3191,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: *enabled,
             hint,
+            ..Default::default()
         },
         ContextMenuItem::DynamicItem {
             label,
@@ -3204,6 +3206,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: *enabled,
             hint,
+            ..Default::default()
         },
         ContextMenuItem::Separator => ContextMenuRow {
             toggle: None,
@@ -3213,6 +3216,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: true,
             enabled: false,
             hint: String::new(),
+            ..Default::default()
         },
         ContextMenuItem::LuaItem { label, .. } => ContextMenuRow {
             toggle: None,
@@ -3222,6 +3226,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         },
         ContextMenuItem::ConfigItem { label, .. }
         | ContextMenuItem::ReconnectItem { label, .. } => ContextMenuRow {
@@ -3232,6 +3237,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         },
         ContextMenuItem::Submenu { label, .. } => ContextMenuRow {
             toggle: None,
@@ -3242,6 +3248,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint,
+            ..Default::default()
         },
         // ProfileChoice rows only live inside a Submenu, so they
         // reach menu.items (and this arm) after a drill-in swaps the
@@ -3255,6 +3262,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         },
         // New-tab ▾ shell choice — a normal clickable row.
         ContextMenuItem::NewTabShell { label, .. } => ContextMenuRow {
@@ -3265,6 +3273,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint,
+            ..Default::default()
         },
         // URL-aware leading rows ("Open Link" /
         // "Copy Link Address") — normal clickable rows.
@@ -3276,6 +3285,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: true,
             hint: String::new(),
+            ..Default::default()
         },
         // A card's media rows — normal clickable rows.
         ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => {
@@ -3287,6 +3297,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
                 separator: false,
                 enabled: true,
                 hint: String::new(),
+                ..Default::default()
             }
         }
         // Dropdown parity: Info renders as a dimmed
@@ -3299,6 +3310,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: false,
             hint: String::new(),
+            ..Default::default()
         },
     }
 }

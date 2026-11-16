@@ -37,6 +37,7 @@ pub fn hint_label_rect(
 /// `String` so the UI can build them on-demand (e.g. conditionally
 /// enable Copy based on whether a selection exists); the renderer
 /// stays agnostic of the `Action` enum that drives them.
+#[derive(Default)]
 pub struct ContextMenuRow {
     /// Matched Unicode scalar ranges in the displayed label. Ordinary menus
     /// leave this absent and retain their default text color.
@@ -64,6 +65,39 @@ pub struct ContextMenuRow {
     /// name without it.
     /// `None` on every row that is not a toggle.
     pub toggle: Option<MenuToggle>,
+    /// Secondary text two columns after the label that says what the label
+    /// cannot, such as a palette command's "Vertical divider". It is painted
+    /// whole or not at all ([`menu_row_description_left`]). Empty on most
+    /// rows.
+    pub description: String,
+    /// What a screen reader hears after the row's name, in place of the
+    /// hint: the shortcut in words, then the description. `None` reads the
+    /// hint as it is painted.
+    pub a11y_description: Option<String>,
+    /// A group heading, such as the empty palette's "Tabs": painted as a
+    /// disabled row in secondary text, with a divider above it unless it is
+    /// the first row. It is never selected, pressed, or announced as an
+    /// option, and option indices skip it ([`menu_row_option`]).
+    pub heading: bool,
+}
+
+/// The option a picker's row `row` is, counting only rows that can be
+/// selected (no heading or separator): what a picker stores as its selection
+/// and what accessibility numbers. `None` for a heading or separator.
+pub fn menu_row_option(rows: &[ContextMenuRow], row: usize) -> Option<usize> {
+    let is_option = |row: &ContextMenuRow| !row.heading && !row.separator;
+    rows.get(row)
+        .filter(|row| is_option(row))
+        .map(|_| rows[..row].iter().filter(|row| is_option(row)).count())
+}
+
+/// The row option `option` is painted on: [`menu_row_option`]'s inverse.
+pub fn menu_option_row(rows: &[ContextMenuRow], option: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| !row.heading && !row.separator)
+        .nth(option)
+        .map(|(index, _)| index)
 }
 
 /// The state of a menu row that toggles a setting: a check box (on or off)
@@ -118,6 +152,27 @@ pub fn menu_row_chars(row: &ContextMenuRow) -> usize {
 /// Where a row's right-aligned hint starts, given its display width in pixels.
 pub(crate) fn menu_hint_left(ax: f32, panel_w: f32, hint_w: f32) -> f32 {
     (ax + panel_w - 16.0 - hint_w).max(ax + 16.0)
+}
+
+/// Where a row's description starts, two columns after its label, in a panel
+/// `panel_w` wide at `ax`: `None` when the row has none or it would not fit
+/// whole beside the label, its hint and two columns before the hint. A
+/// description is never ellipsized. The painter, and every test of what is
+/// shown, measure the row's own description text here.
+pub fn menu_row_description_left(
+    row: &ContextMenuRow,
+    ax: f32,
+    panel_w: f32,
+    cell_w: f32,
+) -> Option<f32> {
+    use unicode_width::UnicodeWidthStr as _;
+
+    if row.description.is_empty() || row.separator {
+        return None;
+    }
+    let needed = menu_row_chars(row) + 2 + row.description.width();
+    (needed <= menu::panel_columns(panel_w, cell_w))
+        .then(|| ax + 16.0 + (row.label.width() + 2) as f32 * cell_w)
 }
 
 /// The swatch squares of the row at `row_y`, left to right: just left of the
@@ -322,7 +377,14 @@ impl ContextMenu {
         })
     }
 
+    /// The picker's query header ([`Self::picker_header_rect`]).
     pub fn header_rect(&self) -> Rect4 {
+        self.picker_header_rect()
+    }
+
+    /// A picker's query header: as wide as the card, just above its rows and
+    /// any pinned status band between them.
+    pub fn picker_header_rect(&self) -> Rect4 {
         let status_h = self.status.as_ref().map_or(0.0, MenuStatus::height);
         (
             self.anchor.0,
@@ -583,6 +645,11 @@ pub struct Overlay {
     pub scrollbar_active: bool,
     /// Pane whose scrollbar is under the native pointer, including unfocused panes.
     pub scrollbar_hovered_pane: Option<u64>,
+    /// Pane whose jump-to-bottom button is under the pointer, where a press
+    /// would reach it.
+    pub scrollback_pill_hovered: Option<u64>,
+    /// Pane whose jump-to-bottom button took a press not yet released.
+    pub scrollback_pill_pressed: Option<u64>,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
     /// `Some` while the right-click context menu is open. Rendered on
@@ -901,26 +968,81 @@ pub(crate) fn toast_buffer_text(
 
 /// Renderer-side projection of `WindowState::confirm_dialog`.
 /// Stripped of dispatch state — just the bits needed to paint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfirmDialogOverlay {
     /// Prompt text shown at the top of the modal.
     pub heading: String,
     pub body: String,
     /// Button labels in display order (Cancel typically first).
     pub buttons: Vec<ConfirmDialogButton>,
-    /// Which button has focus (idx into `buttons`).
+    /// Which focus stop has focus: an index into `buttons`, or
+    /// `buttons.len()` for the link of `detail`.
     pub focus_idx: usize,
+    /// The hovered and the pressed focus stop, numbered like `focus_idx`.
     pub hover_idx: Option<usize>,
     pub pressed_idx: Option<usize>,
     pub scroll: usize,
+    /// Structured content below the body: what a paste would send.
+    pub detail: Option<ConfirmDialogDetail>,
 }
 
 /// Paint-side button shape. Destructive buttons use a warning accent;
 /// the focused button also has a visible outline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfirmDialogButton {
     pub label: String,
     pub destructive: bool,
+    /// Take the first button's neutral fill instead of the accent: a choice
+    /// that is neither the recommended one nor destructive.
+    pub neutral: bool,
+    /// The letter of `label` underlined as the button's access key.
+    pub access_key: Option<char>,
+}
+
+/// What a paste confirmation shows between its reason and its buttons: a
+/// bounded preview with the control characters marked, what was found, and
+/// the policy that asked with a link to change it. All text arrives resolved;
+/// the renderer wraps and places it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmDialogDetail {
+    /// The preview, logical lines separated by `\n`.
+    pub preview: String,
+    /// Byte ranges of `preview` that spell a control character in ASCII.
+    /// Each is drawn as a chip: warning-coloured letters in an outlined box.
+    /// In order, not overlapping.
+    pub preview_tokens: Vec<std::ops::Range<usize>>,
+    /// What the text holds, one count per part ("2 lines", "1 escape
+    /// sequence"). The parts share a line, separated by a middle dot, while
+    /// they fit; where the line breaks, the dot is left out.
+    pub summary: Vec<String>,
+    /// What each kind of control found does, most serious first.
+    pub findings: Vec<ConfirmDialogFinding>,
+    /// A last row for the kinds `findings` leaves out; empty for none.
+    pub more: String,
+    /// The policy in force, shown above the buttons.
+    pub policy: String,
+    /// A link after the policy text; a focus stop after the last button.
+    /// Empty for none.
+    pub link: String,
+    /// The letter of `link` underlined as its access key.
+    pub link_access_key: Option<char>,
+    /// The whole question as assistive technology reads it, in place of
+    /// `body`: every control character of the preview is spelled as words, so
+    /// it cannot be mistaken for typed text. Never painted.
+    pub description: String,
+}
+
+/// One findings row: the control as the preview spells it, what it does, and
+/// how often it occurs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmDialogFinding {
+    pub token: String,
+    pub meaning: String,
+    pub count: String,
+    /// The control does not reach the program whichever choice is made, and
+    /// `meaning` says so. Its token is drawn as plain text, not in the
+    /// warning colour.
+    pub removed: bool,
 }
 
 /// Most lane images one frame draws: one per pane with a lane.
@@ -1496,11 +1618,12 @@ pub struct TabBar {
     /// Find is open in this window, so the Find button shows as toggled on.
     pub search_open: bool,
     /// Visual indicator that broadcast / group-input mode is
-    /// on. Without this, the user can forget broadcast is enabled and
-    /// type to one pane expecting it to stay local — every keystroke
-    /// goes to every pane in the active tab silently. The renderer
-    /// tints the active tab segment with a warning accent when set;
-    /// inactive tabs (which aren't affected by broadcast) stay normal.
+    /// on in this window. Without this, the user can forget broadcast is
+    /// enabled and type to one pane expecting it to stay local — every
+    /// keystroke goes to every pane in the scope (the tab, the window or a
+    /// named group) silently. The renderer tints the active tab segment with
+    /// a warning accent when set; the panes the input reaches are outlined
+    /// from each `PaneView::broadcast`.
     pub broadcast: bool,
     /// Index of the segment whose `✕` close button is currently
     /// hovered by the mouse — used to draw a hover background so the
@@ -1740,6 +1863,20 @@ pub(crate) fn menu_chrome_quads(
             1.0,
             theme.palette[8],
             0.65,
+        ));
+    }
+    // A heading's divider sits on its top edge, as wide as a separator's.
+    for (_, (_, row_y, _, _)) in context_menu_row_rects(menu, (cw, ch))
+        .into_iter()
+        .filter(|(i, _)| *i > 0 && menu.rows[*i].heading)
+    {
+        out.push(rect(
+            ax + 12.0,
+            row_y,
+            (panel_w - 24.0).max(0.0),
+            1.0,
+            theme.palette[8],
+            0.55,
         ));
     }
     for (_, (_, row_y, _, _)) in context_menu_row_rects(menu, (cw, ch))

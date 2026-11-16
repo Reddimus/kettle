@@ -160,7 +160,9 @@ pub(crate) use accessibility::OutputAnnouncement;
 use accessibility::*;
 pub(crate) use actions::*;
 use automation::*;
-pub(crate) use broadcast::{BroadcastKind, BroadcastRow, broadcast_rows};
+pub(crate) use broadcast::{
+    BroadcastKind, BroadcastRow, broadcast_rows, pane_broadcast_description,
+};
 use chrome::*;
 use clipboard::*;
 use completion::*;
@@ -403,6 +405,9 @@ pub struct App {
     /// Seq of the window that has (or most recently had) OS focus. Routes
     /// window-less events (UserEvent wakeups, remote/ctl/Lua commands).
     focused_seq: u64,
+    /// What the focused window's group broadcast reached in the other
+    /// windows when last checked (`broadcast::foreign_broadcast_reach`).
+    foreign_broadcast_reach: Option<u64>,
     window_focus_order: VecDeque<u64>,
     /// Next `WindowState::seq` to assign (consumed by `open_window`).
     next_window_seq: u64,
@@ -1180,6 +1185,10 @@ impl ApplicationHandler<UserEvent> for App {
                     Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             }
         }
+        // Every window is back in the map: a group broadcast from the focused
+        // window outlines its members in the others, which redraw whenever
+        // what it reaches changed this turn.
+        self.sync_foreign_broadcast_reach();
         if let Some(deadline) = self.config_reload_deadline {
             let deadline =
                 deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
@@ -1239,8 +1248,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// calls `exit()` right after, so this is the last code that runs: no
     /// destructor does, and `run_app` never returns. Hand a running
     /// recording its tail, save the session once more, then run the exit
-    /// teardown (`exit.rs`), which deletes the private copies and waits for
-    /// the session write. Closing the last window reaches here too, with
+    /// teardown (`exit.rs`), which withdraws the control server, deletes the
+    /// private copies and waits for the session write. Closing the last
+    /// window reaches here too, with
     /// nothing left to save.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         let runtime_tracker = self.runtime_tracker.clone();
@@ -1310,6 +1320,9 @@ mod link_hint_ux_tests;
 
 #[cfg(test)]
 mod scrollback_receipt_hit_tests;
+
+#[cfg(test)]
+mod scrollback_indicator_tests;
 
 #[cfg(test)]
 mod scrollbar_tests;

@@ -10,6 +10,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- Scrolled to the very top of a history that has lost its oldest lines, a
+  pane shows **Start of kept history · 10,000 lines** at its top right: where
+  the history Kettle still holds begins and how many lines that is, so the
+  history limit (`scrollback`, or `scrollback-bytes` in a wide pane) is
+  visible where you run into it. It shows only there,
+  never at a live prompt after Clear Scrollback, and without the count in a
+  pane too narrow for it. Screen readers read it as text. No default changes:
+  `scrollback` stays 10,000 lines.
+
+- When the focused pane is scrolled back from its live output, screen
+  readers are given a polite **Viewing history** status. It carries no line
+  count, so scrolling further does not repeat it; the jump button beside it
+  still says how far back the view is. Orca on GNOME speaks it once each
+  time the pane leaves live output; VoiceOver and Narrator are not yet
+  checked.
+
+- Copied files and images paste in Wayland sessions without XWayland. Kettle
+  reads `text/uri-list` (or GNOME's `x-special/gnome-copied-files`) and
+  `image/png` through its own Wayland connection: it decides from the types
+  the clipboard lists and reads what it chose once, within one two-second
+  deadline, so a source that stops sending cannot hold the window. A copied
+  link or remote file pastes its text; a damaged or oversize file list, or an
+  image that cannot be read, pastes nothing and a notification says so.
+
+- Middle-click pastes PRIMARY, and selecting text sets it, natively on Wayland
+  where the compositor has the primary-selection protocol
+  (`zwp_primary_selection_device_manager_v1`). Elsewhere PRIMARY still uses
+  XWayland when it is running.
+
 - A bell in the pane you are looking at now marks the active tab with the
   same bell a background tab gets, until you answer it: the next key, IME
   commit or paste in that pane, a click in it, or moving to another pane or
@@ -235,6 +264,45 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `osc52-notify = false`); blocked OSC 52 reads and writes explain the policy
   once per pane. The README now documents paste choices and accessibility.
 
+- The Confirm paste dialog says why it asked and what it found. Its first
+  sentence names the bracketed-paste end code in the text (`ESC[201~`, or
+  `CSI 201~` for the one-character form), says when a receiving program has
+  bracketed paste off and line breaks will arrive as Enter, or says that the
+  policy is Always. The preview spells each control character in ASCII inside
+  an outlined chip (`ESC`, `^C`, `CSI`) instead of a one-cell control picture,
+  shows a tab as plain space, and moves to the most serious control when that
+  lies beyond the first lines, so nothing before it (a harmless line, a run
+  of tabs or of direction overrides) can hide an end code below it. Up to
+  four findings say what each kind of control does in the current mode, with
+  backspace and delete on separate rows: one that Kettle removes whichever
+  button is chosen says so (the end code always; ESC and the signal keys
+  inside a bracketed paste). When the text holds more than four kinds, the
+  rows go to the end code and the ones that reach the program before the ones
+  a bracketed paste removes. Text-direction formatting
+  characters such as
+  U+202E are listed and counted, and Paste without controls removes them.
+  Counts of zero are gone. The
+  four choices share one row when the window is wide enough and stack edge to
+  edge otherwise; only the recommended one keeps the accent color. A policy
+  line shows the setting in force with a "Paste settings…" link, which pastes
+  nothing and opens Settings on the new Paste protection row. On Linux and
+  Windows each choice has an Alt+letter access key, matched by the letter the
+  keyboard layout types. Screen readers hear control characters as words
+  ("control character escape"). See [Pasting](README.md#pasting).
+
+- Settings > Behavior has rows for Paste protection (`paste-protection`) and
+  Clipboard access by programs (`osc52`: Off, Copy only, Read only, Copy and
+  read).
+
+- OSC 52 notices name the program in the pane's foreground when Kettle can
+  tell which it is, on macOS and Linux: "A program copied 42 characters to
+  the clipboard while vim was in the foreground". Kettle sees the pane, not
+  the sender, so the notice does not claim the foreground program sent the
+  request. Only the program's name is shown, sanitised and at most 32 columns
+  wide; a shell at its prompt is not named. A refused read or copy now points
+  at Settings > Behavior > Clipboard access by programs instead of listing
+  config values.
+
 - Links now highlight under the pointer and show their destination and opening
   gesture in a status pill. Quick-select hints include on-screen help, shorter
   labels that use nearby blank space, and entries in the Edit and terminal
@@ -319,6 +387,109 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   within the same 2048 retained commands.
 
 ### Changed
+
+- Broadcast input now outlines every pane it reaches, not only the one you
+  type in. The sending pane keeps a solid outline in the theme's yellow;
+  each pane that receives its input, under the tab, window or group scope,
+  gets a dashed outline in the same colour, and panes outside the scope, or
+  read-only or held panes it skips, keep the normal divider. A window you
+  are not typing in keeps showing its own scope, which is armed. The yellow
+  is lifted to 3:1 against the pane background where a theme's own falls
+  short (Catppuccin Latte's was about 2.2:1), and a receiving pane's
+  outline, rounded corners included, is kept clear of the unfocused-pane
+  dim. A group broadcast also outlines its members in other windows.
+  Per-pane titlebars use the receive colours only on receiving panes, so a
+  pane outside a group no longer looks like a member. Screen readers
+  describe the sending pane as broadcasting and each receiving pane as
+  receiving broadcast input, and `kettle ctl ui_geometry` reports each
+  pane's `broadcast` role (`sending`, `receiving` or null).
+
+- The **↓ N lines** pill of a scrolled-back pane now reads as the button it
+  is. It has an outline that is at least 3:1 against the terminal on every
+  bundled theme, in an opaque window and at the default 0.99 and 0.86
+  opacities, a hover and a pressed state, and after the count it shows
+  the key bound to `scroll_to_bottom` (Ctrl+End by default). The key follows
+  a rebind and is left out when the action is unbound or the pane is too
+  narrow; the count always shows. Like a native button it now acts when the
+  press is released over it; a release anywhere else, or the pointer
+  leaving the window, cancels it.
+  Screen readers get the key as the button's shortcut, and `kettle ctl
+  ui_geometry` reports the button's state and key hint.
+
+- Text wins over an image when the clipboard offers both, on every platform:
+  cells copied from a spreadsheet paste as text instead of the path of a
+  picture of them. Before, the image won on macOS, Windows and X11. A paste
+  reads copied files first, then text, then an image.
+
+- `paste-files = off` pastes nothing for copied files, on every platform.
+  Before, the paste fell through to the plain-text copy of the paths that
+  file managers put beside the list (on macOS, the file's name), or to an
+  image of the file.
+
+- macOS gains the standard tab, window and select-all chords of Terminal,
+  Safari, iTerm2 and Ghostty: `Shift+Cmd+]` and `Shift+Cmd+[` go to the next
+  and previous tab, `Shift+Cmd+W` closes the window and `Cmd+A` selects all.
+  Window › Next Tab and Previous Tab, Shell › Close Window and Edit › Select
+  All show them, and so do the command palette and the keyboard-shortcut
+  list. `Ctrl+PageDown`/`Ctrl+PageUp` and `Ctrl+Shift+Q` still work, and
+  Linux and Windows keep exactly their chords. The `}` and `{` that AppKit
+  reports for Shift+Cmd+] / [ are the same chord as the brackets, so
+  rebinding or unbinding either spelling replaces the whole chord, and no
+  list shows a brace. While a program owns the keyboard, Shift+Cmd+] / [
+  reach it only when there is one tab, as Cmd+1-9 do; Shift+Cmd+W and Cmd+A
+  stay Kettle's, as Cmd+W and Cmd+C do. Cmd+A selects the whole scrollback
+  and screen, or in the alternate screen the screen the program drew; with
+  Find or another text field open it selects that field's text. On macOS a
+  shortcut hint now always shows the Cmd chord when an action has one,
+  rather than whichever chord has the shorter name; checked against every
+  default action, this changes no hint other than the four above.
+
+- The command palette, the layout picker and the SSH launcher show up to 12
+  rows at a time instead of 8 when the window has room; the theme picker
+  keeps its 14.
+
+- On a HiDPI display the command palette is as wide, in points, as at 1x:
+  56% of the window, from 360 to 720 points. It was held to 720 pixels, so
+  on a 2x Retina display a 1280-point window got a 360-point palette, about
+  43 columns, too narrow for most command descriptions. The painted card,
+  its query header, presses, accessibility and `ctl ui_geometry` all take
+  one layout, so they agree at every scale. The theme, layout and SSH
+  pickers keep their pixel widths.
+
+- Command palette rows can carry a short description after the label, in
+  secondary text, where the label leaves something out: which way a split's
+  divider runs, where a new or duplicated tab or pane starts, that the
+  prompt jumps and output selection need shell integration, and that help
+  opens in the browser. A description is shown whole or not at all. The
+  parenthetical notes that used to sit in five split labels moved there, or
+  were dropped where they only repeated the label, and "About kettle" and
+  "Open kettle help / README" read "About Kettle" and "Open Kettle help".
+  For every query, between equally good matches, a command with a shortcut
+  now ranks first, ahead of a shorter label without one: `split` lists Split
+  right, Split down and Split automatically before Split up and Split left,
+  in English and Spanish, and `tab` lists the tab commands that have
+  shortcuts first. A search of four or more characters that matches fewer
+  than three labels also searches descriptions. For a screen reader each
+  command's name is its label, and its description is the shortcut in words
+  ("Command T" for New tab on macOS, "Control Shift T" elsewhere; never
+  glyphs), then the description; checked with Orca and in the macOS
+  accessibility tree. On Linux each result also exposes its place among all
+  results, not among the rows in view (AT-SPI `posinset`/`setsize`), which
+  Orca reads as "1 of 6" after `split` when its "speak position in set"
+  option is on; macOS's AccessKit adapter does not pass it on.
+
+- With nothing typed, the command palette lists its commands under headings
+  in order of use: Tabs (New tab, Close tab, Next tab, Previous tab first),
+  Splits, Panes, Windows, Search and selection, Scrolling, Text size,
+  Appearance, Terminal, Broadcast input, Previews, Layouts, profiles and SSH,
+  Settings and Help. Profiles sit in their group and update rows under Help.
+  Typing shows the ranked list without headings, and so does the
+  keyboard-shortcut list. Arrows, Enter, the pointer and screen readers skip
+  the headings; screen readers keep one flat list and hear a group's name
+  after its first command. `ctl ui_geometry` leaves headings out of the
+  picker's `rows`; each row's `index` is still its painted row, so the empty
+  palette's first command has `index` 1, and a new `option` field gives the
+  command index that selection, Enter and accessibility use (0 for it).
 
 - The bell marker is a drawn bell instead of a triangle, which read as a
   warning: a round dome, a lip and a clapper, 11 pixels at 1x in the theme's
@@ -555,7 +726,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   goes to a program that reads the mouse or opens the context menu. While
   you drag a selection the cursor stays solid, and it starts blinking again,
   visible, when you let go. Moving the pointer and scrolling leave the blink
-  alone, and its timing is unchanged.
+  alone.
+
+- The cursor stays visible for one whole blink period, 1.06 s at the default
+  `cursor-blink-interval = 530`, after anything that restarts its blink: a
+  key, a paste, a click in the terminal, focus, Reset, closing an overlay, a
+  setting change, or a program switching the blink on or off (DEC mode 12).
+  It used to go dark half a period (0.53 s) after any of them, so a glance
+  or a screenshot just after touching the terminal could find no cursor.
+  After the hold it blinks on and off with the same half-period as before,
+  and typing keeps it solid. It still stops, visible, after
+  `cursor-blink-timeout`, and `cursor-blink = false` is unchanged. On macOS
+  the window server takes over an idle window's blink at the end of the hold
+  at the earliest and shows the same timing. GTK text views hold their
+  cursor for about one blink period after a key or a click in the same way.
 
 - An unfocused window's selection keeps a 2:1 contrast with the background
   (was 1.5:1), so it stays visible while still quieter than the focused one.
@@ -676,6 +860,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
+  allowed 256 MiB) and decoded with limits set before any pixel memory is
+  allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults
+  had no side limit and allowed 512 MiB. On Wayland the image is decoded off
+  the window thread and re-encoded, so the temporary file never carries the
+  source's own bytes or metadata.
+
 - Notification text from programs and scripts is stripped of Unicode bidi
   formatting characters, which could reorder what a notification says, as
   well as control characters, before it reaches the desktop, the toast or
@@ -691,6 +882,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A paste carrying a bracketed-paste end marker (`ESC [201~`) now asks first
   even where bracketed paste is on, as such text was made to escape it. Kettle
   still removes the marker whichever choice is made.
+
 - Update pulldown-cmark to 0.13.6, fixing quadratic parsing of nested image
   wikilinks (RUSTSEC-2026-0433, #763), and async-executor to 1.14.1, replacing
   a yanked release.
@@ -706,6 +898,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- The one-character form of the bracketed-paste end marker (U+009B followed
+  by `201~`) opened the Confirm paste dialog and was then sent on by Paste
+  and by Paste as one line. Both markers are now removed in that form too, in
+  every mode.
+
+- Inside a bracketed paste Kettle now drops the bytes a terminal turns into a
+  signal before the program reads them: 0x03 (interrupt), 0x1A (suspend) and
+  0x1C (quit), and 0x19 (delayed suspend) on macOS. A shell interrupted in the
+  middle of a paste left bracketed mode and ran the rest as typed input.
+  Alacritty, Ghostty and VTE neutralize the interrupt byte in pasted text too.
+
+- With `vim-menu-nav`, `y` in the Confirm paste dialog sent the raw text even
+  when it held control characters. A bare letter can be typed ahead of the
+  dialog, so `y` now only takes Paste without controls, and only when that
+  text cannot run a line: every receiving program has bracketed paste on, or
+  the cleaned text has no line break. Otherwise, and when the recommended
+  choice is the plain Paste, `y` does nothing: press Enter on the focused
+  button, or use its access key.
+
+- An answer given in the Confirm paste dialog while every receiving program
+  had bracketed paste on was used even when one of them turned it off before
+  the answer. The text then arrived outside bracketed paste: each line break
+  as Enter, with `ESC` and the signal keys intact. Kettle now sends nothing
+  in that case and asks again, describing the paste for the mode the program
+  is in. The new question opens by saying the program stopped using bracketed
+  paste after the answer, so nothing was pasted. A choice with no line break or control character left in it, such as
+  Paste as one line, is sent as before.
+
+- Up and Down in a confirmation whose buttons are stacked move focus from one
+  button to the next. They only scrolled the text, which did nothing visible
+  when it fit. A row of buttons keeps Up and Down for scrolling, except in the
+  Confirm paste dialog, where they reach the Paste settings link above the
+  row. PageUp, PageDown, Home and End scroll every confirmation.
 
 - A crash, `kill -9`, power loss or a logout that hangs no longer loses the
   last changes to a saved session. Kettle saved every tab, split and window
@@ -772,6 +998,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   time, so a process that later gets the same pid does not keep one alive;
   one written by an earlier release goes once the entry it names is gone or
   belongs to a process that is gone. A running server's pointer stays.
+
+- On macOS, quitting Kettle with ⌘Q, Quit in the app or Dock menu, or by
+  logging out no longer leaves its control server's files behind. These
+  quits end in AppKit's `exit()`, which ran none of the server's shutdown,
+  so each left `<pid>.json` and `ctl-<pid>.sock` in the registry, and a
+  `<pid>.alias.json` pointer for a Kettle whose registry is elsewhere, until
+  a later Kettle's cleanup found them. Quitting, on every platform, now
+  removes them first, before Kettle waits for the session write, so a client
+  no longer finds a Kettle that is quitting. A Kettle stopped by a signal, or
+  ended by Windows at logoff or shutdown, still leaves them to that cleanup.
+
+- Kettle's own tests and smokes no longer read, prune or add to the control
+  registry directory the OS names for the account that runs them. A Kettle
+  under test with a private `XDG_RUNTIME_DIR` still published its pointer
+  in, and pruned, `~/.local/state/kettle/ctl`, and `kettle mcp` and the
+  `kettle` crate's unit tests looked for servers there, so a suite run inside
+  Kettle could reach the Kettle it ran in. `KETTLE_TEST_OS_CTL_DIR`, for
+  tests and smokes only, names the directory to use instead of every one the
+  OS names; a value that is not an absolute path names none. On Windows,
+  where the registry is that directory, it moves the registry too. The test
+  suites and smokes set it, and the `kettle` crate's unit tests no longer
+  look for a running Kettle at all.
 
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
@@ -954,8 +1202,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   symbol font could claim first.
 
 - Copy and paste of text work in Wayland sessions without XWayland, including
-  GNOME, OSC 52 copies included. Middle-click PRIMARY and image or file paste
-  still use XWayland where it is available.
+  GNOME, OSC 52 copies included.
 
 - With grapheme clustering on, Indic spacing marks and conjuncts and Thai/Lao
   spacing vowels now reserve two cells, VS15 text variants of default emoji

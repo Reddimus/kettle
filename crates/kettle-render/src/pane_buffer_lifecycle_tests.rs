@@ -189,6 +189,7 @@ fn context_menu_hover_preserves_text_damage_key() {
                 separator: false,
                 enabled: true,
                 hint: "Ctrl+Shift+C".to_string(),
+                ..Default::default()
             },
             super::ContextMenuRow {
                 toggle: None,
@@ -198,6 +199,7 @@ fn context_menu_hover_preserves_text_damage_key() {
                 separator: false,
                 enabled: true,
                 hint: "Ctrl+Shift+V".to_string(),
+                ..Default::default()
             },
         ],
         highlight: 0,

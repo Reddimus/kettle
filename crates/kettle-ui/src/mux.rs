@@ -1247,6 +1247,17 @@ impl Pane {
         path_argv_with_default(&self.argv, self.term.default_shell_program.as_ref())
     }
 
+    /// Why this pane refuses user input, if it does: its PTY input failed, or
+    /// it is read-only or held after its shell exited. [`Self::feed_input`]
+    /// and the broadcast outlines (`BroadcastRoles`) read the same answer, so
+    /// a pane is outlined as receiving exactly when broadcast input reaches it.
+    pub(crate) fn input_refusal(&self) -> Option<PaneInputResult> {
+        pane_input_policy(
+            !self.held && self.pty_input.failed(),
+            self.read_only || self.held,
+        )
+    }
+
     /// Terminator parity: write user-originated input (keystroke /
     /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
     /// toggle. Returns the explicit enqueue outcome. VTE
@@ -1255,10 +1266,7 @@ impl Pane {
     /// `send_text`/`run_command`), NOT the terminal protocol. Both paths share
     /// the bounded PTY-input worker so neither can block the UI.
     pub fn feed_input(&self, bytes: &[u8]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(
-            !self.held && self.pty_input.failed(),
-            self.read_only || self.held,
-        ) {
+        if let Some(result) = self.input_refusal() {
             return result;
         }
         if bytes.len() > MAX_USER_INPUT_MESSAGE_BYTES {
@@ -1271,10 +1279,7 @@ impl Pane {
     /// the room its input keeps for releases, so a full queue never leaves
     /// the program holding the press.
     pub fn feed_mouse_release(&self, bytes: &[u8]) -> PaneInputResult {
-        if let Some(result) = pane_input_policy(
-            !self.held && self.pty_input.failed(),
-            self.read_only || self.held,
-        ) {
+        if let Some(result) = self.input_refusal() {
             return result;
         }
         let bytes: Arc<[u8]> = Arc::from(bytes);
@@ -5667,7 +5672,10 @@ pub(crate) enum PaneShellKind {
     Cmd,
 }
 
-fn path_argv_with_default<'a>(argv: &'a [String], default: Option<&'a String>) -> &'a [String] {
+pub(crate) fn path_argv_with_default<'a>(
+    argv: &'a [String],
+    default: Option<&'a String>,
+) -> &'a [String] {
     if argv.is_empty()
         && let Some(program) = default
     {
