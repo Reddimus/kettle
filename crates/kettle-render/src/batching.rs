@@ -1177,11 +1177,23 @@ fn fit_emoji_images(
     let (sx, sy) = (w as f32 / width, h as f32 / height);
     let mut fitted = Vec::with_capacity(glyphs.len());
     for (glyph, &(key, natural)) in glyphs.iter().zip(keys) {
-        let left = x + ((glyph.pos[0] - bounds.0) * sx).round() as i32;
-        let top = y + ((glyph.pos[1] - bounds.1) * sy).round() as i32;
-        let right = x + ((glyph.pos[0] + glyph.size[0] - bounds.0) * sx).round() as i32;
-        let bottom = y + ((glyph.pos[1] + glyph.size[1] - bounds.1) * sy).round() as i32;
-        let size = [(right - left).max(1) as u32, (bottom - top).max(1) as u32];
+        let (left, right) = fitted_span(
+            glyph.pos[0],
+            glyph.pos[0] + glyph.size[0],
+            bounds.0,
+            sx,
+            x,
+            w,
+        );
+        let (top, bottom) = fitted_span(
+            glyph.pos[1],
+            glyph.pos[1] + glyph.size[1],
+            bounds.1,
+            sy,
+            y,
+            h,
+        );
+        let size = [(right - left) as u32, (bottom - top) as u32];
         let Some(slot) = source.fitted(key, natural, size) else {
             return false;
         };
@@ -1198,6 +1210,26 @@ fn fit_emoji_images(
         glyph.kind = slot.kind;
     }
     true
+}
+
+/// The whole-pixel span `[lo, hi)` an image edge pair `start..end` (shaped
+/// pixels, measured from the cluster union's edge `origin`) takes when the
+/// union is scaled by `scale` onto the fitted span `at..at + len`: the scaled
+/// edges rounded, at least one pixel wide and never outside the fitted span.
+/// A sliver of a mark at the union's far edge, which rounds to nothing there,
+/// keeps its last pixel inside rather than spilling past it.
+pub(crate) fn fitted_span(
+    start: f32,
+    end: f32,
+    origin: f32,
+    scale: f32,
+    at: i32,
+    len: i32,
+) -> (i32, i32) {
+    let limit = at + len.max(1);
+    let lo = (at + ((start - origin) * scale).round() as i32).clamp(at, limit - 1);
+    let hi = (at + ((end - origin) * scale).round() as i32).clamp(lo + 1, limit);
+    (lo, hi)
 }
 
 fn fit_emoji_glyphs(glyphs: &mut [GlyphInstance], cell: Rect4) {

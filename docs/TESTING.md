@@ -2015,15 +2015,24 @@ it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
 `emoji_fit_tests` pin how an emoji reaches the screen at 13, 14 and 17 px and
 1x, 1.5x and 2x. Without a GPU or any emoji font, they check that the fitted
 rectangle is whole pixels inside the row less its margin and fills it in one
-dimension, and that the grid emit draws each image of a cluster (lightning, and
-lightning plus a combining acute) 1:1 from an image of exactly that size,
-through a synthetic glyph source. `emoji_raster`'s unit tests check the area
-resampler on integer and fractional ratios, upsampling and a transparent pixel
-whose colour must not tint its neighbour. With a colour emoji face (Apple Color
-Emoji on macOS, Noto Color Emoji on the Ubuntu runner image),
-`a_colour_bitmap_emoji_is_an_area_average_of_its_largest_strike` compares 😀,
-❤️ and 👩‍💻 against an independent per-pixel integration of the largest strike;
-it reports `EMOJI_FONT_SKIP` without one. The GPU tests draw lightning and a
+dimension, that a sliver of an image at a cluster's edge keeps a pixel inside
+the fitted rectangle, and that the grid emit draws each image of a cluster
+(lightning, and lightning plus a combining acute) 1:1 from an image of exactly
+that size, through a synthetic glyph source. The block cursor's claim on a
+cluster is checked against the cursor buffer's eight-image limit without a
+GPU. `emoji_raster`'s unit tests check the area resampler on integer and
+fractional ratios, upsampling, linear-light averaging of colour (black beside
+white is sRGB 188) and a transparent pixel whose colour must not tint its
+neighbour, and that sources stay bounded: no strike above 256 ppem, and no
+outline above 512 ppem for any font size.
+`an_outline_emoji_is_an_area_average_of_its_larger_outline` checks the outline
+path with the bundled lightning on every host. With a colour emoji face (Apple
+Color Emoji on macOS, Noto Color Emoji on the Ubuntu runner image, Segoe UI
+Emoji on Windows), `a_colour_emoji_is_an_area_average_of_its_source` compares
+😀, ❤️ and 👩‍💻 against an independent per-pixel integration, in linear
+light, of the source each must use: the largest strike for a bitmap face, the
+larger outline for a COLR one. It reports `EMOJI_FONT_SKIP` without a face or
+when the face lacks every fixture. The GPU tests draw lightning and a
 colour 😀 in a real frame (1:1, inside the row), compare an emoji cell with the
 block cursor on and off it in an opaque window (no pixel may change), and
 check that one glyph fitted at two widths keeps two images and that a font-size

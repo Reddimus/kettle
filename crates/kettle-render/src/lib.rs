@@ -6023,30 +6023,18 @@ impl Renderer {
         // monochrome image in it takes the cursor's text colour. A cell the
         // pane did not draw as an emoji cluster (a replacement character, a
         // missing glyph) keeps the glyphon cursor pass.
-        let emoji_cursor = cursor_glyph.is_none().then(|| {
-            let cursor = self.pending_cursor_glyph.as_ref()?;
-            let (cell, color) = (cursor.emoji?, cursor.color);
-            let images = self.emoji_cells.iter().find(|images| {
-                images.pane == cell.pane && images.line == cell.line && images.column == cell.column
-            })?;
-            let range = images.instances.clone();
-            let mut glyphs = self
-                .glyph_instances
-                .get(range.start as usize..range.end as usize)?
-                .to_vec();
-            for glyph in &mut glyphs {
-                if glyph.kind == 1 {
-                    glyph.color = [
-                        f32::from(color.r) / 255.0,
-                        f32::from(color.g) / 255.0,
-                        f32::from(color.b) / 255.0,
-                        1.0,
-                    ];
-                }
-            }
-            Some((glyphs, cell.pane, range))
-        });
-        let emoji_cursor = emoji_cursor.flatten();
+        let emoji_cursor = cursor_glyph
+            .is_none()
+            .then(|| {
+                let cursor = self.pending_cursor_glyph.as_ref()?;
+                terminal::emoji_cursor_images(
+                    &self.emoji_cells,
+                    &self.glyph_instances,
+                    cursor.emoji?,
+                    cursor.color,
+                )
+            })
+            .flatten();
         self.cursor_emoji_bounds = emoji_cursor.as_ref().and_then(|(glyphs, _, _)| {
             let x0 = glyphs.iter().map(|g| g.pos[0]).reduce(f32::min)?;
             let y0 = glyphs.iter().map(|g| g.pos[1]).reduce(f32::min)?;

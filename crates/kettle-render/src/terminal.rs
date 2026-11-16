@@ -326,6 +326,40 @@ pub(crate) struct EmojiCursorCell {
     pub(crate) column: usize,
 }
 
+/// The images the block cursor redraws for the emoji cluster at `cell`: the
+/// pane's own uploaded `instances` of it, a monochrome one in the cursor text
+/// `color`, with the pane rect that clips them and their instance range.
+/// `None`, leaving the cell to the glyphon cursor pass, when the pane drew no
+/// emoji cluster there or drew it as more images than the cursor buffer holds.
+pub(crate) fn emoji_cursor_images(
+    cells: &[PaneEmojiCell],
+    instances: &[super::GlyphInstance],
+    cell: EmojiCursorCell,
+    color: Rgb,
+) -> Option<(Vec<super::GlyphInstance>, [f32; 4], std::ops::Range<u32>)> {
+    let images = cells.iter().find(|images| {
+        images.pane == cell.pane && images.line == cell.line && images.column == cell.column
+    })?;
+    let range = images.instances.clone();
+    if range.is_empty() || range.len() > super::glyphpipe::MAX_CURSOR_GLYPHS {
+        return None;
+    }
+    let mut glyphs = instances
+        .get(range.start as usize..range.end as usize)?
+        .to_vec();
+    for glyph in &mut glyphs {
+        if glyph.kind == 1 {
+            glyph.color = [
+                f32::from(color.r) / 255.0,
+                f32::from(color.g) / 255.0,
+                f32::from(color.b) / 255.0,
+                1.0,
+            ];
+        }
+    }
+    Some((glyphs, cell.pane, range))
+}
+
 pub(crate) fn invalidate_pane_titlebar_texts(texts: &mut [String]) {
     texts.iter_mut().for_each(String::clear);
 }

@@ -14,15 +14,19 @@ use glyphon::cosmic_text::{CacheKey, FontSystem, SwashCache, SwashContent};
 use super::glyphpipe::GlyphSlot;
 
 /// The largest colour-bitmap strike used as a source, in pixels per em. A
-/// face whose every strike is larger uses its smallest.
-const MAX_SOURCE_PPEM: u16 = 256;
+/// glyph whose every strike is larger keeps its shaped-size image instead.
+pub(crate) const MAX_SOURCE_PPEM: u16 = 256;
+
+/// The most pixels a source image may have, whatever its strike or outline
+/// size claimed: resampling holds four `f32`s per source pixel.
+pub(crate) const MAX_SOURCE_PIXELS: u64 = 1 << 20;
 
 /// Source pixels per target pixel for an outline (or COLR) emoji, which is
 /// drawn at that multiple of its target size and averaged down.
 const OUTLINE_SUPERSAMPLE: f32 = 4.0;
 
 /// The largest outline source, in pixels per em.
-const MAX_OUTLINE_PPEM: f32 = 512.0;
+pub(crate) const MAX_OUTLINE_PPEM: f32 = 512.0;
 
 /// A fitted emoji image: straight-alpha RGBA when `color`, else coverage.
 #[derive(Debug)]
@@ -34,36 +38,58 @@ pub(crate) struct FittedRaster {
 }
 
 /// The pixels-per-em to rasterize `key` at as the source of a `target_height`
-/// image whose shaped-size image is `natural_height` pixels tall.
+/// image whose shaped-size image is `natural_height` pixels tall, or `None`
+/// when no bounded source exists.
 ///
 /// A colour bitmap face is read from its largest strike that holds the glyph
-/// (at most [`MAX_SOURCE_PPEM`]), which swash returns unscaled. Anything else
-/// is drawn at [`OUTLINE_SUPERSAMPLE`] times the target.
+/// and is at most [`MAX_SOURCE_PPEM`], which swash returns unscaled; a glyph
+/// whose strikes are all larger has no bounded source. Anything else is drawn
+/// as an outline (see [`outline_source_ppem`]).
 pub(crate) fn source_ppem(
     fonts: &mut FontSystem,
     key: CacheKey,
     natural_height: u32,
     target_height: u32,
-) -> f32 {
+) -> Option<f32> {
     let font_size = f32::from_bits(key.font_size_bits);
     if let Some(font) = fonts.get_font(key.font_id, key.font_weight) {
-        let face = font.as_swash();
-        let mut sizes: Vec<u16> = face
+        let strikes: Vec<u16> = font
+            .as_swash()
             .color_strikes()
             .filter(|strike| strike.contains(key.glyph_id))
             .map(|strike| strike.ppem())
-            .filter(|&ppem| ppem > 0)
             .collect();
-        sizes.sort_unstable();
-        if let Some(&largest) = sizes.iter().rev().find(|&&ppem| ppem <= MAX_SOURCE_PPEM) {
-            return f32::from(largest);
-        }
-        if let Some(&smallest) = sizes.first() {
-            return f32::from(smallest);
+        if !strikes.is_empty() {
+            return pick_strike(&strikes).map(f32::from);
         }
     }
+    Some(outline_source_ppem(
+        font_size,
+        natural_height,
+        target_height,
+    ))
+}
+
+/// The largest of a glyph's colour-bitmap strike sizes that is at most
+/// [`MAX_SOURCE_PPEM`], or `None` when every one is larger.
+pub(crate) fn pick_strike(sizes: &[u16]) -> Option<u16> {
+    sizes
+        .iter()
+        .copied()
+        .filter(|&ppem| ppem > 0 && ppem <= MAX_SOURCE_PPEM)
+        .max()
+}
+
+/// The size to draw an outline (or COLR) glyph at as the source of a
+/// `target_height` image: [`OUTLINE_SUPERSAMPLE`] times the target, at least
+/// the shaped `font_size` and never more than [`MAX_OUTLINE_PPEM`], even when
+/// the font size alone exceeds it.
+pub(crate) fn outline_source_ppem(font_size: f32, natural_height: u32, target_height: u32) -> f32 {
     let scale = target_height.max(1) as f32 / natural_height.max(1) as f32;
-    (font_size * scale * OUTLINE_SUPERSAMPLE).clamp(font_size, MAX_OUTLINE_PPEM)
+    (font_size * scale * OUTLINE_SUPERSAMPLE)
+        .max(font_size)
+        .min(MAX_OUTLINE_PPEM)
+        .max(1.0)
 }
 
 /// `key`'s image resampled to exactly `size` pixels, its shaped-size image
@@ -79,7 +105,7 @@ pub(crate) fn fitted_emoji_raster(
     if width == 0 || height == 0 {
         return None;
     }
-    let ppem = source_ppem(fonts, key, natural.h as u32, height);
+    let ppem = source_ppem(fonts, key, natural.h as u32, height)?;
     let (source, _, _) = CacheKey::new(
         key.font_id,
         key.glyph_id,
@@ -95,7 +121,11 @@ pub(crate) fn fitted_emoji_raster(
         SwashContent::SubpixelMask => return None,
     };
     let (sw, sh) = (image.placement.width, image.placement.height);
-    if sw == 0 || sh == 0 || image.data.len() != (sw * sh) as usize * channels {
+    if sw == 0
+        || sh == 0
+        || u64::from(sw) * u64::from(sh) > MAX_SOURCE_PIXELS
+        || image.data.len() != (sw * sh) as usize * channels
+    {
         return None;
     }
     Some(FittedRaster {
@@ -109,8 +139,9 @@ pub(crate) fn fitted_emoji_raster(
 /// Resample a `channels`-channel (1 or 4) image of `from` pixels to `to`
 /// pixels by area averaging: each target pixel is the mean of the source area
 /// it covers, weighted by overlap. Four-channel images are straight-alpha
-/// RGBA and are averaged premultiplied, so a transparent pixel's colour never
-/// tints its neighbours.
+/// sRGB RGBA and are averaged as premultiplied linear light, so a transparent
+/// pixel's colour never tints its neighbours and fine light-on-dark detail
+/// keeps its brightness. One-channel coverage is already linear.
 pub(crate) fn area_resample(src: &[u8], from: [u32; 2], channels: usize, to: [u32; 2]) -> Vec<u8> {
     let ([sw, sh], [dw, dh]) = (from.map(|v| v as usize), to.map(|v| v as usize));
     if dw == 0 || dh == 0 {
@@ -120,15 +151,16 @@ pub(crate) fn area_resample(src: &[u8], from: [u32; 2], channels: usize, to: [u3
         return vec![0; dw * dh * channels];
     }
     let premultiplied: Vec<f32> = if channels == 4 {
+        let decode: [f32; 256] = std::array::from_fn(|v| srgb_to_linear(v as f32 / 255.0));
         src.as_chunks::<4>()
             .0
             .iter()
             .flat_map(|p| {
                 let a = f32::from(p[3]) / 255.0;
                 [
-                    f32::from(p[0]) * a,
-                    f32::from(p[1]) * a,
-                    f32::from(p[2]) * a,
+                    decode[usize::from(p[0])] * a,
+                    decode[usize::from(p[1])] * a,
+                    decode[usize::from(p[2])] * a,
                     f32::from(p[3]),
                 ]
             })
@@ -168,7 +200,7 @@ pub(crate) fn area_resample(src: &[u8], from: [u32; 2], channels: usize, to: [u3
                 if alpha > 0.0 {
                     let unmultiply = 255.0 / alpha;
                     for c in 0..3 {
-                        target[c] = to_byte(pixel[c] * unmultiply);
+                        target[c] = to_byte(linear_to_srgb(pixel[c] * unmultiply) * 255.0);
                     }
                 }
                 target[3] = to_byte(alpha);
@@ -182,6 +214,25 @@ pub(crate) fn area_resample(src: &[u8], from: [u32; 2], channels: usize, to: [u3
 
 fn to_byte(value: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
+}
+
+/// An sRGB-encoded channel in `0..=1` as linear light.
+pub(crate) fn srgb_to_linear(encoded: f32) -> f32 {
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light in `0..=1` as an sRGB-encoded channel.
+pub(crate) fn linear_to_srgb(linear: f32) -> f32 {
+    let linear = linear.clamp(0.0, 1.0);
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// For each of `to` target pixels along one axis, the source pixels it covers
@@ -236,6 +287,46 @@ mod tests {
         let src = [255, 0, 0, 255, 0, 255, 0, 0];
         let out = area_resample(&src, [2, 1], 4, [1, 1]);
         assert_eq!(out, vec![255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn colour_is_averaged_in_linear_light() {
+        // Opaque black beside opaque white: half the light is sRGB 188, not
+        // the 128 an average of the encoded values gives.
+        let src = [0, 0, 0, 255, 255, 255, 255, 255];
+        assert_eq!(
+            area_resample(&src, [2, 1], 4, [1, 1]),
+            vec![188, 188, 188, 255]
+        );
+        // Coverage is linear already.
+        assert_eq!(area_resample(&[0, 255], [2, 1], 1, [1, 1]), vec![128]);
+    }
+
+    #[test]
+    fn a_strike_above_the_cap_is_never_a_source() {
+        assert_eq!(pick_strike(&[20, 40, 160]), Some(160));
+        assert_eq!(pick_strike(&[300, 160, 20]), Some(160));
+        assert_eq!(pick_strike(&[MAX_SOURCE_PPEM]), Some(MAX_SOURCE_PPEM));
+        // Only strikes above the cap: no source, so the cluster keeps its
+        // shaped-size image rather than decoding a huge one.
+        assert_eq!(pick_strike(&[512]), None);
+        assert_eq!(pick_strike(&[4096, 1024]), None);
+        assert_eq!(pick_strike(&[0]), None);
+    }
+
+    #[test]
+    fn an_outline_source_is_bounded_for_any_font_size() {
+        for font_size in [1.0f32, 13.0, 100.0, 511.0, 512.0, 600.0, 4096.0, f32::MAX] {
+            for (natural, target) in [(0, 0), (13, 14), (13, 13), (600, 600), (1, 4096)] {
+                let ppem = outline_source_ppem(font_size, natural, target);
+                assert!(
+                    (1.0..=MAX_OUTLINE_PPEM).contains(&ppem),
+                    "{font_size} px, {natural} -> {target}: {ppem}"
+                );
+            }
+        }
+        // Four times the target where that fits.
+        assert!((outline_source_ppem(13.0, 13, 14) - 56.0).abs() < 1e-3);
     }
 
     #[test]
