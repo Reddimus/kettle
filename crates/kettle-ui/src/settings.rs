@@ -1286,6 +1286,13 @@ pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
             for value in [Text::SettingsValueOn, Text::SettingsValueOff] {
                 cols = cols.max(width(tr.text(value)));
             }
+            // The words `row_value` shows instead while this session cannot
+            // blur, or is still asking whether it can.
+            if field.key == "window-blur" {
+                for value in [Text::SettingsValueChecking, Text::SettingsValueUnavailable] {
+                    cols = cols.max(width(tr.text(value)));
+                }
+            }
         }
         FieldKind::Choice { values, labels } => match labels {
             Some(labels) => {
@@ -3575,6 +3582,61 @@ mod control_size_tests {
                 )
             })
             .collect()
+    }
+
+    /// The Window blur switch keeps one width through every state it can
+    /// show (On, Off, Checking…, Unavailable) in English and Spanish, so a
+    /// Wayland probe or an unavailable session never moves its edge or the
+    /// Reset chip beside it.
+    #[test]
+    fn window_blur_keeps_one_width_through_its_states() {
+        let cats = categories(&[]);
+        let blur = cats
+            .iter()
+            .flat_map(|c| &c.fields)
+            .find(|f| f.key == "window-blur")
+            .unwrap();
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            for surface in [(1280.0_f32, 820.0_f32), (640.0, 820.0)] {
+                let mut chips = Vec::new();
+                for saved in [true, false] {
+                    let cfg = Config {
+                        window_blur: saved,
+                        ..Config::default()
+                    };
+                    for state in [
+                        BlurState::Available,
+                        BlurState::Checking,
+                        BlurState::Unavailable,
+                    ] {
+                        let set = kettle_render::SettingsOverlay {
+                            rows: vec![kettle_render::SettingsRow {
+                                label: tr.text(blur.label).into(),
+                                value: row_value(blur, state, &cfg, &tr),
+                                control: kettle_render::SettingsControl::Toggle(saved),
+                                unavailable: state != BlurState::Available,
+                                value_cols: field_value_cols(&cfg, blur, &tr),
+                                reset: Some(!saved),
+                                ..Default::default()
+                            }],
+                            reset_label: tr.text(Text::SettingsResetButton).into(),
+                            ..Default::default()
+                        };
+                        let layout =
+                            kettle_render::settings_layout(&set, (8.4, 17.5), surface, 8.4);
+                        chips.push((saved, state, layout.rows[0].chip_rect));
+                    }
+                }
+                let first = chips[0].2;
+                for (saved, state, chip) in &chips {
+                    assert_eq!(
+                        *chip, first,
+                        "{language:?} {surface:?} saved {saved} {state:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Every row's widest value, in English and Spanish, shows whole in the
