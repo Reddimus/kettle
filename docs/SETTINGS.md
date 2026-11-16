@@ -8,7 +8,13 @@ The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
 control. On/Off switches show their state with a knob as well as the label,
 choices have arrows, and quantities
-show their units. Below a panel width of 640 pixels, categories become a
+show their units. A control keeps one width while its value changes. The
+highlighted option has a bar at its left edge as well as a tint. An option
+you have changed shows a **Reset** button beside its value; the highlighted
+option shows it dimmed when it already holds its default. Where a row is
+too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
+the narrowest rows it is left out (Delete still resets). Below a panel width
+of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
 or right overflow arrow, or scroll over the strip, to page toward earlier or
 later categories. The selected category stays visible. Long labels, descriptions
@@ -32,15 +38,19 @@ assistive technology cancels any pending keybinding capture.
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | ← / → | Change the highlighted option |
-| Delete / Backspace | Reset the highlighted setting to its default (not the theme, GPU, shortcut or text rows) |
+| Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
 | Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
 
 The panel is also fully **mouse-driven**: **left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
-adjust it, **click a category** to switch pages, and **click outside** the
-panel to close. (A keybind row starts capture on click, the image-path row opens
+adjust it, **left-click Reset** to restore a changed row's default, **click
+a category** to switch pages, and **click outside** the panel to close. A
+right-click or the wheel over Reset acts on the row as anywhere else on it.
+Screen readers get one Reset button for the highlighted row, named for the
+row and the default it restores ("Reset Font size to 14 px") and marked
+unavailable while the row holds that default. (A keybind row starts capture on click, the image-path row opens
 an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
@@ -91,7 +101,7 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 | Minimum contrast | `minimum-contrast` | Off (default) · 3 · 4.5 · 7, each a ratio to 1; lifts terminal text colours toward white or black until each reads at that ratio on its background. A ratio set by hand in the config (such as 2.5) shows as it is until you step it. The theme picker's **Contrast:** button steps the same values |
 | Font size | `font-size` | 6–72 px |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the row says "Not available in this session; opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On |
 | Window padding | `window-padding-x` | 0–40 px |
 | Cursor shape | `cursor-style` | Block · Bar · Underline; applies to running panes immediately |
 | Unfocused cursor | `cursor-unfocused-style` | Hollow (default) · Hidden · Unchanged; windows and inactive split panes; applies live |

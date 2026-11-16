@@ -276,6 +276,7 @@ fn cursor_glyph_damage_key_reuses_only_identical_vertices() {
         clip: (0.0, 0.0, 100.0, 80.0),
         marks: Vec::new(),
         builtin: None,
+        emoji: None,
     };
     let initial = super::cursor_glyph_damage_key(
         Some(&cursor),

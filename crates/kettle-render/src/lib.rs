@@ -13,6 +13,7 @@ mod background;
 mod batching;
 mod capture;
 mod completion;
+mod emoji_raster;
 mod fonts;
 mod geometry;
 mod gpu;
@@ -114,9 +115,7 @@ use gpu::{
     try_adapter_candidates,
 };
 use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
-use labels::{
-    display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
-};
+use labels::{fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front};
 /// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
 pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
 /// Space around the size chip's text, in pixels.
@@ -124,7 +123,9 @@ const RESIZE_CHIP_PAD: f32 = 14.0;
 /// Size of a tab's close `×` relative to its title.
 pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
-pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label};
+pub use labels::{
+    display_width, fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label,
+};
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
@@ -180,8 +181,9 @@ use search::{
 use search::{search_bar_text, search_editor_label, search_focused_label};
 pub use settings::{
     SettingsControl, SettingsHit, SettingsLayout, SettingsOverlay, SettingsPanelGeometry,
-    SettingsRow, SettingsRowGeometry, settings_hit_test, settings_hit_test_with_text_width,
-    settings_layout, settings_panel_geometry, settings_value_rect,
+    SettingsResetChip, SettingsRow, SettingsRowGeometry, settings_control_height,
+    settings_hit_test, settings_hit_test_with_text_width, settings_layout, settings_panel_geometry,
+    settings_value_rect,
 };
 use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
@@ -412,6 +414,12 @@ pub struct Renderer {
     /// pane's text is clipped to its own rect at draw time (persists across idle
     /// frames alongside the instance buffer).
     glyph_clips: Vec<GlyphClip>,
+    /// The emoji clusters in `glyph_instances`, so the block cursor draws a
+    /// cluster from the pane's own images (see `PaneEmojiCell`).
+    emoji_cells: Vec<terminal::PaneEmojiCell>,
+    /// Where the block cursor redraws an emoji cluster from the pane's own
+    /// images (`[x, y, w, h]`), or `None` when glyphon draws its glyph.
+    cursor_emoji_bounds: Option<[f32; 4]>,
     /// Pooled per-run scratch: byte offset of each cell's base scalar.
     /// Attached zero-width marks share their base cell's column. Reused
     /// across runs/frames to keep the glyph-emit walk allocation-free.
@@ -529,7 +537,7 @@ pub struct Renderer {
     /// cursor frames (including menu hover) can render its retained vertices;
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
-    last_cursor_glyph_key: Option<u64>,
+    cursor_glyph_cache: terminal::CursorGlyphCache,
     /// The surface rectangles of the cursor glyph's images when its cluster
     /// has fallback-placed marks (`mark_fallback::cursor_images`) and they
     /// are drawn as glyphon custom glyphs; empty when glyphon draws the
@@ -3771,6 +3779,40 @@ impl Renderer {
         // Theme foreground — used by tab bar text and other chrome below
         // (where there's no specific pane to take an OSC 10 override from).
         let fg = theme.foreground;
+        let text_layout_key =
+            text_layout_damage_key(panes, cfg, (sw, sh), (cw, ch), pane_titlebar_h);
+        let text_layout_changed = self.last_text_layout_key != Some(text_layout_key);
+        self.last_text_layout_key = Some(text_layout_key);
+        let builtin_cursor = self
+            .pending_cursor_glyph
+            .as_ref()
+            .and_then(|cursor| cursor.builtin);
+        // A mapped instance buffer becomes writable again only through a poll
+        // (or a submit) after the frames that drew from it have finished.
+        if self.gpu.mapped_uploads() {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        }
+        // Cell-locked pane text has its OWN damage gate. A cursor blink
+        // can force `need_prepare` via `cursor_char_changed` for the separate
+        // cursor glyph pass, but it must not clear/re-upload pane glyph
+        // instances. Only pane text changes and layout/style damage refresh the
+        // glyph pipeline. Legacy panes use it only while dimmed, preserving
+        // their continuous layout. The same gate clears unused instances.
+        let grid_upload_needed =
+            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
+        if grid_upload_needed {
+            let mut gi = std::mem::take(&mut self.glyph_instances);
+            let mut gc = std::mem::take(&mut self.glyph_clips);
+            gi.clear();
+            gc.clear();
+            self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
+            self.grid_glyphs_dirty =
+                !self
+                    .glyph_pipeline
+                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
+            self.glyph_instances = gi;
+            self.glyph_clips = gc;
+        }
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
         // Menu text lives in its own areas vec, prepared by a dedicated
         // `menu_text_renderer.prepare(...)` after the main
@@ -5215,25 +5257,24 @@ impl Renderer {
         // Settings surfaces use the menu layer, before all modal text.
         let mut settings_surfaces = Vec::new();
         if let Some(set) = &overlay.settings {
-            let layout = settings_layout(
-                set,
-                (cw, self.overlay_text_line_height()),
-                (sw, sh),
-                self.overlay_text_cell_width(),
-            );
+            let text_cw = self.overlay_text_cell_width();
+            let line = self.overlay_text_line_height();
+            let layout = settings_layout(set, (cw, line), (sw, sh), text_cw);
             let acc = self.ui_accent(cfg, theme);
-            let settings::SettingsColors {
-                selected,
-                border,
-                control,
-                selected_control,
-            } = settings::settings_colors(
+            let palette = settings::settings_colors(
                 theme,
                 acc,
                 self.config.format.is_srgb(),
                 &mut self.chrome_colors,
             );
-            let rail = self.chrome_colors.icon(acc, selected);
+            let settings::SettingsColors {
+                selected,
+                border,
+                control,
+                selected_control,
+                focus,
+                ..
+            } = palette;
             // Ink on a switched-on toggle: whichever theme end stands out more
             // against the accent, for its knob and its label.
             let on_ink = if color::contrast_ratio(theme.foreground, acc)
@@ -5279,13 +5320,15 @@ impl Renderer {
                     0.0,
                 );
             }
+            // Focus shows as a bar, not only as the light fill.
+            let bar = settings::settings_focus_bar_width(line);
             if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
-                    (r.0, r.1 + 4.0, 2.0, (r.3 - 8.0).max(0.0)),
-                    rail,
+                    settings::settings_focus_bar(*r, bar),
+                    focus,
                     1.0,
-                    rail,
+                    focus,
                     0.0,
                     0.0,
                 );
@@ -5308,6 +5351,14 @@ impl Renderer {
                 let row_selected = row.index == set.focused_row && !set.search_focused;
                 if row_selected {
                     shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
+                    shape(
+                        settings::settings_focus_bar(row.rect, bar),
+                        focus,
+                        1.0,
+                        focus,
+                        0.0,
+                        0.0,
+                    );
                 }
                 let control = if row_selected {
                     selected_control
@@ -5315,62 +5366,67 @@ impl Renderer {
                     control
                 };
                 let data = &set.rows[row.index];
-                let on = data.control == SettingsControl::Toggle(true) && !data.disabled;
+                let switch = matches!(data.control, SettingsControl::Toggle(_));
+                // Accent fill only where the switch is on and its effect shows.
+                let on = settings::settings_knob_on_right(data) && !data.unavailable;
                 shape(
                     row.chip_rect,
                     if on { acc } else { theme.background },
                     1.0,
                     control,
                     1.0,
-                    if matches!(data.control, SettingsControl::Toggle(_)) {
-                        row.chip_rect.3 / 2.0
-                    } else {
-                        4.0
-                    },
+                    if switch { row.chip_rect.3 / 2.0 } else { 4.0 },
                 );
                 // A switch's knob: at the right end when on, the left when
                 // off, so the state reads without the label or the colour.
-                if matches!(data.control, SettingsControl::Toggle(_)) {
+                // Where the effect is unavailable the knob stays where the
+                // setting is, hollow.
+                if switch {
                     let (x, y, w, h) = row.chip_rect;
                     let d = settings_toggle_knob(h);
-                    let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
-                    let fill = if on { on_ink } else { control };
-                    shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
+                    let kx = if settings::settings_knob_on_right(data) {
+                        x + w - d - 3.0
+                    } else {
+                        x + 3.0
+                    };
+                    let knob = (kx, y + (h - d) / 2.0, d, d);
+                    if data.unavailable {
+                        shape(knob, theme.background, 1.0, control, 1.5, d / 2.0);
+                    } else {
+                        let fill = if on { on_ink } else { control };
+                        shape(knob, fill, 1.0, fill, 0.0, d / 2.0);
+                    }
+                }
+                if let Some(reset) = row.reset {
+                    shape(
+                        reset.rect,
+                        theme.background,
+                        1.0,
+                        if reset.enabled { control } else { border },
+                        1.0,
+                        4.0,
+                    );
+                    if reset.icon {
+                        header_icons::push_header_icon(
+                            &mut menu_q,
+                            header_icons::HeaderIcon::Reset,
+                            reset.rect,
+                            self.chrome_colors.text(theme.foreground, theme.background),
+                            self.scale,
+                            &mut self.header_icon_masks,
+                        );
+                    }
                 }
             }
-            let items = settings_text_items(set, &layout, self.overlay_text_cell_width());
+            let items = settings_text_items(set, &layout, text_cw);
             for (i, item) in items.iter().enumerate() {
-                let mut background = theme.background;
-                let mut foreground = theme.foreground;
-                let mut muted = matches!(
+                let color = settings::settings_text_color(
+                    set,
                     item.kind,
-                    SettingsTextKind::Muted | SettingsTextKind::Description(_)
+                    &palette,
+                    (theme, acc, on_ink),
+                    &mut self.chrome_colors,
                 );
-                match item.kind {
-                    SettingsTextKind::Category(index) if index == set.active_category => {
-                        background = selected;
-                    }
-                    SettingsTextKind::Label(index)
-                    | SettingsTextKind::Value(index)
-                    | SettingsTextKind::Description(index) => {
-                        let row = &set.rows[index];
-                        muted |= row.disabled;
-                        if item.kind == SettingsTextKind::Value(index) {
-                            if row.control == SettingsControl::Toggle(true) && !row.disabled {
-                                background = acc;
-                                foreground = on_ink;
-                            }
-                        } else if index == set.focused_row && !set.search_focused {
-                            background = selected;
-                        }
-                    }
-                    _ => {}
-                }
-                let color = if muted {
-                    self.chrome_colors.muted(foreground, background)
-                } else {
-                    self.chrome_colors.text(foreground, background)
-                };
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
                     left: item.rect.0,
@@ -5821,10 +5877,73 @@ impl Renderer {
         };
         let chrome_changed = chrome_hash != self.last_chrome_hash;
         self.last_chrome_hash = chrome_hash;
-        let text_layout_key =
-            text_layout_damage_key(panes, cfg, (sw, sh), (cw, ch), pane_titlebar_h);
-        let text_layout_changed = self.last_text_layout_key != Some(text_layout_key);
-        self.last_text_layout_key = Some(text_layout_key);
+        // A built-in glyph under the block cursor. The pane emits the same
+        // cell with the same mask, so the cursor only looks up the slot the
+        // pane resolved and never allocates: an allocation here, after the
+        // upload, could evict a slot the uploaded pane instances still draw.
+        let cursor_glyph = builtin_cursor.and_then(|cell| {
+            let clip = self.pending_cursor_glyph.as_ref()?.clip;
+            let slot = self
+                .glyph_pipeline
+                .resident(cell.key(self.builtin_strokes)?)?;
+            let instance = builtin_glyph_at(&cell, slot);
+            let rect = [clip.0, clip.1, clip.2, clip.3];
+            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
+            // Retain the uploaded index across visibility changes and cursor moves;
+            // only the pane's copy is omitted while its cursor copy draws.
+            let index = (pane.start..pane.start + pane.count).find(|&index| {
+                let glyph = &self.glyph_instances[index as usize];
+                glyph.pos == instance.pos
+                    && glyph.size == instance.size
+                    && glyph.uv == instance.uv
+                    && glyph.kind == instance.kind
+            })?;
+            Some((vec![instance], rect, index..index + 1))
+        });
+        // An emoji cluster under the block cursor: the very instances the
+        // pane uploaded, so the cursor cannot resize, crop or move it. A
+        // monochrome image in it takes the cursor's text colour. A cell the
+        // pane did not draw as an emoji cluster (a replacement character, a
+        // missing glyph) keeps the glyphon cursor pass.
+        let emoji_cursor = cursor_glyph
+            .is_none()
+            .then(|| {
+                let cursor = self.pending_cursor_glyph.as_ref()?;
+                terminal::emoji_cursor_images(
+                    &self.emoji_cells,
+                    &self.glyph_instances,
+                    cursor.emoji?,
+                    cursor.color,
+                )
+            })
+            .flatten();
+        self.cursor_emoji_bounds = emoji_cursor.as_ref().and_then(|(glyphs, _, _)| {
+            let x0 = glyphs.iter().map(|g| g.pos[0]).reduce(f32::min)?;
+            let y0 = glyphs.iter().map(|g| g.pos[1]).reduce(f32::min)?;
+            let x1 = glyphs
+                .iter()
+                .map(|g| g.pos[0] + g.size[0])
+                .reduce(f32::max)?;
+            let y1 = glyphs
+                .iter()
+                .map(|g| g.pos[1] + g.size[1])
+                .reduce(f32::max)?;
+            Some([x0, y0, x1 - x0, y1 - y0])
+        });
+        if self.cursor_emoji_bounds.is_some() {
+            self.cursor_mark_images.clear();
+            if let Some(marks) = self.cursor_marks.as_mut() {
+                marks.hide();
+            }
+        }
+        let cursor_glyph = cursor_glyph.or(emoji_cursor);
+        self.glyph_pipeline.set_cursor(
+            &self.gpu.device,
+            &self.gpu.queue,
+            cursor_glyph
+                .as_ref()
+                .map(|(glyphs, rect, range)| (glyphs.as_slice(), *rect, range.clone())),
+        );
         // When the cursor moves to a DIFFERENT glyph, force the main prepare so
         // that glyph is freshly resident in the atlas before the cursor pass
         // reuses its bitmap (otherwise the 1-glyph cursor prepare could be the
@@ -5844,7 +5963,10 @@ impl Renderer {
         let cursor_metrics = pane_metrics(self.metrics.font_size, self.cell_h);
         let cursor_glyph_key =
             cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), cursor_metrics, &family);
-        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        let pane_emoji_cursor = self.cursor_emoji_bounds.is_some();
+        let cursor_glyph_changed = self
+            .cursor_glyph_cache
+            .changed(cursor_glyph_key, pane_emoji_cursor);
         // A built-in cursor glyph is drawn from the glyph pipeline's atlas,
         // so it cannot grow glyphon's.
         let cursor_char_changed = cursor_glyph_changed
@@ -5871,17 +5993,13 @@ impl Renderer {
             || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
-        let builtin_cursor = self
-            .pending_cursor_glyph
-            .as_ref()
-            .and_then(|cursor| cursor.builtin);
         let need_cursor_prepare = self.pending_cursor_glyph.is_some()
             && builtin_cursor.is_none()
             && (need_prepare || cursor_glyph_changed);
         // The glyphon cursor vertices are not refreshed while the cursor sits
         // on a built-in glyph, so they must not be trusted afterwards.
         if cursor_glyph_key.is_none() || builtin_cursor.is_some() {
-            self.last_cursor_glyph_key = None;
+            self.cursor_glyph_cache.clear();
             self.cursor_mark_images.clear();
             if let Some(marks) = self.cursor_marks.as_mut() {
                 marks.hide();
@@ -6009,57 +6127,6 @@ impl Renderer {
                 )?;
             }
         }
-        // A mapped instance buffer becomes writable again only through a poll
-        // (or a submit) after the frames that drew from it have finished.
-        if self.gpu.mapped_uploads() {
-            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
-        }
-        // Cell-locked pane text has its OWN damage gate. A cursor blink
-        // can force `need_prepare` via `cursor_char_changed` for the separate
-        // cursor glyph pass, but it must not clear/re-upload pane glyph
-        // instances. Only pane text changes and layout/style damage refresh the
-        // glyph pipeline. Legacy panes use it only while dimmed, preserving
-        // their continuous layout. The same gate clears unused instances.
-        let grid_upload_needed =
-            self.grid_glyphs_dirty || any_pane_text_changed || text_layout_changed;
-        if grid_upload_needed {
-            let mut gi = std::mem::take(&mut self.glyph_instances);
-            let mut gc = std::mem::take(&mut self.glyph_clips);
-            gi.clear();
-            gc.clear();
-            self.emit_pane_glyphs(panes, cfg, &mut gi, &mut gc);
-            self.grid_glyphs_dirty =
-                !self
-                    .glyph_pipeline
-                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
-            self.glyph_instances = gi;
-            self.glyph_clips = gc;
-        }
-        // A built-in glyph under the block cursor. The pane emits the same
-        // cell with the same mask, so the cursor only looks up the slot the
-        // pane resolved and never allocates: an allocation here, after the
-        // upload, could evict a slot the uploaded pane instances still draw.
-        let cursor_glyph = builtin_cursor.and_then(|cell| {
-            let clip = self.pending_cursor_glyph.as_ref()?.clip;
-            let slot = self
-                .glyph_pipeline
-                .resident(cell.key(self.builtin_strokes)?)?;
-            let instance = builtin_glyph_at(&cell, slot);
-            let rect = [clip.0, clip.1, clip.2, clip.3];
-            let pane = self.glyph_clips.iter().find(|pane| pane.rect == rect)?;
-            // Retain the uploaded index across visibility changes and cursor moves;
-            // only the pane's copy is omitted while its cursor copy draws.
-            let index = (pane.start..pane.start + pane.count).find(|&index| {
-                let glyph = &self.glyph_instances[index as usize];
-                glyph.pos == instance.pos
-                    && glyph.size == instance.size
-                    && glyph.uv == instance.uv
-                    && glyph.kind == instance.kind
-            })?;
-            Some((instance, rect, index))
-        });
-        self.glyph_pipeline
-            .set_cursor(&self.gpu.device, &self.gpu.queue, cursor_glyph);
         // Prepare the focused solid-block cursor's inverted glyph only when its
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
@@ -6079,7 +6146,7 @@ impl Renderer {
                     c.marks.as_slice(),
                 )
             })
-            .filter(|_| need_cursor_prepare)
+            .filter(|_| need_cursor_prepare && self.cursor_emoji_bounds.is_none())
         {
             self.cursor_glyph_buffer.set_metrics(cursor_metrics);
             // The cursor draws its own glyph last, over the pane's, so it has
@@ -6174,7 +6241,12 @@ impl Renderer {
             // Commit the retained-vertex key only after prepare succeeds. A
             // transient atlas/device error must retry rather than treating
             // stale vertices as current on the next frame.
-            self.last_cursor_glyph_key = cursor_glyph_key;
+            self.cursor_glyph_cache.record(cursor_glyph_key, false);
+        }
+        if pane_emoji_cursor {
+            // This key describes the pane images, not glyphon vertices. The
+            // backend comparison above forces a prepare when switching back.
+            self.cursor_glyph_cache.record(cursor_glyph_key, true);
         }
         if preparing_text {
             self.text_prepare_dirty = false;
@@ -6731,6 +6803,9 @@ mod run_attrs_tests;
 mod settings_panel_cols_tests;
 
 #[cfg(test)]
+mod settings_reset_layout_tests;
+
+#[cfg(test)]
 mod text_layout_damage_tests;
 
 #[cfg(test)]
@@ -6747,6 +6822,9 @@ mod fallback_walk_tests;
 
 #[cfg(test)]
 mod emoji_shaping_tests;
+
+#[cfg(test)]
+mod emoji_fit_tests;
 
 #[cfg(test)]
 mod theme_picker_tests;

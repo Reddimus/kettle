@@ -99,11 +99,36 @@ fn macos_native_blur_allowed(borderless: bool) -> bool {
     !borderless
 }
 
-/// Settings calls blur unavailable only on a settled "no". The status comes
-/// from the last sync, and a Wayland probe may since have found blur, still
-/// be running or be waiting to retry, so `blur_possible` overrides it.
-fn blur_unavailable_for(status: BackdropStatus, blur_possible: bool) -> bool {
-    status == BackdropStatus::Unavailable && !blur_possible
+/// What Settings shows for Window blur. It calls blur unavailable only on a
+/// settled "no". The status comes from the last sync, and a Wayland probe
+/// may since have found blur, so a found answer overrides it. While the
+/// probe still runs or waits to retry, the answer is pending: Settings shows
+/// neither On nor Unavailable, so it never shows one and then the other.
+/// `wayland` is the probe's answer, `None` where nothing probes (X11,
+/// Windows), whose status is already settled.
+fn blur_state_for(
+    status: BackdropStatus,
+    wayland: Option<BlurAnswer>,
+) -> crate::settings::BlurState {
+    use crate::settings::BlurState;
+    if status != BackdropStatus::Unavailable {
+        return BlurState::Available;
+    }
+    match wayland {
+        None | Some(BlurAnswer::No) => BlurState::Unavailable,
+        Some(BlurAnswer::Yes) => BlurState::Available,
+        Some(BlurAnswer::Pending) => BlurState::Checking,
+    }
+}
+
+/// A Wayland blur probe's answer so far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+enum BlurAnswer {
+    /// Not asked yet, asking, or waiting to retry after a busy probe slot.
+    Pending,
+    No,
+    Yes,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -116,11 +141,14 @@ impl BlurDiscovery {
         self.0.lock().is_ok_and(|state| state.1 == 3)
     }
 
-    /// Anything but a settled "no": idle or waiting to retry after a busy
-    /// probe slot, running, or found blur. Only meaningful on Wayland, where
-    /// discovery probes; X11 never does.
-    fn blur_possible(&self) -> bool {
-        self.0.lock().is_ok_and(|state| state.1 != 2)
+    /// The probe's answer so far. Only meaningful on Wayland, where
+    /// discovery probes; X11 never does. A poisoned lock reads as "no".
+    fn answer(&self) -> BlurAnswer {
+        match self.0.lock().map(|state| state.1) {
+            Ok(3) => BlurAnswer::Yes,
+            Ok(0 | 1) => BlurAnswer::Pending,
+            _ => BlurAnswer::No,
+        }
     }
 
     fn reset(&self) {
@@ -410,13 +438,14 @@ impl NativeMaterial {
     }
 
     /// Whether this window asked for blur that the window system cannot
-    /// give (GNOME and X11 on Linux, Windows without its backdrop).
-    pub(crate) fn blur_unavailable(&self) -> bool {
+    /// give (GNOME and X11 on Linux, Windows without its backdrop), or is
+    /// still asking a Wayland compositor.
+    pub(crate) fn blur_state(&self) -> crate::settings::BlurState {
         #[cfg(target_os = "linux")]
-        let blur_possible = self.linux_wayland && self.blur_discovery.blur_possible();
+        let wayland = self.linux_wayland.then(|| self.blur_discovery.answer());
         #[cfg(not(target_os = "linux"))]
-        let blur_possible = false;
-        blur_unavailable_for(self.status.get(), blur_possible)
+        let wayland = None;
+        blur_state_for(self.status.get(), wayland)
     }
 
     #[cfg(target_os = "macos")]
@@ -761,10 +790,11 @@ fn probe_wayland_kwin_blur() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackdropStatus, MacosMaterialPolicy, blur_unavailable_for, caption_colors, colorref,
+        BackdropStatus, BlurAnswer, MacosMaterialPolicy, blur_state_for, caption_colors, colorref,
         contrast_ratio, linux_blur_policy, macos_backdrop_status, macos_material_policy,
         macos_native_blur_allowed,
     };
+    use crate::settings::BlurState;
     use kettle_config::{BackgroundType, Config};
 
     static BLUR_PROBE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -805,8 +835,9 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap();
         }
-        assert!(
-            !blur_unavailable_for(BackdropStatus::Unavailable, discovery.blur_possible()),
+        assert_eq!(
+            blur_state_for(BackdropStatus::Unavailable, Some(discovery.answer())),
+            BlurState::Checking,
             "a busy probe slot is a retry, not a Settings answer"
         );
         release.send(()).unwrap();
@@ -879,21 +910,22 @@ mod tests {
         assert!(!discovery.supported());
     }
 
-    /// Settings says blur is unavailable only on a settled "no": not while
-    /// the Wayland probe runs (turning blur on under KWin must not flash the
-    /// note), and not once it has found blur, even before the next sync
-    /// replaces the previous status. A busy retry is covered above.
+    /// Settings says blur is unavailable only on a settled "no", and while
+    /// the Wayland probe runs it says it is checking: neither On (GNOME would
+    /// then flip it to Unavailable) nor Unavailable (KWin would flip it to
+    /// On). Once the probe has found blur it is available, even before the
+    /// next sync replaces the previous status. A busy retry is covered above.
     #[test]
     fn blur_is_unavailable_only_after_the_probe_answers_no() {
         let _serial = BLUR_PROBE_TEST_LOCK.lock().unwrap();
         let discovery = super::BlurDiscovery::default();
-        assert!(
-            blur_unavailable_for(BackdropStatus::Unavailable, false),
+        assert_eq!(
+            blur_state_for(BackdropStatus::Unavailable, None),
+            BlurState::Unavailable,
             "X11 never probes, so its answer is no"
         );
-        let unavailable =
-            || blur_unavailable_for(BackdropStatus::Unavailable, discovery.blur_possible());
-        assert!(!unavailable(), "Wayland has not asked yet");
+        let state = || blur_state_for(BackdropStatus::Unavailable, Some(discovery.answer()));
+        assert_eq!(state(), BlurState::Checking, "Wayland has not asked yet");
         for found in [false, true] {
             discovery.reset();
             let (entered, started) = std::sync::mpsc::channel();
@@ -914,16 +946,31 @@ mod tests {
             started
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap();
-            assert!(!unavailable(), "a running probe is not an answer");
+            assert_eq!(
+                state(),
+                BlurState::Checking,
+                "a running probe is not an answer"
+            );
             release.send(()).unwrap();
             woken
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap();
             assert_eq!(discovery.supported(), found);
-            assert_eq!(unavailable(), !found, "probe found blur: {found}");
+            assert_eq!(
+                state(),
+                if found {
+                    BlurState::Available
+                } else {
+                    BlurState::Unavailable
+                },
+                "probe found blur: {found}"
+            );
         }
-        assert!(!blur_unavailable_for(BackdropStatus::Active, false));
-        assert!(!blur_unavailable_for(BackdropStatus::Disabled, false));
+        for status in [BackdropStatus::Active, BackdropStatus::Disabled] {
+            for answer in [None, Some(BlurAnswer::No), Some(BlurAnswer::Pending)] {
+                assert_eq!(blur_state_for(status, answer), BlurState::Available);
+            }
+        }
     }
 
     #[test]

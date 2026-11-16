@@ -27,6 +27,12 @@ pub(crate) struct Colors {
     backed: std::collections::HashMap<([u32; 3], u64, bool), Rgb>,
     pub(crate) pill: Option<PillColors>,
     pub(crate) scrollbar: Option<(ScrollbarColorKey, crate::scrollback::ScrollbarColors)>,
+    /// The Settings panel's colours, resolved once per theme, accent and
+    /// blend mode rather than every frame.
+    pub(crate) settings: Option<(
+        crate::settings::SettingsColorKey,
+        crate::settings::SettingsColors,
+    )>,
 }
 
 impl Colors {

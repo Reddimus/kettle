@@ -254,6 +254,15 @@ class PathSafetyTests(unittest.TestCase):
                 self.exercise(out, baseline, root)
 
 
+def move_reset_to_another_row(geometry):
+    """Only a row other than the focused, changed Appearance row has an
+    enabled Reset chip."""
+    rows = geometry["settings"]["rows"]
+    rows[1].update(reset_rect=dict(rows[0]["reset_rect"], y=rows[1]["rect"]["y"] + 2),
+                   reset_enabled=True)
+    rows[0].update(reset_rect=None, reset_enabled=None)
+
+
 def geometry_fixture(name, scale=1, narrow=False):
     width = 640 if narrow else 1280
     def rect(x, y, w, h):
@@ -290,7 +299,12 @@ def geometry_fixture(name, scale=1, narrow=False):
         g["settings"] = dict(rect=rect(20, 40, width - 40, 700),
                              content_rect=rect(30, 100, width - 60, 600),
                              search_rect=rect(30, 50, width - 60, 30),
-                             rows=[dict(rect=rect(30, 100, width - 60, 30))])
+                             focused_row=0,
+                             rows=[dict(index=0, rect=rect(30, 100, width - 60, 30),
+                                        reset_rect=rect(width - 200, 102, 60, 26),
+                                        reset_enabled=True),
+                                   dict(index=1, rect=rect(30, 130, width - 60, 30),
+                                        reset_rect=None, reset_enabled=None)])
     if modal == "search":
         g["search"] = dict(rect=rect(0, 790, width, 30), has_match=name == "search-matches",
                            controls=[dict(name=key, rect=rect(i * 40, 790, 40, 30))
@@ -363,6 +377,11 @@ class GeometryTests(unittest.TestCase):
             ("palette-empty", lambda g: g["picker"].update(rows=[])),
             ("palette-nomatch", lambda g: g["picker"]["rows"][0].update(enabled=True)),
             ("settings", lambda g: g["settings"]["search_rect"].update(y=800)),
+            ("settings", lambda g: g["settings"]["rows"][0]["reset_rect"].update(x=-10)),
+            ("settings", lambda g: g["settings"]["rows"][0].update(reset_rect=None)),
+            # The changed Appearance row's chip is there but dimmed.
+            ("settings", lambda g: g["settings"]["rows"][0].update(reset_enabled=False)),
+            ("settings", move_reset_to_another_row),
             ("search-matches", lambda g: g["search"].update(has_match=False)),
             ("search-nomatch", lambda g: g["search"].update(has_match=True)),
             ("search-matches", lambda g: g["search"]["controls"].pop()),

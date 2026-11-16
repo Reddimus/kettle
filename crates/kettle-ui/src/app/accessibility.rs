@@ -952,12 +952,16 @@ impl App {
             settings.focused_row.hash(&mut hasher);
             settings.search_query.hash(&mut hasher);
             settings.search_focused.hash(&mut hasher);
+            settings.reset_label.hash(&mut hasher);
+            settings.reset_name.hash(&mut hasher);
             for row in &settings.rows {
                 row.label.hash(&mut hasher);
                 row.value.hash(&mut hasher);
                 row.description.hash(&mut hasher);
                 row.category.hash(&mut hasher);
                 row.disabled.hash(&mut hasher);
+                row.reset.hash(&mut hasher);
+                row.unavailable.hash(&mut hasher);
             }
         }
         if let Some(menu) = &ws.context_menu {
@@ -1644,6 +1648,12 @@ impl App {
             }
             return;
         }
+        if request.target_node == accessibility_settings_reset_id() {
+            if request.action == AccessibilityAction::Click {
+                self.settings_reset_selected(ws);
+            }
+            return;
+        }
         if ws.theme_picker_input.is_some()
             && let Some(slot) = accessibility_theme_slot(request.target_node)
         {
@@ -2215,6 +2225,10 @@ pub(super) fn modal_accessibility_diagnostic_label<'a>(
                 return Some(row.label.as_str());
             }
         }
+        // The Reset button's name holds the row's default value.
+        if id == accessibility_settings_reset_id() {
+            return Some(settings.reset_label.as_str());
+        }
     }
     node.label()
 }
@@ -2252,6 +2266,38 @@ pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
 const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
 const MODAL_KIND_PALETTE_STATUS: u64 = 14;
+/// The Settings dialog's Reset button, for the selected row.
+pub(super) const MODAL_KIND_SETTINGS_RESET: u64 = 15;
+
+// Two modal kinds sharing a number would give two nodes one AccessKit id.
+const _: () = {
+    let kinds = [
+        MODAL_KIND_PALETTE,
+        MODAL_KIND_LAYOUTS,
+        MODAL_KIND_SSH,
+        MODAL_KIND_TITLE,
+        MODAL_KIND_THEMES,
+        MODAL_KIND_SETTINGS,
+        MODAL_KIND_SETTINGS_SEARCH,
+        MODAL_KIND_SETTINGS_GROUP,
+        MODAL_KIND_PALETTE_STATUS,
+        MODAL_KIND_SETTINGS_RESET,
+    ];
+    let mut i = 0;
+    while i < kinds.len() {
+        let mut j = i + 1;
+        while j < kinds.len() {
+            assert!(kinds[i] != kinds[j], "two modal kinds share a number");
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
+/// The Settings Reset button's node.
+pub(super) fn accessibility_settings_reset_id() -> NodeId {
+    accessibility_modal_id(MODAL_KIND_SETTINGS_RESET, 0)
+}
 /// Text runs take kinds of their own, above every modal kind, so no row index
 /// can reach them.
 const MODAL_KIND_TEXT_RUN: u64 = 1 << 8;
@@ -3034,12 +3080,44 @@ pub(super) fn modal_accessibility_projection(
             list.set_children(groups);
         }
         projection.nodes.push((list_id, list));
+        let mut dialog_children = vec![search_id, list_id];
+        // One Reset button, for the selected row, named for that row and
+        // its default and unavailable while the row holds it. It follows
+        // the selection and the row's value on every update, and works
+        // whether or not the narrow panel has room to draw its chip.
+        if !settings.search_focused
+            && !settings.reset_name.is_empty()
+            && let Some(row) = settings.rows.get(settings.focused_row)
+            && let Some(enabled) = row.reset
+            && !row.disabled
+        {
+            let id = accessibility_settings_reset_id();
+            let mut button = Node::new(Role::Button);
+            button.set_label(settings.reset_name.clone());
+            button.set_keyboard_shortcut("Delete");
+            button.add_action(AccessibilityAction::Click);
+            if !enabled {
+                button.set_disabled();
+            }
+            match layout.rows.iter().find(|r| r.index == settings.focused_row) {
+                Some(geometry) => {
+                    button.set_bounds(bounds(
+                        geometry
+                            .reset
+                            .map_or(geometry.chip_rect, |reset| reset.rect),
+                    ));
+                }
+                None => button.set_hidden(),
+            }
+            projection.nodes.push((id, button));
+            dialog_children.push(id);
+        }
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label(match settings.categories.get(settings.active_category) {
             Some(category) => tr.settings_a11y_dialog(category),
             None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
         });
-        dialog.set_children([search_id, list_id]);
+        dialog.set_children(dialog_children);
         dialog.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
         projection.nodes.push((container_id, dialog));

@@ -935,7 +935,6 @@ settings_note_agent_previews_launch_off = "accepted"
 settings_note_agent_previews_pending_off = "accepted"
 settings_note_agent_previews_unavailable = "accepted"
 settings_note_blur = "accepted"
-settings_note_blur_unavailable = "accepted"
 settings_note_claude_code_forbidden = "accepted"
 settings_note_claude_code_needs_previews = "accepted"
 settings_note_claude_code_new_panes = "accepted"
@@ -1171,6 +1170,16 @@ scrollback_kept = "draft"
 scrollback_a11y_viewing = "draft"
 scrollback_kept_lines = "draft"
 
+# 2026-11-16: C06 Settings. The Reset chip, the unavailable and checking
+# states of the Window blur switch, and the Reset button's screen-reader
+# name are new; settings_note_blur_unavailable was reworded to name the
+# saved setting. All are drafts.
+settings_note_blur_unavailable = "draft"
+settings_value_unavailable = "draft"
+settings_value_checking = "draft"
+settings_reset_button = "draft"
+settings_a11y_reset = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",
@@ -1320,6 +1329,7 @@ keys = [
     "settings_a11y_dialog",
     "settings_a11y_fields",
     "settings_a11y_title",
+    "settings_a11y_reset",
     "update_a11y_available",
     "menu_a11y_update",
     "update_a11y_failed",

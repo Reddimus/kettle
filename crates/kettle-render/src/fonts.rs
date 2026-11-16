@@ -121,6 +121,53 @@ pub(crate) fn fit_emoji((x, y, w, h): super::Rect4, ink: (f32, f32)) -> super::R
     (x + (w - iw) * 0.5, y + (h - ih) * 0.5, iw, ih)
 }
 
+/// The space an emoji keeps from the rows above and below, in physical
+/// pixels: 1/16 of the row height, at least one pixel.
+///
+/// Measured against Ghostty in the C08 panel captures, its tallest emoji (👩‍💻,
+/// 👨‍👩‍👧, 👍🏽) clear their row by one pixel at 17 and 21 px rows and its round
+/// faces by two, while an emoji filling the whole row reads as clipped where
+/// it meets the row above.
+pub(crate) fn emoji_inset(line_height: f32) -> f32 {
+    (line_height / 16.0).round().max(1.0)
+}
+
+/// The rectangle an emoji cluster in `cell` (its columns by the row height)
+/// is fitted into: the cell less [`emoji_inset`] at the top and bottom.
+pub(crate) fn emoji_box((x, y, w, h): super::Rect4) -> super::Rect4 {
+    let inset = emoji_inset(h).min(((h - 1.0) / 2.0).max(0.0));
+    (x, y + inset, w, h - 2.0 * inset)
+}
+
+/// The whole-pixel rectangle `[x, y, width, height]` an image of `ink` size
+/// is drawn at inside `area`, or `None` when no whole pixel fits.
+///
+/// The image keeps its aspect ratio to the nearest pixel and is scaled to the
+/// largest size that fits the whole pixels inside `area`, then centred with
+/// whole-pixel offsets (any odd pixel goes below and to the right). Its ink
+/// therefore never leaves `area`, and drawing it 1:1 needs no resampling on
+/// the GPU.
+pub(crate) fn fit_emoji_pixels(area: super::Rect4, ink: (f32, f32)) -> Option<[i32; 4]> {
+    // Layout arithmetic leaves edges a hair off whole pixels (17.5 * 2.0 + 4.0).
+    const SLACK: f32 = 1e-3;
+    let (x, y, w, h) = area;
+    let (left, top) = ((x - SLACK).ceil(), (y - SLACK).ceil());
+    let (right, bottom) = ((x + w + SLACK).floor(), (y + h + SLACK).floor());
+    let (room_w, room_h) = (right - left, bottom - top);
+    if !(ink.0 > 0.0 && ink.1 > 0.0 && room_w >= 1.0 && room_h >= 1.0) {
+        return None;
+    }
+    let scale = (room_w / ink.0).min(room_h / ink.1);
+    let width = (ink.0 * scale).round().clamp(1.0, room_w);
+    let height = (ink.1 * scale).round().clamp(1.0, room_h);
+    Some([
+        (left + ((room_w - width) / 2.0).floor()) as i32,
+        (top + ((room_h - height) / 2.0).floor()) as i32,
+        width as i32,
+        height as i32,
+    ])
+}
+
 pub(crate) fn emoji_cursor_transform(
     buffer: &TextBuffer,
     fonts: &mut FontSystem,
@@ -161,7 +208,7 @@ pub(crate) fn emoji_cursor_transform(
     if !(w > 0.0 && h > 0.0) {
         return None;
     }
-    let fitted = fit_emoji(cell, (w, h));
+    let fitted = fit_emoji(emoji_box(cell), (w, h));
     let scale = fitted.2 / w;
     Some((
         fitted.0 - bounds.0 * scale,

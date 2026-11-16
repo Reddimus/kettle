@@ -48,6 +48,15 @@ short description where a label does not say it all (whole or hidden), and
 ranks commands with a shortcut first. The PR description shows each before and
 after.
 
+The eight `settings` captures were then replaced by PR #887 from the Linux CI
+job in
+[run 43917753647](https://github.com/Reddimus/kettle/actions/runs/43917753647),
+artifact `ui-states-43917753647-1`, in the same environment: descriptions and
+key hints reach about 7:1, the focused row carries an accent bar, the changed
+Appearance row (and any other changed row) shows a Reset chip, value controls
+are taller and fixed-width, and Window blur reads Unavailable with the saved
+setting in its description. The PR description shows each before and after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |

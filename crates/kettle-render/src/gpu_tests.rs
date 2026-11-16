@@ -1306,6 +1306,7 @@ fn screenshot_grid_emits_cell_locked_glyphs() {
             &device,
             &queue,
             &mut starts,
+            &mut Vec::new(),
         );
         assert!(
             instances.len() > 20,
@@ -1506,6 +1507,7 @@ fn grid_prompt_blink_frames_for(
             &device,
             &queue,
             &mut starts,
+            &mut Vec::new(),
         );
         glyph_pipe.upload(&device, &queue, [w as f32, h as f32], &instances);
         let clips = [GlyphClip {

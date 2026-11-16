@@ -644,46 +644,144 @@ fn the_jump_button_colours_are_resolved_once_per_theme() {
     );
 }
 
-/// Field, choice and switch outlines, and an off switch's knob, are at least
-/// 3:1 against the panel, and on the selected row against its fill as well.
-/// The panel is opaque, so the window's opacity does not reach them.
+/// Whether any ink at all reaches `minimum` against both surfaces: black or
+/// white does whenever anything does.
+fn reachable_on_both(first: Rgb, second: Rgb, minimum: f64) -> bool {
+    [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
+        .into_iter()
+        .any(|ink| {
+            color::contrast_ratio(ink, first).min(color::contrast_ratio(ink, second)) >= minimum
+        })
+}
+
+/// The Settings panel over every bundled theme, blend mode and accent. The
+/// panel is opaque, so the window's opacity does not reach it.
+///
+/// - The panel's outline and sidebar divider are 3:1 against the panel, so
+///   the panel's edge shows over the dimmed window.
+/// - Field, choice, switch and Reset outlines, and an off switch's knob, are
+///   4.5:1 against the panel, and on the focused row against its fill as
+///   well, wherever any ink can be; never below 3:1.
+/// - Descriptions, hints and notes reach `SETTINGS_DESCRIPTION_SHARE` of
+///   their label's contrast, between 4.5:1 and 7:1, and stay quieter than
+///   the label; on the focused row `SETTINGS_FOCUSED_DESCRIPTION_SHARE`.
+/// - The focus bar is 3:1 against the panel and the focused row's fill, so
+///   focus shows even where the fill barely differs from the panel.
 #[test]
-fn settings_control_outlines_reach_three_to_one() {
+fn settings_outlines_text_and_focus_reach_their_floors() {
     let mut colors = Colors::default();
     let mut failures = Vec::new();
+    let mut fail = |what: String| failures.push(what);
     for name in Theme::list() {
         let theme = Theme::by_name(name);
+        let bg = theme.background;
         for linear in [true, false] {
             for accent in [theme.accent, theme.palette[4]] {
                 let palette = settings::settings_colors(&theme, accent, linear, &mut colors);
-                let selected = color::over(theme.background, accent, 0.18, linear);
-                for (role, outline, surface) in [
-                    ("outline on the panel", palette.control, theme.background),
+                let selected = color::over(bg, accent, settings::SETTINGS_SELECTED_ALPHA, linear);
+                assert_eq!(palette.selected, selected);
+                let at = format!("{name} linear={linear} accent={accent:?}");
+                let ratio = color::contrast_ratio;
+                if ratio(palette.border, bg) < ICON_CONTRAST {
+                    fail(format!(
+                        "{at} panel outline {:.3}",
+                        ratio(palette.border, bg)
+                    ));
+                }
+                if ratio(palette.control, bg) < TEXT_CONTRAST {
+                    fail(format!(
+                        "{at} control outline {:.3}",
+                        ratio(palette.control, bg)
+                    ));
+                }
+                let both = |ink| ratio(ink, bg).min(ratio(ink, selected));
+                let floor = if reachable_on_both(bg, selected, TEXT_CONTRAST) {
+                    TEXT_CONTRAST
+                } else {
+                    ICON_CONTRAST
+                };
+                if both(palette.selected_control) < floor {
+                    fail(format!(
+                        "{at} focused-row outline {:.3} < {floor}",
+                        both(palette.selected_control)
+                    ));
+                }
+                if reachable_on_both(bg, selected, ICON_CONTRAST)
+                    && both(palette.focus) < ICON_CONTRAST
+                {
+                    fail(format!("{at} focus bar {:.3}", both(palette.focus)));
+                }
+                for (role, ink, surface, share) in [
                     (
-                        "selected-row outline inside",
-                        palette.selected_control,
-                        theme.background,
+                        "description",
+                        palette.description,
+                        bg,
+                        settings::SETTINGS_DESCRIPTION_SHARE,
                     ),
                     (
-                        "selected-row outline around",
-                        palette.selected_control,
+                        "focused description",
+                        palette.description_selected,
                         selected,
+                        settings::SETTINGS_FOCUSED_DESCRIPTION_SHARE,
                     ),
                 ] {
-                    let ratio = color::contrast_ratio(outline, surface);
-                    if ratio < ICON_CONTRAST {
-                        failures.push(format!("{name} linear={linear} {role}: {ratio:.3}"));
+                    let label = ratio(colors.text(theme.foreground, surface), surface);
+                    let target =
+                        (share * label).clamp(TEXT_CONTRAST, chrome::SECONDARY_TEXT_CONTRAST);
+                    let got = ratio(ink, surface);
+                    if got + 0.01 < target || got > label.max(TEXT_CONTRAST) + 0.01 {
+                        fail(format!(
+                            "{at} {role} {got:.3}, target {target:.3}, label {label:.3}"
+                        ));
                     }
                 }
-                // The panel's own outline and divider stay as they were.
-                assert_eq!(
-                    palette.border,
-                    color::over(theme.background, theme.palette[8], 0.65, linear)
-                );
             }
         }
     }
-    report(&failures, "settings outline");
+    report(&failures, "settings floor");
+}
+
+/// The judged panels, pinned: TokyoNight Night under a GNOME desktop's
+/// purple accent (the r17 Linux capture's), and Kettle Day under its own.
+/// Before this change their descriptions sat on the 4.5:1 floor and the
+/// focused row's label at 4.94:1.
+#[test]
+fn settings_judged_panels_read_clearly() {
+    let mut colors = Colors::default();
+    let ratio = color::contrast_ratio;
+    for (name, accent, description, focused_label, focused_description) in [
+        (
+            "TokyoNight Night",
+            Some(Rgb::new(0xbb, 0x99, 0xf8)),
+            7.0,
+            7.0,
+            6.3,
+        ),
+        ("TokyoNight Night", None, 7.0, 7.0, 6.3),
+        ("Kettle Day", None, 5.7, 6.5, 5.9),
+    ] {
+        let theme = Theme::by_name(name);
+        let accent = accent.unwrap_or(theme.accent);
+        let palette = settings::settings_colors(&theme, accent, true, &mut colors);
+        let bg = theme.background;
+        let label = colors.text(theme.foreground, palette.selected);
+        let context = format!("{name} {accent:?}");
+        assert!(ratio(palette.description, bg) >= description, "{context}");
+        assert!(ratio(label, palette.selected) >= focused_label, "{context}");
+        assert!(
+            ratio(palette.description_selected, palette.selected) >= focused_description,
+            "{context}"
+        );
+        assert!(ratio(palette.border, bg) >= ICON_CONTRAST, "{context}");
+        assert!(ratio(palette.control, bg) >= TEXT_CONTRAST, "{context}");
+        for surface in [bg, palette.selected] {
+            assert!(ratio(palette.focus, surface) >= ICON_CONTRAST, "{context}");
+            assert!(
+                ratio(palette.selected_control, surface) >= TEXT_CONTRAST,
+                "{context}"
+            );
+        }
+    }
 }
 
 /// The painter takes these colours from the helpers the sweeps test.
@@ -704,9 +802,12 @@ fn the_painter_uses_the_swept_helpers() {
         "letterminal=color::Backing::translucent(theme.background,composed_bg_alpha(cfg),color::PLATFORM_BACKDROP_LIFT,);letpill_colors=self.chrome_colors.scrollback_pill(theme,self.config.format.is_srgb(),terminal);",
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
-        "}=settings::settings_colors(",
+        "letpalette=settings::settings_colors(",
         "letfill=ifon{on_ink}else{control};",
         "letcontrol=ifrow_selected{selected_control}else{control};",
+        "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
+        "settings::settings_focus_bar(row.rect,bar),focus,",
+        "settings::settings_focus_bar(*r,bar),focus,",
     ] {
         let needle: String = needle.split_whitespace().collect();
         assert!(source.contains(&needle), "missing: {needle}");

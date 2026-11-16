@@ -3759,11 +3759,42 @@ matches glyphon's
 (mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
 so antialiasing, gamma and theme colors are identical. Ordinary glyphs differ
 only in X position. Emoji presentation fits its ink to the cell rectangle
-while preserving aspect ratio. All images in an emoji cluster share one fit
-of their combined ink bounds, preserving shaped combining-mark offsets;
-separate destination and atlas-source sizes scale the bitmaps without changing
-shaped advances or neighboring baselines.
-The block-cursor glyph uses the same fit. This prevents glyph drift. Without
+less a margin of 1/16 of the row (at least one pixel) above and below
+(`fonts::emoji_box`), preserving aspect ratio. All images in an emoji cluster
+share one fit of their combined ink bounds, preserving shaped combining-mark
+offsets, and the fit lands on whole pixels (`fonts::fit_emoji_pixels`): each
+image's edges are the union's scaled edges rounded, so touching images still
+touch, and each keeps at least one pixel inside the fitted rectangle. Each
+image is then rasterized at exactly that size (`emoji_raster`): a colour
+bitmap face's largest strike up to 256 ppem, read unscaled, or an outline
+drawn at four times the target (at most 512 ppem), averaged down by area as
+premultiplied linear light. Bitmap glyph dimensions are checked from sbix/CBDT
+headers before decoding, with the decoded pixel count checked again afterward.
+Sparse CBLC source indices whose interpretation differs between parsers are
+refused, retaining the shaped-size fallback.
+COLR's encoded RGB is unpremultiplied before conversion to linear light and
+premultiplied again after encoding. The output retains Swash's alpha encoding,
+matching the normal `RasterGlyph::from_swash` upload, which passes its bytes
+through unchanged (COLR premultiplied, PNG bitmaps straight). A glyph whose strikes are all above 256 ppem, or
+whose source would exceed 2^20 pixels, has no bounded source and keeps its
+shaped-size image. The atlas keys it as `SlotKey::Emoji { key, size }`
+with the subpixel bins cleared; the shaped-size image is never uploaded, only
+its placement, from a cache of at most 16,384 entries. The instance draws it
+1:1, so the nearest-neighbour atlas sampler is exact. Both caches are dropped
+with the rest of the glyph cache on any font size, scale or family change; the
+fitted slots share the slot map's 131,072-entry LRU bound and the colour
+atlas's growth and eviction. When a fitted image is unavailable the cluster
+falls back to its shaped-size images scaled into the same place.
+The emit records each emoji cluster's instance range by buffer line and grid
+column. A block cursor on that cell redraws those very instances through the
+glyph pipeline's cursor buffer (a monochrome image takes the cursor text
+colour) and hides the pane's copy, as it does for a built-in glyph, so moving
+the cursor cannot change an emoji's size, crop or baseline. A cell the pane did
+not draw as an emoji cluster, such as a replacement character, or a cluster of
+more images than the buffer's eight, keeps the glyphon cursor pass. Cursor
+images are resolved before the prepare gate. An unchanged emoji retains its
+damage key; switching between pane images and glyphon vertices invalidates it,
+so leaving an emoji cannot reuse stale glyphon vertices. This prevents glyph drift. Without
 pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following
