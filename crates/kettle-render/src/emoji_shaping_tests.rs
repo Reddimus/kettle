@@ -33,7 +33,7 @@ fn ink(buffer: &TextBuffer, fonts: &mut FontSystem, swash: &mut SwashCache) -> (
 }
 
 #[test]
-fn emoji_presentation_fills_height_with_repo_font_and_preserves_text_presentation() {
+fn emoji_presentation_fills_its_inset_row_with_repo_font_and_preserves_text_presentation() {
     let mut fonts = fixture_fonts();
     let mut swash = SwashCache::new();
     let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
@@ -51,7 +51,9 @@ fn emoji_presentation_fills_height_with_repo_font_and_preserves_text_presentatio
         )
         .expect("emoji needs a fitted transform");
         assert!(scale > 1.0);
-        assert!((before.1 as f32 * scale - 32.0).abs() < 0.01);
+        // The 32 px row less the emoji's margin above and below.
+        let height = 32.0 - 2.0 * super::fonts::emoji_inset(32.0);
+        assert!((before.1 as f32 * scale - height).abs() < 0.01);
         assert!(x.is_finite() && y.is_finite());
         assert_eq!(buf.layout_runs().next().unwrap().line_y, baseline);
     }
@@ -347,9 +349,11 @@ fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
             assert!((left + right - (origin.0 * 2.0 + 40.0)).abs() < 0.001);
             assert!((top + bottom - (origin.1 * 2.0 + 32.0)).abs() < 0.001);
             assert!(right - left <= 40.001 && bottom - top <= 32.001);
+            // The row less the emoji's margin above and below.
+            let height = 32.0 - 2.0 * super::fonts::emoji_inset(32.0);
             assert!(
-                (right - left - 40.0).abs() < 0.001 || (bottom - top - 32.0).abs() < 0.001,
-                "combined ink must fill at least one cell dimension"
+                (right - left - 40.0).abs() < 0.001 || (bottom - top - height).abs() < 0.001,
+                "combined ink must fill at least one dimension of the emoji box"
             );
             assert_eq!(
                 neighbor.pos, raw_neighbor,

@@ -88,7 +88,7 @@ fn grid_path_wiring_is_present() {
 /// content damage or layout/style damage.
 #[test]
 fn grid_upload_damage_excludes_cursor_blink() {
-    let src = super::production_source();
+    let src = kettle_test_support::code_only(&super::production_source());
     assert!(
         src.contains("last_text_layout_key: Option<u64>"),
         "renderer must keep a layout damage key for cached text/grid vertices"
@@ -112,8 +112,8 @@ fn grid_upload_damage_excludes_cursor_blink() {
     let gate = src
         .split("let grid_upload_needed =")
         .nth(1)
-        .and_then(|s| s.split("if let Some((gx, gy, gcolor,").next())
-        .expect("grid upload block present before cursor-glyph prepare");
+        .and_then(|s| s.split("let mut areas: Vec<TextArea>").next())
+        .expect("grid upload block present before borrowed text areas");
     assert!(
         !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),
         "grid upload gate/block must not depend on cursor blink state"

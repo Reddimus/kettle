@@ -2014,6 +2014,41 @@ test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
 
+`emoji_fit_tests` pin how an emoji reaches the screen at 13, 14 and 17 px and
+1x, 1.5x and 2x. Without a GPU or any emoji font, they check that the fitted
+rectangle is whole pixels inside the row less its margin and fills it in one
+dimension, that a sliver of an image at a cluster's edge keeps a pixel inside
+the fitted rectangle, and that the grid emit draws each image of a cluster
+(lightning, and lightning plus a combining acute) 1:1 from an image of exactly
+that size, through a synthetic glyph source. The block cursor's claim on a
+cluster is checked against the cursor buffer's eight-image limit without a
+GPU. `emoji_raster`'s unit tests check the area resampler on integer and
+fractional ratios, upsampling, linear-light averaging of colour (black beside
+white is sRGB 188) and a transparent pixel whose colour must not tint its
+neighbour, and that sources stay bounded: no strike above 256 ppem, and no
+outline above 512 ppem for any font size. Header-only fixtures reject oversized
+bitmap dimensions before decoding. Synthetic COLR fixtures retain partial-alpha
+colour and the normal upload's premultiplied encoding; straight-alpha fixtures
+retain their existing results.
+`an_outline_emoji_is_an_area_average_of_its_larger_outline` checks the outline
+path with the bundled lightning on every host. With a colour emoji face (Apple
+Color Emoji on macOS, Noto Color Emoji on the Ubuntu runner image, Segoe UI
+Emoji on Windows), `a_colour_emoji_is_an_area_average_of_its_source` compares
+😀, ❤️ and 👩‍💻 against an independent per-pixel integration, in linear
+light, of the source each must use: the largest strike for a bitmap face, the
+larger outline for a COLR one. It reports `EMOJI_FONT_SKIP` without a face or
+when the face lacks every fixture. The GPU tests draw lightning and a
+colour 😀 in a real frame (1:1, inside the row), compare an emoji cell with the
+block cursor on and off it in an opaque window (no pixel may change), and
+check that one glyph fitted at two widths keeps two images and that a font-size
+change drops every image and placement of the old size; they report
+`EMOJI_FIT_GPU_SKIP` or `EMOJI_CURSOR_GPU_SKIP` without an adapter.
+The portable cursor-cache test checks retained keys and renderer transitions.
+`an_emoji_cursor_retains_prepares_and_refreshes_after_moving_off` checks unchanged
+frames' `chrome_prepares` and `text_prepares`, moving onto text and another emoji,
+and replacing the cursor cell. It reports `EMOJI_CURSOR_RETAIN_GPU_SKIP` without
+an adapter.
+
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that
 never rise, above marks that sink halfway, aligned and double classes), whole

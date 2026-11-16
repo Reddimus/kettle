@@ -2485,6 +2485,7 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "read-fonts 0.37.0",
+ "swash",
  "tempfile",
  "unicode-bidi",
  "unicode-segmentation",

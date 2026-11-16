@@ -403,6 +403,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the highlighted row, named for the default it restores ("Reset Font size
   to 14 px"), and `kettle ctl ui_geometry` reports each row's Reset chip.
 
+- Colour emoji are sharp and whole. Each one is rasterized at exactly the size
+  its cell draws it, averaged down from the font's largest bitmap, instead of
+  stretching a font-size image on the GPU; Apple Color Emoji at 13 px had come
+  out blocky with its top flattened. Emoji also keep a margin of 1/16 of the
+  row (at least one pixel) from the rows above and below, and the block cursor
+  draws the same image, so moving it onto an emoji no longer resizes it.
+
 - Broadcast input now outlines every pane it reaches, not only the one you
   type in. The sending pane keeps a solid outline in the theme's yellow;
   each pane that receives its input, under the tab, window or group scope,

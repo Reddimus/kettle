@@ -932,6 +932,17 @@ impl Renderer {
     /// glyphon's `prepare_glyph` places them, or `None` for no glyph.
     fn cursor_glyph_ink(&mut self, target_size: [u32; 2]) -> Option<PixelBox> {
         let cursor = self.pending_cursor_glyph.as_ref()?;
+        if let Some([x, y, width, height]) = self.cursor_emoji_bounds {
+            // The pane's own emoji images, redrawn over the block.
+            let ink = PixelBox {
+                x0: x.floor() as i64,
+                y0: y.floor() as i64,
+                x1: (x + width).ceil() as i64,
+                y1: (y + height).ceil() as i64,
+            }
+            .intersect(PixelBox::surface(target_size));
+            return (!ink.is_empty()).then_some(ink);
+        }
         if !self.cursor_mark_images.is_empty() {
             // The glyph is drawn as these images; its shaped text is clear.
             let bounds = glyphon_bounds(cursor.clip, target_size);
@@ -1388,6 +1399,7 @@ mod tests {
             clip: (0.0, 0.0, 200.0, 200.0),
             marks: Vec::new(),
             builtin: None,
+            emoji: None,
         };
         let mut swash = SwashCache::new();
         let original =

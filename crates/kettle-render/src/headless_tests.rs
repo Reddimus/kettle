@@ -1409,7 +1409,7 @@ fn block_cursor_uses_the_pane_baseline_with_scaled_rows() {
             .line_y;
         assert_eq!(cursor_y, pane_y);
         assert_eq!(
-            renderer.last_cursor_glyph_key,
+            renderer.cursor_glyph_cache.key,
             cursor_glyph_damage_key(
                 renderer.pending_cursor_glyph.as_ref(),
                 pane_metrics(renderer.metrics.font_size, renderer.cell_h),
@@ -1451,9 +1451,9 @@ fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
         assert_eq!(attrs.family, expected.family);
         assert_eq!(attrs.font_features, expected.font_features);
         if previous_key.is_some() {
-            assert_ne!(renderer.last_cursor_glyph_key, previous_key);
+            assert_ne!(renderer.cursor_glyph_cache.key, previous_key);
         }
-        previous_key = renderer.last_cursor_glyph_key;
+        previous_key = renderer.cursor_glyph_cache.key;
     }
 }
 
@@ -4228,22 +4228,24 @@ fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
                 } else {
                     1
                 };
-                let expected = super::fonts::fit_emoji(
-                    (
-                        cfg.padding_x,
-                        cfg.padding_y,
-                        columns as f32 * renderer.cell_w,
-                        renderer.cell_h,
-                    ),
-                    (glyph.uv_size[0], glyph.uv_size[1]),
-                );
-                assert!(
-                    (glyph.pos[0] - expected.0).abs() < 0.01,
+                // Drawn 1:1, in whole pixels, as large as the cell's emoji
+                // box allows at the image's aspect ratio.
+                let area = super::fonts::emoji_box((
+                    cfg.padding_x,
+                    cfg.padding_y,
+                    columns as f32 * renderer.cell_w,
+                    renderer.cell_h,
+                ));
+                let [x, y, w, h] =
+                    super::fonts::fit_emoji_pixels(area, (glyph.size[0], glyph.size[1]))
+                        .expect("the emoji fits its cell");
+                assert_eq!(glyph.uv_size, glyph.size, "{mode:?} {clustered} {emoji:?}");
+                assert_eq!(
+                    glyph.pos,
+                    [x as f32, y as f32],
                     "{mode:?} {clustered} {emoji:?}"
                 );
-                assert!((glyph.pos[1] - expected.1).abs() < 0.01);
-                assert!((glyph.size[0] - expected.2).abs() < 0.01);
-                assert!((glyph.size[1] - expected.3).abs() < 0.01);
+                assert_eq!(glyph.size, [w as f32, h as f32]);
                 assert_eq!(snap.cells.iter().find(|c| c.c == 'X').unwrap().col, columns);
                 let baseline = renderer.pane_buffers[0]
                     .layout_runs()

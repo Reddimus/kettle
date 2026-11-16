@@ -37,6 +37,8 @@ raw-window-handle = "0.6.2"
 # GPOS mark anchors, to tell which marks the shaping font placed itself. The
 # version harfrust and skrifa already resolve for cosmic-text.
 read-fonts = { version = "0.37.0", default-features = false, features = ["std"] }
+# Inspect the raster source so COLR and bitmap alpha keep their representation.
+swash = { version = "0.2.10", default-features = false }
 unicode-bidi.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
