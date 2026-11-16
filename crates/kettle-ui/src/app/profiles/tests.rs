@@ -458,7 +458,7 @@ fn pending_palette_header_does_not_shift_ranked_keyboard_or_pointer_actions() {
                 assert_eq!(row.label, commands[index].label.shown(&tr));
                 assert!(row.enabled && !row.separator);
             }
-            for surface in [(360.0, 600.0), (800.0, 600.0)] {
+            for surface in [(280.0, 600.0), (360.0, 600.0), (800.0, 600.0)] {
                 let menu = picker_context_menu(
                     open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
                     surface,
