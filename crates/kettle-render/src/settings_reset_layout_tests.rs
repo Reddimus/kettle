@@ -309,3 +309,37 @@ fn taller_controls_keep_the_appearance_page_in_view() {
     let small = settings_layout(&set, (8.4, 17.5), (800.0, 600.0), 8.4);
     assert_eq!(small.rows.len(), 5);
 }
+
+/// Free text (the image path) is not centred: it starts where its inline
+/// editor starts, on the same line, so opening the editor does not move it.
+#[test]
+fn text_values_start_where_their_editor_does() {
+    for (surface, cell) in [
+        ((1280.0, 820.0), (8.4, 17.5)),
+        ((640.0, 820.0), (8.4, 17.5)),
+        ((2560.0, 1640.0), (16.8, 35.0)),
+        ((800.0, 160.0), (8.0, 16.0)),
+    ] {
+        let set = SettingsOverlay {
+            rows: vec![SettingsRow {
+                label: "Image path".into(),
+                value: "~/Pictures/wallpaper.png".into(),
+                control: SettingsControl::Text,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let layout = settings_layout(&set, cell, surface, cell.0);
+        let items = settings_text_items(&set, &layout, cell.0);
+        let value = items
+            .iter()
+            .find(|item| item.kind == SettingsTextKind::Value(0))
+            .expect("the path is drawn");
+        let editor = super::settings_value_rect(&set, cell.0, cell.1, surface.0, surface.1, cell.0);
+        assert_eq!(
+            (value.rect.0, value.rect.1, value.rect.3),
+            (editor.0, editor.1, editor.3),
+            "{surface:?}"
+        );
+    }
+}

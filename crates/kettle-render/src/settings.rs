@@ -751,7 +751,7 @@ pub fn settings_value_rect(
         .iter()
         .find(|row| row.index == set.focused_row)
         .map_or(layout.empty_rect, |row| {
-            chip_text_rect(row.chip_rect, ch, 4.0)
+            chip_text_rect(row.chip_rect, row.label_rect.3, 4.0)
         })
 }
 
@@ -928,12 +928,18 @@ pub(crate) fn settings_text_items(
             } else {
                 data.chip_text()
             };
-        centred(
-            &mut centred_items,
-            &value,
-            room,
-            SettingsTextKind::Value(row.index),
-        );
+        if data.control == SettingsControl::Text {
+            // Free text starts where its inline editor does, so opening
+            // the editor does not move it.
+            push(&value, room, SettingsTextKind::Value(row.index));
+        } else {
+            centred(
+                &mut centred_items,
+                &value,
+                room,
+                SettingsTextKind::Value(row.index),
+            );
+        }
         push(
             &data.description,
             row.description_rect,
