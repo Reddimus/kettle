@@ -214,7 +214,7 @@ fn settings_choice_chips_keep_both_arrows_when_values_are_shortened() {
     let mut set = overlay();
     set.rows.truncate(1);
     set.rows[0].control = SettingsControl::Choice;
-    set.rows[0].value = "A very long theme or GPU name that cannot fit in the chip".into();
+    set.rows[0].value = "A very long theme or GPU name that cannot fit in the chip ".repeat(3);
     for surface in [(1280.0, 820.0), (560.0, 600.0)] {
         let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
         let items = super::settings::settings_text_items(&set, &layout, 8.0);

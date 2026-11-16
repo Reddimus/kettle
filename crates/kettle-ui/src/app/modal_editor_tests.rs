@@ -107,11 +107,13 @@ fn review_settings_value_slot_uses_natural_font_width() {
             label: "Image path".into(),
             value: String::new(),
             disabled: false,
+            ..Default::default()
         }],
         focused_row: 0,
         title: "Settings".into(),
         hints: String::new(),
         footer_note: None,
+        ..Default::default()
     };
     let text_cw = 10.0;
     for scale in [0.5, 1.0, 2.0] {
@@ -119,9 +121,15 @@ fn review_settings_value_slot_uses_natural_font_width() {
         let layout = kettle_render::settings_layout(&set, (cw, 20.0), (1600.0, 600.0), text_cw);
         let value = kettle_render::settings_value_rect(&set, cw, 20.0, 1600.0, 600.0, text_cw);
         let chip = layout.rows[0].chip_rect;
+        // One line of the editor, centred in the chip.
         assert_eq!(
             value,
-            (chip.0 + 4.0, chip.1 + 4.0, chip.2 - 8.0, chip.3 - 8.0)
+            (
+                chip.0 + 4.0,
+                chip.1 + (chip.3 - 20.0) * 0.5,
+                chip.2 - 8.0,
+                20.0
+            )
         );
         assert!(value.2 > 200.0, "text paths need a usable editor width");
     }

@@ -52,8 +52,10 @@ pub(crate) fn fit_key_hint(hint: &str, max_cols: usize) -> String {
     fit_single_line_label(&format!("({last})"), max_cols)
 }
 
-/// Display width (terminal columns) of a string, via `unicode-width`.
-pub(crate) fn display_width(s: &str) -> usize {
+/// Display width (terminal columns) of a string, via `unicode-width`: the
+/// measure every overlay layout fits its text by. Callers that size a
+/// control for text the renderer will draw measure with this too.
+pub fn display_width(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }

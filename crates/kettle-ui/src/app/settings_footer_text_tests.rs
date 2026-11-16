@@ -40,6 +40,7 @@ fn settings_accessibility_names_follow_the_ui_language() {
             title: String::new(),
             hints: String::new(),
             footer_note: None,
+            ..Default::default()
         }),
         ..kettle_render::Overlay::default()
     };
@@ -770,10 +771,13 @@ fn the_settings_projection_follows_the_windows_blur_state() {
         .collect::<Vec<_>>()
         .join(" ");
     for wiring in [
-        "let blur_unavailable = ws .native_material .as_ref() \
-         .is_some_and(|material| material.blur_unavailable());",
-        "description: tr .text(crate::settings::row_description(f, blur_unavailable)) \
-         .to_string(),",
+        "let blur = ws .native_material .as_ref() \
+         .map_or_else(Default::default, |material| material.blur_state());",
+        "let blur_unavailable = blur == crate::settings::BlurState::Unavailable;",
+        "crate::settings::row_value(f, blur, &self.cfg, tr)",
+        "description: crate::settings::row_description(f, blur, &self.cfg, tr),",
+        "unavailable: f.key == \"window-blur\" \
+         && blur != crate::settings::BlurState::Available,",
         "settings_footer_note( tr, active_gpu.as_deref(), \
          active.fields.get(fld).map(|f| f.key), blur_unavailable,",
     ] {
@@ -783,4 +787,46 @@ fn the_settings_projection_follows_the_windows_blur_state() {
         !projection.contains("crate::settings::description("),
         "rows describe themselves through row_description"
     );
+}
+
+/// The projection gives each row its Reset state and the width of its widest
+/// value, and the panel the Reset words, all in the UI's language from the
+/// same catalogue the painter and the accessibility tree read.
+#[test]
+fn the_settings_projection_carries_reset_and_stable_widths() {
+    let src = super::production_source();
+    let projection = src
+        .split_once("fn settings_overlay_projection(")
+        .expect("settings_overlay_projection")
+        .1
+        .split_once("fn settings_mouse(")
+        .expect("end of settings_overlay_projection")
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for wiring in [
+        "reset: crate::settings::reset_state(&self.cfg, f),",
+        "crate::settings::field_value_cols(&self.cfg, f, tr)",
+        "reset_label: tr.text(kettle_i18n::Text::SettingsResetButton).to_string(),",
+        ".map(|value| tr.settings_a11y_reset(tr.text(f.label), &value))",
+    ] {
+        assert!(projection.contains(wiring), "{wiring}");
+    }
+    let mouse = src
+        .split_once("fn settings_mouse(")
+        .expect("settings_mouse")
+        .1
+        .split_once("fn confirm_close(")
+        .expect("end of settings_mouse")
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for wiring in [
+        "kettle_render::SettingsHit::Reset(index) if crate::settings::reset_pointer(is_click, dir) == crate::settings::ResetPointer::Row => { kettle_render::SettingsHit::Field(index) }",
+        "self.settings_reset(ws, &cats, cat, f);",
+    ] {
+        assert!(mouse.contains(wiring), "{wiring}");
+    }
 }

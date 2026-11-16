@@ -292,6 +292,8 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "kettle_render::settings_layout",
         "\"search_rect\":",
         "\"chip_rect\":",
+        "\"reset_rect\": row.reset.map(|reset| rect_json(reset.rect)),",
+        "\"reset_enabled\": row.reset.map(|reset| reset.enabled),",
         "\"description_rect\":",
         "\"first_line\":",
         "\"visible_lines\":",
@@ -676,6 +678,7 @@ fn confirmation_accessibility_excludes_the_retained_settings_subtree() {
             title: "Settings".into(),
             hints: String::new(),
             footer_note: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -849,12 +852,14 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
                     label: label.into(),
                     value: value.into(),
                     disabled: false,
+                    ..Default::default()
                 })
                 .collect(),
             focused_row: 0,
             title: "Settings".into(),
             hints: String::new(),
             footer_note: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -999,11 +1004,13 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
                 label: "Background image".into(),
                 value: String::new(),
                 disabled: false,
+                ..Default::default()
             }],
             focused_row: 0,
             title: "Settings".into(),
             hints: String::new(),
             footer_note: None,
+            ..Default::default()
         }),
         text_field: Some(kettle_render::TextFieldOverlay {
             picker_header: false,
@@ -2107,4 +2114,175 @@ fn ctl_close_question_geometry_never_carries_the_body() {
     assert_eq!(json["buttons"][1]["label"], "Close pane");
     assert_eq!(json["buttons"][1]["destructive"], true);
     assert!(json["detail"].is_null());
+}
+
+/// The Settings dialog has one Reset button, for the selected row: named for
+/// the row and the default it restores, offered as the default (click)
+/// action with Delete as its shortcut, unavailable while the row holds its
+/// default. It follows the selection and the row's value: after a change it
+/// is available, after the reset it is not, on a row Reset does not cover
+/// (and while search has the keyboard) it is gone. Control diagnostics name
+/// it without the value.
+#[test]
+fn settings_reset_button_follows_the_selected_row() {
+    let row = |label: &str, value: &str, reset| kettle_render::SettingsRow {
+        label: label.into(),
+        value: value.into(),
+        reset,
+        ..Default::default()
+    };
+    let overlay = |modified: bool, focused: usize, search_focused: bool| kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: vec![
+                row("Font size", if modified { "16 px" } else { "14 px" }, Some(modified)),
+                row("Theme", "TokyoNight Night", None),
+            ],
+            focused_row: focused,
+            search_focused,
+            reset_label: "Reset".into(),
+            reset_name: if focused == 0 {
+                EN_TEXT.settings_a11y_reset("Font size", "14 px")
+            } else {
+                String::new()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let reset_id = super::accessibility_settings_reset_id();
+    let button = |overlay: &kettle_render::Overlay| {
+        let projection = super::modal_accessibility_projection(
+            overlay,
+            (1280.0, 820.0),
+            (8.4, 17.5),
+            1.0,
+            &EN_TEXT,
+        );
+        let dialog = projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == super::accessibility_modal_id(5, 0))
+            .map(|(_, node)| node.clone())
+            .expect("the Settings dialog");
+        let button = projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == reset_id)
+            .map(|(_, node)| node.clone());
+        if button.is_some() {
+            assert!(dialog.children().contains(&reset_id), "the dialog holds Reset");
+        }
+        button
+    };
+    for (modified, disabled) in [(false, true), (true, false), (false, true)] {
+        let overlay = overlay(modified, 0, false);
+        let node = button(&overlay).expect("the selected row has Reset");
+        assert_eq!(node.role(), accesskit::Role::Button);
+        assert_eq!(node.label(), Some("Reset Font size to 14 px"));
+        assert_eq!(node.keyboard_shortcut(), Some("Delete"));
+        assert!(node.supports_action(accesskit::Action::Click));
+        assert_eq!(node.is_disabled(), disabled, "modified: {modified}");
+        let layout = kettle_render::settings_layout(
+            overlay.settings.as_ref().unwrap(),
+            (8.4, 17.5),
+            (1280.0, 820.0),
+            8.4,
+        );
+        let chip = layout.rows[0].reset.expect("the selected row draws Reset").rect;
+        let bounds = node.bounds().expect("Reset has bounds");
+        assert_eq!(
+            (bounds.x0, bounds.y0, bounds.x1, bounds.y1),
+            (
+                f64::from(chip.0),
+                f64::from(chip.1),
+                f64::from(chip.0 + chip.2),
+                f64::from(chip.1 + chip.3)
+            )
+        );
+        assert_eq!(
+            super::modal_accessibility_diagnostic_label(&overlay, reset_id, &node),
+            Some("Reset"),
+            "diagnostics carry no values"
+        );
+    }
+    assert!(button(&overlay(true, 1, false)).is_none(), "the theme row has no Reset");
+    assert!(button(&overlay(true, 0, true)).is_none(), "search has the keyboard");
+    let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+    assert_eq!(
+        es.settings_a11y_reset("Tamaño de fuente", "14 px"),
+        "Restablecer Tamaño de fuente a 14 px"
+    );
+}
+
+/// A screen reader's click on Reset resets the selected row, as Delete does,
+/// and every change to a row's Reset state or availability republishes the
+/// tree. No App can be built in a test, so this guards the wiring.
+#[test]
+fn settings_reset_button_is_operable_and_republished() {
+    let src = production_source();
+    let handler = src
+        .split("fn handle_accessibility_action(")
+        .nth(1)
+        .and_then(|rest| rest.split("        if !ws.search.open {").next())
+        .expect("handler before search");
+    assert!(handler.contains(
+        "if request.target_node == accessibility_settings_reset_id() {\n            if request.action == AccessibilityAction::Click {\n                self.settings_reset_selected(ws);"
+    ));
+    let key = src
+        .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .nth(1)
+        .and_then(|rest| rest.split("fn publish_accessibility_if_due").next())
+        .expect("accessibility_key body");
+    for line in [
+        "settings.reset_name.hash(&mut hasher);",
+        "row.reset.hash(&mut hasher);",
+        "row.unavailable.hash(&mut hasher);",
+    ] {
+        assert!(key.contains(line), "{line}");
+    }
+    let reset = src
+        .split("fn settings_reset_selected(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("settings_reset_selected");
+    assert!(reset.contains(".filter(|nav| !nav.search_focused && !nav.capturing)"));
+    assert!(reset.contains("self.settings_reset(ws, &cats, cat, fld);"));
+}
+
+/// A switch whose effect this session cannot show stays operable (it can be
+/// turned off), so screen readers get it enabled, with the reason and the
+/// saved setting in its description.
+#[test]
+fn an_unavailable_switch_stays_enabled_with_its_reason() {
+    let note = EN_TEXT.settings_note_blur_unavailable("On");
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: vec![kettle_render::SettingsRow {
+                label: "Window blur".into(),
+                value: "Unavailable".into(),
+                description: note.clone(),
+                control: kettle_render::SettingsControl::Toggle(true),
+                unavailable: true,
+                reset: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+    let row = projection
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == super::accessibility_modal_id(5, 2))
+        .map(|(_, node)| node)
+        .expect("the Window blur row");
+    assert!(!row.is_disabled());
+    assert_eq!(row.value(), Some("Unavailable"));
+    let description = row.description().unwrap_or_default();
+    assert!(description.contains("saved setting: On"), "{description}");
+    assert!(!description.to_lowercase().contains("not available"), "{description}");
 }
