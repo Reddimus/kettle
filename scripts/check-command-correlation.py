@@ -98,6 +98,26 @@ def run_correlated_command(
     raise RuntimeError("command was never admitted")
 
 
+def at_bare_prompt(screen):
+    """Whether the screen ends at a drawn fixture prompt with nothing after it."""
+    lines = screen.get("text", "").rstrip().splitlines()
+    return bool(lines) and lines[-1].rstrip().endswith("PROBE>")
+
+
+def send_escape_at_prompt(app, wait):
+    """Type a lone Escape only once the shell has drawn its next prompt.
+
+    run_command returns at OSC 133 D, while Fish is still running its prompt
+    hooks. Fish 4.2 and later then ask for the cursor position before drawing
+    the prompt, and Fish 4.2 reads an Escape already queued together with the
+    reply's ESC as alt-Escape, inserting the rest of the reply as text. Once
+    the prompt is drawn, Fish has sent that query and re-enabled the Kitty
+    keyboard protocol, so Escape arrives as CSI 27 u and cannot join the reply.
+    """
+    wait(lambda: at_bare_prompt(app.json_ctl("read_screen")))
+    app.json_ctl("send_keys", {"keys": ["escape"]})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kettle", type=Path, required=True)
@@ -426,7 +446,7 @@ def main() -> int:
                             + "; bind -M insert \\cxz "
                             + observer
                         )
-                        app.json_ctl("send_keys", {"keys": ["escape"]})
+                        send_escape_at_prompt(app, wait)
                         time.sleep(0.05)
                         app.json_ctl("send_keys", {"keys": ["ctrl+x", "z"]})
                         wait(lambda: mode_file.exists())
