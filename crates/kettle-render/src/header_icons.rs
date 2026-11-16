@@ -1,6 +1,6 @@
 //! The GNOME header's symbolic icons and the discs behind its window buttons,
-//! drawn as coverage masks rather than shaped from a font, so their size and
-//! weight never depend on the installed fonts.
+//! and the Settings Reset icon, drawn as coverage masks rather than shaped
+//! from a font, so their size and weight never depend on the installed fonts.
 //!
 //! The icons follow Adwaita's symbolic set: a 16-unit grid, strokes 2 units
 //! wide (1.5 for the window outlines), drawn at one unit per logical pixel.
@@ -35,6 +35,9 @@ pub(crate) enum HeaderIcon {
     Close,
     /// The filled disc behind a window button, the whole mask wide.
     Disc,
+    /// Settings' Reset chip when too narrow for its word: a ring open at
+    /// the upper left, an arrowhead at its top pointing left (anticlockwise).
+    Reset,
 }
 
 impl HeaderIcon {
@@ -113,6 +116,12 @@ fn icon_ink(icon: HeaderIcon, x: f32, y: f32) -> bool {
         }
         HeaderIcon::Close => capsule((4.5, 4.5), (11.5, 11.5)) || capsule((11.5, 4.5), (4.5, 11.5)),
         HeaderIcon::Disc => (x - 8.0).hypot(y - 8.0) <= 8.0,
+        HeaderIcon::Reset => {
+            let ring = ((x - 8.0).hypot(y - 9.0) - 5.0).abs() <= 1.0 && !(x < 8.0 && y < 9.0);
+            // The arrowhead: tip at (3.5, 4), base upright at x = 8.5.
+            let head = (3.5..=8.5).contains(&x) && (y - 4.0).abs() <= (x - 3.5) * 0.6;
+            ring || head
+        }
     }
 }
 
@@ -335,6 +344,34 @@ mod tests {
             );
             // Round ends: the corner pixel of a bar is only partly covered.
             assert!(menu[(2 * scale * side + scale) as usize] < 255);
+        }
+    }
+
+    /// The Reset icon is a ring 2 points thick, open at its upper left,
+    /// with an arrowhead at its top pointing left into the gap: an
+    /// anticlockwise arrow, inside the 16-point square.
+    #[test]
+    fn reset_icon_is_an_open_ring_with_an_arrowhead() {
+        for scale in [1_u32, 2] {
+            let side = 16 * scale;
+            let reset = header_icon_mask(HeaderIcon::Reset, side);
+            let at = |x: f32, y: f32| {
+                reset[((y * scale as f32) as u32 * side + (x * scale as f32) as u32) as usize]
+            };
+            let (l, t, w, h) = ink_box(&reset, side);
+            assert!(l + w <= side && t + h <= side, "{scale}x");
+            // Down the right side: the ring's stroke, 2 points.
+            let runs = column_runs(&reset, side, 13 * scale - 1);
+            assert!(
+                runs.iter().any(|(_, len)| *len >= 2 * scale),
+                "{scale}x {runs:?}"
+            );
+            // The ring's right, bottom and left are ink, its upper left open.
+            assert!(at(12.5, 9.5) >= 128 && at(8.5, 13.5) >= 128 && at(3.5, 9.5) >= 128);
+            assert_eq!(at(4.5, 6.5), 0, "{scale}x: the gap");
+            // The arrowhead's point, left of the top of the ring.
+            assert!(at(5.0, 4.0) >= 128, "{scale}x: the arrowhead");
+            assert!(ink_area(&reset) < ink_area(&header_icon_mask(HeaderIcon::Disc, side)) * 0.5);
         }
     }
 

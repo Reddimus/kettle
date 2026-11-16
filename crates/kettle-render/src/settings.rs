@@ -1,4 +1,5 @@
 use super::{Rect4, display_width, fit_single_line_label};
+use kettle_config::Rgb;
 
 /// Resolved settings data. Every consumer uses `settings_layout` for placement.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -19,6 +20,13 @@ pub struct SettingsOverlay {
     pub search_focused: bool,
     pub search_placeholder: String,
     pub no_matches: String,
+    /// The Reset chip's label in the UI's language. Layout, hit testing,
+    /// painting and the accessibility tree all measure this one string.
+    pub reset_label: String,
+    /// The accessible name of the selected row's Reset button, with the
+    /// default it restores ("Reset Font size to 14 px"); empty where the
+    /// selected row has no Reset.
+    pub reset_name: String,
 }
 
 impl SettingsOverlay {
@@ -27,47 +35,151 @@ impl SettingsOverlay {
     }
 }
 
-/// The Settings panel's surfaces and strokes. The panel is opaque, so they are
-/// resolved against the theme's own background.
+/// How strongly the focused row and the active category are filled with the
+/// accent. Their focus bar, not the fill, shows focus, so the fill stays
+/// light enough for the row's text to keep most of its contrast.
+pub(crate) const SETTINGS_SELECTED_ALPHA: f64 = 0.08;
+
+/// How far a description may fall below its label: at least this fraction
+/// of the label's contrast, between `TEXT_CONTRAST` and
+/// `SECONDARY_TEXT_CONTRAST`. A theme whose labels are only 7:1 still keeps
+/// its descriptions visibly quieter than its labels.
+pub(crate) const SETTINGS_DESCRIPTION_SHARE: f64 = 0.8;
+
+/// The same on the focused row, whose fill already sets it apart.
+pub(crate) const SETTINGS_FOCUSED_DESCRIPTION_SHARE: f64 = 0.9;
+
+/// The Settings panel's surfaces, strokes and inks. The panel is opaque, so
+/// they are resolved against the theme's own background.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SettingsColors {
-    /// The focused row and the active category.
-    pub(crate) selected: kettle_config::Rgb,
-    /// The panel's own outline and the sidebar divider, which only group
-    /// content and stay quiet.
-    pub(crate) border: kettle_config::Rgb,
-    /// The outlines of fields, choices, switches, the search field and the
-    /// category arrows, and an off switch's knob. They show where a control
-    /// is and which state it is in, so they keep `ICON_CONTRAST` against the
-    /// panel.
-    pub(crate) control: kettle_config::Rgb,
+    /// The focused row's fill and the active category's.
+    pub(crate) selected: Rgb,
+    /// The panel's own outline and the sidebar divider: `ICON_CONTRAST`
+    /// against the panel, so the panel's edge shows over the dimmed window.
+    pub(crate) border: Rgb,
+    /// The outlines of fields, choices, switches, Reset, the search field and
+    /// the category arrows, and an off switch's knob. They show where a
+    /// control is, so they keep `TEXT_CONTRAST` against the panel where the
+    /// theme allows and never less than `ICON_CONTRAST`.
+    pub(crate) control: Rgb,
     /// `control` on the selected row, where the outline also has to stand
     /// out from the row's fill around it.
-    pub(crate) selected_control: kettle_config::Rgb,
+    pub(crate) selected_control: Rgb,
+    /// Descriptions, footer hints and notes, the search placeholder and an
+    /// unavailable switch's label, on the panel.
+    pub(crate) description: Rgb,
+    /// A description on the focused row's fill.
+    pub(crate) description_selected: Rgb,
+    /// The bar beside the focused row and the active category:
+    /// `ICON_CONTRAST` against both the panel and the fill.
+    pub(crate) focus: Rgb,
+}
+
+/// The key `Colors` keeps the resolved `SettingsColors` under.
+pub(crate) type SettingsColorKey = ([u32; 4], bool);
+
+pub(crate) fn settings_color_key(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    linear: bool,
+) -> SettingsColorKey {
+    (
+        [theme.background, theme.foreground, theme.palette[8], accent]
+            .map(crate::MinimumContrastCache::color_key),
+        linear,
+    )
 }
 
 pub(crate) fn settings_colors(
     theme: &kettle_config::Theme,
-    accent: kettle_config::Rgb,
+    accent: Rgb,
     linear: bool,
     colors: &mut super::chrome::Colors,
 ) -> SettingsColors {
-    let selected = colors.surface(theme.background, accent, 0.18, linear);
-    let border = colors.surface(theme.background, theme.palette[8], 0.65, linear);
-    let control = colors.icon(border, theme.background);
-    let selected_control = super::color::with_min_contrast_on_both(
-        control,
-        theme.background,
+    use super::chrome::{ICON_CONTRAST, TEXT_CONTRAST};
+    use super::color::with_min_contrast_on_both;
+    let key = settings_color_key(theme, accent, linear);
+    if let Some((saved, palette)) = colors.settings
+        && saved == key
+    {
+        return palette;
+    }
+    let bg = theme.background;
+    let selected = colors.surface(bg, accent, SETTINGS_SELECTED_ALPHA, linear);
+    let quiet = colors.surface(bg, theme.palette[8], 0.65, linear);
+    let border = colors.icon(quiet, bg);
+    // A mid-tone theme can leave no ink at the text floor against both the
+    // panel and the fill; the outline then keeps the icon floor.
+    let floored = |ink: Rgb, minimum: f64| {
+        let ink = with_min_contrast_on_both(ink, bg, selected, minimum, false);
+        let weakest =
+            super::color::contrast_ratio(ink, bg).min(super::color::contrast_ratio(ink, selected));
+        (weakest >= minimum).then_some(ink)
+    };
+    let control = colors.text(quiet, bg);
+    let selected_control = floored(control, TEXT_CONTRAST)
+        .or_else(|| floored(control, ICON_CONTRAST))
+        .unwrap_or_else(|| with_min_contrast_on_both(control, bg, selected, ICON_CONTRAST, false));
+    let control = if super::color::contrast_ratio(control, bg) >= TEXT_CONTRAST {
+        control
+    } else {
+        colors.icon(quiet, bg)
+    };
+    let description =
+        settings_quieter_ink(colors, theme.foreground, bg, SETTINGS_DESCRIPTION_SHARE);
+    let description_selected = settings_quieter_ink(
+        colors,
+        theme.foreground,
         selected,
-        super::chrome::ICON_CONTRAST,
-        false,
+        SETTINGS_FOCUSED_DESCRIPTION_SHARE,
     );
-    SettingsColors {
+    let focus = with_min_contrast_on_both(accent, bg, selected, ICON_CONTRAST, true);
+    let palette = SettingsColors {
         selected,
         border,
         control,
         selected_control,
+        description,
+        description_selected,
+        focus,
+    };
+    colors.settings = Some((key, palette));
+    palette
+}
+
+/// `fg`'s readable ink on `surface`, moved toward the surface until its
+/// contrast falls to `share` of the label's, kept between `TEXT_CONTRAST` and
+/// `SECONDARY_TEXT_CONTRAST`. Never moved further than `muted` moves (55%).
+pub(crate) fn settings_quieter_ink(
+    colors: &mut super::chrome::Colors,
+    fg: Rgb,
+    surface: Rgb,
+    share: f64,
+) -> Rgb {
+    use super::chrome::{SECONDARY_TEXT_CONTRAST, TEXT_CONTRAST};
+    use super::color::{contrast_ratio, over};
+    let label = colors.text(fg, surface);
+    let target =
+        (share * contrast_ratio(label, surface)).clamp(TEXT_CONTRAST, SECONDARY_TEXT_CONTRAST);
+    let reaches = |t: f64| contrast_ratio(over(label, surface, t, false), surface) >= target;
+    let mut dim = 0.0_f64;
+    if reaches(0.0) {
+        let (mut lo, mut hi) = (0.0_f64, 0.55_f64);
+        if reaches(hi) {
+            lo = hi;
+        }
+        while hi - lo > 1.0 / 16384.0 {
+            let mid = (lo + hi) / 2.0;
+            if reaches(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        dim = lo;
     }
+    colors.text(over(label, surface, dim, false), surface)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -87,6 +199,17 @@ pub struct SettingsRow {
     pub category: usize,
     pub control: SettingsControl,
     pub disabled: bool,
+    /// Whether Reset covers this row: `None` where it does not (the theme,
+    /// shortcuts, free text), otherwise whether the value differs from its
+    /// default, which is when Reset can act.
+    pub reset: Option<bool>,
+    /// The switch's effect is unavailable in this session, or still being
+    /// checked: it is drawn without the accent fill, its knob hollow.
+    pub unavailable: bool,
+    /// Columns of the widest value this row can show in the UI's language,
+    /// so its control keeps one width while the value changes. `0` sizes it
+    /// to the value shown.
+    pub value_cols: usize,
 }
 
 impl SettingsRow {
@@ -97,6 +220,28 @@ impl SettingsRow {
             self.value.clone()
         }
     }
+
+    /// Columns the chip's text is sized for: the value shown, or the widest
+    /// it can show, with a choice's arrows.
+    fn chip_cols(&self) -> usize {
+        let stable = match self.control {
+            SettingsControl::Choice if self.value_cols > 0 => self.value_cols + 4,
+            _ => self.value_cols,
+        };
+        display_width(&self.chip_text()).max(stable)
+    }
+}
+
+/// A row's Reset chip as laid out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsResetChip {
+    pub rect: Rect4,
+    /// The row differs from its default, so the chip resets it. A disabled
+    /// chip shows on the focused row at its default only.
+    pub enabled: bool,
+    /// Too narrow beside the label for the word: the chip shows the reset
+    /// icon alone. Its accessible name stays the full one.
+    pub icon: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +251,7 @@ pub struct SettingsRowGeometry {
     pub label_rect: Rect4,
     pub description_rect: Rect4,
     pub chip_rect: Rect4,
+    pub reset: Option<SettingsResetChip>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +273,7 @@ pub struct SettingsLayout {
 
 impl SettingsLayout {
     /// Wheel notches are positive toward earlier categories, as for menu rows.
+    /// A wheel over a Reset chip steps its row, as it does anywhere else on it.
     pub fn pointer_hit(&self, cursor: (f32, f32), wheel: Option<i32>) -> SettingsHit {
         let hit = self.hit_test(cursor);
         if self.sidebar_rect.is_none()
@@ -137,7 +284,10 @@ impl SettingsLayout {
                 .category_page(-direction.signum())
                 .map_or(SettingsHit::Inert, SettingsHit::Category);
         }
-        hit
+        match hit {
+            SettingsHit::Reset(index) if wheel.is_some() => SettingsHit::Field(index),
+            hit => hit,
+        }
     }
 
     fn hit_test(&self, cursor: (f32, f32)) -> SettingsHit {
@@ -161,6 +311,11 @@ impl SettingsLayout {
             }
         }
         for row in &self.rows {
+            if row.reset.is_some_and(|reset| contains(reset.rect, cursor)) {
+                return SettingsHit::Reset(row.index);
+            }
+        }
+        for row in &self.rows {
             if contains(row.rect, cursor) {
                 return SettingsHit::Field(row.index);
             }
@@ -179,9 +334,59 @@ impl SettingsLayout {
     }
 }
 
-/// The diameter of a settings switch's knob in a chip `height` tall.
+/// The diameter of a settings switch's knob in a chip `height` tall: 3 px in
+/// from the track, and no more than four fifths of it, so a tall chip at a
+/// large font keeps room for its label.
 pub(crate) fn settings_toggle_knob(height: f32) -> f32 {
-    (height - 6.0).max(4.0)
+    (height - 6.0).min(height * 0.8).max(4.0)
+}
+
+/// The height of every Settings control (the search field, a category, a
+/// value chip and Reset) for text `line` pixels tall: `line + 12` at 1x, and
+/// a line and a half once that is more, so at the default fonts (13 pt on
+/// macOS, 14 px elsewhere) a chip stays at least 24 points tall at 2x, where
+/// `line` doubles but fixed padding would not.
+pub fn settings_control_height(line: f32) -> f32 {
+    (line + 12.0).max(line * 1.5)
+}
+
+/// The narrowest a label beside an icon-only Reset chip may become before
+/// the chip gives way, in columns.
+const MIN_LABEL_COLS: f32 = 12.0;
+
+/// Where a row's Reset chip goes, and how much room it leaves its label.
+///
+/// The value chip never yields, and Reset never pushes into it. In order,
+/// as the row narrows: a disabled chip (the focused row at its default)
+/// shows only beside the whole label; an enabled chip shows its word beside
+/// the whole label, else the icon beside the whole label, else the icon
+/// while the label keeps `MIN_LABEL_COLS`; past that it is not drawn, and
+/// Delete and the accessibility tree still reset the row.
+fn place_reset(
+    row: &SettingsRow,
+    shown: bool,
+    reset_label: &str,
+    (label_x, chip_x): (f32, f32),
+    chip_h: f32,
+    text_cw: f32,
+) -> Option<(f32, bool, bool)> {
+    let enabled = row.reset?;
+    if row.disabled || !shown {
+        return None;
+    }
+    let gap = text_cw.max(6.0);
+    let room = |chip: f32| chip_x - 12.0 - label_x - chip - gap;
+    let need = display_width(&row.label) as f32 * text_cw;
+    let word = (display_width(reset_label) as f32 * text_cw + 20.0).max(chip_h);
+    if need <= room(word) + 0.01 {
+        return Some((word, enabled, false));
+    }
+    if !enabled {
+        return None;
+    }
+    let icon = chip_h;
+    (need <= room(icon) + 0.01 || room(icon) >= need.min(MIN_LABEL_COLS * text_cw))
+        .then_some((icon, true, true))
 }
 
 fn inset((x, y, w, h): Rect4, padding: f32) -> Rect4 {
@@ -255,9 +460,12 @@ pub fn settings_layout(
         .1
         .max(1.0)
         .min((h / if compact { 4.0 } else { 8.0 }).max(1.0));
-    let control_h = line + 12.0;
+    let control_h = settings_control_height(line);
     let gap = if compact { 2.0 } else { 6.0 };
-    let row_h = line * 2.0 + 16.0;
+    // The chip, then the description below it. Short panels drop the
+    // spacing between them first.
+    let row_gap = if compact { 4.0 } else { 6.0 };
+    let row_h = control_h + line + row_gap;
     let wide = w >= 640.0;
     let side_w = (w * 0.26).max(150.0);
     let sidebar_rect = wide.then_some((rect.0, rect.1, side_w, h));
@@ -425,34 +633,60 @@ pub fn settings_layout(
         }
         // A switch also holds its knob beside the label.
         let knob = if matches!(row.control, SettingsControl::Toggle(_)) {
-            settings_toggle_knob(line + 8.0) + 2.0
+            settings_toggle_knob(control_h) + 2.0
         } else {
             0.0
         };
+        // Every chip keeps one width while its value changes and is at
+        // least eight columns wide. It may take what the label leaves, so a
+        // long value shows whole beside a short label; where both are long
+        // it keeps about half the row.
         let chip_w = if row.control == SettingsControl::Text {
             inner.2 * 0.48
         } else {
-            (display_width(&row.chip_text()) as f32 * text_cw + 20.0 + knob)
-                .max(64.0)
-                .min(inner.2 * 0.48)
+            let label_need = display_width(&row.label) as f32 * text_cw;
+            (row.chip_cols() as f32 * text_cw + 20.0 + knob)
+                .max(8.0 * text_cw + 20.0)
+                .min((inner.2 - 18.0 - label_need).max(inner.2 * 0.48))
         };
-        let chip_rect = (inner.0 + inner.2 - chip_w, y + 2.0, chip_w, line + 8.0);
+        let chip_rect = (inner.0 + inner.2 - chip_w, y + 1.0, chip_w, control_h);
+        let label_x = inner.0 + 6.0;
+        let reset = place_reset(
+            row,
+            row.reset == Some(true) || (index == focused && !set.search_focused),
+            &set.reset_label,
+            (label_x, chip_rect.0),
+            control_h,
+            text_cw,
+        )
+        .map(|(width, enabled, icon)| SettingsResetChip {
+            rect: (
+                chip_rect.0 - text_cw.max(6.0) - width,
+                chip_rect.1,
+                width,
+                control_h,
+            ),
+            enabled,
+            icon,
+        });
+        let label_end = reset.map_or(chip_rect.0, |reset| reset.rect.0);
         rows.push(SettingsRowGeometry {
             index,
             rect: (inner.0, y, inner.2, row_h),
             label_rect: (
-                inner.0 + 6.0,
-                y + 6.0,
-                (inner.2 - chip_w - 18.0).max(0.0),
+                label_x,
+                chip_rect.1 + (control_h - line) * 0.5,
+                (label_end - 12.0 - label_x).max(0.0),
                 line,
             ),
             description_rect: (
-                inner.0 + 6.0,
-                y + line + 12.0,
+                label_x,
+                y + control_h + row_gap * 0.5,
                 (inner.2 - 12.0).max(0.0),
                 line,
             ),
             chip_rect,
+            reset,
         });
         y += row_h;
         previous = Some(row.category);
@@ -516,7 +750,22 @@ pub fn settings_value_rect(
         .rows
         .iter()
         .find(|row| row.index == set.focused_row)
-        .map_or(layout.empty_rect, |row| inset(row.chip_rect, 4.0))
+        .map_or(layout.empty_rect, |row| {
+            chip_text_rect(row.chip_rect, row.label_rect.3, 4.0)
+        })
+}
+
+/// One line of text inside `chip`, `padding` in from its sides and centred
+/// on its height.
+fn chip_text_rect((x, y, w, h): Rect4, line: f32, padding: f32) -> Rect4 {
+    let p = padding.min(w * 0.5);
+    let height = line.min(h).max(0.0);
+    (
+        x + p,
+        y + (h - height) * 0.5,
+        (w - 2.0 * p).max(0.0),
+        height,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +775,9 @@ pub enum SettingsHit {
     Search,
     Category(usize),
     Field(usize),
+    /// A row's Reset chip, enabled or not. Only a primary click resets; the
+    /// pointer layer treats anything else there as a hit on the row.
+    Reset(usize),
 }
 
 pub fn settings_hit_test(
@@ -559,6 +811,8 @@ pub(crate) enum SettingsTextKind {
     Label(usize),
     Description(usize),
     Value(usize),
+    /// The word on a row's Reset chip.
+    Reset(usize),
     Muted,
 }
 
@@ -622,30 +876,70 @@ pub(crate) fn settings_text_items(
             push(name, *rect, SettingsTextKind::Heading);
         }
     }
+    // Centred text: fitted to `room`, then given a rect just its own width.
+    let centred = |items: &mut Vec<SettingsTextItem>, text: &str, room: Rect4, kind| {
+        let cols = (room.2 / cw.max(1.0)).floor().max(0.0) as usize;
+        let text = fit_single_line_label(text, cols);
+        let width = (display_width(&text) as f32 * cw).min(room.2);
+        items.push(SettingsTextItem {
+            rect: (room.0 + (room.2 - width) * 0.5, room.1, width, room.3),
+            text,
+            kind,
+        });
+    };
+    let mut centred_items = Vec::new();
     for row in &layout.rows {
         let data = &set.rows[row.index];
+        let line = row.label_rect.3;
         push(
             &data.label,
             row.label_rect,
             SettingsTextKind::Label(row.index),
         );
-        let mut value_rect = inset(row.chip_rect, 4.0);
+        if let Some(reset) = row.reset.filter(|reset| !reset.icon) {
+            centred(
+                &mut centred_items,
+                &set.reset_label,
+                chip_text_rect(reset.rect, line, 10.0),
+                SettingsTextKind::Reset(row.index),
+            );
+        }
+        let mut room = chip_text_rect(row.chip_rect, line, 4.0);
         // Reserve the knob after chip-width clamping, on either end of the switch.
         if matches!(data.control, SettingsControl::Toggle(_)) {
-            let knob = (settings_toggle_knob(row.chip_rect.3) + 2.0).min(value_rect.2);
-            if data.control == SettingsControl::Toggle(false) || data.disabled {
-                value_rect.0 += knob;
+            let knob = (settings_toggle_knob(row.chip_rect.3) + 2.0).min(room.2);
+            if !settings_knob_on_right(data) {
+                room.0 += knob;
             }
-            value_rect.2 -= knob;
+            room.2 -= knob;
         }
-        let cols = (value_rect.2 / cw.max(1.0)).floor().max(0.0) as usize;
+        let cols = (room.2 / cw.max(1.0)).floor().max(0.0) as usize;
         let value =
             if data.control == SettingsControl::Choice && !data.value.is_empty() && cols >= 4 {
-                format!("‹ {} ›", fit_single_line_label(&data.value, cols - 4))
+                // The arrows sit at the chip's ends, the value centred
+                // between them, so they stay put as the value changes.
+                let value = fit_single_line_label(&data.value, cols - 4);
+                let spare = (cols - 4).saturating_sub(display_width(&value));
+                format!(
+                    "‹ {}{value}{} ›",
+                    " ".repeat(spare / 2),
+                    " ".repeat(spare - spare / 2)
+                )
             } else {
                 data.chip_text()
             };
-        push(&value, value_rect, SettingsTextKind::Value(row.index));
+        if data.control == SettingsControl::Text {
+            // Free text starts where its inline editor does, so opening
+            // the editor does not move it.
+            push(&value, room, SettingsTextKind::Value(row.index));
+        } else {
+            centred(
+                &mut centred_items,
+                &value,
+                room,
+                SettingsTextKind::Value(row.index),
+            );
+        }
         push(
             &data.description,
             row.description_rect,
@@ -658,5 +952,77 @@ pub(crate) fn settings_text_items(
     for (text, rect) in &layout.footer {
         push(text, *rect, SettingsTextKind::Muted);
     }
+    items.extend(centred_items);
     items
+}
+
+/// Width of the bar that marks the focused row and the active category:
+/// a sixth of a line, so it keeps its weight at 2x.
+pub(crate) fn settings_focus_bar_width(line: f32) -> f32 {
+    (line / 6.0).round().max(2.0)
+}
+
+/// The focus bar along the left edge of `rect`.
+pub(crate) fn settings_focus_bar((x, y, _, h): Rect4, width: f32) -> Rect4 {
+    (x, y + 4.0, width, (h - 8.0).max(0.0))
+}
+
+/// The ink of one Settings text item. Labels, values and titles are
+/// `TEXT_CONTRAST` text; descriptions, hints, notes and the placeholder use
+/// the palette's quieter inks. A disabled row stays at the `muted` floor
+/// (4.5:1), quieter than enabled descriptions: WCAG exempts an inactive
+/// control's text, and the floor keeps it readable anyway.
+pub(crate) fn settings_text_color(
+    set: &SettingsOverlay,
+    kind: SettingsTextKind,
+    palette: &SettingsColors,
+    (theme, accent, on_ink): (&kettle_config::Theme, Rgb, Rgb),
+    colors: &mut super::chrome::Colors,
+) -> Rgb {
+    let (fg, bg) = (theme.foreground, theme.background);
+    let index = match kind {
+        SettingsTextKind::Category(index) if index == set.active_category => {
+            return colors.text(fg, palette.selected);
+        }
+        SettingsTextKind::Title | SettingsTextKind::Heading | SettingsTextKind::Category(_) => {
+            return colors.text(fg, bg);
+        }
+        SettingsTextKind::Muted => return palette.description,
+        SettingsTextKind::Label(index)
+        | SettingsTextKind::Value(index)
+        | SettingsTextKind::Description(index)
+        | SettingsTextKind::Reset(index) => index,
+    };
+    let Some(row) = set.rows.get(index) else {
+        return colors.text(fg, bg);
+    };
+    let focused = index == set.focused_row && !set.search_focused;
+    // Labels and descriptions sit on the focused row's fill; chips are
+    // filled with the panel.
+    let in_chip = matches!(
+        kind,
+        SettingsTextKind::Value(_) | SettingsTextKind::Reset(_)
+    );
+    let surface = if focused && !in_chip {
+        palette.selected
+    } else {
+        bg
+    };
+    if row.disabled {
+        return colors.muted(fg, surface);
+    }
+    match kind {
+        SettingsTextKind::Value(_) if row.unavailable => palette.description,
+        SettingsTextKind::Value(_) if settings_knob_on_right(row) => colors.text(on_ink, accent),
+        SettingsTextKind::Description(_) if focused => palette.description_selected,
+        SettingsTextKind::Description(_) => palette.description,
+        SettingsTextKind::Reset(_) if row.reset != Some(true) => colors.muted(fg, bg),
+        _ => colors.text(fg, surface),
+    }
+}
+
+/// Whether a switch's knob sits at its right end: switched on, even where
+/// this session cannot show the effect. A disabled switch reads as off.
+pub(crate) fn settings_knob_on_right(row: &SettingsRow) -> bool {
+    row.control == SettingsControl::Toggle(true) && !row.disabled
 }

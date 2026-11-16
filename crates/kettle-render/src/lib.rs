@@ -115,9 +115,7 @@ use gpu::{
     try_adapter_candidates,
 };
 use gpu::{latch_gpu_fault, live_device_limits, resolve_headless_adapter};
-use labels::{
-    display_width, fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front,
-};
+use labels::{fit_key_hint, fit_single_line_label, middle_ellipsis, take_cols_front};
 /// Size of the strip's `+`, `▾` and `≡` glyphs relative to tab text.
 pub(crate) const TAB_CONTROL_GLYPH_SCALE: f32 = 2.0;
 /// Space around the size chip's text, in pixels.
@@ -125,7 +123,9 @@ const RESIZE_CHIP_PAD: f32 = 14.0;
 /// Size of a tab's close `×` relative to its title.
 pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
-pub use labels::{fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label};
+pub use labels::{
+    display_width, fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label,
+};
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
 #[cfg(test)]
@@ -181,8 +181,9 @@ use search::{
 use search::{search_bar_text, search_editor_label, search_focused_label};
 pub use settings::{
     SettingsControl, SettingsHit, SettingsLayout, SettingsOverlay, SettingsPanelGeometry,
-    SettingsRow, SettingsRowGeometry, settings_hit_test, settings_hit_test_with_text_width,
-    settings_layout, settings_panel_geometry, settings_value_rect,
+    SettingsResetChip, SettingsRow, SettingsRowGeometry, settings_control_height,
+    settings_hit_test, settings_hit_test_with_text_width, settings_layout, settings_panel_geometry,
+    settings_value_rect,
 };
 use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
@@ -5209,25 +5210,24 @@ impl Renderer {
         // Settings surfaces use the menu layer, before all modal text.
         let mut settings_surfaces = Vec::new();
         if let Some(set) = &overlay.settings {
-            let layout = settings_layout(
-                set,
-                (cw, self.overlay_text_line_height()),
-                (sw, sh),
-                self.overlay_text_cell_width(),
-            );
+            let text_cw = self.overlay_text_cell_width();
+            let line = self.overlay_text_line_height();
+            let layout = settings_layout(set, (cw, line), (sw, sh), text_cw);
             let acc = self.ui_accent(cfg, theme);
-            let settings::SettingsColors {
-                selected,
-                border,
-                control,
-                selected_control,
-            } = settings::settings_colors(
+            let palette = settings::settings_colors(
                 theme,
                 acc,
                 self.config.format.is_srgb(),
                 &mut self.chrome_colors,
             );
-            let rail = self.chrome_colors.icon(acc, selected);
+            let settings::SettingsColors {
+                selected,
+                border,
+                control,
+                selected_control,
+                focus,
+                ..
+            } = palette;
             // Ink on a switched-on toggle: whichever theme end stands out more
             // against the accent, for its knob and its label.
             let on_ink = if color::contrast_ratio(theme.foreground, acc)
@@ -5273,13 +5273,15 @@ impl Renderer {
                     0.0,
                 );
             }
+            // Focus shows as a bar, not only as the light fill.
+            let bar = settings::settings_focus_bar_width(line);
             if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
-                    (r.0, r.1 + 4.0, 2.0, (r.3 - 8.0).max(0.0)),
-                    rail,
+                    settings::settings_focus_bar(*r, bar),
+                    focus,
                     1.0,
-                    rail,
+                    focus,
                     0.0,
                     0.0,
                 );
@@ -5302,6 +5304,14 @@ impl Renderer {
                 let row_selected = row.index == set.focused_row && !set.search_focused;
                 if row_selected {
                     shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
+                    shape(
+                        settings::settings_focus_bar(row.rect, bar),
+                        focus,
+                        1.0,
+                        focus,
+                        0.0,
+                        0.0,
+                    );
                 }
                 let control = if row_selected {
                     selected_control
@@ -5309,62 +5319,67 @@ impl Renderer {
                     control
                 };
                 let data = &set.rows[row.index];
-                let on = data.control == SettingsControl::Toggle(true) && !data.disabled;
+                let switch = matches!(data.control, SettingsControl::Toggle(_));
+                // Accent fill only where the switch is on and its effect shows.
+                let on = settings::settings_knob_on_right(data) && !data.unavailable;
                 shape(
                     row.chip_rect,
                     if on { acc } else { theme.background },
                     1.0,
                     control,
                     1.0,
-                    if matches!(data.control, SettingsControl::Toggle(_)) {
-                        row.chip_rect.3 / 2.0
-                    } else {
-                        4.0
-                    },
+                    if switch { row.chip_rect.3 / 2.0 } else { 4.0 },
                 );
                 // A switch's knob: at the right end when on, the left when
                 // off, so the state reads without the label or the colour.
-                if matches!(data.control, SettingsControl::Toggle(_)) {
+                // Where the effect is unavailable the knob stays where the
+                // setting is, hollow.
+                if switch {
                     let (x, y, w, h) = row.chip_rect;
                     let d = settings_toggle_knob(h);
-                    let kx = if on { x + w - d - 3.0 } else { x + 3.0 };
-                    let fill = if on { on_ink } else { control };
-                    shape((kx, y + (h - d) / 2.0, d, d), fill, 1.0, fill, 0.0, d / 2.0);
+                    let kx = if settings::settings_knob_on_right(data) {
+                        x + w - d - 3.0
+                    } else {
+                        x + 3.0
+                    };
+                    let knob = (kx, y + (h - d) / 2.0, d, d);
+                    if data.unavailable {
+                        shape(knob, theme.background, 1.0, control, 1.5, d / 2.0);
+                    } else {
+                        let fill = if on { on_ink } else { control };
+                        shape(knob, fill, 1.0, fill, 0.0, d / 2.0);
+                    }
+                }
+                if let Some(reset) = row.reset {
+                    shape(
+                        reset.rect,
+                        theme.background,
+                        1.0,
+                        if reset.enabled { control } else { border },
+                        1.0,
+                        4.0,
+                    );
+                    if reset.icon {
+                        header_icons::push_header_icon(
+                            &mut menu_q,
+                            header_icons::HeaderIcon::Reset,
+                            reset.rect,
+                            self.chrome_colors.text(theme.foreground, theme.background),
+                            self.scale,
+                            &mut self.header_icon_masks,
+                        );
+                    }
                 }
             }
-            let items = settings_text_items(set, &layout, self.overlay_text_cell_width());
+            let items = settings_text_items(set, &layout, text_cw);
             for (i, item) in items.iter().enumerate() {
-                let mut background = theme.background;
-                let mut foreground = theme.foreground;
-                let mut muted = matches!(
+                let color = settings::settings_text_color(
+                    set,
                     item.kind,
-                    SettingsTextKind::Muted | SettingsTextKind::Description(_)
+                    &palette,
+                    (theme, acc, on_ink),
+                    &mut self.chrome_colors,
                 );
-                match item.kind {
-                    SettingsTextKind::Category(index) if index == set.active_category => {
-                        background = selected;
-                    }
-                    SettingsTextKind::Label(index)
-                    | SettingsTextKind::Value(index)
-                    | SettingsTextKind::Description(index) => {
-                        let row = &set.rows[index];
-                        muted |= row.disabled;
-                        if item.kind == SettingsTextKind::Value(index) {
-                            if row.control == SettingsControl::Toggle(true) && !row.disabled {
-                                background = acc;
-                                foreground = on_ink;
-                            }
-                        } else if index == set.focused_row && !set.search_focused {
-                            background = selected;
-                        }
-                    }
-                    _ => {}
-                }
-                let color = if muted {
-                    self.chrome_colors.muted(foreground, background)
-                } else {
-                    self.chrome_colors.text(foreground, background)
-                };
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
                     left: item.rect.0,
@@ -6739,6 +6754,9 @@ mod run_attrs_tests;
 
 #[cfg(test)]
 mod settings_panel_cols_tests;
+
+#[cfg(test)]
+mod settings_reset_layout_tests;
 
 #[cfg(test)]
 mod text_layout_damage_tests;

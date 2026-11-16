@@ -771,10 +771,11 @@ impl App {
         let tr = &self.ui_text;
         let (label_cols, value_cols) = crate::settings::column_widths(&self.cfg, &cats, tr);
         let fld = nav.field.min(active.fields.len().saturating_sub(1));
-        let blur_unavailable = ws
+        let blur = ws
             .native_material
             .as_ref()
-            .is_some_and(|material| material.blur_unavailable());
+            .map_or_else(Default::default, |material| material.blur_state());
+        let blur_unavailable = blur == crate::settings::BlurState::Unavailable;
         Some(kettle_render::SettingsOverlay {
             categories: cats.iter().map(|c| tr.text(c.name).to_string()).collect(),
             label_cols,
@@ -807,13 +808,11 @@ impl App {
                         // Capture prompt on the focused keybind row.
                         tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
                     } else {
-                        crate::settings::read(&self.cfg, f, tr)
+                        crate::settings::row_value(f, blur, &self.cfg, tr)
                     };
                     kettle_render::SettingsRow {
                         label: tr.text(f.label).to_string(),
-                        description: tr
-                            .text(crate::settings::row_description(f, blur_unavailable))
-                            .to_string(),
+                        description: crate::settings::row_description(f, blur, &self.cfg, tr),
                         category,
                         control: match f.kind {
                             crate::settings::FieldKind::Toggle => {
@@ -833,6 +832,14 @@ impl App {
                         value,
                         disabled: crate::settings::field_disabled(&self.cfg, f.key)
                             || (f.key == "gpu" && self.gpu_discovery_pending),
+                        reset: crate::settings::reset_state(&self.cfg, f),
+                        unavailable: f.key == "window-blur"
+                            && blur != crate::settings::BlurState::Available,
+                        value_cols: if crate::settings::is_keybind(f) {
+                            0
+                        } else {
+                            crate::settings::field_value_cols(&self.cfg, f, tr)
+                        },
                     }
                 })
                 .collect(),
@@ -843,6 +850,16 @@ impl App {
                 .unwrap_or(0),
             title: tr.text(active.name).to_string(),
             hints: settings_hints(tr, self.cfg.vim_menu_nav),
+            reset_label: tr.text(kettle_i18n::Text::SettingsResetButton).to_string(),
+            reset_name: active
+                .fields
+                .get(fld)
+                .filter(|f| crate::settings::reset_state(&self.cfg, f).is_some())
+                .and_then(|f| {
+                    crate::settings::default_display(f, tr)
+                        .map(|value| tr.settings_a11y_reset(tr.text(f.label), &value))
+                })
+                .unwrap_or_default(),
             footer_note: {
                 let graphics = active.name == kettle_i18n::Text::SettingsCategoryGraphics;
                 let active_gpu = graphics.then(|| {
@@ -927,7 +944,16 @@ impl App {
             (sw, sh),
             self.overlay_text_cell_width(ws),
         );
-        let hit = layout.pointer_hit((mx, my), (!is_click).then_some(dir));
+        // Off a primary click, the Reset chip is part of its row.
+        let hit = match layout.pointer_hit((mx, my), (!is_click).then_some(dir)) {
+            kettle_render::SettingsHit::Reset(index)
+                if crate::settings::reset_pointer(is_click, dir)
+                    == crate::settings::ResetPointer::Row =>
+            {
+                kettle_render::SettingsHit::Field(index)
+            }
+            hit => hit,
+        };
         if ws
             .settings_nav
             .as_ref()
@@ -976,6 +1002,21 @@ impl App {
                         &self.ui_text,
                         hit,
                     );
+                }
+            }
+            kettle_render::SettingsHit::Reset(_) => {
+                // Focus the row and reset it; it never cycles. At its default
+                // (a disabled chip) the click only focuses the row.
+                let cats = crate::settings::categories(&self.gpu_choices);
+                let identity = ws
+                    .settings_nav
+                    .as_mut()
+                    .and_then(|nav| nav.apply_hit(&cats, &self.cfg, &self.ui_text, hit));
+                if let Some((cat, f)) = identity {
+                    if let Some(nav) = ws.settings_nav.as_mut() {
+                        nav.capturing = false;
+                    }
+                    self.settings_reset(ws, &cats, cat, f);
                 }
             }
             kettle_render::SettingsHit::Field(f) => {
@@ -2125,6 +2166,34 @@ impl App {
         }
         if let Some(value) = crate::settings::default_value(field) {
             self.settings_store(ws, field.key, value);
+        }
+    }
+
+    /// Reset the selected Settings row, as Delete does: what the Reset
+    /// button in the accessibility tree does. Nothing while search, a chord
+    /// capture or an inline edit holds the keyboard, as for Delete.
+    pub(super) fn settings_reset_selected(&mut self, ws: &mut WindowState) {
+        let Some((cat, fld)) = ws
+            .settings_nav
+            .as_ref()
+            .filter(|nav| !nav.search_focused && !nav.capturing)
+            .map(|nav| (nav.category, nav.field))
+        else {
+            return;
+        };
+        if ws.settings_text_edit.is_some() || ws.theme_picker_input.is_some() {
+            return;
+        }
+        let cats = crate::settings::categories(&self.gpu_choices);
+        if cats
+            .get(cat)
+            .is_some_and(|category| fld < category.fields.len())
+        {
+            self.settings_reset(ws, &cats, cat, fld);
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
     }
 

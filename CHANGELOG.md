@@ -386,6 +386,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Settings is easier to read and to use with the pointer. Descriptions,
+  footer hints and notes reach 7:1 against the panel where the theme allows,
+  and never less than four fifths of their label's contrast (TokyoNight Night
+  7.0:1 and Kettle Day 5.7:1, up from 4.5:1). The highlighted row and
+  category carry a bar at their left edge, at least 3:1 against the panel
+  and their fill, so the fill can stay light and their text keeps its
+  contrast (TokyoNight Night's highlighted label under GNOME's purple accent
+  7.0:1, up from 4.9:1).
+  Every control is one height, at least 24 points at 1x and 2x with the
+  default font, and keeps one width while its value changes; a choice's
+  arrows stay at its ends. A changed setting shows a **Reset** button beside
+  its value, and the highlighted row shows it dimmed when it already holds
+  its default; on a narrow row it becomes an icon, and on the narrowest it
+  is left out (Delete still resets). Screen readers get one Reset button for
+  the highlighted row, named for the default it restores ("Reset Font size
+  to 14 px"), and `kettle ctl ui_geometry` reports each row's Reset chip.
+
 - Colour emoji are sharp and whole. Each one is rasterized at exactly the size
   its cell draws it, averaged down from the font's largest bitmap, instead of
   stretching a font-size image on the GPU; Apple Color Emoji at 13 px had come
@@ -716,10 +733,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the configured opacity, as it does with blur off. The Linux default stays
   99%. Wherever the session cannot blur (those Linux sessions, KDE Plasma on
   X11 included, and Windows without its system backdrop, such as Windows 10),
-  Settings says "Not available in this session; opacity still applies." under
-  the Window blur switch, in English and Spanish, and the footer of the
-  Window blur and Background opacity rows drops its hint about what blur
-  needs.
+  the Settings Window blur switch reads **Unavailable** instead of On,
+  without the accent fill and with a hollow knob, and says "This session
+  cannot blur; saved setting: On. Opacity still applies." under it, in
+  English and Spanish; it still turns blur off. On Wayland, while Kettle
+  asks the compositor (at most half a second), it reads **Checking…**, so it
+  never shows On before Unavailable. The footer of the Window blur and
+  Background opacity rows drops its hint about what blur needs.
 
 - In Kettle's GNOME header bar the new-tab options button is the window's
   primary menu, named "Main menu" and placed at the end of the header as GNOME
@@ -1034,10 +1054,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - The outlines of Settings' fields, choices and switches, the search
   field, the category arrows and an off switch's knob were about 1.5:1. They
-  now keep 3:1 against the panel (3.0:1 in TokyoNight Night). On the
-  highlighted row they are brighter, keeping 3:1 against the highlight too
-  (6.2:1 against the panel there). The panel's own outline and divider stay
-  quiet.
+  now keep 4.5:1 against the panel, and on the highlighted row against the
+  highlight too, wherever the theme allows (all bundled themes but Hot Dog
+  Stand in an sRGB blend, which keeps 3:1). The panel's own outline and
+  sidebar divider keep 3:1.
 
 - On a translucent window, text on the active tab was checked against the
   theme's background rather than what the window shows over the desktop.

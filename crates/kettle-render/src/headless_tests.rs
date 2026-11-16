@@ -1547,11 +1547,13 @@ fn confirmation_preserves_settings_below_opaque_panel() {
             label: "A conflicting key binding".into(),
             value: "Ctrl+W".into(),
             disabled: false,
+            ..Default::default()
         }],
         focused_row: 0,
         title: "Settings: Keys".into(),
         hints: "Settings keyboard hints".into(),
         footer_note: None,
+        ..Default::default()
     });
     let raised = capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
     let (x, y, w, h) = layout.rect;

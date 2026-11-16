@@ -1410,7 +1410,7 @@ impl App {
                 "search_rect": rect_json(layout.search_rect),
                 "search_focused": settings.search_focused,
                 "categories": layout.category_rects.iter().map(|r| r.map(rect_json)).collect::<Vec<_>>(),
-                "rows": layout.rows.iter().map(|row| serde_json::json!({"index": row.index, "rect": rect_json(row.rect), "chip_rect": rect_json(row.chip_rect), "label_rect": rect_json(row.label_rect), "description_rect": rect_json(row.description_rect)})).collect::<Vec<_>>(),
+                "rows": layout.rows.iter().map(|row| serde_json::json!({"index": row.index, "rect": rect_json(row.rect), "chip_rect": rect_json(row.chip_rect), "label_rect": rect_json(row.label_rect), "description_rect": rect_json(row.description_rect), "reset_rect": row.reset.map(|reset| rect_json(reset.rect)), "reset_enabled": row.reset.map(|reset| reset.enabled), "reset_icon": row.reset.map(|reset| reset.icon), "unavailable": settings.rows.get(row.index).is_some_and(|data| data.unavailable)})).collect::<Vec<_>>(),
                 "focused_row": settings.focused_row,
                 "row_count": settings.rows.len(),
                 "active_category": settings.active_category,
