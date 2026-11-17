@@ -1622,6 +1622,7 @@ impl App {
                 };
                 if typing {
                     dismiss_link_hover(ws);
+                    self.dismiss_selection_hint(ws);
                 }
                 if typing && ws.tab_focus.take().is_some() {
                     ws.accessibility_pending = true;
@@ -1684,6 +1685,7 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
                     dismiss_link_hover(ws);
+                    self.dismiss_selection_hint(ws);
                 }
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.

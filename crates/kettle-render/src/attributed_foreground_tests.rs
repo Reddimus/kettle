@@ -5,6 +5,146 @@ use super::{
 use alacritty_terminal::vte::ansi::Color as AnsiColor;
 use kettle_config::{Config, Theme};
 
+#[test]
+fn theme_selection_contrast_and_user_color_precedence() {
+    use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
+    let cfg = Config::default();
+    let mut sweep_minimum = f64::INFINITY;
+    for name in Theme::list() {
+        let theme = cfg.theme_by_name(name);
+        for alpha in [1.0, 0.99, 0.86, 0.5] {
+            let mut cache = MinimumContrastCache::default();
+            let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
+            let mut user_theme = theme.clone();
+            user_theme.selection_background_user = true;
+            let legacy = PaneSelectionFills::new(&user_theme, theme.background, alpha, &mut cache);
+            assert_eq!(
+                fills.cell(
+                    CellHighlight::Search(false),
+                    &cfg,
+                    &theme,
+                    theme.background,
+                    &mut cache
+                ),
+                legacy.row(true),
+                "{name} at {alpha}: search retains the previous fill policy"
+            );
+            assert!(
+                color::contrast_ratio(fills.row(true), fills.row(false)) >= 1.3,
+                "{name} at {alpha}: focus separation"
+            );
+            for (highlight, focused) in [
+                (CellHighlight::Selection, true),
+                (CellHighlight::InactiveSelection, false),
+            ] {
+                for background in [
+                    theme.background,
+                    theme.palette[0],
+                    theme.palette[4],
+                    theme.selection_background,
+                ] {
+                    let fill = fills.cell(highlight, &cfg, &theme, background, &mut cache);
+                    for ink in std::iter::once(theme.foreground).chain(theme.palette) {
+                        let drawn = resolved_highlight_foreground_cached(
+                            ink, fill, highlight, &cfg, &theme, &mut cache,
+                        );
+                        let ratio = color::contrast_ratio(drawn, fill);
+                        sweep_minimum = sweep_minimum.min(ratio);
+                        if alpha == 0.99
+                            && background == theme.background
+                            && ink == theme.foreground
+                            && ["TokyoNight Night", "Kettle Day"].contains(&name)
+                        {
+                            eprintln!(
+                                "C09_CONTRAST {name}: focused={focused}, ink={drawn:?}, fill={fill:?}, ratio={ratio:.6}"
+                            );
+                        }
+                        assert!(
+                            ratio >= 7.0,
+                            "{name} at {alpha}, focused={focused}: {drawn:?} on {fill:?} = {ratio}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("C09_BUNDLED_SWEEP_MINIMUM {sweep_minimum:.9}");
+    for override_text in [
+        "selection-background = #283457",
+        "selection-foreground = #c0caf5",
+        "selection-background = #283457\nselection-foreground = #c0caf5",
+    ] {
+        let cfg = Config::parse_text(&format!("theme = TokyoNight Night\n{override_text}\n"));
+        let mut cache = MinimumContrastCache::default();
+        let fills = PaneSelectionFills::new(&cfg.theme, cfg.theme.background, 0.99, &mut cache);
+        assert_eq!(fills.row(true), Rgb::new(78, 102, 168));
+        assert_eq!(fills.row(false), Rgb::new(78, 78, 78));
+        let ink = resolved_highlight_foreground_cached(
+            cfg.theme.foreground,
+            fills.row(false),
+            CellHighlight::InactiveSelection,
+            &cfg,
+            &cfg.theme,
+            &mut cache,
+        );
+        assert_eq!(ink, Rgb::new(192, 202, 245));
+    }
+}
+
+#[test]
+fn cell_selection_keeps_focus_separation_with_local_fallback() {
+    use super::theme::{PaneSelectionFills, resolved_highlight_foreground_cached};
+    let cfg = Config::default();
+    let theme = cfg.theme_by_name("Kanagawa Lotus");
+    let background = Rgb::new(0, 0, 0);
+    let mut cache = MinimumContrastCache::default();
+    let fills = PaneSelectionFills::new(&theme, theme.background, 1.0, &mut cache);
+    assert!(
+        color::contrast_ratio(fills.row(true), background) < 3.0,
+        "the active pane fill must need a local fallback"
+    );
+    assert!(
+        color::contrast_ratio(fills.row(false), background) >= 2.0,
+        "the inactive pane fill must already separate from the cell background"
+    );
+    let active = fills.cell(
+        CellHighlight::Selection,
+        &cfg,
+        &theme,
+        background,
+        &mut cache,
+    );
+    let inactive = fills.cell(
+        CellHighlight::InactiveSelection,
+        &cfg,
+        &theme,
+        background,
+        &mut cache,
+    );
+    assert!(
+        color::contrast_ratio(active, inactive) >= 1.3,
+        "the final cell fills must keep focus separation: {active:?} / {inactive:?}"
+    );
+    for (highlight, fill) in [
+        (CellHighlight::Selection, active),
+        (CellHighlight::InactiveSelection, inactive),
+    ] {
+        for ink in std::iter::once(theme.foreground).chain(theme.palette) {
+            let drawn = resolved_highlight_foreground_cached(
+                ink, fill, highlight, &cfg, &theme, &mut cache,
+            );
+            assert!(color::contrast_ratio(drawn, fill) >= 7.0);
+        }
+        for background in [theme.background, Rgb::new(255, 255, 255)] {
+            assert_eq!(
+                fills.cell(highlight, &cfg, &theme, background, &mut cache),
+                fills.row(matches!(highlight, CellHighlight::Selection)),
+                "keep the pane pair when neither state needs a local fallback"
+            );
+        }
+    }
+}
+
 /// `minimum-contrast` must survive `bold-is-bright`.
 ///
 /// If the lift runs first, `bold_is_bright` then replaces the foreground
@@ -327,7 +467,13 @@ fn automatic_highlight_text_is_readable_in_every_bundled_palette() {
                     );
                     assert!(color::contrast_ratio(underline, fill) >= 4.5);
                 }
-                if color::contrast_ratio(fg, fill) >= 4.5 {
+                if color::contrast_ratio(fg, fill)
+                    >= if matches!(highlight, CellHighlight::Selection) {
+                        7.0
+                    } else {
+                        4.5
+                    }
+                {
                     assert_eq!(drawn, fg, "{name}: readable {label} on {kind}");
                 } else {
                     let best = [
@@ -521,7 +667,8 @@ fn highlights_choose_maximum_contrast_after_user_and_cell_ink() {
 fn inactive_selection_moves_toward_background_and_keeps_aa_ink() {
     let cfg = Config::default();
     for name in Theme::list() {
-        let theme = Theme::by_name(name);
+        let mut theme = Theme::by_name(name);
+        theme.selection_background_user = true;
         let mut cache = MinimumContrastCache::default();
         let active = super::theme::selection_fill(&theme, theme.background, true, &mut cache);
         let inactive = super::theme::selection_fill(&theme, theme.background, false, &mut cache);
@@ -573,7 +720,10 @@ fn default_theme_selections_become_stronger_tints_with_readable_text() {
         let mut cache = MinimumContrastCache::default();
         let fill = super::theme::selection_fill(&theme, background, true, &mut cache);
         assert!(
-            color::contrast_ratio(fill, background) >= 3.0,
+            color::contrast_ratio(fill, background) >= 3.0
+                || super::theme::PaneSelectionFills::new(&theme, background, 1.0, &mut cache)
+                    .outline(&theme, true)
+                    .is_some(),
             "{name}: {fill:?} has {:.2}:1",
             color::contrast_ratio(fill, background)
         );
@@ -604,7 +754,13 @@ fn default_theme_selections_become_stronger_tints_with_readable_text() {
         }
         let inactive = super::theme::selection_fill(&theme, background, false, &mut cache);
         let inactive_contrast = color::contrast_ratio(inactive, background);
-        assert!(inactive_contrast >= 2.0, "{name}: {inactive_contrast:.2}");
+        assert!(
+            inactive_contrast >= 2.0
+                || super::theme::PaneSelectionFills::new(&theme, background, 1.0, &mut cache)
+                    .outline(&theme, false)
+                    .is_some(),
+            "{name}: {inactive_contrast:.2}"
+        );
         assert!(
             inactive_contrast < color::contrast_ratio(fill, background),
             "{name}: the unfocused fill must stay weaker"
@@ -622,14 +778,6 @@ fn every_bundled_selection_keeps_its_hue_or_its_colour() {
             theme.background,
             true,
             &mut MinimumContrastCache::default(),
-        );
-        if color::contrast_ratio(selection, theme.background) >= 3.0 {
-            assert_eq!(fill, selection, "{name}: a separate colour is kept");
-            continue;
-        }
-        assert!(
-            color::contrast_ratio(fill, theme.background) >= 3.0,
-            "{name}"
         );
         let channels = [selection.r, selection.g, selection.b];
         // A near-grey's hue is rounding noise.
@@ -697,7 +845,8 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
     let cfg = Config::default();
     let grey = |c: Rgb| c.r == c.g && c.g == c.b;
     for name in Theme::list() {
-        let theme = Theme::by_name(name);
+        let mut theme = Theme::by_name(name);
+        theme.selection_background_user = true;
         for alpha in [1.0, 0.86] {
             let mut cache = MinimumContrastCache::default();
             let fills = PaneSelectionFills::new(&theme, theme.background, alpha, &mut cache);
@@ -787,7 +936,8 @@ fn unfocused_selection_is_neutral_grey_in_every_bundled_theme() {
 fn selections_are_measured_against_a_see_through_background_as_shown() {
     use super::theme::{PaneSelectionFills, selection_contrast_target};
     let cfg = Config::default();
-    let theme = cfg.theme_by_name("TokyoNight Night");
+    let mut theme = cfg.theme_by_name("TokyoNight Night");
+    theme.selection_background_user = true;
     let mut cache = MinimumContrastCache::default();
     let fills = PaneSelectionFills::new(&theme, theme.background, 0.86, &mut cache);
     let target = selection_contrast_target(theme.background, fills.row(true), 0.86);
@@ -868,7 +1018,8 @@ fn selected_text_stays_readable_on_see_through_and_opaque_fills() {
 fn an_opaque_window_keeps_the_theme_selection() {
     use super::theme::{PaneSelectionFills, selection_backdrop_alpha};
     let mut cfg = Config::default();
-    let theme = cfg.theme_by_name("TokyoNight Night");
+    let mut theme = cfg.theme_by_name("TokyoNight Night");
+    theme.selection_background_user = true;
     let fills = |alpha: f64| {
         PaneSelectionFills::new(
             &theme,
@@ -988,7 +1139,7 @@ fn a_see_through_selection_keeps_its_side_of_the_theme_background() {
                 color::contrast_ratio(base, theme.background),
             );
             assert!(
-                now >= was - 0.01,
+                now >= was - 0.01 || fills.outline(&theme, true).is_some(),
                 "{name} at {alpha}: {focused:?} is {now:.2}:1 from the background, {base:?} {was:.2}:1"
             );
         }

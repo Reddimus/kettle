@@ -6969,6 +6969,7 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     cfg.theme.background = Rgb::new(0, 0, 0);
     cfg.theme.foreground = Rgb::new(255, 255, 255);
     cfg.theme.selection_background = Rgb::new(60, 90, 190);
+    cfg.theme.selection_background_user = true;
     cfg.theme.palette[4] = Rgb::new(255, 230, 0);
     let accent = Rgb::new(0, 255, 170);
     renderer.set_accent_override(Some(accent));
@@ -7238,6 +7239,8 @@ fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() 
     cfg.show_titlebar = false;
     cfg.background_opacity = 1.0;
     cfg.unfocused_split_opacity = 0.1;
+    // Explicit user colours retain the fill-only contrast policy.
+    cfg.theme.selection_background_user = true;
     let (cell_w, cell_h) = (renderer.cell_w, renderer.cell_h);
     // Cells 0..5 of both rows carry the default selection fill as their own
     // background; only row 0 is selected, so row 1 shows what row 0 would.
@@ -7322,6 +7325,8 @@ fn a_selection_over_program_backgrounds_keeps_one_fill_where_it_separates() {
     cfg.show_titlebar = false;
     cfg.background_opacity = 1.0;
     cfg.theme = cfg.theme_by_name("TokyoNight Night");
+    // Explicit user colours retain the fill-only contrast policy.
+    cfg.theme.selection_background_user = true;
     let theme = cfg.theme.clone();
     let mut cache = MinimumContrastCache::default();
     let row_fill = |focused: bool, cache: &mut MinimumContrastCache| {
@@ -7810,6 +7815,7 @@ fn a_see_through_window_paints_the_selection_measured_as_shown() {
     use kettle_core::{Column, Line, Point};
     let _serial = gpu_test_guard();
     let mut cfg = gpu_test_config();
+    cfg.theme.selection_background_user = true;
     cfg.show_titlebar = false;
     cfg.background_opacity = 0.86;
     let Some(mut renderer) =

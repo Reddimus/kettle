@@ -786,6 +786,7 @@ impl App {
         };
         let ctl_policy = ctl_overrides(&startup).resolve(initial_cfg.ctl_policy());
         let mut app = App {
+            selection_hint: Default::default(),
             pending_shell_action: PendingShellAction::default(),
             #[cfg(target_os = "linux")]
             wayland: None,

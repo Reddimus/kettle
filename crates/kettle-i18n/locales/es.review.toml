@@ -45,6 +45,7 @@
 # to draft pending review of the revised text in rendered UI.
 
 [status]
+selection_gesture_hint = "draft"
 a11y_window_minimize = "accepted"
 a11y_window_maximize = "accepted"
 a11y_window_restore = "accepted"
@@ -1449,6 +1450,7 @@ keys = [
     "osc52_blocked_read_by",
     "osc52_blocked_write_by",
 
+    "selection_gesture_hint",
     "scrollback_a11y_viewing",
     "scrollback_kept",
     "scrollback_kept_lines",
