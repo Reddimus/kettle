@@ -77,7 +77,7 @@ fn the_new_tab_dropdown_follows_the_ui_language() {
             "Command palette",
             "Keyboard shortcuts",
             "Help",
-            "About kettle"
+            "About Kettle"
         ]
     );
     // Shell names are shown as detected.
@@ -92,7 +92,7 @@ fn the_new_tab_dropdown_follows_the_ui_language() {
             "Paleta de comandos",
             "Atajos de teclado",
             "Ayuda",
-            "Acerca de kettle"
+            "Acerca de Kettle"
         ]
     );
 }

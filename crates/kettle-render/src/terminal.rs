@@ -292,9 +292,9 @@ pub(crate) struct PendingCursorGlyph {
     pub(crate) color: Rgb,
     /// Pane rect `(x, y, w, h)`, narrowed to the cell for clustered text.
     pub(crate) clip: (f32, f32, f32, f32),
-    /// The grid pane's images of the cell when fallback mark placement moved
-    /// one of them (`batching::moved_cell_images`). The cursor pass then
-    /// draws these, in `color`, instead of the shaped `text`.
+    /// The pane's positioned images when a mark moved or Arabic join sides
+    /// require anchored glyphs and connectors (`batching::moved_cell_images`).
+    /// The cursor draws these in `color` instead of the shaped `text`.
     pub(crate) marks: Vec<super::batching::CellImage>,
     /// The cell's glyph when Kettle draws it itself (box drawing, blocks,
     /// Powerline, braille), in `color`. The glyph pipeline draws it from the
@@ -415,7 +415,7 @@ pub(crate) fn cursor_glyph_damage_key(
     cursor.clip.2.to_bits().hash(&mut hash);
     cursor.clip.3.to_bits().hash(&mut hash);
     for image in &cursor.marks {
-        (image.key, image.rect).hash(&mut hash);
+        (image.raster_key(), image.rect).hash(&mut hash);
     }
     metrics.font_size.to_bits().hash(&mut hash);
     metrics.line_height.to_bits().hash(&mut hash);
@@ -906,6 +906,12 @@ impl Renderer {
                         clustered: flags.contains(Flags::GRAPHEME) && !marks.is_empty(),
                         text_presentation,
                         single_image: cluster_needs_single_image(flags, dc, marks),
+                        // Joined Arabic cells reach their partners' edges.
+                        joins: if owned_cell || hidden || builtin.is_some() {
+                            Default::default()
+                        } else {
+                            map.map(|map| map.joins(col)).unwrap_or_default()
+                        },
                     },
                     family: text_family.clone(),
                 });
@@ -1768,27 +1774,46 @@ impl Renderer {
         }
         // A mark the grid moved in the cursor's cell: the cursor pass draws
         // the pane's own images of that cell, where the pane drew them.
-        if cfg.text_renderer == TextRendererMode::Grid
+        if (cfg.text_renderer == TextRendererMode::Grid || row_map(cvrow).is_some())
             && draw_cursor
             && cursor_focused
             && matches!(shape, EShape::Block)
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()
             && let Ok(row) = usize::try_from(cvrow)
         {
-            let column = vis(
-                cvrow,
-                cursor_wide_quad.map_or(cp.column.0, |(column, _)| column),
-            );
+            let logical_column = cursor_wide_quad.map_or(cp.column.0, |(column, _)| column);
+            let column = vis(cvrow, logical_column);
+            let joined = row_map(cvrow).is_some_and(|map| {
+                let joins = map.joins(logical_column);
+                joins.left || joins.right
+            });
             cursor.marks = super::batching::moved_cell_images(
                 buf,
                 &self.pane_mark_shifts[idx],
                 (row, column),
+                joined,
                 (ox, oy),
                 cw,
+                if cfg.text_renderer == TextRendererMode::Grid {
+                    GlyphPositioning::Grid(cw)
+                } else {
+                    GlyphPositioning::GraphemeRows(cw)
+                },
                 &mut self.font_system,
                 &mut self.swash,
                 &mut self.glyph_char_starts,
             );
+            if row_map(cvrow).is_some_and(|map| {
+                let joins = map.joins(cp.column.0);
+                joins.left || joins.right
+            }) {
+                let left = (ox + column as f32 * cw).round().max(cursor.clip.0);
+                let right = (ox
+                    + (column as f32 + cursor_wide_quad.map_or(1.0, |(_, width)| width)) * cw)
+                    .round()
+                    .min(cursor.clip.0 + cursor.clip.2);
+                cursor.clip = (left, cursor.clip.1, (right - left).max(0.0), cursor.clip.3);
+            }
         }
         // Return the scratch (with its grown String buffers) to the pool for the
         // next frame/pane.

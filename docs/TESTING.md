@@ -2081,6 +2081,23 @@ Arabic joining is checked against the isolated
 form, with distinct initial, medial and final glyph IDs, cell metadata and
 optional ligatures both on and off. The bundled fonts lack Arabic, so that
 test requires a host fallback and reports `ARABIC_FONT_SKIP` if unavailable.
+`arabic_join` checks reciprocal drawable seams, width-2 geometry, colour
+ownership, missing tatweel, and base-only connector metrics with synthetic
+glyphs. `arabic_join_tests` exercises the shared emitter without a GPU and
+compares cursor masks with pane geometry in Grid and Legacy at 1x/2x. Host
+faces are selected by name (Geeza Pro, Noto Sans Arabic, DejaVu Sans); absent
+faces print `ARABIC_FONT_SKIP`. `KETTLE_ARABIC_FONT_DIR` can supply
+`NotoSansArabic-Regular.ttf` and `DejaVuSans.ttf` for missing named faces;
+they are loaded into the test's font database, without system installation.
+The CPU continuity check composites mask coverage and requires an eight-connected
+path above half coverage between joined base bodies. It allows a letter's
+natural curve to leave tatweel's bitmap row, while rejecting disconnected
+strokes and floating bridges. It checks the two joined groups of `مرحبا`
+separately, preserving the nonjoining hah/reh boundary. The bidi GPU tests
+assert flat-stroke continuity, word boundaries, style/selection ownership,
+and cursor placement;
+they print `ARABIC_GPU_SKIP` without an adapter. Those skips are not rendering
+passes. Windows fallback rendering requires a separate native check.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.

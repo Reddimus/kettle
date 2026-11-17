@@ -106,6 +106,7 @@ fn assert_ligature_ink_is_preserved(text: &str) {
                         clustered: true,
                         text_presentation: false,
                         single_image: false,
+                        joins: Default::default(),
                     };
                     spans.add_span(column..column + 1, &attrs.clone().metadata(cell.metadata()));
                 }
@@ -257,6 +258,7 @@ fn emoji_combining_mark_keeps_one_shared_transform_in_all_positioning_modes() {
                         clustered: true,
                         text_presentation: false,
                         single_image: false,
+                        joins: Default::default(),
                     };
                     spans.add_span(bytes, &attrs.clone().metadata(cell.metadata()));
                 }
@@ -401,6 +403,7 @@ fn indic_zwj_cluster_preserves_multiple_shaped_images() {
             '\u{915}',
             &['\u{94d}', '\u{200d}', '\u{937}'],
         ),
+        joins: Default::default(),
     };
     let attrs = Attrs::new()
         .family(Family::Name("Devanagari Sangam MN"))
@@ -457,6 +460,7 @@ fn joined_and_skin_tone_clusters_have_one_image_or_one_replacement() {
             clustered: true,
             text_presentation: false,
             single_image,
+            joins: Default::default(),
         };
         let text: String = std::iter::once('\u{1f469}')
             .chain(marks.iter().copied())
@@ -515,6 +519,7 @@ fn arabic_shaped_runs_use_contextual_joining_forms() {
                 clustered: true,
                 text_presentation: false,
                 single_image: false,
+                joins: Default::default(),
             };
             spans.add_span(
                 byte..byte + c.len_utf8(),
@@ -565,6 +570,7 @@ fn available_emoji_font_shapes_supported_clusters_without_decomposing() {
             clustered: true,
             text_presentation: false,
             single_image: true,
+            joins: Default::default(),
         };
         let attrs = Attrs::new()
             .family(Family::Name(kettle_config::font::FAMILY))

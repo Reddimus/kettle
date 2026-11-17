@@ -156,7 +156,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     assert!(matches!(
         items[12],
         ContextMenuItem::Item {
-            label: "About kettle",
+            label: "About Kettle",
             action: Action::About,
             enabled: true
         }
