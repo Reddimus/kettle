@@ -1,5 +1,5 @@
-//! The block cursor's inverted copy of a cell whose marks fallback placement
-//! moved (`batching::moved_cell_images`), drawn as glyphon custom glyphs.
+//! The block cursor's positioned masks, including moved marks and Arabic
+//! connectors (`batching::moved_cell_images`), drawn as glyphon custom glyphs.
 //!
 //! It has an atlas of its own. glyphon caches a custom raster by id and size
 //! and, when an atlas grows, asks for every cached custom raster again and
@@ -27,7 +27,7 @@ pub(crate) struct CursorMarks {
     renderer: TextRenderer,
     /// The text area's buffer, always empty: only custom glyphs are drawn.
     buffer: TextBuffer,
-    ids: HashMap<CacheKey, u16>,
+    ids: HashMap<(CacheKey, [u16; 4]), u16>,
     /// Every raster this atlas may hold, by id and size.
     masks: HashMap<(u16, u16, u16), Vec<u8>>,
     /// Whether the last prepare drew anything.
@@ -59,7 +59,7 @@ impl CursorMarks {
     pub(crate) fn has_room(&self, images: &[CellImage]) -> bool {
         let new = images
             .iter()
-            .filter(|image| !self.ids.contains_key(&image.key))
+            .filter(|image| !self.ids.contains_key(&image.raster_key()))
             .count();
         self.masks.len() + new <= MASK_LIMIT
     }
@@ -85,7 +85,7 @@ impl CursorMarks {
                 continue;
             };
             let next = self.ids.len();
-            let Some(&mut id) = (match self.ids.entry(image.key) {
+            let Some(&mut id) = (match self.ids.entry(image.raster_key()) {
                 std::collections::hash_map::Entry::Occupied(id) => Some(id.into_mut()),
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     u16::try_from(next).ok().map(|id| slot.insert(id))
@@ -176,6 +176,7 @@ mod tests {
         );
         CellImage {
             key,
+            sample: [0, 0, side as u16, side as u16],
             rect: [0, 0, side, side],
             mask: vec![0x80; (side * side) as usize],
         }
@@ -243,7 +244,7 @@ mod tests {
         );
         for id in 0..MASK_LIMIT as u16 - 1 {
             let image = image(id, 2);
-            marks.ids.insert(image.key, id);
+            marks.ids.insert(image.raster_key(), id);
             marks.masks.insert((id, 2, 2), image.mask);
         }
         let held = [image(0, 2)];
@@ -251,5 +252,31 @@ mod tests {
         assert!(marks.has_room(&held), "held images need no room");
         assert!(marks.has_room(&new[..1]));
         assert!(!marks.has_room(&new), "past the limit a new atlas is due");
+    }
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_atlas_distinguishes_natural_and_stretched_masks_of_the_same_glyph() {
+        let (key, _, _) = CacheKey::new(
+            glyphon::fontdb::ID::dummy(),
+            7,
+            13.0,
+            (0.0, 0.0),
+            glyphon::fontdb::Weight::NORMAL,
+            glyphon::cosmic_text::CacheKeyFlags::empty(),
+        );
+        let natural = CellImage {
+            key,
+            rect: [0, 0, 3, 2],
+            mask: vec![255; 6],
+            sample: [0, 0, 3, 2],
+        };
+        let mut bridge = natural.clone();
+        bridge.sample = [1, 0, 1, 2];
+        assert_ne!(natural.raster_key(), bridge.raster_key());
     }
 }

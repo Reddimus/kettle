@@ -3651,6 +3651,7 @@ moving existing items.
 | --- | --- |
 | `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
 | `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
+| `arabic_join` | Reciprocal Arabic seam ownership, base placement and coloured connector fragments |
 | `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
 | `overlays` | Tab/status bars, menus, title editing, IME projections, toasts, receipts, confirmation projections and shared overlay state |
 | `update_toast` | Theme-derived toast surfaces and control contrast, using shared rounded geometry |
@@ -3675,6 +3676,33 @@ moving existing items.
 Existing test modules remain attached to the crate root so their test names stay
 stable. The renderer source-guard helper joins the production portions of the
 root and extracted modules, excluding test-only items from each file.
+
+### Arabic joining across cells
+
+`kettle-core::bidi` chooses Arabic presentation forms in logical order and
+reports their visual joining sides only at RTL levels. U+0640 tatweel also
+participates; joining characters from other scripts do not. Lam-alef remains
+two cells. Each row is independent, including across soft wraps.
+
+Grid and bidi Legacy rows carry these sides in `GridGlyphCell`, whose full
+metadata participates in the shaped-row key. `arabic_join::JoinedRow` collects
+joining images during the normal glyph walk, without a glyph prepass or linear
+cell searches. After both bases are known to be drawable, it anchors them
+against reciprocal visual neighbours using the cell's full column width.
+Marks move with their base but never supply connector metrics. A face without
+a mask for its own U+0640 keeps its original placement and gets no bridge.
+
+The visual-left cell owns each seam and emits its two fragments once. Each
+fragment samples the middle column of its base face's tatweel, uses that
+cell's resolved foreground (including selection/search), and stops at the
+shared cell edge. Fragments never overlap into a neighbour, even when colours
+match. Hidden/card cells and row ends cannot be partners. The block cursor
+reuses these positioned masks and connector samples in cursor colour in both
+renderers; its cache distinguishes natural masks from stretched samples.
+
+This repairs connector gaps, not proportional glyph widths, fallback
+baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
+face (option D) remains a separate follow-up; font selection is unchanged.
 
 ## Render pass order
 

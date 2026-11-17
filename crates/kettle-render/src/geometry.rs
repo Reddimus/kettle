@@ -563,24 +563,40 @@ pub(crate) struct GridGlyphCell {
     pub clustered: bool,
     pub text_presentation: bool,
     pub single_image: bool,
+    /// The visual sides a joined Arabic cell connects on.
+    pub joins: kettle_core::bidi::Joins,
+}
+
+#[cfg(test)]
+thread_local! {
+    static GRID_GLYPH_METADATA_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl GridGlyphCell {
+    #[cfg(test)]
+    pub(crate) fn metadata_decode_count() -> usize {
+        GRID_GLYPH_METADATA_DECODES.get()
+    }
+
     pub fn metadata(self) -> usize {
         self.column
             .checked_add(1)
-            .and_then(|column| column.checked_mul(32))
+            .and_then(|column| column.checked_mul(128))
             .map_or(0, |column| {
                 column
                     | self.width
                     | (usize::from(self.clustered) << 2)
                     | (usize::from(self.text_presentation) << 3)
                     | (usize::from(self.single_image) << 4)
+                    | (usize::from(self.joins.left) << 5)
+                    | (usize::from(self.joins.right) << 6)
             })
     }
 
     pub fn from_metadata(metadata: usize) -> Option<Self> {
-        let column = (metadata >> 5).checked_sub(1)?;
+        #[cfg(test)]
+        GRID_GLYPH_METADATA_DECODES.update(|count| count + 1);
+        let column = (metadata >> 7).checked_sub(1)?;
         let width = metadata & 3;
         matches!(width, 1 | 2).then_some(Self {
             column,
@@ -588,6 +604,10 @@ impl GridGlyphCell {
             clustered: metadata & 4 != 0,
             text_presentation: metadata & 8 != 0,
             single_image: metadata & 16 != 0,
+            joins: kettle_core::bidi::Joins {
+                left: metadata & 32 != 0,
+                right: metadata & 64 != 0,
+            },
         })
     }
 }
