@@ -158,14 +158,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   group. The checkmark also follows a group scope that ends because its last
   pane closed.
 
-- On macOS, the title bar shows a Settings gear before the new-tab `▾ +`
-  buttons, so Settings is one click away in every window. Clicking it opens
-  Settings, as Cmd+, does; its tooltip names whichever key opens Settings,
-  and screen readers call it Settings (Configuración in Spanish). The gear
-  sits apart from `▾ +`, which do not move, and it hides only when the
-  window is too narrow to keep a tab beside it. A lone tab stays centred
-  on the window beside it, narrowing in a narrow window. Windows and Linux keep
-  Settings in their `▾` and `≡` menus.
+- On macOS, the title bar shows a Settings gear before a joined `+ ▾`
+  new-tab button, so Settings is one click away in every window. Clicking it
+  opens Settings, as Cmd+, does; its tooltip names whichever key opens
+  Settings, and screen readers call it Settings (Configuración in Spanish).
+  The gear sits apart from `+ ▾`, which do not move, and it hides only when
+  the window is too narrow to keep a tab beside it. A lone tab stays centred
+  on the window and is sized to its title (160 to 240 points), narrowing in a
+  narrow window. On macOS the `▾` menu lists shells, New Window with Profile,
+  layouts and SSH, leaving Settings, the command palette and About to the
+  gear and the menu bar. Screen readers name each control as its tooltip
+  does and meet them in screen order. Windows and Linux keep Settings in
+  their `▾` and `≡` menus.
 
 - Making the font larger or smaller, or resetting it, from the keyboard,
   the menus or Ctrl+scroll shows the new size and the grid it leaves, such
@@ -406,12 +410,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- The macOS titlebar keeps a lone tab centred and sizes it to its title. The
-  new-tab controls form a joined `+ ▾` button beside a separate Settings gear.
-  Its dropdown keeps shells, profiles, layouts and SSH without duplicating
-  app commands from the menu bar. Screen-reader names follow tooltips and
-  controls follow their screen order on every platform.
-
 - Theme and default selections keep selected text at 7:1 in both focus
   states, including ANSI colours. A clean perimeter preserves selection
   visibility where the fill alone cannot. Explicit user selection colours
@@ -433,6 +431,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   is left out (Delete still resets). Screen readers get one Reset button for
   the highlighted row, named for the default it restores ("Reset Font size
   to 14 px"), and `kettle ctl ui_geometry` reports each row's Reset chip.
+  Rows sit under group headings (Appearance: Colors and text, Window,
+  Cursor), labels are bold, values sit in filled wells, Reset is joined to
+  its control, and the key hints move into the sidebar when they fit. The
+  panel is sized in logical pixels, so a 2x display shows as many rows as a
+  1x one (it showed about half before); a 1600x1000 window shows all twelve
+  Appearance rows.
 
 - Colour emoji are sharp and whole. Each one is rasterized at exactly the size
   its cell draws it, averaged down from the font's largest bitmap, instead of
