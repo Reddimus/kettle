@@ -311,3 +311,377 @@ fn pane_rows_shape_left_to_right_without_mirroring() {
     assert!(rtl.iter().any(|&rtl| rtl));
     assert_ne!(glyph, open_bracket);
 }
+
+fn arabic_renderer(family: &str) -> Option<(Renderer, Config)> {
+    let Some((mut renderer, cfg)) = renderer(640, 220) else {
+        eprintln!("ARABIC_GPU_SKIP: no adapter; {family} was not rendered");
+        return None;
+    };
+    crate::arabic_join_tests::isolate_named_face(&mut renderer.font_system, family)
+        .then_some((renderer, cfg))
+}
+
+fn connector_band(renderer: &mut Renderer, row: usize) -> Vec<u32> {
+    let run = renderer.pane_buffers[0]
+        .layout_runs()
+        .find(|run| run.line_i == row)
+        .unwrap();
+    let glyph = run
+        .glyphs
+        .iter()
+        .find(|glyph| glyph.w > 0.0 && glyph.glyph_id != 0)
+        .unwrap();
+    let mut key = glyph.physical((0.0, 0.0), 1.0).cache_key;
+    key.glyph_id = renderer
+        .font_system
+        .get_font(key.font_id, key.font_weight)
+        .unwrap()
+        .as_swash()
+        .charmap()
+        .map('\u{640}');
+    assert_ne!(key.glyph_id, 0, "named Arabic fixture must have tatweel");
+    key.x_bin = glyphon::cosmic_text::SubpixelBin::Zero;
+    let tatweel = renderer
+        .swash
+        .get_image_uncached(&mut renderer.font_system, key)
+        .unwrap();
+    assert_eq!(tatweel.content, glyphon::SwashContent::Mask);
+    let p = tatweel.placement;
+    let baseline = run.line_y.round();
+    let band: Vec<_> = (0..p.height)
+        .filter(|&y| tatweel.data[(y * p.width + p.width / 2) as usize] > 127)
+        .map(|y| (baseline + y as f32 - p.top as f32) as u32)
+        .collect();
+    assert!(
+        !band.is_empty(),
+        "named Arabic fixture must have a connector band"
+    );
+    band
+}
+
+fn band_has_ink(frame: &image::RgbaImage, x: u32, band: &[u32], bg: Rgb) -> bool {
+    band.iter().any(|&y| {
+        let p = frame.get_pixel(x, y);
+        u32::from(p[0].abs_diff(bg.r))
+            + u32::from(p[1].abs_diff(bg.g))
+            + u32::from(p[2].abs_diff(bg.b))
+            > 120
+    })
+}
+
+#[test]
+fn flat_arabic_joins_are_one_unbroken_stroke() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        cfg.padding_x = 4.25;
+        cfg.padding_y = 4.0;
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for size in [13.0, 14.0] {
+                cfg.font_size = size;
+                renderer.set_font_size(size);
+                for scale in [1.0, 2.0] {
+                    renderer.set_scale(scale);
+                    for text in ["ـببببـ", "ـــــ"] {
+                        let snap = snapshot_of(30, 4, format!("{text}\x1b[?25l").as_bytes());
+                        let frame = capture(
+                            &mut renderer,
+                            &cfg,
+                            &[pane(&snap, 640, 220)],
+                            &focused(false),
+                        );
+                        let band: Vec<_> = connector_band(&mut renderer, 0)
+                            .into_iter()
+                            .map(|y| y + cfg.padding_y as u32)
+                            .collect();
+                        let left = cfg.padding_x.floor() as u32;
+                        let right = (cfg.padding_x + text.chars().count() as f32 * renderer.cell_w)
+                            .ceil() as u32;
+                        let ink: Vec<_> = (left..right)
+                            .filter(|&x| band_has_ink(&frame, x, &band, cfg.theme.background))
+                            .collect();
+                        assert!(!ink.is_empty());
+                        for x in ink[0]..=*ink.last().unwrap() {
+                            assert!(
+                                band_has_ink(&frame, x, &band, cfg.theme.background),
+                                "{family} {mode:?} {size}px@{scale}x {text:?}: gap at {x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn joined_word_edges_are_inked_and_a_nonjoining_seam_keeps_its_hole() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                let snap = snapshot_of(30, 4, "مرحبا\x1b[?25l".as_bytes());
+                let frame = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 220)],
+                    &focused(false),
+                );
+                let band: Vec<_> = connector_band(&mut renderer, 0)
+                    .into_iter()
+                    .map(|y| y + cfg.padding_y as u32)
+                    .collect();
+                for boundary in [1.0, 2.0, 4.0] {
+                    let x = (cfg.padding_x + boundary * renderer.cell_w).round() as u32;
+                    assert!(
+                        (x - 1..=x + 1).all(|x| band_has_ink(
+                            &frame,
+                            x,
+                            &band,
+                            cfg.theme.background
+                        )),
+                        "{family} {mode:?}@{scale}: joining edge {boundary}"
+                    );
+                }
+                let seam = (cfg.padding_x + 3.0 * renderer.cell_w).round() as u32;
+                assert!(
+                    (seam - 3..seam + 3).any(|x| !band_has_ink(
+                        &frame,
+                        x,
+                        &band,
+                        cfg.theme.background
+                    )),
+                    "hah/reh must remain unjoined"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn arabic_style_and_selection_boundaries_keep_bridge_colour_inside_its_cell() {
+    use alacritty_terminal::selection::SelectionRange;
+    use kettle_core::{Column, Line, Point};
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                let mut snap =
+                    snapshot_of(30, 4, "ـ\x1b[31mب\x1b[1;3mب\x1b[0mـ\x1b[?25l".as_bytes());
+                snap.selection = Some(SelectionRange::new(
+                    Point::new(Line(0), Column(1)),
+                    Point::new(Line(0), Column(1)),
+                    false,
+                ));
+                let mut overlay = focused(false);
+                overlay.highlights.push(HighlightRect {
+                    row: 0,
+                    col: 2,
+                    width: 1,
+                    active: true,
+                });
+                capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+                let mut bridges = 0;
+                for bridge in renderer
+                    .glyph_instances
+                    .iter()
+                    .filter(|g| g.uv_size[0] == 1.0 && g.size[0] > 1.0)
+                {
+                    bridges += 1;
+                    let column = ((bridge.pos[0] + bridge.size[0] / 2.0 - cfg.padding_x)
+                        / renderer.cell_w)
+                        .floor() as usize;
+                    let left = (cfg.padding_x + column as f32 * renderer.cell_w).round();
+                    let right = (cfg.padding_x + (column + 1) as f32 * renderer.cell_w).round();
+                    assert!(bridge.pos[0] >= left && bridge.pos[0] + bridge.size[0] <= right);
+                    let glyph = renderer.pane_buffers[0]
+                        .layout_runs()
+                        .next()
+                        .unwrap()
+                        .glyphs
+                        .iter()
+                        .find(|g| {
+                            g.w > 0.0
+                                && GridGlyphCell::from_metadata(g.metadata)
+                                    .is_some_and(|c| c.column == column)
+                        })
+                        .unwrap();
+                    let c = glyph.color_opt.unwrap();
+                    assert_eq!(
+                        bridge.color,
+                        [
+                            c.r() as f32 / 255.0,
+                            c.g() as f32 / 255.0,
+                            c.b() as f32 / 255.0,
+                            c.a() as f32 / 255.0
+                        ]
+                    );
+                }
+                assert!(bridges > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn block_cursor_keeps_arabic_initial_and_its_bridge_in_the_panes_position() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                let mut snap = snapshot_of(30, 4, "مرحبا\r".as_bytes());
+                snap.cursor.shape = alacritty_terminal::vte::ansi::CursorShape::Block;
+                capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snap, 640, 220)],
+                    &focused(true),
+                );
+                let cursor = renderer.pending_cursor_glyph.as_ref().unwrap();
+                assert!(cursor.marks.len() >= 2, "base plus its bridge");
+                assert!(cursor.marks.iter().any(|image| image.sample[2] == 1));
+                let glyph = renderer.pane_buffers[0]
+                    .layout_runs()
+                    .next()
+                    .unwrap()
+                    .glyphs
+                    .iter()
+                    .find(|g| {
+                        g.w > 0.0
+                            && GridGlyphCell::from_metadata(g.metadata)
+                                .is_some_and(|c| c.column == 4)
+                    })
+                    .unwrap();
+                let image = renderer
+                    .swash
+                    .get_image_uncached(
+                        &mut renderer.font_system,
+                        glyph.physical((0.0, 0.0), 1.0).cache_key,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    cursor.marks[0].rect[0],
+                    (cfg.padding_x + 5.0 * renderer.cell_w - glyph.w).round() as i32
+                        + image.placement.left
+                );
+                assert_eq!(
+                    renderer.cursor_mark_images,
+                    cursor
+                        .marks
+                        .iter()
+                        .map(|image| image.rect)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn joined_arabic_leaves_latin_and_hebrew_rows_pixel_identical() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                let before = snapshot_of(
+                    30,
+                    5,
+                    "Latin: A -> B\r\nשלום (123)\r\nplain\x1b[?25l".as_bytes(),
+                );
+                let after = snapshot_of(
+                    30,
+                    5,
+                    "Latin: A -> B\r\nשלום (123)\r\nـبببـ\x1b[?25l".as_bytes(),
+                );
+                let before = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&before, 640, 220)],
+                    &focused(false),
+                );
+                let after = capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&after, 640, 220)],
+                    &focused(false),
+                );
+                let bottom = (cfg.padding_y + 2.0 * renderer.cell_h).floor() as u32;
+                for y in 0..bottom {
+                    for x in 0..640 {
+                        assert_eq!(
+                            before.get_pixel(x, y),
+                            after.get_pixel(x, y),
+                            "{family} {mode:?}@{scale}: unrelated row pixel {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            let snap = snapshot_of(4, 4, "ب\x1b[8mب\x1b[0mبببب\x1b[?25l".as_bytes());
+            capture(
+                &mut renderer,
+                &cfg,
+                &[pane(&snap, 640, 220)],
+                &focused(false),
+            );
+            for run in renderer.pane_buffers[0].layout_runs() {
+                for (_, attrs) in renderer.pane_buffers[0].lines[run.line_i]
+                    .attrs_list()
+                    .spans_iter()
+                {
+                    let Some(cell) = GridGlyphCell::from_metadata(attrs.metadata) else {
+                        continue;
+                    };
+                    if cell.column == 0 {
+                        assert!(!cell.joins.left);
+                    }
+                    if cell.column + cell.width == 4 {
+                        assert!(!cell.joins.right);
+                    }
+                    if run.line_i == 0 && cell.column == 2 {
+                        assert_eq!(
+                            cell.joins,
+                            kettle_core::bidi::Joins::default(),
+                            "hidden logical column 1"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

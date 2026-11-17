@@ -110,6 +110,16 @@ pub struct RowBidi {
     rtl: Box<[bool]>,
     /// Sorted by logical column.
     display: Box<[(u16, char)]>,
+    /// The visual sides each joined cell connects on, sorted by logical
+    /// column (bit 0: left, bit 1: right).
+    joins: Box<[(u16, u8)]>,
+}
+
+/// The visual sides of a cell that join its neighbours.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct Joins {
+    pub left: bool,
+    pub right: bool,
 }
 
 /// One unit of the layout: a cell, or a two-column character with its spacer.
@@ -175,6 +185,7 @@ pub fn row_bidi(cells: &[BidiCell]) -> Option<RowBidi> {
 
     let mut rtl = vec![false; columns];
     let mut display = Vec::new();
+    let mut joins = Vec::new();
     for (index, unit) in units.iter().enumerate() {
         if levels[index].is_rtl() {
             rtl[unit.col..unit.col + unit.width].fill(true);
@@ -185,8 +196,20 @@ pub fn row_bidi(cells: &[BidiCell]) -> Option<RowBidi> {
         {
             shown = mirror;
         }
-        if let Some(form) = arabic_form(&units, &levels, index) {
-            shown = form;
+        if let Some((form, back, ahead)) = arabic_form(&units, &levels, index) {
+            if let Some(form) = form {
+                shown = form;
+            }
+            // Logical back is visual right in right-to-left text.
+            let (right, left) = if levels[index].is_rtl() {
+                (back, ahead)
+            } else {
+                (ahead, back)
+            };
+            let bits = u8::from(left) | u8::from(right) << 1;
+            if bits != 0 {
+                joins.push((to_u16(unit.col), bits));
+            }
         }
         if shown != unit.c {
             display.push((to_u16(unit.col), shown));
@@ -198,6 +221,7 @@ pub fn row_bidi(cells: &[BidiCell]) -> Option<RowBidi> {
         vis2log: vis2log.into(),
         rtl: rtl.into(),
         display: display.into(),
+        joins: joins.into(),
     })
 }
 
@@ -269,14 +293,24 @@ fn neighbour(units: &[Unit], levels: &[Level], index: usize, forward: bool) -> O
     }
 }
 
-/// The contextual presentation form of an Arabic letter, if it has one.
-fn arabic_form(units: &[Unit], levels: &[Level], index: usize) -> Option<char> {
+/// The contextual presentation form of a joining letter, if it has one, and
+/// whether the form drawn joins back and ahead (logical order). A join
+/// causing character (tatweel) has no forms but joins like a dual letter.
+fn arabic_form(
+    units: &[Unit],
+    levels: &[Level],
+    index: usize,
+) -> Option<(Option<char>, bool, bool)> {
     let unit = &units[index];
-    let kind = joining(unit.c)?;
-    if !matches!(kind, Joining::Dual | Joining::Right) {
+    // FORMS contains only Arabic-script letters. Other scripts' joining
+    // controls must not enter the Arabic renderer, including in mixed rows.
+    if !levels[index].is_rtl() || (unit.c != '\u{0640}' && forms(unit.c).is_none()) {
         return None;
     }
-    let forms = forms(unit.c)?;
+    let kind = joining(unit.c)?;
+    if !matches!(kind, Joining::Dual | Joining::Right | Joining::Causing) {
+        return None;
+    }
     // A joiner stored with the previous letter forces the join; a non-joiner
     // breaks it.
     let joins_back = neighbour(units, levels, index, false).is_some_and(|prev| {
@@ -290,7 +324,7 @@ fn arabic_form(units: &[Unit], levels: &[Level], index: usize) -> Option<char> {
             ),
         }
     });
-    let joins_ahead = kind == Joining::Dual
+    let joins_ahead = matches!(kind, Joining::Dual | Joining::Causing)
         && match unit.join {
             JoinControl::Zwnj => false,
             JoinControl::Zwj => true,
@@ -301,12 +335,19 @@ fn arabic_form(units: &[Unit], levels: &[Level], index: usize) -> Option<char> {
                 )
             }),
         };
-    let [isolated, final_, initial, medial] = forms;
+    let Some([isolated, final_, initial, medial]) = forms(unit.c) else {
+        // A letter without presentation forms is drawn as written.
+        return (unit.c == '\u{0640}').then_some((None, joins_back, joins_ahead));
+    };
+    // The sides of the form actually drawn, after any fallback.
+    let pick = |form: Option<char>, back: bool, ahead: bool| form.map(|c| (Some(c), back, ahead));
     match (joins_back, joins_ahead) {
-        (true, true) => medial.or(final_).or(isolated),
-        (true, false) => final_.or(isolated),
-        (false, true) => initial.or(isolated),
-        (false, false) => isolated,
+        (true, true) => pick(medial, true, true)
+            .or(pick(final_, true, false))
+            .or(pick(isolated, false, false)),
+        (true, false) => pick(final_, true, false).or(pick(isolated, false, false)),
+        (false, true) => pick(initial, false, true).or(pick(isolated, false, false)),
+        (false, false) => pick(isolated, false, false),
     }
 }
 
@@ -341,6 +382,20 @@ impl RowBidi {
             .binary_search_by_key(&col, |&(at, _)| at)
             .ok()
             .map(|index| self.display[index].1)
+    }
+
+    /// The visual sides a logical cell joins its neighbours on.
+    pub fn joins(&self, col: usize) -> Joins {
+        u16::try_from(col)
+            .ok()
+            .and_then(|col| self.joins.binary_search_by_key(&col, |&(at, _)| at).ok())
+            .map_or_else(Joins::default, |index| {
+                let bits = self.joins[index].1;
+                Joins {
+                    left: bits & 1 != 0,
+                    right: bits & 2 != 0,
+                }
+            })
     }
 
     /// Whether a shaping ligature must not join this cell to the next one in

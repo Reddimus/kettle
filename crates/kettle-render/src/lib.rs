@@ -9,6 +9,9 @@
 //! [`offscreen_selftest`] validates shader and pipeline creation without a
 //! window surface.
 
+mod arabic_join;
+#[cfg(test)]
+mod arabic_join_tests;
 mod background;
 mod batching;
 mod capture;
@@ -330,6 +333,7 @@ fn production_source() -> String {
         kettle_test_support::production_source(include_str!("fonts.rs")),
         kettle_test_support::production_source(include_str!("overlays.rs")),
         kettle_test_support::production_source(include_str!("batching.rs")),
+        kettle_test_support::production_source(include_str!("arabic_join.rs")),
         kettle_test_support::production_source(include_str!("theme.rs")),
         kettle_test_support::production_source(include_str!("search.rs")),
         kettle_test_support::production_source(include_str!("text_field.rs")),
@@ -6144,9 +6148,8 @@ impl Renderer {
                 right: (gclip.0 + gclip.2) as i32,
                 bottom: (gclip.1 + gclip.3) as i32,
             };
-            // The grid pane moved a mark in this cell, which glyphon cannot
-            // do: the pane's own images of the cell are drawn instead, as
-            // custom glyphs in an atlas of their own (see `cursor_marks`).
+            // Moved marks and joined Arabic cells reuse the pane's positioned
+            // masks and connectors as custom glyphs (see `cursor_marks`).
             let marked = !gmarks.is_empty() && scale == 1.0;
             let area = TextArea {
                 buffer: &self.cursor_glyph_buffer,

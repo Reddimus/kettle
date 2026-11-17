@@ -609,6 +609,15 @@ pub(crate) trait GlyphSource {
 
     /// The emit drew an emoji cluster.
     fn emoji_cell(&mut self, _cell: EmojiCellImages) {}
+
+    /// The joining stroke (tatweel, U+0640) of the face and size `base` was
+    /// shaped with, as a mask image, or `None` when the face has none.
+    fn connector(
+        &mut self,
+        _base: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        None
+    }
 }
 
 impl<F> GlyphSource for F
@@ -729,6 +738,29 @@ impl GlyphSource for AtlasGlyphs<'_> {
     fn emoji_cell(&mut self, cell: EmojiCellImages) {
         self.emoji_cells.push(cell);
     }
+
+    fn connector(
+        &mut self,
+        base: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        let key = connector_key(self.font_system, base)?;
+        self.slot(key).filter(|slot| slot.kind == 1)
+    }
+}
+
+fn connector_key(
+    fonts: &mut FontSystem,
+    base: glyphon::cosmic_text::CacheKey,
+) -> Option<glyphon::cosmic_text::CacheKey> {
+    let font = fonts.get_font(base.font_id, base.font_weight)?;
+    let glyph_id = font.as_swash().charmap().map('\u{0640}');
+    if glyph_id == 0 {
+        return None;
+    }
+    let mut key = base;
+    key.glyph_id = glyph_id;
+    key.x_bin = glyphon::cosmic_text::SubpixelBin::Zero;
+    Some(key)
 }
 
 /// The glyph instance for one cell Kettle draws itself, its mask rasterized
@@ -830,10 +862,23 @@ pub(crate) fn emit_positioned_glyphs(
         }
         let line_y = run.line_y;
         let mut prefix_anchors = std::collections::HashMap::new();
+        let mut joined: Option<super::arabic_join::JoinedRow> = None;
         for (range, attrs) in buf.lines[run.line_i].attrs_list().spans_iter() {
-            if super::geometry::GridGlyphCell::from_metadata(attrs.metadata)
-                .is_none_or(|cell| !cell.clustered)
+            let Some(cell) = super::geometry::GridGlyphCell::from_metadata(attrs.metadata) else {
+                continue;
+            };
+            if let Some(cw) = cell_w
+                && (cell.joins.left || cell.joins.right)
+                && let Some(text) = run.text.get(range.clone())
             {
+                joined.get_or_insert_with(Default::default).add(
+                    cell,
+                    range.start + alacritty_terminal::term::grapheme_base_offset(text),
+                    origin.0,
+                    cw,
+                );
+            }
+            if !cell.clustered {
                 continue;
             }
             let Some(text) = run.text.get(range.clone()) else {
@@ -909,9 +954,6 @@ pub(crate) fn emit_positioned_glyphs(
                         .copied()
                         .unwrap_or(glyph.x);
                 }
-                if only.is_some_and(|(_, column)| column != col) {
-                    continue;
-                }
                 // Keep the shaped offsets until every image in the cluster
                 // has been rasterized, so fitting uses their combined ink.
                 let off_x = cell_w.map_or(origin.0, |cw| {
@@ -919,11 +961,42 @@ pub(crate) fn emit_positioned_glyphs(
                     cell_locked_glyph_offset(cell_left, glyph, cluster_x)
                 });
                 let phys = glyph.physical((off_x, origin.1), 1.0);
-                let slot = if fitted_cluster {
+                let selected = only.is_none_or(|(_, column)| column == col);
+                let joining = glyph.metadata & 96 != 0 && joined.is_some();
+                if !selected
+                    && (!joining
+                        || only.is_some_and(|(_, target)| {
+                            !joined.as_ref().unwrap().needs(col, target)
+                        }))
+                {
+                    continue;
+                }
+                let slot = if !selected && glyph.w <= 0.0 {
+                    None
+                } else if fitted_cluster {
                     glyph_source.placement(phys.cache_key)
                 } else {
                     glyph_source.slot(phys.cache_key)
                 };
+                if joining {
+                    let pen = origin.0
+                        + col as f32 * cell_w.unwrap()
+                        + (glyph.x - cluster_x)
+                        + glyph.font_size * glyph.x_offset;
+                    joined.as_mut().unwrap().observe(
+                        glyph,
+                        pen,
+                        line_y.round() + phys.y as f32,
+                        slot,
+                        phys.cache_key,
+                        glyph.color_opt.unwrap_or(default_color),
+                        (selected && slot.is_some()).then_some(out.len()),
+                        &mut glyph_source,
+                    );
+                }
+                if !selected {
+                    continue;
+                }
                 let Some(slot) = slot else {
                     continue;
                 };
@@ -1031,6 +1104,9 @@ pub(crate) fn emit_positioned_glyphs(
                 });
             }
         }
+        if let Some(joined) = joined {
+            joined.finish(out, only.map(|(_, column)| column));
+        }
     }
 }
 
@@ -1042,11 +1118,22 @@ pub(crate) struct CellImage {
     /// `x, y, width, height`, in surface pixels.
     pub(crate) rect: [i32; 4],
     pub(crate) mask: Vec<u8>,
+    /// The source rectangle distinguishes a stretched connector from a
+    /// natural glyph using the same raster key in the cursor atlas.
+    pub(crate) sample: [u16; 4],
+}
+
+impl CellImage {
+    pub(crate) fn raster_key(&self) -> (glyphon::cosmic_text::CacheKey, [u16; 4]) {
+        (self.key, self.sample)
+    }
 }
 
 /// The images the grid emit draws for `cell` (a buffer line and grid column)
-/// of `buf` when fallback placement in `marks` moved one of its glyphs;
-/// empty when it moved none, or when one is not a plain coverage mask.
+/// of `buf` when fallback placement moved a mark or the cell carries Arabic
+/// join sides. Includes its connector fragments; empty for ordinary unmoved
+/// cells or when a source image is not a plain coverage mask.
+/// The caller supplies `joined` from the row's bidi map.
 ///
 /// The block cursor's inverted glyph draws these, so it lands on the pane's
 /// copy pixel for pixel: glyphon can only place a whole shaped buffer, and
@@ -1056,17 +1143,22 @@ pub(crate) fn moved_cell_images(
     buf: &TextBuffer,
     marks: &[LineShifts],
     cell: (usize, usize),
+    joined: bool,
     origin: (f32, f32),
     cell_width: f32,
+    positioning: GlyphPositioning,
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
     char_starts: &mut Vec<u32>,
 ) -> Vec<CellImage> {
     let (line, column) = cell;
-    let shifts = shifts_of(marks, line);
-    if shifts.is_empty() {
-        return Vec::new();
+    let shifts = match positioning {
+        GlyphPositioning::Grid(_) => shifts_of(marks, line),
+        _ => &[],
     };
+    if !joined && shifts.is_empty() {
+        return Vec::new();
+    }
     let Some(run) = buf.layout_runs().find(|run| run.line_i == line) else {
         return Vec::new();
     };
@@ -1086,11 +1178,15 @@ pub(crate) fn moved_cell_images(
                 ) == column
         })
     });
-    if !moved {
+    if !moved && !joined {
         return Vec::new();
     }
-    let mut masks = Vec::new();
-    let mut plain = true;
+    let mut source = CursorGlyphs {
+        fonts,
+        swash,
+        masks: Vec::new(),
+        plain: true,
+    };
     let mut out = Vec::new();
     emit_positioned_glyphs(
         &mut out,
@@ -1098,45 +1194,94 @@ pub(crate) fn moved_cell_images(
         marks,
         origin,
         cell_width,
-        GlyphPositioning::Grid(cell_width),
+        positioning,
         Some(cell),
         GColor::rgb(0, 0, 0),
         char_starts,
-        |key| {
-            let image = swash.get_image_uncached(fonts, key)?;
-            let placement = image.placement;
-            if placement.width == 0 || placement.height == 0 {
-                return None;
-            }
-            plain &= image.content == glyphon::SwashContent::Mask;
-            masks.push((key, image.data));
-            Some(super::glyphpipe::GlyphSlot {
-                kind: 0,
-                atlas_x: 0.0,
-                atlas_y: 0.0,
-                w: placement.width as f32,
-                h: placement.height as f32,
-                left: placement.left,
-                top: placement.top,
-            })
-        },
+        &mut source,
     );
-    if !plain || out.len() != masks.len() {
+    if !source.plain {
         return Vec::new();
     }
     out.iter()
-        .zip(masks)
-        .map(|(glyph, (key, mask))| CellImage {
-            key,
+        .map(|glyph| source.image(glyph))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
+}
+
+struct CursorGlyphs<'a> {
+    fonts: &'a mut FontSystem,
+    swash: &'a mut SwashCache,
+    masks: Vec<(glyphon::cosmic_text::CacheKey, glyphon::SwashImage)>,
+    plain: bool,
+}
+
+impl GlyphSource for &mut CursorGlyphs<'_> {
+    fn slot(&mut self, key: glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot> {
+        let image = self.swash.get_image_uncached(self.fonts, key)?;
+        let placement = image.placement;
+        if placement.width == 0 || placement.height == 0 {
+            return None;
+        }
+        self.plain &= image.content == glyphon::SwashContent::Mask;
+        let index = self.masks.len();
+        self.masks.push((key, image));
+        Some(super::glyphpipe::GlyphSlot {
+            kind: 1,
+            atlas_x: 0.0,
+            atlas_y: index as f32,
+            w: placement.width as f32,
+            h: placement.height as f32,
+            left: placement.left,
+            top: placement.top,
+        })
+    }
+
+    fn connector(
+        &mut self,
+        base: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        let key = connector_key(self.fonts, base)?;
+        self.slot(key)
+    }
+}
+
+impl CursorGlyphs<'_> {
+    fn image(&self, glyph: &GlyphInstance) -> Option<CellImage> {
+        let (key, image) = self.masks.get(glyph.uv[1] as usize)?;
+        let width = u16::try_from(glyph.size[0] as u32).ok()?;
+        let height = u16::try_from(glyph.size[1] as u32).ok()?;
+        let count = usize::from(width).checked_mul(usize::from(height))?;
+        if count == 0 || count > 1 << 20 {
+            return None;
+        }
+        let sample = [
+            glyph.uv[0] as u16,
+            0,
+            glyph.uv_size[0] as u16,
+            glyph.uv_size[1] as u16,
+        ];
+        let mut mask = Vec::with_capacity(count);
+        for y in 0..height {
+            for x in 0..width {
+                let sx =
+                    u32::from(sample[0]) + u32::from(x) * u32::from(sample[2]) / u32::from(width);
+                let sy = u32::from(y) * u32::from(sample[3]) / u32::from(height);
+                mask.push(*image.data.get((sy * image.placement.width + sx) as usize)?);
+            }
+        }
+        Some(CellImage {
+            key: *key,
             rect: [
                 glyph.pos[0] as i32,
                 glyph.pos[1] as i32,
-                glyph.size[0] as i32,
-                glyph.size[1] as i32,
+                i32::from(width),
+                i32::from(height),
             ],
             mask,
+            sample,
         })
-        .collect()
+    }
 }
 
 /// Place an emoji cluster's images, emitted at their shaped size and

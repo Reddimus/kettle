@@ -303,6 +303,7 @@ fn grapheme_cell_metadata_overrides_positive_scalar_counts() {
         clustered: true,
         text_presentation: false,
         single_image: false,
+        joins: Default::default(),
     }
     .metadata();
     let next = GridGlyphCell {
@@ -311,6 +312,7 @@ fn grapheme_cell_metadata_overrides_positive_scalar_counts() {
         clustered: false,
         text_presentation: false,
         single_image: false,
+        joins: Default::default(),
     }
     .metadata();
     assert_eq!(glyph_grid_col_with_metadata(&starts, 7, emoji), 0);
@@ -323,8 +325,31 @@ fn grapheme_cell_metadata_overrides_positive_scalar_counts() {
             width: 2,
             clustered: true,
             text_presentation: false,
-            single_image: false
+            single_image: false,
+            joins: Default::default(),
         })
     );
     assert_eq!(GridGlyphCell::from_metadata(0), None);
+}
+
+#[test]
+fn grid_glyph_cell_metadata_round_trips_join_sides() {
+    use super::geometry::GridGlyphCell;
+    for column in [0, 1, 65534] {
+        for width in [1, 2] {
+            for left in [false, true] {
+                for right in [false, true] {
+                    let cell = GridGlyphCell {
+                        column,
+                        width,
+                        clustered: true,
+                        text_presentation: true,
+                        single_image: true,
+                        joins: kettle_core::bidi::Joins { left, right },
+                    };
+                    assert_eq!(GridGlyphCell::from_metadata(cell.metadata()), Some(cell));
+                }
+            }
+        }
+    }
 }
