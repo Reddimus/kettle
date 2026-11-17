@@ -207,7 +207,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
   Konsole: brackets inside right-to-left text are mirrored and Arabic letters
-  join. Selection, links and mouse clicks follow the text as drawn, while
+  join, their strokes running unbroken from cell to cell even where the
+  font's letters are narrower than a cell. Selection, links and mouse clicks
+  follow the text as drawn, while
   copies, search and the program see it in its original order. Full-screen
   programs keep logical order, and `bidi = false` turns it off.
 
