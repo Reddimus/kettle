@@ -192,6 +192,20 @@ def assert_geometry(geometry, name: str) -> None:
             inside(row["rect"], settings["content_rect"], "settings row")
             if row.get("reset_rect"):
                 inside(row["reset_rect"], row["rect"], "settings reset")
+        groups = settings["groups"]
+        row_indices = {row["index"] for row in settings["rows"]}
+        starts = [group["first_row"] for group in groups]
+        assert starts == sorted(set(starts)), "settings group starts are not ordered and unique"
+        for index, group in enumerate(groups):
+            assert group["first_row"] in row_indices, "settings group has no first row"
+            inside(group["rect"], settings["content_rect"], "settings group")
+            for other in [row["rect"] for row in settings["rows"]] + [g["rect"] for g in groups[:index]]:
+                a, b = group["rect"], other
+                assert any(a[axis] + a[extent] <= b[axis] + 0.01 or
+                           b[axis] + b[extent] <= a[axis] + 0.01
+                           for axis, extent in (("x", "width"), ("y", "height"))), "settings group overlaps another item"
+            row = next(row for row in settings["rows"] if row["index"] == group["first_row"])
+            assert group["rect"]["y"] + group["rect"]["height"] <= row["rect"]["y"] + 0.01, "settings group follows its first row"
         # The fixture's theme line changes the focused Appearance row, so that
         # row shows an enabled Reset chip, not the dimmed one a row at its
         # default would show.

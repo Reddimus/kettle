@@ -957,6 +957,7 @@ impl App {
                 row.value.hash(&mut hasher);
                 row.description.hash(&mut hasher);
                 row.category.hash(&mut hasher);
+                row.group.hash(&mut hasher);
                 row.disabled.hash(&mut hasher);
                 row.reset.hash(&mut hasher);
                 row.unavailable.hash(&mut hasher);
@@ -2356,6 +2357,7 @@ pub(super) const MODAL_KIND_THEMES: u64 = 10;
 pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
 const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
+const MODAL_KIND_SETTINGS_SECTION: u64 = 15;
 /// The Settings dialog's Reset button, for the selected row.
 pub(super) const MODAL_KIND_SETTINGS_RESET: u64 = 14;
 
@@ -2963,7 +2965,8 @@ pub(super) fn modal_accessibility_projection(
     if let Some(settings) = overlay.settings.as_ref() {
         let container_id = accessibility_modal_id(5, 0);
         let list_id = accessibility_modal_id(5, 1);
-        let layout = kettle_render::settings_layout(settings, metrics, surface, metrics.0);
+        let layout =
+            kettle_render::settings_layout(settings, metrics, surface, metrics.0, scale_factor);
         let bounds = |r: kettle_render::Rect4| {
             accesskit::Rect::new(
                 r.0 as f64,
@@ -3072,8 +3075,33 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut list = Node::new(Role::ListBox);
         list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
-        if settings.search_query.is_empty() {
+        if settings.search_query.is_empty() && settings.rows.iter().all(|row| row.group.is_empty())
+        {
             list.set_children(children.clone());
+        } else if settings.search_query.is_empty() {
+            let mut groups = Vec::new();
+            let mut first = 0;
+            while first < settings.rows.len() {
+                let name = &settings.rows[first].group;
+                let end = (first + 1..settings.rows.len())
+                    .find(|&i| settings.rows[i].group != *name)
+                    .unwrap_or(settings.rows.len());
+                let id = accessibility_modal_id(MODAL_KIND_SETTINGS_SECTION, groups.len());
+                let mut group = Node::new(Role::Group);
+                group.set_label(name.clone());
+                group.set_children(children[first..end].to_vec());
+                if let Some((_, rect)) = layout
+                    .groups
+                    .iter()
+                    .find(|(row, _)| *row >= first && *row < end)
+                {
+                    group.set_bounds(bounds(*rect));
+                }
+                projection.nodes.push((id, group));
+                groups.push(id);
+                first = end;
+            }
+            list.set_children(groups);
         } else if settings.rows.is_empty() {
             let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
             let mut empty = static_text_node(tr.text(kettle_i18n::Text::SettingsNoMatches));
@@ -3097,7 +3125,11 @@ pub(super) fn modal_accessibility_projection(
                 let mut group = Node::new(Role::Group);
                 group.set_label(name.clone());
                 group.set_children(members);
-                if let Some((_, rect)) = layout.groups.iter().find(|(c, _)| *c == category) {
+                if let Some((_, rect)) = layout
+                    .groups
+                    .iter()
+                    .find(|(first_row, _)| settings.rows[*first_row].category == category)
+                {
                     group.set_bounds(bounds(*rect));
                 }
                 projection.nodes.push((id, group));

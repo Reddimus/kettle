@@ -1179,6 +1179,17 @@ osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mi
 scrollback_kept = "Inicio del historial conservado"
 scrollback_a11y_viewing = "Viendo el historial"
 
+settings_group_colors_text = "Colores y texto"
+settings_group_window = "Ventana"
+settings_group_cursor = "Cursor"
+settings_group_general = "General"
+settings_group_mouse_keyboard = "Mouse y teclado"
+settings_group_scrolling = "Desplazamiento"
+settings_group_clipboard = "Portapapeles"
+settings_group_panes = "Paneles"
+settings_group_tabs = "Pestañas"
+settings_group_tools = "Herramientas"
+
 [completion_matches]
 one = "{count} coincidencia"
 other = "{count} coincidencias"

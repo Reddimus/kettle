@@ -14,6 +14,9 @@ fn every_static_message_has_clean_text_in_both_languages() {
         // Model-drafted Spanish is a draft, but it is never left as English,
         // except for words Spanish shares.
         let cognate = [
+            // These Settings section names are shared Spanish words.
+            Text::SettingsGroupCursor,
+            Text::SettingsGroupGeneral,
             Text::MacosMenuApp,
             Text::MacosMenuShell,
             // macOS's own Spanish Window menu says Zoom.
@@ -321,6 +324,9 @@ fn no_spanish_message_is_left_in_english() {
     let english: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
     let spanish: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
     let cognates = [
+        // These Settings section names are shared Spanish words.
+        "settings_group_cursor",
+        "settings_group_general",
         "macos_menu_app",
         "macos_menu_shell",
         "macos_menu_zoom_window",

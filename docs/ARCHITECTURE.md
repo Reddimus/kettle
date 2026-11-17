@@ -6006,3 +6006,23 @@ reduced-motion and color-scheme, with bounded parsing and live updates.
 Left/right lanes, order and omissions
 share the control geometry. Missing or invalid settings use the default right
 minimize, maximize/restore, close order.
+
+### Settings geometry and sections
+
+`kettle-render::settings_layout` receives device-pixel metrics, surface size and
+an explicit backing scale. It lays out in logical pixels, then scales every
+rectangle for painting, pointer input, inline editors, accessibility and ctl.
+The panel uses 72% width (560-980 logical pixels) and 84% height (360-820), with
+a 16-pixel surface margin. Font metrics do not determine the backing scale.
+
+The UI catalogue keeps fields flat and records each section heading's first
+field. Reordering preserves config keys, not numeric field positions. Search
+projects fields in catalogue order and displays category headings instead of
+section headings. Rendered `groups` and ctl groups contain visible-projection
+`first_row` indices and full heading bands. AX search derives the category
+from that row while retaining category-based node IDs; browsing sections use
+a separate node kind and retain field IDs and inline editors as children.
+
+Settings hints retain key/action pairs through wrapping and rich-text shaping.
+The shaping cache includes runs, resolved colors, font metrics, width, height
+and family, so a theme change with identical strings refreshes the hint inks.

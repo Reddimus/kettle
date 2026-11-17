@@ -3515,3 +3515,33 @@ context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut statu
 
 [messages.quick_portal_size]
 context = "crates/kettle-ui/src/settings.rs: Wayland size description, independently of saved Position. 100 percent requests maximization."
+
+[messages.settings_group_colors_text]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_window]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_cursor]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_general]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_mouse_keyboard]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_scrolling]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_clipboard]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_panes]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_tabs]
+context = "Settings section heading; not a focusable field or search term."
+
+[messages.settings_group_tools]
+context = "Settings section heading; not a focusable field or search term."

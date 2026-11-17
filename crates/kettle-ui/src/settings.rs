@@ -143,6 +143,7 @@ pub struct Field {
 pub struct Category {
     pub name: Text,
     pub fields: Vec<Field>,
+    pub groups: Vec<(Text, usize)>,
 }
 
 /// Description keys stay independent of config tokens and translated labels.
@@ -718,6 +719,19 @@ fn text(label: Text, key: &'static str, placeholder: Text) -> Field {
     }
 }
 
+fn grouped(name: Text, sections: Vec<(Text, Vec<Field>)>) -> Category {
+    let mut category = Category {
+        name,
+        fields: Vec::new(),
+        groups: Vec::new(),
+    };
+    for (heading, fields) in sections {
+        category.groups.push((heading, category.fields.len()));
+        category.fields.extend(fields);
+    }
+    category
+}
+
 /// The curated catalogue. Covers the settings a typical user actually reaches
 /// for; the long tail lives in the config file (right-click Preferences >
 /// Advanced...).
@@ -736,105 +750,121 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         gpu_labels.push(Label::Name(Cow::Owned(label.clone())));
     }
     vec![
-        Category {
-            name: T::SettingsCategoryAppearance,
-            fields: vec![
-                // The most popular themes as a cyclable list of
-                // options; ←/→ live-previews each (the settings handler persists
-                // + reloads on every step, so the theme applies instantly). The
-                // full 500+ bundle stays reachable via the right-click Theme
-                // submenu / NextTheme / the `theme =` config line. Theme names
-                // are proper names, shown verbatim.
-                choice(
-                    T::SettingsFieldAppearance,
-                    "theme-mode",
-                    &["auto", "light", "dark", "explicit"],
-                    &[
-                        Label::Text(T::SettingsValueFollowSystem),
-                        Label::Text(T::SettingsValueLightAppearance),
-                        Label::Text(T::SettingsValueDarkAppearance),
-                        Label::Text(T::SettingsValueFixedTheme),
+        grouped(
+            T::SettingsCategoryAppearance,
+            vec![
+                (
+                    T::SettingsGroupColorsText,
+                    vec![
+                        // The most popular themes as a cyclable list of
+                        // options; ←/→ live-previews each (the settings handler persists
+                        // + reloads on every step, so the theme applies instantly). The
+                        // full 500+ bundle stays reachable via the right-click Theme
+                        // submenu / NextTheme / the `theme =` config line. Theme names
+                        // are proper names, shown verbatim.
+                        choice(
+                            T::SettingsFieldAppearance,
+                            "theme-mode",
+                            &["auto", "light", "dark", "explicit"],
+                            &[
+                                Label::Text(T::SettingsValueFollowSystem),
+                                Label::Text(T::SettingsValueLightAppearance),
+                                Label::Text(T::SettingsValueDarkAppearance),
+                                Label::Text(T::SettingsValueFixedTheme),
+                            ],
+                        ),
+                        Field {
+                            label: T::SettingsFieldTheme,
+                            key: "theme",
+                            kind: FieldKind::Choice {
+                                values: kettle_config::Theme::POPULAR,
+                                labels: None,
+                            },
+                        },
+                        // The theme picker's Contrast button steps the same values.
+                        choice(
+                            T::SettingsFieldMinimumContrast,
+                            "minimum-contrast",
+                            &["0", "3", "4.5", "7"],
+                            &[
+                                Label::Text(T::SettingsValueOff),
+                                Label::Name(Cow::Borrowed("3")),
+                                Label::Name(Cow::Borrowed("4.5")),
+                                Label::Name(Cow::Borrowed("7")),
+                            ],
+                        ),
+                        number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
                     ],
                 ),
-                Field {
-                    label: T::SettingsFieldTheme,
-                    key: "theme",
-                    kind: FieldKind::Choice {
-                        values: kettle_config::Theme::POPULAR,
-                        labels: None,
-                    },
-                },
-                // The theme picker's Contrast button steps the same values.
-                choice(
-                    T::SettingsFieldMinimumContrast,
-                    "minimum-contrast",
-                    &["0", "3", "4.5", "7"],
-                    &[
-                        Label::Text(T::SettingsValueOff),
-                        Label::Name(Cow::Borrowed("3")),
-                        Label::Name(Cow::Borrowed("4.5")),
-                        Label::Name(Cow::Borrowed("7")),
+                (
+                    T::SettingsGroupWindow,
+                    vec![
+                        number(
+                            T::SettingsFieldBackgroundOpacity,
+                            "background-opacity",
+                            20,
+                            100,
+                            1,
+                            "%",
+                        ),
+                        toggle(T::SettingsFieldWindowBlur, "window-blur"),
+                        number(
+                            T::SettingsFieldWindowPadding,
+                            "window-padding-x",
+                            0,
+                            40,
+                            2,
+                            "px",
+                        ),
+                        toggle(T::SettingsFieldShowTitlebar, "show-titlebar"),
                     ],
                 ),
-                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "px"),
-                number(
-                    T::SettingsFieldBackgroundOpacity,
-                    "background-opacity",
-                    20,
-                    100,
-                    1,
-                    "%",
-                ),
-                toggle(T::SettingsFieldWindowBlur, "window-blur"),
-                number(
-                    T::SettingsFieldWindowPadding,
-                    "window-padding-x",
-                    0,
-                    40,
-                    2,
-                    "px",
-                ),
-                choice(
-                    // Use the canonical `cursor-style`
-                    // key (CONFIG.md's authoritative spelling) rather than the
-                    // `cursor-shape` back-compat alias, so the overlay persists
-                    // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
-                    // agree. Persist `beam`, the legacy alias for `bar`, while
-                    // the display label is `Bar`.
-                    T::SettingsFieldCursorShape,
-                    "cursor-style",
-                    &["block", "beam", "underline"],
-                    &[
-                        Label::Text(T::SettingsValueBlock),
-                        Label::Text(T::SettingsValueBar),
-                        Label::Text(T::SettingsValueUnderline),
+                (
+                    T::SettingsGroupCursor,
+                    vec![
+                        choice(
+                            // Use the canonical `cursor-style`
+                            // key (CONFIG.md's authoritative spelling) rather than the
+                            // `cursor-shape` back-compat alias, so the overlay persists
+                            // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
+                            // agree. Persist `beam`, the legacy alias for `bar`, while
+                            // the display label is `Bar`.
+                            T::SettingsFieldCursorShape,
+                            "cursor-style",
+                            &["block", "beam", "underline"],
+                            &[
+                                Label::Text(T::SettingsValueBlock),
+                                Label::Text(T::SettingsValueBar),
+                                Label::Text(T::SettingsValueUnderline),
+                            ],
+                        ),
+                        choice(
+                            T::SettingsFieldCursorUnfocusedStyle,
+                            "cursor-unfocused-style",
+                            &["hollow", "hidden", "unchanged"],
+                            &[
+                                Label::Text(T::SettingsValueHollowCursor),
+                                Label::Text(T::SettingsValueHiddenCursor),
+                                Label::Text(T::SettingsValueUnchangedCursor),
+                            ],
+                        ),
+                        toggle(T::SettingsFieldCursorBlink, "cursor-blink"),
+                        // Seconds without typing before the blink rests on a visible
+                        // cursor; 0 blinks indefinitely.
+                        number(
+                            T::SettingsFieldCursorBlinkTimeout,
+                            "cursor-blink-timeout",
+                            0,
+                            3600,
+                            5,
+                            "s",
+                        ),
                     ],
                 ),
-                choice(
-                    T::SettingsFieldCursorUnfocusedStyle,
-                    "cursor-unfocused-style",
-                    &["hollow", "hidden", "unchanged"],
-                    &[
-                        Label::Text(T::SettingsValueHollowCursor),
-                        Label::Text(T::SettingsValueHiddenCursor),
-                        Label::Text(T::SettingsValueUnchangedCursor),
-                    ],
-                ),
-                toggle(T::SettingsFieldCursorBlink, "cursor-blink"),
-                // Seconds without typing before the blink rests on a visible
-                // cursor; 0 blinks indefinitely.
-                number(
-                    T::SettingsFieldCursorBlinkTimeout,
-                    "cursor-blink-timeout",
-                    0,
-                    3600,
-                    5,
-                    "s",
-                ),
-                toggle(T::SettingsFieldShowTitlebar, "show-titlebar"),
             ],
-        },
+        ),
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryTextRendering,
             fields: vec![
                 toggle(T::SettingsFieldGraphemeClustering, "grapheme-clustering"),
@@ -846,6 +876,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         // Sub-options below the type are dimmed and skipped when they don't
         // apply to the selected type (see `field_disabled`).
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryBackground,
             fields: vec![
                 choice(
@@ -888,133 +919,154 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
             ],
         },
-        Category {
-            name: T::SettingsCategoryBehavior,
-            fields: vec![
-                choice(
-                    T::SettingsFieldLanguage,
-                    "language",
-                    &["auto", "en", "es"],
-                    LANGUAGE_LABELS,
-                ),
-                choice(
-                    T::SettingsFieldScrollbar,
-                    "scrollbar",
-                    &["never", "auto", "always"],
-                    &[
-                        Label::Text(T::SettingsValueHidden),
-                        Label::Text(T::SettingsValueAutomatic),
-                        Label::Text(T::SettingsValueAlways),
+        grouped(
+            T::SettingsCategoryBehavior,
+            vec![
+                (
+                    T::SettingsGroupGeneral,
+                    vec![
+                        choice(
+                            T::SettingsFieldLanguage,
+                            "language",
+                            &["auto", "en", "es"],
+                            LANGUAGE_LABELS,
+                        ),
+                        choice(
+                            T::SettingsFieldBell,
+                            "bell",
+                            &["off", "visual", "attention", "both"],
+                            &[
+                                Label::Text(T::SettingsValueOff),
+                                Label::Text(T::SettingsValueVisualFlash),
+                                Label::Text(T::SettingsValueAttention),
+                                Label::Text(T::SettingsValueVisualFlashAndAttention),
+                            ],
+                        ),
+                        choice(
+                            T::SettingsFieldCompletionOverlay,
+                            "completion-overlay",
+                            &["auto", "off"],
+                            &[
+                                Label::Text(T::SettingsValueAutomatic),
+                                Label::Text(T::SettingsValueOff),
+                            ],
+                        ),
+                        choice(
+                            T::SettingsFieldUpdatePolicy,
+                            "update-policy",
+                            &["off", "notify", "auto"],
+                            &[
+                                Label::Text(T::SettingsValueOff),
+                                Label::Text(T::SettingsValueNotify),
+                                Label::Text(T::SettingsValueInstallAutomatically),
+                            ],
+                        ),
+                        number(
+                            T::SettingsFieldUpdateCheckInterval,
+                            "update-check-interval-hours",
+                            1,
+                            720,
+                            1,
+                            "h",
+                        ),
                     ],
                 ),
-                choice(
-                    T::SettingsFieldCompletionOverlay,
-                    "completion-overlay",
-                    &["auto", "off"],
-                    &[
-                        Label::Text(T::SettingsValueAutomatic),
-                        Label::Text(T::SettingsValueOff),
+                (
+                    T::SettingsGroupMouseKeyboard,
+                    vec![
+                        choice(
+                            T::SettingsFieldFocus,
+                            "focus",
+                            &["click", "sloppy", "system"],
+                            &[
+                                Label::Text(T::SettingsValueClickToFocus),
+                                Label::Text(T::SettingsValueFollowsMouse),
+                                Label::Text(T::SettingsValueSystemDefault),
+                            ],
+                        ),
+                        toggle(
+                            T::SettingsFieldMouseHideWhileTyping,
+                            "mouse-hide-while-typing",
+                        ),
+                        // hjkl navigation in menus/overlays (default ON).
+                        toggle(T::SettingsFieldVimMenuNav, "vim-menu-nav"),
                     ],
                 ),
-                // Width of the pronounced overlay scrollbar.
-                number(
-                    T::SettingsFieldScrollbarWidth,
-                    "scrollbar-width",
-                    2,
-                    40,
-                    2,
-                    "px",
-                ),
-                choice(
-                    T::SettingsFieldBell,
-                    "bell",
-                    &["off", "visual", "attention", "both"],
-                    &[
-                        Label::Text(T::SettingsValueOff),
-                        Label::Text(T::SettingsValueVisualFlash),
-                        Label::Text(T::SettingsValueAttention),
-                        Label::Text(T::SettingsValueVisualFlashAndAttention),
+                (
+                    T::SettingsGroupScrolling,
+                    vec![
+                        choice(
+                            T::SettingsFieldScrollbar,
+                            "scrollbar",
+                            &["never", "auto", "always"],
+                            &[
+                                Label::Text(T::SettingsValueHidden),
+                                Label::Text(T::SettingsValueAutomatic),
+                                Label::Text(T::SettingsValueAlways),
+                            ],
+                        ),
+                        // Width of the pronounced overlay scrollbar.
+                        number(
+                            T::SettingsFieldScrollbarWidth,
+                            "scrollbar-width",
+                            2,
+                            40,
+                            2,
+                            "px",
+                        ),
+                        number(
+                            T::SettingsFieldScrollbackLines,
+                            "scrollback",
+                            0,
+                            100_000,
+                            1_000,
+                            "",
+                        ),
+                        number(
+                            T::SettingsFieldScrollbackMemory,
+                            "scrollback-bytes",
+                            0,
+                            1024,
+                            10,
+                            "MB",
+                        ),
                     ],
                 ),
-                number(
-                    T::SettingsFieldScrollbackLines,
-                    "scrollback",
-                    0,
-                    100_000,
-                    1_000,
-                    "",
-                ),
-                number(
-                    T::SettingsFieldScrollbackMemory,
-                    "scrollback-bytes",
-                    0,
-                    1024,
-                    10,
-                    "MB",
-                ),
-                toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
-                toggle(T::SettingsFieldCopyTrimWhitespace, "copy-trim-whitespace"),
-                // When a text paste asks first. The Confirm paste dialog
-                // links here.
-                choice(
-                    T::SettingsFieldPasteProtection,
-                    "paste-protection",
-                    &["auto", "always", "off"],
-                    &[
-                        Label::Text(T::SettingsValueAutomatic),
-                        Label::Text(T::SettingsValueAlways),
-                        Label::Text(T::SettingsValueOff),
-                    ],
-                ),
-                // What OSC 52 lets a program in a pane do with the clipboard.
-                choice(
-                    T::SettingsFieldOsc52,
-                    "osc52",
-                    &["off", "copy", "paste", "both"],
-                    &[
-                        Label::Text(T::SettingsValueOff),
-                        Label::Text(T::SettingsValueCopyOnly),
-                        Label::Text(T::SettingsValueReadOnly),
-                        Label::Text(T::SettingsValueCopyAndRead),
-                    ],
-                ),
-                toggle(
-                    T::SettingsFieldMouseHideWhileTyping,
-                    "mouse-hide-while-typing",
-                ),
-                choice(
-                    T::SettingsFieldUpdatePolicy,
-                    "update-policy",
-                    &["off", "notify", "auto"],
-                    &[
-                        Label::Text(T::SettingsValueOff),
-                        Label::Text(T::SettingsValueNotify),
-                        Label::Text(T::SettingsValueInstallAutomatically),
-                    ],
-                ),
-                number(
-                    T::SettingsFieldUpdateCheckInterval,
-                    "update-check-interval-hours",
-                    1,
-                    720,
-                    1,
-                    "h",
-                ),
-                // hjkl navigation in menus/overlays (default ON).
-                toggle(T::SettingsFieldVimMenuNav, "vim-menu-nav"),
-                choice(
-                    T::SettingsFieldFocus,
-                    "focus",
-                    &["click", "sloppy", "system"],
-                    &[
-                        Label::Text(T::SettingsValueClickToFocus),
-                        Label::Text(T::SettingsValueFollowsMouse),
-                        Label::Text(T::SettingsValueSystemDefault),
+                (
+                    T::SettingsGroupClipboard,
+                    vec![
+                        toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
+                        toggle(T::SettingsFieldCopyTrimWhitespace, "copy-trim-whitespace"),
+                        // When a text paste asks first. The Confirm paste dialog
+                        // links here.
+                        choice(
+                            T::SettingsFieldPasteProtection,
+                            "paste-protection",
+                            &["auto", "always", "off"],
+                            &[
+                                Label::Text(T::SettingsValueAutomatic),
+                                Label::Text(T::SettingsValueAlways),
+                                Label::Text(T::SettingsValueOff),
+                            ],
+                        ),
+                        // What OSC 52 lets a program in a pane do with the clipboard.
+                        choice(
+                            T::SettingsFieldOsc52,
+                            "osc52",
+                            &["off", "copy", "paste", "both"],
+                            &[
+                                Label::Text(T::SettingsValueOff),
+                                Label::Text(T::SettingsValueCopyOnly),
+                                Label::Text(T::SettingsValueReadOnly),
+                                Label::Text(T::SettingsValueCopyAndRead),
+                            ],
+                        ),
                     ],
                 ),
             ],
-        },
+        ),
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategorySearch,
             fields: vec![
                 toggle(T::SettingsFieldSearchWrap, "search-wrap"),
@@ -1034,6 +1086,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         // `tab-bar-position` offers only top/bottom; left/right (vertical bars)
         // stay config-only, as docs/SETTINGS.md says.
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryTabs,
             fields: vec![
                 choice(
@@ -1069,6 +1122,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             ],
         },
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryGraphics,
             fields: vec![
                 // Tier A: the power-preference policy (integrated vs discrete).
@@ -1096,6 +1150,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             ],
         },
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryAgents,
             // Display only. Agent control (`agent-server`) stays config-only:
             // it grants reading and typing, and applies at launch.
@@ -1118,24 +1173,45 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
             ],
         },
-        Category {
-            name: T::SettingsCategoryKeybinds,
-            fields: vec![
-                keybind(T::SettingsKeybindSplitRight, "split_right"),
-                keybind(T::SettingsKeybindSplitDown, "split_down"),
-                keybind(T::SettingsKeybindClosePane, "close_pane"),
-                keybind(T::SettingsKeybindNewTab, "new_tab"),
-                keybind(T::SettingsKeybindNextTab, "next_tab"),
-                keybind(T::SettingsKeybindPreviousTab, "previous_tab"),
-                keybind(T::SettingsKeybindStartSearch, "start_search"),
-                keybind(T::SettingsKeybindCommandPalette, "command_palette"),
-                keybind(T::SettingsKeybindOpenSettings, "open_settings"),
-                keybind(T::SettingsKeybindToggleZoom, "toggle_zoom"),
-                keybind(T::SettingsKeybindCopy, "copy"),
-                keybind(T::SettingsKeybindPaste, "paste"),
+        grouped(
+            T::SettingsCategoryKeybinds,
+            vec![
+                (
+                    T::SettingsGroupPanes,
+                    vec![
+                        keybind(T::SettingsKeybindSplitRight, "split_right"),
+                        keybind(T::SettingsKeybindSplitDown, "split_down"),
+                        keybind(T::SettingsKeybindClosePane, "close_pane"),
+                        keybind(T::SettingsKeybindToggleZoom, "toggle_zoom"),
+                    ],
+                ),
+                (
+                    T::SettingsGroupTabs,
+                    vec![
+                        keybind(T::SettingsKeybindNewTab, "new_tab"),
+                        keybind(T::SettingsKeybindNextTab, "next_tab"),
+                        keybind(T::SettingsKeybindPreviousTab, "previous_tab"),
+                    ],
+                ),
+                (
+                    T::SettingsGroupTools,
+                    vec![
+                        keybind(T::SettingsKeybindStartSearch, "start_search"),
+                        keybind(T::SettingsKeybindCommandPalette, "command_palette"),
+                        keybind(T::SettingsKeybindOpenSettings, "open_settings"),
+                    ],
+                ),
+                (
+                    T::SettingsGroupClipboard,
+                    vec![
+                        keybind(T::SettingsKeybindCopy, "copy"),
+                        keybind(T::SettingsKeybindPaste, "paste"),
+                    ],
+                ),
             ],
-        },
+        ),
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategorySessions,
             fields: vec![
                 choice(
@@ -1163,6 +1239,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             ],
         },
         Category {
+            groups: Vec::new(),
             name: T::SettingsCategoryQuickTerminal,
             fields: vec![
                 Field {
@@ -2941,7 +3018,7 @@ mod tests {
                     ..Default::default()
                 };
                 let layout =
-                    kettle_render::settings_layout(&set, (8.0, 16.0), (1152.0, 720.0), 8.0);
+                    kettle_render::settings_layout(&set, (8.0, 16.0), (1152.0, 720.0), 8.0, 1.0);
                 let rect = layout.category_rects[active].expect("selected category stays visible");
                 assert_eq!(
                     layout.pointer_hit((rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0), None),
@@ -3413,7 +3490,7 @@ mod search_tests {
                 for _ in 0..cats.len() {
                     set.active_category = nav.category;
                     let layout =
-                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0, 1.0);
                     let arrow = if forward {
                         layout.category_next
                     } else {
@@ -3431,12 +3508,13 @@ mod search_tests {
                     assert!(nav.field < cats[target].fields.len());
                     set.active_category = nav.category;
                     assert!(
-                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0)
+                        kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0, 1.0)
                             .category_rects[target]
                             .is_some()
                     );
                 }
-                let layout = kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0);
+                let layout =
+                    kettle_render::settings_layout(&set, (8.0, 16.0), (800.0, 600.0), 8.0, 1.0);
                 let end = if forward { cats.len() - 1 } else { 0 };
                 assert!(layout.category_rects[end].is_some());
             }
@@ -3657,14 +3735,14 @@ mod control_size_tests {
                         reset_label: tr.text(Text::SettingsResetButton).into(),
                         ..Default::default()
                     };
-                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw);
+                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw, 1.0);
                     let context = format!("{language:?} {surface:?} {}", field.key);
                     if surface.0 == 1280.0 {
                         let cols = (layout.rows[0].description_rect.2 / cw).floor() as usize;
                         assert!(cols >= 76, "{context}: description has {cols} columns");
                     }
                     let value_rect = kettle_render::settings_value_rect(
-                        &set, cw, line, surface.0, surface.1, cw,
+                        &set, cw, line, surface.0, surface.1, cw, 1.0,
                     );
                     let cols = (value_rect.2 / cw).floor() as usize;
                     assert!(
@@ -3746,7 +3824,7 @@ mod control_size_tests {
                             ..Default::default()
                         };
                         let layout =
-                            kettle_render::settings_layout(&set, (8.4, 17.5), surface, 8.4);
+                            kettle_render::settings_layout(&set, (8.4, 17.5), surface, 8.4, 1.0);
                         chips.push((saved, state, layout.rows[0].chip_rect));
                     }
                 }
@@ -3779,7 +3857,7 @@ mod control_size_tests {
                         reset_label: tr.text(Text::SettingsResetButton).into(),
                         ..Default::default()
                     };
-                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw);
+                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw, 1.0);
                     let geometry = &layout.rows[0];
                     let chip = geometry.chip_rect;
                     let knob = match row.control {
@@ -3863,6 +3941,260 @@ mod restore_scrollback_tests {
             assert_eq!(next_value(&cfg, field, 1), next);
             let spanish = Translator::new(kettle_i18n::Language::Es);
             assert_ne!(read(&cfg, field, &spanish), label);
+        }
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    #[test]
+    fn settings_catalogue_sections_keep_every_field_in_order() {
+        let cats = categories(&[]);
+        for (name, starts, keys) in [
+            (
+                Text::SettingsCategoryAppearance,
+                vec![0, 4, 8],
+                vec![
+                    "theme-mode",
+                    "theme",
+                    "minimum-contrast",
+                    "font-size",
+                    "background-opacity",
+                    "window-blur",
+                    "window-padding-x",
+                    "show-titlebar",
+                    "cursor-style",
+                    "cursor-unfocused-style",
+                    "cursor-blink",
+                    "cursor-blink-timeout",
+                ],
+            ),
+            (
+                Text::SettingsCategoryBehavior,
+                vec![0, 5, 8, 12],
+                vec![
+                    "language",
+                    "bell",
+                    "completion-overlay",
+                    "update-policy",
+                    "update-check-interval-hours",
+                    "focus",
+                    "mouse-hide-while-typing",
+                    "vim-menu-nav",
+                    "scrollbar",
+                    "scrollbar-width",
+                    "scrollback",
+                    "scrollback-bytes",
+                    "copy-on-select",
+                    "copy-trim-whitespace",
+                    "paste-protection",
+                    "osc52",
+                ],
+            ),
+            (
+                Text::SettingsCategoryKeybinds,
+                vec![0, 4, 7, 10],
+                vec![
+                    "split_right",
+                    "split_down",
+                    "close_pane",
+                    "toggle_zoom",
+                    "new_tab",
+                    "next_tab",
+                    "previous_tab",
+                    "start_search",
+                    "command_palette",
+                    "open_settings",
+                    "copy",
+                    "paste",
+                ],
+            ),
+        ] {
+            let cat = cats.iter().find(|cat| cat.name == name).unwrap();
+            assert_eq!(
+                cat.fields.iter().map(|field| field.key).collect::<Vec<_>>(),
+                keys
+            );
+            assert_eq!(
+                cat.groups
+                    .iter()
+                    .map(|(_, start)| *start)
+                    .collect::<Vec<_>>(),
+                starts
+            );
+            for lang in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+                let tr = Translator::new(lang);
+                let names: Vec<_> = cat
+                    .groups
+                    .iter()
+                    .map(|(heading, _)| tr.text(*heading))
+                    .collect();
+                assert!(
+                    names
+                        .iter()
+                        .all(|name| kettle_render::display_width(name) <= 20)
+                );
+                assert_eq!(
+                    names
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
+                    names.len()
+                );
+            }
+            assert_eq!(
+                cat.fields
+                    .iter()
+                    .map(|field| field.key)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                keys.len()
+            );
+        }
+        assert!(
+            cats.iter()
+                .filter(|cat| cat.fields.len() <= 6)
+                .all(|cat| cat.groups.is_empty())
+        );
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_geometry_tests {
+    use super::*;
+    use kettle_i18n::Language;
+
+    fn appearance(tr: &Translator) -> kettle_render::SettingsOverlay {
+        let cats = categories(&[]);
+        let cat = &cats[0];
+        let cfg = Config::default();
+        kettle_render::SettingsOverlay {
+            categories: cats.iter().map(|cat| tr.text(cat.name).into()).collect(),
+            title: tr.text(cat.name).into(),
+            hints: [
+                ("↑↓/jk", Text::SettingsHintField),
+                ("←→/hl", Text::SettingsHintChange),
+                ("g/G", Text::SettingsHintEnds),
+                ("Del", Text::SettingsHintReset),
+                ("Tab", Text::SettingsHintCategory),
+                ("Esc", Text::SettingsHintClose),
+            ]
+            .into_iter()
+            .map(|(key, action)| (key.into(), tr.text(action).into()))
+            .collect(),
+            reset_label: tr.text(Text::SettingsResetButton).into(),
+            rows: cat
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, field)| kettle_render::SettingsRow {
+                    label: tr.text(field.label).into(),
+                    description: tr.text(description(field)).into(),
+                    value: read(&cfg, field, tr),
+                    reset: reset_state(&cfg, field),
+                    group: cat
+                        .groups
+                        .iter()
+                        .rev()
+                        .find(|(_, first)| *first <= i)
+                        .map_or(String::new(), |(heading, _)| tr.text(*heading).into()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn settings_reference_frames_keep_the_catalogue_rows_in_both_languages_and_scales() {
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let set = appearance(&tr);
+            for font in [13.0, 14.0] {
+                for (surface, rows) in [
+                    ((1600.0, 968.0), 12),
+                    ((1280.0, 820.0), 10),
+                    ((640.0, 820.0), 8),
+                ] {
+                    for scale in [1.0, 2.0] {
+                        let layout = kettle_render::settings_layout(
+                            &set,
+                            (font * 0.6 * scale, font * 1.25 * scale),
+                            (surface.0 * scale, surface.1 * scale),
+                            font * 0.6 * scale,
+                            scale,
+                        );
+                        assert_eq!(
+                            layout.rows.len(),
+                            rows,
+                            "{language:?} font={font} surface={surface:?} {scale}x"
+                        );
+                        assert_eq!(layout.groups.len(), if rows == 8 { 2 } else { 3 });
+                        assert_eq!(layout.sidebar_hints, surface.0 >= 1280.0);
+                        if surface.0 == 1280.0 {
+                            assert!(
+                                (layout.rows[0].description_rect.2 / layout.text_cw).floor()
+                                    >= 76.0
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn settings_moved_rows_focus_adjust_reset_and_select_the_right_capture_action() {
+        let cats = categories(&[]);
+        let tr = Translator::new(Language::En);
+        let mut nav = SettingsNav::default();
+        let cfg = Config::default();
+        for (key, position) in [("show-titlebar", 7), ("toggle_zoom", 3)] {
+            assert!(nav.focus_key(&cats, key));
+            assert_eq!(nav.field, position);
+            let projection = nav.visible_fields(&cats, &tr);
+            let index = projection
+                .iter()
+                .position(|pair| *pair == (nav.category, nav.field))
+                .unwrap();
+            let focused = nav
+                .apply_hit(&cats, &cfg, &tr, kettle_render::SettingsHit::Field(index))
+                .unwrap();
+            let field = &cats[focused.0].fields[focused.1];
+            assert_eq!(field.key, key);
+            if key == "show-titlebar" {
+                let value = next_value(&cfg, field, 1);
+                let changed = Config::parse_text(&format!("{key} = {value}"));
+                assert_eq!(read(&changed, field, &tr), tr.text(Text::SettingsValueOff));
+                assert_eq!(reset_state(&changed, field), Some(true));
+                let reset = nav
+                    .apply_hit(
+                        &cats,
+                        &changed,
+                        &tr,
+                        kettle_render::SettingsHit::Reset(index),
+                    )
+                    .unwrap();
+                assert_eq!(cats[reset.0].fields[reset.1].key, key);
+                let restored =
+                    Config::parse_text(&format!("{key} = {}", default_value(field).unwrap()));
+                assert_eq!(reset_state(&restored, field), Some(false));
+            } else {
+                assert!(is_keybind(field));
+                assert_eq!(keybind_action(field), Some("toggle_zoom"));
+                assert_eq!(reset_state(&cfg, field), None);
+            }
+            nav.query = if key == "show-titlebar" {
+                "show-titlebar"
+            } else {
+                "toggle_zoom"
+            }
+            .into();
+            nav.reconcile(&cats, &cfg, &tr);
+            assert_eq!(nav.visible_fields(&cats, &tr), vec![focused]);
+            assert_eq!(nav.focus_result(&cats, &cfg, &tr, 0), Some(focused));
         }
     }
 }
