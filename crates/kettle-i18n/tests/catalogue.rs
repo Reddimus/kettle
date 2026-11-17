@@ -290,6 +290,30 @@ fn the_mouse_override_hint_does_not_name_the_product() {
     }
 }
 
+/// Prose names the product Kettle: the About row, and a sentence or clause
+/// that starts with it. Lowercase `kettle` stays for the command (`kettle
+/// update`, "Add kettle to PATH") and the `kettle:` prefix of notification
+/// titles.
+#[test]
+fn prose_names_the_product_with_a_capital() {
+    for catalogue in [
+        include_str!("../locales/en.toml"),
+        include_str!("../locales/es.toml"),
+    ] {
+        let table: toml::Table = catalogue.parse().unwrap();
+        for (key, value) in &table {
+            let Some(text) = value.as_str() else {
+                continue;
+            };
+            // Code in backticks (`true; kettle update`) is a command, not prose.
+            let prose: String = text.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+            for lead in ["About kettle", "Acerca de kettle", ". kettle ", "; kettle "] {
+                assert!(!prose.contains(lead), "{key}: {text}");
+            }
+        }
+    }
+}
+
 /// No Spanish message is left in English, formatted and plural ones included,
 /// except words Spanish shares and a message with no words.
 #[test]
