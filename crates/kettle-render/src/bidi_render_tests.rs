@@ -174,25 +174,37 @@ fn a_selection_over_reordered_text_fills_its_visual_cells() {
         true,
         &mut MinimumContrastCache::default(),
     );
+    // Where the fill alone does not separate from the background, the
+    // selection also draws a perimeter outline over its edge pixels.
+    let outline = super::theme::PaneSelectionFills::new(
+        &cfg.theme,
+        cfg.theme.background,
+        renderer.selection_backdrop_alpha,
+        &mut MinimumContrastCache::default(),
+    )
+    .outline(&cfg.theme, true);
+    let near = |pixel: &image::Rgba<u8>, color: Rgb| {
+        pixel[0].abs_diff(color.r) <= 8
+            && pixel[1].abs_diff(color.g) <= 8
+            && pixel[2].abs_diff(color.b) <= 8
+    };
     let (ox, oy) = pane_grid_origin((0.0, 0.0, 320.0, 120.0), (cfg.padding_x, cfg.padding_y));
-    // The share of a cell's pixels painted in the selection fill: glyph ink
-    // covers only part of a cell, and adapters round blends differently.
+    // The share of a cell's pixels painted by the selection (its fill or its
+    // outline): glyph ink covers only part of a cell, and adapters round
+    // blends differently.
     let filled = |col: usize| {
         let (left, top) = (ox + col as f32 * renderer.cell_w, oy);
-        let (mut near, mut total) = (0u32, 0u32);
+        let (mut hits, mut total) = (0u32, 0u32);
         for y in top.ceil() as u32..(top + renderer.cell_h).floor() as u32 {
             for x in left.ceil() as u32..(left + renderer.cell_w).floor() as u32 {
                 let pixel = frame.get_pixel(x, y);
                 total += 1;
-                if pixel[0].abs_diff(fill.r) <= 8
-                    && pixel[1].abs_diff(fill.g) <= 8
-                    && pixel[2].abs_diff(fill.b) <= 8
-                {
-                    near += 1;
+                if near(pixel, fill) || outline.is_some_and(|line| near(pixel, line)) {
+                    hits += 1;
                 }
             }
         }
-        near as f32 / total.max(1) as f32
+        hits as f32 / total.max(1) as f32
     };
     for col in [5, 6] {
         assert!(

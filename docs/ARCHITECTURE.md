@@ -1371,6 +1371,16 @@ images, before higher modal chrome; no media textures or decoders are copied.
 Pinning clears modal ownership and opens a `Mux` lane around that same state.
 Closing restores a live, visible origin and consumes the closing gesture.
 
+Selection fill/ink pairs are cached in `kettle-render::theme`. Theme colours
+use a 7:1 text floor; either user-configured selection colour retains the
+legacy 4.5:1 path. Search uses that legacy path independently. The renderer
+collects visual row runs after bidi mapping and draws only their union's
+exposed perimeter when the fill needs help separating from its backdrop.
+`App::selection_hint` owns the once-per-process gesture lesson, including its
+window/pane owner and release deadline. Dispatch and idle scheduling reconcile
+it; the shared `PaneStatus` projection supplies paint, diagnostics and the
+polite accessibility Status without changing terminal dimensions or input.
+
 A pane's geometry comes from one place: `kettle-ui`'s `pane_partition`
 divides each split leaf `Mux::layout` hands out into a `PanePartition`, its
 titlebar (on a tab showing more than one pane), its terminal with the

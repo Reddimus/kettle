@@ -3270,6 +3270,22 @@ pub(super) fn nest_context_menu_accessibility(
     }
     join_wrapped_info_accessibility(projection, &menu.items, 2);
     for (index, item) in menu.items.iter().enumerate() {
+        if matches!(
+            item,
+            ContextMenuItem::Item {
+                action: Action::Copy,
+                ..
+            }
+        ) && let Some((_, node)) = projection
+            .nodes
+            .iter_mut()
+            .find(|(id, _)| *id == accessibility_modal_id(2, index + 1))
+        {
+            node.set_description(selection_hint::selection_gesture_text(
+                tr,
+                cfg!(target_os = "macos"),
+            ));
+        }
         if matches!(item, ContextMenuItem::Submenu { .. })
             && let Some((_, node)) = projection
                 .nodes
@@ -3295,6 +3311,18 @@ pub(super) fn nest_context_menu_accessibility(
             }
             let id = accessibility_modal_id(kind, index + 1);
             let mut item = context_menu_item_node(row, MENU_TOGGLE_MARK_IN_NAME, tr);
+            if matches!(
+                parent.items.get(index),
+                Some(ContextMenuItem::Item {
+                    action: Action::Copy,
+                    ..
+                })
+            ) {
+                item.set_description(selection_hint::selection_gesture_text(
+                    tr,
+                    cfg!(target_os = "macos"),
+                ));
+            }
             if matches!(
                 parent.items.get(index),
                 Some(ContextMenuItem::Submenu { .. })

@@ -609,6 +609,12 @@ impl Renderer {
             &mut self.minimum_contrast_cache,
         );
         let selection_bg = selection_fills.row(window_focused);
+        let mut outline_backdrops = selection_fills.outline(theme, window_focused).map(|_| {
+            (
+                selection_fills.outline_backdrop(),
+                selection_fills.outline_backdrop(),
+            )
+        });
         let mut links: Vec<_> = links.iter().collect();
         links.sort_unstable_by_key(|link| (link.row, link.col));
         let dim_bg = if term_colors.reverse_video() {
@@ -931,6 +937,32 @@ impl Renderer {
                 &mut self.minimum_contrast_cache,
             );
             if matches!(
+                highlight,
+                CellHighlight::Selection | CellHighlight::InactiveSelection
+            ) && !super::theme::user_selection_colors(theme)
+                && color::contrast_ratio(cell_background, highlight_bg)
+                    < if window_focused { 3.0 } else { 2.0 }
+            {
+                outline_backdrops = Some(outline_backdrops.map_or(
+                    (highlight_bg, highlight_bg),
+                    |(low, high)| {
+                        let l = color::relative_luminance(highlight_bg);
+                        (
+                            if l < color::relative_luminance(low) {
+                                highlight_bg
+                            } else {
+                                low
+                            },
+                            if l > color::relative_luminance(high) {
+                                highlight_bg
+                            } else {
+                                high
+                            },
+                        )
+                    },
+                ));
+            }
+            if matches!(
                 card_cell,
                 inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
             ) {
@@ -1231,6 +1263,7 @@ impl Renderer {
         // Selection. A block (Alt+drag) selection draws a per-row COLUMN
         // rectangle so the highlight matches the rectangular text that's copied;
         // a linear selection wraps full lines. `selection_row_span` encodes both.
+        let mut selection_runs = Vec::new();
         if let Some(sel) = snap.selection {
             let (s, e) = (sel.start, sel.end);
             for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
@@ -1265,6 +1298,10 @@ impl Renderer {
                         selection_bg,
                         1.0,
                     ));
+                    selection_runs.push(super::selection_outline::SelectionRun {
+                        row: vrow,
+                        columns: run,
+                    });
                 }
             }
         }
@@ -1277,6 +1314,29 @@ impl Renderer {
             quads.extend(search_quads);
         }
         decorations.extend(highlight_decorations);
+        if let Some((low, high)) = outline_backdrops {
+            let ink = color::with_min_contrast_on_both(
+                selection_bg,
+                low,
+                high,
+                if window_focused { 3.0 } else { 2.0 },
+                true,
+            );
+            selection_runs.sort_by_key(|run| (run.row, run.columns.start));
+            let target = if inactive > 0.0 {
+                &mut *decorations
+            } else {
+                &mut *quads
+            };
+            super::selection_outline::append_outline(
+                target,
+                &selection_runs,
+                (ox, oy),
+                (cw, ch),
+                self.scale,
+                ink,
+            );
+        }
 
         // The focused cursor blinks; inactive outlines remain steady.
         // Shape comes from the engine's live `RenderableContent.cursor.shape`
