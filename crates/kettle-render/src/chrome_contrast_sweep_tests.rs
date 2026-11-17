@@ -803,11 +803,10 @@ fn the_painter_uses_the_swept_helpers() {
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "letpalette=settings::settings_colors(",
-        "letfill=ifon{on_ink}else{control};",
-        "letcontrol=ifrow_selected{selected_control}else{control};",
+        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),row_selected,self.scale,)",
         "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
-        "settings::settings_focus_bar(row.rect,bar),focus,",
-        "settings::settings_focus_bar(*r,bar),focus,",
+        "settings::settings_focus_bar(row.rect,bar,self.scale),focus,",
+        "settings::settings_focus_bar(*r,bar,self.scale),focus,",
     ] {
         let needle: String = needle.split_whitespace().collect();
         assert!(source.contains(&needle), "missing: {needle}");

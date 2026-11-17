@@ -4,9 +4,9 @@ use kettle_i18n::{Language, Text, Translator};
 #[test]
 fn contextual_notes_do_not_move_the_panel() {
     let mut set = SettingsOverlay::default();
-    let before = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let before = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
     set.footer_note = Some("A very long active GPU note that must fit without moving the panel across category switches".into());
-    let after = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let after = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
     assert_eq!(before.rect, after.rect);
     assert_eq!(before.content_rect, after.content_rect);
     assert_eq!(before.search_rect, after.search_rect);
@@ -43,7 +43,7 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
             ..Default::default()
         };
         for surface in [(1280.0, 820.0), (800.0, 600.0), (560.0, 600.0)] {
-            let layout = settings_layout(&set, (9.6, 20.0), surface, 9.6);
+            let layout = settings_layout(&set, (9.6, 20.0), surface, 9.6, 1.0);
             for item in super::settings::settings_text_items(&set, &layout, 9.6) {
                 assert!(!item.text.contains('\n'));
                 let factor = if item.kind == super::SettingsTextKind::Title {
@@ -86,11 +86,11 @@ fn switch_labels_clear_the_knob() {
         rows: cases.iter().map(|(text, on)| row(text, *on)).collect(),
         ..Default::default()
     };
-    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
     let items = super::settings::settings_text_items(&set, &layout, 8.0);
     for (index, (text, on)) in cases.into_iter().enumerate() {
         let chip = layout.rows[index].chip_rect;
-        let knob = super::settings::settings_toggle_knob(chip.3);
+        let knob = super::settings::settings_toggle_knob(chip.3, 1.0);
         let value = items
             .iter()
             .find(|item| item.kind == SettingsTextKind::Value(index))
@@ -143,10 +143,10 @@ fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
                     ((120.0, 120.0), (8.0, 16.0), 24.0, false),
                     ((56.0, 120.0), (8.0, 16.0), 24.0, false),
                 ] {
-                    let layout = settings_layout(&set, cell, surface, text_cw);
+                    let layout = settings_layout(&set, cell, surface, text_cw, 1.0);
                     let row = &layout.rows[0];
                     let chip = row.chip_rect;
-                    let diameter = super::settings::settings_toggle_knob(chip.3);
+                    let diameter = super::settings::settings_toggle_knob(chip.3, 1.0);
                     let items = super::settings::settings_text_items(&set, &layout, text_cw);
                     let value = items
                         .iter()

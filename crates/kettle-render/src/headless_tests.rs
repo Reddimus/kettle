@@ -1551,7 +1551,7 @@ fn confirmation_preserves_settings_below_opaque_panel() {
         }],
         focused_row: 0,
         title: "Settings: Keys".into(),
-        hints: "Settings keyboard hints".into(),
+        hints: vec![("Settings".into(), "keyboard hints".into())],
         footer_note: None,
         ..Default::default()
     });

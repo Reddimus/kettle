@@ -12,9 +12,8 @@ pub struct SettingsOverlay {
     pub rows: Vec<SettingsRow>,
     pub focused_row: usize,
     pub title: String,
-    /// Key hints as `key action` groups joined by ` · `. The footer wraps
-    /// between groups, never inside one.
-    pub hints: String,
+    /// Keys and their translated actions stay together when hints wrap.
+    pub hints: Vec<(String, String)>,
     pub footer_note: Option<String>,
     pub search_query: String,
     pub search_focused: bool,
@@ -30,6 +29,15 @@ pub struct SettingsOverlay {
 }
 
 impl SettingsOverlay {
+    pub fn heading(&self, index: usize) -> &str {
+        let row = &self.rows[index];
+        if self.search_query.is_empty() {
+            &row.group
+        } else {
+            self.categories.get(row.category).map_or("", String::as_str)
+        }
+    }
+
     pub(crate) fn backdrop_alpha(&self) -> f32 {
         if self.background_page { 0.30 } else { 0.55 }
     }
@@ -66,6 +74,10 @@ pub(crate) struct SettingsColors {
     /// `control` on the selected row, where the outline also has to stand
     /// out from the row's fill around it.
     pub(crate) selected_control: Rgb,
+    pub(crate) well: Rgb,
+    pub(crate) well_control: Rgb,
+    pub(crate) selected_well_control: Rgb,
+    pub(crate) unavailable_control: Rgb,
     /// Descriptions, footer hints and notes, the search placeholder and an
     /// unavailable switch's label, on the panel.
     pub(crate) description: Rgb,
@@ -126,6 +138,24 @@ pub(crate) fn settings_colors(
     } else {
         colors.icon(quiet, bg)
     };
+    let well = colors.surface(bg, theme.foreground, 0.06, linear);
+    let well_control = settings_outline(control, well, bg);
+    // A joined Reset exposes the panel as well as the well on its inside.
+    let surfaces = [bg, well, selected];
+    let darkest = *surfaces
+        .iter()
+        .min_by(|a, b| {
+            super::color::relative_luminance(**a).total_cmp(&super::color::relative_luminance(**b))
+        })
+        .unwrap();
+    let lightest = *surfaces
+        .iter()
+        .max_by(|a, b| {
+            super::color::relative_luminance(**a).total_cmp(&super::color::relative_luminance(**b))
+        })
+        .unwrap();
+    let selected_well_control = settings_outline(control, darkest, lightest);
+    let unavailable_control = with_min_contrast_on_both(border, bg, selected, ICON_CONTRAST, false);
     let description =
         settings_quieter_ink(colors, theme.foreground, bg, SETTINGS_DESCRIPTION_SHARE);
     let description_selected = settings_quieter_ink(
@@ -140,12 +170,27 @@ pub(crate) fn settings_colors(
         border,
         control,
         selected_control,
+        well,
+        well_control,
+        selected_well_control,
+        unavailable_control,
         description,
         description_selected,
         focus,
     };
     colors.settings = Some((key, palette));
     palette
+}
+
+fn settings_outline(ink: Rgb, inside: Rgb, outside: Rgb) -> Rgb {
+    use super::chrome::{ICON_CONTRAST, TEXT_CONTRAST};
+    use super::color::{contrast_ratio, with_min_contrast_on_both};
+    let ink = with_min_contrast_on_both(ink, inside, outside, TEXT_CONTRAST, false);
+    if contrast_ratio(ink, inside).min(contrast_ratio(ink, outside)) >= TEXT_CONTRAST {
+        ink
+    } else {
+        with_min_contrast_on_both(ink, inside, outside, ICON_CONTRAST, false)
+    }
 }
 
 /// `fg`'s readable ink on `surface`, moved toward the surface until its
@@ -197,6 +242,7 @@ pub struct SettingsRow {
     pub value: String,
     pub description: String,
     pub category: usize,
+    pub group: String,
     pub control: SettingsControl,
     pub disabled: bool,
     /// Whether Reset covers this row: `None` where it does not (the theme,
@@ -269,9 +315,70 @@ pub struct SettingsLayout {
     pub footer: Vec<(String, Rect4)>,
     pub empty_rect: Rect4,
     pub first_row: usize,
+    pub scale: f32,
+    pub line: f32,
+    pub text_cw: f32,
+    pub hints: Vec<SettingsHintLine>,
+    pub sidebar_hints: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsHintLine {
+    pub runs: Vec<(String, bool)>,
+    pub rect: Rect4,
+}
+
+impl SettingsHintLine {
+    pub fn text(&self) -> String {
+        self.runs.iter().map(|(text, _)| text.as_str()).collect()
+    }
 }
 
 impl SettingsLayout {
+    fn scale_rects(&mut self, scale: f32) {
+        let rect = |r: &mut Rect4| {
+            r.0 *= scale;
+            r.1 *= scale;
+            r.2 *= scale;
+            r.3 *= scale;
+        };
+        rect(&mut self.rect);
+        if let Some(r) = &mut self.sidebar_rect {
+            rect(r);
+        }
+        rect(&mut self.content_rect);
+        rect(&mut self.search_rect);
+        rect(&mut self.title_rect);
+        rect(&mut self.empty_rect);
+        for r in self.category_rects.iter_mut().flatten() {
+            rect(r);
+        }
+        for (_, r) in [&mut self.category_previous, &mut self.category_next]
+            .into_iter()
+            .flatten()
+        {
+            rect(r);
+        }
+        for row in &mut self.rows {
+            rect(&mut row.rect);
+            rect(&mut row.label_rect);
+            rect(&mut row.description_rect);
+            rect(&mut row.chip_rect);
+            if let Some(reset) = &mut row.reset {
+                rect(&mut reset.rect);
+            }
+        }
+        for (_, r) in &mut self.groups {
+            rect(r);
+        }
+        for (_, r) in &mut self.footer {
+            rect(r);
+        }
+        for line in &mut self.hints {
+            rect(&mut line.rect);
+        }
+    }
+
     /// Wheel notches are positive toward earlier categories, as for menu rows.
     /// A wheel over a Reset chip steps its row, as it does anywhere else on it.
     pub fn pointer_hit(&self, cursor: (f32, f32), wheel: Option<i32>) -> SettingsHit {
@@ -337,15 +444,12 @@ impl SettingsLayout {
 /// The diameter of a settings switch's knob in a chip `height` tall: 3 px in
 /// from the track, and no more than four fifths of it, so a tall chip at a
 /// large font keeps room for its label.
-pub(crate) fn settings_toggle_knob(height: f32) -> f32 {
-    (height - 6.0).min(height * 0.8).max(4.0)
+pub(crate) fn settings_toggle_knob(height: f32, scale: f32) -> f32 {
+    (height - 6.0 * scale).min(height * 0.8).max(4.0 * scale)
 }
 
-/// The height of every Settings control (the search field, a category, a
-/// value chip and Reset) for text `line` pixels tall: `line + 12` at 1x, and
-/// a line and a half once that is more, so at the default fonts (13 pt on
-/// macOS, 14 px elsewhere) a chip stays at least 24 points tall at 2x, where
-/// `line` doubles but fixed padding would not.
+/// Height in logical pixels of each Settings control for a logical line.
+/// `settings_layout` applies the backing scale after placement.
 pub fn settings_control_height(line: f32) -> f32 {
     (line + 12.0).max(line * 1.5)
 }
@@ -374,7 +478,11 @@ fn place_reset(
     if row.disabled || !shown {
         return None;
     }
-    let gap = text_cw.max(6.0);
+    let gap = if matches!(row.control, SettingsControl::Toggle(_)) {
+        4.0
+    } else {
+        0.0
+    };
     let room = |chip: f32| chip_x - 12.0 - label_x - chip - gap;
     let need = display_width(&row.label) as f32 * text_cw;
     let word = (display_width(reset_label) as f32 * text_cw + 20.0).max(chip_h);
@@ -420,23 +528,42 @@ fn wrapped_lines(text: &str, width: f32, cw: f32) -> Vec<String> {
 /// Wrap key hints between their ` · ` groups, so a key stays beside what it
 /// does and no line starts or ends with a separator. A group wider than the
 /// line is cut with an ellipsis.
-fn wrapped_hint_lines(text: &str, width: f32, cw: f32) -> Vec<String> {
+fn wrapped_hint_lines(
+    hints: &[(String, String)],
+    width: f32,
+    cw: f32,
+    separate: bool,
+) -> Vec<Vec<(String, bool)>> {
     let cols = (width / cw.max(1.0)).floor().max(1.0) as usize;
-    let mut result = Vec::new();
-    for source in text.lines() {
-        let mut line = String::new();
-        for group in source.split(" · ").map(str::trim).filter(|g| !g.is_empty()) {
-            if !line.is_empty() && display_width(&line) + 3 + display_width(group) > cols {
-                result.push(fit_single_line_label(&std::mem::take(&mut line), cols));
-            }
-            if !line.is_empty() {
-                line.push_str(" · ");
-            }
-            line.push_str(group);
+    let mut lines = Vec::new();
+    let mut runs = Vec::new();
+    let mut used = 0;
+    for (key, action) in hints {
+        let group = format!("{key} {action}");
+        let width = display_width(&group);
+        if !runs.is_empty() && (separate || used + 3 + width > cols) {
+            lines.push(std::mem::take(&mut runs));
+            used = 0;
         }
-        result.push(fit_single_line_label(&line, cols));
+        if !runs.is_empty() {
+            runs.push((" · ".into(), false));
+            used += 3;
+        }
+        // Truncate a whole pair, never wrap between the key and its action.
+        let fitted = fit_single_line_label(&group, cols);
+        let key_end = key.len().min(fitted.len());
+        if fitted.starts_with(key) {
+            runs.push((key.clone(), true));
+            runs.push((fitted[key_end..].to_string(), false));
+        } else {
+            runs.push((fitted, true));
+        }
+        used += width.min(cols);
     }
-    result
+    if !runs.is_empty() {
+        lines.push(runs);
+    }
+    lines
 }
 
 /// Pixel layout shared by painting, pointer input, text editing, AX and ctl.
@@ -446,10 +573,20 @@ pub fn settings_layout(
     cell: (f32, f32),
     surface: (f32, f32),
     text_cw: f32,
+    scale: f32,
 ) -> SettingsLayout {
-    let (sw, sh) = surface;
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    // All Settings dimensions, padding and breakpoints are logical pixels.
+    // Only this boundary converts to/from the device-pixel consumers.
+    let cell = (cell.0 / scale, cell.1 / scale);
+    let text_cw = text_cw / scale;
+    let (sw, sh) = (surface.0 / scale, surface.1 / scale);
     let w = (sw * 0.72).clamp(560.0, 980.0).min((sw - 32.0).max(0.0));
-    let h = (sh * 0.78).clamp(360.0, 760.0).min((sh - 32.0).max(0.0));
+    let h = (sh * 0.84).clamp(360.0, 820.0).min((sh - 32.0).max(0.0));
     let rect = ((sw - w) * 0.5, (sh - h) * 0.5, w, h);
     // Short panels trade the repeated title and spacing for a complete field.
     let compact = h < 240.0;
@@ -580,8 +717,36 @@ pub fn settings_layout(
         if compact { 0.0 } else { line * 1.25 + 6.0 },
     );
     let rows_top = title_y + title_rect.3 + if compact { 0.0 } else { 8.0 };
-    let footer_gap = if compact { 2.0 } else { 12.0 };
-    let mut footer_lines = wrapped_hint_lines(&set.hints, inner.2, text_cw);
+    let sidebar_start =
+        rect.1 + pad + control_h + 12.0 + set.categories.len() as f32 * control_h + 12.0;
+    let sidebar_hints = wide
+        && category_rects.iter().all(Option::is_some)
+        && set
+            .categories
+            .iter()
+            .all(|name| display_width(name) as f32 * text_cw <= side_w - pad * 2.0 - 12.0)
+        && sidebar_start + set.hints.len() as f32 * line + pad <= rect.1 + h
+        && set.hints.iter().all(|(key, action)| {
+            display_width(&format!("{key} {action}")) as f32 * text_cw <= side_w - pad * 2.0
+        });
+    let hint_runs = wrapped_hint_lines(
+        &set.hints,
+        if sidebar_hints {
+            side_w - 2.0 * pad
+        } else {
+            inner.2
+        },
+        text_cw,
+        sidebar_hints,
+    );
+    let mut footer_lines: Vec<String> = if sidebar_hints {
+        Vec::new()
+    } else {
+        hint_runs
+            .iter()
+            .map(|runs| runs.iter().map(|(text, _)| text.as_str()).collect())
+            .collect()
+    };
     if let Some(note) = &set.footer_note {
         footer_lines.extend(wrapped_lines(note, inner.2, text_cw));
     }
@@ -590,24 +755,36 @@ pub fn settings_layout(
     let footer_capacity = ((inner.1 + inner.3 - rows_top - row_h - line - 12.0) / line)
         .floor()
         .max(0.0) as usize;
-    if footer_lines.len() > footer_capacity {
-        footer_lines.drain(..footer_lines.len() - footer_capacity);
-    }
+    let removed = footer_lines.len().saturating_sub(footer_capacity);
+    footer_lines.drain(..removed);
+    let footer_gap = if footer_lines.is_empty() {
+        0.0
+    } else if compact {
+        2.0
+    } else {
+        12.0
+    };
     let footer_top = inner.1 + inner.3 - footer_lines.len() as f32 * line;
-    let footer = footer_lines
+    let footer: Vec<_> = footer_lines
         .into_iter()
         .enumerate()
         .map(|(i, text)| (text, (inner.0, footer_top + i as f32 * line, inner.2, line)))
         .collect();
     let available = (footer_top - footer_gap - rows_top).max(0.0);
-    let grouped = !set.search_query.is_empty() && available >= row_h + line + 6.0;
+    let heading_h = line + 12.0;
+    let grouped = set
+        .rows
+        .iter()
+        .enumerate()
+        .any(|(i, _)| !set.heading(i).is_empty())
+        && available + 0.01 >= row_h + heading_h;
     let focused = set.focused_row.min(set.rows.len().saturating_sub(1));
-    let group_h = if grouped { line + 6.0 } else { 0.0 };
+    let group_h = if grouped { heading_h } else { 0.0 };
     let mut first = focused;
     let mut used = row_h + group_h;
     while first > 0 {
         let extra = row_h
-            + if grouped && set.rows[first - 1].category != set.rows[first].category {
+            + if grouped && set.heading(first - 1) != set.heading(first) {
                 group_h
             } else {
                 0.0
@@ -623,17 +800,18 @@ pub fn settings_layout(
     let mut groups = Vec::new();
     let mut previous = None;
     for (index, row) in set.rows.iter().enumerate().skip(first) {
-        let group = grouped && previous != Some(row.category);
+        let group =
+            grouped && !set.heading(index).is_empty() && previous != Some(set.heading(index));
         if y + row_h + if group { group_h } else { 0.0 } > rows_top + available + 0.01 {
             break;
         }
         if group {
-            groups.push((row.category, (inner.0, y, inner.2, line)));
+            groups.push((index, (inner.0, y, inner.2, group_h)));
             y += group_h;
         }
         // A switch also holds its knob beside the label.
         let knob = if matches!(row.control, SettingsControl::Toggle(_)) {
-            settings_toggle_knob(control_h) + 2.0
+            settings_toggle_knob(control_h, 1.0) + 2.0
         } else {
             0.0
         };
@@ -661,7 +839,13 @@ pub fn settings_layout(
         )
         .map(|(width, enabled, icon)| SettingsResetChip {
             rect: (
-                chip_rect.0 - text_cw.max(6.0) - width,
+                chip_rect.0
+                    - if matches!(row.control, SettingsControl::Toggle(_)) {
+                        4.0
+                    } else {
+                        0.0
+                    }
+                    - width,
                 chip_rect.1,
                 width,
                 control_h,
@@ -689,9 +873,40 @@ pub fn settings_layout(
             reset,
         });
         y += row_h;
-        previous = Some(row.category);
+        previous = Some(set.heading(index));
     }
-    SettingsLayout {
+    let hints = if sidebar_hints {
+        hint_runs
+            .into_iter()
+            .enumerate()
+            .map(|(i, runs)| SettingsHintLine {
+                runs,
+                rect: (
+                    rect.0 + pad,
+                    sidebar_start + i as f32 * line,
+                    side_w - 2.0 * pad,
+                    line,
+                ),
+            })
+            .collect()
+    } else {
+        hint_runs
+            .into_iter()
+            .enumerate()
+            .skip(removed)
+            .filter_map(|(i, runs)| {
+                footer
+                    .get(i - removed)
+                    .map(|(_, rect)| SettingsHintLine { runs, rect: *rect })
+            })
+            .collect()
+    };
+    let mut layout = SettingsLayout {
+        scale,
+        line: line * scale,
+        text_cw: text_cw * scale,
+        hints,
+        sidebar_hints,
         rect,
         sidebar_rect,
         content_rect,
@@ -705,7 +920,9 @@ pub fn settings_layout(
         footer,
         empty_rect: (inner.0, rows_top, inner.2, line),
         first_row: first,
-    }
+    };
+    layout.scale_rects(scale);
+    layout
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -722,8 +939,9 @@ pub fn settings_panel_geometry(
     ch: f32,
     sw: f32,
     sh: f32,
+    scale: f32,
 ) -> SettingsPanelGeometry {
-    let layout = settings_layout(set, (cw, ch), (sw, sh), cw);
+    let layout = settings_layout(set, (cw, ch), (sw, sh), cw, scale);
     SettingsPanelGeometry {
         rect: layout.rect,
         focused_rect: layout
@@ -744,14 +962,15 @@ pub fn settings_value_rect(
     sw: f32,
     sh: f32,
     text_cw: f32,
+    scale: f32,
 ) -> Rect4 {
-    let layout = settings_layout(set, (cw, ch), (sw, sh), text_cw);
+    let layout = settings_layout(set, (cw, ch), (sw, sh), text_cw, scale);
     layout
         .rows
         .iter()
         .find(|row| row.index == set.focused_row)
         .map_or(layout.empty_rect, |row| {
-            chip_text_rect(row.chip_rect, row.label_rect.3, 4.0)
+            chip_text_rect(row.chip_rect, row.label_rect.3, 4.0 * layout.scale)
         })
 }
 
@@ -780,6 +999,7 @@ pub enum SettingsHit {
     Reset(usize),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn settings_hit_test(
     set: &SettingsOverlay,
     cw: f32,
@@ -788,8 +1008,9 @@ pub fn settings_hit_test(
     sh: f32,
     x: f32,
     y: f32,
+    scale: f32,
 ) -> SettingsHit {
-    settings_hit_test_with_text_width(set, (cw, ch), (sw, sh), (x, y), cw)
+    settings_hit_test_with_text_width(set, (cw, ch), (sw, sh), (x, y), cw, scale)
 }
 
 pub fn settings_hit_test_with_text_width(
@@ -798,8 +1019,9 @@ pub fn settings_hit_test_with_text_width(
     surface: (f32, f32),
     cursor: (f32, f32),
     text_cw: f32,
+    scale: f32,
 ) -> SettingsHit {
-    let layout = settings_layout(set, cell, surface, text_cw);
+    let layout = settings_layout(set, cell, surface, text_cw, scale);
     layout.pointer_hit(cursor, None)
 }
 
@@ -820,6 +1042,7 @@ pub(crate) struct SettingsTextItem {
     pub text: String,
     pub rect: Rect4,
     pub kind: SettingsTextKind,
+    pub runs: Vec<(String, bool)>,
 }
 
 pub(crate) fn settings_text_items(
@@ -841,6 +1064,7 @@ pub(crate) fn settings_text_items(
             ),
             rect,
             kind,
+            runs: Vec::new(),
         });
     };
     if layout.title_rect.3 > 0.0 {
@@ -848,14 +1072,18 @@ pub(crate) fn settings_text_items(
     }
     for (text, arrow) in [("<", layout.category_previous), (">", layout.category_next)] {
         if let Some((_, rect)) = arrow {
-            push(text, inset(rect, 4.0), SettingsTextKind::Heading);
+            push(
+                text,
+                inset(rect, 4.0 * layout.scale),
+                SettingsTextKind::Heading,
+            );
         }
     }
     for (i, rect) in layout.category_rects.iter().enumerate() {
         if let Some(rect) = rect {
             push(
                 &set.categories[i],
-                inset(*rect, 6.0),
+                inset(*rect, 6.0 * layout.scale),
                 SettingsTextKind::Category(i),
             );
         }
@@ -867,14 +1095,16 @@ pub(crate) fn settings_text_items(
             } else {
                 &set.search_query
             },
-            inset(layout.search_rect, 6.0),
+            inset(layout.search_rect, 6.0 * layout.scale),
             SettingsTextKind::Muted,
         );
     }
-    for (category, rect) in &layout.groups {
-        if let Some(name) = set.categories.get(*category) {
-            push(name, *rect, SettingsTextKind::Heading);
-        }
+    for (first_row, rect) in &layout.groups {
+        push(
+            set.heading(*first_row),
+            (rect.0, rect.1 + 12.0 * layout.scale, rect.2, layout.line),
+            SettingsTextKind::Heading,
+        );
     }
     // Centred text: fitted to `room`, then given a rect just its own width.
     let centred = |items: &mut Vec<SettingsTextItem>, text: &str, room: Rect4, kind| {
@@ -885,6 +1115,7 @@ pub(crate) fn settings_text_items(
             rect: (room.0 + (room.2 - width) * 0.5, room.1, width, room.3),
             text,
             kind,
+            runs: Vec::new(),
         });
     };
     let mut centred_items = Vec::new();
@@ -900,14 +1131,15 @@ pub(crate) fn settings_text_items(
             centred(
                 &mut centred_items,
                 &set.reset_label,
-                chip_text_rect(reset.rect, line, 10.0),
+                chip_text_rect(reset.rect, line, 10.0 * layout.scale),
                 SettingsTextKind::Reset(row.index),
             );
         }
-        let mut room = chip_text_rect(row.chip_rect, line, 4.0);
+        let mut room = chip_text_rect(row.chip_rect, line, 4.0 * layout.scale);
         // Reserve the knob after chip-width clamping, on either end of the switch.
         if matches!(data.control, SettingsControl::Toggle(_)) {
-            let knob = (settings_toggle_knob(row.chip_rect.3) + 2.0).min(room.2);
+            let knob = (settings_toggle_knob(row.chip_rect.3, layout.scale) + 2.0 * layout.scale)
+                .min(room.2);
             if !settings_knob_on_right(data) {
                 room.0 += knob;
             }
@@ -950,7 +1182,17 @@ pub(crate) fn settings_text_items(
         push(&set.no_matches, layout.empty_rect, SettingsTextKind::Muted);
     }
     for (text, rect) in &layout.footer {
-        push(text, *rect, SettingsTextKind::Muted);
+        if !layout.hints.iter().any(|hint| hint.rect == *rect) {
+            push(text, *rect, SettingsTextKind::Muted);
+        }
+    }
+    for hint in &layout.hints {
+        items.push(SettingsTextItem {
+            text: hint.text(),
+            rect: hint.rect,
+            kind: SettingsTextKind::Muted,
+            runs: hint.runs.clone(),
+        });
     }
     items.extend(centred_items);
     items
@@ -963,8 +1205,8 @@ pub(crate) fn settings_focus_bar_width(line: f32) -> f32 {
 }
 
 /// The focus bar along the left edge of `rect`.
-pub(crate) fn settings_focus_bar((x, y, _, h): Rect4, width: f32) -> Rect4 {
-    (x, y + 4.0, width, (h - 8.0).max(0.0))
+pub(crate) fn settings_focus_bar((x, y, _, h): Rect4, width: f32, scale: f32) -> Rect4 {
+    (x, y + 4.0 * scale, width, (h - 8.0 * scale).max(0.0))
 }
 
 /// The ink of one Settings text item. Labels, values and titles are
@@ -1003,7 +1245,11 @@ pub(crate) fn settings_text_color(
         kind,
         SettingsTextKind::Value(_) | SettingsTextKind::Reset(_)
     );
-    let surface = if focused && !in_chip {
+    let surface = if matches!(kind, SettingsTextKind::Value(_))
+        && matches!(row.control, SettingsControl::Value | SettingsControl::Text)
+    {
+        palette.well
+    } else if focused && !in_chip {
         palette.selected
     } else {
         bg
@@ -1012,7 +1258,7 @@ pub(crate) fn settings_text_color(
         return colors.muted(fg, surface);
     }
     match kind {
-        SettingsTextKind::Value(_) if row.unavailable => palette.description,
+        SettingsTextKind::Value(_) if row.unavailable => colors.text(palette.description, surface),
         SettingsTextKind::Value(_) if settings_knob_on_right(row) => colors.text(on_ink, accent),
         SettingsTextKind::Description(_) if focused => palette.description_selected,
         SettingsTextKind::Description(_) => palette.description,
@@ -1025,4 +1271,199 @@ pub(crate) fn settings_text_color(
 /// this session cannot show the effect. A disabled switch reads as off.
 pub(crate) fn settings_knob_on_right(row: &SettingsRow) -> bool {
     row.control == SettingsControl::Toggle(true) && !row.disabled
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SettingsSurface {
+    pub(crate) rect: Rect4,
+    pub(crate) fill: Rgb,
+    pub(crate) stroke: Rgb,
+    pub(crate) width: f32,
+    pub(crate) radius: f32,
+}
+
+pub(crate) fn settings_row_surfaces(
+    row: &SettingsRowGeometry,
+    data: &SettingsRow,
+    palette: &SettingsColors,
+    (bg, accent, on_ink): (Rgb, Rgb, Rgb),
+    selected: bool,
+    scale: f32,
+) -> Vec<SettingsSurface> {
+    let switch = matches!(data.control, SettingsControl::Toggle(_));
+    let on = settings_knob_on_right(data) && !data.unavailable;
+    let well = matches!(data.control, SettingsControl::Value | SettingsControl::Text);
+    let fill = if on {
+        accent
+    } else if well {
+        palette.well
+    } else {
+        bg
+    };
+    let control = if switch && data.unavailable {
+        palette.unavailable_control
+    } else if well && selected {
+        palette.selected_well_control
+    } else if well {
+        palette.well_control
+    } else if selected {
+        palette.selected_control
+    } else {
+        palette.control
+    };
+    let mut shapes = Vec::new();
+    let mut shape = |rect, fill, stroke, width, radius| {
+        shapes.push(SettingsSurface {
+            rect,
+            fill,
+            stroke,
+            width,
+            radius,
+        })
+    };
+    let joined = row.reset.filter(|_| {
+        matches!(
+            data.control,
+            SettingsControl::Value | SettingsControl::Choice
+        )
+    });
+    if let Some(reset) = joined {
+        let (x, y, w, h) = reset.rect;
+        shape(
+            (x, y, row.chip_rect.0 + row.chip_rect.2 - x, h),
+            fill,
+            control,
+            scale,
+            4.0 * scale,
+        );
+        shape(inset(reset.rect, scale), bg, bg, 0.0, 3.0 * scale);
+        shape(
+            (
+                x + 4.0 * scale,
+                y + scale,
+                (w - 4.0 * scale).max(0.0),
+                h - 2.0 * scale,
+            ),
+            bg,
+            bg,
+            0.0,
+            0.0,
+        );
+        shape(
+            (row.chip_rect.0 - 0.5 * scale, y, scale, h),
+            control,
+            control,
+            0.0,
+            0.0,
+        );
+    } else {
+        shape(
+            row.chip_rect,
+            fill,
+            control,
+            scale,
+            if switch {
+                row.chip_rect.3 / 2.0
+            } else {
+                4.0 * scale
+            },
+        );
+    }
+    if switch {
+        let (x, y, w, h) = row.chip_rect;
+        let d = settings_toggle_knob(h, scale);
+        let kx = if settings_knob_on_right(data) {
+            x + w - d - 3.0 * scale
+        } else {
+            x + 3.0 * scale
+        };
+        let knob = (kx, y + (h - d) / 2.0, d, d);
+        if data.unavailable {
+            shape(knob, bg, control, 1.5 * scale, d / 2.0);
+        } else {
+            let fill = if on { on_ink } else { control };
+            shape(knob, fill, fill, 0.0, d / 2.0);
+        }
+    }
+    if let Some(reset) = row.reset.filter(|_| joined.is_none()) {
+        shape(
+            reset.rect,
+            bg,
+            if reset.enabled {
+                control
+            } else {
+                palette.border
+            },
+            scale,
+            4.0 * scale,
+        );
+    }
+    shapes
+}
+
+pub(crate) struct SettingsTextStyle<'a> {
+    pub(crate) metrics: super::Metrics,
+    pub(crate) family: &'a str,
+    pub(crate) color: Rgb,
+    pub(crate) description: Rgb,
+}
+
+pub(crate) fn shape_settings_text(
+    font_system: &mut super::FontSystem,
+    buffer: &mut super::TextBuffer,
+    key: &mut u64,
+    item: &SettingsTextItem,
+    style: &SettingsTextStyle<'_>,
+) {
+    use super::{Attrs, Family, Metrics, Shaping, Weight, Wrap};
+    use std::hash::{Hash, Hasher};
+    let title = item.kind == SettingsTextKind::Title;
+    let bold = title
+        || item.kind == SettingsTextKind::Heading
+        || (matches!(item.kind, SettingsTextKind::Label(_))
+            && style.family == kettle_config::font::FAMILY);
+    let factor = if title { 1.2 } else { 1.0 };
+    let metrics = Metrics::new(
+        style.metrics.font_size * factor,
+        style.metrics.line_height * factor,
+    );
+    let mut hash = std::hash::DefaultHasher::new();
+    item.text.hash(&mut hash);
+    item.runs.hash(&mut hash);
+    bold.hash(&mut hash);
+    for ink in [style.color, style.description] {
+        (ink.r, ink.g, ink.b).hash(&mut hash);
+    }
+    metrics.font_size.to_bits().hash(&mut hash);
+    metrics.line_height.to_bits().hash(&mut hash);
+    item.rect.2.to_bits().hash(&mut hash);
+    item.rect.3.to_bits().hash(&mut hash);
+    style.family.hash(&mut hash);
+    let current = hash.finish();
+    if *key != current {
+        buffer.set_metrics(metrics);
+        buffer.set_size(Some(item.rect.2), Some(item.rect.3));
+        buffer.set_wrap(Wrap::None);
+        let base = Attrs::new()
+            .family(Family::Name(style.family))
+            .weight(if bold { Weight::BOLD } else { Weight::NORMAL });
+        if item.runs.is_empty() {
+            buffer.set_text(&item.text, &base, Shaping::Advanced, None);
+        } else {
+            buffer.set_rich_text(
+                item.runs.iter().map(|(text, key)| {
+                    let ink = if *key { style.color } else { style.description };
+                    (
+                        text.as_str(),
+                        base.clone().color(super::GColor::rgb(ink.r, ink.g, ink.b)),
+                    )
+                }),
+                &base,
+                Shaping::Advanced,
+                None,
+            );
+        }
+        *key = current;
+    }
+    buffer.shape_until_scroll(font_system, false);
 }

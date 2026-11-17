@@ -122,7 +122,7 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
             let mut states = std::collections::BTreeSet::new();
             for width in (300..=2000).step_by(10) {
                 let surface = (width as f32 * scale, 1000.0 * scale);
-                let layout = settings_layout(&set, (cw, line), surface, cw);
+                let layout = settings_layout(&set, (cw, line), surface, cw, scale);
                 let items = settings_text_items(&set, &layout, cw);
                 for row in &layout.rows {
                     let data = &set.rows[row.index];
@@ -211,14 +211,8 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
                     ));
                 }
             }
-            // The sweep reaches every step of the order. At 2x the panel,
-            // capped in device pixels, never has room for the disabled
-            // chip beside the longest Spanish label.
-            let steps: &[&str] = if scale == 1.0 {
-                &["0 word", "0 none", "1 word", "1 icon"]
-            } else {
-                &["0 none", "1 icon", "4 word"]
-            };
+            // Logical geometry reaches the same Reset states at either DPI.
+            let steps: &[&str] = &["0 word", "0 none", "1 word", "1 icon"];
             for &state in steps {
                 assert!(
                     states.contains(state),
@@ -240,7 +234,7 @@ fn controls_share_one_height_and_keep_their_width() {
         (2.0, 15.6, 32.5),
         (2.0, 16.8, 35.0),
     ] {
-        let control_h = settings_control_height(line);
+        let control_h = settings_control_height(line / scale) * scale;
         assert!(control_h >= 24.0 * scale, "{line}");
         for (control, narrow, wide, cols) in [
             (SettingsControl::Choice, "Light", "Follow system", 13),
@@ -265,8 +259,8 @@ fn controls_share_one_height_and_keep_their_width() {
                 ..Default::default()
             };
             let surface = (1280.0 * scale, 820.0 * scale);
-            let first = settings_layout(&set(narrow), (cw, line), surface, cw);
-            let second = settings_layout(&set(wide), (cw, line), surface, cw);
+            let first = settings_layout(&set(narrow), (cw, line), surface, cw, scale);
+            let second = settings_layout(&set(wide), (cw, line), surface, cw, scale);
             assert_eq!(
                 first.rows[0].chip_rect, second.rows[0].chip_rect,
                 "{control:?} {line}: the chip moved with its value"
@@ -282,7 +276,7 @@ fn controls_share_one_height_and_keep_their_width() {
     }
 }
 
-/// The judged Linux window (1600x1000, the 14 px font's 8.4x17.5 cell)
+/// A typical Linux window (1600x1000, the 14 px font's 8.4x17.5 cell)
 /// still shows the whole twelve-row Appearance page; an 800x600 window
 /// shows five rows, as it did before the taller controls (51 px rows then,
 /// 53 px now).
@@ -299,15 +293,21 @@ fn taller_controls_keep_the_appearance_page_in_view() {
             })
             .collect(),
         title: "Appearance".into(),
-        hints: "↑↓/jk field · ←→/hl change · g/G ends · Del reset · Tab category · Esc close"
-            .into(),
+        hints: vec![
+            ("↑↓/jk".into(), "field".into()),
+            ("←→/hl".into(), "change".into()),
+            ("g/G".into(), "ends".into()),
+            ("Del".into(), "reset".into()),
+            ("Tab".into(), "category".into()),
+            ("Esc".into(), "close".into()),
+        ],
         ..Default::default()
     };
     let set = rows(12);
-    let judged = settings_layout(&set, (8.4, 17.5), (1600.0, 1000.0), 8.4);
-    assert_eq!(judged.rows.len(), 12);
-    let small = settings_layout(&set, (8.4, 17.5), (800.0, 600.0), 8.4);
-    assert_eq!(small.rows.len(), 5);
+    let wide = settings_layout(&set, (8.4, 17.5), (1600.0, 1000.0), 8.4, 1.0);
+    assert_eq!(wide.rows.len(), 12);
+    let small = settings_layout(&set, (8.4, 17.5), (800.0, 600.0), 8.4, 1.0);
+    assert_eq!(small.rows.len(), 6);
 }
 
 /// Free text (the image path) is not centred: it starts where its inline
@@ -329,13 +329,14 @@ fn text_values_start_where_their_editor_does() {
             }],
             ..Default::default()
         };
-        let layout = settings_layout(&set, cell, surface, cell.0);
+        let layout = settings_layout(&set, cell, surface, cell.0, 1.0);
         let items = settings_text_items(&set, &layout, cell.0);
         let value = items
             .iter()
             .find(|item| item.kind == SettingsTextKind::Value(0))
             .expect("the path is drawn");
-        let editor = super::settings_value_rect(&set, cell.0, cell.1, surface.0, surface.1, cell.0);
+        let editor =
+            super::settings_value_rect(&set, cell.0, cell.1, surface.0, surface.1, cell.0, 1.0);
         assert_eq!(
             (value.rect.0, value.rect.1, value.rect.3),
             (editor.0, editor.1, editor.3),

@@ -1400,7 +1400,7 @@ impl App {
         let picker = picker_diagnostic_geometry(&diagnostic_overlay);
         let settings = diagnostic_overlay.settings.as_ref().map(|settings| {
             let layout = kettle_render::settings_layout(settings, (cell_w, self.overlay_text_line_height(target)),
-                (surface.0 as f32, surface.1 as f32), self.overlay_text_cell_width(target));
+                (surface.0 as f32, surface.1 as f32), self.overlay_text_cell_width(target), target.window.as_ref().map_or(1.0, |window| window.scale_factor() as f32));
             let focused = layout.rows.iter().find(|row| row.index == settings.focused_row).map_or(layout.empty_rect, |row| row.rect);
             serde_json::json!({
                 "rect": rect_json(layout.rect),
@@ -1411,6 +1411,7 @@ impl App {
                 "search_focused": settings.search_focused,
                 "categories": layout.category_rects.iter().map(|r| r.map(rect_json)).collect::<Vec<_>>(),
                 "rows": layout.rows.iter().map(|row| serde_json::json!({"index": row.index, "rect": rect_json(row.rect), "chip_rect": rect_json(row.chip_rect), "label_rect": rect_json(row.label_rect), "description_rect": rect_json(row.description_rect), "reset_rect": row.reset.map(|reset| rect_json(reset.rect)), "reset_enabled": row.reset.map(|reset| reset.enabled), "reset_icon": row.reset.map(|reset| reset.icon), "unavailable": settings.rows.get(row.index).is_some_and(|data| data.unavailable)})).collect::<Vec<_>>(),
+                "groups": layout.groups.iter().map(|(first_row, rect)| serde_json::json!({"first_row": first_row, "rect": rect_json(*rect)})).collect::<Vec<_>>(),
                 "focused_row": settings.focused_row,
                 "row_count": settings.rows.len(),
                 "active_category": settings.active_category,

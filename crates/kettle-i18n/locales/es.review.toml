@@ -45,6 +45,16 @@
 # to draft pending review of the revised text in rendered UI.
 
 [status]
+settings_group_colors_text = "draft"
+settings_group_window = "draft"
+settings_group_cursor = "draft"
+settings_group_general = "draft"
+settings_group_mouse_keyboard = "draft"
+settings_group_scrolling = "draft"
+settings_group_clipboard = "draft"
+settings_group_panes = "draft"
+settings_group_tabs = "draft"
+settings_group_tools = "draft"
 selection_gesture_hint = "draft"
 a11y_window_minimize = "accepted"
 a11y_window_maximize = "accepted"

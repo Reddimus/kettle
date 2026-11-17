@@ -166,6 +166,9 @@ impl App {
                     (cw, self.overlay_text_line_height(ws)),
                     surface,
                     self.overlay_text_cell_width(ws),
+                    ws.window
+                        .as_ref()
+                        .map_or(1.0, |window| window.scale_factor() as f32),
                 );
                 rect_contains(
                     if kind == ModalKind::Settings {
@@ -220,6 +223,9 @@ impl App {
                 sw,
                 sh,
                 self.overlay_text_cell_width(ws),
+                ws.window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor() as f32),
             );
             String::new()
         } else if ws
@@ -233,13 +239,20 @@ impl App {
                 (cw, self.overlay_text_line_height(ws)),
                 (sw, sh),
                 self.overlay_text_cell_width(ws),
+                ws.window
+                    .as_ref()
+                    .map_or(1.0, |window| window.scale_factor() as f32),
             )
             .search_rect;
+            let scale = ws
+                .window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32);
             rect = (
-                r.0 + 6.0,
-                r.1 + 6.0,
-                (r.2 - 12.0).max(0.0),
-                (r.3 - 12.0).max(0.0),
+                r.0 + 6.0 * scale,
+                r.1 + 6.0 * scale,
+                (r.2 - 12.0 * scale).max(0.0),
+                (r.3 - 12.0 * scale).max(0.0),
             );
             String::new()
         } else if ws.layout_picker_input.is_some() {
@@ -827,6 +840,12 @@ impl App {
                             tr,
                         ),
                         category,
+                        group: cats[category]
+                            .groups
+                            .iter()
+                            .rev()
+                            .find(|(_, start)| *start <= i)
+                            .map_or(String::new(), |(heading, _)| tr.text(*heading).to_string()),
                         control: match f.kind {
                             crate::settings::FieldKind::Toggle => {
                                 kettle_render::SettingsControl::Toggle(crate::settings::read_bool(
@@ -955,6 +974,9 @@ impl App {
             (cw, self.overlay_text_line_height(ws)),
             (sw, sh),
             self.overlay_text_cell_width(ws),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
         );
         // Off a primary click, the Reset chip is part of its row.
         let hit = match layout.pointer_hit((mx, my), (!is_click).then_some(dir)) {
