@@ -2044,18 +2044,28 @@ GNOME's `≡` at 2 times (`TAB_CONTROL_GLYPH_SCALE`).
 `tab_strip::control_glyph_metrics` caps each em at 90% of its button's shorter
 side and its line at the button's height, so a glyph stays centred and
 unclipped; click targets do not change.
-`app::chrome::horizontal_new_tab_controls` reserves two targets at least 28 pt
-square (growing with the band height), a 4 pt
-inter-button gap, a 4 pt leading gap and an 8 pt outside margin. In a macOS
-title bar `titlebar_settings_control` adds a Settings gear the size of `▾`, 8 pt
-before it, without moving `▾ +`; it shows only while the lane still keeps
-`tab-min-width` beside every control (never by tab count). The gear is drawn as
-alpha quads from `tab_strip::gear_mask`, not a font glyph, and opens Settings on
-a release over it. The gear takes its room from the right of the strip, so
-`centre_lone_titlebar_tab` narrows a lone tab evenly about the window centre,
-down to `tab-min-width`, rather than letting it slide off centre, and a
-torn-off tab is held in that same lone tab (`tear_off_destination_tab`, shared
-with the Wayland grip). Titlebar height
+`app::chrome::horizontal_new_tab_controls` keeps the plain strip's geometry.
+The macOS titlebar instead joins `+` and a 28 pt dropdown with an internal
+divider, shared hover fill and an 8 pt gap before the separate Settings gear.
+It keeps the old reservation for tabs, so multi-tab positions are unchanged.
+The lone tab measures the formatted literal title or directory leaf, rounds
+up to two cells, then clamps to 160-240 pt (respecting `tab-min-width`). Its
+centred title lane reserves equal space on either side for activity and close
+controls, including while the close hit target is hidden. Width is held while
+the pointer is in the strip or a tab drag is live, and released on leave,
+resize or DPI change. Narrow windows retain the centred narrowing and minimum
+width fallback. A tear-off uses that destination's content width and clamps
+its grab offset inside the tab.
+The menu owns its origin through shell-discovery replacement and submenu
+navigation. Only the macOS new-tab menu omits Settings through About; its
+origin also supplies the accessible name and expanded/pressed state, and
+clears with the menu. AccessKit children follow each strip's screen order.
+On macOS the dropdown uses the ComboBox role, mapped to AXPopUpButton, and a
+toggled value for open state because this adapter drops HasPopup/expanded.
+While the menu is open, only its popup remains in the strip's accessibility
+tree; pressing it dismisses the menu. Compact-control glyph contrast uses the
+same opaque background as the shared hover and open-menu fills.
+Titlebar height
 is at least 28 pt. These physical rectangles flow through `TabBar` to painting,
 clicks, AccessKit and `ui_geometry`; content offsets and IME follow the same
 band height. Tooltips use translated action names and the live keymap shortcut,
@@ -6073,3 +6083,23 @@ the read cannot replace it with defaults. This preserves the existing config
 reload work; profile directory enumeration runs on the inventory worker.
 Inventory refresh preserves a manually scrolled menu viewport, independently of
 its highlighted row. Resize and keyboard navigation still keep selection visible.
+
+### Settings geometry and sections
+
+`kettle-render::settings_layout` receives device-pixel metrics, surface size and
+an explicit backing scale. It lays out in logical pixels, then scales every
+rectangle for painting, pointer input, inline editors, accessibility and ctl.
+The panel uses 72% width (560-980 logical pixels) and 84% height (360-820), with
+a 16-pixel surface margin. Font metrics do not determine the backing scale.
+
+The UI catalogue keeps fields flat and records each section heading's first
+field. Reordering preserves config keys, not numeric field positions. Search
+projects fields in catalogue order and displays category headings instead of
+section headings. Rendered `groups` and ctl groups contain visible-projection
+`first_row` indices and full heading bands. AX search derives the category
+from that row while retaining category-based node IDs; browsing sections use
+a separate node kind and retain field IDs and inline editors as children.
+
+Settings hints retain key/action pairs through wrapping and rich-text shaping.
+The shaping cache includes runs, resolved colors, font metrics, width, height
+and family, so a theme change with identical strings refreshes the hint inks.

@@ -161,6 +161,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
     use super::{ContextMenuItem, ContextMenuState, accessibility_context_menu_item_index};
     let mut ws = WindowState::new(1, Mux::new());
     ws.context_menu = Some(ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: (0.0, 0.0),
         anchor_scale: 1.0,
         items: vec![
@@ -296,6 +297,7 @@ fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() 
         "\"reset_rect\": row.reset.map(|reset| rect_json(reset.rect)),",
         "\"reset_enabled\": row.reset.map(|reset| reset.enabled),",
         "\"description_rect\":",
+        "\"groups\": layout.groups",
         "\"first_line\":",
         "\"visible_lines\":",
         "\"focused_rect\":",
@@ -677,7 +679,7 @@ fn confirmation_accessibility_excludes_the_retained_settings_subtree() {
             rows: Vec::new(),
             focused_row: 0,
             title: "Settings".into(),
-            hints: String::new(),
+            hints: Vec::new(),
             footer_note: None,
             ..Default::default()
         }),
@@ -858,7 +860,7 @@ fn settings_rows_carry_their_values_for_every_screen_reader() {
                 .collect(),
             focused_row: 0,
             title: "Settings".into(),
-            hints: String::new(),
+            hints: Vec::new(),
             footer_note: None,
             ..Default::default()
         }),
@@ -1009,7 +1011,7 @@ fn settings_inline_edit_exposes_text_caret_and_actions() {
             }],
             focused_row: 0,
             title: "Settings".into(),
-            hints: String::new(),
+            hints: Vec::new(),
             footer_note: None,
             ..Default::default()
         }),
@@ -1342,7 +1344,7 @@ fn settings_search_and_row_descriptions_have_layout_bounds_and_text_actions() {
             description: "Set the terminal font size in points.".into(), ..Default::default() }],
         ..Default::default()
     };
-    let layout = kettle_render::settings_layout(&settings, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let layout = kettle_render::settings_layout(&settings, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
     let overlay = kettle_render::Overlay {
         settings: Some(settings),
         text_field: Some(kettle_render::TextFieldOverlay {
@@ -1505,8 +1507,8 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
             assert_eq!(close.1.label(), Some(tr.a11y_tab_close("shell 0").as_str()));
             assert_eq!(close.1.bounds().unwrap().y0, bar.segments[0].close.1 as f64);
             for text in [
-                tr.text(kettle_i18n::Text::PaletteNewTab),
-                tr.text(kettle_i18n::Text::A11yNewTabMenu),
+                tr.text(kettle_i18n::Text::MenuNewTab),
+                tr.text(kettle_i18n::Text::TabNewOptions),
             ] {
                 assert!(nodes.iter().any(|(_, node)| node.label() == Some(text)
                     && node.supports_action(accesskit::Action::Click)));
@@ -1531,7 +1533,7 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
             assert!(
                 !header
                     .iter()
-                    .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::A11yNewTabMenu)))
+                    .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::TabNewOptions)))
             );
             bar.window_controls.clear();
             bar.linux_header = false;
@@ -2346,7 +2348,7 @@ fn settings_reset_button_follows_the_selected_row() {
             (8.4, 17.5),
             (1280.0, 820.0),
             8.4,
-        );
+         1.0);
         let chip = layout.rows[0].reset.expect("the selected row draws Reset").rect;
         let bounds = node.bounds().expect("Reset has bounds");
         assert_eq!(
@@ -2558,4 +2560,68 @@ fn settings_accessibility_click_dispatches_configure_and_retry() {
     }
     let source = include_str!("accessibility.rs");
     assert!(source.contains("self.settings_adjust(ws, &cats, cat, fld, dir)"));
+}
+
+#[test]
+fn settings_browsing_groups_preserve_focus_editor_membership_and_hidden_rows() {
+    use kettle_render::{SettingsOverlay, SettingsRow};
+    for scale in [1.0,2.0] {
+        let settings = SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: (0..12).map(|i| SettingsRow { label: format!("Field {i}"), group: ["Colors and text","Window","Cursor"][i/4].into(), ..Default::default() }).collect(),
+            focused_row: 10,
+            ..Default::default()
+        };
+        let surface = (1280.0*scale,500.0*scale);
+        let metrics = (8.4*scale,17.5*scale);
+        let layout = kettle_render::settings_layout(&settings,metrics,surface,metrics.0,scale);
+        let overlay = kettle_render::Overlay { settings: Some(settings.clone()), ..Default::default() };
+        let tree = super::modal_accessibility_projection(&overlay,surface,metrics,scale,&EN_TEXT);
+        let groups: Vec<_> = tree.nodes.iter().filter(|(_,node)| node.role()==accesskit::Role::Group).collect();
+        assert_eq!(groups.len(),3);
+        for (ordinal,(_,node)) in groups.iter().enumerate() {
+            assert_eq!(node.label(),Some(["Colors and text","Window","Cursor"][ordinal]));
+            assert_eq!(node.children(),(0..4).map(|i| super::accessibility_modal_id(5,ordinal*4+i+2)).collect::<Vec<_>>());
+        }
+        assert_eq!(tree.focus,Some(super::accessibility_modal_id(5,12)));
+        for (index,_) in settings.rows.iter().enumerate() {
+            let node = &tree.nodes.iter().find(|(id,_)| *id==super::accessibility_modal_id(5,index+2)).unwrap().1;
+            assert_eq!(node.is_hidden(),!layout.rows.iter().any(|row| row.index==index));
+        }
+        let mut editing = overlay;
+        editing.text_field = Some(kettle_render::TextFieldOverlay { text: "editing".into(), rect: layout.rows.iter().find(|row| row.index==10).unwrap().chip_rect, picker_header: false, placeholder: String::new(), cursor_byte: 0, selection: None, horizontal_scroll: 0, prefix: String::new(), hint: String::new(), accent_palette: 0 });
+        let tree = super::modal_accessibility_projection(&editing,surface,metrics,scale,&EN_TEXT);
+        let input_id = super::accessibility_modal_id(super::MODAL_KIND_SETTINGS,1);
+        let group = tree.nodes.iter().find(|(_,node)| node.role()==accesskit::Role::Group && node.label()==Some("Cursor")).unwrap();
+        assert_eq!(group.1.children()[2],input_id);
+        assert_eq!(tree.focus,Some(input_id));
+    }
+}
+
+#[test]
+fn settings_search_group_bounds_follow_first_row_indices_and_sticky_category() {
+    for scale in [1.0,2.0] {
+        let mut settings = kettle_render::SettingsOverlay {
+            categories: (0..8).map(|i| format!("Category {i}")).collect(),
+            search_query: "result".into(),
+            rows: (0..16).map(|i| kettle_render::SettingsRow { category: if i<2 {3} else {7}, label: format!("Result {i}"), group: "Ignored section".into(), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        for focus in [0,10,15] {
+            settings.focused_row = focus;
+            let surface = (1280.0*scale,500.0*scale);
+            let metrics = (8.4*scale,17.5*scale);
+            let layout = kettle_render::settings_layout(&settings,metrics,surface,metrics.0,scale);
+            let overlay = kettle_render::Overlay { settings: Some(settings.clone()), ..Default::default() };
+            let tree = super::modal_accessibility_projection(&overlay,surface,metrics,scale,&EN_TEXT);
+            for (first,rect) in &layout.groups {
+                let category = settings.rows[*first].category;
+                let id = super::accessibility_modal_id(13,category+1);
+                let node = &tree.nodes.iter().find(|(node,_)| *node==id).unwrap().1;
+                assert_eq!(node.label(),Some(settings.categories[category].as_str()));
+                assert_eq!(node.bounds(),Some(accesskit::Rect::new(rect.0 as f64,rect.1 as f64,(rect.0+rect.2) as f64,(rect.1+rect.3) as f64)));
+            }
+            assert_eq!(tree.focus,Some(super::accessibility_modal_id(5,focus+2)));
+        }
+    }
 }

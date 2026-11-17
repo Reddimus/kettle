@@ -2,6 +2,59 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum MenuOrigin {
+    #[default]
+    Other,
+    MainMenu,
+    NewTab {
+        compact: bool,
+    },
+}
+
+impl MenuOrigin {
+    pub(crate) fn is_new_tab(self) -> bool {
+        matches!(self, Self::NewTab { .. } | Self::MainMenu)
+    }
+
+    pub(super) fn shell_items(
+        self,
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
+        let mut items = App::shell_menu_items(shells, profiles, tr);
+        if matches!(self, Self::NewTab { compact: true })
+            && let Some(end) = items.iter().position(|item| {
+                matches!(
+                    item,
+                    ContextMenuItem::Item {
+                        action: Action::OpenSettings,
+                        ..
+                    }
+                )
+            })
+        {
+            items.truncate(end);
+            if matches!(items.last(), Some(ContextMenuItem::Separator)) {
+                items.pop();
+            }
+        }
+        items
+    }
+
+    pub(super) fn label(self, tr: &kettle_i18n::Translator) -> Option<String> {
+        self.is_new_tab().then(|| {
+            tr.text(if self == Self::MainMenu {
+                kettle_i18n::Text::A11yMainMenu
+            } else {
+                kettle_i18n::Text::TabNewOptions
+            })
+            .to_string()
+        })
+    }
+}
+
 impl ContextMenuState {
     pub(super) fn preview_target(&self) -> Option<PreviewMenuTarget> {
         self.items.iter().find_map(|item| match item {
@@ -809,6 +862,7 @@ impl App {
             .map(|window| window.scale_factor())
             .unwrap_or(1.0);
         ws.context_menu = Some(ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor,
             anchor_scale,
             items,
@@ -1010,12 +1064,28 @@ impl App {
     pub(super) fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
         let shells = kettle_core::term::cached_shells();
-        let items = Self::shell_menu_items(
-            shells.as_deref(),
-            self.profile_inventory.snapshot(),
-            &self.ui_text,
-        );
-        self.show_context_menu(ws, items, px, py);
+        let origin = if ws.linux_titlebar {
+            MenuOrigin::MainMenu
+        } else {
+            MenuOrigin::NewTab {
+                compact: cfg!(target_os = "macos") && ws.macos_titlebar_tabs,
+            }
+        };
+        self.show_new_tab_menu(ws, shells.as_deref(), origin, (px, py));
+    }
+
+    pub(super) fn show_new_tab_menu(
+        &mut self,
+        ws: &mut WindowState,
+        shells: Option<&[kettle_core::term::ShellChoice]>,
+        origin: MenuOrigin,
+        anchor: (f32, f32),
+    ) {
+        let items = origin.shell_items(shells, self.profile_inventory.snapshot(), &self.ui_text);
+        self.show_context_menu(ws, items, anchor.0, anchor.1);
+        if let Some(menu) = ws.context_menu.as_mut() {
+            menu.origin = origin;
+        }
     }
 
     /// Move the context-menu highlight by `delta` (±1), skipping
@@ -1514,7 +1584,11 @@ impl App {
             scroll_offset: menu.scroll_offset,
             panel_w_clamped,
             panel_h_clamped,
-            a11y_label: ws.context_menu_a11y_label.clone(),
+            a11y_label: ws
+                .context_menu
+                .as_ref()
+                .and_then(|m| m.origin.label(&self.ui_text))
+                .or_else(|| ws.context_menu_a11y_label.clone()),
             status: None,
             picker_header_height: 0.0,
             picker_footer: None,
@@ -1863,6 +1937,7 @@ mod tests {
 
     fn menu(items: Vec<ContextMenuItem>) -> ContextMenuState {
         ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (0.0, 0.0),
             anchor_scale: 1.0,
             items,
@@ -2236,6 +2311,7 @@ pub(super) enum PreviewMenuAction {
 /// Anchor is the post-clamp panel top-left; rows mirror the renderer's
 /// `ContextMenu` slice but carry the live `Action` for dispatch.
 pub(crate) struct ContextMenuState {
+    pub(crate) origin: MenuOrigin,
     pub(super) anchor: (f32, f32),
     /// DPI scale at which `anchor` was captured. Anchors are physical pixels;
     /// rescale them across monitor transitions before clamping so the menu
@@ -3109,6 +3185,7 @@ pub(super) fn grouped_terminal_menu(
 impl ContextMenuLevel {
     pub(super) fn as_state(&self) -> ContextMenuState {
         ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: self.anchor,
             anchor_scale: self.anchor_scale,
             items: self.items.clone(),
@@ -3149,6 +3226,7 @@ mod cascading_tests {
             }],
         }];
         let mut state = ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (40.0, 60.0),
             anchor_scale: 2.0,
             items: parent,

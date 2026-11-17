@@ -74,7 +74,6 @@ a11y_tab_new_output = "{title}, salida nueva"
 a11y_tab_bell = "{title}, sonó la campana"
 a11y_tab_output_stopped = "{title}, la salida se detuvo"
 a11y_main_menu = "Menú principal"
-a11y_new_tab_menu = "Menú de nueva pestaña"
 quick_terminal_toggle = "Mostrar u ocultar la terminal rápida"
 settings_category_quick_terminal = "Terminal rápida"
 quick_terminal_hotkey = "Atajo global"
@@ -1182,6 +1181,17 @@ osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mi
 
 scrollback_kept = "Inicio del historial conservado"
 scrollback_a11y_viewing = "Viendo el historial"
+
+settings_group_colors_text = "Colores y texto"
+settings_group_window = "Ventana"
+settings_group_cursor = "Cursor"
+settings_group_general = "General"
+settings_group_mouse_keyboard = "Mouse y teclado"
+settings_group_scrolling = "Desplazamiento"
+settings_group_clipboard = "Portapapeles"
+settings_group_panes = "Paneles"
+settings_group_tabs = "Pestañas"
+settings_group_tools = "Herramientas"
 
 [completion_matches]
 one = "{count} coincidencia"

@@ -74,7 +74,6 @@ a11y_tab_new_output = "{title}, new output"
 a11y_tab_bell = "{title}, bell rang"
 a11y_tab_output_stopped = "{title}, output stopped"
 a11y_main_menu = "Main menu"
-a11y_new_tab_menu = "New tab menu"
 quick_terminal_toggle = "Toggle quick terminal"
 settings_category_quick_terminal = "Quick terminal"
 quick_terminal_hotkey = "Global hotkey"
@@ -1181,6 +1180,17 @@ osc52_blocked_write_by = "A program was blocked from copying to the clipboard wh
 
 scrollback_kept = "Start of kept history"
 scrollback_a11y_viewing = "Viewing history"
+
+settings_group_colors_text = "Colors and text"
+settings_group_window = "Window"
+settings_group_cursor = "Cursor"
+settings_group_general = "General"
+settings_group_mouse_keyboard = "Mouse and keyboard"
+settings_group_scrolling = "Scrolling"
+settings_group_clipboard = "Clipboard"
+settings_group_panes = "Panes"
+settings_group_tabs = "Tabs"
+settings_group_tools = "Tools"
 
 [completion_matches]
 one = "{count} match"

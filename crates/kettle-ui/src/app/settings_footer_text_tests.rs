@@ -4,18 +4,26 @@ use kettle_i18n::{Language, Translator};
 const EN: Translator = Translator::new(Language::En);
 const ES: Translator = Translator::new(Language::Es);
 
+fn joined_hints(tr: &Translator, vim_nav: bool) -> String {
+    settings_hints(tr, vim_nav)
+        .iter()
+        .map(|(key, action)| format!("{key} {action}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 #[test]
 fn hints_name_the_keys_and_translate_only_their_actions() {
     assert_eq!(
-        settings_hints(&EN, true),
+        joined_hints(&EN, true),
         "↑↓/jk field · ←→/hl change · g/G ends · Del reset · Tab category · Esc close"
     );
     assert_eq!(
-        settings_hints(&EN, false),
+        joined_hints(&EN, false),
         "↑↓ field · ←→ change · Del reset · Tab category · Esc close"
     );
     assert_eq!(
-        settings_hints(&ES, false),
+        joined_hints(&ES, false),
         "↑↓ campo · ←→ cambiar · Del restablecer · Tab categoría · Esc cerrar"
     );
 }
@@ -38,7 +46,7 @@ fn settings_accessibility_names_follow_the_ui_language() {
             rows: Vec::new(),
             focused_row: 0,
             title: String::new(),
-            hints: String::new(),
+            hints: Vec::new(),
             footer_note: None,
             ..Default::default()
         }),
@@ -587,8 +595,9 @@ fn the_laid_out_settings_footer_separates_key_groups() {
                     hints: settings_hints(&tr, vim_nav),
                     ..Default::default()
                 };
-                let layout = kettle_render::settings_layout(&set, (cw, 16.0), surface, cw);
-                let lines: Vec<&str> = layout.footer.iter().map(|(t, _)| t.as_str()).collect();
+                let layout = kettle_render::settings_layout(&set, (cw, 16.0), surface, cw, 1.0);
+                let texts: Vec<_> = layout.hints.iter().map(|hint| hint.text()).collect();
+                let lines: Vec<&str> = texts.iter().map(String::as_str).collect();
                 // Each group's line and its key, action and end columns.
                 let mut placed = Vec::new();
                 let mut from = (0, 0);
@@ -630,7 +639,7 @@ fn the_laid_out_settings_footer_separates_key_groups() {
                         pairs += 1;
                     }
                 }
-                assert!(pairs > 0, "{lines:?}");
+                assert!(layout.sidebar_hints || pairs > 0, "{lines:?}");
                 wrapped |= lines.len() > 1;
                 for line in &lines {
                     assert!(
@@ -652,7 +661,7 @@ fn the_settings_hints_fit_a_default_window_in_every_language() {
     use unicode_width::UnicodeWidthStr as _;
     for tr in [EN, ES, Translator::pseudo()] {
         for vim_nav in [false, true] {
-            let hints = settings_hints(&tr, vim_nav);
+            let hints = joined_hints(&tr, vim_nav);
             assert!(hints.width() <= 144, "{hints:?}");
         }
     }

@@ -63,6 +63,7 @@ impl App {
                 self.close_window_now(ws, DropPanes::No);
             }
             WindowEvent::Resized(size) => {
+                ws.lone_tab_width.set(None);
                 self.confirm_cancel_press(ws);
                 self.confirm_scroll(ws, 0, true);
                 self.sync_output_frame_budget(ws, false);
@@ -136,6 +137,7 @@ impl App {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                ws.lone_tab_width.set(None);
                 // The patch was drawn at the old scale, and the new-scale frame
                 // may wait for the paired resize.
                 Self::hide_cursor_layer(ws);

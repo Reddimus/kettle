@@ -1569,6 +1569,11 @@ pub struct TabBar {
     pub window_controls: Vec<WindowControlButton>,
     pub pressed_new_tab: bool,
     pub pressed_new_tab_menu: bool,
+    /// The launcher menu owns the popup, including while a submenu is open.
+    pub new_tab_menu_open: bool,
+    /// Live shortcuts in spoken form for accessibility descriptions.
+    pub new_tab_shortcut: Option<String>,
+    pub settings_shortcut: Option<String>,
     /// Localized action and live shortcut for the currently hovered control.
     pub tooltip: Option<String>,
     /// The strip replaces the macOS caption and has a fixed native height.
@@ -1590,7 +1595,7 @@ pub struct TabBar {
     pub segments: Vec<TabSeg>,
     /// The trailing "new tab" (+) button rect.
     pub new_tab: Rect4,
-    /// The `▾` dropdown-arrow rect, immediately LEFT of `new_tab`.
+    /// The `▾` dropdown-arrow rect, beside `new_tab`.
     /// Clicking it opens the new-tab shell chooser. Zero-area `(0,0,0,0)` when
     /// the dropdown is disabled (vertical tab bars) — the renderer then draws a
     /// plain `+` and the hit-test skips the arrow branch.
@@ -1599,10 +1604,10 @@ pub struct TabBar {
     /// same rect used for click dispatch, so hover paint cannot drift from the
     /// action users actually trigger.
     pub hovered_new_tab: bool,
-    /// The pointer is over the shell-dropdown hit target immediately left of
+    /// The pointer is over the shell-dropdown hit target beside
     /// `+`. Kept separate so each half has an unambiguous hover response.
     pub hovered_new_tab_menu: bool,
-    /// The Settings button that leads the `▾ +` pair in a macOS title bar,
+    /// The Settings button that leads the `+ ▾` pair in a macOS title bar,
     /// drawn as a gear. Zero-area `(0,0,0,0)` everywhere else, and in a lane
     /// too narrow to keep a tab beside it; the renderer then draws nothing.
     pub settings: Rect4,
@@ -1683,6 +1688,9 @@ impl TabBar {
             window_controls: Vec::new(),
             pressed_new_tab: false,
             pressed_new_tab_menu: false,
+            new_tab_menu_open: false,
+            new_tab_shortcut: None,
+            settings_shortcut: None,
             tooltip: None,
             in_titlebar: false,
             linux_header: false,

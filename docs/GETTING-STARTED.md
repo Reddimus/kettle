@@ -28,10 +28,11 @@ your `PATH`.
 
 A single-tab window hides the tab strip by default. Creating another tab shows
 it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
-expose their tab titles, selected tab, Close buttons, New tab, and New tab menu
+expose their tab titles, selected tab, Close buttons, New Tab, and New Tab Options
 to screen readers. The menu button beside `+` opens shell choices and shortcuts.
-On macOS, where the tabs sit in the title bar, a gear before `▾ +` opens
-Settings, as `Cmd+,` does; screen readers call it Settings.
+On macOS, where the tabs sit in the title bar, a compact lone tab stays centred. A gear before the joined `+ ▾` button opens
+Settings, as `Cmd+,` does. The dropdown keeps shell choices, profiles, layouts
+and SSH; Settings and other app commands remain in the macOS menu bar.
 
 If the shell or directly launched command fails, its pane stays open with
 "Process exited with code N". Press **Enter** or click **Restart** to run the

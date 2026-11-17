@@ -170,7 +170,12 @@ impl App {
         let cards = self.accessible_cards(ws);
         let mut children = Vec::with_capacity(layout.len());
         let mut nodes = Vec::with_capacity(layout.len() * 2 + cards.len() + 1);
-        if !self.pointer_modal_open(ws) {
+        if !self.pointer_modal_open(ws)
+            || ws
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.origin.is_new_tab())
+        {
             let anchors: Vec<_> = (0..ws.mux.tabs.len())
                 .filter_map(|i| ws.mux.tab_anchor_panes(i).first().copied())
                 .collect();
@@ -184,6 +189,8 @@ impl App {
                 children.push(ACCESSIBILITY_TAB_LIST_ID);
                 nodes.extend(tabs);
             }
+        }
+        if !self.pointer_modal_open(ws) {
             for (pane, toast) in self.persistent_notices(ws) {
                 children.push(persistent_notice_id(pane, 0));
                 nodes.extend(persistent_notice_nodes(pane, &toast));
@@ -959,6 +966,7 @@ impl App {
                 row.value.hash(&mut hasher);
                 row.description.hash(&mut hasher);
                 row.category.hash(&mut hasher);
+                row.group.hash(&mut hasher);
                 row.disabled.hash(&mut hasher);
                 row.reset.hash(&mut hasher);
                 row.unavailable.hash(&mut hasher);
@@ -1081,6 +1089,11 @@ impl App {
         ) {
             id.hash(&mut hasher);
             node.label().hash(&mut hasher);
+            node.description().hash(&mut hasher);
+            node.role().hash(&mut hasher);
+            node.is_expanded().hash(&mut hasher);
+            node.toggled().hash(&mut hasher);
+            node.children().hash(&mut hasher);
             node.is_selected().hash(&mut hasher);
             if let Some(rect) = node.bounds() {
                 for value in [rect.x0, rect.y0, rect.x1, rect.y1] {
@@ -1396,6 +1409,14 @@ impl App {
             return;
         }
         ws.tab_focus = None;
+        if dismiss_launcher_menu_accessibility(ws, &request) {
+            self.reset_blink_phase(ws);
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
         // Focus on the config notice lets Enter and Escape answer it; focus
         // anywhere else hands those keys back to the terminal.
         self.config_notice_focus = request.action == AccessibilityAction::Focus
@@ -2362,6 +2383,7 @@ pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
 const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
 const MODAL_KIND_PALETTE_STATUS: u64 = 14;
+const MODAL_KIND_SETTINGS_SECTION: u64 = 16;
 /// The Settings dialog's Reset button, for the selected row.
 pub(super) const MODAL_KIND_SETTINGS_RESET: u64 = 15;
 
@@ -2378,6 +2400,7 @@ const _: () = {
         MODAL_KIND_SETTINGS_GROUP,
         MODAL_KIND_PALETTE_STATUS,
         MODAL_KIND_SETTINGS_RESET,
+        MODAL_KIND_SETTINGS_SECTION,
     ];
     let mut i = 0;
     while i < kinds.len() {
@@ -3036,7 +3059,8 @@ pub(super) fn modal_accessibility_projection(
     if let Some(settings) = overlay.settings.as_ref() {
         let container_id = accessibility_modal_id(5, 0);
         let list_id = accessibility_modal_id(5, 1);
-        let layout = kettle_render::settings_layout(settings, metrics, surface, metrics.0);
+        let layout =
+            kettle_render::settings_layout(settings, metrics, surface, metrics.0, scale_factor);
         let bounds = |r: kettle_render::Rect4| {
             accesskit::Rect::new(
                 r.0 as f64,
@@ -3145,8 +3169,33 @@ pub(super) fn modal_accessibility_projection(
         }
         let mut list = Node::new(Role::ListBox);
         list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
-        if settings.search_query.is_empty() {
+        if settings.search_query.is_empty() && settings.rows.iter().all(|row| row.group.is_empty())
+        {
             list.set_children(children.clone());
+        } else if settings.search_query.is_empty() {
+            let mut groups = Vec::new();
+            let mut first = 0;
+            while first < settings.rows.len() {
+                let name = &settings.rows[first].group;
+                let end = (first + 1..settings.rows.len())
+                    .find(|&i| settings.rows[i].group != *name)
+                    .unwrap_or(settings.rows.len());
+                let id = accessibility_modal_id(MODAL_KIND_SETTINGS_SECTION, groups.len());
+                let mut group = Node::new(Role::Group);
+                group.set_label(name.clone());
+                group.set_children(children[first..end].to_vec());
+                if let Some((_, rect)) = layout
+                    .groups
+                    .iter()
+                    .find(|(row, _)| *row >= first && *row < end)
+                {
+                    group.set_bounds(bounds(*rect));
+                }
+                projection.nodes.push((id, group));
+                groups.push(id);
+                first = end;
+            }
+            list.set_children(groups);
         } else if settings.rows.is_empty() {
             let id = accessibility_modal_id(MODAL_KIND_SETTINGS_GROUP, 0);
             let mut empty = static_text_node(tr.text(kettle_i18n::Text::SettingsNoMatches));
@@ -3170,7 +3219,11 @@ pub(super) fn modal_accessibility_projection(
                 let mut group = Node::new(Role::Group);
                 group.set_label(name.clone());
                 group.set_children(members);
-                if let Some((_, rect)) = layout.groups.iter().find(|(c, _)| *c == category) {
+                if let Some((_, rect)) = layout
+                    .groups
+                    .iter()
+                    .find(|(first_row, _)| settings.rows[*first_row].category == category)
+                {
                     group.set_bounds(bounds(*rect));
                 }
                 projection.nodes.push((id, group));
@@ -4009,10 +4062,10 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
 /// The GNOME header's Find button, beside its window buttons' ids.
 pub(super) const ACCESSIBILITY_HEADER_FIND_ID: NodeId = NodeId((1 << 51) | 3);
 const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
-const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
-const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
+pub(super) const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
+pub(super) const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
 /// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
-const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
+pub(super) const ACCESSIBILITY_TAB_SETTINGS_ID: NodeId = NodeId((1 << 54) | 3);
 
 /// The action a screen reader's click on one of the strip's own buttons
 /// runs: New tab opens a tab, and the macOS title bar's gear opens Settings
@@ -4051,7 +4104,7 @@ pub(super) fn tab_accessibility_projection(
     }
     let mut nodes = Vec::new();
     let mut children = Vec::new();
-    for seg in &bar.segments {
+    for seg in bar.segments.iter().filter(|_| !bar.new_tab_menu_open) {
         let Some(anchor) = anchors.get(seg.idx).copied() else {
             continue;
         };
@@ -4087,7 +4140,7 @@ pub(super) fn tab_accessibility_projection(
         (
             ACCESSIBILITY_TAB_NEW_ID,
             bar.new_tab,
-            tr.text(kettle_i18n::Text::PaletteNewTab),
+            tr.text(kettle_i18n::Text::MenuNewTab),
         ),
         (
             ACCESSIBILITY_TAB_MENU_ID,
@@ -4097,7 +4150,7 @@ pub(super) fn tab_accessibility_projection(
             tr.text(if bar.linux_header {
                 kettle_i18n::Text::A11yMainMenu
             } else {
-                kettle_i18n::Text::A11yNewTabMenu
+                kettle_i18n::Text::TabNewOptions
             }),
         ),
         (
@@ -4106,9 +4159,31 @@ pub(super) fn tab_accessibility_projection(
             tr.text(kettle_i18n::Text::SettingsA11yTitle),
         ),
     ] {
+        if bar.new_tab_menu_open && id != ACCESSIBILITY_TAB_MENU_ID {
+            continue;
+        }
         if rect.2 > 0.0 && rect.3 > 0.0 && rect.0 > PARKED_TAB / 2.0 && rect.1 > PARKED_TAB / 2.0 {
-            let mut button = Node::new(Role::Button);
+            let popup = id == ACCESSIBILITY_TAB_MENU_ID;
+            // This adapter maps ComboBox to AXPopUpButton but drops HasPopup.
+            let mut button = Node::new(if popup && cfg!(target_os = "macos") {
+                Role::ComboBox
+            } else {
+                Role::Button
+            });
             button.set_label(label);
+            if popup {
+                button.set_has_popup(accesskit::HasPopup::Menu);
+                button.set_expanded(bar.new_tab_menu_open);
+                if cfg!(target_os = "macos") {
+                    button.set_toggled(accesskit::Toggled::from(bar.new_tab_menu_open));
+                }
+            } else if let Some(shortcut) = if id == ACCESSIBILITY_TAB_NEW_ID {
+                bar.new_tab_shortcut.as_ref()
+            } else {
+                bar.settings_shortcut.as_ref()
+            } {
+                button.set_description(shortcut.clone());
+            }
             button.add_action(AccessibilityAction::Click);
             button.set_bounds(accessibility_rect(rect));
             nodes.push((id, button));
@@ -4116,7 +4191,7 @@ pub(super) fn tab_accessibility_projection(
         }
     }
     // GNOME's Find button: a toggle, pressed while Find is open.
-    if bar.search.2 > 0.0 && bar.search.3 > 0.0 {
+    if !bar.new_tab_menu_open && bar.search.2 > 0.0 && bar.search.3 > 0.0 {
         let mut button = Node::new(Role::Button);
         button.set_label(tr.text(kettle_i18n::Text::A11yHeaderFind));
         button.add_action(AccessibilityAction::Click);
@@ -4125,7 +4200,11 @@ pub(super) fn tab_accessibility_projection(
         nodes.push((ACCESSIBILITY_HEADER_FIND_ID, button));
         children.push(ACCESSIBILITY_HEADER_FIND_ID);
     }
-    for control in &bar.window_controls {
+    for control in bar
+        .window_controls
+        .iter()
+        .filter(|_| !bar.new_tab_menu_open)
+    {
         let id = window_control_accessibility_id(control.action);
         let mut button = Node::new(Role::Button);
         button.set_label(control.label.clone());
@@ -4134,6 +4213,16 @@ pub(super) fn tab_accessibility_projection(
         nodes.push((id, button));
         children.push(id);
     }
+    children.sort_by(|a, b| {
+        let position = |id: &NodeId| {
+            nodes
+                .iter()
+                .find(|(node, _)| node == id)
+                .and_then(|(_, n)| n.bounds())
+                .map_or(f64::INFINITY, |r| if vertical { r.y0 } else { r.x0 })
+        };
+        position(a).total_cmp(&position(b))
+    });
     let mut list = Node::new(Role::TabList);
     list.set_orientation(if vertical {
         accesskit::Orientation::Vertical
@@ -4178,6 +4267,27 @@ pub(super) fn persistent_notice_nodes(
     status.set_children(children);
     nodes.push((persistent_notice_id(pane, 0), status));
     nodes
+}
+
+/// The expanded popup remains actionable while its menu owns other input.
+pub(super) fn dismiss_launcher_menu_accessibility(
+    ws: &mut WindowState,
+    request: &ActionRequest,
+) -> bool {
+    if request.target_tree != TreeId::ROOT
+        || request.target_node != ACCESSIBILITY_TAB_MENU_ID
+        || request.action != AccessibilityAction::Click
+        || ws.confirm_dialog.is_some()
+        || !ws
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.origin.is_new_tab())
+    {
+        return false;
+    }
+    ws.context_menu = None;
+    ws.pressed_new_tab_menu = false;
+    true
 }
 
 #[cfg(test)]
@@ -4411,6 +4521,7 @@ mod context_menu_nesting_tests {
         };
         let mut ws = WindowState::new(1, Mux::new());
         ws.context_menu = Some(ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (240.0, 60.0),
             anchor_scale: 1.0,
             items: vec![leaf.clone()],

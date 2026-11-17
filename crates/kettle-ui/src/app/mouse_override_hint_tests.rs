@@ -494,6 +494,7 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
         // Open on its own.
         let mut ws = WindowState::new(1, Mux::new());
         ws.context_menu = Some(ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (40.0, 60.0),
             anchor_scale: 1.0,
             items: menu.clone(),
@@ -515,6 +516,7 @@ fn a_screen_reader_reads_the_wrapped_shift_hint_as_one_sentence() {
 
         // Split is open, and the terminal menu is its parent panel.
         ws.context_menu = Some(ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (240.0, 60.0),
             anchor_scale: 1.0,
             items: vec![leaf.clone()],
@@ -596,6 +598,7 @@ fn hovering_a_continued_line_of_the_hint_keeps_the_tree_valid() {
         for hovered in [1, lines.len() - 1] {
             for from_parent in [false, true] {
                 let mut state = ContextMenuState {
+                    origin: crate::app::MenuOrigin::Other,
                     anchor: (40.0, 60.0),
                     anchor_scale: 1.0,
                     items: menu.clone(),
@@ -707,6 +710,7 @@ fn separate_info_lines_are_read_one_by_one() {
     ];
     let mut ws = WindowState::new(1, Mux::new());
     ws.context_menu = Some(ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: (40.0, 60.0),
         anchor_scale: 1.0,
         items: menu.clone(),

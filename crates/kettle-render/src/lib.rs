@@ -185,13 +185,15 @@ use search::{
 };
 #[cfg(test)]
 use search::{search_bar_text, search_editor_label, search_focused_label};
+#[cfg(test)]
+use settings::SettingsTextKind;
+use settings::settings_text_items;
 pub use settings::{
-    SettingsControl, SettingsHit, SettingsLayout, SettingsOverlay, SettingsPanelGeometry,
-    SettingsResetChip, SettingsRow, SettingsRowGeometry, settings_control_height,
-    settings_hit_test, settings_hit_test_with_text_width, settings_layout, settings_panel_geometry,
-    settings_value_rect,
+    SettingsControl, SettingsHintLine, SettingsHit, SettingsLayout, SettingsOverlay,
+    SettingsPanelGeometry, SettingsResetChip, SettingsRow, SettingsRowGeometry,
+    settings_control_height, settings_hit_test, settings_hit_test_with_text_width, settings_layout,
+    settings_panel_geometry, settings_value_rect,
 };
-use settings::{SettingsTextKind, settings_text_items, settings_toggle_knob};
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
 use terminal::{
     PendingCursorGlyph, cursor_glyph_damage_key, cursor_glyph_top, invalidate_pane_titlebar_texts,
@@ -650,7 +652,7 @@ pub struct Renderer {
     theme_footer_key: u64,
     /// Shaped settings slots, truncated to the shared layout's visible text.
     settings_buffers: Vec<TextBuffer>,
-    settings_texts: Vec<(String, bool)>,
+    settings_texts: Vec<u64>,
     /// Label and secondary-description buffers for the focused pane's
     /// completion shelf. Separate pools keep the command token crisp while the
     /// explanation stays visually subordinate.
@@ -999,6 +1001,9 @@ impl Renderer {
         let cw = self.cell_w;
         let ch = self.cell_h;
         let metrics = self.metrics;
+        if overlay.settings.is_some() {
+            self.ensure_bundled_style_faces();
+        }
         let family = self.font_family.clone();
         let sw = self.config.width as f32;
         let sh = self.config.height as f32;
@@ -1625,6 +1630,13 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
+                let joined = tabbar.in_titlebar && !tabbar.linux_header;
+                quads.extend(tab_strip::joined_new_tab_quads(
+                    tabbar,
+                    chrome_strip_bg,
+                    theme.foreground,
+                    self.scale,
+                ));
                 for (bounds, hovered, pressed, toggled) in [
                     (
                         tabbar.new_tab_menu,
@@ -1651,6 +1663,9 @@ impl Renderer {
                         tabbar.search_open,
                     ),
                 ] {
+                    if joined && (bounds == tabbar.new_tab || bounds == tabbar.new_tab_menu) {
+                        continue;
+                    }
                     if bounds.2 > 0.0
                         && let Some(fill) = tab_strip::flat_button_fill(
                             chrome_strip_bg,
@@ -3386,42 +3401,46 @@ impl Renderer {
                 (cw, self.overlay_text_line_height()),
                 (sw, sh),
                 self.overlay_text_cell_width(),
+                self.scale,
             );
             let lines = settings_text_items(set, &layout, self.overlay_text_cell_width());
             while self.settings_buffers.len() < lines.len() {
                 self.settings_buffers
                     .push(TextBuffer::new(&mut self.font_system, metrics));
             }
-            while self.settings_texts.len() < lines.len() {
-                self.settings_texts.push((String::new(), false));
-            }
+            self.settings_texts.resize(lines.len(), 0);
             self.settings_buffers.truncate(lines.len());
-            self.settings_texts.truncate(lines.len());
+            let accent = self.ui_accent(cfg, theme);
+            let palette = settings::settings_colors(
+                theme,
+                accent,
+                self.config.format.is_srgb(),
+                &mut self.chrome_colors,
+            );
             for (i, item) in lines.iter().enumerate() {
-                let buf = &mut self.settings_buffers[i];
-                let title = item.kind == SettingsTextKind::Title;
-                let factor = if title { 1.2 } else { 1.0 };
-                buf.set_metrics(Metrics::new(
-                    metrics.font_size * factor,
-                    metrics.line_height * factor,
-                ));
-                buf.set_size(Some(item.rect.2), Some(item.rect.3));
-                buf.set_wrap(Wrap::None);
-                let bold = title || item.kind == SettingsTextKind::Heading;
-                if self.settings_texts[i].0 != item.text || self.settings_texts[i].1 != bold {
-                    buf.set_text(
-                        &item.text,
-                        &Attrs::new().family(Family::Name(&family)).weight(if bold {
-                            Weight::BOLD
-                        } else {
-                            Weight::NORMAL
-                        }),
-                        Shaping::Advanced,
-                        None,
-                    );
-                    self.settings_texts[i] = (item.text.clone(), bold);
-                }
-                buf.shape_until_scroll(&mut self.font_system, false);
+                let style = settings::SettingsTextStyle {
+                    metrics,
+                    family: &family,
+                    color: if item.runs.is_empty() {
+                        settings::settings_text_color(
+                            set,
+                            item.kind,
+                            &palette,
+                            (theme, accent, theme.foreground),
+                            &mut self.chrome_colors,
+                        )
+                    } else {
+                        self.chrome_colors.text(theme.foreground, theme.background)
+                    },
+                    description: palette.description,
+                };
+                settings::shape_settings_text(
+                    &mut self.font_system,
+                    &mut self.settings_buffers[i],
+                    &mut self.settings_texts[i],
+                    item,
+                    &style,
+                );
             }
         }
 
@@ -4850,11 +4869,20 @@ impl Renderer {
                     chrome_strip_bg
                 }
             };
-            let background = toolbar_background(
-                &mut self.chrome_colors,
-                tabbar.hovered_new_tab,
-                tabbar.pressed_new_tab,
-            );
+            let background = if tabbar.in_titlebar && !tabbar.linux_header {
+                tab_strip::joined_control_background(
+                    tabbar,
+                    chrome_strip_bg,
+                    theme.foreground,
+                    false,
+                )
+            } else {
+                toolbar_background(
+                    &mut self.chrome_colors,
+                    tabbar.hovered_new_tab,
+                    tabbar.pressed_new_tab,
+                )
+            };
             let plus_fg = self
                 .chrome_colors
                 .tab_text(plus_fg, background, overlay.window_focused);
@@ -4902,11 +4930,20 @@ impl Renderer {
                 } else {
                     fg
                 };
-                let background = toolbar_background(
-                    &mut self.chrome_colors,
-                    tabbar.hovered_new_tab_menu,
-                    tabbar.pressed_new_tab_menu,
-                );
+                let background = if tabbar.in_titlebar && !tabbar.linux_header {
+                    tab_strip::joined_control_background(
+                        tabbar,
+                        chrome_strip_bg,
+                        theme.foreground,
+                        true,
+                    )
+                } else {
+                    toolbar_background(
+                        &mut self.chrome_colors,
+                        tabbar.hovered_new_tab_menu,
+                        tabbar.pressed_new_tab_menu,
+                    )
+                };
                 let arrow_fg =
                     self.chrome_colors
                         .tab_text(arrow_fg, background, overlay.window_focused);
@@ -5272,7 +5309,7 @@ impl Renderer {
         if let Some(set) = &overlay.settings {
             let text_cw = self.overlay_text_cell_width();
             let line = self.overlay_text_line_height();
-            let layout = settings_layout(set, (cw, line), (sw, sh), text_cw);
+            let layout = settings_layout(set, (cw, line), (sw, sh), text_cw, self.scale);
             let acc = self.ui_accent(cfg, theme);
             let palette = settings::settings_colors(
                 theme,
@@ -5284,7 +5321,6 @@ impl Renderer {
                 selected,
                 border,
                 control,
-                selected_control,
                 focus,
                 ..
             } = palette;
@@ -5311,7 +5347,7 @@ impl Renderer {
                     size: [r.2, r.3],
                     fill: rgba(fill, alpha),
                     stroke: rgba(stroke, 1.0),
-                    params: [radius, border, 0.0, 0.0],
+                    params: [radius * self.scale, border * self.scale, 0.0, 0.0],
                 });
             };
             shape(
@@ -5325,7 +5361,12 @@ impl Renderer {
             shape(layout.rect, theme.background, 1.0, border, 1.0, 6.0);
             if let Some(side) = layout.sidebar_rect {
                 shape(
-                    (side.0 + side.2 - 1.0, side.1 + 12.0, 1.0, side.3 - 24.0),
+                    (
+                        side.0 + side.2 - self.scale,
+                        side.1 + 12.0 * self.scale,
+                        self.scale,
+                        side.3 - 24.0 * self.scale,
+                    ),
                     border,
                     1.0,
                     border,
@@ -5334,11 +5375,11 @@ impl Renderer {
                 );
             }
             // Focus shows as a bar, not only as the light fill.
-            let bar = settings::settings_focus_bar_width(line);
+            let bar = settings::settings_focus_bar_width(line / self.scale) * self.scale;
             if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
-                    settings::settings_focus_bar(*r, bar),
+                    settings::settings_focus_bar(*r, bar, self.scale),
                     focus,
                     1.0,
                     focus,
@@ -5365,7 +5406,7 @@ impl Renderer {
                 if row_selected {
                     shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
                     shape(
-                        settings::settings_focus_bar(row.rect, bar),
+                        settings::settings_focus_bar(row.rect, bar, self.scale),
                         focus,
                         1.0,
                         focus,
@@ -5373,63 +5414,46 @@ impl Renderer {
                         0.0,
                     );
                 }
-                let control = if row_selected {
-                    selected_control
-                } else {
-                    control
-                };
                 let data = &set.rows[row.index];
-                let switch = matches!(data.control, SettingsControl::Toggle(_));
-                // Accent fill only where the switch is on and its effect shows.
-                let on = settings::settings_knob_on_right(data) && !data.unavailable;
-                shape(
-                    row.chip_rect,
-                    if on { acc } else { theme.background },
-                    1.0,
-                    control,
-                    1.0,
-                    if switch { row.chip_rect.3 / 2.0 } else { 4.0 },
-                );
-                // A switch's knob: at the right end when on, the left when
-                // off, so the state reads without the label or the colour.
-                // Where the effect is unavailable the knob stays where the
-                // setting is, hollow.
-                if switch {
-                    let (x, y, w, h) = row.chip_rect;
-                    let d = settings_toggle_knob(h);
-                    let kx = if settings::settings_knob_on_right(data) {
-                        x + w - d - 3.0
-                    } else {
-                        x + 3.0
-                    };
-                    let knob = (kx, y + (h - d) / 2.0, d, d);
-                    if data.unavailable {
-                        shape(knob, theme.background, 1.0, control, 1.5, d / 2.0);
-                    } else {
-                        let fill = if on { on_ink } else { control };
-                        shape(knob, fill, 1.0, fill, 0.0, d / 2.0);
-                    }
-                }
-                if let Some(reset) = row.reset {
+                for surface in settings::settings_row_surfaces(
+                    row,
+                    data,
+                    &palette,
+                    (theme.background, acc, on_ink),
+                    row_selected,
+                    self.scale,
+                ) {
                     shape(
-                        reset.rect,
-                        theme.background,
+                        surface.rect,
+                        surface.fill,
                         1.0,
-                        if reset.enabled { control } else { border },
-                        1.0,
-                        4.0,
+                        surface.stroke,
+                        surface.width / self.scale,
+                        surface.radius / self.scale,
                     );
-                    if reset.icon {
-                        header_icons::push_header_icon(
-                            &mut menu_q,
-                            header_icons::HeaderIcon::Reset,
-                            reset.rect,
-                            self.chrome_colors.text(theme.foreground, theme.background),
-                            self.scale,
-                            &mut self.header_icon_masks,
-                        );
-                    }
                 }
+                if let Some(reset) = row.reset
+                    && reset.icon
+                {
+                    header_icons::push_header_icon(
+                        &mut menu_q,
+                        header_icons::HeaderIcon::Reset,
+                        reset.rect,
+                        self.chrome_colors.text(theme.foreground, theme.background),
+                        self.scale,
+                        &mut self.header_icon_masks,
+                    );
+                }
+            }
+            for (_, r) in layout.groups.iter().skip(1) {
+                shape(
+                    (r.0, r.1 + 8.0 * self.scale, r.2, self.scale),
+                    border,
+                    1.0,
+                    border,
+                    0.0,
+                    0.0,
+                );
             }
             let items = settings_text_items(set, &layout, text_cw);
             for (i, item) in items.iter().enumerate() {
@@ -5453,6 +5477,25 @@ impl Renderer {
         }
 
         if let (Some(field), Some(layout)) = (&overlay.text_field, &field_layout) {
+            let settings_ink =
+                if let Some(set) = overlay.settings.as_ref().filter(|set| !set.search_focused) {
+                    let accent = self.ui_accent(cfg, theme);
+                    let palette = settings::settings_colors(
+                        theme,
+                        accent,
+                        self.config.format.is_srgb(),
+                        &mut self.chrome_colors,
+                    );
+                    Some(settings::settings_text_color(
+                        set,
+                        settings::SettingsTextKind::Value(set.focused_row),
+                        &palette,
+                        (theme, accent, theme.foreground),
+                        &mut self.chrome_colors,
+                    ))
+                } else {
+                    None
+                };
             let picker = overlay
                 .context_menu
                 .as_ref()
@@ -5470,7 +5513,14 @@ impl Renderer {
                 menu_q.push(rect(x, y, w, h, theme.selection_background, 1.0));
             }
             let (x, y, w, h) = layout.caret;
-            menu_q.push(rect(x, y, w, h, theme.foreground, 1.0));
+            menu_q.push(rect(
+                x,
+                y,
+                w,
+                h,
+                settings_ink.unwrap_or(theme.foreground),
+                1.0,
+            ));
             let cw =
                 text_field_cell_width(field, self.overlay_text_cell_width(), metrics.line_height);
             let slots = text_field_rects(field, cw);
@@ -5487,13 +5537,15 @@ impl Renderer {
                         bottom: (slot.1 + slot.3) as i32,
                     },
                     default_color: {
-                        let color = overlays::text_field_slot_color(
-                            picker,
-                            index,
-                            theme,
-                            fg,
-                            &mut self.chrome_colors,
-                        );
+                        let color = settings_ink.unwrap_or_else(|| {
+                            overlays::text_field_slot_color(
+                                picker,
+                                index,
+                                theme,
+                                fg,
+                                &mut self.chrome_colors,
+                            )
+                        });
                         GColor::rgb(color.r, color.g, color.b)
                     },
                     custom_glyphs: &[],
@@ -6845,3 +6897,6 @@ mod update_toast_tests;
 
 #[cfg(test)]
 mod scrollback_pill_tests;
+
+#[cfg(test)]
+mod settings_hierarchy_tests;

@@ -13,6 +13,7 @@ fn menu(items: Vec<ContextMenuItem>) -> ContextMenuState {
         scroll_offset: 0,
         typeahead_buf: String::new(),
         typeahead_until: None,
+        origin: Default::default(),
     }
 }
 

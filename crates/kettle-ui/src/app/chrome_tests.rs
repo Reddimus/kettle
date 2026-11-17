@@ -834,10 +834,11 @@ fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
                 let left = if titlebar { 78.0 * scale } else { 0.0 };
                 let y = if bottom { 232.0 * scale } else { 0.0 };
                 let band = (left, y, 420.0 * scale - left, 28.0 * scale);
-                let (menu, plus, reserve) = horizontal_new_tab_controls(band, scale, true);
+                let (menu, plus, reserve) = if titlebar { super::chrome::titlebar_new_tab_controls(band, scale) } else { horizontal_new_tab_controls(band, scale, true) };
                 let mut bar = kettle_render::TabBar::hidden();
                 bar.height = band.3;
                 bar.band = band;
+                bar.in_titlebar = titlebar;
                 bar.new_tab = plus;
                 bar.new_tab_menu = menu;
                 for (rect, target) in [
@@ -860,10 +861,15 @@ fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
                         }
                     }
                 }
-                assert_eq!(plus.0 - menu.0 - menu.2, 4.0 * scale);
-                assert_eq!(420.0 * scale - plus.0 - plus.2, 8.0 * scale);
+                if titlebar {
+                    assert_eq!(plus.0 + plus.2, menu.0);
+                    assert_eq!(420.0 * scale - menu.0 - menu.2, 8.0 * scale);
+                } else {
+                    assert_eq!(plus.0 - menu.0 - menu.2, 4.0 * scale);
+                    assert_eq!(420.0 * scale - plus.0 - plus.2, 8.0 * scale);
+                }
                 assert_eq!(
-                    new_tab_hover_target(&bar, menu.0 + menu.2 + scale, y + 14.0 * scale),
+                    new_tab_hover_target(&bar, plus.0.max(menu.0) + plus.2.max(menu.2) + scale, y + 14.0 * scale),
                     None
                 );
                 let nodes = tab_accessibility_projection(
@@ -882,7 +888,7 @@ fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
                     assert!(
                         nodes
                             .iter()
-                            .any(|(_, node)| node.role() == accesskit::Role::Button
+                            .any(|(_, node)| node.supports_action(accesskit::Action::Click)
                                 && node.bounds() == Some(expected))
                     );
                 }
@@ -1027,9 +1033,7 @@ fn macos_titlebar_lane(width: f32, scale: f32) -> kettle_render::Rect4 {
     (78.0 * scale, 0.0, (width - 78.0) * scale, 32.0 * scale)
 }
 
-/// The macOS title bar gains a Settings gear that leads `▾ +` by a gap
-/// wider than theirs; `▾` and `+` stay exactly where a strip without it
-/// puts them, and no other strip gets one.
+/// The gear remains separate from the joined pair; other strips keep their controls.
 #[test]
 fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
     use super::chrome::{HorizontalTabGeometry, horizontal_tab_geometry};
@@ -1047,13 +1051,14 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                     layout,
                     ..
                 } = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
-                let (menu, plus, _) = super::horizontal_new_tab_controls(lane, scale, true);
-                assert_eq!((arrow_rect, plus_rect), (menu, plus), "▾ + moved");
+                let (menu, plus, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
+                assert_eq!((arrow_rect, plus_rect), (menu, plus));
+                assert_eq!(plus.0 + plus.2, menu.0);
                 let case = format!("{width}px @{scale}x, {tabs} tabs");
                 assert!(settings_rect.2 > 0.0, "{case}: no gear");
-                assert_eq!((settings_rect.2, settings_rect.3), (menu.2, menu.3), "{case}");
+                assert_eq!((settings_rect.2, settings_rect.3), (plus.2, plus.3), "{case}");
                 assert_eq!(settings_rect.1, menu.1, "{case}");
-                let gap = menu.0 - (settings_rect.0 + settings_rect.2);
+                let gap = plus.0 - (settings_rect.0 + settings_rect.2);
                 assert!(gap >= 8.0 * scale - 0.01, "{case}: gap {gap}");
                 assert!(
                     settings_rect.0 >= lane.0 && settings_rect.1 >= lane.1,
@@ -1094,15 +1099,15 @@ fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
         let probe = macos_titlebar_lane(1280.0, scale);
-        let (menu, plus, reserve) = super::horizontal_new_tab_controls(probe, scale, true);
-        let extra = menu.2 + 8.0 * scale;
+        let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(probe, scale);
+        let extra = plus.2 + 8.0 * scale;
         let threshold = reserve + extra + cfg.tab_min_width;
         for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
             let lane = (probe.0, 0.0, lane_width, probe.3);
             for tabs in [1, 20] {
                 let geometry = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
                 assert_eq!(geometry.settings_rect.2 > 0.0, shown, "{lane_width} @{scale}x");
-                let (menu, plus_now, _) = super::horizontal_new_tab_controls(lane, scale, true);
+                let (menu, plus_now, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
                 assert_eq!(geometry.arrow_rect, menu);
                 assert_eq!(geometry.plus_rect, plus_now);
                 assert!(plus_now.2 == plus.2 && menu.2 > 0.0);
@@ -1143,28 +1148,7 @@ fn macos_titlebar_settings_gear_keeps_a_lone_tab_centred() {
                     x + w,
                     geometry.settings_rect.0
                 );
-                // The same strip without the gear, as the title bar laid it
-                // out before the gear: its reserve is `▾ +` alone.
-                let (_, _, reserve) = super::horizontal_new_tab_controls(lane, scale, true);
-                let before = super::titlebar_tab_layout(
-                    1,
-                    0,
-                    (lane.2 - reserve, reserve, lane.0),
-                    lane.3,
-                    cfg.tab_min_width,
-                    cfg.scroll_tabbar,
-                );
-                let before_x = lane.0 + before.xs[0].expect("the lone tab showed");
-                let before_offset = (before_x + before.last_width * 0.5 - centre_of_window).abs();
-                assert!(
-                    offset <= before_offset + 0.01,
-                    "{case}: {offset} px off centre, {before_offset} px without the gear"
-                );
-                // Where the tab already fitted, centred and at its full
-                // width, in the strip the gear leaves, it keeps that width.
-                if before_offset < 0.01 && before_x + before.last_width <= lane.0 + geometry.strip {
-                    assert_eq!(w, before.last_width, "{case}");
-                }
+                assert_eq!(w, 160.0 * scale, "{case}: compact width");
             }
         }
     }
@@ -1179,20 +1163,20 @@ fn a_lone_titlebar_tab_narrows_no_further_than_the_minimum() {
     // Centred room 2 * min(160, 200 - 160) = 80, under a 120 minimum.
     let space = (200.0, 120.0, 0.0);
     let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
-    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    centre_lone_titlebar_tab(&mut layout, space, 240.0, 120.0);
     assert_eq!((layout.width, layout.last_width), (120.0, 120.0));
     assert_eq!(layout.xs, vec![Some(80.0)], "clamped to end at the strip");
     // Room for 200 about a centre at 150: narrowed to it, centred.
     let space = (250.0, 50.0, 0.0);
     let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
-    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    centre_lone_titlebar_tab(&mut layout, space, 240.0, 120.0);
     assert_eq!(layout.last_width, 200.0);
     assert_eq!(layout.xs, vec![Some(50.0)]);
     // Narrower than the minimum: untouched.
     let space = (100.0, 50.0, 0.0);
     let untouched = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
     let mut layout = titlebar_tab_layout(1, 0, space, 28.0, 120.0, true);
-    centre_lone_titlebar_tab(&mut layout, space, 28.0, 120.0);
+    centre_lone_titlebar_tab(&mut layout, space, 240.0, 120.0);
     assert_eq!(
         (layout.xs, layout.last_width, layout.arrow_left),
         (untouched.xs, untouched.last_width, untouched.arrow_left)
@@ -1417,7 +1401,7 @@ fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
         tab_button_action(*id)
     };
     assert_eq!(action_of("Settings"), Some(Action::OpenSettings));
-    assert_eq!(action_of("New tab"), Some(Action::NewTab));
+    assert_eq!(action_of("New Tab"), Some(Action::NewTab));
     assert_eq!(tab_button_action(accessibility_tab_id(7, false)), None);
 }
 
@@ -1438,12 +1422,12 @@ fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_lone_tab_beside_the_gear() {
         for width in (500..=660).step_by(4).map(|w| w as f32).chain([1280.0]) {
             let band = macos_titlebar_lane(width, scale);
             let case = format!("{width}pt @{scale}x");
-            let (menu, _, reserve) = super::horizontal_new_tab_controls(band, scale, true);
+            let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(band, scale);
             let (gear, _) =
-                titlebar_settings_control(menu, band.2, reserve, scale, cfg.tab_min_width);
+                titlebar_settings_control(plus, band.2, reserve, scale, cfg.tab_min_width);
             assert!(gear.2 > 0.0, "{case}: no gear");
             let in_tab = f64::from(32.0 * scale);
-            let grab = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, in_tab);
+            let grab = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, (160.0 * scale, in_tab));
             let x = (grab - in_tab) as f32;
             // A tab centred on the window from `x` is this wide.
             let centre = width * scale * 0.5;
@@ -1605,4 +1589,381 @@ fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
         (Some(NewTabHoverTarget::Settings), true)
     );
     assert!(ws.hovered_settings && !ws.hovered_new_tab_menu);
+}
+#[test]
+fn compact_header_lone_fixture_is_centred_at_display_scale() {
+    for scale in [1.0, 1.5, 2.0] {
+        let cfg = kettle_config::Config::default();
+        let lane = macos_titlebar_lane(1280.0, scale);
+        let geometry = super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        assert_eq!(geometry.layout.last_width, 160.0 * scale);
+        assert_eq!(lane.0 + geometry.layout.xs[0].unwrap(), 560.0 * scale);
+    }
+}
+
+#[test]
+fn compact_header_controls_join_plus_then_menu() {
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 2.0] {
+        let lane = macos_titlebar_lane(1280.0, scale);
+        let geometry = super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        let plus = geometry.plus_rect;
+        let menu = geometry.arrow_rect;
+        assert_eq!(plus.0 + plus.2, menu.0);
+        assert_eq!(menu.2, 28.0 * scale);
+        assert_eq!(geometry.settings_rect.0 + geometry.settings_rect.2 + 8.0 * scale, plus.0);
+    }
+}
+
+#[test]
+fn compact_header_accessible_names_follow_tooltips_and_screen_order() {
+    use super::*;
+    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    // Desired geometry, independent of the geometry regression above.
+    bar.new_tab = (1212.0, 0.0, 32.0, 32.0);
+    bar.new_tab_menu = (1244.0, 0.0, 28.0, 32.0);
+    bar.settings = (1172.0, 0.0, 32.0, 32.0);
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+        let labels: Vec<_> = list.1.children().iter().filter_map(|id| nodes.iter().find(|(node, _)| node == id)).map(|(_, n)| n.label().unwrap()).collect();
+        assert_eq!(labels, [tr.text(kettle_i18n::Text::SettingsA11yTitle), tr.text(kettle_i18n::Text::MenuNewTab), tr.text(kettle_i18n::Text::TabNewOptions)]);
+    }
+}
+
+
+#[test]
+fn compact_header_width_measures_leaf_literal_format_and_symmetric_chrome() {
+    use super::chrome::{compact_lone_tab_width as width, compact_lone_tab_content};
+    for scale in [1.0, 1.5, 2.0] {
+        let metrics = (8.0 * scale, 32.0 * scale, scale);
+        let chrome = (120.0, true, 0.0);
+        assert_eq!(width("fixture", None, "{title}", "", metrics, chrome), 160.0 * scale);
+        assert_eq!(width("ignored", Some("~/Repos/kettle/crates"), "{title}", "", metrics, chrome), 160.0 * scale);
+        let title = "abcdefghijklmno";
+        let w = width(title, None, "{title}", "", metrics, chrome);
+        assert_eq!(w, 192.0 * scale);
+        let rest = compact_lone_tab_content((640.0 * scale - w / 2.0, 0.0, w, 32.0 * scale), false, true, 0.0, scale);
+        let hover = compact_lone_tab_content((640.0 * scale - w / 2.0, 0.0, w, 32.0 * scale), true, true, 0.0, scale);
+        assert_eq!(rest.title, hover.title);
+        assert!(hover.title.2 >= 15.0 * 8.0 * scale);
+        assert_eq!(rest.title.0 + rest.title.2 / 2.0, 640.0 * scale);
+        assert_eq!((rest.close.2, rest.close.3), (0.0, 0.0));
+        assert!(hover.close.2 > 0.0);
+        assert!(hover.hint.is_none() && rest.hint.is_none());
+        assert_eq!(width(&"x".repeat(40), None, "{title}", "", metrics, chrome), 240.0 * scale);
+        assert_eq!(width("/a/very/long/literal/title", None, "{title}", "", metrics, chrome), 240.0 * scale);
+        assert_eq!(width("x", None, "123456789012345{title}{title}", "", metrics, chrome), 208.0 * scale);
+        assert_eq!(width("fixture", None, "{title}", "REC", metrics, chrome), 160.0 * scale);
+    }
+    // The final cap wins over cell quantization and respects larger config minima.
+    assert_eq!(width(&"x".repeat(40), None, "{title}", "", (8.5, 32.0, 1.0), (120.0, true, 0.0)), 240.0);
+    assert_eq!(width("x", None, "{title}", "", (8.0, 32.0, 1.0), (300.0, true, 0.0)), 300.0);
+}
+
+#[test]
+fn compact_header_width_hold_releases_on_leave_resize_and_dpi() {
+    use super::chrome::hold_lone_tab_width;
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    let band = (78.0, 0.0, 1202.0, 32.0);
+    assert_eq!(hold_lone_tab_width(&ws, band, 160.0), 160.0);
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(900.0, 15.0));
+    assert_eq!(hold_lone_tab_width(&ws, band, 160.0), 160.0);
+    assert_eq!(hold_lone_tab_width(&ws, band, 240.0), 160.0);
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(900.0, 32.0));
+    assert_eq!(hold_lone_tab_width(&ws, band, 240.0), 240.0);
+    ws.tab_drag_active = true;
+    assert_eq!(hold_lone_tab_width(&ws, band, 192.0), 192.0);
+    assert_eq!(hold_lone_tab_width(&ws, band, 160.0), 192.0);
+    ws.tab_drag_active = false;
+    ws.leave_tab_bar();
+    assert_eq!(ws.lone_tab_width.get(), None);
+    assert_eq!(hold_lone_tab_width(&ws, band, 160.0), 160.0);
+    let source = include_str!("window_events.rs");
+    for event in ["WindowEvent::Resized(size) => {", "WindowEvent::ScaleFactorChanged { scale_factor, .. } => {"] {
+        assert!(source.split_once(event).unwrap().1.trim_start().starts_with("ws.lone_tab_width.set(None);"));
+    }
+}
+
+#[test]
+fn compact_header_tearoff_clamps_grip_to_actual_destination() {
+    use super::chrome::{tear_off_destination_tab, titlebar_tear_off_grab_x};
+    let cfg = kettle_config::Config::default();
+    let buttons = crate::window_buttons::ButtonLayout::default();
+    for scale in [1.0, 2.0] {
+        for width in [160.0, 192.0, 240.0] {
+            let band = macos_titlebar_lane(1280.0, scale);
+            let tab = tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons, Some(width * scale));
+            assert_eq!(tab.2, width * scale);
+            assert_eq!(tab.0 + tab.2 / 2.0, 640.0 * scale);
+            for offset in [-1.0, 32.0, 270.0, 1000.0] {
+                let grip = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, (width * scale, offset));
+                if offset == 32.0 { assert_eq!(grip, f64::from(tab.0) + 32.0); }
+                assert!(grip >= f64::from(tab.0 + 8.0 * scale));
+                assert!(grip <= f64::from(tab.0 + tab.2 - 8.0 * scale));
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_header_divider_is_menu_control_and_gaps_remain_draggable() {
+    use super::*;
+    let bar = macos_titlebar_strip(1280.0, 1.0);
+    let x = bar.new_tab_menu.0;
+    assert_eq!(new_tab_hover_target(&bar, x - 0.01, 16.0), Some(NewTabHoverTarget::Plus));
+    assert_eq!(new_tab_hover_target(&bar, x, 16.0), Some(NewTabHoverTarget::Menu));
+    assert!(titlebar_control_at(&bar, x, 16.0));
+    assert!(!empty_titlebar_space(&bar, x, 16.0));
+    assert!(empty_titlebar_space(&bar, bar.settings.0 - 2.0, 16.0));
+    assert!(empty_titlebar_space(&bar, bar.settings.0 + bar.settings.2 + 4.0, 16.0));
+}
+
+#[test]
+fn compact_header_preserves_multitab_and_other_platform_geometry() {
+    use super::chrome::*;
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 1.5, 2.0] {
+        for width in [400.0, 640.0, 1280.0] {
+            for tabs in [2, 3, 20] {
+                for active in [0, tabs - 1] {
+                    let lane = macos_titlebar_lane(width, scale);
+                    let (_, _, reserve) = super::horizontal_new_tab_controls(lane, scale, true);
+                    let reserve = reserve + lane.3 + 8.0 * scale;
+                    let expected = titlebar_tab_layout(tabs, active, (lane.2 - reserve, reserve, lane.0), lane.3, cfg.tab_min_width, cfg.scroll_tabbar);
+                    let actual = horizontal_tab_geometry(lane, scale, (false, true), (tabs, active), &cfg);
+                    assert_eq!(actual.layout.xs, expected.xs);
+                    assert_eq!(actual.layout.width, expected.width);
+                    assert_eq!(actual.layout.last_width, expected.last_width);
+                    assert_eq!(actual.layout.arrow_left, expected.arrow_left);
+                    assert_eq!(actual.layout.arrow_right, expected.arrow_right);
+                }
+            }
+        }
+        let plain = horizontal_tab_geometry((0.0, 0.0, 1280.0 * scale, 32.0 * scale), scale, (false, false), (1, 0), &cfg);
+        assert_eq!(plain.plus_rect, (1240.0 * scale, 0.0, 32.0 * scale, 32.0 * scale));
+        assert_eq!(plain.arrow_rect, (1204.0 * scale, 0.0, 32.0 * scale, 32.0 * scale));
+        assert_eq!(plain.layout.last_width, 1200.0 * scale);
+        let gnome = horizontal_tab_geometry((0.0, 0.0, 1280.0 * scale, 46.0 * scale), scale, (true, true), (3, 0), &cfg);
+        assert_eq!(gnome.plus_rect, (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
+        assert_eq!(gnome.arrow_rect, (1239.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
+        assert_eq!(gnome.search_rect, (1199.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
+        assert_eq!(gnome.layout.width, 411.0 * scale);
+        assert_eq!(gnome.layout.last_width, 324.0 * scale);
+        assert_eq!(gnome.layout.xs, vec![Some(0.0), Some(411.0 * scale), Some(822.0 * scale)]);
+    }
+}
+
+#[test]
+fn compact_header_ax_popup_shortcuts_and_all_layout_orders() {
+    use super::*;
+    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    let tr = kettle_i18n::Translator::default();
+    let bindings = kettle_config::keybinds::defaults();
+    // Default hints are the same live values used by tooltips.
+    for target in [NewTabHoverTarget::Plus, NewTabHoverTarget::Settings] {
+        assert!(chrome::chrome_button_shortcut(&bindings, target).is_some());
+    }
+    bar.new_tab_shortcut = Some("Cmd+Y".into());
+    bar.settings_shortcut = Some("Cmd+U".into());
+    let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+    let node = |id| &nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    assert_eq!(node(ACCESSIBILITY_TAB_NEW_ID).description(), Some("Cmd+Y"));
+    assert_eq!(node(ACCESSIBILITY_TAB_SETTINGS_ID).description(), Some("Cmd+U"));
+    bar.new_tab_menu_open = true;
+    let open_nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+    let menu = &open_nodes.iter().find(|(id, _)| *id == ACCESSIBILITY_TAB_MENU_ID).unwrap().1;
+    assert_eq!(menu.has_popup(), Some(accesskit::HasPopup::Menu));
+    assert_eq!(menu.is_expanded(), Some(true));
+    if cfg!(target_os = "macos") {
+        assert_eq!(menu.role(), accesskit::Role::ComboBox);
+        assert_eq!(menu.toggled(), Some(accesskit::Toggled::True));
+    }
+    bar.new_tab_shortcut = None;
+    bar.settings_shortcut = None;
+    bar.new_tab_menu_open = false;
+    let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+    assert_eq!(nodes.iter().find(|(id, _)| *id == ACCESSIBILITY_TAB_NEW_ID).unwrap().1.description(), None);
+    assert_eq!(nodes.iter().find(|(id, _)| *id == ACCESSIBILITY_TAB_MENU_ID).unwrap().1.is_expanded(), Some(false));
+    for linux in [false, true] {
+        bar.in_titlebar = linux;
+        bar.linux_header = linux;
+        bar.settings = (0.0, 0.0, 0.0, 0.0);
+        bar.new_tab = if linux { (7.0, 0.0, 34.0, 34.0) } else { (1240.0, 0.0, 32.0, 32.0) };
+        bar.new_tab_menu = (1200.0, 0.0, 32.0, 32.0);
+        bar.search = if linux { (1160.0, 0.0, 34.0, 34.0) } else { (0.0, 0.0, 0.0, 0.0) };
+        let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
+        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+        let expected = if linux { vec![ACCESSIBILITY_TAB_NEW_ID, ACCESSIBILITY_HEADER_FIND_ID, ACCESSIBILITY_TAB_MENU_ID] } else { vec![ACCESSIBILITY_TAB_MENU_ID, ACCESSIBILITY_TAB_NEW_ID] };
+        assert_eq!(list.1.children(), expected);
+        if linux { assert_eq!(nodes.iter().find(|(id, _)| *id == ACCESSIBILITY_TAB_MENU_ID).unwrap().1.label(), Some(tr.text(kettle_i18n::Text::A11yMainMenu))); }
+    }
+}
+
+#[test]
+fn compact_header_shortcut_descriptions_follow_rebinds_and_unbinds() {
+    use super::chrome::{chrome_button_description, NewTabHoverTarget};
+    let parsed = kettle_config::Config::parse_text("keybind = ctrl+shift+f2=new_tab\nkeybind = ctrl+shift+f3=open_settings\n").keybinds;
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        for (action, target, key) in [(Action::NewTab, NewTabHoverTarget::Plus, "F2"), (Action::OpenSettings, NewTabHoverTarget::Settings, "F3")] {
+            let (trigger, _) = parsed.iter().find(|(trigger, bound)| **bound == action && trigger.label().contains(key)).unwrap();
+            let mut bindings = kettle_config::keybinds::defaults();
+            bindings.retain(|_, bound| *bound != action);
+            bindings.insert(*trigger, action.clone());
+            let description = chrome_button_description(&bindings, target, &tr).unwrap();
+            assert!(description.contains(key));
+            assert_eq!(description, trigger.spoken_label(cfg!(target_os = "macos"), &tr));
+            bindings.retain(|_, bound| *bound != action);
+            assert_eq!(chrome_button_description(&bindings, target, &tr), None);
+        }
+    }
+}
+
+#[test]
+fn compact_header_sweep_keeps_controls_tabs_and_fullscreen_drag_space_disjoint() {
+    use super::*;
+    let cfg = kettle_config::Config::default();
+    for scale in [1.0, 1.5, 2.0] {
+        for width in [400.0, 640.0, 1280.0] {
+            for fullscreen in [false, true] {
+                let left = if fullscreen { 0.0 } else { 78.0 * scale };
+                let lane = (left, 0.0, width * scale - left, 32.0 * scale);
+                for count in [1, 3, 20] {
+                    for active in [0, count - 1] {
+                        let g = chrome::horizontal_tab_geometry(lane, scale, (false, true), (count, active), &cfg);
+                        assert!(g.layout.xs[active].is_some());
+                        assert_eq!(g.plus_rect.0 + g.plus_rect.2, g.arrow_rect.0);
+                        assert!(g.settings_rect.0 + g.settings_rect.2 + 8.0 * scale <= g.plus_rect.0);
+                        let mut end = lane.0;
+                        for (i, x) in g.layout.xs.iter().enumerate() {
+                            let Some(x) = x else { continue };
+                            let w = if i + 1 == count { g.layout.last_width } else { g.layout.width };
+                            assert!(lane.0 + x + 0.01 >= end, "{width} @{scale}, {count} tabs, fullscreen={fullscreen}: {} < {end}", lane.0 + x);
+                            end = lane.0 + x + w;
+                            assert!(end <= g.settings_rect.0 + 0.01);
+                            assert!(w >= cfg.tab_min_width || g.layout.arrow_left.is_some());
+                        }
+                        if count == 1 {
+                            assert_eq!(lane.0 + g.layout.xs[0].unwrap() + g.layout.last_width / 2.0, width * scale / 2.0);
+                            assert!(lane.0 + g.layout.xs[0].unwrap() > lane.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_header_open_popup_has_no_inert_background_actions_and_can_dismiss() {
+    use super::*;
+    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    bar.new_tab_menu_open = true;
+    bar.segments.push(kettle_render::TabSeg {
+        idx: 0, rect: (560.0, 0.0, 160.0, 32.0), title_rect: (592.0, 0.0, 96.0, 32.0),
+        close: (688.0, 0.0, 32.0, 32.0), title: "fixture".into(), path: None,
+        hint: None, active: true, activity: kettle_render::TabActivity::Normal,
+    });
+    let tr = kettle_i18n::Translator::default();
+    let nodes = tab_accessibility_projection(&bar, &[7], false, &tr);
+    assert_eq!(nodes.len(), 2);
+    let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+    assert_eq!(list.1.children(), [ACCESSIBILITY_TAB_MENU_ID]);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.context_menu = Some(ContextMenuState {
+        origin: MenuOrigin::NewTab { compact: true },
+        anchor: (0.0, 32.0), anchor_scale: 1.0, items: Vec::new(),
+        highlight: 0, drill_stack: Vec::new(), scroll_offset: 0,
+        typeahead_buf: String::new(), typeahead_until: None,
+    });
+    let mut request = accesskit::ActionRequest { action: accesskit::Action::Click, target_tree: accesskit::TreeId::ROOT, target_node: ACCESSIBILITY_TAB_NEW_ID, data: None };
+    assert!(!accessibility::dismiss_launcher_menu_accessibility(&mut ws, &request));
+    request.target_node = ACCESSIBILITY_TAB_MENU_ID;
+    assert!(accessibility::dismiss_launcher_menu_accessibility(&mut ws, &request));
+    assert!(ws.context_menu.is_none());
+    assert!(!accessibility::dismiss_launcher_menu_accessibility(&mut ws, &request));
+}
+
+#[test]
+fn compact_header_rtl_and_wide_literal_titles_fit_the_centred_lane() {
+    use super::chrome::{compact_lone_tab_content, compact_lone_tab_width};
+    for title in ["שלום עולם", "مرحبا", "目录窗口", "abc שלום"] {
+        let width = compact_lone_tab_width(title, None, "{title}", "", (8.0, 32.0, 1.0), (120.0, true, 0.0));
+        let content = compact_lone_tab_content((640.0 - width / 2.0, 0.0, width, 32.0), false, true, 0.0, 1.0);
+        assert_eq!(kettle_render::fit_tab_segment_title(title, None, 0, "{title}", content.title.2, 8.0), title);
+    }
+}
+
+#[test]
+fn compact_header_focused_bell_keeps_an_unheld_title_untruncated_without_close() {
+    use super::chrome::{
+        compact_lone_tab_content, hold_lone_tab_width, measured_lone_titlebar_width,
+        tab_render_activity,
+    };
+    let cfg = kettle_config::Config {
+        close_button_on_tab: false,
+        tab_format: "{title}".into(),
+        ..title_test_config()
+    };
+    let title = "abcdefghijklmno";
+    let (mut mux, panes) = title_test_tab_mux(1);
+    mux.tabs[0].title_override = Some(title.into());
+    let mut ws = crate::window_state::WindowState::new(0, mux);
+    ws.macos_titlebar_tabs = true;
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(640.0, 100.0));
+    let band = (78.0, 0.0, 1202.0, 32.0);
+    let labels = ws.mux.tab_labels(&EN_TEXT);
+    let label = labels.first().unwrap();
+    let segment = |ws: &crate::window_state::WindowState| {
+        let activity = tab_render_activity(
+            ws,
+            0,
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(cfg.tab_silence_threshold_ms),
+        );
+        let measured =
+            measured_lone_titlebar_width(ws, Some(label), &cfg, "", (8.0, 32.0, 1.0));
+        let width = hold_lone_tab_width(ws, band, measured);
+        let rect = (640.0 - width / 2.0, 0.0, width, 32.0);
+        let content = compact_lone_tab_content(
+            rect,
+            false,
+            cfg.close_button_on_tab,
+            kettle_render::activity_lane(activity, 1.0),
+            1.0,
+        );
+        kettle_render::TabSeg {
+            idx: 0,
+            rect,
+            title_rect: content.title,
+            close: content.close,
+            hint: None,
+            title: label.text.clone(),
+            path: label.path.clone(),
+            active: true,
+            activity,
+        }
+    };
+    let resting = segment(&ws);
+    assert_eq!(resting.rect.2, 160.0);
+    assert_eq!(resting.activity, kettle_render::TabActivity::Normal);
+    ws.mux.touch_tab_bell(panes[0]);
+    ws.mux.ring_focused_bell(panes[0]);
+    assert!(!ws.mux.tabs[0].bell);
+    assert!(ws.mux.tab_focused_bell(0));
+    let ringing = segment(&ws);
+    assert_eq!(ringing.activity, kettle_render::TabActivity::Bell);
+    assert_eq!(
+        kettle_render::tab_segment_label(&ringing, &cfg.tab_format, 8.0, ""),
+        title,
+        "focused bell must leave room for the full title"
+    );
+    assert_eq!(ringing.rect.2, 176.0);
+    assert_eq!(ringing.title_rect.2, 130.0);
+    assert_eq!((ringing.close.2, ringing.close.3), (0.0, 0.0));
+    assert_eq!(ws.lone_tab_width.get(), None);
+    ws.mux.panes[&panes[0]].answer_focused_bell();
+    assert_eq!(segment(&ws).rect.2, 160.0);
 }

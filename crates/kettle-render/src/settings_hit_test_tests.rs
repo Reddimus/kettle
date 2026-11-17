@@ -30,7 +30,12 @@ fn overlay() -> SettingsOverlay {
         title: "Appearance".into(),
         search_placeholder: "Search settings".into(),
         no_matches: "No settings match".into(),
-        hints: "Up/Down field · Left/Right change · Tab category · Esc close".into(),
+        hints: vec![
+            ("Up/Down".into(), "field".into()),
+            ("Left/Right".into(), "change".into()),
+            ("Tab".into(), "category".into()),
+            ("Esc".into(), "close".into()),
+        ],
         ..Default::default()
     }
 }
@@ -60,12 +65,12 @@ fn disjoint(a: Rect4, b: Rect4) {
 fn settings_window_uses_proportional_clamped_dimensions() {
     let set = overlay();
     for (sw, sh, width, height) in [
-        (1280.0, 820.0, 921.6, 639.6),
-        (800.0, 600.0, 576.0, 468.0),
-        (560.0, 600.0, 528.0, 468.0),
-        (2000.0, 1200.0, 980.0, 760.0),
+        (1280.0, 820.0, 921.6, 688.8),
+        (800.0, 600.0, 576.0, 504.0),
+        (560.0, 600.0, 528.0, 504.0),
+        (2000.0, 1200.0, 980.0, 820.0),
     ] {
-        let panel = settings_panel_geometry(&set, 8.0, 16.0, sw, sh).rect;
+        let panel = settings_panel_geometry(&set, 8.0, 16.0, sw, sh, 1.0).rect;
         assert!((panel.2 - width).abs() < 0.1, "{panel:?}");
         assert!((panel.3 - height).abs() < 0.1, "{panel:?}");
         assert!((panel.0 - (sw - width) / 2.0).abs() < 0.1);
@@ -80,7 +85,7 @@ fn settings_panes_rows_chips_search_and_footer_do_not_overlap() {
             let mut set = overlay();
             set.focused_row = focus;
             set.footer_note = Some("Active GPU: Test (Integrated, Metal)\nRestart Kettle or open a new window to apply pending changes.".into());
-            let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+            let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
             inside(
                 (16.0, 16.0, surface.0 - 32.0, surface.1 - 32.0),
                 layout.rect,
@@ -133,7 +138,7 @@ fn settings_hit_targets_and_editor_share_the_painted_rectangles() {
         for cw in [4.0, 8.0, 16.0] {
             for active in 0..set.categories.len() {
                 set.active_category = active;
-                let layout = settings_layout(&set, (cw, 16.0), surface, 8.0);
+                let layout = settings_layout(&set, (cw, 16.0), surface, 8.0, 1.0);
                 let hit = |r: Rect4| {
                     settings_hit_test_with_text_width(
                         &set,
@@ -141,6 +146,7 @@ fn settings_hit_targets_and_editor_share_the_painted_rectangles() {
                         surface,
                         (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0),
                         8.0,
+                        1.0,
                     )
                 };
                 assert_eq!(hit(layout.search_rect), SettingsHit::Search);
@@ -153,12 +159,19 @@ fn settings_hit_targets_and_editor_share_the_painted_rectangles() {
                     assert_eq!(hit(row.label_rect), SettingsHit::Field(row.index));
                     assert_eq!(hit(row.description_rect), SettingsHit::Field(row.index));
                 }
-                let value = settings_value_rect(&set, cw, 16.0, surface.0, surface.1, 8.0);
+                let value = settings_value_rect(&set, cw, 16.0, surface.0, surface.1, 8.0, 1.0);
                 inside(layout.rows[0].chip_rect, value);
                 assert!(value.2 > 0.0 && value.3 >= 16.0);
                 assert_eq!(hit(layout.title_rect), SettingsHit::Inert);
                 assert_eq!(
-                    settings_hit_test_with_text_width(&set, (cw, 16.0), surface, (0.0, 0.0), 8.0),
+                    settings_hit_test_with_text_width(
+                        &set,
+                        (cw, 16.0),
+                        surface,
+                        (0.0, 0.0),
+                        8.0,
+                        1.0
+                    ),
                     SettingsHit::Outside
                 );
             }
@@ -173,10 +186,10 @@ fn settings_search_groups_and_empty_state_use_real_layout_slots() {
     set.rows.truncate(4);
     set.rows[2].category = 3;
     set.rows[3].category = 3;
-    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0);
+    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
     assert_eq!(
         layout.groups.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
-        [0, 3]
+        [0, 2]
     );
     for (_, rect) in &layout.groups {
         for row in &layout.rows {
@@ -184,7 +197,7 @@ fn settings_search_groups_and_empty_state_use_real_layout_slots() {
         }
     }
     set.rows.clear();
-    let layout = settings_layout(&set, (8.0, 16.0), (560.0, 600.0), 8.0);
+    let layout = settings_layout(&set, (8.0, 16.0), (560.0, 600.0), 8.0, 1.0);
     let items = super::settings::settings_text_items(&set, &layout, 8.0);
     assert!(
         items
@@ -216,7 +229,7 @@ fn settings_choice_chips_keep_both_arrows_when_values_are_shortened() {
     set.rows[0].control = SettingsControl::Choice;
     set.rows[0].value = "A very long theme or GPU name that cannot fit in the chip ".repeat(3);
     for surface in [(1280.0, 820.0), (560.0, 600.0)] {
-        let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+        let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
         let items = super::settings::settings_text_items(&set, &layout, 8.0);
         let value = items
             .iter()
@@ -244,7 +257,7 @@ fn short_settings_windows_keep_the_focused_row_editable() {
                 let mut set = overlay();
                 set.focused_row = focus;
                 set.search_query = query.into();
-                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
                 let row = layout
                     .rows
                     .iter()
@@ -256,7 +269,7 @@ fn short_settings_windows_keep_the_focused_row_editable() {
                 for category in layout.category_rects.iter().flatten() {
                     disjoint(*category, row.rect);
                 }
-                let value = settings_value_rect(&set, 8.0, 16.0, surface.0, surface.1, 8.0);
+                let value = settings_value_rect(&set, 8.0, 16.0, surface.0, surface.1, 8.0, 1.0);
                 inside(row.chip_rect, value);
                 assert!(value.2 > 0.0 && value.3 >= 16.0);
                 for (_, group) in &layout.groups {
@@ -279,7 +292,7 @@ fn narrow_settings_categories_are_reachable_through_pointer_transitions() {
             }
             visited[active] = true;
             set.active_category = active;
-            let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+            let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
             assert!(layout.category_rects[active].is_some());
             let category_y = layout.category_rects[active].unwrap().1 + 1.0;
             for x in 0..surface.0 as usize {
@@ -289,6 +302,7 @@ fn narrow_settings_categories_are_reachable_through_pointer_transitions() {
                     surface,
                     (x as f32, category_y),
                     8.0,
+                    1.0,
                 ) && !visited[index]
                 {
                     pending.push(index);
@@ -363,7 +377,7 @@ fn category_arrows_and_wheel_page_forward_and_back_without_hiding_selection() {
             let mut set = overlay();
             for direction in [1, -1] {
                 for _ in 0..set.categories.len() {
-                    let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                    let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
                     let arrow = if direction > 0 {
                         layout.category_next
                     } else {
@@ -388,11 +402,12 @@ fn category_arrows_and_wheel_page_forward_and_back_without_hiding_selection() {
                     );
                     set.active_category = target;
                     assert!(
-                        settings_layout(&set, (8.0, 16.0), surface, 8.0).category_rects[target]
+                        settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0).category_rects
+                            [target]
                             .is_some()
                     );
                 }
-                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0);
+                let layout = settings_layout(&set, (8.0, 16.0), surface, 8.0, 1.0);
                 if direction > 0 {
                     assert!(layout.category_rects.last().unwrap().is_some());
                     assert!(layout.category_next.is_none());
