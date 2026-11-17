@@ -3395,6 +3395,11 @@ mod search_tests {
                 let es = ES.text(key);
                 assert!(!en.is_empty() && !es.is_empty(), "{}", field.key);
                 assert!(en.chars().count() <= 70, "{}: {en}", field.key);
+                assert!(
+                    kettle_render::display_width(es) <= 76,
+                    "{}: {es}",
+                    field.key
+                );
                 assert_ne!(en, es, "{}", field.key);
             }
         }
@@ -3435,10 +3440,24 @@ mod search_tests {
             row_description(blur, BlurState::Unavailable, &cfg, &EN),
             "This session cannot blur; saved setting: On. Opacity still applies."
         );
-        assert_eq!(
-            row_description(blur, BlurState::Unavailable, &cfg, &ES),
-            "Esta sesión no puede desenfocar; ajuste guardado: Activado. La opacidad se sigue aplicando."
-        );
+        for (saved, expected) in [
+            (
+                true,
+                "Esta sesión no desenfoca (guardado: Activado); la opacidad sí se aplica.",
+            ),
+            (
+                false,
+                "Esta sesión no desenfoca (guardado: Desactivado); la opacidad sí se aplica.",
+            ),
+        ] {
+            let cfg = Config {
+                window_blur: saved,
+                ..Config::default()
+            };
+            let note = row_description(blur, BlurState::Unavailable, &cfg, &ES);
+            assert!(kettle_render::display_width(&note) <= 76, "{saved}: {note}");
+            assert_eq!(note, expected);
+        }
         assert!(
             row_description(blur, BlurState::Unavailable, &cfg, &EN)
                 .chars()
@@ -3553,6 +3572,52 @@ mod search_tests {
 mod control_size_tests {
     use super::*;
     use kettle_i18n::Language;
+
+    #[test]
+    fn description_budget_and_capture_prompts_fit_settings_layout() {
+        let cfg = Config::default();
+        let cats = categories(&[]);
+        let (cw, line) = (8.4_f32, 17.5_f32);
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let prompt = tr.text(Text::SettingsPressChord);
+            assert!(prompt.contains("Esc"), "{language:?}: {prompt}");
+            for surface in [(1280.0_f32, 820.0_f32), (640.0, 820.0)] {
+                for field in cats
+                    .iter()
+                    .flat_map(|cat| &cat.fields)
+                    .filter(|f| is_keybind(f))
+                {
+                    let set = kettle_render::SettingsOverlay {
+                        rows: vec![kettle_render::SettingsRow {
+                            label: tr.text(field.label).into(),
+                            value: prompt.into(),
+                            description: tr.text(description(field)).into(),
+                            control: kettle_render::SettingsControl::Value,
+                            reset: reset_state(&cfg, field),
+                            ..Default::default()
+                        }],
+                        reset_label: tr.text(Text::SettingsResetButton).into(),
+                        ..Default::default()
+                    };
+                    let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw);
+                    let context = format!("{language:?} {surface:?} {}", field.key);
+                    if surface.0 == 1280.0 {
+                        let cols = (layout.rows[0].description_rect.2 / cw).floor() as usize;
+                        assert!(cols >= 76, "{context}: description has {cols} columns");
+                    }
+                    let value_rect = kettle_render::settings_value_rect(
+                        &set, cw, line, surface.0, surface.1, cw,
+                    );
+                    let cols = (value_rect.2 / cw).floor() as usize;
+                    assert!(
+                        kettle_render::display_width(prompt) <= cols,
+                        "{context}: {prompt} in {cols} columns"
+                    );
+                }
+            }
+        }
+    }
 
     /// Each row as the projection builds it, showing its widest value.
     fn widest_rows(cfg: &Config, tr: &Translator) -> Vec<(String, kettle_render::SettingsRow)> {
