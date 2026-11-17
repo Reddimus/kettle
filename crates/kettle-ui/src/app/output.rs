@@ -872,6 +872,7 @@ impl App {
             | UserEvent::ShellsDetected
             | UserEvent::SystemSettingsChanged(_)
             | UserEvent::ToggleQuickTerminal
+            | UserEvent::GlobalShortcut
             | UserEvent::Activation
             | UserEvent::SessionResave
             | UserEvent::PastedImageEncoded

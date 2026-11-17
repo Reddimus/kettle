@@ -486,8 +486,15 @@ Toggle the dedicated quick terminal in the running instance, or start Kettle.
 Its tabs and splits keep running while hidden. Configure position (top, bottom,
 left, right, center), screen percentage (default 40), animation, autohide, and
 hotkey in Settings or with quick-terminal-* config keys. macOS and X11 register
-the configured global hotkey; on Wayland and Windows bind this command in the
-desktop shortcut settings. System Reduce Motion disables the slide.
+the configured global hotkey. On Wayland, Settings uses the GlobalShortcuts
+portal when available; the desktop owns the chord after confirmation. Enter
+opens shortcut configuration on version-2 backends. GNOME 50 users change it in
+Settings > Apps > Kettle > Global Shortcuts. Delete disables registration.
+Without portal support, or when desktop focus policy prevents summoning, bind
+this command in desktop shortcut settings. Windows uses that command fallback.
+On Wayland, size applies to both dimensions independently of position; 100 percent
+requests maximization. Kettle adds no slide there. System Reduce Motion disables
+Kettle's slide on other platforms.
 .PP
 The bare
 .B kettle

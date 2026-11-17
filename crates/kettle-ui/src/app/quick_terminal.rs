@@ -108,6 +108,14 @@ impl App {
                     })
                 })
                 .cloned()
+                .or_else(|| {
+                    self.quick_terminal
+                        .model
+                        .window
+                        .and_then(|seq| self.windows.get(&seq))
+                        .and_then(|ws| ws.window.as_ref())
+                        .and_then(|window| window.current_monitor())
+                })
                 .or_else(|| el.primary_monitor())
                 .or_else(|| monitors.into_iter().next())?;
             let p = monitor.position();
@@ -124,14 +132,38 @@ impl App {
                 height: s.height,
             })
         })?;
-        Some(quick::geometry(
+        Some(quick::session_geometry(
             screen,
             self.cfg.quick_terminal_position,
             self.cfg.quick_terminal_size,
+            self.quick_terminal.wayland,
         ))
     }
 
     pub(super) fn reconcile_quick_hotkey(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.quick_terminal.wayland {
+            if self.activation.is_some() {
+                if self.quick_terminal.portal.is_none() {
+                    let proxy = self.proxy.clone();
+                    let pending = self.quick_terminal.portal_wake_pending.clone();
+                    self.quick_terminal.portal = quick::portal::Watch::start(
+                        self.ui_text
+                            .text(kettle_i18n::Text::QuickTerminalToggle)
+                            .into(),
+                        Arc::new(move || {
+                            if !pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                                let _ = proxy.send_event(UserEvent::GlobalShortcut);
+                            }
+                        }),
+                    );
+                }
+                if let Some(portal) = &self.quick_terminal.portal {
+                    portal.set_trigger(self.cfg.quick_terminal_hotkey);
+                }
+            }
+            return;
+        }
         let trigger = self.cfg.quick_terminal_hotkey;
         if self.quick_terminal.attempted_hotkey == Some(trigger) {
             return;
@@ -150,6 +182,49 @@ impl App {
                     self.ui_text
                         .text(kettle_i18n::Text::QuickTerminalHotkeyFailed),
                 );
+            }
+        }
+    }
+
+    pub(super) fn quick_portal_status(&self) -> Option<quick::portal::Status> {
+        if !self.quick_terminal.wayland {
+            return None;
+        }
+        if self.cfg.quick_terminal_hotkey.is_none() {
+            return Some(quick::portal::Status::Disabled);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = &self.quick_terminal.portal {
+            return Some(portal.status());
+        }
+        Some(if self.activation.is_some() {
+            quick::portal::Status::Unavailable
+        } else {
+            quick::portal::Status::OtherOwner
+        })
+    }
+
+    pub(super) fn drain_global_shortcuts(&mut self, el: &ActiveEventLoop) {
+        self.quick_terminal
+            .portal_wake_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        if self.gpu.is_none() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = &self.quick_terminal.portal {
+            let activations = portal.drain();
+            for token in activations {
+                self.quick_terminal.activation_token = token;
+                self.toggle_quick_terminal(el);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = el;
+        for ws in self.windows.values_mut() {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
         }
     }
@@ -227,7 +302,9 @@ impl App {
         match self.quick_terminal.model.toggle(can_return) {
             Effect::Show => {
                 let rect = self.quick_geometry(el);
-                let animate = self.quick_system_motion_allowed();
+                let animate = quick::can_slide(self.quick_terminal.wayland, || {
+                    self.quick_system_motion_allowed()
+                });
                 self.quick_terminal.slide = rect.filter(|_| animate).map(|rect| {
                     quick::Slide::new(
                         seq,
@@ -239,7 +316,14 @@ impl App {
                 self.quick_terminal.focus_check = None;
                 if let Some(mut ws) = self.windows.remove(&seq) {
                     if let Some(window) = ws.window.as_ref() {
-                        if let Some(rect) = rect {
+                        if let Some(maximized) = quick::session_maximized(
+                            self.quick_terminal.wayland,
+                            self.cfg.quick_terminal_size,
+                        ) {
+                            self.quick_terminal
+                                .size
+                                .show(seq, window.as_ref(), rect, maximized);
+                        } else if let Some(rect) = rect {
                             let (x, y) = self
                                 .quick_terminal
                                 .slide
@@ -336,18 +420,20 @@ impl App {
                 .and_then(|ws| ws.window.clone())
             && let Some(bridge) = self.wayland.as_mut()
         {
-            if let Some(token) = self.quick_terminal.activation_token.as_deref() {
-                if bridge.activate_external(token, &target) {
-                    self.quick_terminal.activation_token = None;
-                    self.quick_terminal.activation_until = None;
-                }
-            } else if let Some(source_seq) = self.quick_terminal.previous_window
-                && let Some(source) = self
-                    .windows
-                    .get(&source_seq)
+            let previous = self.quick_terminal.previous_window.and_then(|seq| {
+                self.windows
+                    .get(&seq)
                     .and_then(|ws| ws.window.clone())
-                && bridge.activate(source_seq, source, target_seq, target)
-            {
+                    .map(|window| (seq, window))
+            });
+            if quick::portal::activate_target(
+                bridge,
+                self.quick_terminal.activation_token.as_deref(),
+                previous,
+                target_seq,
+                target,
+            ) {
+                self.quick_terminal.activation_token = None;
                 self.quick_terminal.activation_until = None;
             }
         }

@@ -3759,3 +3759,56 @@ transitions, inactive colors, localized tooltips, AT-SPI button activation,
 IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless
 fallbacks. Portable checks do not establish compositor or rendering acceptance.
+
+### Wayland GlobalShortcuts portal
+
+`quick_terminal::portal` covers the portable mapping, repeat/lifecycle model,
+Settings actions and EN/ES copy, unknown trigger descriptions, tokenless activation
+routing and Wayland dimensions. The Linux fake uses zbus's in-process `Channel`
+transport: no session bus, desktop connection or dialog is needed. It serves real
+Request/Session/Registry/GlobalShortcuts interfaces, emits immediate responses on
+returned paths, and covers activation, release, refusal, missing interface,
+closure, cancellation without Response, stale signals, description updates and
+configuration errors. Two child processes with different build labels exercise
+one shared registration lock and takeover after owner exit.
+
+The optional `scripts/check-quick-terminal-portal.py --execute --binary PATH`
+starts a private bus and headless GNOME Shell. `--seed` preconfigures only private
+dconf for the returning-shortcut path; omit it to exercise the private dialog.
+Do not run these checks on the owner's desktop. The script replaces the entire
+environment, including HOME, XDG directories, XDG_RUNTIME_DIR, TMPDIR and
+KETTLE_TEST_OS_CTL_DIR, and routes both D-Bus addresses to its private daemon.
+It excludes systemd service activation. Its `--self-test` checks isolation without
+starting any service; `just quick-terminal-portal-self-test` runs it in the gauntlet. The live fixture has not been run as part of implementation.
+
+Within that fixture, load probes with its private environment.json and verify:
+
+1. Settings text, keyboard Enter/Space, pointer activation, Delete-to-none, and AT
+   action/value updates in English and Spanish. Verify GNOME v1 instructions;
+   verify ConfigureShortcuts separately on a v2 native backend.
+2. Focus another app, summon, dismiss, and summon the already-minimized quick
+   window. Record both windows' focused and minimized states, including workspace
+   changes. A first map receiving focus alone does not establish token acceptance.
+3. Compare with a withheld-token negative control. Repeat with a tokenless backend;
+   report focus/minimization refusal as a desktop limit rather than success.
+4. Hold past a repeat delay greater than 750 ms and use slow autorepeat. Expect one
+   toggle until release; exercise rapid distinct presses and autohide separately.
+5. Cancel the private dialog, restart Kettle and verify no automatic second bind.
+   Explicit retry must work. Change a nonempty preference while pending and check
+   that no second dialog appears. Disable while pending and check that stale
+   completion cannot restore registration; document any remaining provider dialog.
+6. Close a portal session without dropping the service name; restart the private
+   frontend; test queued activation followed by disable and takeover across builds.
+7. Test monitor/scale changes, all saved Positions producing the same Wayland
+   dimensions, 100% to smaller sizes, and no Kettle slide under either motion mode.
+8. Inspect private logs for token disclosure without publishing the token. Count
+   requests per session; one BindShortcuts is allowed per session.
+
+GUI-free tests do not establish compositor focus, rendered Settings, accessibility
+publication or backend dialog cancellation. Native GNOME/KDE checks remain required.
+
+For recorded focus observations, `--verify-observations PATH` checks a JSON object
+with `before`, `summoned`, `dismissed` and `withheld` states. The script's oracle
+self-test gives the exact boolean fields; first-map focus alone fails it. This
+validates the recorded assertions, not the provenance of captures or a real
+compositor. Keep raw captures private and record matched conditions separately.

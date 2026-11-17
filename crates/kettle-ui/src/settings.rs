@@ -253,7 +253,53 @@ pub enum BlurState {
 /// (`BlurState::Unavailable`), the Window blur row says so, and names the
 /// saved setting, instead of describing an effect the window will not show.
 /// Search still matches the field's own description.
-pub fn row_description(field: &Field, blur: BlurState, cfg: &Config, tr: &Translator) -> String {
+#[derive(Clone)]
+pub(crate) struct RowContext {
+    pub blur: BlurState,
+    pub quick: Option<crate::quick_terminal::portal::Status>,
+    pub gnome: bool,
+}
+impl RowContext {
+    pub(crate) fn unavailable(&self, field: &Field) -> bool {
+        match field.key {
+            "window-blur" => self.blur != BlurState::Available,
+            "quick-terminal-hotkey" => self.quick.as_ref().is_some_and(|status| {
+                !matches!(
+                    status,
+                    crate::quick_terminal::portal::Status::Registered { .. }
+                )
+            }),
+            _ => false,
+        }
+    }
+}
+
+impl From<BlurState> for RowContext {
+    fn from(blur: BlurState) -> Self {
+        Self {
+            blur,
+            quick: None,
+            gnome: false,
+        }
+    }
+}
+
+pub fn row_description(
+    field: &Field,
+    context: impl Into<RowContext>,
+    cfg: &Config,
+    tr: &Translator,
+) -> String {
+    let RowContext { blur, quick, gnome } = context.into();
+    if let Some(status) = &quick {
+        match field.key {
+            "quick-terminal-hotkey" => return status.note(tr, gnome),
+            "quick-terminal-position" => return tr.text(Text::QuickPortalPosition).into(),
+            "quick-terminal-animation" => return tr.text(Text::QuickPortalAnimation).into(),
+            "quick-terminal-size" => return tr.text(Text::QuickPortalSize).into(),
+            _ => {}
+        }
+    }
     match field.key {
         "window-blur" if blur == BlurState::Unavailable => {
             tr.settings_note_blur_unavailable(&read(cfg, field, tr))
@@ -265,7 +311,18 @@ pub fn row_description(field: &Field, blur: BlurState, cfg: &Config, tr: &Transl
 /// What a row's control shows: its value, except that a Window blur switch
 /// whose effect this session cannot show (or has not yet decided) says so
 /// instead of On.
-pub fn row_value(field: &Field, blur: BlurState, cfg: &Config, tr: &Translator) -> String {
+pub fn row_value(
+    field: &Field,
+    context: impl Into<RowContext>,
+    cfg: &Config,
+    tr: &Translator,
+) -> String {
+    let RowContext { blur, quick, .. } = context.into();
+    if field.key == "quick-terminal-hotkey"
+        && let Some(status) = quick
+    {
+        return status.value(cfg, tr);
+    }
     match (field.key, blur) {
         ("window-blur", BlurState::Unavailable) => {
             tr.text(Text::SettingsValueUnavailable).to_string()

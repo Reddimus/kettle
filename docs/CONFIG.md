@@ -483,16 +483,17 @@ and the keybind map, for example `keybind = ctrl+grave=toggle_quick_terminal`.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `quick-terminal-position` | `top` \| `bottom` \| `left` \| `right` \| `center` | `top` | Screen edge, or centered on the screen |
-| `quick-terminal-size` | integer percent, 1-100 | `40` | Top/bottom use this fraction of screen height and full width; left/right use this fraction of width and full height; center uses this fraction of both dimensions |
+| `quick-terminal-position` | `top` \| `bottom` \| `left` \| `right` \| `center` | `top` | Screen edge, or centered; Wayland delegates placement to the desktop |
+| `quick-terminal-size` | integer percent, 1-100 | `40` | Top/bottom use this fraction of screen height and full width; left/right use this fraction of width and full height; center and Wayland use this fraction of both dimensions |
 | `quick-terminal-hotkey` | modified key chord, or `none` | unset | Examples: `ctrl+grave`, `cmd+escape`. Settings has a key-capture field; bare Delete/Backspace clears it and bare Esc cancels capture |
-| `quick-terminal-animation` | bool | `true` | Slide into view in 150 ms. System Reduce Motion or `reduce-motion = on` makes it instant, as does `false` |
+| `quick-terminal-animation` | bool | `true` | Slide into view in 150 ms. System Reduce Motion or `reduce-motion = on` makes it instant, as does `false`. Kettle does not slide on Wayland |
 | `quick-terminal-autohide` | bool | `true` | Hide when another application gains focus. Switching to another Kettle window keeps it visible |
 
-Each show selects the screen under the pointer (the active screen on macOS),
-requests placement above normal windows and focuses the terminal. Toggling it
-again hides it and returns focus to the previous app or Kettle window. When you
-switch apps yourself, autohide keeps focus in the app you selected. Hidden tabs
+On macOS and X11, each show selects the screen under the pointer (the active
+screen on macOS), requests placement above normal windows and focuses the
+terminal. Toggling it again hides it and returns focus to the previous app or
+Kettle window. Wayland presentation and focus follow the desktop rules below.
+When you switch apps yourself, autohide keeps focus in the app you selected. Hidden tabs
 and splits keep running; the quick workspace is not saved into normal session
 restore. Position and size changes apply on the next show. Hotkey changes
 register on reload.
@@ -504,17 +505,36 @@ shows a translated notice. macOS excludes the window from its Window menu and
 window cycling; Windows skips its taskbar entry and Alt-Tab and X11 requests skip-taskbar
 and skip-pager hints.
 
-On **Wayland and Windows**, set a desktop shortcut that runs
-`kettle quick-terminal`. A configured `quick-terminal-hotkey` logs once that it
-is not registered there. Wayland compositors control window placement,
-stacking, visibility and activation; screen-edge placement and sliding require
-compositor window rules where the compositor does not honor these requests.
+On **Wayland**, Kettle registers the hotkey with the desktop through the
+GlobalShortcuts portal (GNOME 48 and later, KDE Plasma). Choose a chord in
+Settings > Quick terminal: the desktop asks once, in its own dialog, to confirm
+it and may let you pick a different key. From then on the desktop owns the
+shortcut, and the Settings row shows the key it reports, or **Desktop managed**
+when it reports none. Change it in the desktop's shortcut settings: on GNOME 50,
+Settings > Apps > Kettle > Global Shortcuts; where the desktop supports it,
+Enter on the row opens that page. Delete on the row turns the shortcut off.
+Changing `quick-terminal-hotkey` afterwards does not move a shortcut the desktop
+already holds. If you cancel the desktop's dialog, Kettle does not ask again by
+itself; Enter on the row asks again. With several Kettle versions running, one
+registers the shortcut and another takes over when it quits. The desktop
+identifies Kettle by its `kettle.desktop` entry, which the installers add.
+
+Focus follows the desktop. GNOME passes an activation token with each press,
+which Kettle uses to raise and focus the quick terminal. KDE sends none: Kettle
+still asks for focus, but the desktop may keep the window behind, and the
+Settings row says so.
+
+Wayland lets the desktop place windows. Kettle sizes the quick terminal to the
+configured percentage of the screen in both directions (100% maximizes it),
+whatever `quick-terminal-position` says; position, stacking, workspaces and any
+animation are the desktop's, so Kettle's own slide does not run there. Hiding
+minimizes the window, and the desktop chooses what gets focus next.
+
+Without the portal, add a desktop shortcut that runs `kettle quick-terminal`.
 Desktop launchers should supply `XDG_ACTIVATION_TOKEN` (for a custom `.desktop`
-launcher, set `StartupNotify=true`); Kettle forwards this bounded token to the
-running instance to raise and focus the quick window. Without a desktop token,
-Wayland activation remains subject to the compositor's focus policy. Hiding
-requests minimization on Wayland. No extra global-shortcut service or
-Accessibility permission is required.
+launcher, set `StartupNotify=true`) so the running instance can take focus.
+
+On **Windows**, use a desktop shortcut that runs `kettle quick-terminal`.
 
 ### Extended keys
 
