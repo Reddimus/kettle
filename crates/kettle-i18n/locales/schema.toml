@@ -2692,9 +2692,6 @@ args = [{ name = "title", type = "str" }]
 context = "crates/kettle-ui/src/app/accessibility.rs: the screen-reader name of a background tab whose activity marker shows its watched output went quiet (a ring). The argument is the tab title."
 args = [{ name = "title", type = "str" }]
 
-[messages.a11y_new_tab_menu]
-context = "crates/kettle-ui/src/app/notices.rs and accessibility.rs: process exit or config notice controls and tab strip screen-reader names."
-
 [messages.quick_terminal_toggle]
 context = "crates/kettle-ui: Command palette and macOS View menu action. Toggles the dedicated quick terminal."
 

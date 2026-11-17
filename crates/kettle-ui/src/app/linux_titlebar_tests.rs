@@ -764,7 +764,7 @@ fn gnome_header_plus_leads_and_agrees_everywhere() {
                 let nodes = tab_accessibility_projection(&bar, &[1, 2, 3], false, &tr);
                 let node = nodes
                     .iter()
-                    .find(|(_, n)| n.label() == Some(tr.text(kettle_i18n::Text::PaletteNewTab)))
+                    .find(|(_, n)| n.label() == Some(tr.text(kettle_i18n::Text::MenuNewTab)))
                     .expect("the new-tab button");
                 assert_eq!(
                     node.1.bounds().unwrap(),

@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- The macOS titlebar keeps a lone tab centred and sizes it to its title. The
+  new-tab controls form a joined `+ ▾` button beside a separate Settings gear.
+  Its dropdown keeps shells, profiles, layouts and SSH without duplicating
+  app commands from the menu bar. Screen-reader names follow tooltips and
+  controls follow their screen order on every platform.
+
 ### Added
 
 - On Wayland the quick-terminal hotkey is now a real global shortcut: Kettle

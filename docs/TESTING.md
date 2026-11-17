@@ -3813,6 +3813,16 @@ self-test gives the exact boolean fields; first-map focus alone fails it. This
 validates the recorded assertions, not the provenance of captures or a real
 compositor. Keep raw captures private and record matched conditions separately.
 
+Compact macOS header regressions cover content sizing, stable centred title
+lanes, pointer width holds, destination tear-off grips, joined control hit
+boundaries and quads, menu origin through shell detection and submenus, and
+localized accessibility names, shortcuts, popup state and screen order.
+GNOME and plain-strip geometry and CPU quad guards retain their prior output;
+`tests/ui-states/linux` baselines do not change. Run the native-titlebar Python
+self-test for the joined-control fixtures. GPU, live fullscreen reveal,
+window dragging, double-click preferences and VoiceOver require their native
+runner; CPU tests alone do not verify those interactions.
+
 ### Settings hierarchy regressions
 
 Settings tests cover both bundled platform font sizes (13 and 14), independent

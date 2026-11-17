@@ -825,6 +825,7 @@ fn non_text_modals_block_control_plane_typing_into_search() {
         "vi owns the keyboard above search"
     );
     ws.context_menu = Some(ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: (0.0, 0.0),
         anchor_scale: 1.0,
         items: Vec::new(),

@@ -35,6 +35,7 @@ fn field(kind: ModalKind) -> WindowState {
         ModalKind::Hint => ws.hint_state = Some((Vec::new(), String::new())),
         ModalKind::ContextMenu => {
             ws.context_menu = Some(ContextMenuState {
+                origin: crate::app::MenuOrigin::Other,
                 anchor: (10.0, 10.0),
                 anchor_scale: 1.0,
                 items: Vec::new(),

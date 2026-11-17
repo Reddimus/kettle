@@ -12,6 +12,22 @@ pub(super) fn tab_bar_height(cell_height: f32, pos: TabBarPos) -> f32 {
 }
 
 impl App {
+    pub(super) fn lone_titlebar_width(
+        &self,
+        ws: &WindowState,
+        label: Option<&crate::mux::TabLabel>,
+        height: f32,
+        notice: &str,
+    ) -> f32 {
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+        let cell = self.overlay_text_cell_width(ws)
+            * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws));
+        measured_lone_titlebar_width(ws, label, &self.cfg, notice, (cell, height, scale))
+    }
+
     /// True when the cursor is over the status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
     /// the terminal I-beam over the status strip too.
@@ -177,6 +193,9 @@ impl App {
                 window_controls,
                 pressed_new_tab: false,
                 pressed_new_tab_menu: false,
+                new_tab_menu_open: false,
+                new_tab_shortcut: None,
+                settings_shortcut: None,
                 tooltip: None,
                 in_titlebar: ws.macos_titlebar_tabs,
                 linux_header: ws.linux_titlebar,
@@ -238,7 +257,7 @@ impl App {
             settings_rect,
             lead,
             strip,
-            layout,
+            mut layout,
         } = horizontal_tab_geometry(
             tab_lane,
             scale,
@@ -246,6 +265,17 @@ impl App {
             (n, active),
             &self.cfg,
         );
+        let compact_lone = ws.macos_titlebar_tabs && !ws.linux_titlebar && n == 1;
+        if compact_lone {
+            let width = self.lone_titlebar_width(ws, labels.first(), height, &recording_notice);
+            let held = hold_lone_tab_width(ws, band, width);
+            centre_lone_titlebar_tab(
+                &mut layout,
+                (strip, tab_lane.2 - strip, tab_lane.0),
+                held,
+                self.cfg.tab_min_width,
+            );
+        }
         // Tab positions count from past the GNOME header's leading `+`.
         let x0 = x0 + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
@@ -266,27 +296,7 @@ impl App {
                 // Normal (the focused-tab accent already signals "you are
                 // here") unless the bell rang in the focused pane and the user
                 // has not answered it.
-                let activity = ws
-                    .mux
-                    .tabs
-                    .get(i)
-                    .map(|tab| {
-                        match crate::mux::classify_tab_activity(
-                            i == active,
-                            tab.bell,
-                            ws.mux.tab_focused_bell(i),
-                            tab.last_output_at,
-                            tab.last_seen_at,
-                            now,
-                            silence,
-                        ) {
-                            crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
-                            crate::mux::TabActivity::Output => RenderTabActivity::Output,
-                            crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
-                            crate::mux::TabActivity::Silent => RenderTabActivity::Silent,
-                        }
-                    })
-                    .unwrap_or(RenderTabActivity::Normal);
+                let activity = tab_render_activity(ws, i, now, silence);
                 // The last tab yields the trailing `▾`/`+` button reservation
                 // in the full-width-aligned layout, so it is narrower than the
                 // rest; every other layout has `last_width == width`.
@@ -330,6 +340,15 @@ impl App {
                     hint.as_deref(),
                     cell_w,
                 );
+                if compact_lone {
+                    content = compact_lone_tab_content(
+                        rect,
+                        hovered,
+                        self.cfg.close_button_on_tab,
+                        kettle_render::activity_lane(activity, scale),
+                        scale,
+                    );
+                }
                 if ws.macos_titlebar_tabs && n == 1 {
                     let window_width = band.0 + band.2;
                     content.title = centered_title_lane(content.title, window_width * 0.5);
@@ -368,6 +387,20 @@ impl App {
             window_controls,
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
+            new_tab_menu_open: ws
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.origin.is_new_tab()),
+            new_tab_shortcut: chrome_button_description(
+                &self.cfg.keybinds,
+                NewTabHoverTarget::Plus,
+                &self.ui_text,
+            ),
+            settings_shortcut: chrome_button_description(
+                &self.cfg.keybinds,
+                NewTabHoverTarget::Settings,
+                &self.ui_text,
+            ),
             tooltip,
             in_titlebar: ws.macos_titlebar_tabs,
             linux_header: ws.linux_titlebar,
@@ -485,27 +518,7 @@ impl App {
                 } else {
                     PARKED_TAB
                 };
-                let activity = ws
-                    .mux
-                    .tabs
-                    .get(i)
-                    .map(|tab| {
-                        match crate::mux::classify_tab_activity(
-                            i == active,
-                            tab.bell,
-                            ws.mux.tab_focused_bell(i),
-                            tab.last_output_at,
-                            tab.last_seen_at,
-                            now,
-                            silence,
-                        ) {
-                            crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
-                            crate::mux::TabActivity::Output => RenderTabActivity::Output,
-                            crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
-                            crate::mux::TabActivity::Silent => RenderTabActivity::Silent,
-                        }
-                    })
-                    .unwrap_or(RenderTabActivity::Normal);
+                let activity = tab_render_activity(ws, i, now, silence);
                 let rect = (strip_x, seg_y, strip_w, height);
                 let closable = self.cfg.close_button_on_tab && strip_w >= height;
                 let close = tab_close_rect(strip_x + strip_w - height, seg_y, height, closable);
@@ -545,6 +558,20 @@ impl App {
             window_controls: Vec::new(),
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
+            new_tab_menu_open: ws
+                .context_menu
+                .as_ref()
+                .is_some_and(|menu| menu.origin.is_new_tab()),
+            new_tab_shortcut: chrome_button_description(
+                &self.cfg.keybinds,
+                NewTabHoverTarget::Plus,
+                &self.ui_text,
+            ),
+            settings_shortcut: chrome_button_description(
+                &self.cfg.keybinds,
+                NewTabHoverTarget::Settings,
+                &self.ui_text,
+            ),
             tooltip: self.new_tab_tooltip(ws, &[]),
             in_titlebar: false,
             linux_header: false,
@@ -998,27 +1025,25 @@ pub(super) fn horizontal_new_tab_controls(
     (menu, plus, reserve)
 }
 
-/// The Settings gear that leads the `▾ +` pair in a macOS title bar, the
-/// size of `menu` and set apart from it by a gap twice theirs, so it reads
-/// as its own control rather than a third segment of the split button.
-/// `▾` and `+` stay where they were. The gear shows only while the lane
+/// The separate Settings gear before the joined pair. Its size follows `+`,
+/// and its 8 pt gap keeps it outside the split button. It shows while the lane
 /// still keeps `min_tab` for tabs beside every control; the tab count never
 /// decides, as extra tabs scroll. Returns the rect and the reservation it
 /// adds, both zero when hidden.
 pub(super) fn titlebar_settings_control(
-    menu: kettle_render::Rect4,
+    plus: kettle_render::Rect4,
     lane_width: f32,
     reserve: f32,
     scale: f32,
     min_tab: f32,
 ) -> (kettle_render::Rect4, f32) {
     let gap = 8.0 * scale;
-    let side = menu.2;
+    let side = plus.2;
     let extra = side + gap;
     if side <= 0.0 || lane_width - reserve - extra < min_tab.max(1.0) {
         return ((0.0, 0.0, 0.0, 0.0), 0.0);
     }
-    ((menu.0 - gap - side, menu.1, side, menu.3), extra)
+    ((plus.0 - gap - side, plus.1, side, plus.3), extra)
 }
 
 /// The live shortcut a strip control's tooltip names: whatever key runs the
@@ -1027,12 +1052,25 @@ pub(super) fn chrome_button_shortcut(
     bindings: &kettle_config::keybinds::Bindings,
     target: NewTabHoverTarget,
 ) -> Option<String> {
-    let action = match target {
+    kettle_config::keybinds::ui_hint_label(bindings, &chrome_button_action(target))
+}
+
+fn chrome_button_action(target: NewTabHoverTarget) -> Action {
+    match target {
         NewTabHoverTarget::Settings => Action::OpenSettings,
         NewTabHoverTarget::Search => Action::StartSearch,
         NewTabHoverTarget::Menu | NewTabHoverTarget::Plus => Action::NewTab,
-    };
-    kettle_config::keybinds::ui_hint_label(bindings, &action)
+    }
+}
+
+pub(super) fn chrome_button_description(
+    bindings: &kettle_config::keybinds::Bindings,
+    target: NewTabHoverTarget,
+    tr: &kettle_i18n::Translator,
+) -> Option<String> {
+    let macos = cfg!(target_os = "macos");
+    kettle_config::keybinds::hint_trigger(bindings, &chrome_button_action(target), macos)
+        .map(|trigger| trigger.spoken_label(macos, tr))
 }
 
 pub(super) fn new_tab_tooltip(
@@ -1443,11 +1481,11 @@ fn titlebar_preferred_tab_width(n: usize, height: f32, min: f32) -> f32 {
 /// the tab narrows evenly about the centre, down to `min`, rather than
 /// sliding off it; only below `min` does it clamp into the strip. A strip
 /// narrower than `min` keeps `titlebar_tab_layout`'s result. `space` and
-/// `height` are as `titlebar_tab_layout` takes them.
+/// `preferred` is the measured width, after display-scale bounds.
 pub(super) fn centre_lone_titlebar_tab(
     layout: &mut TabStripLayout,
     space: (f32, f32, f32),
-    height: f32,
+    preferred: f32,
     min: f32,
 ) {
     let (strip, reserve, left) = space;
@@ -1455,7 +1493,6 @@ pub(super) fn centre_lone_titlebar_tab(
     if layout.xs.len() != 1 || strip < min.max(2.0) {
         return;
     }
-    let preferred = titlebar_preferred_tab_width(1, height, min);
     let centre = (strip + reserve - left) * 0.5;
     let room = 2.0 * centre.min(strip - centre);
     let width = preferred.min(room).max(min).min(strip);
@@ -1555,8 +1592,11 @@ pub(super) fn horizontal_tab_geometry(
             controls.trail,
         )
     } else {
-        let (menu, plus, reserve) =
-            horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible());
+        let (menu, plus, reserve) = if titlebar {
+            titlebar_new_tab_controls(lane, scale)
+        } else {
+            horizontal_new_tab_controls(lane, scale, new_tab_dropdown_visible())
+        };
         (menu, plus, (0.0, 0.0, 0.0, 0.0), 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
@@ -1564,7 +1604,7 @@ pub(super) fn horizontal_tab_geometry(
     let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
     if titlebar && !linux {
         let (rect, extra) =
-            titlebar_settings_control(arrow_rect, lane.2, button_w, scale, cfg.tab_min_width);
+            titlebar_settings_control(plus_rect, lane.2, button_w, scale, cfg.tab_min_width);
         settings_rect = rect;
         button_w += extra;
     }
@@ -1583,7 +1623,12 @@ pub(super) fn horizontal_tab_geometry(
         // macOS lone tab narrows about the centre instead. The Linux header
         // has no gear and keeps its layout.
         if !linux && n == 1 {
-            centre_lone_titlebar_tab(&mut layout, space, lane.3, cfg.tab_min_width);
+            centre_lone_titlebar_tab(
+                &mut layout,
+                space,
+                (160.0 * scale).max(cfg.tab_min_width),
+                cfg.tab_min_width,
+            );
         }
         layout
     } else {
@@ -1616,6 +1661,7 @@ pub(super) fn tear_off_destination_tab(
     header: (bool, bool),
     scale: f32,
     buttons: &crate::window_buttons::ButtonLayout,
+    lone_width: Option<f32>,
 ) -> Rect {
     if cfg.tab_bar_pos.is_vertical() || !header.1 {
         return band;
@@ -1626,7 +1672,17 @@ pub(super) fn tear_off_destination_tab(
         (0.0, 0.0)
     };
     let lane = horizontal_tab_lane(band, reservations);
-    let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+    let mut geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+    if !header.0
+        && let Some(width) = lone_width
+    {
+        centre_lone_titlebar_tab(
+            &mut geometry.layout,
+            (geometry.strip, lane.2 - geometry.strip, lane.0),
+            width,
+            cfg.tab_min_width,
+        );
+    }
     (
         lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
@@ -1644,9 +1700,14 @@ pub(super) fn titlebar_tear_off_grab_x(
     header: (bool, bool),
     scale: f32,
     buttons: &crate::window_buttons::ButtonLayout,
-    in_tab: f64,
+    grip: (f32, f64),
 ) -> f64 {
-    f64::from(tear_off_destination_tab(cfg, band, header, scale, buttons).0) + in_tab
+    let tab = tear_off_destination_tab(cfg, band, header, scale, buttons, Some(grip.0));
+    let margin = (8.0 * scale).min(tab.2 * 0.5);
+    f64::from(tab.0)
+        + grip
+            .1
+            .clamp(f64::from(margin), f64::from((tab.2 - margin).max(margin)))
 }
 
 /// The shortcut shown on tab `index`: whatever key the bindings give "go to
@@ -1659,4 +1720,136 @@ pub(super) fn tab_goto_hint(
 ) -> Option<String> {
     let index = u8::try_from(index).ok().filter(|index| *index < 9)?;
     kettle_config::keybinds::ui_hint_label(bindings, &Action::GotoTab(index))
+}
+
+/// Unlike a left-aligned lane, a window-centred title needs equal reserves.
+pub(super) fn compact_lone_tab_width(
+    title: &str,
+    path: Option<&str>,
+    format: &str,
+    notice: &str,
+    metrics: (f32, f32, f32),
+    chrome: (f32, bool, f32),
+) -> f32 {
+    let (cell, height, scale) = metrics;
+    let (min, close, activity) = chrome;
+    let leaf = path.map(|p| p.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(p));
+    let label =
+        kettle_config::template::fill(format, &[("n", "1"), ("title", leaf.unwrap_or(title))]);
+    let cells = kettle_render::display_width(&label)
+        + if notice.is_empty() {
+            0
+        } else {
+            kettle_render::display_width(notice) + 1
+        };
+    let reserve = (8.0 * scale + activity).max(if close { height } else { 8.0 * scale });
+    let quantum = 2.0 * cell.max(1.0);
+    let rounded = ((cells as f32 * cell + 2.0 * reserve) / quantum).ceil() * quantum;
+    let lo = (160.0 * scale).max(min);
+    rounded.clamp(lo, (240.0 * scale).max(lo))
+}
+
+pub(super) fn hold_lone_tab_width(ws: &WindowState, band: Rect, width: f32) -> f32 {
+    let hold = ws.tab_drag_active
+        || ws
+            .native_pointer
+            .is_some_and(|p| rect_contains(band, p.x as f32, p.y as f32));
+    if hold {
+        let held = ws.lone_tab_width.get().unwrap_or(width);
+        ws.lone_tab_width.set(Some(held));
+        held
+    } else {
+        ws.lone_tab_width.set(None);
+        width
+    }
+}
+
+pub(super) fn compact_lone_tab_content(
+    rect: Rect,
+    hovered: bool,
+    close: bool,
+    activity: f32,
+    scale: f32,
+) -> kettle_render::HorizontalTabContent {
+    let reserve = (8.0 * scale + activity).max(if close { rect.3 } else { 8.0 * scale });
+    let half = (rect.2 * 0.5 - reserve).max(0.0);
+    kettle_render::HorizontalTabContent {
+        title: (rect.0 + rect.2 * 0.5 - half, rect.1, half * 2.0, rect.3),
+        close: tab_close_rect(
+            rect.0 + rect.2 - rect.3,
+            rect.1,
+            rect.3,
+            hovered && close && rect.2 >= rect.3,
+        ),
+        hint: None,
+    }
+}
+
+pub(super) fn titlebar_new_tab_controls(band: Rect, scale: f32) -> (Rect, Rect, f32) {
+    let (_, _, reserve) = horizontal_new_tab_controls(band, scale, true);
+    let side = band.3.max(28.0 * scale);
+    let menu = (
+        band.0 + band.2 - 8.0 * scale - 28.0 * scale,
+        band.1,
+        28.0 * scale,
+        side,
+    );
+    let plus = (menu.0 - side, menu.1, side, side);
+    (menu, plus, reserve)
+}
+
+pub(super) fn measured_lone_titlebar_width(
+    ws: &WindowState,
+    label: Option<&crate::mux::TabLabel>,
+    cfg: &Config,
+    notice: &str,
+    metrics: (f32, f32, f32),
+) -> f32 {
+    let (cell, height, scale) = metrics;
+    let activity = tab_render_activity(
+        ws,
+        ws.mux.active,
+        std::time::Instant::now(),
+        std::time::Duration::from_millis(cfg.tab_silence_threshold_ms),
+    );
+    compact_lone_tab_width(
+        label.map_or("", |l| l.text.as_str()),
+        label.and_then(|l| l.path.as_deref()),
+        &cfg.tab_format,
+        notice,
+        (cell, height, scale),
+        (
+            cfg.tab_min_width,
+            cfg.close_button_on_tab,
+            kettle_render::activity_lane(activity, scale),
+        ),
+    )
+}
+
+pub(super) fn tab_render_activity(
+    ws: &WindowState,
+    index: usize,
+    now: std::time::Instant,
+    silence: std::time::Duration,
+) -> RenderTabActivity {
+    ws.mux
+        .tabs
+        .get(index)
+        .map(|tab| {
+            match crate::mux::classify_tab_activity(
+                index == ws.mux.active,
+                tab.bell,
+                ws.mux.tab_focused_bell(index),
+                tab.last_output_at,
+                tab.last_seen_at,
+                now,
+                silence,
+            ) {
+                crate::mux::TabActivity::Normal => RenderTabActivity::Normal,
+                crate::mux::TabActivity::Output => RenderTabActivity::Output,
+                crate::mux::TabActivity::Bell => RenderTabActivity::Bell,
+                crate::mux::TabActivity::Silent => RenderTabActivity::Silent,
+            }
+        })
+        .unwrap_or(RenderTabActivity::Normal)
 }

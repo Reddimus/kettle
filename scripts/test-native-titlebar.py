@@ -143,11 +143,11 @@ class TitlebarGeometryTests(unittest.TestCase):
             "content": rect(0, 28, 800, 572),
             "tab_bar": {"in_titlebar": True, "y": 0, "height": 28 * scale,
                         "band": rect(78, 0, 722, 28),
-                        "new_tab": rect(772, 0, 28, 28),
-                        "new_tab_menu": rect(744, 0, 28, 28),
-                        "segments": [{"rect": rect(240, 0, 320, 28),
-                                      "title_rect": rect(300, 0, 200, 28),
-                                      "close": rect(560, 0, 0, 0),
+                        "new_tab": rect(736, 0, 28, 28),
+                        "new_tab_menu": rect(764, 0, 28, 28),
+                        "segments": [{"rect": rect(320, 0, 160, 28),
+                                      "title_rect": rect(348, 0, 104, 28),
+                                      "close": rect(480, 0, 0, 0),
                                       "hint": None, "hovered": False,
                                       "fitted_title": "",
                                       "label": "Kettle caption fixture"}]},
@@ -173,10 +173,7 @@ class TitlebarGeometryTests(unittest.TestCase):
                 geometry = self.fixture(scale)
                 tab = geometry["tab_bar"]["segments"][0]
                 tab["hovered"] = count == 1
-                tab["title_rect"].update(x=316 * scale, width=168 * scale)
-                tab["close"].update(x=532 * scale, width=28 * scale, height=28 * scale)
-                tab["hint"] = {"text": "Cmd+1", "rect": dict(
-                    x=492 * scale, y=0, width=40 * scale, height=28 * scale)}
+                tab["close"].update(x=452 * scale, width=28 * scale, height=28 * scale)
                 if count == 2:
                     def segment(x, index):
                         return dict(tab, hovered=False,
@@ -206,15 +203,16 @@ class TitlebarGeometryTests(unittest.TestCase):
             geometry = self.fixture(scale)
             geometry["tab_bar"]["settings"] = gear(0, 0)
             checker.titlebar_geometry(geometry)
-            geometry["tab_bar"]["settings"] = gear(708)
+            geometry["tab_bar"]["settings"] = gear(700)
             checker.titlebar_geometry(geometry)
-            for bad in (gear(712), gear(708, 16), gear(70)):
+            for bad in (gear(704), gear(700, 16), gear(70)):
                 geometry["tab_bar"]["settings"] = bad
                 with self.assertRaises(AssertionError):
                     checker.titlebar_geometry(geometry)
 
     def test_titlebar_geometry_rejects_overlap_missing_title_and_small_controls(self):
         for mutate in (
+            lambda g: g["tab_bar"]["new_tab_menu"].update(x=765),
             lambda g: g["content"].update(y=0),
             lambda g: g["tab_bar"]["segments"][0]["rect"].update(x=0),
             lambda g: g["tab_bar"]["segments"][0]["title_rect"].update(x=0),
