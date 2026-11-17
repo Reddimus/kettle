@@ -2914,6 +2914,14 @@ fails. An executed command's failure or timeout is returned without retry.
 Portable regressions cover these boundaries. A delayed native Bash prompt
 provides a control for the transition before Readline enables paste again.
 
+`run_command` returns at the command-end mark, before the shell draws its next
+prompt, and Fish 4.2 and later ask for the cursor position in that gap. Fish
+4.2 reads an Escape typed before the question together with the reply's ESC as
+Alt+Escape, and inserts the rest of the reply as command-line text. The Fish
+Vi check therefore types Escape only at the drawn prompt, where Fish has
+re-enabled the Kitty keyboard protocol and Escape arrives as `CSI 27 u`. A
+portable regression covers the wait.
+
 The Linux build job runs it under Xvfb; macOS runs it on its native desktop.
 Windows runs the PowerShell token, native-status, bounded-input and binding
 ownership and post-installation binding-replacement fixtures through
