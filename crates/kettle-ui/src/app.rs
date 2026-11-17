@@ -283,6 +283,7 @@ pub enum UserEvent {
     /// fresh OS window. The bounded inbox carries the request and completion.
     Activation,
     ToggleQuickTerminal,
+    GlobalShortcut,
     /// Remote control: the remote-command file changed and
     /// the watcher needs the main thread to read + process new lines.
     /// One event per change (notify coalesces consecutive writes), so
@@ -747,6 +748,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.reconcile_quick_hotkey();
         self.drain_activation_requests(event_loop);
+        self.drain_global_shortcuts(event_loop);
         #[cfg(target_os = "linux")]
         {
             if self.wayland.is_none() {
@@ -832,6 +834,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ToggleQuickTerminal => {
                 self.toggle_quick_terminal(el);
             }
+            UserEvent::GlobalShortcut => self.drain_global_shortcuts(el),
             UserEvent::Activation => self.drain_activation_requests(el),
             // `touch` above did what this asks.
             UserEvent::SessionResave => {}

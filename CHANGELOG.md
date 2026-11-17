@@ -10,6 +10,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- On Wayland the quick-terminal hotkey is now a real global shortcut: Kettle
+  registers it with the desktop through the GlobalShortcuts portal (GNOME 48
+  and later, KDE Plasma), which asks once to confirm it. Settings > Quick
+  terminal shows the key the desktop holds, opens or names the desktop page
+  for changing it, and turns it off with Delete. On GNOME each press passes
+  an activation token that Kettle uses to raise and focus the quick terminal.
+  Without the portal, a desktop
+  shortcut that runs `kettle quick-terminal` still works. The quick terminal's
+  size on Wayland is the configured percentage of the screen in both
+  directions; the desktop places and animates it.
+
 - The first plain text drag in each run shows selection gestures during the
   drag and for eight seconds afterward: Alt-drag for a rectangle (Option on
   macOS), and Shift-click to extend. The English and Spanish hint is a polite
@@ -209,7 +220,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
   Konsole: brackets inside right-to-left text are mirrored and Arabic letters
-  join. Selection, links and mouse clicks follow the text as drawn, while
+  join, their strokes running unbroken from cell to cell even where the
+  font's letters are narrower than a cell. Selection, links and mouse clicks
+  follow the text as drawn, while
   copies, search and the program see it in its original order. Full-screen
   programs keep logical order, and `bidi = false` turns it off.
 

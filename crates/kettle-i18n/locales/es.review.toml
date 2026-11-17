@@ -1183,6 +1183,22 @@ settings_value_checking = "draft"
 settings_reset_button = "draft"
 settings_a11y_reset = "draft"
 
+quick_portal_size = "draft"
+quick_portal_unset = "draft"
+quick_portal_other_owner = "draft"
+quick_portal_connecting = "draft"
+quick_portal_pending = "draft"
+quick_portal_registered = "draft"
+quick_portal_gnome = "draft"
+quick_portal_desktop = "draft"
+quick_portal_focus = "draft"
+quick_portal_retry = "draft"
+quick_portal_unavailable = "draft"
+quick_portal_identity = "draft"
+quick_portal_managed = "draft"
+quick_portal_position = "draft"
+quick_portal_animation = "draft"
+
 [second-pass]
 keys = [
     "a11y_window_minimize",

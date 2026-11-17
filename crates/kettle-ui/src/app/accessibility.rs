@@ -1318,6 +1318,55 @@ impl App {
         request: ActionRequest,
         event_loop: &ActiveEventLoop,
     ) {
+        if matches!(
+            request.action,
+            AccessibilityAction::Focus | AccessibilityAction::Click
+        ) && let Some(settings) = self.settings_overlay_projection(ws)
+        {
+            let cats = crate::settings::categories(&self.gpu_choices);
+            let (surface, scale) = ws.window.as_ref().map_or(((800.0, 600.0), 1.0), |window| {
+                let size = window.inner_size();
+                (
+                    (size.width as f32, size.height as f32),
+                    window.scale_factor() as f32,
+                )
+            });
+            // The window's own overlay: production builds have no default one.
+            let mut overlay = self.overlay(ws, true);
+            overlay.settings = Some(settings);
+            let projection = modal_accessibility_projection(
+                &overlay,
+                surface,
+                (
+                    self.overlay_text_cell_width(ws),
+                    self.overlay_text_line_height(ws),
+                ),
+                scale,
+                &self.ui_text,
+            );
+            let rows: Vec<_> = ws
+                .settings_nav
+                .as_ref()
+                .unwrap()
+                .visible_fields(&cats, &self.ui_text)
+                .into_iter()
+                .enumerate()
+                .map(|(index, identity)| {
+                    projection
+                        .nodes
+                        .iter()
+                        .find(|(id, _)| *id == accessibility_modal_id(5, index + 2))
+                        .filter(|(_, node)| !node.is_hidden() && !node.is_disabled())
+                        .map(|_| identity)
+                })
+                .collect();
+            if handle_accessibility_action(ws, &request, &rows, |ws, cat, fld, dir| {
+                self.settings_adjust(ws, &cats, cat, fld, dir);
+            }) {
+                self.update_ime_cursor_area(ws);
+                return;
+            }
+        }
         if let Some(dialog) = ws.confirm_dialog.as_ref() {
             match confirmation_accessibility_action(
                 request.target_node,
@@ -2181,6 +2230,53 @@ pub(super) fn card_accessibility_node(
     node
 }
 
+/// Dispatch Settings row actions independently of the event loop. The row map
+/// comes from the same filtered projection and geometry as the accessible nodes.
+pub(super) fn handle_accessibility_action(
+    ws: &mut WindowState,
+    request: &ActionRequest,
+    rows: &[Option<(usize, usize)>],
+    adjust: impl FnOnce(&mut WindowState, usize, usize, i32),
+) -> bool {
+    if request.target_tree != TreeId::ROOT
+        || !matches!(
+            request.action,
+            AccessibilityAction::Focus | AccessibilityAction::Click
+        )
+        || ws.confirm_dialog.is_some()
+        || ws.context_menu.is_some()
+        || ws.palette_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.settings_text_edit.is_some()
+        || ws.settings_nav.as_ref().is_none_or(|nav| nav.capturing)
+    {
+        return false;
+    }
+    let Some((cat, fld)) = request
+        .target_node
+        .0
+        .checked_sub(accessibility_modal_id(5, 2).0)
+        .and_then(|index| rows.get(index as usize))
+        .copied()
+        .flatten()
+    else {
+        return false;
+    };
+    end_modal_composition(ws);
+    let nav = ws.settings_nav.as_mut().unwrap();
+    nav.category = cat;
+    nav.field = fld;
+    nav.search_focused = false;
+    if request.action == AccessibilityAction::Click {
+        adjust(ws, cat, fld, 0);
+    }
+    ws.accessibility_pending = true;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    true
+}
+
 pub(super) fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
     NodeId(ACCESSIBILITY_MODAL_ID_MASK | (kind << 16) | index as u64)
 }
@@ -3039,6 +3135,9 @@ pub(super) fn modal_accessibility_projection(
             }
             if row.disabled {
                 node.set_disabled();
+            } else if !node.is_hidden() {
+                node.add_action(AccessibilityAction::Focus);
+                node.add_action(AccessibilityAction::Click);
             }
             node.set_selected(index == settings.focused_row);
             children.push(id);

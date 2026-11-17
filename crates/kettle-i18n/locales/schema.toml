@@ -3479,3 +3479,48 @@ plural = "count"
 
 [messages.scrollback_a11y_viewing]
 context = "crates/kettle-ui/src/app/accessibility.rs scrollback_accessibility_nodes: polite status a screen reader speaks once when the focused pane is scrolled back into its history, away from live output. It carries no line count on purpose, so further scrolling is not announced again."
+
+[messages.quick_portal_unset]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_other_owner]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_connecting]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_pending]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_registered]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_gnome]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_desktop]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_focus]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_retry]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_unavailable]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_identity]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_managed]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_position]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_animation]
+context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."
+
+[messages.quick_portal_size]
+context = "crates/kettle-ui/src/settings.rs: Wayland size description, independently of saved Position. 100 percent requests maximization."

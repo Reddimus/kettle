@@ -78,6 +78,15 @@ impl App {
                     ws.dpi_resize_surface_suspended = true;
                     return;
                 }
+                if self.quick_terminal.wayland
+                    && let Some(window) = &ws.window
+                {
+                    self.quick_terminal.size.configured(
+                        ws.seq,
+                        window.as_ref(),
+                        (size.width, size.height),
+                    );
+                }
                 self.sync_macos_titlebar(ws);
                 // AppKit can briefly restore its stale standard frame. Wait
                 // for the window-local restore before reflowing terminal grids.

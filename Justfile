@@ -456,7 +456,7 @@ macos-compare-score-self-test:
 # This is the fast pre-commit loop; run it before every commit. It does NOT
 # cover the packaging/installer/update-manifest/GPU-render checks ci.yml
 # also runs; see `gauntlet-full` below for those.
-gauntlet: grapheme-tables-check bidi-tables-check conformance-adapter-self-test live-ui-helper-selftest ui-states-self-test native-titlebar-self-test wayland-first-frame-self-test shell-integration-check vm-launcher-test fuzz-check
+gauntlet: grapheme-tables-check bidi-tables-check conformance-adapter-self-test live-ui-helper-selftest ui-states-self-test native-titlebar-self-test wayland-first-frame-self-test quick-terminal-portal-self-test shell-integration-check vm-launcher-test fuzz-check
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
@@ -915,6 +915,10 @@ native-titlebar-smoke: release
 # Native checker semantics can be tested without a desktop.
 native-titlebar-self-test:
     {{scope_python}} scripts/test-native-titlebar.py
+
+# Pure fixture isolation and focus-oracle checks; starts no desktop services.
+quick-terminal-portal-self-test:
+    {{scope_python}} scripts/check-quick-terminal-portal.py --self-test
 
 [unix]
 wayland-first-frame-self-test:

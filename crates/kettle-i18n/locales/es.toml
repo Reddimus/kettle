@@ -89,6 +89,22 @@ quick_terminal_size_description = "Usar % de pantalla: alto arriba/abajo, ancho 
 quick_terminal_animation_description = "Deslizar al mostrar, salvo que el sistema tenga Reducir movimiento activado."
 quick_terminal_autohide_description = "Ocultar al enfocar otra aplicación; dejar pestañas y paneles en ejecución."
 quick_terminal_hotkey_failed = "No se pudo registrar el atajo de la terminal rápida. Puede estar en uso; elige otra combinación en Configuración."
+quick_portal_size = "Wayland: porcentaje de ambas dimensiones; 100 % pide maximizar."
+quick_portal_unset = "Pulsar Enter para elegir un atajo; Delete lo borra."
+quick_portal_other_owner = "Otra instancia de Kettle tiene el atajo; se toma al salir aquella."
+quick_portal_connecting = "Conectar con el servicio de atajos del escritorio."
+quick_portal_pending = "Confirmar este atajo en el diálogo del escritorio."
+quick_portal_registered = "Lo define el escritorio. Enter abre su configuración de atajos."
+quick_portal_gnome = "Lo define el escritorio; cambiarlo en Configuración > Aplicaciones > Kettle."
+quick_portal_desktop = "Lo define el escritorio; cambiarlo en sus ajustes de atajos."
+quick_portal_focus = "El foco depende del escritorio. Alternativa: kettle quick-terminal."
+quick_portal_retry = "El escritorio no lo registró. Enter vuelve a pedirlo."
+quick_portal_unavailable = "Portal no disponible. Enter reintenta; o usar kettle quick-terminal."
+quick_portal_identity = "Identidad no disponible. Revisar kettle.desktop; Enter reintenta."
+quick_portal_managed = "Lo gestiona el escritorio"
+quick_portal_position = "Wayland: el escritorio coloca esta ventana; el tamaño sí se aplica."
+quick_portal_animation = "Wayland: el escritorio anima esta ventana; Kettle no la desliza."
+
 
 # Neutral Latin American Spanish. The owner designated an independent reviewer.
 # Rendered context and required second-pass acceptance remain pending for 5.0.

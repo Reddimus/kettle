@@ -89,6 +89,22 @@ quick_terminal_size_description = "Screen percent: height at top/bottom, width a
 quick_terminal_animation_description = "Slide into view unless the system has Reduce Motion enabled."
 quick_terminal_autohide_description = "Hide when another app gains focus; keep tabs and splits running."
 quick_terminal_hotkey_failed = "Could not register the quick terminal hotkey. It may already be in use; choose another chord in Settings."
+quick_portal_size = "Wayland: percent of both dimensions; 100% requests maximization."
+quick_portal_unset = "Press Enter to choose a shortcut; Delete clears."
+quick_portal_other_owner = "Another Kettle owns this shortcut; it takes over when that one exits."
+quick_portal_connecting = "Connecting to the desktop shortcut service."
+quick_portal_pending = "Confirm this shortcut in the desktop's dialog."
+quick_portal_registered = "Set by the desktop. Enter opens its shortcut settings."
+quick_portal_gnome = "Set by the desktop; change it in Settings > Apps > Kettle."
+quick_portal_desktop = "Set by the desktop; change it in its shortcut settings."
+quick_portal_focus = "Focus depends on the desktop. Use kettle quick-terminal as fallback."
+quick_portal_retry = "The desktop did not register it. Enter asks again."
+quick_portal_unavailable = "Portal unavailable. Enter retries; or bind kettle quick-terminal."
+quick_portal_identity = "Desktop identity unavailable. Check kettle.desktop; Enter retries."
+quick_portal_managed = "Desktop managed"
+quick_portal_position = "Wayland: the desktop places this window; size still applies."
+quick_portal_animation = "Wayland: the desktop animates this window; Kettle does not slide it."
+
 
 # English reference text. Every key in schema.toml, nothing else.
 
