@@ -305,8 +305,10 @@ fn prose_names_the_product_with_a_capital() {
             let Some(text) = value.as_str() else {
                 continue;
             };
+            // Code in backticks (`true; kettle update`) is a command, not prose.
+            let prose: String = text.split('`').step_by(2).collect::<Vec<_>>().join(" ");
             for lead in ["About kettle", "Acerca de kettle", ". kettle ", "; kettle "] {
-                assert!(!text.contains(lead), "{key}: {text}");
+                assert!(!prose.contains(lead), "{key}: {text}");
             }
         }
     }
