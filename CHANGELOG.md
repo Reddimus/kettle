@@ -662,8 +662,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - When a window loses focus its selection turns a neutral grey, as a
   selection in an inactive macOS window does, instead of a dimmer shade of
   the same colour, so it changes colour as well as strength. The grey stays
-  at least 2:1 from the theme's background and at least 1.3:1 quieter than
-  the focused colour. With the window's background see-through (the macOS
+  at least 1.3:1 quieter than the focused colour and reaches 2:1 from the
+  theme's background where selected text can keep 7:1 on it; where it
+  cannot, a perimeter at 2:1 or more keeps the selection visible. With the window's background see-through (the macOS
   and Windows default), selection colours are now chosen against the
   background as it shows over the desktop, not against the theme's solid
   colour. There the unfocused grey reaches about 2:1 where the focused
@@ -799,8 +800,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   at the earliest and shows the same timing. GTK text views hold their
   cursor for about one blink period after a key or a click in the same way.
 
-- An unfocused window's selection keeps a 2:1 contrast with the background
-  (was 1.5:1), so it stays visible while still quieter than the focused one.
+- An unfocused window's selection stays at least 2:1 from the background
+  (was 1.5:1), by its fill or, where the fill must stay quieter to keep its
+  text at 7:1, by its perimeter, so it stays visible while still quieter
+  than the focused one.
 
 - A theme selection colour too faint for 3:1 against the background is now
   strengthened as a deeper or lighter tint of its own hue, not greyed toward
