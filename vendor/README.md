@@ -663,6 +663,9 @@ them.
 - Source: crates.io `arboard` 3.6.1, checksum
   `0348a1c054491f4bfe6ab86a7b6ab1e44e45d899005de92f58b3df180b36ddaf`.
 - Licenses: MIT or Apache-2.0; both licenses and the upstream README are retained.
+- Local changes (2026-11-17): disable default features only for the `env_logger`
+  dev-dependency to remove unmaintained `humantime` (RUSTSEC-2026-0542) from the
+  vendor validation graph; the retained tests need no logger features.
 - Patch: strip a URI-list line's CR terminator before percent decoding. Nautilus
   supplies CRLF, which otherwise becomes an extra filename byte and triggers a
   multiline paste prompt. Encoded `%0D` filename bytes remain intact.
