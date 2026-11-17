@@ -776,6 +776,14 @@ impl App {
             .as_ref()
             .map_or_else(Default::default, |material| material.blur_state());
         let blur_unavailable = blur == crate::settings::BlurState::Unavailable;
+        let context = crate::settings::RowContext {
+            blur,
+            quick: self.quick_portal_status(),
+            gnome: std::env::var("XDG_CURRENT_DESKTOP")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("gnome"),
+        };
         Some(kettle_render::SettingsOverlay {
             categories: cats.iter().map(|c| tr.text(c.name).to_string()).collect(),
             label_cols,
@@ -808,11 +816,16 @@ impl App {
                         // Capture prompt on the focused keybind row.
                         tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
                     } else {
-                        crate::settings::row_value(f, blur, &self.cfg, tr)
+                        crate::settings::row_value(f, context.clone(), &self.cfg, tr)
                     };
                     kettle_render::SettingsRow {
                         label: tr.text(f.label).to_string(),
-                        description: crate::settings::row_description(f, blur, &self.cfg, tr),
+                        description: crate::settings::row_description(
+                            f,
+                            context.clone(),
+                            &self.cfg,
+                            tr,
+                        ),
                         category,
                         control: match f.kind {
                             crate::settings::FieldKind::Toggle => {
@@ -833,8 +846,7 @@ impl App {
                         disabled: crate::settings::field_disabled(&self.cfg, f.key)
                             || (f.key == "gpu" && self.gpu_discovery_pending),
                         reset: crate::settings::reset_state(&self.cfg, f),
-                        unavailable: f.key == "window-blur"
-                            && blur != crate::settings::BlurState::Available,
+                        unavailable: context.unavailable(f),
                         value_cols: if crate::settings::is_keybind(f) {
                             0
                         } else {
@@ -2108,6 +2120,9 @@ impl App {
         {
             return;
         }
+        if field.key == "quick-terminal-hotkey" && dir == 0 && self.quick_portal_action(ws, false) {
+            return;
+        }
         if crate::settings::is_keybind(field) {
             // Activate on a keybind row → enter chord-capture; ←/→ no-op.
             if dir == 0
@@ -2149,6 +2164,46 @@ impl App {
         self.settings_store(ws, key_str, new_val);
     }
 
+    fn quick_portal_action(&mut self, ws: &mut WindowState, clear: bool) -> bool {
+        use crate::quick_terminal::portal::Action;
+        let Some(status) = self.quick_portal_status() else {
+            return false;
+        };
+        let handled =
+            crate::quick_terminal::portal::settings_action(&status, clear, |action| match action {
+                Action::Capture => {}
+                Action::Clear => {
+                    if self.persist_pref("quick-terminal-hotkey", "none") {
+                        self.cfg.quick_terminal_hotkey = None;
+                        self.reconcile_quick_hotkey();
+                    }
+                }
+                Action::Retry => {
+                    self.reconcile_quick_hotkey();
+                    #[cfg(target_os = "linux")]
+                    if let Some(portal) = &self.quick_terminal.portal {
+                        portal.retry();
+                    }
+                }
+                Action::Configure =>
+                {
+                    #[cfg(target_os = "linux")]
+                    if let Some(portal) = &self.quick_terminal.portal {
+                        portal.configure();
+                    }
+                }
+                Action::None => {}
+            });
+        if !handled {
+            return false;
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// Reset the focused Settings row to the value a config that does not set
     /// it would give, through the same write and reload as a change.
     pub(super) fn settings_reset(
@@ -2159,6 +2214,9 @@ impl App {
         fld: usize,
     ) {
         let field = &cats[cat].fields[fld];
+        if field.key == "quick-terminal-hotkey" && self.quick_portal_action(ws, true) {
+            return;
+        }
         if crate::settings::field_disabled(&self.cfg, field.key)
             || crate::settings::holds_default(&self.cfg, field)
         {

@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 pub(crate) mod hotkey;
 pub(crate) mod native;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) mod portal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// AppKit points on macOS; physical pixels on other platforms.
@@ -76,6 +78,79 @@ pub(crate) fn geometry(screen: Rect, position: Position, percent: u8) -> Rect {
         y: screen.y.saturating_add_unsigned(dy),
         width,
         height,
+    }
+}
+
+pub(crate) fn session_geometry(
+    screen: Rect,
+    position: Position,
+    percent: u8,
+    wayland: bool,
+) -> Rect {
+    geometry(
+        screen,
+        if wayland { Position::Center } else { position },
+        percent,
+    )
+}
+pub(crate) fn session_maximized(wayland: bool, percent: u8) -> Option<bool> {
+    wayland.then_some(percent == 100)
+}
+
+pub(crate) trait SizeWindow {
+    fn is_maximized(&self) -> bool;
+    fn set_maximized(&self, maximized: bool);
+    fn request_size(&self, rect: Rect);
+}
+impl SizeWindow for winit::window::Window {
+    fn is_maximized(&self) -> bool {
+        self.is_maximized()
+    }
+    fn set_maximized(&self, maximized: bool) {
+        self.set_maximized(maximized);
+    }
+    fn request_size(&self, rect: Rect) {
+        let _ = self.request_inner_size(window_size(rect));
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct WaylandSize {
+    pending: Option<(u64, Rect)>,
+}
+impl WaylandSize {
+    pub(crate) fn show(
+        &mut self,
+        seq: u64,
+        window: &impl SizeWindow,
+        rect: Option<Rect>,
+        maximized: bool,
+    ) {
+        self.pending = if maximized {
+            None
+        } else {
+            rect.map(|rect| (seq, rect))
+        };
+        window.set_maximized(maximized);
+        if !maximized
+            && !window.is_maximized()
+            && let Some(rect) = rect
+        {
+            window.request_size(rect);
+        }
+    }
+    pub(crate) fn configured(&mut self, seq: u64, window: &impl SizeWindow, size: (u32, u32)) {
+        let Some((pending_seq, rect)) = self.pending else {
+            return;
+        };
+        if pending_seq != seq || window.is_maximized() || size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        // Wayland ignores a resize until the unmaximized configure arrives.
+        self.pending = None;
+        if size != (rect.width, rect.height) {
+            window.request_size(rect);
+        }
     }
 }
 
@@ -181,8 +256,12 @@ pub(crate) struct Runtime {
     pub activation_until: Option<Instant>,
     pub wayland: bool,
     pub slide: Option<Slide>,
+    pub size: WaylandSize,
     pub focus_check: Option<Instant>,
     pub hotkey: Option<hotkey::Registration>,
+    #[cfg(target_os = "linux")]
+    pub portal: Option<portal::Watch>,
+    pub portal_wake_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub attempted_hotkey: Option<Option<kettle_config::keybinds::Trigger>>,
 }
 
@@ -194,11 +273,66 @@ pub(crate) fn animation_allowed(
     enabled && mode != kettle_config::ReduceMotion::On && system()
 }
 
+pub(crate) fn can_slide(wayland: bool, allowed: impl FnOnce() -> bool) -> bool {
+    !wayland && allowed()
+}
+
 pub(crate) const FRAME: Duration = Duration::from_millis(10);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wayland_size_waits_for_unmaximized_configure() {
+        use std::cell::{Cell, RefCell};
+        struct Window {
+            maximized: Cell<bool>,
+            size: Cell<(u32, u32)>,
+            requests: RefCell<Vec<(u32, u32)>>,
+        }
+        impl SizeWindow for Window {
+            fn is_maximized(&self) -> bool {
+                self.maximized.get()
+            }
+            fn set_maximized(&self, _: bool) {} // A request does not change the last configure.
+            fn request_size(&self, rect: Rect) {
+                self.requests.borrow_mut().push((rect.width, rect.height));
+                if !self.maximized.get() {
+                    self.size.set((rect.width, rect.height));
+                }
+            }
+        }
+        let window = Window {
+            maximized: Cell::new(true),
+            size: Cell::new((2000, 1000)),
+            requests: Default::default(),
+        };
+        let mut model = WaylandSize::default();
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 400,
+        };
+        model.show(7, &window, Some(rect), false);
+        assert_eq!(window.size.get(), (2000, 1000));
+        model.configured(7, &window, (2000, 1000)); // An older maximized configure.
+        window.maximized.set(false);
+        window.size.set((1000, 700)); // The compositor restores the pre-maximized size.
+        model.configured(8, &window, (1000, 700)); // Another window must not consume it.
+        model.configured(7, &window, (1000, 700));
+        assert_eq!(window.size.get(), (800, 400));
+        let count = window.requests.borrow().len();
+        model.configured(7, &window, (800, 400));
+        assert_eq!(window.requests.borrow().len(), count);
+        window.maximized.set(true);
+        model.show(7, &window, Some(rect), false);
+        model.show(7, &window, Some(rect), true); // A newer maximize cancels the small size.
+        window.maximized.set(false);
+        model.configured(7, &window, (1000, 700));
+        assert!(model.pending.is_none());
+    }
+
     #[test]
     fn review_quick_cross_dpi_placement_moves_before_resize_without_animation() {
         use std::cell::{Cell, RefCell};

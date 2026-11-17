@@ -154,7 +154,11 @@ impl Bridge {
                 request.token.destroy();
                 return false;
             }
-            if let Some(token) = request.ready.take() {
+            if let Some(token) = request
+                .ready
+                .take()
+                .filter(|token| crate::quick_terminal::portal::valid_token(token))
+            {
                 if let (Some(manager), Some(target)) = (
                     &self.state.activation,
                     surface(&self.connection, &request.target),
@@ -201,6 +205,37 @@ impl Bridge {
             return false;
         };
         self.activate_with_serial(seat, serial, source, to, target)
+    }
+
+    /// xdg-activation-v1 explicitly permits omitting the event serial. This is
+    /// best effort for tokenless portal backends; it confers no focus privilege.
+    pub(crate) fn activate_without_gesture(&mut self, to: u64, target: Arc<Window>) -> bool {
+        if self.state.pending.len() >= MAX_PENDING {
+            return false;
+        }
+        let Some(manager) = self.state.activation.as_ref() else {
+            return false;
+        };
+        let Some(id) = self.state.next_request.checked_add(1) else {
+            return false;
+        };
+        self.state.next_request = id;
+        let token = manager.get_activation_token(&self.queue.handle(), id);
+        token.set_app_id("kettle".into());
+        token.commit();
+        self.state.pending.insert(
+            id,
+            Pending {
+                token,
+                ready: None,
+                target_seq: to,
+                target: target.clone(),
+                _source: target,
+                deadline: Instant::now() + ACTIVATION_WITHIN,
+            },
+        );
+        let _ = self.connection.flush();
+        true
     }
 
     fn activate_with_serial(
@@ -617,6 +652,19 @@ impl Drop for Bridge {
             manager.destroy();
         }
         let _ = self.connection.flush();
+    }
+}
+
+impl crate::quick_terminal::portal::ActivationBridge for Bridge {
+    type Window = Arc<Window>;
+    fn external(&mut self, token: &str, target: &Self::Window) -> bool {
+        self.activate_external(token, target)
+    }
+    fn recent(&mut self, from: u64, source: Self::Window, to: u64, target: Self::Window) -> bool {
+        self.activate(from, source, to, target)
+    }
+    fn without_gesture(&mut self, to: u64, target: Self::Window) -> bool {
+        self.activate_without_gesture(to, target)
     }
 }
 

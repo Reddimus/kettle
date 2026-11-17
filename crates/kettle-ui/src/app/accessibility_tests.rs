@@ -2286,3 +2286,118 @@ fn an_unavailable_switch_stays_enabled_with_its_reason() {
     assert!(description.contains("saved setting: On"), "{description}");
     assert!(!description.to_lowercase().contains("not available"), "{description}");
 }
+
+#[test]
+fn settings_accessibility_click_dispatches_configure_and_retry() {
+    use crate::quick_terminal::portal::{self, Status};
+    use accesskit::{Action, ActionRequest};
+    let cats = crate::settings::categories(&[]);
+    let (cat, fld) = cats
+        .iter()
+        .enumerate()
+        .find_map(|(cat, category)| {
+            category
+                .fields
+                .iter()
+                .position(|field| field.key == "quick-terminal-hotkey")
+                .map(|fld| (cat, fld))
+        })
+        .unwrap();
+    for status in [
+        Status::Registered {
+            trigger: None,
+            configurable: true,
+            focus_dependent: false,
+        },
+        Status::Suppressed,
+    ] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            query: "quick-terminal-hotkey".into(),
+            search_focused: true,
+            ..Default::default()
+        });
+        let fields = ws
+            .settings_nav
+            .as_ref()
+            .unwrap()
+            .visible_fields(&cats, &EN_TEXT);
+        assert_eq!(fields, [(cat, fld)]);
+        let settings = kettle_render::SettingsOverlay {
+            categories: cats
+                .iter()
+                .map(|category| EN_TEXT.text(category.name).into())
+                .collect(),
+            search_query: "quick-terminal-hotkey".into(),
+            rows: vec![kettle_render::SettingsRow {
+                category: cat,
+                label: "Global hotkey".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let projection = super::modal_accessibility_projection(
+            &kettle_render::Overlay {
+                settings: Some(settings),
+                ..Default::default()
+            },
+            (1280.0, 820.0),
+            (8.0, 16.0),
+            1.0,
+            &EN_TEXT,
+        );
+        let target = super::accessibility_modal_id(5, 2);
+        let node = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == target)
+            .unwrap()
+            .1;
+        // Record both failures independently: the dispatch must work as well as
+        // the advertised default action, including the filtered row identity.
+        let mut adjusted = None;
+        let mut effect = None;
+        let request = ActionRequest {
+            action: Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: target,
+            data: None,
+        };
+        let handled = super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &request,
+            &[Some((cat, fld))],
+            |_, cat, fld, dir| {
+                adjusted = Some((cat, fld, dir));
+                assert!(portal::settings_action(&status, false, |action| effect = Some(action)));
+            },
+        );
+        assert!(handled, "Settings Click did not reach the action handler");
+        assert_eq!(adjusted, Some((cat, fld, 0)));
+        assert_eq!(effect, Some(status.action(false)));
+        assert!(node.supports_action(Action::Click));
+        assert!(node.supports_action(Action::Focus));
+        assert!(!ws.settings_nav.as_ref().unwrap().search_focused);
+        assert!(ws.accessibility_pending);
+        let mut invoked = false;
+        assert!(!super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &request,
+            &[None],
+            |_, _, _, _| invoked = true,
+        ));
+        assert!(!invoked, "disabled or hidden rows must not activate");
+        let request = ActionRequest {
+            action: Action::Focus,
+            ..request
+        };
+        assert!(super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &request,
+            &[Some((cat, fld))],
+            |_, _, _, _| panic!("Focus activated the row"),
+        ));
+    }
+    let source = include_str!("accessibility.rs");
+    assert!(source.contains("self.settings_adjust(ws, &cats, cat, fld, dir)"));
+}

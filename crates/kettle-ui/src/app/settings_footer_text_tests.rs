@@ -774,10 +774,9 @@ fn the_settings_projection_follows_the_windows_blur_state() {
         "let blur = ws .native_material .as_ref() \
          .map_or_else(Default::default, |material| material.blur_state());",
         "let blur_unavailable = blur == crate::settings::BlurState::Unavailable;",
-        "crate::settings::row_value(f, blur, &self.cfg, tr)",
-        "description: crate::settings::row_description(f, blur, &self.cfg, tr),",
-        "unavailable: f.key == \"window-blur\" \
-         && blur != crate::settings::BlurState::Available,",
+        "crate::settings::row_value(f, context.clone(), &self.cfg, tr)",
+        "description: crate::settings::row_description( f, context.clone(), &self.cfg, tr, ),",
+        "unavailable: context.unavailable(f),",
         "settings_footer_note( tr, active_gpu.as_deref(), \
          active.fields.get(fld).map(|f| f.key), blur_unavailable,",
     ] {

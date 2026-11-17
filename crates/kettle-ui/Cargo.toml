@@ -213,3 +213,6 @@ objc2-foundation-03 = { package = "objc2-foundation", version = "0.3.2" }
 # wgpu-hal already builds this version; default features would also pull
 # objc2-core-video, which nothing else uses.
 objc2-quartz-core-03 = { package = "objc2-quartz-core", version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-metal", "CALayer", "CAMetalLayer", "CAAnimation", "CAMediaTiming", "CATransaction", "CABase"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5.19", features = ["p2p"] }

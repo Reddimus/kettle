@@ -5815,8 +5815,22 @@ and an X11 connection whose passive grabs end when the registration drops.
 Settings capture reads physical modifiers, including composing Option, and
 canonicalizes shifted US punctuation to base keys plus Shift before persistence
 and native registration.
-Native callbacks only enqueue an event-loop toggle. Wayland and Windows use
-desktop shortcuts invoking the CLI.
+Native callbacks only enqueue an event-loop toggle. On Wayland, a dedicated
+`kettle-shortcuts` thread drives async zbus, with Registry registration before
+other portal calls. A trusted app-wide file lock arbitrates across build primaries;
+waiters poll for takeover. A portable model gates repeats until Deactivated and
+resets on session/connection loss. Commands coalesce through shared desired state,
+while bounded, generation-tagged activations carry tokens outside Debug events.
+The window-less event drain consumes tokens through the existing Wayland bridge
+and republishes Settings/accessibility. Request signals are subscribed before
+calls, with bounded bodies and sender/session/request validation. Bind outcomes
+persist a private, bounded, desktop/chord-scoped prompt suppression record;
+response 2 is deliberately treated as ambiguous. Configuration only loses its v2
+action on an unsupported-method error. A nonempty preference change keeps the
+existing session or pending dialog. Desktop-owned trigger text is bounded and
+sanitized; absence means unknown, not unbound. Wayland size ignores Position and
+skips Kettle's slide. Tokenless activation is best effort under compositor policy.
+Windows and unsupported Wayland desktops retain the CLI desktop-shortcut fallback.
 
 
 Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
