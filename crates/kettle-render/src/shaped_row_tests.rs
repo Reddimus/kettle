@@ -298,6 +298,7 @@ fn grapheme_row_keys_ignore_positions_beyond_the_shaped_extent() {
                 clustered: true,
                 text_presentation: false,
                 single_image: false,
+                joins: Default::default(),
             },
             family: None,
         })
@@ -326,6 +327,7 @@ fn grapheme_geometry_is_part_of_the_shaped_row_cache_key() {
             clustered: true,
             text_presentation: false,
             single_image: false,
+            joins: Default::default(),
         },
         family: None,
     }];
@@ -351,6 +353,7 @@ fn grapheme_metadata_survives_shaping_with_the_cell_style() {
         clustered: true,
         text_presentation: false,
         single_image: false,
+        joins: Default::default(),
     };
     let spacer = GridGlyphCell {
         column: 1,
@@ -358,6 +361,7 @@ fn grapheme_metadata_survives_shaping_with_the_cell_style() {
         clustered: false,
         text_presentation: false,
         single_image: false,
+        joins: Default::default(),
     };
     let next = GridGlyphCell {
         column: 2,
@@ -365,6 +369,7 @@ fn grapheme_metadata_survives_shaping_with_the_cell_style() {
         clustered: false,
         text_presentation: false,
         single_image: false,
+        joins: Default::default(),
     };
     let positions = [
         CellGlyphSpan {
@@ -443,6 +448,7 @@ fn clipped_cached_grapheme_row_is_validated_when_it_becomes_visible() {
         clustered: true,
         text_presentation: false,
         single_image: true,
+        joins: Default::default(),
     };
     let base = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
     let mut attrs = AttrsList::new(&base);
@@ -469,4 +475,31 @@ fn clipped_cached_grapheme_row_is_validated_when_it_becomes_visible() {
     );
     assert!(!grapheme_row_needs_validation(true, true, false));
     assert!(!grapheme_row_needs_validation(false, true, true));
+}
+
+#[test]
+fn arabic_join_sides_are_part_of_the_shaped_row_cache_key() {
+    use super::geometry::GridGlyphCell;
+    use super::terminal::CellGlyphSpan;
+    let row = runs(&["A"]);
+    let shaped = ShapedRow::of(&row);
+    let mut positions = vec![CellGlyphSpan {
+        bytes: 0..1,
+        family: None,
+        cell: GridGlyphCell {
+            column: 0,
+            width: 1,
+            clustered: false,
+            text_presentation: false,
+            single_image: false,
+            joins: Default::default(),
+        },
+    }];
+    let mut keys = std::collections::HashSet::new();
+    for left in [false, true] {
+        for right in [false, true] {
+            positions[0].cell.joins = kettle_core::bidi::Joins { left, right };
+            assert!(keys.insert(shaped.key_with_positions(&row, &positions)));
+        }
+    }
 }

@@ -159,6 +159,78 @@ fn explicit_bidi_controls_cannot_reorder_a_row() {
 }
 
 #[test]
+fn arabic_cells_report_only_their_visual_joining_sides() {
+    let left = Joins {
+        left: true,
+        right: false,
+    };
+    let right = Joins {
+        left: false,
+        right: true,
+    };
+    let both = Joins {
+        left: true,
+        right: true,
+    };
+    for (text, expected) in [
+        ("مرحبا", vec![left, right, left, both, right]),
+        ("لا", vec![left, right]),
+        ("ـبـ", vec![left, both, right]),
+    ] {
+        let cells = row(text);
+        let map = row_bidi(&cells).unwrap();
+        assert_eq!(
+            (0..cells.len())
+                .map(|col| map.joins(col))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let mut cells = row("بب");
+    cells[0] = BidiCell::new('ب', CellKind::Narrow, &['\u{64e}']);
+    let map = row_bidi(&cells).unwrap();
+    assert_eq!((map.joins(0), map.joins(1)), (left, right));
+    cells[0] = BidiCell::new('ب', CellKind::Narrow, &['\u{200c}']);
+    let map = row_bidi(&cells).unwrap();
+    assert_eq!(
+        (map.joins(0), map.joins(1)),
+        (Joins::default(), Joins::default())
+    );
+    let lone = [BidiCell::new('ب', CellKind::Narrow, &['\u{200d}'])];
+    assert_eq!(row_bidi(&lone).unwrap().joins(0), left);
+    assert_eq!(row_bidi(&row("ب")).unwrap().joins(0), Joins::default());
+}
+
+#[test]
+fn other_scripts_and_causing_characters_never_get_arabic_join_sides() {
+    // The Hebrew cell activates bidi even for the LTR Mongolian run.
+    for text in [
+        "abc שלום",
+        "א \u{1820}\u{180a}\u{1820}",
+        "\u{7ca}\u{7fa}\u{7ca}",
+    ] {
+        let cells = row(text);
+        let map = row_bidi(&cells).unwrap();
+        assert!(
+            (0..cells.len()).all(|col| map.joins(col) == Joins::default()),
+            "{text:?}"
+        );
+    }
+    for c in ['\u{7fa}', '\u{883}', '\u{884}', '\u{885}', '\u{180a}'] {
+        let cells = [
+            BidiCell::new('ب', CellKind::Narrow, &[]),
+            BidiCell::new(c, CellKind::Narrow, &[]),
+            BidiCell::new('ب', CellKind::Narrow, &[]),
+        ];
+        assert_eq!(
+            row_bidi(&cells).unwrap().joins(1),
+            Joins::default(),
+            "{c:?}"
+        );
+    }
+}
+
+#[test]
 fn trailing_blanks_stay_at_the_end() {
     let map = row_bidi(&row("שלום   ")).expect("a Hebrew row has a map");
     assert_eq!(log2vis(&map), [3, 2, 1, 0, 4, 5, 6]);
@@ -223,4 +295,20 @@ fn tables_match_the_bidi_classes_they_extend() {
     assert_eq!(joining('ب'), Some(Joining::Dual));
     assert_eq!(joining('ـ'), Some(Joining::Causing));
     assert_eq!(joining('a'), None);
+}
+
+#[test]
+fn even_arabic_forms_cannot_report_joins_at_an_ltr_level() {
+    let units: Vec<_> = ['ب', 'ب']
+        .into_iter()
+        .enumerate()
+        .map(|(col, c)| Unit {
+            col,
+            c,
+            width: 1,
+            byte: col * 2,
+            join: JoinControl::None,
+        })
+        .collect();
+    assert_eq!(arabic_form(&units, &[Level::ltr(), Level::ltr()], 0), None);
 }
