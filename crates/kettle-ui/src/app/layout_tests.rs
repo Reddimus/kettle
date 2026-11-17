@@ -190,7 +190,7 @@ fn resized_ignores_degenerate_size() {
         .split("WindowEvent::Resized(size) => {")
         .nth(1)
         .expect("Resized arm present");
-    let head = &arm[..arm.len().min(900)];
+    let head = arm.split("if self.quick_terminal").next().unwrap();
     assert!(
         head.contains("size.width == 0 || size.height == 0") && head.contains("return"),
         "the Resized handler must early-return on a 0-dimension size"

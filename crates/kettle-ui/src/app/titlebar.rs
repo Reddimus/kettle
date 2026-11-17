@@ -569,28 +569,16 @@ mod tests {
                 let h = 28.0 * scale;
                 let strip = width - left - 2.0 * h;
                 let layout = titlebar_tab_layout(1, 0, (strip, 2.0 * h, left), h, 80.0, true);
+                let mut layout = layout;
+                centre_lone_titlebar_tab(&mut layout, (strip, 2.0 * h, left), 160.0 * scale, 80.0);
                 let rect = (left + layout.xs[0].unwrap(), 0.0, layout.width, h);
                 for hovered in [false, true] {
-                    let content = kettle_render::horizontal_tab_content_layout(
-                        rect,
-                        hovered,
-                        true,
-                        0.0,
-                        "shell",
-                        Some("Cmd+1"),
-                        8.0 * scale,
-                    );
-                    let title = centered_title_lane(content.title, width * 0.5);
-                    assert!((title.0 + title.2 * 0.5 - width * 0.5).abs() < 0.01);
-                    assert!(title.0 >= left);
-                    assert_eq!(content.hint.is_some(), hovered);
-                    if let Some(hint) = content.hint {
-                        assert!(title.0 + title.2 <= hint.0);
-                        assert!(content.close.2 >= 20.0 * scale && content.close.3 >= 20.0 * scale);
-                    } else {
-                        assert_eq!(content.close.2, 0.0);
-                        assert_eq!(content.close.3, 0.0);
-                    }
+                    let content = compact_lone_tab_content(rect, hovered, true, 0.0, scale);
+                    assert!((content.title.0 + content.title.2 * 0.5 - width * 0.5).abs() < 0.01);
+                    assert!(content.title.0 >= left);
+                    assert!(content.hint.is_none());
+                    assert_eq!(content.close.2 > 0.0, hovered);
+                    assert_eq!(content.close.3 > 0.0, hovered);
                 }
                 assert!(
                     rect.0 + rect.2 < left + strip,

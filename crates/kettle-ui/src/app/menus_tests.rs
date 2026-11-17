@@ -1503,6 +1503,7 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
     for index in [0, 1] {
         let mut ws = WindowState::new(1, Mux::new());
         ws.context_menu = Some(ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
             anchor: (10.0, 10.0),
             anchor_scale: 1.0,
             items: vec![
@@ -1740,6 +1741,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
     let active = panel(&items, (300.0, 30.0), 2, 5.0 * row_h);
     let mut ws = WindowState::new(1, Mux::new());
     ws.context_menu = Some(ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: active.anchor,
         anchor_scale: 1.0,
         items: items.clone(),
@@ -2322,4 +2324,43 @@ fn the_select_output_row_acts_on_the_row_the_menu_opened_over() {
     assert!(body("select_command_output").contains(
         "term.command_output_rows(at) .is_some_and(|rows| select_output_rows(&term.term, rows))"
     ));
+}
+
+#[test]
+fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
+    use super::{ContextMenuState, MenuOrigin};
+    use super::modals::{ModalKind, dispatch_modal_press};
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let shells = vec![("sh".to_string(), vec!["sh".to_string()])];
+        let origin = MenuOrigin::NewTab { compact: true };
+        assert!(App::shell_menu_is_loading(&origin.shell_items(None, &tr), &tr));
+        let mut state = ContextMenuState {
+            origin,
+            anchor: (10.0, 32.0), anchor_scale: 1.0,
+            items: origin.shell_items(Some(&shells), &tr),
+            highlight: 0, drill_stack: Vec::new(), scroll_offset: 0,
+            typeahead_buf: String::new(), typeahead_until: None,
+        };
+        let actions = |items: &[ContextMenuItem]| items.iter().filter_map(|i| match i { ContextMenuItem::Item { action, .. } => Some(action.clone()), _ => None }).collect::<Vec<_>>();
+        assert_eq!(actions(&state.items), [Action::SaveLayout, Action::OpenLayoutPicker, Action::OpenSsh]);
+        assert!(!matches!(state.items.last(), Some(ContextMenuItem::Separator)));
+        assert!(matches!(&state.items[0], ContextMenuItem::NewTabShell { .. }));
+        assert_eq!(state.origin.label(&tr).as_deref(), Some(tr.text(kettle_i18n::Text::TabNewOptions)));
+        let profile = state.items.iter().position(|i| matches!(i, ContextMenuItem::Submenu { .. })).unwrap();
+        assert!(state.enter_submenu(profile));
+        assert_eq!(state.origin, origin);
+        assert!(state.leave_submenu());
+        assert_eq!(state.origin, origin);
+        let full = MenuOrigin::NewTab { compact: false }.shell_items(Some(&shells), &tr);
+        assert!(actions(&full).contains(&Action::OpenSettings));
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        ws.context_menu = Some(state);
+        assert!(dispatch_modal_press(&mut ws, ModalKind::ContextMenu, false, 0));
+        assert!(!ws.context_menu.as_ref().is_some_and(|m| m.origin.is_new_tab()));
+    }
+    let event = include_str!("../app.rs");
+    let refresh = event.split_once("UserEvent::ShellsDetected => {").unwrap().1.split("UserEvent::Wayland").next().unwrap();
+    assert!(refresh.contains("self.show_new_tab_menu(&mut ws, Some(&shells), origin, anchor)"));
+    assert!(!refresh.contains("Self::new_tab_menu_items("));
 }

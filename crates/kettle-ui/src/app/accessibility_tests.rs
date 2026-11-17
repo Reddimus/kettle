@@ -161,6 +161,7 @@ fn context_menu_accessibility_exposes_actions_and_validates_targets() {
     use super::{ContextMenuItem, ContextMenuState, accessibility_context_menu_item_index};
     let mut ws = WindowState::new(1, Mux::new());
     ws.context_menu = Some(ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: (0.0, 0.0),
         anchor_scale: 1.0,
         items: vec![
@@ -1503,8 +1504,8 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
             assert_eq!(close.1.label(), Some(tr.a11y_tab_close("shell 0").as_str()));
             assert_eq!(close.1.bounds().unwrap().y0, bar.segments[0].close.1 as f64);
             for text in [
-                tr.text(kettle_i18n::Text::PaletteNewTab),
-                tr.text(kettle_i18n::Text::A11yNewTabMenu),
+                tr.text(kettle_i18n::Text::MenuNewTab),
+                tr.text(kettle_i18n::Text::TabNewOptions),
             ] {
                 assert!(nodes.iter().any(|(_, node)| node.label() == Some(text)
                     && node.supports_action(accesskit::Action::Click)));
@@ -1529,7 +1530,7 @@ fn tab_accessibility_exposes_titles_selection_and_named_actions_on_both_axes() {
             assert!(
                 !header
                     .iter()
-                    .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::A11yNewTabMenu)))
+                    .any(|(_, node)| node.label() == Some(tr.text(kettle_i18n::Text::TabNewOptions)))
             );
             bar.window_controls.clear();
             bar.linux_header = false;

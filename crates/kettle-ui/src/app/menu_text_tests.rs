@@ -608,6 +608,7 @@ fn a_parent_panel_keeps_its_check_box_states() {
     };
     let mut ws = super::WindowState::new(1, super::Mux::new());
     ws.context_menu = Some(super::ContextMenuState {
+        origin: crate::app::MenuOrigin::Other,
         anchor: (440.0, 60.0),
         anchor_scale: 1.0,
         items: scrollbar.clone(),

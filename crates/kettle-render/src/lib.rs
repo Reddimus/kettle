@@ -1625,6 +1625,13 @@ impl Renderer {
                 };
                 quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             } else {
+                let joined = tabbar.in_titlebar && !tabbar.linux_header;
+                quads.extend(tab_strip::joined_new_tab_quads(
+                    tabbar,
+                    chrome_strip_bg,
+                    theme.foreground,
+                    self.scale,
+                ));
                 for (bounds, hovered, pressed, toggled) in [
                     (
                         tabbar.new_tab_menu,
@@ -1651,6 +1658,9 @@ impl Renderer {
                         tabbar.search_open,
                     ),
                 ] {
+                    if joined && (bounds == tabbar.new_tab || bounds == tabbar.new_tab_menu) {
+                        continue;
+                    }
                     if bounds.2 > 0.0
                         && let Some(fill) = tab_strip::flat_button_fill(
                             chrome_strip_bg,
@@ -4828,11 +4838,20 @@ impl Renderer {
                     chrome_strip_bg
                 }
             };
-            let background = toolbar_background(
-                &mut self.chrome_colors,
-                tabbar.hovered_new_tab,
-                tabbar.pressed_new_tab,
-            );
+            let background = if tabbar.in_titlebar && !tabbar.linux_header {
+                tab_strip::joined_control_background(
+                    tabbar,
+                    chrome_strip_bg,
+                    theme.foreground,
+                    false,
+                )
+            } else {
+                toolbar_background(
+                    &mut self.chrome_colors,
+                    tabbar.hovered_new_tab,
+                    tabbar.pressed_new_tab,
+                )
+            };
             let plus_fg = self
                 .chrome_colors
                 .tab_text(plus_fg, background, overlay.window_focused);
@@ -4880,11 +4899,20 @@ impl Renderer {
                 } else {
                     fg
                 };
-                let background = toolbar_background(
-                    &mut self.chrome_colors,
-                    tabbar.hovered_new_tab_menu,
-                    tabbar.pressed_new_tab_menu,
-                );
+                let background = if tabbar.in_titlebar && !tabbar.linux_header {
+                    tab_strip::joined_control_background(
+                        tabbar,
+                        chrome_strip_bg,
+                        theme.foreground,
+                        true,
+                    )
+                } else {
+                    toolbar_background(
+                        &mut self.chrome_colors,
+                        tabbar.hovered_new_tab_menu,
+                        tabbar.pressed_new_tab_menu,
+                    )
+                };
                 let arrow_fg =
                     self.chrome_colors
                         .tab_text(arrow_fg, background, overlay.window_focused);

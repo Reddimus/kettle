@@ -59,14 +59,17 @@ def titlebar_geometry(geometry):
     assert geometry["content"]["y"] >= band["height"], "terminal overlaps titlebar"
     for control in ("new_tab", "new_tab_menu"):
         rect = bar[control]
-        assert rect["width"] >= 20 * scale and rect["height"] >= 20 * scale, control
+        assert rect["width"] >= 28 * scale and rect["height"] >= 28 * scale, control
+    plus, menu = bar["new_tab"], bar["new_tab_menu"]
+    assert abs(plus["x"] + plus["width"] - menu["x"]) <= 0.5, (
+        "new-tab halves must join in + then dropdown order"
+    )
     # The Settings gear leads the pair, apart from it, when the lane has room.
     gear = bar.get("settings") or {"width": 0}
     if gear["width"]:
-        menu = bar["new_tab_menu"]
         assert gear["width"] >= 20 * scale and gear["height"] >= 20 * scale, "settings"
         assert gear["x"] >= band["x"], "settings gear overlaps traffic lights"
-        assert gear["x"] + gear["width"] + 8 * scale <= menu["x"] + 0.5, (
+        assert gear["x"] + gear["width"] + 8 * scale <= plus["x"] + 0.5, (
             "settings gear must sit apart from the new-tab pair"
         )
     for tab in bar["segments"]:
@@ -80,6 +83,7 @@ def titlebar_geometry(geometry):
             assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
     if len(bar["segments"]) == 1:
         tab = bar["segments"][0]
+        assert tab["hint"] is None, "single tab must hide its shortcut hint"
         if not tab["hovered"]:
             assert tab["hint"] is None, "idle single tab must hide its shortcut hint"
             assert tab["close"]["width"] == tab["close"]["height"] == 0, (

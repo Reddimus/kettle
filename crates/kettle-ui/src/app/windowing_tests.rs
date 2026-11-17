@@ -1063,7 +1063,7 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
                 ..Config::default()
             };
             let band = (0.0, 0.0, width * scale, 46.0 * scale);
-            let destination = tear_off_destination_tab(&cfg, band, (true, true), scale, &buttons);
+            let destination = tear_off_destination_tab(&cfg, band, (true, true), scale, &buttons, None);
             assert!((destination.0 - expected_x * scale).abs() < 0.001);
             let grip = wayland_tab_anchor_x(TabBarPos::Top, destination, f64::from(32.0 * scale));
             assert!(
@@ -1085,6 +1085,7 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
             (true, true),
             scale,
             &buttons,
+            None,
         );
         assert!((destination.0 - 198.14286 * scale).abs() < 0.001);
         assert!(
@@ -1130,7 +1131,7 @@ fn wayland_tearoff_ordinary_bar_grips_keep_their_offsets() {
                     22.0 * scale,
                 );
                 let destination =
-                    tear_off_destination_tab(&cfg, band, (false, false), scale, &buttons);
+                    tear_off_destination_tab(&cfg, band, (false, false), scale, &buttons, None);
                 assert_eq!(destination, band);
                 assert_eq!(wayland_tab_anchor_x(pos, destination, 31.0), 31.0);
                 let expected_y = if pos == TabBarPos::Top {

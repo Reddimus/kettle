@@ -797,14 +797,16 @@ impl ApplicationHandler<UserEvent> for App {
                     let Some(mut ws) = self.windows.remove(&seq) else {
                         continue;
                     };
-                    if let Some(anchor) = ws
+                    if let Some((anchor, origin)) = ws
                         .context_menu
                         .as_ref()
-                        .filter(|menu| Self::shell_menu_is_loading(&menu.items, &self.ui_text))
-                        .map(|menu| menu.anchor)
+                        .filter(|menu| {
+                            menu.origin.is_new_tab()
+                                && Self::shell_menu_is_loading(&menu.items, &self.ui_text)
+                        })
+                        .map(|menu| (menu.anchor, menu.origin))
                     {
-                        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
-                        self.show_context_menu(&mut ws, items, anchor.0, anchor.1);
+                        self.show_new_tab_menu(&mut ws, Some(&shells), origin, anchor);
                         if let Some(window) = &ws.window {
                             window.request_redraw();
                         }

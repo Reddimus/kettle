@@ -956,6 +956,8 @@ pub(crate) struct WindowState {
     pub(crate) linux_titlebar: bool,
     pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
     pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
+    /// Desired lone-tab width held across title changes while the pointer is in the strip.
+    pub(crate) lone_tab_width: std::cell::Cell<Option<f32>>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     /// The primary button is down in this window, as title-bar tracking saw.
     pub(crate) titlebar_pressed: bool,
@@ -1587,6 +1589,7 @@ impl WindowState {
     /// When the pointer leaves the window, nothing in the tab bar is under
     /// it or pressed any more.
     pub(crate) fn leave_tab_bar(&mut self) {
+        self.lone_tab_width.set(None);
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
@@ -1739,6 +1742,7 @@ impl WindowState {
             linux_titlebar: false,
             pressed_window_control: None,
             hovered_window_control: None,
+            lone_tab_width: std::cell::Cell::new(None),
             titlebar_click: None,
             titlebar_pressed: false,
             titlebar_window_held: false,

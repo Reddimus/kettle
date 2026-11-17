@@ -289,6 +289,14 @@ pub(crate) fn activity_marker_quads(
 /// The GNOME header's `+` leads the strip, so its tooltip hangs under it
 /// rather than at the far end where every other strip keeps `+`.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    if bar.in_titlebar && !bar.linux_header {
+        if bar.hovered_new_tab && !bar.pressed_new_tab {
+            return bar.new_tab;
+        }
+        if bar.hovered_new_tab_menu && !bar.pressed_new_tab_menu {
+            return bar.new_tab_menu;
+        }
+    }
     if bar.hovered_settings && !bar.pressed_settings && bar.settings.2 > 0.0 {
         return (bar.settings.0, bar.band.1, bar.settings.2, bar.band.3);
     }
@@ -2053,9 +2061,7 @@ mod tests {
         let source = crate::production_source()
             .split_whitespace()
             .collect::<String>();
-        assert!(source.contains(
-            "(tabbar.search,tabbar.hovered_search,tabbar.pressed_search,tabbar.search_open,),]{ifbounds.2>0.0&&letSome(fill)=tab_strip::flat_button_fill("
-        ));
+        assert!(source.contains("ifbounds.2>0.0&&letSome(fill)=tab_strip::flat_button_fill("));
     }
 
     /// Find's tooltip hangs under Find, inside the window, at 1x and 2x,
@@ -2582,5 +2588,207 @@ mod window_control_tests {
                 }
             }
         }
+    }
+}
+
+/// CPU geometry shared by the renderer and the compact-header paint tests.
+pub(crate) fn joined_new_tab_quads(
+    bar: &TabBar,
+    chrome: Rgb,
+    foreground: Rgb,
+    scale: f32,
+) -> Vec<QuadInstance> {
+    let mut quads = Vec::new();
+    if !bar.in_titlebar || bar.linux_header || bar.new_tab_menu.2 <= 0.0 {
+        return quads;
+    }
+    let plus = bar.new_tab;
+    let menu = bar.new_tab_menu;
+    let group = (plus.0, plus.1, menu.0 + menu.2 - plus.0, plus.3);
+    if let Some(fill) = joined_group_fill(bar, chrome, foreground) {
+        rounded_fill(
+            &mut quads,
+            group,
+            6.0 * scale,
+            (true, true),
+            (fill, 1.0),
+            None,
+        );
+    }
+    for (bounds, hovered, pressed, toggled) in [
+        (plus, bar.hovered_new_tab, bar.pressed_new_tab, false),
+        (
+            menu,
+            bar.hovered_new_tab_menu,
+            bar.pressed_new_tab_menu,
+            bar.new_tab_menu_open,
+        ),
+    ] {
+        if let Some(fill) = flat_button_fill(chrome, foreground, hovered, pressed, toggled) {
+            rounded_fill(
+                &mut quads,
+                bounds,
+                6.0 * scale,
+                (true, true),
+                (fill, 1.0),
+                None,
+            );
+        }
+    }
+    let divider = crate::chrome::tab_detail(chrome, foreground, false);
+    quads.push(rect(
+        menu.0,
+        menu.1 + 6.0 * scale,
+        scale.min(menu.2),
+        (menu.3 - 12.0 * scale).max(0.0),
+        divider,
+        1.0,
+    ));
+    quads
+}
+
+fn joined_group_fill(bar: &TabBar, chrome: Rgb, foreground: Rgb) -> Option<Rgb> {
+    (bar.hovered_new_tab || bar.hovered_new_tab_menu).then(|| {
+        crate::color::over(
+            chrome,
+            crate::chrome::strip_hover(chrome, foreground, false),
+            0.45,
+            false,
+        )
+    })
+}
+
+pub(crate) fn joined_control_background(
+    bar: &TabBar,
+    chrome: Rgb,
+    foreground: Rgb,
+    menu: bool,
+) -> Rgb {
+    let (hovered, pressed, toggled) = if menu {
+        (
+            bar.hovered_new_tab_menu,
+            bar.pressed_new_tab_menu,
+            bar.new_tab_menu_open,
+        )
+    } else {
+        (bar.hovered_new_tab, bar.pressed_new_tab, false)
+    };
+    flat_button_fill(chrome, foreground, hovered, pressed, toggled)
+        .or_else(|| joined_group_fill(bar, chrome, foreground))
+        .unwrap_or(chrome)
+}
+
+#[cfg(test)]
+mod compact_header_tests {
+    use super::*;
+
+    fn bar(scale: f32) -> TabBar {
+        let mut bar = TabBar::hidden();
+        bar.in_titlebar = true;
+        bar.band = (78.0 * scale, 0.0, 1202.0 * scale, 32.0 * scale);
+        bar.new_tab = (1212.0 * scale, 0.0, 32.0 * scale, 32.0 * scale);
+        bar.new_tab_menu = (1244.0 * scale, 0.0, 28.0 * scale, 32.0 * scale);
+        bar
+    }
+
+    #[test]
+    fn compact_header_divider_shared_hover_and_open_menu_are_painted() {
+        let bg = Rgb::new(30, 30, 30);
+        let fg = Rgb::new(220, 220, 220);
+        for scale in [1.0, 1.5, 2.0] {
+            let mut bar = bar(scale);
+            let idle = joined_new_tab_quads(&bar, bg, fg, scale);
+            assert_eq!(idle.len(), 1);
+            assert_eq!(idle[0].pos, [1244.0 * scale, 6.0 * scale]);
+            assert_eq!(idle[0].size, [scale, 20.0 * scale]);
+            bar.hovered_new_tab = true;
+            let hovered = joined_new_tab_quads(&bar, bg, fg, scale);
+            assert!(hovered.iter().any(|q| q.pos[0] <= bar.new_tab.0
+                && q.pos[0] + q.size[0] >= bar.new_tab_menu.0 + bar.new_tab_menu.2
+                && q.color[3] == 1.0));
+            bar.hovered_new_tab = false;
+            bar.new_tab_menu_open = true;
+            let open = joined_new_tab_quads(&bar, bg, fg, scale);
+            assert!(open.len() > idle.len());
+            assert!(
+                open[..open.len() - 1]
+                    .iter()
+                    .all(|q| q.pos[0] >= bar.new_tab_menu.0)
+            );
+        }
+    }
+
+    #[test]
+    fn compact_header_tooltips_follow_halves_and_spanish_stays_in_window() {
+        for scale in [1.0, 2.0] {
+            let mut bar = bar(scale);
+            for menu in [false, true] {
+                bar.hovered_new_tab = !menu;
+                bar.hovered_new_tab_menu = menu;
+                let anchor = tooltip_anchor(&bar);
+                assert_eq!(anchor, if menu { bar.new_tab_menu } else { bar.new_tab });
+                let tooltip = tooltip_rect(
+                    anchor,
+                    (1280.0 * scale, 820.0 * scale),
+                    (240.0 * scale, 20.0 * scale),
+                    scale,
+                );
+                assert!(tooltip.0 >= 0.0 && tooltip.0 + tooltip.2 <= 1280.0 * scale);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_header_plain_and_gnome_paint_guards() {
+        for linux in [false, true] {
+            let mut bar = bar(1.0);
+            bar.in_titlebar = linux;
+            bar.linux_header = linux;
+            bar.hovered_new_tab = true;
+            bar.new_tab_menu_open = true;
+            assert!(
+                joined_new_tab_quads(&bar, Rgb::new(30, 30, 30), Rgb::new(220, 220, 220), 1.0)
+                    .is_empty()
+            );
+            if !linux {
+                assert_eq!(tooltip_anchor(&bar), bar.band);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod compact_header_contrast_tests {
+    use super::*;
+    #[test]
+    fn compact_header_glyph_contrast_uses_the_painted_open_and_shared_background() {
+        let strip = Rgb::new(30, 30, 30);
+        let fg = Rgb::new(80, 80, 80);
+        let mut bar = TabBar::hidden();
+        bar.in_titlebar = true;
+        bar.new_tab_menu_open = true;
+        let background = joined_control_background(&bar, strip, fg, true);
+        assert_ne!(background, strip);
+        assert_eq!(
+            background,
+            flat_button_fill(strip, fg, false, false, true).unwrap()
+        );
+        let mut colors = crate::chrome::Colors::default();
+        let ink = colors.tab_text(fg, background, true);
+        assert!(crate::color::contrast_ratio(ink, background) >= 4.5);
+        bar.new_tab_menu_open = false;
+        bar.hovered_new_tab = true;
+        let shared = joined_control_background(&bar, strip, fg, true);
+        assert_ne!(shared, strip);
+        assert_eq!(shared, joined_group_fill(&bar, strip, fg).unwrap());
+        let ink = colors.tab_text(fg, shared, true);
+        assert!(crate::color::contrast_ratio(ink, shared) >= 4.5);
+        let source = crate::production_source();
+        assert_eq!(
+            source
+                .matches("tab_strip::joined_control_background(")
+                .count(),
+            2
+        );
     }
 }
