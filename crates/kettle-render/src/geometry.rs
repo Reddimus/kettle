@@ -595,7 +595,7 @@ impl GridGlyphCell {
 
     pub fn from_metadata(metadata: usize) -> Option<Self> {
         #[cfg(test)]
-        GRID_GLYPH_METADATA_DECODES.update(|count| count + 1);
+        GRID_GLYPH_METADATA_DECODES.with(|count| count.set(count.get() + 1));
         let column = (metadata >> 7).checked_sub(1)?;
         let width = metadata & 3;
         matches!(width, 1 | 2).then_some(Self {
