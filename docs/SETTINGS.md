@@ -87,12 +87,31 @@ spelling. Quantities use a space before the unit, for example `13 px`, `6 px`,
 Labels and descriptions sit to the left of the value controls. The active
 category uses the same selection highlight as menus. Search, category controls,
 and the right pane footer stay in place while the focused option scrolls into
-view. The panel uses 72% of the window width (560-980 pixels) and 78% of its
-height (360-760 pixels), with at least 16 pixels of margin on each side.
+view. The panel uses 72% of the window width (560-980 logical pixels) and 84% of
+its height (360-820 logical pixels), with at least 16 pixels of margin on each side.
+
+The panel uses logical pixels for its size limits, margins, spacing, strokes and
+sidebar breakpoint, multiplied by the window's backing scale. Font size is
+independent of that scale. The sidebar appears when the panel is at least 640
+logical pixels wide. Hints move below its categories only when all categories
+and complete key/action pairs fit; otherwise they wrap between pairs in the
+content footer. Notices remain in the content footer.
+
+With the default bundled font and no notice, Appearance shows 12 rows on the
+1600x968 Linux rendering surface, 10 at 1280x820 on Linux and macOS, and 8 at
+640x820. Those counts apply at both 1x and 2x. A notice can reduce the count;
+navigation keeps the selected field visible under its section heading.
+Bundled-family field labels, headings and the title use the bundled bold face
+on the first Settings frame. Custom font families depend on their installed
+faces. Number and text values have filled wells; choices retain outlines.
+Reset shares an outline with its number or choice, while switches keep a
+four-logical-pixel gap. Free text and shortcut fields have no Reset.
 
 ## What's in the panel
 
-**Appearance**
+### Appearance
+
+#### Colors and text
 
 | Option | Config key | Notes |
 |---|---|---|
@@ -100,14 +119,24 @@ height (360-760 pixels), with at least 16 pixels of margin on each side.
 | Theme | `theme`, `light-theme` or `dark-theme` | curated list: Kettle's default pair (TokyoNight Night, Kettle Day) and the most popular themes; ←/→ and the wheel live-preview each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. Enter, Space or a click opens the [theme picker](#theme-picker), which searches the full 500+-theme bundle. `NextTheme`/`PrevTheme` and a `theme =` line in your config reach every theme too |
 | Minimum contrast | `minimum-contrast` | Off (default) · 3 · 4.5 · 7, each a ratio to 1; lifts terminal text colours toward white or black until each reads at that ratio on its background. A ratio set by hand in the config (such as 2.5) shows as it is until you step it. The theme picker's **Contrast:** button steps the same values |
 | Font size | `font-size` | 6–72 px |
+
+#### Window
+
+| Option | Config key | Notes |
+|---|---|---|
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On |
 | Window padding | `window-padding-x` | 0–40 px |
+| Show pane titlebars | `show-titlebar` | On / Off |
+
+#### Cursor
+
+| Option | Config key | Notes |
+|---|---|---|
 | Cursor shape | `cursor-style` | Block · Bar · Underline; applies to running panes immediately |
 | Unfocused cursor | `cursor-unfocused-style` | Hollow (default) · Hidden · Unchanged; windows and inactive split panes; applies live |
 | Cursor blink | `cursor-blink` | On / Off |
 | Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
-| Show pane titlebars | `show-titlebar` | On / Off |
 
 **Background** — options that don't apply to the chosen type are dimmed
 and skipped; the page dims its backdrop so the **live** wallpaper previews around
@@ -120,26 +149,43 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays |
 | Interface bar color | `chrome-background` | Theme · Automatic (from wallpaper) · Black · White |
 
-**Behavior**
+### Behavior
+
+#### General
 
 | Option | Config key | Notes |
 |---|---|---|
 | Language | `language` | Automatic · English · Español; each language is named in itself. Applies when Kettle restarts, and the footer says so once the choice differs from the running language |
-| Scrollbar | `scrollbar` | Hidden · Automatic · Always |
-| Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
-| Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
 | Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention. Visual also marks the active tab while a bell in the pane you are looking at is unanswered |
+| Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
+| Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |
+| Update check interval | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
+
+#### Mouse and keyboard
+
+| Option | Config key | Notes |
+|---|---|---|
+| Focus mode | `focus` | Click to focus · Follows mouse · System default |
+| Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
+| Vim menu navigation | `vim-menu-nav` | On / Off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+
+#### Scrolling
+
+| Option | Config key | Notes |
+|---|---|---|
+| Scrollbar | `scrollbar` | Hidden · Automatic · Always |
+| Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
 | Scrollback lines | `scrollback` | 0–100000 |
 | Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
+
+#### Clipboard
+
+| Option | Config key | Notes |
+|---|---|---|
 | Copy on selection | `copy-on-select` | On / Off; its description lists Option/Alt-drag for blocks and Shift-click to extend |
 | Trim trailing spaces on copy | `copy-trim-whitespace` | On (default) drops trailing whitespace at each copied line's end. Off copies the selection exactly as displayed |
 | Paste protection | `paste-protection` | Automatic (default) · Always · Off: when Kettle asks before pasting text. The Confirm paste dialog's "Paste settings…" link opens Settings on this row |
 | Clipboard access by programs | `osc52` | Off · Copy only (default) · Read only · Copy and read: what OSC 52 lets a program in a pane do with the clipboard. Read only and Copy and read let a remote program read it |
-| Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
-| Focus mode | `focus` | Click to focus · Follows mouse · System default |
-| Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |
-| Update check interval | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
-| Vim menu navigation | `vim-menu-nav` | On / Off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
 
 **Sessions**
 
@@ -219,12 +265,29 @@ the system cannot run the check yet. Agent control itself (`agent-server`)
 stays in the config file, because it grants reading and typing and applies at
 launch.
 
-**Keybinds** — rebind common actions interactively. Each row shows the chord
+### Keybinds
+
+Rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the
 action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
-actions: split right/down, close pane, new/next/previous tab, search, command
-palette, open settings, zoom pane, copy, paste.
+actions are grouped in this order:
+
+#### Panes
+
+Split right, Split down, Close pane, Zoom pane.
+
+#### Tabs
+
+New tab, Next tab, Previous tab.
+
+#### Tools
+
+Search, Command palette, Open settings.
+
+#### Clipboard
+
+Copy, Paste.
 
 ## Beyond the panel
 

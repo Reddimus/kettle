@@ -300,10 +300,11 @@ def geometry_fixture(name, scale=1, narrow=False):
                              content_rect=rect(30, 100, width - 60, 600),
                              search_rect=rect(30, 50, width - 60, 30),
                              focused_row=0,
-                             rows=[dict(index=0, rect=rect(30, 100, width - 60, 30),
-                                        reset_rect=rect(width - 200, 102, 60, 26),
+                             groups=[dict(first_row=0, rect=rect(30, 100, width - 60, 24))],
+                             rows=[dict(index=0, rect=rect(30, 130, width - 60, 30),
+                                        reset_rect=rect(width - 200, 132, 60, 26),
                                         reset_enabled=True),
-                                   dict(index=1, rect=rect(30, 130, width - 60, 30),
+                                   dict(index=1, rect=rect(30, 160, width - 60, 30),
                                         reset_rect=None, reset_enabled=None)])
     if modal == "search":
         g["search"] = dict(rect=rect(0, 790, width, 30), has_match=name == "search-matches",
@@ -358,6 +359,23 @@ class GeometryTests(unittest.TestCase):
                         status, results = self.run_fixture(name, geometry_fixture(name, scale, narrow), raw)
                         self.assertEqual(status, 0)
                         self.assertEqual(results[0]["result"], "geometry ok")
+
+    def test_settings_groups_validate_first_rows_and_nonoverlapping_bounds(self):
+        for scale in (1, 2):
+            for narrow in (False, True):
+                good = geometry_fixture("settings", scale, narrow)
+                capture.assert_geometry(good, "settings")
+                for mutate in (
+                    lambda g: g["settings"].pop("groups"),
+                    lambda g: g["settings"]["groups"][0].update(first_row=99),
+                    lambda g: g["settings"]["groups"][0]["rect"].update(x=-10),
+                    lambda g: g["settings"]["groups"][0]["rect"].update(y=130 * scale),
+                    lambda g: g["settings"]["groups"].append(copy.deepcopy(g["settings"]["groups"][0])),
+                ):
+                    bad = copy.deepcopy(good)
+                    mutate(bad)
+                    with self.assertRaises((AssertionError, KeyError)):
+                        capture.assert_geometry(bad, "settings")
 
     def test_bad_geometry_fails_and_keeps_diagnostics(self):
         cases = (

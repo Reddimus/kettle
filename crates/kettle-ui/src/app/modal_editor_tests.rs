@@ -111,15 +111,16 @@ fn review_settings_value_slot_uses_natural_font_width() {
         }],
         focused_row: 0,
         title: "Settings".into(),
-        hints: String::new(),
+        hints: Vec::new(),
         footer_note: None,
         ..Default::default()
     };
     let text_cw = 10.0;
     for scale in [0.5, 1.0, 2.0] {
         let cw = text_cw * scale;
-        let layout = kettle_render::settings_layout(&set, (cw, 20.0), (1600.0, 600.0), text_cw);
-        let value = kettle_render::settings_value_rect(&set, cw, 20.0, 1600.0, 600.0, text_cw);
+        let layout =
+            kettle_render::settings_layout(&set, (cw, 20.0), (1600.0, 600.0), text_cw, 1.0);
+        let value = kettle_render::settings_value_rect(&set, cw, 20.0, 1600.0, 600.0, text_cw, 1.0);
         let chip = layout.rows[0].chip_rect;
         // One line of the editor, centred in the chip.
         assert_eq!(

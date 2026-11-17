@@ -3812,3 +3812,26 @@ with `before`, `summoned`, `dismissed` and `withheld` states. The script's oracl
 self-test gives the exact boolean fields; first-map focus alone fails it. This
 validates the recorded assertions, not the provenance of captures or a real
 compositor. Keep raw captures private and record matched conditions separately.
+
+### Settings hierarchy regressions
+
+Settings tests cover both bundled platform font sizes (13 and 14), independent
+font-size changes, English/Spanish, 640/1280/1600 widths and backing scales 1/2.
+`settings_hierarchy_tests` exercises sticky headings, the exact short-panel
+heading boundary, overflowing notices, paired hint wrapping, theme cache
+invalidation, adjacent-surface contrast and joined Reset geometry. A portable
+font test verifies bundled bold advances; the cold-open renderer test checks
+that Settings loads bold before any styled terminal output. A missing GPU
+adapter is reported explicitly by that renderer test.
+
+`hierarchy_tests`, `hierarchy_geometry_tests` and the Settings accessibility
+tests verify all grouped catalogues, moved-key actions, row-based heading
+bounds, hidden rows and editor membership. `scripts/test-capture-ui-states.py`
+checks ctl group first-row associations and non-overlapping heading bands.
+Keep semantic regression evidence by reverting the relevant behavior while
+retaining its types and tests, observing the targeted assertion failure, then
+restoring and rerunning. A compiler failure is not regression evidence.
+
+Refresh Linux Settings PNGs only from reviewed CI artifacts. Native captures,
+Orca and VoiceOver still need their native runners; portable layout and AX
+projection tests do not establish native visual or speech behavior.
