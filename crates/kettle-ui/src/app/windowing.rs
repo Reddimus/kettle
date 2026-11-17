@@ -3064,6 +3064,7 @@ impl App {
             return;
         }
         let mut ws = ws;
+        self.sync_selection_hint(&mut ws, std::time::Instant::now());
         self.sync_pane_focus_reports(&mut ws);
         self.sync_focused_bell(&mut ws);
         if seq == self.focused_seq {

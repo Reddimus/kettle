@@ -1760,6 +1760,16 @@ and `INLINE_CARD_GPU_SKIPPED` when the adapter cannot exercise it.
 Require acceptance for both Grid and Legacy cases you claim to have tested.
 Headless readbacks still do not prove native input or installed-package behavior.
 
+The `c09_` selection tests sweep every bundled theme, ANSI ink and sampled
+program background at opaque and translucent alpha values. They require 7:1
+text and 1.3:1 focus separation, and pin the original explicit-user colours.
+The outline check compares exposed union edges at 1x and 2x without fonts or
+per-cell seams. Hint checks cover the held drag, eight-second release tail,
+once-per-process suppression, cancellation, localized physical modifiers and
+the single polite Status whose full text matches the painted projection.
+Native Linux, macOS and Windows input and assistive-technology runs remain
+necessary to validate actual event delivery and announcements.
+
 The `regression_` tests in `kettle-render` and `kettle-ui` cover close-chip
 contrast with an overridden chrome background, pane and lane dimming order,
 single dimming of terminal decorations, inactive color emoji dimming with an
@@ -2979,6 +2989,14 @@ parameter errors are not retried; a permanently disabled paste mode still
 fails. An executed command's failure or timeout is returned without retry.
 Portable regressions cover these boundaries. A delayed native Bash prompt
 provides a control for the transition before Readline enables paste again.
+
+`run_command` returns at the command-end mark, before the shell draws its next
+prompt, and Fish 4.2 and later ask for the cursor position in that gap. Fish
+4.2 reads an Escape typed before the question together with the reply's ESC as
+Alt+Escape, and inserts the rest of the reply as command-line text. The Fish
+Vi check therefore types Escape only at the drawn prompt, where Fish has
+re-enabled the Kitty keyboard protocol and Escape arrives as `CSI 27 u`. A
+portable regression covers the wait.
 
 The Linux build job runs it under Xvfb; macOS runs it on its native desktop.
 Windows runs the PowerShell token, native-status, bounded-input and binding

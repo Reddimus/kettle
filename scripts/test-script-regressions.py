@@ -287,6 +287,39 @@ class ScriptRegressionTests(unittest.TestCase):
         self.assertEqual(attempts, 1)
         self.assertEqual(fixture.ctl.call_count, 1)
 
+    def test_fish_vi_escape_waits_for_the_drawn_prompt(self):
+        # Fish 4.2 asks for the cursor position between OSC 133 D and drawing
+        # its prompt; an Escape typed in that gap joins the reply's ESC.
+        check = load('check-command-correlation')
+        echo = "PROBE> fish_vi_key_bindings; bind -M insert \\cxz 'printf mode'\n"
+        screens = [{'text': echo + '\n\n'}] * 2 + [{'text': echo + '[I] PROBE> \n\n'}]
+        fixture = Mock()
+        fixture.json_ctl.side_effect = screens + [{'pane': 1, 'keys': 1}]
+
+        def wait(condition):
+            for _ in screens:
+                if condition():
+                    return
+            raise AssertionError('the prompt was never drawn')
+
+        check.send_escape_at_prompt(fixture, wait)
+        self.assertEqual([c.args for c in fixture.json_ctl.call_args_list],
+                         [('read_screen',)] * 3 + [('send_keys', {'keys': ['escape']})])
+        for text, expected in [('[I] PROBE> ', True), ('PROBE> ', True),
+                               ('[I] PROBE> [14;1R', False), (echo, False), ('', False)]:
+            with self.subTest(text=text):
+                self.assertEqual(check.at_bare_prompt({'text': text + '\n\n'}), expected)
+
+    def test_fish_vi_check_types_escape_only_at_the_prompt(self):
+        tree = ast.parse((SCRIPTS / 'check-command-correlation.py').read_text())
+        block = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
+                     and ast.unparse(n.test) == "label == 'fish'"
+                     and 'fish_vi_key_bindings' in ast.unparse(n))
+        calls = {ast.unparse(n.func) for n in ast.walk(block) if isinstance(n, ast.Call)}
+        self.assertIn('send_escape_at_prompt', calls)
+        self.assertEqual([n.lineno for n in ast.walk(block)
+                          if isinstance(n, ast.Constant) and n.value == 'escape'], [])
+
     def test_modal_startup_failure_preserves_clipboard(self):
         modal = load('check-modal-shortcuts')
         with tempfile.TemporaryDirectory() as raw, \

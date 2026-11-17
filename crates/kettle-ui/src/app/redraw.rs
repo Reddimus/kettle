@@ -208,6 +208,10 @@ impl App {
                     kettle_render::avoid_hint_labels(&mut status, pane, &hint_bounds);
                     pane_statuses.push(status);
                 }
+            } else if let Some(status) =
+                self.selection_hint_status(ws, pane, status_cell, std::time::Instant::now())
+            {
+                pane_statuses.push(status);
             } else if let Some(link) = self.hovered_link_at_cursor(ws) {
                 let (cw, ch) = ws
                     .renderer

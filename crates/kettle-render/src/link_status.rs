@@ -14,6 +14,7 @@ pub struct PaneStatus {
     /// Full destination for assistive technology, absent for the hint legend.
     pub target: Option<String>,
     pub link_bounds: Option<Rect4>,
+    pub selection_hint: bool,
 }
 
 pub fn link_status_layout(
@@ -64,6 +65,7 @@ pub fn link_status_layout(
         text,
         description: format!("{target} | {gesture}"),
         target: Some(target.to_string()),
+        selection_hint: false,
         link_bounds: hovered.iter().copied().reduce(|left, right| {
             let (x, y) = (left.0.min(right.0), left.1.min(right.1));
             (
@@ -106,8 +108,15 @@ pub fn hint_legend_layout(pane: Rect4, cell: (f32, f32), legend: &str) -> Option
         text: lines.join("\n"),
         description: legend.to_string(),
         target: None,
+        selection_hint: false,
         link_bounds: None,
     })
+}
+
+pub fn selection_hint_layout(pane: Rect4, cell: (f32, f32), text: &str) -> Option<PaneStatus> {
+    let mut status = hint_legend_layout(pane, cell, text)?;
+    status.selection_hint = true;
+    Some(status)
 }
 
 /// Keep the legend near the bottom without hiding chips on the last row.

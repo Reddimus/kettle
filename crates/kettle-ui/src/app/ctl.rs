@@ -1547,7 +1547,7 @@ impl App {
             .iter()
             .map(|status| {
                 serde_json::json!({
-                    "kind": if status.target.is_some() { "link_hover" } else { "hint_legend" },
+                    "kind": if status.selection_hint { "selection_hint" } else if status.target.is_some() { "link_hover" } else { "hint_legend" },
                     "rect": rect_json(status.rect),
                 })
             })

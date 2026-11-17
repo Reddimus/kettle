@@ -20,11 +20,14 @@ mod gpu;
 mod labels;
 mod link_status;
 mod mark_fallback;
-pub use link_status::{PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout};
+pub use link_status::{
+    PaneStatus, avoid_hint_labels, hint_legend_layout, link_status_layout, selection_hint_layout,
+};
 mod overlays;
 mod screenshot;
 mod scrollback;
 mod search;
+mod selection_outline;
 #[cfg(test)]
 use labels::overlay_label_cols;
 pub use scrollback::{
@@ -244,6 +247,8 @@ mod glyphpipe;
 
 #[cfg(test)]
 mod headless_tests;
+#[cfg(test)]
+mod selection_contrast_gpu_tests;
 
 mod imgpipe;
 
@@ -4993,7 +4998,11 @@ impl Renderer {
                 top: status.rect.1,
                 scale: 1.0,
                 bounds: text_bounds_for_rect(status.rect),
-                default_color: gc(theme.foreground),
+                default_color: gc(if status.selection_hint {
+                    color::with_min_contrast(theme.foreground, theme.background, 7.0)
+                } else {
+                    theme.foreground
+                }),
                 custom_glyphs: &[],
             });
         }

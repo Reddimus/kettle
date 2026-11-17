@@ -208,6 +208,7 @@ mod gpu_recovery;
 mod linux_titlebar;
 #[cfg(test)]
 mod linux_titlebar_tests;
+mod selection_hint;
 use linux_titlebar::*;
 mod media;
 mod menus;
@@ -367,6 +368,7 @@ mod restore_content_tests;
 use crate::window_accent::pick_accent_slot;
 
 pub struct App {
+    selection_hint: selection_hint::SelectionHint,
     #[cfg(target_os = "linux")]
     wayland: Option<crate::wayland::Bridge>,
     #[cfg(target_os = "linux")]

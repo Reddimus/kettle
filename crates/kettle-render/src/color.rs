@@ -426,6 +426,21 @@ pub(crate) fn with_min_contrast_same_hue(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rg
     min_contrast_along(fg, bg, min_ratio, same_hue_toward(fg))
 }
 
+/// Reuse the original tint's hue when adjusting an already rounded fill.
+pub(crate) fn selection_tint(fg: Rgb, tint: Rgb, ink: Rgb, minimum: f64) -> Rgb {
+    let (hue, saturation, _) = hsl(tint);
+    let (_, _, lightness) = hsl(fg);
+    let base = from_hsl(hue, saturation, lightness);
+    min_contrast_along(base, ink, minimum, |target, t| {
+        let end = if target == Rgb::new(255, 255, 255) {
+            1.0
+        } else {
+            0.0
+        };
+        from_hsl(hue, saturation, lightness + (end - lightness) * t)
+    })
+}
+
 /// `fg` with its HSL lightness moved `t` of the way to `target`'s (white or
 /// black), keeping its hue and saturation.
 fn same_hue_toward(fg: Rgb) -> impl Fn(Rgb, f64) -> Rgb {

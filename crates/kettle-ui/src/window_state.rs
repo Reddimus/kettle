@@ -1069,6 +1069,7 @@ pub(crate) struct WindowState {
     /// hover preview.
     pub(crate) lane_hover: Option<LaneHover>,
     pub(crate) selecting: bool,
+    pub(crate) selection_hint_plain: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
     /// next frame from extending or scrolling an unrelated split.
@@ -1783,6 +1784,7 @@ impl WindowState {
             lane_playbacks: std::collections::HashMap::new(),
             lane_hover: None,
             selecting: false,
+            selection_hint_plain: false,
             selecting_pane: None,
             selection_autoscroll_edge: 0,
             selection_dragged: false,
