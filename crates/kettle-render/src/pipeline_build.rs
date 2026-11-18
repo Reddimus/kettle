@@ -34,6 +34,15 @@ impl<T: Send + 'static> PipelineBuild<T> {
         F: FnOnce() -> T + Clone + Send + 'static,
     {
         let here = build.clone();
+        Self::try_spawn(name, build).unwrap_or_else(|| Self::at_join(here))
+    }
+
+    /// Start `build` on a thread named `name`, or `None` when no thread can
+    /// be started, leaving the caller to build some other way.
+    pub(crate) fn try_spawn<F>(name: &'static str, build: F) -> Option<Self>
+    where
+        F: FnOnce() -> T + Send + 'static,
+    {
         #[cfg(test)]
         let refused = tests::threads_refused();
         #[cfg(not(test))]
@@ -47,14 +56,14 @@ impl<T: Send + 'static> PipelineBuild<T> {
             Ok(handle) => {
                 #[cfg(test)]
                 tests::note_spawn(name);
-                Self {
+                Some(Self {
                     handle: Some(handle),
                     at_join: None,
-                }
+                })
             }
             Err(error) => {
-                log::debug!("building {name} on this thread: {error}");
-                Self::at_join(here)
+                log::debug!("no thread for {name}: {error}");
+                None
             }
         }
     }
@@ -116,6 +125,11 @@ pub(crate) mod tests {
 
     pub(super) fn threads_refused() -> bool {
         REFUSE_THREADS.get()
+    }
+
+    /// Refuse this thread's builds a thread, or stop refusing them.
+    pub(crate) fn refuse_threads(refuse: bool) {
+        REFUSE_THREADS.set(refuse);
     }
 
     /// The builds this thread put on threads of their own since the last call.

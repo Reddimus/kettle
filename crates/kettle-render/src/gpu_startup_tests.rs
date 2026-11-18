@@ -3,8 +3,8 @@
 
 use super::gpu::{
     BackendPlatform, EarlyGpuInstance, EarlyValue, OwnedGpuDisplayHandle,
-    early_vulkan_instance_applies_for, gpu_instance_for_backends, instance_descriptor,
-    instance_for_attempt, pipelines_compile_on_threads,
+    early_vulkan_instance_applies_for, finish_glyph_pipeline, gpu_instance_for_backends,
+    instance_descriptor, instance_for_attempt, pipelines_compile_on_threads, start_glyph_build,
 };
 use super::gpu_tests::{gpu_test_config, gpu_test_guard};
 use super::{Config, Renderer};
@@ -324,12 +324,30 @@ fn an_unused_early_value_does_not_wait_for_its_threads_teardown() {
     let _ = unblock.send(());
 }
 
-/// A taken value comes from the thread that made it.
+/// A taken value is the one its thread made, handed over without waiting
+/// for that thread's exit, which can block in thread-local teardown.
 #[test]
-fn a_taken_early_value_is_the_one_its_thread_made() {
-    let early =
-        EarlyValue::spawn("kettle-test-early", || 6 * 7, Duration::from_secs(2)).expect("thread");
-    assert_eq!(early.take(), Some(42));
+fn a_taken_early_value_does_not_wait_for_its_threads_teardown() {
+    let (unblock, blocked) = mpsc::channel::<()>();
+    let early = EarlyValue::spawn(
+        "kettle-test-early",
+        move || {
+            AT_EXIT.with_borrow_mut(|slot| *slot = Some(BlockAtExit(blocked)));
+            6 * 7
+        },
+        Duration::from_secs(2),
+    )
+    .expect("thread started");
+    let (sent, taken) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(early.take());
+    });
+    assert_eq!(
+        taken.recv_timeout(Duration::from_secs(1)),
+        Ok(Some(42)),
+        "taken while the thread's teardown is still blocked"
+    );
+    let _ = unblock.send(());
 }
 
 /// GL runs every device call under one context lock, so its renderer builds
@@ -379,39 +397,81 @@ fn the_renderer_compiles_its_independent_pipelines_on_worker_threads() {
 
 /// The worker threads charge nothing to the graphics budget: the glyph
 /// pipeline only compiles there, and its atlases and buffers are charged
-/// after the image layers, where the whole pipeline used to be built, so
-/// the budget is charged in the order it was before.
+/// after the image layers, where the whole pipeline used to be built.
 #[test]
-fn the_graphics_budget_is_charged_in_the_order_it_was_before() {
+fn the_glyph_pipeline_is_charged_after_the_image_layers() {
     let src = super::production_source();
-    let body = src
-        .split_once("fn with_gpu(")
-        .expect("with_gpu")
-        .1
-        .split_once("\n    }\n")
-        .expect("end of with_gpu")
-        .0;
+    let body = |start: &str, end: &str| {
+        src.split_once(start)
+            .unwrap_or_else(|| panic!("{start}"))
+            .1
+            .split_once(end)
+            .expect("end of the function")
+            .0
+            .to_owned()
+    };
+    assert!(!body("pub(crate) fn start_glyph_build(", "\n}\n").contains("budget"));
+    let with_gpu = body("fn with_gpu(", "\n    }\n");
     let at = |needle: &str| {
-        body.find(needle)
+        with_gpu
+            .find(needle)
             .unwrap_or_else(|| panic!("with_gpu lacks {needle}"))
     };
-    let glyph_start = at("let glyph_build = on_threads.then(|| {");
-    let glyph_end = glyph_start + body[glyph_start..].find("});").expect("end of the build");
-    let glyph_closure = &body[glyph_start..glyph_end];
-    assert!(glyph_closure.contains("GlyphPipeline::compile(&device, format)"));
-    assert!(!glyph_closure.contains("budget"));
+    let start = at("let glyph_build = start_glyph_build(on_threads, &device, format);");
     let background_layer = at("let bg_imgs = shared");
-    let glyph_join = at("let glyph_pipeline = match glyph_build {");
-    assert!(background_layer < glyph_join);
-    assert_eq!(body.matches("GlyphPipeline::with_shaders(").count(), 1);
-    // On GL and on a caller's device, the pipeline is built as it was.
-    assert_eq!(
-        body.matches(
-            "None => GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()),"
-        )
-        .count(),
-        1
+    let finish = at("finish_glyph_pipeline(glyph_build, &device, format, graphics_budget.clone())");
+    assert!(start < background_layer && background_layer < finish);
+}
+
+/// A glyph pipeline built on this thread, as on GL or when its compile gets
+/// no thread, keeps its original order: a budget refused at its first atlas
+/// returns before the layout or the render pipeline is created. The target
+/// format cannot blend, so any glyph render pipeline created for it is a
+/// validation error, and an empty error scope shows none was.
+#[test]
+fn a_glyph_pipeline_without_a_thread_is_refused_before_it_compiles() {
+    use super::GlyphPipeline;
+    use kettle_core::{GraphicsBudget, GraphicsLimits};
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some(renderer) = Renderer::headless_for_tests(&cfg, 64, 64).expect("renderer") else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let device = renderer.gpu().device.clone();
+    let format = wgpu::TextureFormat::Rgba8Uint;
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    drop(GlyphPipeline::compile(&device, format));
+    assert!(
+        pollster::block_on(scope.pop()).is_some(),
+        "compiling the glyph pipeline for {format:?} is a validation error"
     );
+
+    let refused = || {
+        GraphicsBudget::independent(GraphicsLimits {
+            image_bytes: 1,
+            retained_bytes: 1,
+            process_gpu_bytes: 1,
+            ..GraphicsLimits::default()
+        })
+        .expect("valid limits")
+    };
+    for (label, on_threads) in [("no thread could be had", true), ("off threads", false)] {
+        super::pipeline_build::tests::refuse_threads(true);
+        let build = start_glyph_build(on_threads, &device, format);
+        super::pipeline_build::tests::refuse_threads(false);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = finish_glyph_pipeline(build, &device, format, refused());
+        let error = pollster::block_on(scope.pop());
+        assert!(
+            pipeline.is_none(),
+            "{label}: the budget refuses the first atlas"
+        );
+        assert!(
+            error.is_none(),
+            "{label}: nothing compiled before the refusal: {error:?}"
+        );
+    }
 }
 
 /// Only a renderer that created its device compiles on worker threads. A
@@ -441,5 +501,5 @@ fn only_a_renderer_with_its_own_device_compiles_on_worker_threads() {
             .count(),
         4
     );
-    assert_eq!(with_gpu.matches("PipelineBuild::spawn(").count(), 1);
+    assert!(with_gpu.contains("let glyph_build = start_glyph_build(on_threads, &device, format);"));
 }

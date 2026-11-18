@@ -317,6 +317,38 @@ pub(crate) fn pipelines_compile_on_threads(backend: wgpu::Backend) -> bool {
     backend != wgpu::Backend::Gl
 }
 
+/// The glyph pipeline's compile, started on its own thread when `on_threads`
+/// and a thread can be had. Otherwise `None`: [`finish_glyph_pipeline`] then
+/// builds the whole pipeline in its original order, so a budget refused at
+/// an atlas returns before anything compiles.
+pub(crate) fn start_glyph_build(
+    on_threads: bool,
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> Option<PipelineBuild<crate::glyphpipe::GlyphShaders>> {
+    if !on_threads {
+        return None;
+    }
+    let device = device.clone();
+    PipelineBuild::try_spawn("kettle-glyphs", move || {
+        GlyphPipeline::compile(&device, format)
+    })
+}
+
+/// The glyph pipeline, from the compile `build` started, or built whole on
+/// this thread when there is none.
+pub(crate) fn finish_glyph_pipeline(
+    build: Option<PipelineBuild<crate::glyphpipe::GlyphShaders>>,
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    budget: kettle_core::GraphicsBudget,
+) -> Option<GlyphPipeline> {
+    match build {
+        Some(build) => GlyphPipeline::with_shaders(device, format, budget, build.join()),
+        None => GlyphPipeline::new_with_budget(device, format, budget),
+    }
+}
+
 /// Whether a renderer constructor may compile pipelines on worker threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PipelineThreads {
@@ -753,12 +785,7 @@ impl Renderer {
             let device = device.clone();
             move || starfield::StarfieldPipeline::new(&device, format)
         });
-        let glyph_build = on_threads.then(|| {
-            let device = device.clone();
-            PipelineBuild::spawn("kettle-glyphs", move || {
-                GlyphPipeline::compile(&device, format)
-            })
-        });
+        let glyph_build = start_glyph_build(on_threads, &device, format);
 
         // Fonts loaded before the window reach here already measured. Ones
         // measured for another scale or font are measured again, without
@@ -909,13 +936,11 @@ impl Renderer {
         let starfield = starfield_build.join();
         // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
         // Always constructed; only emitted/drawn in grid mode.
-        let glyph_pipeline = match glyph_build {
-            Some(build) => {
-                GlyphPipeline::with_shaders(&device, format, graphics_budget.clone(), build.join())
-            }
-            None => GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()),
-        }
-        .ok_or_else(|| anyhow!("GPU graphics budget exhausted while creating glyph pipeline"))?;
+        let glyph_pipeline =
+            finish_glyph_pipeline(glyph_build, &device, format, graphics_budget.clone())
+                .ok_or_else(|| {
+                    anyhow!("GPU graphics budget exhausted while creating glyph pipeline")
+                })?;
 
         Ok(Renderer {
             surface,
