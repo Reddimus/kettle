@@ -144,9 +144,12 @@ def main():
             result['stalled_clock_unrun'] = 'needs an owned cold Pulse null sink'
         stages = [
             # The audio-path decoder tests. HEIF and AVIF stills need ffmpeg 7.1,
-            # newer than this runner's, and are no part of the audio path.
+            # newer than this runner's, and are no part of the audio path; nor
+            # is the one-shot decodes' address-space check, which the Linux
+            # workspace suite runs.
             ('decoder', executable(args.decoder_tests_json, 'ffmpeg'),
-             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills'], 31),
+             ['--skip', 'real_ffmpeg_draws_heif_and_avif_stills',
+              '--skip', 'real_ffmpeg_decodes_within_the_worker_address_space_on_many_processors'], 31),
             ('playback', native, ['--ignored', '--skip', stalled_case], 5),
             ('broker', executable(args.worker_tests_json, 'process_boundary'),
              ['--ignored', '--exact', 'linux_pcm_only_broker_plays_pauses_and_closes'], 1),

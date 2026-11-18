@@ -958,6 +958,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On Linux machines with many processors, about 12 or more, ffmpeg drew no
+  video poster, video frame or HEIC/AVIF photo. Left to choose, it started
+  filter and encoder threads for every processor, and their stacks and
+  allocator arenas outgrew the media worker's 1 GiB address space before it
+  wrote a picture. These one-shot decodes now run one filter thread and one
+  encoder thread, as playback already did.
+
 - The one-character form of the bracketed-paste end marker (U+009B followed
   by `201~`) opened the Confirm paste dialog and was then sent on by Paste
   and by Paste as one line. Both markers are now removed in that form too, in

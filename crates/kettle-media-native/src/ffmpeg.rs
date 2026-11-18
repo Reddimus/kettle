@@ -553,7 +553,11 @@ enum Seek {
     Time(u64),
 }
 
-/// One decode: its fixed arguments around the numbers Kettle computed.
+/// One decode: its fixed arguments around the numbers Kettle computed. One
+/// filter thread and one encoder thread, as a session has: left to choose,
+/// ffmpeg starts threads by the processor count, each with its own stack
+/// and allocator arena, and on a machine with many the decode outgrows the
+/// worker's address space before it writes a frame.
 fn frame_args(
     container: VideoContainer,
     index: u32,
@@ -571,6 +575,8 @@ fn frame_args(
         "file",
         "-threads",
         THREADS,
+        "-filter_threads",
+        "1",
         "-f",
         demuxer(container),
     ]
@@ -598,6 +604,8 @@ fn frame_args(
             format!("scale={width}:{height}:flags=area,setsar=1"),
             "-pix_fmt".to_string(),
             "rgba".to_string(),
+            "-threads:v".to_string(),
+            "1".to_string(),
             "-f".to_string(),
             "rawvideo".to_string(),
             "pipe:1".to_string(),
@@ -1394,7 +1402,8 @@ fn parse_still_probe(text: &str) -> Result<StillProbe, FailureCode> {
 
 /// The decode of a still, turned as it is shown and drawn at exactly
 /// `width` by `height`: a grid of tiles as the one picture they make. ffmpeg
-/// turns nothing itself, so the size is the one asked for.
+/// turns nothing itself, so the size is the one asked for. Its filter graph
+/// and encoder get one thread each, as a video frame's decode does.
 fn still_args(grid: bool, turn: u32, width: u32, height: u32) -> Vec<String> {
     let turned = match turn {
         90 => "transpose=clock,",
@@ -1403,6 +1412,12 @@ fn still_args(grid: bool, turn: u32, width: u32, height: u32) -> Vec<String> {
         _ => "",
     };
     let filters = format!("{turned}scale={width}:{height}:flags=area,setsar=1");
+    // A grid's graph is a complex one, which has its own thread count.
+    let filter_threads = if grid {
+        "-filter_complex_threads"
+    } else {
+        "-filter_threads"
+    };
     let mut args: Vec<String> = [
         "-nostdin",
         "-hide_banner",
@@ -1412,6 +1427,8 @@ fn still_args(grid: bool, turn: u32, width: u32, height: u32) -> Vec<String> {
         "file",
         "-threads",
         THREADS,
+        filter_threads,
+        "1",
         "-noautorotate",
         "-f",
         "mov",
@@ -1441,6 +1458,8 @@ fn still_args(grid: bool, turn: u32, width: u32, height: u32) -> Vec<String> {
             "1",
             "-pix_fmt",
             "rgba",
+            "-threads:v",
+            "1",
             "-f",
             "rawvideo",
             "pipe:1",
@@ -1882,6 +1901,15 @@ mod tests {
         );
         assert_eq!(at(&grid, "-map").as_deref(), Some("[still]"));
         assert!(!grid.iter().any(|arg| arg == "-vf"));
+        // One thread for the graph, simple or complex, and one for the
+        // encoder, however many processors ffmpeg counts.
+        for (args, graph) in [
+            (&plain, "-filter_threads"),
+            (&grid, "-filter_complex_threads"),
+        ] {
+            assert_eq!(at(args, graph).as_deref(), Some("1"), "{graph}");
+            assert_eq!(at(args, "-threads:v").as_deref(), Some("1"), "{graph}");
+        }
     }
 
     /// Only a release that reads stills whole, 7.1 or later, or a build
@@ -2181,8 +2209,9 @@ format.duration="10.000000"
             args.join(" "),
             format!(
                 "-nostdin -hide_banner -loglevel error -protocol_whitelist file -threads 2 \
-                 -f matroska -seek_timestamp 1 -ss 1.500000 -i {INPUT} -map 0:2 -an -sn -dn \
-                 -frames:v 1 -vf scale=160:90:flags=area,setsar=1 -pix_fmt rgba -f rawvideo pipe:1"
+                 -filter_threads 1 -f matroska -seek_timestamp 1 -ss 1.500000 -i {INPUT} \
+                 -map 0:2 -an -sn -dn -frames:v 1 -vf scale=160:90:flags=area,setsar=1 \
+                 -pix_fmt rgba -threads:v 1 -f rawvideo pipe:1"
             )
         );
         let by_time = frame_args(VideoContainer::Avi, 0, "2.000000", false, 4, 4);
