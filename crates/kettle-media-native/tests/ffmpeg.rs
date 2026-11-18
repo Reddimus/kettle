@@ -735,6 +735,92 @@ fn real_ffmpeg_draws_heif_and_avif_stills() {
     }
 }
 
+/// A real ffmpeg's one-shot decodes fit the worker's address-space limit
+/// (1 GiB, set by `kettle-media-worker` before it reads anything) however
+/// many processors it counts: told it has 64, it still draws a HEIF still,
+/// a grid of tiles and a video's frames under that limit. Left to choose
+/// its own filter and encoder threads, it starts some for each processor,
+/// and from about 12 to 20 of them, by the picture's size, a decode no
+/// longer fits.
+#[cfg(target_os = "linux")]
+#[test]
+fn real_ffmpeg_decodes_within_the_worker_address_space_on_many_processors() {
+    use kettle_media::video::{StillImage, StillInput};
+    let Some(real) = installed() else {
+        return;
+    };
+    let [ffmpeg, ffprobe] = real.programs();
+    let help = Command::new(ffmpeg)
+        .args(["-hide_banner", "-h", "long"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "ffmpeg -h long failed: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    if !String::from_utf8_lossy(&help.stdout).contains("-cpucount") {
+        eprintln!("skipped: this ffmpeg cannot be told how many processors it has");
+        return;
+    }
+    // Stand-ins that run the real programs: ffmpeg under the worker's limit,
+    // in KiB, counting 64 processors. A limit that cannot be set stops the
+    // run instead of decoding without it. (No command substitution: the
+    // decoder's containment refuses the stand-in a fork.)
+    let [ffmpeg, ffprobe] = [ffmpeg, ffprobe].map(|program| {
+        let quoted = program.to_str().filter(|path| !path.contains('\''));
+        quoted.unwrap_or_else(|| panic!("{program:?} cannot be single-quoted"))
+    });
+    let stand_ins = kettle_test_support::private_tempdir("kettle-ffmpeg-many-");
+    for (name, body) in [
+        (
+            "ffmpeg",
+            format!("ulimit -v 1048576 || exit 97\nexec '{ffmpeg}' -cpucount 64 \"$@\""),
+        ),
+        ("ffprobe", format!("exec '{ffprobe}' \"$@\"")),
+    ] {
+        write_script(
+            &stand_ins.path().join(name),
+            format!("#!/bin/sh\n{body}\n").as_bytes(),
+        );
+    }
+    let decoder = Ffmpeg::trust(&stand_ins.path().join("ffmpeg")).unwrap();
+    for name in ["solid.heic", "grid.heic"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/still")
+            .join(name);
+        let bytes = std::fs::read(&path).unwrap();
+        let file = File::open(&path).unwrap();
+        let identity = PathIdentity::of(&file.metadata().unwrap()).unwrap();
+        let input = StillInput {
+            bytes: &bytes,
+            file: Some((&file, identity)),
+        };
+        match decoder.still_image(input, StillImage::Heif, 64, later()) {
+            Ok(drawn) => assert_eq!((drawn.width, drawn.height), (64, 48), "{name}"),
+            Err(FailureCode::CodecUnavailable) => {
+                eprintln!("skipped {name}: this ffmpeg reads no stills");
+            }
+            Err(failure) => panic!("{name}: {failure:?}"),
+        }
+    }
+    let directory = kettle_test_support::private_tempdir("kettle-ffmpeg-fixture-");
+    let path = directory.path().join("index.webm");
+    std::fs::copy(fixture("index.webm"), &path).unwrap();
+    let clip = Clip::open(directory, path);
+    let (result, _) = take(&decoder, &clip, &[666, 2000], (32, 18), later());
+    let stills = result.unwrap_or_else(|failure| panic!("index.webm: {failure:?}"));
+    assert_eq!(
+        stills
+            .frames
+            .iter()
+            .map(|frame| frame_index(&frame.rgba, 32, 18, false))
+            .collect::<Vec<_>>(),
+        [6, 20]
+    );
+}
+
 /// A real ffmpeg on a clip cut short fails as the stream's fault.
 #[test]
 fn real_ffmpeg_refuses_a_truncated_clip() {
