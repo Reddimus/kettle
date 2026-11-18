@@ -409,7 +409,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Changed
 
 - The first window appears sooner. On Linux with an NVIDIA GPU under GNOME,
-  launch to the compositor's first frame went from 377 to 316 ms (median
+  launch to the compositor's first frame went from 377 to 314 ms (median
   of 15 cold starts each); other GPUs and platforms were not measured. GPU
   setup no longer has wgpu build the shaders that validate indirect draws,
   which Kettle never issues, and the first window's renderer compiles five

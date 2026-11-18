@@ -20,12 +20,20 @@ run was rejected for foreign CPU, and none failed. Medians, with the range:
 
 | build | `window_ms` | `ready_ms` |
 |---|---|---|
-| `main` before this change (`1415a82b1`) | 377 (371-390) | 23 |
-| this change | 316 (303-329) | 32 |
-| this change without the early Vulkan instance | 325 (314-335) | 23 |
+| `main` before this change (`1415a82b1`) | 377 (372-386) | 23 |
+| this change | 314 (304-329) | 32 |
+
+An earlier set of the same size compared measurement-only builds of the
+first version of this change:
+
+| build | `window_ms` | `ready_ms` |
+|---|---|---|
+| `main` (`1415a82b1`) | 377 (371-390) | 23 |
+| the change | 316 (303-329) | 32 |
+| without the early Vulkan instance | 325 (314-335) | 23 |
 | the early instance started after the first pane, not in `run_with` | 325 (317-344) | 23 |
 
-The last two rows were measurement-only builds.
+In that set:
 
 - **No indirect-call validation, and five pipelines compiled on worker
   threads: −52 ms.** Adapter and device setup fell from 252.8 to 234.8 ms,
@@ -38,9 +46,14 @@ The last two rows were measurement-only builds.
   shell's first prompt moves from 23 to 32 ms, still about 280 ms before
   the first frame shows it. Started after the first pane instead, it gains
   nothing.
+
+In the final set, adapter and device setup took 214.2 ms against 252.8 ms
+on `main`, and the setup after the device 43.8 against 77.1 ms. A screenshot
+1.5 s after the first frame was pixel-identical between the two builds.
+
 - **What this does not say.** Mesa, Intel and AMD drivers, X11, warm shader
   caches, macOS and Windows were not measured. Adapter and device setup is
-  still 213 ms of the 316.
+  still 214 ms of the 314.
 
 ## 5.0.0 — release checks
 
