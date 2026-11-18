@@ -904,6 +904,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   live bottom, and the scrollbar's hover target is wider.
 - `scrollback-bytes` defaults to 64 MB, so the default 10,000-line history
   fits at common window widths.
+- Scrollback holds far less memory. A line in history no longer stores the
+  blank cells that end it, so `seq 1 100000` in a maximized 1600x1000 pane
+  on Linux grows Kettle by 2.4 MiB instead of 43.3 MiB (169.2 MiB in all,
+  down from 212.3). Blanks with a background, an attribute or a link are
+  kept, and `scrollback-bytes` keeps the same number of lines as before.
+  Output of lines of one length scrolls as fast as before; lines of mixed
+  length scroll about 10% slower.
 - The context menu puts the actions for what you clicked first (Copy, Paste,
   Select All, and Open or Copy Link on a link) and groups pane, tab, title
   and appearance commands into submenus, so it no longer scrolls. Each
