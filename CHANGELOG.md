@@ -421,7 +421,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Windows, the instance is still created when the window needs it.
   `kettle --gpu-info` now reports the adapter's own maximum buffer size; wgpu
   capped it at 4 GiB while it validated indirect calls. Kettle's device still
-  asks for no more than before.
+  asks for no more than before. On the same machine Kettle's idle memory
+  rose by about 3 MiB, from 170 to 173 MiB, most likely the driver's
+  allocations made while compiling on the other threads.
 
 - Theme and default selections keep selected text at 7:1 in both focus
   states, including ANSI colours. A clean perimeter preserves selection

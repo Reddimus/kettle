@@ -51,6 +51,18 @@ In the final set, adapter and device setup took 214.2 ms against 252.8 ms
 on `main`, and the setup after the device 43.8 against 77.1 ms. A screenshot
 1.5 s after the first frame was pixel-identical between the two builds.
 
+- **Idle memory rises by about 3 MiB.** The same protocol, run in full on
+  the same host (5 runs each, interleaved), put idle PSS at a median 169.8
+  MiB (169.6-170.2) on `main` and 173.0 MiB (172.8-173.4) with this change,
+  and 213.3 against 216.5 MiB after `seq 1 100000`; the 50 MiB `cat` took
+  the same time (0.407 and 0.408 s). By mapping, anonymous memory grew by
+  12.2 MiB and the main thread's heap shrank by 7.7. The likely cause, not
+  verified further: the driver allocates while it compiles, and on the
+  worker threads those allocations land in glibc's per-thread malloc arenas,
+  which keep more of it than the main heap. A measurement-only build of the first version without the early
+  instance idled at 175.4 MiB, so the pipeline threads, not the early
+  instance, carry the cost; that build differed in other ways, so this is
+  indicative only.
 - **What this does not say.** Mesa, Intel and AMD drivers, X11, warm shader
   caches, macOS and Windows were not measured. Adapter and device setup is
   still 214 ms of the 314.
