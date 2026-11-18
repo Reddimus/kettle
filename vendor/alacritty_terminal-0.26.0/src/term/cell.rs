@@ -1,3 +1,4 @@
+use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -275,6 +276,50 @@ impl Cell {
 }
 
 impl GridCell for Cell {
+    /// Moves the run with one copy and refills it from one default cell,
+    /// rather than taking each cell and building each default.
+    fn take_cells(cells: &mut [Self], into: &mut Vec<Self>) {
+        let len = cells.len();
+        if len == 0 {
+            return;
+        }
+        into.reserve(len);
+        let blank = Cell::default();
+        let source = cells.as_mut_ptr();
+        // SAFETY: `into` has room for `len` more cells. Each cell is copied
+        // into it bitwise, and its place in `cells` is then overwritten
+        // without being dropped, so every cell keeps one owner; nothing in
+        // between can panic. A default cell's `extra` is `None`, so copies of
+        // its bytes are valid default cells that share nothing. The copies
+        // within `cells` never overlap.
+        unsafe {
+            ptr::copy_nonoverlapping(source, into.as_mut_ptr().add(into.len()), len);
+            into.set_len(into.len() + len);
+            ptr::write(source, blank);
+            let mut done = 1;
+            while done < len {
+                let count = done.min(len - done);
+                ptr::copy_nonoverlapping(source, source.add(done), count);
+                done += count;
+            }
+        }
+    }
+
+    /// Cells without extra storage own nothing, so a row of them is emptied
+    /// without running each drop.
+    fn clear_cells(cells: &mut Vec<Self>) {
+        if cells
+            .iter()
+            .fold(false, |owns, cell| owns | cell.extra.is_some())
+        {
+            cells.clear();
+        } else {
+            // SAFETY: shortening a vector exposes no uninitialized cell, and
+            // the cells left undropped own no heap storage.
+            unsafe { cells.set_len(0) };
+        }
+    }
+
     #[inline]
     fn is_empty(&self) -> bool {
         (self.c == ' ' || self.c == '\t')
@@ -330,22 +375,17 @@ pub trait LineLength {
 
 impl LineLength for grid::Row<Cell> {
     fn line_length(&self) -> Column {
-        let mut length = Column(0);
-
         if self[Column(self.len() - 1)].flags.contains(Flags::WRAPLINE) {
             return Column(self.len());
         }
 
-        for (index, cell) in self[..].iter().rev().enumerate() {
-            if cell.c != ' '
-                || cell.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) == Some(false)
-            {
-                length = Column(self.len() - index);
-                break;
-            }
-        }
-
-        length
+        // Iterate the row rather than slice it: a history row may be compact.
+        self.into_iter()
+            .rposition(|cell| {
+                cell.c != ' '
+                    || cell.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) == Some(false)
+            })
+            .map_or(Column(0), |index| Column(index + 1))
     }
 }
 

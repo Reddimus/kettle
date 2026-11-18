@@ -33,6 +33,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             Ordering::Equal => (),
         }
 
+        self.settle_rows();
+
         // Restore template cell.
         self.cursor.template = template;
         self.history_limit_on_growth = history_limit_on_growth;
@@ -53,6 +55,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Need to resize before updating buffer.
         self.raw.grow_visible_lines(target);
         self.lines = target;
+
+        // The new top lines come from history, so they may be compact.
+        for line in (0..lines_added as i32).map(Line::from) {
+            self.raw[line].make_full();
+        }
 
         let history_size = self.history_size();
         let from_history = min(history_size, lines_added);

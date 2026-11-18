@@ -1097,8 +1097,8 @@ impl<T> Term<T> {
             None => grid_line.line_length(),
             Some(false) => Column(self.columns()),
             Some(true) => {
-                let printed = grid_line[..]
-                    .iter()
+                let printed = grid_line
+                    .into_iter()
                     .rposition(|cell| cell.flags.contains(Flags::DRAWN))
                     .map_or(Column(0), |column| Column(column + 1));
                 cmp::max(grid_line.line_length(), printed)
