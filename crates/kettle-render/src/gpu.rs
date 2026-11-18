@@ -317,6 +317,18 @@ pub(crate) fn pipelines_compile_on_threads(backend: wgpu::Backend) -> bool {
     backend != wgpu::Backend::Gl
 }
 
+/// Whether a renderer constructor may compile pipelines on worker threads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PipelineThreads {
+    /// The constructor created the device itself, so no caller can hold an
+    /// error scope on it: the workers' errors reach the device's
+    /// uncaptured-error handler, as this thread's would have.
+    Allowed,
+    /// The device is the caller's, which may have pushed error scopes.
+    /// wgpu keeps those per thread, so everything is built on this one.
+    CallerThread,
+}
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -493,8 +505,17 @@ impl Renderer {
             recovery_wake,
         };
         let t_rest = std::time::Instant::now();
-        let built =
-            Self::with_gpu_and_surface(gpu, surface, wayland, width, height, scale, cfg, fonts);
+        let built = Self::with_gpu_and_surface(
+            gpu,
+            surface,
+            wayland,
+            width,
+            height,
+            scale,
+            cfg,
+            fonts,
+            PipelineThreads::Allowed,
+        );
         // This span covers everything after device creation, INCLUDING the
         // font-system time logged separately, so do not add the two together.
         log::info!(
@@ -539,6 +560,7 @@ impl Renderer {
             scale,
             cfg,
             fonts,
+            PipelineThreads::CallerThread,
         )
     }
 
@@ -554,6 +576,7 @@ impl Renderer {
         scale: f32,
         cfg: &Config,
         fonts: Option<StartupFonts>,
+        threads: PipelineThreads,
     ) -> Result<Renderer> {
         let caps = surface.get_capabilities(&gpu.adapter);
         let format = caps
@@ -574,6 +597,7 @@ impl Renderer {
             scale,
             cfg,
             fonts,
+            threads,
         )
     }
 
@@ -658,6 +682,7 @@ impl Renderer {
                 scale,
                 cfg,
                 None,
+                PipelineThreads::Allowed,
             )
             .map(Some)
         })
@@ -677,6 +702,7 @@ impl Renderer {
         scale: f32,
         cfg: &Config,
         fonts: Option<StartupFonts>,
+        threads: PipelineThreads,
     ) -> Result<Renderer> {
         let GpuContext { device, queue, .. } = gpu.clone();
         let alpha_mode = desired_alpha_mode(cfg, &supported_alpha_modes);
@@ -700,17 +726,16 @@ impl Renderer {
             surface.configure(&device, &config);
         }
 
-        // These five pipelines need only the device and the format, so they
-        // compile on their own threads while this one sets up the text and
-        // the shared pipelines. Each is joined where it was built before, and
-        // the glyph pipeline's budgeted atlases and buffers are still made
-        // there, so the graphics budget is charged in the same order. Their
-        // errors reach the device's uncaptured-error handler, as before; an
-        // error scope is per thread, so one pushed around this constructor
-        // does not see them. GL builds each on this thread, where it was
-        // built before.
+        // These five pipelines need only the device and the format, so a
+        // renderer that created its device compiles them on their own threads
+        // while this one sets up the text and the shared pipelines. Each is
+        // joined where it was built before. The glyph pipeline only compiles
+        // there; its budgeted atlases and buffers are still made at its join,
+        // so the graphics budget is charged in the same order. On GL, or on
+        // a caller's device, each is built on this thread where it was before.
         let graphics_budget = kettle_core::GraphicsBudget::default();
-        let on_threads = pipelines_compile_on_threads(gpu.adapter.get_info().backend);
+        let on_threads = threads == PipelineThreads::Allowed
+            && pipelines_compile_on_threads(gpu.adapter.get_info().backend);
         let outline_build = PipelineBuild::start(on_threads, "kettle-outline", {
             let device = device.clone();
             move || OutlinePipeline::new(&device, format)
@@ -728,9 +753,11 @@ impl Renderer {
             let device = device.clone();
             move || starfield::StarfieldPipeline::new(&device, format)
         });
-        let glyph_build = PipelineBuild::start(on_threads, "kettle-glyphs", {
+        let glyph_build = on_threads.then(|| {
             let device = device.clone();
-            move || GlyphPipeline::compile(&device, format)
+            PipelineBuild::spawn("kettle-glyphs", move || {
+                GlyphPipeline::compile(&device, format)
+            })
         });
 
         // Fonts loaded before the window reach here already measured. Ones
@@ -882,12 +909,12 @@ impl Renderer {
         let starfield = starfield_build.join();
         // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
         // Always constructed; only emitted/drawn in grid mode.
-        let glyph_pipeline = GlyphPipeline::with_shaders(
-            &device,
-            format,
-            graphics_budget.clone(),
-            glyph_build.join(),
-        )
+        let glyph_pipeline = match glyph_build {
+            Some(build) => {
+                GlyphPipeline::with_shaders(&device, format, graphics_budget.clone(), build.join())
+            }
+            None => GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()),
+        }
         .ok_or_else(|| anyhow!("GPU graphics budget exhausted while creating glyph pipeline"))?;
 
         Ok(Renderer {
@@ -1288,11 +1315,10 @@ fn gpu_instance_for_live_display(
 /// the one that attempt would create itself: Vulkan only, Kettle's flags, and
 /// the event loop's display handle, which it keeps for the life of the GPU
 /// context. It is started only where wgpu has Vulkan and it is that first
-/// attempt ([`early_vulkan_instance_applies_for`]), so `gpu-backend = gl`, a
-/// GPU pin, macOS and Windows never load the Vulkan ICD early.
-pub struct EarlyGpuInstance {
-    handle: Option<std::thread::JoinHandle<wgpu::Instance>>,
-}
+/// attempt (`early_vulkan_instance_applies_for`), so `gpu-backend = gl`, a
+/// GPU pin, macOS and Windows never load the Vulkan ICD early. One nobody
+/// takes is destroyed on its own thread (`EarlyValue`).
+pub struct EarlyGpuInstance(EarlyValue<wgpu::Instance>);
 
 impl EarlyGpuInstance {
     /// Start creating the instance for `cfg`, or `None` when the first
@@ -1302,9 +1328,11 @@ impl EarlyGpuInstance {
     where
         D: HasDisplayHandle + Send + Sync + 'static,
     {
-        if !early_vulkan_instance_applies_for(host_backend_platform(), cfg)
-            || !wgpu::Instance::enabled_backend_features().contains(wgpu::Backends::VULKAN)
-        {
+        if !early_vulkan_instance_applies_for(
+            host_backend_platform(),
+            cfg,
+            wgpu::Instance::enabled_backend_features(),
+        ) {
             return None;
         }
         let display_handle = OwnedGpuDisplayHandle::new(display_handle);
@@ -1314,63 +1342,93 @@ impl EarlyGpuInstance {
     }
 
     pub(crate) fn spawn(create: impl FnOnce() -> wgpu::Instance + Send + 'static) -> Option<Self> {
-        std::thread::Builder::new()
-            .name("kettle-gpu-init".into())
-            .spawn(create)
-            .map_err(|error| log::debug!("no early Vulkan instance: {error}"))
-            .ok()
-            .map(|handle| Self {
-                handle: Some(handle),
-            })
+        EarlyValue::spawn("kettle-gpu-init", create, UNUSED_EARLY_INSTANCE_WAIT).map(Self)
     }
 
     /// The instance, once it exists, or `None` if its thread panicked (where
     /// panics unwind, as in tests; the release profile aborts on it, as it
     /// did inline); the caller then creates its own.
-    pub(crate) fn take(mut self) -> Option<wgpu::Instance> {
-        let handle = self.handle.take()?;
+    pub(crate) fn take(self) -> Option<wgpu::Instance> {
         let waited = std::time::Instant::now();
-        let instance = handle
-            .join()
-            .map_err(|_| log::debug!("the early Vulkan instance thread panicked"))
-            .ok()?;
-        log::info!(
-            "renderer init: waited {:.1}ms for the early Vulkan instance",
-            waited.elapsed().as_secs_f64() * 1000.0
-        );
-        Some(instance)
-    }
-
-    /// Wait up to `wait` for an instance nobody took, and destroy it, so a
-    /// working driver is not torn down at exit with this thread still inside
-    /// the Vulkan loader. A driver still in `vkCreateInstance` after that is
-    /// left running rather than waited for: when startup fails before window
-    /// 1's renderer, nothing else would bound this wait. Only the attempt
-    /// that takes the instance waits without a limit, inside the GPU-init
-    /// watchdog.
-    pub(crate) fn release(&mut self, wait: std::time::Duration) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        let deadline = std::time::Instant::now() + wait;
-        while !handle.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        let instance = self.0.take();
+        match &instance {
+            Some(_) => log::info!(
+                "renderer init: waited {:.1}ms for the early Vulkan instance",
+                waited.elapsed().as_secs_f64() * 1000.0
+            ),
+            None => log::debug!("the early Vulkan instance thread panicked"),
         }
-        if handle.is_finished() {
-            let _ = handle.join();
-        } else {
-            log::warn!("left the unused early Vulkan instance still being created");
-        }
+        instance
     }
 }
 
-/// How long an unused early instance is waited for: several times what
-/// `vkCreateInstance` took on NVIDIA (about 125 ms).
+/// How long an unused early instance's thread is waited for: several times
+/// what `vkCreateInstance` took on NVIDIA (about 125 ms).
 const UNUSED_EARLY_INSTANCE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-impl Drop for EarlyGpuInstance {
+/// A value made on its own thread and handed over through a rendezvous.
+///
+/// One nobody takes is dropped by the thread that made it, never by its
+/// owner: dropping this lets the thread's hand-over fail, the thread drops
+/// the value and finishes, and the owner waits for that at most
+/// `unused_wait`. A thread still busy after that, inside a hung driver say,
+/// is left to finish on its own. That bound matters when startup fails
+/// before window 1's renderer, outside the GPU-init watchdog.
+pub(crate) struct EarlyValue<T> {
+    handover: Option<std::sync::mpsc::Receiver<T>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    unused_wait: std::time::Duration,
+}
+
+impl<T: Send + 'static> EarlyValue<T> {
+    pub(crate) fn spawn(
+        name: &str,
+        make: impl FnOnce() -> T + Send + 'static,
+        unused_wait: std::time::Duration,
+    ) -> Option<Self> {
+        let (handover, receiver) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                // With no receiver left, the value comes back and is
+                // dropped here, on this thread.
+                let _ = handover.send(make());
+            })
+            .map_err(|error| log::debug!("no {name} thread: {error}"))
+            .ok()?;
+        Some(Self {
+            handover: Some(receiver),
+            thread: Some(thread),
+            unused_wait,
+        })
+    }
+
+    /// The value, once it is made, or `None` if its thread panicked first.
+    pub(crate) fn take(mut self) -> Option<T> {
+        let value = self.handover.take()?.recv().ok();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        value
+    }
+}
+
+impl<T> Drop for EarlyValue<T> {
     fn drop(&mut self) {
-        self.release(UNUSED_EARLY_INSTANCE_WAIT);
+        drop(self.handover.take());
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + self.unused_wait;
+        while !thread.is_finished() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                log::warn!("left an unused early GPU value to its thread");
+                return;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
+        }
+        let _ = thread.join();
     }
 }
 
@@ -1389,11 +1447,17 @@ pub(crate) fn instance_for_attempt(
 }
 
 /// Whether the first window's first GPU attempt on `platform` is a Vulkan
-/// instance of its own: the unpinned Auto-preference direct probe, with
-/// Vulkan first in its backend order. Windows and macOS try DX12 or Metal
-/// first, and a `gpu-backend` other than Vulkan or Auto leads with that.
-pub(crate) fn early_vulkan_instance_applies_for(platform: BackendPlatform, cfg: &Config) -> bool {
-    platform == BackendPlatform::Other
+/// instance of its own: wgpu was built with Vulkan (`compiled`), and it is
+/// the unpinned Auto-preference direct probe with Vulkan first in its
+/// backend order. Windows and macOS try DX12 or Metal first, and a
+/// `gpu-backend` other than Vulkan or Auto leads with that.
+pub(crate) fn early_vulkan_instance_applies_for(
+    platform: BackendPlatform,
+    cfg: &Config,
+    compiled: wgpu::Backends,
+) -> bool {
+    compiled.contains(wgpu::Backends::VULKAN)
+        && platform == BackendPlatform::Other
         && can_probe_native_backend_directly(cfg)
         && backend_attempt_order_for(platform, configured_backend(cfg.gpu_backend)).first()
             == Some(&wgpu::Backend::Vulkan)

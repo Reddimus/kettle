@@ -409,16 +409,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Changed
 
 - The first window appears sooner. On Linux with an NVIDIA GPU under GNOME,
-  launch to the compositor's first frame went from 377 to 316 ms (median of
-  15 cold starts each); other GPUs and platforms were not measured. GPU
+  launch to the compositor's first frame went from 377 to 316 ms (median
+  of 15 cold starts each); other GPUs and platforms were not measured. GPU
   setup no longer has wgpu build the shaders that validate indirect draws,
-  which Kettle never issues, and five of the renderer's shaders compile at
-  the same time as the rest of its setup instead of one after another
-  (except on OpenGL). On Linux and FreeBSD, where Kettle tries Vulkan first,
-  the first window's Vulkan instance is created while the config is applied
-  and the window comes up. With `gpu-backend = gl`, a pinned GPU or a
-  `gpu-power-preference` other than auto, and on macOS and Windows, the
-  instance is still created when the window needs it.
+  which Kettle never issues, and the first window's renderer compiles five
+  of its shaders at the same time as the rest of its setup instead of one
+  after another (except on OpenGL). On Linux and FreeBSD, where Kettle tries
+  Vulkan first, the first window's Vulkan instance is created while the
+  config is applied and the window comes up. With `gpu-backend = gl`, a
+  pinned GPU or a `gpu-power-preference` other than auto, and on macOS and
+  Windows, the instance is still created when the window needs it.
   `kettle --gpu-info` now reports the adapter's own maximum buffer size; wgpu
   capped it at 4 GiB while it validated indirect calls. Kettle's device still
   asks for no more than before.

@@ -2180,10 +2180,11 @@ that attempt would create itself. Window 1's renderer joins it inside the
 hung-driver watchdog. Only its first Vulkan attempt uses it; every other
 attempt, and every later Vulkan attempt, creates its own. If the thread could
 not start (or, where panics unwind, panicked), the attempt creates the instance
-itself. An instance nobody took, such as when startup fails before window 1's
-renderer, is waited for up to two seconds and destroyed, and is otherwise left
-to the process's exit. `gpu-backend = gl`, a pin, macOS and Windows never start
-it, so they never load the Vulkan driver early.
+itself. The thread hands the instance over through a rendezvous, so one nobody
+took, such as when startup fails before window 1's renderer, is destroyed by
+that thread; its owner waits for that up to two seconds and otherwise leaves the
+thread to finish. `gpu-backend = gl`, a pin, macOS and Windows never start it,
+so they never load the Vulkan driver early.
 
 On macOS, an eligible first pane starts after `App` construction and before
 `run_app`, while AppKit finishes launching. The order is font preload,
@@ -2321,15 +2322,17 @@ launch coalesces repeated Dock events. Old windows and PTYs remain alive.
   builds its two indirect-argument validation compute pipelines; Kettle issues
   no indirect draw or dispatch, and
   `crates/kettle-test-support/tests/gpu_indirect_calls.rs` fails if one
-  appears. Each renderer compiles the outline, first rounded-surface,
+  appears. A renderer that creates its device (window 1, GPU recovery and
+  headless renderers) compiles the outline, first rounded-surface,
   presentation, starfield and glyph pipelines on worker threads with clones of
-  the device while it builds the text renderers and shared pipelines, and joins
-  each where it used to build it. The glyph pipeline only compiles there: its
-  budgeted atlases and buffers are still made after the image layers, so the
-  graphics budget is charged in the same order. Their errors reach the device's
-  uncaptured-error handler; wgpu's error scopes are per thread, so a scope
-  pushed around a renderer constructor does not see them. On GL, whose device
-  calls all wait on one context lock, the renderer builds them itself.
+  that device while it builds the text renderers and shared pipelines, and
+  joins each where it used to build it. The glyph pipeline only compiles
+  there: its budgeted atlases and buffers are still made after the image
+  layers, so the graphics budget is charged in the same order. Their errors
+  reach the device's uncaptured-error handler. Windows 2..N, built on window
+  1's device, build every pipeline on the calling thread as before, since
+  wgpu's error scopes are per thread and a caller may hold one; so does GL,
+  whose device calls all wait on one context lock.
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
   (same physical GPU through an alternate backend → surface-preferred GPU →

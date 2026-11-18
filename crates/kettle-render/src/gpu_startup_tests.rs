@@ -2,16 +2,18 @@
 //! compiled on worker threads, and the first Vulkan instance created early.
 
 use super::gpu::{
-    BackendPlatform, EarlyGpuInstance, OwnedGpuDisplayHandle, early_vulkan_instance_applies_for,
-    gpu_instance_for_backends, instance_descriptor, instance_for_attempt,
-    pipelines_compile_on_threads,
+    BackendPlatform, EarlyGpuInstance, EarlyValue, OwnedGpuDisplayHandle,
+    early_vulkan_instance_applies_for, gpu_instance_for_backends, instance_descriptor,
+    instance_for_attempt, pipelines_compile_on_threads,
 };
 use super::gpu_tests::{gpu_test_config, gpu_test_guard};
 use super::{Config, Renderer};
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::time::Duration;
+
+/// The backends of a wgpu built with Vulkan, as on Linux and FreeBSD.
+const WITH_VULKAN: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::GL);
 
 /// A display handle that is never read: building a descriptor only stores it.
 struct UnreadDisplay;
@@ -62,11 +64,13 @@ fn the_vulkan_instance_starts_early_only_where_vulkan_is_tried_first() {
     };
     assert!(early_vulkan_instance_applies_for(
         BackendPlatform::Other,
-        &auto
+        &auto,
+        WITH_VULKAN
     ));
     assert!(early_vulkan_instance_applies_for(
         BackendPlatform::Other,
-        &backend(GpuBackend::Vulkan)
+        &backend(GpuBackend::Vulkan),
+        WITH_VULKAN
     ));
     assert!(
         early_vulkan_instance_applies_for(
@@ -74,7 +78,8 @@ fn the_vulkan_instance_starts_early_only_where_vulkan_is_tried_first() {
             &Config {
                 gpu_force_software: true,
                 ..Config::default()
-            }
+            },
+            WITH_VULKAN
         ),
         "the software pass also starts with a Vulkan instance"
     );
@@ -111,14 +116,18 @@ fn the_vulkan_instance_starts_early_only_where_vulkan_is_tried_first() {
         ),
     ] {
         assert!(
-            !early_vulkan_instance_applies_for(BackendPlatform::Other, &cfg),
+            !early_vulkan_instance_applies_for(BackendPlatform::Other, &cfg, WITH_VULKAN),
             "{label} does not start with a Vulkan-only instance"
         );
     }
+    assert!(
+        !early_vulkan_instance_applies_for(BackendPlatform::Other, &auto, wgpu::Backends::GL),
+        "a wgpu without Vulkan, as on NetBSD and OpenBSD, has no instance to start"
+    );
     for platform in [BackendPlatform::Windows, BackendPlatform::MacOs] {
         for cfg in [Config::default(), backend(GpuBackend::Vulkan)] {
             assert!(
-                !early_vulkan_instance_applies_for(platform, &cfg),
+                !early_vulkan_instance_applies_for(platform, &cfg, WITH_VULKAN),
                 "{platform:?} never creates an early instance"
             );
         }
@@ -188,40 +197,101 @@ fn the_window_resolver_takes_each_attempts_instance_from_the_early_one() {
     assert_eq!(direct.matches("gpu_instance_for_live_display(").count(), 1);
 }
 
-/// An early instance nobody took is waited for while it is still being
-/// created, and destroyed, but one that never finishes cannot hold up the
-/// startup failure that dropped it.
-#[test]
-fn an_unused_early_instance_is_waited_for_within_a_bound() {
-    let finished = Arc::new(AtomicBool::new(false));
-    let done = finished.clone();
-    let quick = EarlyGpuInstance::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        done.store(true, Ordering::SeqCst);
-        empty_instance()
+/// Records, when dropped, the thread that dropped it, after an optional
+/// wait that stands in for a slow `vkDestroyInstance`.
+struct Destroyed {
+    on: mpsc::Sender<std::thread::ThreadId>,
+    hold: Option<mpsc::Receiver<()>>,
+}
+
+impl Drop for Destroyed {
+    fn drop(&mut self) {
+        if let Some(hold) = &self.hold {
+            let _ = hold.recv();
+        }
+        let _ = self.on.send(std::thread::current().id());
+    }
+}
+
+/// Drop `early` on a helper thread; whether that returned within `limit`.
+fn dropped_within(early: EarlyValue<Destroyed>, limit: Duration) -> bool {
+    let (returned, dropped) = mpsc::channel();
+    std::thread::spawn(move || {
+        drop(early);
+        let _ = returned.send(());
     });
+    dropped.recv_timeout(limit).is_ok()
+}
+
+/// An early value nobody took is destroyed by the thread that made it, and
+/// its owner waits for that, but only for its bound: neither a maker nor a
+/// destructor that never finishes can hold up the startup failure that
+/// dropped it. The early instance uses the same type.
+#[test]
+fn an_unused_early_value_is_destroyed_on_its_thread_within_a_bound() {
+    let bound = Duration::from_millis(100);
+    let (on, destroyed) = mpsc::channel();
+    let quick = EarlyValue::spawn(
+        "kettle-test-early",
+        move || {
+            std::thread::sleep(Duration::from_millis(50));
+            Destroyed { on, hold: None }
+        },
+        Duration::from_secs(2),
+    )
+    .expect("thread started");
     drop(quick);
-    assert!(
-        finished.load(Ordering::SeqCst),
-        "a working driver is waited for"
+    let by = destroyed
+        .try_recv()
+        .expect("a working driver is waited for, and its instance destroyed");
+    assert_ne!(
+        by,
+        std::thread::current().id(),
+        "on the thread that made it"
     );
 
     let (unblock, blocked) = mpsc::channel::<()>();
-    let mut stuck = EarlyGpuInstance::spawn(move || {
-        let _ = blocked.recv();
-        empty_instance()
-    })
+    let (on, _destroyed) = mpsc::channel();
+    let slow_maker = EarlyValue::spawn(
+        "kettle-test-early",
+        move || {
+            let _ = blocked.recv();
+            Destroyed { on, hold: None }
+        },
+        bound,
+    )
     .expect("thread started");
-    let (returned, dropped) = mpsc::channel();
-    std::thread::spawn(move || {
-        stuck.release(Duration::from_millis(100));
-        let _ = returned.send(());
-    });
     assert!(
-        dropped.recv_timeout(Duration::from_secs(10)).is_ok(),
-        "a hung driver does not hang the drop"
+        dropped_within(slow_maker, Duration::from_secs(1)),
+        "a driver hung in vkCreateInstance does not hang the drop"
     );
     let _ = unblock.send(());
+
+    let (unblock, hold) = mpsc::channel::<()>();
+    let (on, _destroyed) = mpsc::channel();
+    let slow_destructor = EarlyValue::spawn(
+        "kettle-test-early",
+        move || Destroyed {
+            on,
+            hold: Some(hold),
+        },
+        bound,
+    )
+    .expect("thread started");
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(
+        dropped_within(slow_destructor, Duration::from_secs(1)),
+        "a driver hung in vkDestroyInstance does not hang the drop"
+    );
+    let _ = unblock.send(());
+}
+
+/// A taken value comes from the thread that made it.
+#[test]
+fn a_taken_early_value_is_the_one_its_thread_made() {
+    let early =
+        EarlyValue::spawn("kettle-test-early", || 6 * 7, Duration::from_secs(2)).expect("thread");
+    assert_eq!(early.take(), Some(42));
 }
 
 /// GL runs every device call under one context lock, so its renderer builds
@@ -285,13 +355,51 @@ fn the_graphics_budget_is_charged_in_the_order_it_was_before() {
         body.find(needle)
             .unwrap_or_else(|| panic!("with_gpu lacks {needle}"))
     };
-    let glyph_start = at("let glyph_build = PipelineBuild::start(on_threads, \"kettle-glyphs\", {");
+    let glyph_start = at("let glyph_build = on_threads.then(|| {");
     let glyph_end = glyph_start + body[glyph_start..].find("});").expect("end of the build");
     let glyph_closure = &body[glyph_start..glyph_end];
     assert!(glyph_closure.contains("GlyphPipeline::compile(&device, format)"));
     assert!(!glyph_closure.contains("budget"));
     let background_layer = at("let bg_imgs = shared");
-    let glyph_alloc = at("let glyph_pipeline = GlyphPipeline::with_shaders(");
-    assert!(background_layer < glyph_alloc);
-    assert_eq!(body.matches("GlyphPipeline::new_with_budget(").count(), 0);
+    let glyph_join = at("let glyph_pipeline = match glyph_build {");
+    assert!(background_layer < glyph_join);
+    assert_eq!(body.matches("GlyphPipeline::with_shaders(").count(), 1);
+    // On GL and on a caller's device, the pipeline is built as it was.
+    assert_eq!(
+        body.matches(
+            "None => GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()),"
+        )
+        .count(),
+        1
+    );
+}
+
+/// Only a renderer that created its device compiles on worker threads. A
+/// window sharing another's device, whose caller may hold error scopes for
+/// its own thread, builds everything there, as before.
+#[test]
+fn only_a_renderer_with_its_own_device_compiles_on_worker_threads() {
+    let src = super::production_source();
+    let body = |start: &str| {
+        src.split_once(start)
+            .unwrap_or_else(|| panic!("{start}"))
+            .1
+            .split_once("\n    }\n")
+            .expect("end of the function")
+            .0
+            .to_owned()
+    };
+    assert!(body("pub fn new_with_gpu<W>(").contains("PipelineThreads::CallerThread,"));
+    assert!(body("async fn new_with_escalation_inner<W>(").contains("PipelineThreads::Allowed,"));
+    let with_gpu = body("fn with_gpu(");
+    assert!(with_gpu.contains(
+        "let on_threads = threads == PipelineThreads::Allowed\n            && pipelines_compile_on_threads(gpu.adapter.get_info().backend);"
+    ));
+    assert_eq!(
+        with_gpu
+            .matches("PipelineBuild::start(on_threads, ")
+            .count(),
+        4
+    );
+    assert_eq!(with_gpu.matches("PipelineBuild::spawn(").count(), 1);
 }
