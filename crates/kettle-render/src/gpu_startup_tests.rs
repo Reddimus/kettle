@@ -286,6 +286,44 @@ fn an_unused_early_value_is_destroyed_on_its_thread_within_a_bound() {
     let _ = unblock.send(());
 }
 
+/// Stands in for a driver's thread-local teardown that blocks when its
+/// thread exits.
+struct BlockAtExit(mpsc::Receiver<()>);
+
+impl Drop for BlockAtExit {
+    fn drop(&mut self) {
+        let _ = self.0.recv();
+    }
+}
+
+thread_local! {
+    static AT_EXIT: std::cell::RefCell<Option<BlockAtExit>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The owner of an unused early value waits for it to be destroyed, not
+/// for the thread's own exit, which can block in thread-local teardown.
+#[test]
+fn an_unused_early_value_does_not_wait_for_its_threads_teardown() {
+    let (unblock, blocked) = mpsc::channel::<()>();
+    let (on, destroyed) = mpsc::channel();
+    let early = EarlyValue::spawn(
+        "kettle-test-early",
+        move || {
+            AT_EXIT.with_borrow_mut(|slot| *slot = Some(BlockAtExit(blocked)));
+            Destroyed { on, hold: None }
+        },
+        Duration::from_secs(2),
+    )
+    .expect("thread started");
+    assert!(
+        dropped_within(early, Duration::from_secs(1)),
+        "a thread-local teardown that blocks does not hang the drop"
+    );
+    assert!(destroyed.try_recv().is_ok(), "the value was destroyed");
+    let _ = unblock.send(());
+}
+
 /// A taken value comes from the thread that made it.
 #[test]
 fn a_taken_early_value_is_the_one_its_thread_made() {
@@ -295,7 +333,8 @@ fn a_taken_early_value_is_the_one_its_thread_made() {
 }
 
 /// GL runs every device call under one context lock, so its renderer builds
-/// the pipelines itself; every other backend uses worker threads.
+/// the pipelines itself; on every other backend, a renderer that made its
+/// device uses worker threads.
 #[test]
 fn gl_builds_its_pipelines_on_the_calling_thread() {
     assert!(!pipelines_compile_on_threads(wgpu::Backend::Gl));
@@ -308,9 +347,10 @@ fn gl_builds_its_pipelines_on_the_calling_thread() {
     }
 }
 
-/// Every renderer outside GL compiles the five pipelines that depend only on
-/// the device and the format on their own threads, while it builds the text
-/// renderers and the shared quad and image pipelines itself.
+/// A renderer that made its device compiles, outside GL, the five pipelines
+/// that depend only on the device and the format on their own threads, while
+/// it builds the text renderers and the shared quad and image pipelines
+/// itself.
 #[test]
 fn the_renderer_compiles_its_independent_pipelines_on_worker_threads() {
     let _serialized = gpu_test_guard();

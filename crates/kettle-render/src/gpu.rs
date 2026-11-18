@@ -1370,10 +1370,12 @@ const UNUSED_EARLY_INSTANCE_WAIT: std::time::Duration = std::time::Duration::fro
 ///
 /// One nobody takes is dropped by the thread that made it, never by its
 /// owner: dropping this lets the thread's hand-over fail, the thread drops
-/// the value and finishes, and the owner waits for that at most
-/// `unused_wait`. A thread still busy after that, inside a hung driver say,
-/// is left to finish on its own. That bound matters when startup fails
-/// before window 1's renderer, outside the GPU-init watchdog.
+/// the value and its function returns, and the owner waits for that at most
+/// `unused_wait`. The thread is never joined: whatever runs after its
+/// function, such as a driver's thread-local teardown, or a thread still
+/// busy after the wait, inside a hung driver say, finishes on its own. That
+/// bound matters when startup fails before window 1's renderer, outside the
+/// GPU-init watchdog.
 pub(crate) struct EarlyValue<T> {
     handover: Option<std::sync::mpsc::Receiver<T>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -1405,11 +1407,10 @@ impl<T: Send + 'static> EarlyValue<T> {
 
     /// The value, once it is made, or `None` if its thread panicked first.
     pub(crate) fn take(mut self) -> Option<T> {
-        let value = self.handover.take()?.recv().ok();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        value
+        // Taken, the thread has nothing left to wait for, so its handle is
+        // dropped rather than joined.
+        self.thread = None;
+        self.handover.take()?.recv().ok()
     }
 }
 
@@ -1428,7 +1429,6 @@ impl<T> Drop for EarlyValue<T> {
             }
             std::thread::sleep(left.min(std::time::Duration::from_millis(5)));
         }
-        let _ = thread.join();
     }
 }
 
