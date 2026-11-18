@@ -285,6 +285,16 @@ impl GridCell for Cell {
         }
         into.reserve(len);
         let blank = Cell::default();
+        // The argument below holds while `extra` is the only field that owns
+        // heap storage. Naming every field here stops the build when a field
+        // is added, so that it is checked again.
+        let Cell {
+            c: _,
+            fg: _,
+            bg: _,
+            flags: _,
+            extra: _,
+        } = &blank;
         let source = cells.as_mut_ptr();
         // SAFETY: `into` has room for `len` more cells. Each cell is copied
         // into it bitwise, and its place in `cells` is then overwritten
@@ -308,10 +318,18 @@ impl GridCell for Cell {
     /// Cells without extra storage own nothing, so a row of them is emptied
     /// without running each drop.
     fn clear_cells(cells: &mut Vec<Self>) {
-        if cells
-            .iter()
-            .fold(false, |owns, cell| owns | cell.extra.is_some())
-        {
+        // Naming every field stops the build when a field is added, so that
+        // the argument below, which holds while `extra` is the only field
+        // that owns heap storage, is checked again.
+        let owns = |owns: bool,
+                    Cell {
+                        c: _,
+                        fg: _,
+                        bg: _,
+                        flags: _,
+                        extra,
+                    }: &Cell| owns | extra.is_some();
+        if cells.iter().fold(false, owns) {
             cells.clear();
         } else {
             // SAFETY: shortening a vector exposes no uninitialized cell, and
