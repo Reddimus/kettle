@@ -57,7 +57,12 @@ impl SyncGraphicsHarness {
         Self::sized(8, 4, TermConfig::default(), true)
     }
 
-    fn sized(columns: usize, rows: usize, config: TermConfig, graphics_only: bool) -> Self {
+    pub(super) fn sized(
+        columns: usize,
+        rows: usize,
+        config: TermConfig,
+        graphics_only: bool,
+    ) -> Self {
         let (tx, replies) = crossbeam_channel::unbounded();
         let proxy = EventProxy::new(tx, Arc::new(|| {}));
         // Through the clamps a pane's own sizes go through.
@@ -241,7 +246,7 @@ impl SyncGraphicsHarness {
 
     /// Commit a resize's local half, as [`Terminal::try_resize_geometry`]
     /// does before it resizes the PTY.
-    fn resize(&mut self, columns: usize, rows: usize, history: usize) {
+    pub(super) fn resize(&mut self, columns: usize, rows: usize, history: usize) {
         let current = self
             .geometry
             .lock()

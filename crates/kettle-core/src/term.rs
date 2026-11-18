@@ -11079,3 +11079,6 @@ mod sync_update_flush_guard;
 
 #[cfg(test)]
 mod image_lifecycle_tests;
+
+#[cfg(test)]
+mod compact_history_tests;
