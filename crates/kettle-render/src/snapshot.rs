@@ -485,6 +485,34 @@ mod tests {
         assert!(!snap.cursor_blinking);
     }
 
+    /// History rows are stored without their blank ends. Scrolled back to
+    /// them, the viewport captures the cells the same rows give on screen.
+    #[test]
+    fn scrolled_back_capture_matches_the_rows_on_screen() {
+        let rows = "e\u{301}x \x1b[4:3;58;5;1msquiggle\x1b[0m\r\n\x1b[42mgreen\x1b[K\x1b[0m\r\nwide \u{754c}";
+        let (mut history, mut proc) = test_term_with_history(20, 3, 100);
+        proc.advance(&mut history, rows.as_bytes());
+        proc.advance(&mut history, b"\r\n\r\n\r\n");
+        history.scroll_display(alacritty_terminal::grid::Scroll::Delta(3));
+        let grid = history.grid();
+        assert_eq!(grid.history_size(), 3);
+        assert!(grid[Line(-3)].capacity() < 20 && grid[Line(-1)].capacity() < 20);
+        let (mut screen, mut proc) = test_term(20, 3);
+        proc.advance(&mut screen, rows.as_bytes());
+
+        let (mut scrolled, mut live) = (PaneSnapshot::default(), PaneSnapshot::default());
+        scrolled.capture(&history);
+        live.capture(&screen);
+        assert_eq!(scrolled.cells.len(), 60);
+        assert_eq!(scrolled.cells.len(), live.cells.len());
+        for (a, b) in scrolled.cells.iter().zip(&live.cells) {
+            assert_eq!((a.line + 3, a.col), (b.line, b.col));
+            assert_eq!((a.c, a.fg, a.bg, a.flags), (b.c, b.fg, b.bg, b.flags));
+            assert_eq!(a.underline_color, b.underline_color);
+            assert_eq!(a.zerowidth(), b.zerowidth());
+        }
+    }
+
     #[test]
     fn capture_carries_monotonic_history_origin_after_ring_eviction() {
         let (mut term, mut proc) = test_term_with_history(8, 2, 2);
