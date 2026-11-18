@@ -927,6 +927,13 @@ pub(crate) const MAX_CURSOR_GLYPHS: usize = 8;
 /// emptied and refilled from the swash cache on demand.
 const MAX_PLACEMENTS: usize = 16_384;
 
+/// The parts of a [`GlyphPipeline`] that compile, built by
+/// [`GlyphPipeline::compile`].
+pub(crate) struct GlyphShaders {
+    atlas_bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
 impl GlyphPipeline {
     #[cfg(test)]
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -939,46 +946,16 @@ impl GlyphPipeline {
         format: wgpu::TextureFormat,
         budget: GraphicsBudget,
     ) -> Option<Self> {
+        Self::with_shaders(device, format, budget, Self::compile(device, format))
+    }
+
+    /// The shader, bind group layout and render pipeline for `format`. They
+    /// take nothing from a graphics budget, so they can compile on another
+    /// thread while the budget is charged in its usual order.
+    pub(crate) fn compile(device: &wgpu::Device, format: wgpu::TextureFormat) -> GlyphShaders {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-glyph"),
             source: wgpu::ShaderSource::Wgsl(glyph_shader_source(format).into()),
-        });
-        // glyphon's color atlas is sRGB only when the target is sRGB (Accurate
-        // ColorMode); mirror that so a straight sample decodes correctly.
-        let color_format = if format.is_srgb() {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
-        let color = Atlas::new(
-            device,
-            "kettle-glyph-color-atlas",
-            color_format,
-            4,
-            budget.clone(),
-        )?;
-        let mask = Atlas::new(
-            device,
-            "kettle-glyph-mask-atlas",
-            wgpu::TextureFormat::R8Unorm,
-            1,
-            budget.clone(),
-        )?;
-
-        let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kettle-glyph-screen"),
-            size: std::mem::size_of::<Screen>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        // Nearest sampling: every glyph is snapped to an integer physical pixel
-        // and drawn at its exact bitmap size, so 1 screen texel maps to 1 atlas
-        // texel — crisp text, no blur, and the 1px gutter is never sampled.
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("kettle-glyph-sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
         });
         let atlas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kettle-glyph-bgl"),
@@ -1021,14 +998,6 @@ impl GlyphPipeline {
                 },
             ],
         });
-        let bind_group = Self::make_bg(
-            device,
-            &atlas_bgl,
-            &screen_buf,
-            &color.view,
-            &mask.view,
-            &sampler,
-        );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kettle-glyph-layout"),
             bind_group_layouts: &[Some(&atlas_bgl)],
@@ -1068,6 +1037,69 @@ impl GlyphPipeline {
             multiview_mask: None,
             cache: None,
         });
+        GlyphShaders {
+            atlas_bgl,
+            pipeline,
+        }
+    }
+
+    /// The pipeline around `shaders`, with its atlases and buffers charged to
+    /// `budget`.
+    pub(crate) fn with_shaders(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+        shaders: GlyphShaders,
+    ) -> Option<Self> {
+        let GlyphShaders {
+            atlas_bgl,
+            pipeline,
+        } = shaders;
+        // glyphon's color atlas is sRGB only when the target is sRGB (Accurate
+        // ColorMode); mirror that so a straight sample decodes correctly.
+        let color_format = if format.is_srgb() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let color = Atlas::new(
+            device,
+            "kettle-glyph-color-atlas",
+            color_format,
+            4,
+            budget.clone(),
+        )?;
+        let mask = Atlas::new(
+            device,
+            "kettle-glyph-mask-atlas",
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            budget.clone(),
+        )?;
+
+        let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kettle-glyph-screen"),
+            size: std::mem::size_of::<Screen>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Nearest sampling: every glyph is snapped to an integer physical pixel
+        // and drawn at its exact bitmap size, so 1 screen texel maps to 1 atlas
+        // texel — crisp text, no blur, and the 1px gutter is never sampled.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kettle-glyph-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let bind_group = Self::make_bg(
+            device,
+            &atlas_bgl,
+            &screen_buf,
+            &color.view,
+            &mask.view,
+            &sampler,
+        );
         let ring = mapped_uploads(device).then(|| {
             MappedRing::new(
                 "kettle-glyph-instances",

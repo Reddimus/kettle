@@ -5,16 +5,30 @@
 //! empty shader cache. Pipelines that depend on nothing else in the setup
 //! compile at the same time as the rest of it.
 
-/// A value, normally a render pipeline, being built on its own thread.
-/// [`join`](Self::join) returns what building it on this thread would have.
+/// A value, normally a render pipeline, being built on its own thread, or
+/// waiting to be built where it is joined. [`join`](Self::join) returns what
+/// building it there would have.
 pub(crate) struct PipelineBuild<T> {
     handle: Option<std::thread::JoinHandle<T>>,
-    built_here: Option<T>,
+    at_join: Option<Box<dyn FnOnce() -> T>>,
 }
 
 impl<T: Send + 'static> PipelineBuild<T> {
+    /// [`spawn`](Self::spawn) `build` when `on_thread`; otherwise `build`
+    /// runs on this thread when the build is joined.
+    pub(crate) fn start<F>(on_thread: bool, name: &'static str, build: F) -> Self
+    where
+        F: FnOnce() -> T + Clone + Send + 'static,
+    {
+        if on_thread {
+            Self::spawn(name, build)
+        } else {
+            Self::at_join(build)
+        }
+    }
+
     /// Start `build` on a thread named `name`. When no thread can be started,
-    /// `build` runs here instead, before this returns.
+    /// `build` runs on this thread when the build is joined.
     pub(crate) fn spawn<F>(name: &'static str, build: F) -> Self
     where
         F: FnOnce() -> T + Clone + Send + 'static,
@@ -26,37 +40,43 @@ impl<T: Send + 'static> PipelineBuild<T> {
                 tests::note_spawn(name);
                 Self {
                     handle: Some(handle),
-                    built_here: None,
+                    at_join: None,
                 }
             }
             Err(error) => {
                 log::debug!("building {name} on this thread: {error}");
-                Self {
-                    handle: None,
-                    built_here: Some(here()),
-                }
+                Self::at_join(here)
             }
         }
     }
 
-    /// The built value. A panic in `build` resumes here, as it would have
-    /// had `build` run on this thread.
+    fn at_join(build: impl FnOnce() -> T + 'static) -> Self {
+        Self {
+            handle: None,
+            at_join: Some(Box::new(build)),
+        }
+    }
+
+    /// The built value. Where panics unwind, as in tests, a panic in `build`
+    /// resumes here, as it would have had `build` run on this thread; the
+    /// release profile aborts on it, as it did then.
     pub(crate) fn join(mut self) -> T {
         match self.handle.take() {
             Some(handle) => handle
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-            None => self
-                .built_here
+            None => (self
+                .at_join
                 .take()
-                .expect("a pipeline build has a thread or a result"),
+                .expect("a pipeline build has a thread or a build"))(),
         }
     }
 }
 
 impl<T> Drop for PipelineBuild<T> {
-    /// A build dropped before it was joined, when setup fails partway, is
-    /// still waited for, so no build outlives the setup that started it.
+    /// A thread dropped before it was joined, when setup fails partway, is
+    /// still waited for, so no build outlives the setup that started it. A
+    /// build waiting for its join never runs.
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -123,5 +143,24 @@ pub(crate) mod tests {
             finished.load(std::sync::atomic::Ordering::SeqCst),
             "dropping a build waits for its thread"
         );
+    }
+
+    /// A build kept off threads, as on GL, runs on the joining thread when it
+    /// is joined, where the pipeline was built before, and not before.
+    #[test]
+    fn a_build_kept_on_this_thread_runs_where_it_is_joined() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mark = ran.clone();
+        let build = PipelineBuild::start(false, "kettle-test-pl", move || {
+            mark.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::current().id()
+        });
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing is built before the join"
+        );
+        assert_eq!(build.join(), std::thread::current().id());
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(take_spawned(), Vec::<&str>::new(), "no thread was started");
     }
 }
