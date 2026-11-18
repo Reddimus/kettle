@@ -299,6 +299,36 @@ date. Recheck that before upgrading a crate or dropping a patch.
   geometry, so a reflow that bypasses `Term::resize` falls back to the
   upstream clear. `term/restore_clear_guard_tests.rs` tests it directly.
   Upstream has no equivalent; there is nothing to track there.
+- Local changes: scrollback history rows are compact (`grid/row.rs`). Upstream
+  keeps every history row at the full width of the screen, so 10,000 lines of
+  `seq` output in a 190-column pane held about 43 MiB of blank cells. A row
+  that scrolls into history now stores its cells up to the run of
+  `Cell::default()` cells that ends it, and one of them stands for the run.
+  Only cells equal to the default are dropped, so blanks with a background,
+  an attribute, a hyperlink or combining marks stay. The full-width buffer
+  goes to the row the scroll clears, and that row's old allocation joins up
+  to 32 spares on the grid; the next history row is stored in the newest
+  spare near its size, so scrolling through a full history seldom allocates
+  or frees, whatever the line lengths. `GridCell` gains two provided
+  methods, `take_cells` and `clear_cells`, which move, refill and drop cells
+  one at a time; `Cell` instead copies a run and one default cell, and
+  empties a run without visiting drops when no cell in it has extra storage.
+  `Row` itself has no unsafe code for this, so a `GridCell` that gets them
+  wrong gives wrong cells or a panic, never unsound memory. Reads by column
+  and `&Row` iteration see every column; mutable access, `Row::reset`,
+  `Row::grow` and `Row::shrink` act on the full width; `Grid::resize` gives
+  rows it brings on screen their full width and compacts history again.
+  Rows serialize their cells at full width, and a row read back or built
+  with `Row::from_vec` counts every cell as occupied, since an `occ` from
+  elsewhere may break the invariant compaction trusts. Rows on screen are never compact unless a caller
+  assigns a history row there, so slicing one still works; whole or
+  open-ended slices of a compact row are refused in debug builds. `Row`
+  grows by one word, and `Storage::swap` copies five. Two upstream gaps in
+  the `occ` invariant are closed: `Row::grow` after a coloured reset and
+  `Row::append` onto a row with unoccupied cells. `grid/compact_tests.rs`
+  compares compacting and full-width terminals under random output,
+  controls and resizes. Upstream `master` at `791efff6` (2026-11-18) still
+  stores full rows.
 - Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
   is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
   from 2026-08-31, is `0.26.1-dev`. Since
@@ -315,7 +345,8 @@ date. Recheck that before upgrading a crate or dropping a patch.
   origin, selection eviction, alternate-screen semantics, graphics-event
   ordering/coalescing, overflow recovery, region scrolls against the
   row-by-row swap, the query replies (including Neovim's exact undercurl
-  and truecolor probes), and the restore clear guard; run them with
+  and truecolor probes), the restore clear guard, and compact history rows
+  against full-width ones; run them with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p alacritty_terminal`.
 
