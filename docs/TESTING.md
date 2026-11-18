@@ -2226,6 +2226,27 @@ modifiers. The full YAML retains each mismatch. Rerun the live suite before
 claiming updated scores or complete Unicode rendering conformance.
 
 
+The 2026-11-18 run measured the 6.0.0 candidate on Ubuntu 26.04.1 under Xvfb
+with software rendering, with ucs-detect 2.3.8 and `--ucs-all` in fresh panes
+in each mode. esctest passed 459 cases, kept the 41 upstream known-bug cases
+and failed exactly the 67 cases in `scripts/conformance-esctest-expected.txt`,
+with no new failures.
+
+| Measurement | Cases | Mode off | Mode on |
+| --- | ---: | ---: | ---: |
+| VS15 | 158 | 0.00% | 100.00% |
+| VS16 | 426 | 50.00% | 100.00% |
+| ZWJ emoji | 1,445 | 0.69% | 100.00% |
+| Regional-indicator pairs | 262 | 100.00% | 100.00% |
+| Single regional indicators | 26 | 0.00% | 100.00% |
+| Fitzpatrick modifiers | 5 | 100.00% | 100.00% |
+| Narrow codepoints | 36,254 | 99.94% | 100.00% |
+| Wide codepoints | 44,568 | 99.94% | 100.00% |
+| Language sequences | 25,043 | 94.35% | 100.00% |
+
+With mode 2027 off, Kettle keeps the legacy per-codepoint widths, so the
+cluster cases score as they did before.
+
 ## Manual / interactive checks
 
 Use these for behavior that fixtures or synthetic input cannot establish.

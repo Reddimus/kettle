@@ -132,17 +132,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Shift+Tab now moves up one.
 
 - A searchable list of every keyboard shortcut. Choose Help > Keyboard
-  Shortcuts on macOS, Keyboard shortcuts in the new-tab ▾ menu, or "Show
-  keyboard shortcuts" in the command palette: the palette opens listing only
-  the commands that have a shortcut, each with its shortcut, and Enter runs
-  the selected one. Its empty field reads "Search keyboard shortcuts…". The
-  action is `show_keybinds` (alias `keyboard_shortcuts`) for a `keybind` line;
-  it has no default shortcut.
+  Shortcuts on macOS, Keyboard shortcuts in the new-tab ▾ menu on Linux and
+  Windows, or "Show keyboard shortcuts" in the command palette: the palette
+  opens listing only the commands that have a shortcut, each with its
+  shortcut, and Enter runs the selected one. Its empty field reads "Search
+  keyboard shortcuts…". The action is `show_keybinds` (alias
+  `keyboard_shortcuts`) for a `keybind` line; it has no default shortcut.
 
 - macOS has a Help menu, last in the menu bar, with Kettle Help (the README,
-  as the palette's help command opens) and Keyboard Shortcuts. As in other
-  Mac apps, its search field finds any menu command by name. The new-tab ▾
-  menu on every platform gains Keyboard shortcuts and Help rows.
+  as the palette's help command opens) and Keyboard Shortcuts. As in other Mac
+  apps, its search field finds any menu command by name. The new-tab ▾ menu (≡
+  in GNOME's header) gains Keyboard shortcuts and Help rows on Linux and
+  Windows, and on macOS when the tabs are not in the title bar.
 
 - The command palette's empty search field says "Type a command…" in grey
   until you type, in the UI language. When it does not fit beside the key
@@ -224,11 +225,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Hebrew, Arabic and other right-to-left text reads right to left. Each
   normal-screen line is shown in Unicode bidi display order, as in VTE and
   Konsole: brackets inside right-to-left text are mirrored and Arabic letters
-  join, their strokes running unbroken from cell to cell even where the
-  font's letters are narrower than a cell. Selection, links and mouse clicks
-  follow the text as drawn, while
-  copies, search and the program see it in its original order. Full-screen
-  programs keep logical order, and `bidi = false` turns it off.
+  join, and in a font with a tatweel (U+0640) their strokes run unbroken from
+  cell to cell even where its letters are narrower than a cell. Selection,
+  links and mouse clicks follow the text as drawn, while copies, search and
+  the program see it in its original order. Full-screen programs keep logical
+  order, and `bidi = false` turns it off.
 
 - Screen readers announce new command output (politely, the last lines of each
   batch, or a count for a flood), never the command just typed, and stay quiet
@@ -368,12 +369,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   editing startup files. Set `shell-integration = off` to disable it.
 - Completed commands leave success or failure ticks by the scrollbar, with
   their exit codes available to screen readers.
-- `paste-protection` (`auto` by default) asks before a paste that contains
-  a newline or control characters when the program has not turned on
-  bracketed paste, with Paste, Paste as one line and Cancel; `always`
-  confirms every multi-line paste and `off` never asks. In bracketed mode,
-  escape bytes in pasted text are neutralized so the paste cannot end it
-  early.
+- `paste-protection` (`auto` by default) asks before a paste that contains a
+  newline or control characters when the program has not turned on bracketed
+  paste, with Paste, Paste as one line and Cancel, and Paste without controls
+  when the text holds controls; `always` confirms every multi-line paste and
+  `off` never asks. In bracketed mode, escape bytes in pasted text are
+  neutralized so the paste cannot end it early.
 - SGR 53 overline (and SGR 55 to clear it) is drawn like underline at the
   top of the cell.
 - On macOS, a complete menu bar: Kettle (with Settings…), Shell, Edit, View
@@ -415,35 +416,35 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   visibility where the fill alone cannot. Explicit user selection colours
   retain the existing 4.5:1 policy and `minimum-contrast` handling.
 
-- Settings is easier to read and to use with the pointer. Descriptions,
-  footer hints and notes reach 7:1 against the panel where the theme allows,
-  and never less than four fifths of their label's contrast (TokyoNight Night
-  7.0:1 and Kettle Day 5.7:1, up from 4.5:1). The highlighted row and
-  category carry a bar at their left edge, at least 3:1 against the panel
-  and their fill, so the fill can stay light and their text keeps its
-  contrast (TokyoNight Night's highlighted label under GNOME's purple accent
-  7.0:1, up from 4.9:1).
-  Every control is one height, at least 24 points at 1x and 2x with the
-  default font, and keeps one width while its value changes; a choice's
-  arrows stay at its ends. A changed setting shows a **Reset** button beside
-  its value, and the highlighted row shows it dimmed when it already holds
-  its default; on a narrow row it becomes an icon, and on the narrowest it
-  is left out (Delete still resets). Screen readers get one Reset button for
-  the highlighted row, named for the default it restores ("Reset Font size
-  to 14 px"), and `kettle ctl ui_geometry` reports each row's Reset chip.
-  Rows sit under group headings (Appearance: Colors and text, Window,
-  Cursor), labels are bold, values sit in filled wells, Reset is joined to
-  its control, and the key hints move into the sidebar when they fit. The
-  panel is sized in logical pixels, so a 2x display shows as many rows as a
-  1x one (it showed about half before); a 1600x1000 window shows all twelve
-  Appearance rows.
+- Settings is easier to read and to use with the pointer. Descriptions, footer
+  hints and notes take four fifths of their label's contrast against the
+  panel, held between 4.5:1 and 7:1 (TokyoNight Night 7.0:1 and Kettle Day
+  5.7:1, up from 4.5:1). The highlighted row and category carry a bar at their
+  left edge, at least 3:1 against the panel and their fill, so the fill can
+  stay light and their text keeps its contrast (TokyoNight Night's highlighted
+  label under GNOME's purple accent 7.0:1, up from 4.9:1). Every control is
+  one height, at least 24 points at 1x and 2x with the default font, and keeps
+  one width while its value changes; a choice's arrows stay at its ends. A
+  changed setting shows a **Reset** button beside its value, and the
+  highlighted row shows it dimmed when it already holds its default; on a
+  narrow row it becomes an icon, and on the narrowest it is left out (Delete
+  still resets). Screen readers get one Reset button for the highlighted row,
+  named for the default it restores ("Reset Font size to 14 px"), and `kettle
+  ctl ui_geometry` reports each row's Reset chip. Rows sit under group
+  headings (Appearance: Colors and text, Window, Cursor), labels are bold,
+  number, text and shortcut values sit in filled wells, Reset is joined to its
+  control, and the key hints move into the sidebar when they fit. The panel is
+  sized in logical pixels, so a 2x display shows as many rows as a 1x one (it
+  showed about half before); a 1600x1000 window at the default font size shows
+  all twelve Appearance rows.
 
 - Colour emoji are sharp and whole. Each one is rasterized at exactly the size
-  its cell draws it, averaged down from the font's largest bitmap, instead of
-  stretching a font-size image on the GPU; Apple Color Emoji at 13 px had come
-  out blocky with its top flattened. Emoji also keep a margin of 1/16 of the
-  row (at least one pixel) from the rows above and below, and the block cursor
-  draws the same image, so moving it onto an emoji no longer resizes it.
+  its cell draws it, averaged down from the font's largest bitmap of at most
+  256 pixels per em, instead of stretching a font-size image on the GPU; Apple
+  Color Emoji at 13 px had come out blocky with its top flattened. Emoji also
+  keep a margin of 1/16 of the row (at least one pixel) from the rows above
+  and below, and the block cursor draws the same image, so moving it onto an
+  emoji no longer resizes it.
 
 - Broadcast input now outlines every pane it reaches, not only the one you
   type in. The sending pane keeps a solid outline in the theme's yellow;
@@ -606,13 +607,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   shortcuts, at least 7:1 against the panel where the theme's own text
   reaches that, instead of about 4.5:1. Unavailable rows in right-click menus
   stay dimmed.
-- The command palette and the theme, layout and SSH pickers show eight full
-  rows starting right under the search field when the list is longer than
-  that, instead of six rows under an empty strip, and a thin scrollbar thumb
-  at the right edge shows where in the list you are. The panel ends at its
-  last row in a short window. The wheel and the arrow keys scroll as before;
-  the strips that scrolled when hovered are gone. Right-click menus are
-  unchanged.
+- The command palette and the theme, layout and SSH pickers show full rows (up
+  to 12, or 14 in the theme picker) starting right under the search field when
+  the list is longer than that, instead of six rows under an empty strip, and
+  a thin scrollbar thumb at the right edge shows where in the list you are.
+  The panel ends at its last row in a short window. The wheel and the arrow
+  keys scroll as before; the strips that scrolled when hovered are gone.
+  Right-click menus are unchanged.
 - The command palette ranks a command by the best way the typed text fits
   its name, and leaves out names the text only lies scattered through while
   a closer match exists. "font" now lists the font-size commands and no
@@ -661,23 +662,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   grid cells. That lets it fit the font size caption, and on any platform the
   plain `cols×rows` chip may be a pixel wider or narrower than before.
 
-- When a window loses focus its selection turns a neutral grey, as a
-  selection in an inactive macOS window does, instead of a dimmer shade of
-  the same colour, so it changes colour as well as strength. The grey stays
-  at least 1.3:1 quieter than the focused colour and reaches 2:1 from the
-  theme's background where selected text can keep 7:1 on it; where it
-  cannot, a perimeter at 2:1 or more keeps the selection visible. With the window's background see-through (the macOS
-  and Windows default), selection colours are now chosen against the
-  background as it shows over the desktop, not against the theme's solid
-  colour. There the unfocused grey reaches about 2:1 where the focused
-  colour leaves room for it (TokyoNight Night at 86% opacity: 1.85:1, from
-  1.31:1 before), and the focused colour moves a little further from the
-  background, on the side it already sits, while selected text keeps at
-  least 4.5:1. Where the background as shown would pass the selection
-  itself, as TokyoNight Night's does over a white page below about 65%
-  opacity, both colours stay those of an opaque window. Linux, at 99%
-  opacity, changes by about 1%. An opaque window, and one under macOS
-  Reduce Transparency, keeps the focused colours it had.
+- When a window loses focus its selection turns a neutral grey, as a selection
+  in an inactive macOS window does, instead of a dimmer shade of the same
+  colour, so it changes colour as well as strength. The grey stays at least
+  1.3:1 quieter than the focused colour and reaches 2:1 from the theme's
+  background where selected text can keep 7:1 on it; where it cannot, a
+  perimeter at 2:1 or more keeps the selection visible. With the window's
+  background see-through (the macOS and Windows default), selection colours
+  and that perimeter are now measured against the background as it shows over
+  the desktop, not against the theme's solid colour. Where the background as
+  shown would pass the selection itself, as TokyoNight Night's does over a
+  white page below about 65% opacity, both colours stay those of an opaque
+  window. Selection colours you set yourself (`selection-background` or
+  `selection-foreground`) get no perimeter: in a see-through window their
+  unfocused grey reaches about 2:1 where the focused colour leaves room for it
+  (TokyoNight Night at 86% opacity: 1.85:1, from 1.31:1 before), and the
+  focused colour moves a little further from the background, on the side it
+  already sits, while selected text keeps at least 4.5:1. At Linux's 99%
+  opacity they change by about 1%, and an opaque window, or one under macOS
+  Reduce Transparency, keeps the focused colour they had.
 
 - Background tabs in a top or bottom tab bar mark their state with a shape
   as well as a colour: a filled dot for new output, a ring when the output
@@ -764,16 +767,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Cmd/Ctrl-click and quick-select hints are unchanged.
 
 - Background opacity now works on GNOME, X11 and other Linux sessions that
-  cannot blur windows. With window blur on, Kettle used to raise the opacity to
-  99% there, so the Settings slider seemed to do nothing; the window now keeps
-  the configured opacity, as it does with blur off. The Linux default stays
-  99%. Wherever the session cannot blur (those Linux sessions, KDE Plasma on
-  X11 included, and Windows without its system backdrop, such as Windows 10),
-  the Settings Window blur switch reads **Unavailable** instead of On,
-  without the accent fill and with a hollow knob, and says "This session
-  cannot blur; saved setting: On. Opacity still applies." under it, in
-  English and Spanish; it still turns blur off. On Wayland, while Kettle
-  asks the compositor (at most half a second), it reads **Checking…**, so it
+  cannot blur windows. With window blur on, Kettle used to raise the opacity
+  to 99% there, so the Settings slider seemed to do nothing; the window now
+  keeps the configured opacity, as it does with blur off. The Linux default
+  stays 99%. Wherever the session cannot blur (those Linux sessions, KDE
+  Plasma on X11 included, and Windows without its system backdrop, such as
+  Windows 10), the Settings Window blur switch reads **Unavailable** instead
+  of On, without the accent fill and with a hollow knob, and says "This
+  session cannot blur; saved setting: On. Opacity still applies." under it, in
+  English and Spanish; it still turns blur off. On Wayland, while Kettle asks
+  the compositor (up to about half a second), it reads **Checking…**, so it
   never shows On before Unavailable. The footer of the Window blur and
   Background opacity rows drops its hint about what blur needs.
 
@@ -802,23 +805,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   at the earliest and shows the same timing. GTK text views hold their
   cursor for about one blink period after a key or a click in the same way.
 
-- An unfocused window's selection stays at least 2:1 from the background
-  (was 1.5:1), by its fill or, where the fill must stay quieter to keep its
-  text at 7:1, by its perimeter, so it stays visible while still quieter
-  than the focused one.
+- An unfocused window's selection in a theme's colours stays at least 2:1 from
+  the background (was 1.5:1), by its fill or, where the fill must stay quieter
+  to keep its text at 7:1, by its perimeter, so it stays visible while still
+  quieter than the focused one.
 
 - A theme selection colour too faint for 3:1 against the background is now
   strengthened as a deeper or lighter tint of its own hue, not greyed toward
-  white or black: the default TokyoNight Night selection is a clear blue
-  (`#4d64a6`) instead of slate (`#5d6781`). A selection across a status line or
-  prompt keeps that one fill over every program-set background it stands out
-  from. A cell whose background it does not stand out from, such as one that
-  matches it, gets a fill of its own, so the selection no longer vanishes
-  there. The ratios are measured against the opaque background colour: in a
-  translucent window, the macOS and Windows default, the desktop behind the
-  window changes the contrast you see. Link underlines inside a selection or
-  search match, hovered or not, are drawn at their 1 px resting weight in the
-  colour of the text above them, not link blue or the hover accent.
+  white or black: TokyoNight Night's default selection stays blue instead of
+  turning slate (`#5d6781`). A theme's selection is strengthened only as far
+  as its text keeps 7:1, and a perimeter makes up the rest; TokyoNight Night's
+  `#283457` set as `selection-background` becomes `#4d64a6` in an opaque
+  window. A selection across a status line or prompt keeps that one fill over
+  every program-set background it stands out from. A cell whose background it
+  does not stand out from, such as one that matches it, gets a fill of its
+  own, so the selection no longer vanishes there. In a translucent window, the
+  macOS and Windows default, the ratios are measured against the background as
+  it shows over the desktop. Link underlines inside a selection or search
+  match, hovered or not, are drawn at their 1 px resting weight in the colour
+  of the text above them, not link blue or the hover accent.
 
 - The paste confirmation puts its counts on their own line, keeps each count
   with its noun when wrapping, lists Paste without controls first after Cancel
@@ -883,8 +888,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Search shows the current match and total (3/122) next to the query, has a
   Regex toggle beside Case (Case cycles on click), and draws other matches
   with stronger contrast.
-- Selection and search highlights keep at least 3:1 contrast against the
-  background on every theme.
+- A focused selection in a theme's colours keeps at least 3:1 contrast against
+  the background on every theme, by its fill or a perimeter. Search matches
+  other than the current one, and selection colours you set yourself, keep 3:1
+  by their fill against the theme's background colour.
 - A pane scrolled into history shows a ↓ N lines button that returns to the
   live bottom, and the scrollbar's hover target is wider.
 - `scrollback-bytes` defaults to 64 MB, so the default 10,000-line history
@@ -903,10 +910,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   before the title, and on macOS each tab's `Cmd+N` shortcut when it fits.
   The default `tab-format` is now `{title}`; set `tab-format = {n}: {title}`
   for the previous numbered labels.
-- Settings opens as a centred two-pane window: categories in a sidebar,
-  a search field that finds settings by name, description or config key,
-  a one-line description under every setting, and values drawn as controls
-  (On/Off pills, ‹ choice ›). Narrow windows fall back to a single pane.
+- Settings opens as a centred two-pane window: categories in a sidebar, a
+  search field that finds settings by name, description or config key, a
+  one-line description under every setting (short enough in English and
+  Spanish to show whole in a 1280x820 window at the default font size), and
+  values drawn as controls (On/Off pills, ‹ choice ›). Narrow windows fall
+  back to a single pane.
 - The command palette and the theme, layout and SSH pickers open as one
   centred card near the top of the window, with the query field above its
   results, and command labels highlight the characters that match the query.
@@ -1048,6 +1057,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   "Type a command…" follows the same rule, so it also shows in windows that
   used to keep only the hint.
 
+- The new-tab ▾ menu's About row read "About kettle" ("Acerca de kettle"),
+  while the macOS menu bar says "About Kettle". It now reads "About Kettle",
+  and the update and agent-setup notices no longer start a sentence or clause
+  with a lowercase "kettle".
+
 - Control-server pointer files (`<pid>.alias.json`) no longer pile up in
   `~/.local/state/kettle/ctl` (`/run/user/<uid>/kettle/ctl` on Linux when it
   exists, `%LOCALAPPDATA%\kettle\ctl` on Windows). A Kettle whose
@@ -1174,8 +1188,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A scrolling picker (the command palette, theme, layout and SSH pickers) no
   longer leaves a blank part-row under its last result. It used to paint six
-  whole rows in room for eight; it now paints eight, and the last row it
-  paints takes a click.
+  whole rows in room for eight; it now fills its room with whole rows, and the
+  last row it paints takes a click.
 
 - On the highlighted row of the command palette and other pickers, the
   characters matching the query were drawn in the accent colour over the
