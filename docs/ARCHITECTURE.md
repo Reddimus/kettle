@@ -2170,6 +2170,19 @@ A renderer given fonts measured for another scale or size measures them again
 (`StartupFonts::remeasure`) instead of enumerating the system fonts a second
 time.
 
+Window 1's Vulkan instance is created the same way where Vulkan is its first
+GPU attempt: on Linux and the BSDs, with the default backend order or
+`gpu-backend = vulkan`, no GPU pin and an Auto power preference
+(`early_vulkan_instance_applies_for`). Once the config and its command-line
+overrides are read, `run_with` starts `EarlyGpuInstance` on the
+`kettle-gpu-init` thread with the event loop's display handle, the instance
+that attempt would create itself. Window 1's renderer joins it inside the
+hung-driver watchdog, and only its first Vulkan attempt uses it; any other
+attempt, including the software pass, creates its own. If the thread could not
+start or panicked, the attempt creates the instance itself. `gpu-backend = gl`,
+a pin, macOS and Windows never start it, so they never load the Vulkan driver
+early.
+
 On macOS, an eligible first pane starts after `App` construction and before
 `run_app`, while AppKit finishes launching. The order is font preload,
 event-loop build, application setup, display read and font measurement,
@@ -2302,6 +2315,14 @@ launch coalesces repeated Dock events. Old windows and PTYs remain alive.
   offscreen checks, and renderer tests. It permits graphics-only virtual GLES
   adapters that advertise zero compute workgroups without inflating Kettle's
   resource envelope to every hardware maximum; Kettle has no compute pipeline.
+  Every instance leaves out wgpu's `VALIDATION_INDIRECT_CALL`, so no device
+  builds its two indirect-argument validation compute pipelines; Kettle issues
+  no indirect draw or dispatch, and
+  `crates/kettle-test-support/tests/gpu_indirect_calls.rs` fails if one
+  appears. Each renderer compiles the outline, first rounded-surface,
+  presentation, starfield and glyph pipelines on worker threads with clones of
+  the device while it builds the text renderers and shared pipelines, and joins
+  each where it used to build it.
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
   (same physical GPU through an alternate backend → surface-preferred GPU →

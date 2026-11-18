@@ -4,7 +4,8 @@ use super::{
     ScreenshotRecoveryWake, ScreenshotRequest, Shaping, SharedPipelines, StartupFonts, SwashCache,
     TextAtlas, TextBuffer, TextRenderer, Viewport, Weight, Wrap, anyhow, builtin_glyphs,
     card_scene, chrome, clamp_font_size, confirm, desired_alpha_mode, fonts,
-    live_surface_dimensions, metrics_for, present, rounded_surface, starfield, upload,
+    live_surface_dimensions, metrics_for, pipeline_build::PipelineBuild, present, rounded_surface,
+    starfield, upload,
 };
 
 /// The swapchain present mode for a window surface.
@@ -291,6 +292,22 @@ pub(crate) fn live_device_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     .or_worse_values_from(&adapter_limits)
 }
 
+// `Renderer::with_gpu` builds these pipelines on worker threads, from a clone
+// of the device and the window's graphics budget, and `EarlyGpuInstance`
+// hands its instance across threads.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<wgpu::Device>();
+    assert_send::<kettle_core::GraphicsBudget>();
+    assert_send::<OutlinePipeline>();
+    assert_send::<rounded_surface::RoundedSurfacePipeline>();
+    assert_send::<present::PresentationPipeline>();
+    assert_send::<starfield::StarfieldPipeline>();
+    assert_send::<Option<GlyphPipeline>>();
+    assert_send::<wgpu::Instance>();
+    assert_send::<OwnedGpuDisplayHandle>();
+};
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -328,7 +345,9 @@ impl Renderer {
     /// unlike an `Arc<Window>`, does not keep a closed OS window alive.
     ///
     /// `fonts`, when loaded for the same font and scale, are taken over
-    /// instead of loading the system fonts again.
+    /// instead of loading the system fonts again, and so is `early_instance`
+    /// ([`EarlyGpuInstance`]) instead of creating the first Vulkan instance.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_with_display_handle<W, D>(
         window: Arc<W>,
         display_handle: D,
@@ -337,6 +356,7 @@ impl Renderer {
         scale: f32,
         cfg: &Config,
         fonts: Option<StartupFonts>,
+        early_instance: Option<EarlyGpuInstance>,
     ) -> Result<Renderer>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
@@ -351,6 +371,7 @@ impl Renderer {
             cfg,
             AdapterSelection::new(AdapterEscalation::Preferred, None),
             fonts,
+            early_instance,
         )
         .await
     }
@@ -375,6 +396,7 @@ impl Renderer {
             scale,
             cfg,
             AdapterSelection::new(escalation, avoid),
+            None,
             None,
         )
         .await
@@ -403,6 +425,7 @@ impl Renderer {
             cfg,
             selection,
             None,
+            None,
         )
         .await
     }
@@ -417,6 +440,7 @@ impl Renderer {
         cfg: &Config,
         selection: AdapterSelection,
         fonts: Option<StartupFonts>,
+        early_instance: Option<EarlyGpuInstance>,
     ) -> Result<Renderer>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
@@ -435,6 +459,7 @@ impl Renderer {
         let (instance, surface, adapter, (device, queue)) = resolve_window_adapter(
             window,
             display_handle.as_ref(),
+            early_instance,
             cfg,
             selection.escalation,
             selection.avoid,
@@ -666,6 +691,33 @@ impl Renderer {
             surface.configure(&device, &config);
         }
 
+        // These five pipelines need only the device and the format, so they
+        // compile on their own threads while this one sets up the text and
+        // the shared pipelines. Each is joined where it was built before.
+        let graphics_budget = kettle_core::GraphicsBudget::default();
+        let outline_build = PipelineBuild::spawn("kettle-outline", {
+            let device = device.clone();
+            move || OutlinePipeline::new(&device, format)
+        });
+        let rounded_surface_build = PipelineBuild::spawn("kettle-rounded", {
+            let device = device.clone();
+            move || rounded_surface::RoundedSurfacePipeline::new(&device, format)
+        });
+        let presentation_build = PipelineBuild::spawn("kettle-present", {
+            let device = device.clone();
+            let budget = graphics_budget.clone();
+            move || present::PresentationPipeline::new(&device, format, budget)
+        });
+        let starfield_build = PipelineBuild::spawn("kettle-stars", {
+            let device = device.clone();
+            move || starfield::StarfieldPipeline::new(&device, format)
+        });
+        let glyph_build = PipelineBuild::spawn("kettle-glyphs", {
+            let device = device.clone();
+            let budget = graphics_budget.clone();
+            move || GlyphPipeline::new_with_budget(&device, format, budget)
+        });
+
         // Fonts loaded before the window reach here already measured. Ones
         // measured for another scale or font are measured again, without
         // enumerating the system fonts a second time.
@@ -752,7 +804,7 @@ impl Renderer {
         let shared = SharedPipelines::new(&device, format);
         let pane_bases = shared.quads.replace(&device);
         let quads = shared.quads.blend(&device);
-        let pane_outlines = OutlinePipeline::new(&device, format);
+        let pane_outlines = outline_build.join();
         let pane_dimming = shared.quads.blend(&device);
         let text_decorations = shared.quads.blend(&device);
         let overlay_quads = shared.quads.blend(&device);
@@ -762,7 +814,9 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let rounded_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        // Joined before the three copies below: once the first has compiled,
+        // the copies together took about 1.6 ms on NVIDIA.
+        let rounded_surfaces = rounded_surface_build.join();
         let menu_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
             &device,
             format,
@@ -780,7 +834,6 @@ impl Renderer {
         let cursor_glyph_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
-        let graphics_budget = kettle_core::GraphicsBudget::default();
         let card_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let card_base = shared.quads.blend(&device);
@@ -789,8 +842,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let card_cursors = shared.quads.blend(&device);
         let card_decoration = shared.quads.blend(&device);
-        let presentation =
-            present::PresentationPipeline::new(&device, format, graphics_budget.clone());
+        let presentation = presentation_build.join();
         let imgs = shared
             .images
             .layer(&device, graphics_budget.clone())
@@ -812,13 +864,12 @@ impl Renderer {
                 anyhow!("GPU graphics budget exhausted while creating background image pipeline")
             })?;
         // Procedural starfield wallpaper, same back-most slot.
-        let starfield = starfield::StarfieldPipeline::new(&device, format);
+        let starfield = starfield_build.join();
         // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
         // Always constructed; only emitted/drawn in grid mode.
-        let glyph_pipeline =
-            GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()).ok_or_else(
-                || anyhow!("GPU graphics budget exhausted while creating glyph pipeline"),
-            )?;
+        let glyph_pipeline = glyph_build.join().ok_or_else(|| {
+            anyhow!("GPU graphics budget exhausted while creating glyph pipeline")
+        })?;
 
         Ok(Renderer {
             surface,
@@ -1134,9 +1185,34 @@ fn gpu_instance() -> wgpu::Instance {
 }
 
 pub(crate) fn gpu_instance_for_backends(backends: wgpu::Backends) -> wgpu::Instance {
-    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    wgpu::Instance::new(instance_descriptor(backends, None))
+}
+
+/// wgpu's default instance flags without `VALIDATION_INDIRECT_CALL`.
+///
+/// With that flag, every device builds two compute pipelines at creation to
+/// check the arguments of indirect draws and dispatches. Kettle issues none
+/// (`crates/kettle-test-support/tests/gpu_indirect_calls.rs` keeps it that
+/// way), so they only cost startup: about 19 ms of `request_device` on NVIDIA.
+/// Debug builds keep wgpu's other debugging and validation flags.
+pub(crate) fn kettle_instance_flags() -> wgpu::InstanceFlags {
+    wgpu::InstanceFlags::default().difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
+}
+
+/// The descriptor of every instance Kettle creates.
+pub(crate) fn instance_descriptor(
+    backends: wgpu::Backends,
+    display_handle: Option<&OwnedGpuDisplayHandle>,
+) -> wgpu::InstanceDescriptor {
+    let mut descriptor = match display_handle {
+        Some(display_handle) => {
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display_handle.clone()))
+        }
+        None => wgpu::InstanceDescriptor::new_without_display_handle(),
+    };
     descriptor.backends = backends;
-    wgpu::Instance::new(descriptor)
+    descriptor.flags = kettle_instance_flags();
+    descriptor
 }
 
 trait GpuDisplayHandleOwner: HasDisplayHandle + Send + Sync + 'static {}
@@ -1150,10 +1226,10 @@ impl<T> GpuDisplayHandleOwner for T where T: HasDisplayHandle + Send + Sync + 's
 /// [`GpuContext`] can therefore outlive window 1 without preventing that
 /// window's native resources from being destroyed.
 #[derive(Clone)]
-struct OwnedGpuDisplayHandle(Arc<dyn GpuDisplayHandleOwner>);
+pub(crate) struct OwnedGpuDisplayHandle(Arc<dyn GpuDisplayHandleOwner>);
 
 impl OwnedGpuDisplayHandle {
-    fn new<D>(display_handle: D) -> Self
+    pub(crate) fn new<D>(display_handle: D) -> Self
     where
         D: HasDisplayHandle + Send + Sync + 'static,
     {
@@ -1181,14 +1257,97 @@ fn gpu_instance_for_live_display(
     display_handle: Option<&OwnedGpuDisplayHandle>,
     backends: wgpu::Backends,
 ) -> wgpu::Instance {
-    let mut descriptor = match display_handle {
-        Some(display_handle) => {
-            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display_handle.clone()))
+    wgpu::Instance::new(instance_descriptor(backends, display_handle))
+}
+
+/// The first window's Vulkan instance, created on its own thread while the
+/// config is applied and the window comes up.
+///
+/// `vkCreateInstance` needs neither a window nor a surface, and it is the
+/// longest single step of GPU init (about 125 ms on NVIDIA), so the first
+/// window's Vulkan attempt waits only for what is left of it. The instance is
+/// the one that attempt would create itself: Vulkan only, Kettle's flags, and
+/// the event loop's display handle, which it keeps for the life of the GPU
+/// context. It is started only where Vulkan is that first attempt
+/// ([`early_vulkan_instance_applies_for`]), so `gpu-backend = gl`, a GPU pin,
+/// macOS and Windows never load the Vulkan ICD early.
+pub struct EarlyGpuInstance {
+    handle: Option<std::thread::JoinHandle<wgpu::Instance>>,
+}
+
+impl EarlyGpuInstance {
+    /// Start creating the instance for `cfg`, or `None` when the first
+    /// window would not try Vulkan first or no thread can be started. Either
+    /// way the first window then creates every instance itself.
+    pub fn start<D>(cfg: &Config, display_handle: D) -> Option<Self>
+    where
+        D: HasDisplayHandle + Send + Sync + 'static,
+    {
+        if !early_vulkan_instance_applies_for(host_backend_platform(), cfg) {
+            return None;
         }
-        None => wgpu::InstanceDescriptor::new_without_display_handle(),
-    };
-    descriptor.backends = backends;
-    wgpu::Instance::new(descriptor)
+        let display_handle = OwnedGpuDisplayHandle::new(display_handle);
+        Self::spawn(move || {
+            gpu_instance_for_live_display(Some(&display_handle), wgpu::Backends::VULKAN)
+        })
+    }
+
+    pub(crate) fn spawn(create: impl FnOnce() -> wgpu::Instance + Send + 'static) -> Option<Self> {
+        std::thread::Builder::new()
+            .name("kettle-gpu-init".into())
+            .spawn(create)
+            .map_err(|error| log::debug!("no early Vulkan instance: {error}"))
+            .ok()
+            .map(|handle| Self {
+                handle: Some(handle),
+            })
+    }
+
+    /// The instance, once it exists, or `None` if its thread panicked; the
+    /// caller then creates its own.
+    pub(crate) fn take(mut self) -> Option<wgpu::Instance> {
+        let handle = self.handle.take()?;
+        let waited = std::time::Instant::now();
+        let instance = handle
+            .join()
+            .map_err(|_| log::debug!("the early Vulkan instance thread panicked"))
+            .ok()?;
+        log::info!(
+            "renderer init: waited {:.1}ms for the early Vulkan instance",
+            waited.elapsed().as_secs_f64() * 1000.0
+        );
+        Some(instance)
+    }
+}
+
+impl Drop for EarlyGpuInstance {
+    /// An instance nobody took is still waited for and destroyed here, so
+    /// its thread is never left inside the Vulkan loader at exit.
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The early instance, for the first Vulkan attempt; every other attempt,
+/// and any Vulkan attempt after it, creates its own.
+pub(crate) fn early_instance_for(
+    backend: wgpu::Backend,
+    early: &mut Option<EarlyGpuInstance>,
+) -> Option<EarlyGpuInstance> {
+    early.take_if(|_| backend == wgpu::Backend::Vulkan)
+}
+
+/// Whether the first window's first GPU attempt on `platform` is a Vulkan
+/// instance of its own: the unpinned Auto-preference direct probe, with
+/// Vulkan first in its backend order. Windows and macOS try DX12 or Metal
+/// first, and a `gpu-backend` other than Vulkan or Auto leads with that.
+pub(crate) fn early_vulkan_instance_applies_for(platform: BackendPlatform, cfg: &Config) -> bool {
+    platform == BackendPlatform::Other
+        && can_probe_native_backend_directly(cfg)
+        && backend_attempt_order_for(platform, configured_backend(cfg.gpu_backend)).first()
+            == Some(&wgpu::Backend::Vulkan)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1863,10 +2022,12 @@ async fn request_live_device(adapter: wgpu::Adapter) -> Result<(wgpu::Device, wg
 /// Fast startup for the common unpinned Auto policy. Each instance enables one
 /// backend, so a successful native request is one adapter discovery and does
 /// not initialize lower-priority ICDs. Hardware across every backend is tried
-/// before software fallback.
+/// before software fallback. The first Vulkan attempt uses `early_instance`
+/// when there is one; every other attempt creates its own instance.
 async fn resolve_window_adapter<W>(
     window: Arc<W>,
     display_handle: Option<&OwnedGpuDisplayHandle>,
+    early_instance: Option<EarlyGpuInstance>,
     cfg: &Config,
     escalation: AdapterEscalation,
     avoid: Option<GpuAdapterKey>,
@@ -1880,6 +2041,7 @@ async fn resolve_window_adapter<W>(
 where
     W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
 {
+    let mut early_instance = early_instance;
     if escalation == AdapterEscalation::Preferred && can_probe_native_backend_directly(cfg) {
         let mut failures = Vec::new();
         for &software_pass in direct_probe_passes(cfg.gpu_force_software) {
@@ -1887,9 +2049,12 @@ where
                 backend_attempt_order(cfg),
                 |backend| {
                     let window = window.clone();
+                    let early = early_instance_for(backend, &mut early_instance);
                     async move {
                         let instance =
-                            gpu_instance_for_live_display(display_handle, backend_mask(backend));
+                            early.and_then(EarlyGpuInstance::take).unwrap_or_else(|| {
+                                gpu_instance_for_live_display(display_handle, backend_mask(backend))
+                            });
                         let surface = instance.create_surface(window)?;
                         let adapter =
                             request_direct_adapter(&instance, Some(&surface), cfg, software_pass)
@@ -1929,6 +2094,8 @@ where
         ));
     }
 
+    // Only the direct probe has a Vulkan-only attempt to give it to.
+    drop(early_instance);
     let instance = gpu_instance_for_live_display(display_handle, wgpu::Backends::all());
     let surface = instance.create_surface(window)?;
     let mut remaining: Vec<_> = instance
