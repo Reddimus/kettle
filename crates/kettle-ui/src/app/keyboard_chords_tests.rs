@@ -417,6 +417,20 @@ fn parse_send_key_grammar() {
         parse_send_key("space"),
         Some((none, Key::Named(NamedKey::Space)))
     );
+    // Every spelling a keybind accepts for the Menu key, so the control
+    // plane (`send_keys`, `dispatch_keybind`) can press the key it binds.
+    for menu in ["menu", "Menu", "context_menu", "contextmenu", "apps"] {
+        assert_eq!(
+            parse_send_key(menu),
+            Some((none, Key::Named(NamedKey::ContextMenu))),
+            "{menu}"
+        );
+        assert_eq!(
+            super::parse_ctl_logical_key(Some(&serde_json::json!(menu))),
+            Ok(Some(Key::Named(NamedKey::ContextMenu))),
+            "{menu}"
+        );
+    }
     // Chords, with aliases.
     assert_eq!(
         parse_send_key("ctrl+c"),
@@ -688,6 +702,7 @@ fn every_configurable_named_key_matches_its_real_key() {
         ("backspace", NamedKey::Backspace),
         ("delete", NamedKey::Delete),
         ("space", NamedKey::Space),
+        ("menu", NamedKey::ContextMenu),
     ];
     let fkeys = [
         NamedKey::F1,
@@ -1895,6 +1910,8 @@ fn keybind_chord_is_safe_rejects_modless_text_keys() {
     assert!(!keybind_chord_is_safe(Mods::empty(), KKey::Up));
     // A modifier-less F-key is fine (produces no text — F1=help etc.).
     assert!(keybind_chord_is_safe(Mods::empty(), KKey::F(1)));
+    // So is the Menu key, which a config binds bare by default.
+    assert!(keybind_chord_is_safe(Mods::empty(), KKey::Menu));
     // Any modifier makes the chord safe.
     assert!(keybind_chord_is_safe(Mods::CTRL, KKey::Char('a')));
     assert!(keybind_chord_is_safe(Mods::ALT, KKey::Enter));

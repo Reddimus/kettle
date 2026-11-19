@@ -1165,7 +1165,11 @@ impl App {
                 if let Some(focus) = ws.preview_focus {
                     self.open_preview_menu(ws, focus.pane, None);
                 } else {
-                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+                    // Not a click: the menu opens at the text cursor, where
+                    // the keyboard is.
+                    let (px, py) = self
+                        .keyboard_menu_point(ws)
+                        .unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
                     self.open_context_menu(ws, px, py, false);
                 }
             }

@@ -797,6 +797,9 @@ close window (also Shift+Cmd+W on macOS)
 .TP
 .B F11
 toggle fullscreen
+.TP
+.B Menu
+open the right-click menu at the text cursor
 .PP
 Close confirmations appear in a centered dialog with Cancel focused.
 Enter activates the focused button; Space activates on release; Esc cancels.
@@ -1018,6 +1021,11 @@ Copy / Paste / Split Auto, Right, Left, Down and Up / Zoom / Close Pane /
 New Tab / Close Tab / New Window / Close Window / Set Window, Tab and Pane
 Title / Reset Terminal / Read only, then the group rows, the Theme and
 Profile submenus, Settings and Preferences.
+The Menu key opens the same menu at the text cursor. Up and Down move
+through it, Enter picks a row and Escape closes it; while it is open no key
+reaches the program in the pane.
+.B keybind = menu=unbind
+gives the key back to the program.
 .
 .SH CONFIGURATION
 Configuration lives at

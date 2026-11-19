@@ -660,7 +660,9 @@ impl App {
                 )
             });
         append_link_hints_menu_item(&mut items, in_focused_pane && has_hintable_link, tr);
-        if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
+        if in_focused_pane
+            && let Some(url) = self.link_at_point(ws, (px, py)).map(|l| l.uri.clone())
+        {
             items.extend(link_menu_rows(&url, links_pane(ws), tr));
         }
         // A selection holding a diagram an agent printed offers it, even
@@ -760,6 +762,44 @@ impl App {
         let info_columns = self.context_menu_info_columns(ws, &items);
         prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
+    }
+
+    /// The point a terminal menu opened from the keyboard opens over: the
+    /// focused pane's text cursor (`text_cursor_menu_point`). Typing hides the
+    /// pointer, which may rest over another pane or outside the window, so it
+    /// is no guide. `None` without a focused terminal.
+    pub(super) fn keyboard_menu_point(&self, ws: &WindowState) -> Option<(f32, f32)> {
+        use kettle_core::Dimensions as _;
+        let rect = self.focused_terminal(ws, self.area(ws))?;
+        let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id))?;
+        let (cursor, display_offset, grid) = {
+            let term = pane.term.term.lock().ok()?;
+            // The vi-mode cursor while vi mode is on, which can be in history.
+            let point = term.renderable_content().cursor.point;
+            let grid = term.grid();
+            (
+                (point.line.0, point.column.0),
+                grid.display_offset(),
+                (grid.screen_lines(), grid.columns()),
+            )
+        };
+        let cell = ws
+            .renderer
+            .as_ref()
+            .map_or((8.0, 16.0), |r| (r.cell_w, r.cell_h));
+        let pad = (self.cfg.padding_x, self.cfg.padding_y);
+        Some(text_cursor_menu_point(
+            rect,
+            cell,
+            pad,
+            cursor,
+            display_offset,
+            grid,
+            |row, column| {
+                super::links::painted_row_bidi(ws, rect, row)
+                    .map_or(column, |map| map.visual(column))
+            },
+        ))
     }
 
     /// Preserve search under a terminal menu; close other modals.
@@ -3650,6 +3690,38 @@ pub(super) fn viewport_row_id(term: &kettle_core::term::SharedTerm, row: usize) 
             .saturating_sub(grid.display_offset() as u64)
             .saturating_add(row as u64)
     })
+}
+
+/// Where a terminal menu opened from the keyboard opens in a pane's
+/// `terminal` rect: the middle of the text cursor's cell, where a right-click
+/// on the cursor would land, measured with `cell` and `pad` as `px_to_cell`
+/// measures it. `cursor` is the cursor's grid (line, column), its line
+/// counted from the top of the screen and negative in history, where a
+/// vi-mode cursor can be; `grid` is the screen's (rows, columns). A view
+/// scrolled back `display_offset` rows shows the cursor that much lower, and
+/// a cursor above or below the view is taken at the nearest row shown.
+/// `visual` maps the cursor's column on that visible row to the column the
+/// row paints it in, which differs on a row drawn in bidi display order.
+pub(super) fn text_cursor_menu_point(
+    terminal: Rect,
+    cell: (f32, f32),
+    pad: (f32, f32),
+    cursor: (i32, usize),
+    display_offset: usize,
+    grid: (usize, usize),
+    visual: impl FnOnce(usize, usize) -> usize,
+) -> (f32, f32) {
+    let line =
+        i64::from(cursor.0).saturating_add(i64::try_from(display_offset).unwrap_or(i64::MAX));
+    let row = usize::try_from(line.max(0))
+        .unwrap_or(usize::MAX)
+        .min(grid.0.saturating_sub(1));
+    let last_column = grid.1.saturating_sub(1);
+    let column = visual(row, cursor.1.min(last_column)).min(last_column);
+    (
+        terminal.0 + pad.0 + (column as f32 + 0.5) * cell.0,
+        terminal.1 + pad.1 + (row as f32 + 0.5) * cell.1,
+    )
 }
 
 /// A Broadcast Input row as a radio row. The right-click menu hides an

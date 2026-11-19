@@ -864,7 +864,9 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 (e.g. `ctrl+,` for `open_settings`). Plus the named keys: `f1`..`f12`,
 `up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
 `prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`,
-`escape` (alias `esc`), `backspace` (alias `bs`), `delete` (alias `del`), and the symbolic
+`escape` (alias `esc`), `backspace` (alias `bs`), `delete` (alias `del`),
+`menu` (aliases `context_menu`, `contextmenu`, `apps`: the Menu key beside the right Ctrl
+on PC keyboards; macOS never reports it), and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
 GTK's accelerator syntax works too, unchanged from a Terminator config:
@@ -1186,9 +1188,14 @@ Kettle does
 not look the path up itself, so printed text cannot make it reach a network
 mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`
-(`open_context_menu` — the right-click menu — mouse-only by default
-but bindable to a keyboard trigger if you want the menu opened at the
-cursor position).
+(`open_context_menu`: the right-click menu, opened at the text cursor
+rather than under the mouse pointer; `Menu` on Linux and Windows, and
+bindable to any key on macOS). Up and Down move the highlight, which
+starts on the first row it can act on, Enter picks it and Escape closes the
+menu; while it is open no key reaches the program in the pane. Shift+F10,
+the other common menu key, has no default because full-screen programs use
+it. Under the Kitty keyboard protocol a program that asks for every key no
+longer receives the Menu key; `keybind = menu=unbind` gives it back.
 
 **Vi-mode**: `toggle_vi_mode` (`vi_mode` / `vi`) — enter keyboard-driven
 copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,

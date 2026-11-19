@@ -10,6 +10,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- On Linux and Windows the Menu key, the one beside the right Ctrl on PC
+  keyboards, opens the terminal menu at the text cursor, as it does in GNOME
+  Terminal and Terminator. Up and Down move through the menu, Enter picks a
+  row and Escape closes it; while the menu is open no key reaches the program
+  in the pane. Shift+F10 is left to the programs that use it. A
+  `keybind = menu=unbind` line gives the key back to the program, and any
+  key bound to `open_context_menu` (on macOS too) now opens the menu at the
+  text cursor rather than under the mouse pointer.
+
 - On Wayland the quick-terminal hotkey is now a real global shortcut: Kettle
   registers it with the desktop through the GlobalShortcuts portal (GNOME 48
   and later, KDE Plasma), which asks once to confirm it. Settings > Quick
