@@ -2665,13 +2665,26 @@ mod tests {
             crate::Config::parse_text("").keybinds.get(&menu),
             Some(&Action::OpenContextMenu)
         );
-        let unbound = crate::Config::parse_text("keybind = menu=unbind\n");
-        assert_eq!(unbound.keybinds.get(&menu), None);
-        assert!(
-            unbound
+        // Bound first, so the unbind has something to remove on macOS too.
+        for config in [
+            "keybind = menu=unbind\n",
+            "keybind = menu=open_context_menu\nkeybind = menu=unbind\n",
+        ] {
+            let unbound = crate::Config::parse_text(config);
+            assert_eq!(unbound.keybinds.get(&menu), None, "{config}");
+            assert!(
+                unbound
+                    .keybinds
+                    .values()
+                    .all(|action| *action != Action::OpenContextMenu),
+                "{config}"
+            );
+        }
+        assert_eq!(
+            crate::Config::parse_text("keybind = menu=open_context_menu\n")
                 .keybinds
-                .values()
-                .all(|action| *action != Action::OpenContextMenu)
+                .get(&menu),
+            Some(&Action::OpenContextMenu)
         );
 
         let moved = crate::Config::parse_text(
