@@ -2518,7 +2518,11 @@ fn the_menu_key_opens_the_terminal_menu_and_keeps_its_keys_from_the_pty() {
          &mut ws.terminal_owned_key_releases, event.physical_key, event.state, ui_owns_key, );",
     );
     let menu = at("if ws.context_menu.is_some() {");
-    assert!(release < at("if release_consumed { return; }") && release < menu);
+    // The general guard, not the confirmation dialog's: a consumed release
+    // returns before the release goes on to the terminal.
+    let dropped = at("if release_consumed { return; } if event.state == ElementState::Released { \
+         self.write_terminal_key_event(ws, &event, false); return; }");
+    assert!(release < dropped && dropped < menu);
     let branch = &arm[menu..];
     let branch = &branch[..branch.find("} // Vi-mode key dispatch.").expect("branch end")];
     assert!(branch.contains("self.context_menu_key(ws, &event.logical_key, text, event_loop);"));
