@@ -67,6 +67,43 @@ on `main`, and the setup after the device 43.8 against 77.1 ms. A screenshot
   caches, macOS and Windows were not measured. Adapter and device setup is
   still 214 ms of the 314.
 
+## Unreleased — compact scrollback rows (Linux)
+
+History rows stop storing the blank cells that end them (see
+[Scrollback row storage](ARCHITECTURE.md#scrollback-row-storage)). Measured
+2026-11-18 on the Linux panel host (Ubuntu 26.04, GNOME Shell 50.1, RTX 2080,
+i9-10900K) with the panel protocol: a fresh private headless GNOME Shell per
+run, the window maximized to 1600x1000, PSS of Kettle's own processes 3 s
+after launch and 4 s after `seq 1 100000`, and a bash-timed `cat` of two
+50 MiB files: the panel's 69-character lines, and lines of 5 to 150
+characters. Release builds of `1415a82b` (base) and the branch (new), nine
+rounds interleaved, every run under 0.05 cores of foreign CPU. Medians:
+
+| | base | new |
+|---|---|---|
+| idle | 169.0 MiB | 166.8 MiB |
+| after `seq 1 100000` | 212.3 MiB | **169.2 MiB** |
+| growth from `seq` | 43.3 MiB | **2.4 MiB** |
+| `cat`, 69-character lines | 0.410 s | 0.395 s |
+| `cat`, 5–150 characters | 0.358 s | **0.384 s** |
+
+- An earlier set with a third arm, the branch with compaction switched off,
+  gave 166.0, 164.0 and 166.1 MiB idle and 209.3, 166.5 and 209.4 MiB after
+  `seq` (base, new, off). PSS of shared libraries moves a few MiB between
+  sets, so compare within a set.
+- The `seq` growth lands in the terminal thread's malloc arena (anonymous
+  mappings: 59.7 to 18.4 MiB). The 2 MiB at idle is in `[heap]`: maximizing
+  grows the grid, which created 1,000 cache rows at full width before.
+- Lines of mixed length scroll 7 to 12% slower end to end (7.3%, 8.8% and
+  11.6% in three sets); lines of one length do not. The off arm matched base
+  for both files, so the cost is compaction's. The parser alone, 50 MiB into
+  a 190x53 terminal with 10,000 lines of history, seven runs each, on a
+  spawned thread as Kettle parses: 69-character lines 252 to 236 ms, mixed
+  lines 272 to 301 ms, `seq` 21.0 to 11.1 ms. The mixed case stays about
+  10% slower however many spare allocations the grid keeps (32, 64 or 128)
+  and however close a spare must fit, so it is not allocation; it is not
+  yet explained.
+
 ## 5.0.0 — release checks
 
 Measured on the release candidate (`1fec1dd4`, the 5.0.0 code before its

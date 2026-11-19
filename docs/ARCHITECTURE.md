@@ -2679,6 +2679,40 @@ matcher tolerance with saved forward and reverse regex work before the real
 publication helper runs. The UI frame regression exercises the lost link-cache
 invalidation and the post-presentation retry under that interleaving.
 
+### Scrollback row storage
+
+The grid is the vendored `alacritty_terminal` ring buffer of rows. A row on
+screen stores a cell for every column. When a scroll moves a row into history,
+the row stops storing the run of `Cell::default()` cells that ends it and
+keeps one of them to stand for the run, so a five-digit line of `seq` output
+in a 190-column pane stores six cells instead of 190. Only cells equal to the
+default are dropped: a blank with a background, an attribute, a hyperlink or
+combining marks is content and stays. The row's full-width buffer goes to the
+row the scroll clears at the bottom. That row's small allocation joins up to 32
+spares on the grid, and each new history row is stored in the newest spare
+close to its size, so scrolling through a full history moves cells but seldom
+allocates or frees, and full-width buffers never fragment the heap. A cell type
+moves the run of stored cells and refills it with defaults
+(`GridCell::take_cells`), and empties a spare (`GridCell::clear_cells`). The
+provided versions handle one cell at a time; `Cell` copies the run and one
+default cell instead, and skips the drops of a spare none of whose cells owns
+extra storage, with its unsafe code next to the `Cell` invariants it relies
+on. [Performance](PERFORMANCE.md) has the memory and throughput measurements.
+
+Reads see every column: `grid[point]`, `&Row` iteration and `Row::len` treat a
+compact row as full width. Kettle's crates read rows only these ways, outside
+two tests of rows on screen; the renderer snapshot, search, links, selection
+copy and session snapshots are tested on compact history. Any mutable access
+stores the full width first. `Grid::resize` gives
+rows it brings on screen their full width, reflows compact rows without
+expanding the ones it does not rewrite, and compacts history again afterward.
+Rows on screen are never compact, so code that slices a row (`row[..]`) is
+limited to rows on screen; debug builds assert it.
+
+`scrollback-bytes` still counts each history line at the screen's full width.
+That keeps the line limit for a given budget where it was, and makes the
+budget an upper bound on the cells history stores.
+
 ### Typed echo
 
 Output within `TYPING_ECHO_WINDOW` (150 ms) of a keystroke skips the output

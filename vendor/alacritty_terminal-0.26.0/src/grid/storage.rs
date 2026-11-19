@@ -12,6 +12,9 @@ use crate::index::Line;
 /// Maximum number of buffered lines outside of the grid for performance optimization.
 const MAX_CACHE_SIZE: usize = 1_000;
 
+/// Size of a `Row` in machine words, which [`Storage::swap`] copies one at a time.
+const ROW_WORDS: usize = 5;
+
 /// A ring buffer for optimizing indexing and rotation.
 ///
 /// The [`Storage::rotate`] and [`Storage::rotate_down`] functions are fast modular additions on
@@ -135,8 +138,11 @@ impl<T> Storage<T> {
         if self.len + additional_rows > self.inner.len() {
             self.rezero();
 
+            // New rows store one blank cell until they are used. Writing to
+            // a row stores its full width first.
             let realloc_size = self.inner.len() + max(additional_rows, MAX_CACHE_SIZE);
-            self.inner.resize_with(realloc_size, || Row::new(columns));
+            self.inner
+                .resize_with(realloc_size, || Row::new_compact(columns));
         }
 
         self.len += additional_rows;
@@ -156,7 +162,7 @@ impl<T> Storage<T> {
     /// instructions. This implementation achieves the swap in only 8 movups
     /// instructions.
     pub fn swap(&mut self, a: Line, b: Line) {
-        debug_assert_eq!(mem::size_of::<Row<T>>(), mem::size_of::<usize>() * 4);
+        const { assert!(mem::size_of::<Row<T>>() == mem::size_of::<usize>() * ROW_WORDS) };
 
         let a = self.compute_index(a);
         let b = self.compute_index(b);
@@ -172,11 +178,26 @@ impl<T> Storage<T> {
             //
             // The optimizer unrolls this loop and vectorizes it.
             let mut tmp: MaybeUninit<usize>;
-            for i in 0..4 {
+            for i in 0..ROW_WORDS as isize {
                 tmp = *a_ptr.offset(i);
                 *a_ptr.offset(i) = *b_ptr.offset(i);
                 *b_ptr.offset(i) = tmp;
             }
+        }
+    }
+
+    /// Mutable access to two different rows at once.
+    #[inline]
+    pub fn pair_mut(&mut self, a: Line, b: Line) -> (&mut Row<T>, &mut Row<T>) {
+        let a = self.compute_index(a);
+        let b = self.compute_index(b);
+        assert_ne!(a, b, "a row cannot pair with itself");
+        if a < b {
+            let (low, high) = self.inner.split_at_mut(b);
+            (&mut low[a], &mut high[0])
+        } else {
+            let (low, high) = self.inner.split_at_mut(a);
+            (&mut high[0], &mut low[b])
         }
     }
 

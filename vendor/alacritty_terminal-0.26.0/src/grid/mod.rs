@@ -1,6 +1,7 @@
 //! A specialized 2D grid implementation optimized for use in a terminal.
 
 use std::cmp::{max, min};
+use std::mem;
 use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
 
 #[cfg(feature = "serde")]
@@ -10,13 +11,15 @@ use crate::index::{Column, Line, Point};
 use crate::term::cell::{Flags, ResetDiscriminant};
 use crate::vte::ansi::{CharsetIndex, StandardCharset};
 
+#[cfg(test)]
+mod compact_tests;
 pub mod resize;
 mod row;
 mod storage;
 #[cfg(test)]
 mod tests;
 
-pub use self::row::Row;
+pub use self::row::{Row, RowIter};
 use self::storage::Storage;
 
 pub trait GridCell: Sized {
@@ -28,6 +31,26 @@ pub trait GridCell: Sized {
 
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
+
+    /// Move the cells of `cells` onto the end of `into`, leaving a default
+    /// cell in each place.
+    ///
+    /// Compacting history rows moves a run of cells at a time; a type whose
+    /// default owns nothing can copy the run and one default instead of
+    /// handling each cell.
+    #[inline]
+    fn take_cells(cells: &mut [Self], into: &mut Vec<Self>)
+    where
+        Self: Default,
+    {
+        into.extend(cells.iter_mut().map(mem::take));
+    }
+
+    /// Drop every cell of `cells`, leaving it empty.
+    #[inline]
+    fn clear_cells(cells: &mut Vec<Self>) {
+        cells.clear();
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -155,6 +178,11 @@ pub struct Grid<T> {
     /// `Line`.
     #[cfg_attr(feature = "serde", serde(skip))]
     history_origin: u64,
+
+    /// Allocations of evicted history rows, kept to store the rows that
+    /// scroll into history after them.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    spare_rows: Vec<Vec<T>>,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -170,6 +198,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             lines,
             columns,
             history_origin: 0,
+            spare_rows: Vec::new(),
         }
     }
 
@@ -367,9 +396,59 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
         }
 
+        if region.start == 0 {
+            self.compact_new_history(region.end, positions);
+        }
+
         // Ensure all new lines are fully cleared.
         for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
             self.raw[i].reset(&self.cursor.template);
+        }
+        self.debug_assert_screen_full();
+    }
+
+    /// Compact the rows a scroll just moved into history.
+    ///
+    /// The full-width buffer each one used goes to a row that the scroll
+    /// clears at the bottom of the region, and the small allocations of the
+    /// rows it evicts store the next ones (see [`Row::recycle`]).
+    #[inline(never)]
+    fn compact_new_history(&mut self, end: Line, positions: usize) {
+        let retained = min(positions, self.history_size());
+        for i in 0..retained as i32 {
+            let cleared = end - positions + i;
+            // A scroll by more than its region also clears history rows.
+            if cleared.0 < 0 {
+                continue;
+            }
+            let (history, cleared) = self.raw.pair_mut(Line(-1 - i), cleared);
+            Row::recycle(history, cleared, &mut self.spare_rows);
+        }
+    }
+
+    /// Store every cell of the rows on screen, and compact the history rows.
+    ///
+    /// Resizing can bring history rows on screen and reflow rows into history
+    /// at full width.
+    fn settle_rows(&mut self) {
+        for line in (0..self.lines as i32).map(Line::from) {
+            self.raw[line].make_full();
+        }
+        for line in (self.topmost_line().0..0).map(Line::from) {
+            self.raw[line].compact();
+        }
+    }
+
+    /// Rows on screen must store every cell: code that slices a row relies
+    /// on it, and only history rows are compact.
+    #[inline]
+    fn debug_assert_screen_full(&self) {
+        #[cfg(debug_assertions)]
+        for line in (0..self.lines as i32).map(Line::from) {
+            debug_assert!(
+                !self.raw[line].is_compact(),
+                "compact row on screen at {line:?}"
+            );
         }
     }
 
@@ -534,7 +613,10 @@ impl<T> Grid<T> {
     }
 
     #[inline]
-    pub fn cursor_cell(&mut self) -> &mut T {
+    pub fn cursor_cell(&mut self) -> &mut T
+    where
+        T: Default,
+    {
         let point = self.cursor.point;
         &mut self[point.line][point.column]
     }
@@ -575,7 +657,7 @@ impl<T> Index<Point> for Grid<T> {
     }
 }
 
-impl<T> IndexMut<Point> for Grid<T> {
+impl<T: Default> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
         &mut self[point.line][point.column]

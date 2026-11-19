@@ -160,8 +160,9 @@ arboard = { path = "vendor/arboard-3.6.1" }
 # and corrupts unrelated title state. Its active-mode query/screen bookkeeping
 # also loses direct flag changes. Kettle additionally needs correct DEC
 # 47/1047/1049 screen semantics, monotonic document-row identities, post-scroll
-# removal of fully evicted selections, and a bounded ordered journal of
-# graphics-relevant lifecycle and margin-scroll mutations. Keep the released
+# removal of fully evicted selections, a bounded ordered journal of
+# graphics-relevant lifecycle and margin-scroll mutations, and scrollback
+# rows stored without their blank ends. Keep the released
 # source local until an upstream release carries every patch; `vendor/README.md`
 # records the exact scope.
 alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
