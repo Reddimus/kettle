@@ -2365,6 +2365,165 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
     assert!(!refresh.contains("Self::new_tab_menu_items("));
 }
 
+/// The Menu key opens the terminal menu, and while it is open the menu owns
+/// the keyboard: the arrows, Enter and Escape act on it, and neither they nor
+/// the Menu key's own release reach the PTY. A real menu needs a live App, so
+/// this walks the key handler's decisions in its order over a real window:
+/// the modal that owns the press (`top_modal`), then the keybind table, then
+/// the release tracking that keeps a consumed key's release from the
+/// terminal. The default binding is off macOS only, so a config binding the
+/// same key checks winit's key on every platform.
+#[test]
+fn the_menu_key_opens_the_terminal_menu_and_keeps_its_keys_from_the_pty() {
+    use super::{
+        KeyModal, ModalRepeat, modal_repeat_is_inert, resolve_keybind_action, top_modal,
+    };
+    use crate::window_state::{track_consumed_key_release, track_terminal_key_press};
+    use winit::event::ElementState;
+    use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+
+    let menu_key = Key::Named(NamedKey::ContextMenu);
+    let menu_code = PhysicalKey::Code(KeyCode::ContextMenu);
+    let configs = [
+        kettle_config::Config::parse_text("keybind = menu=open_context_menu\n"),
+        #[cfg(not(target_os = "macos"))]
+        kettle_config::Config::default(),
+    ];
+    for cfg in configs {
+        let mut ws = WindowState::new(1, Mux::new());
+        let (mut suppressed, mut terminal) = (HashSet::new(), HashSet::new());
+
+        // Nothing is open, so the press reaches the keybind table, which
+        // takes it ahead of the terminal.
+        assert_eq!(top_modal(&ws), None);
+        let bound = resolve_keybind_action(
+            &cfg.keybinds,
+            Some(&menu_key),
+            Some(&menu_code),
+            ModifiersState::empty(),
+            Some(&menu_key),
+        );
+        assert_eq!(
+            bound.map(|(_, action)| action),
+            Some(Action::OpenContextMenu),
+            "the Menu key would go to the shell"
+        );
+        track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal,
+            menu_code,
+            ElementState::Pressed,
+            true,
+        );
+
+        // The action opens the menu.
+        ws.context_menu = Some(super::ContextMenuState {
+            origin: super::MenuOrigin::Other,
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items: vec![ContextMenuItem::Item {
+                label: "Paste",
+                action: Action::Paste,
+                enabled: true,
+            }],
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        for (key, code) in [
+            (Key::Named(NamedKey::ArrowDown), KeyCode::ArrowDown),
+            (Key::Named(NamedKey::ArrowUp), KeyCode::ArrowUp),
+            (Key::Named(NamedKey::Enter), KeyCode::Enter),
+            (Key::Named(NamedKey::Escape), KeyCode::Escape),
+            (menu_key.clone(), KeyCode::ContextMenu),
+        ] {
+            let code = PhysicalKey::Code(code);
+            assert_eq!(top_modal(&ws), Some(KeyModal::ContextMenu), "{key:?}");
+            assert!(
+                !modal_repeat_is_inert(
+                    ModalRepeat::ContextMenu {
+                        vim_nav: cfg.vim_menu_nav
+                    },
+                    false,
+                    &key,
+                    false
+                ),
+                "a first press of {key:?} acts on the menu"
+            );
+            if code != menu_code {
+                track_consumed_key_release(
+                    &mut suppressed,
+                    &mut terminal,
+                    code,
+                    ElementState::Pressed,
+                    true,
+                );
+                assert!(
+                    track_consumed_key_release(
+                        &mut suppressed,
+                        &mut terminal,
+                        code,
+                        ElementState::Released,
+                        true,
+                    ),
+                    "the release of {key:?} would reach the PTY"
+                );
+            }
+        }
+        assert!(
+            track_consumed_key_release(
+                &mut suppressed,
+                &mut terminal,
+                menu_code,
+                ElementState::Released,
+                true,
+            ),
+            "the Menu key's release would reach the PTY"
+        );
+        assert!(suppressed.is_empty() && terminal.is_empty());
+
+        // Unbound, the key is the program's again: no binding takes it, so
+        // the handler records the press as the terminal's.
+        let unbound = kettle_config::Config::parse_text("keybind = menu=unbind\n");
+        assert_eq!(
+            resolve_keybind_action(
+                &unbound.keybinds,
+                Some(&menu_key),
+                Some(&menu_code),
+                ModifiersState::empty(),
+                Some(&menu_key),
+            ),
+            None
+        );
+        track_terminal_key_press(&mut suppressed, &mut terminal, menu_code);
+        assert!(terminal.contains(&menu_code));
+    }
+
+    // In the handler an open menu takes every key before the keybind table
+    // and the PTY write.
+    let src = production_source();
+    let handler = src
+        .split("let text = event.text.as_ref().map(|s| s.as_str());")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ").next())
+        .expect("KeyboardInput arm present");
+    let menu = handler
+        .find("if ws.context_menu.is_some() {")
+        .expect("the menu's branch");
+    let branch = &handler[menu..];
+    let branch = &branch[..branch.find("\n                }\n").expect("branch end")];
+    assert!(branch.contains("self.context_menu_key(ws, &event.logical_key, text, event_loop);"));
+    assert!(branch.trim_end().ends_with("return;"));
+    assert!(menu < handler.find("resolve_keybind_action(").expect("the keybind table"));
+    assert!(
+        menu < handler
+            .find("self.write_terminal_key_event(ws, &event, true);")
+            .expect("the PTY write")
+    );
+}
+
 /// A menu opened from the keyboard opens over the middle of the text
 /// cursor's cell, not under the pointer typing hid: inside the pane, on the
 /// cursor's row and column, lower when the view is scrolled back, and on the

@@ -110,6 +110,8 @@ fn equivalent(trigger: Trigger) -> (String, NSEventModifierFlags) {
         Key::Escape => "\u{1b}".into(),
         Key::Backspace => "\u{8}".into(),
         Key::Delete => "\u{f728}".into(),
+        // NSMenuFunctionKey.
+        Key::Menu => "\u{f735}".into(),
     };
     (key, flags)
 }

@@ -3212,6 +3212,9 @@ context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a sc
 [messages.a11y_key_delete]
 context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Delete (forward delete) key in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
 
+[messages.a11y_key_menu]
+context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the Menu (Application) key of PC keyboards, the key beside the right Ctrl that opens a context menu, in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
+
 [messages.a11y_key_space]
 context = "crates/kettle-config/src/keybinds.rs Trigger::spoken_label: what a screen reader says for the space bar in a keyboard shortcut, in the command palette's description of a command (\"Shift Command right bracket\"). Modifiers are capitalized key names; other keys are lowercase words. Use the name the platform's own screen reader uses for the key."
 

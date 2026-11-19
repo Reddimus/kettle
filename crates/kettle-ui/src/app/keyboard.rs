@@ -1346,6 +1346,7 @@ pub(super) fn to_kkey(key: &Key) -> Option<KKey> {
             NamedKey::F10 => KKey::F(10),
             NamedKey::F11 => KKey::F(11),
             NamedKey::F12 => KKey::F(12),
+            NamedKey::ContextMenu => KKey::Menu,
             _ => return None,
         },
         _ => return None,
@@ -1355,14 +1356,15 @@ pub(super) fn to_kkey(key: &Key) -> Option<KKey> {
 /// Whether a captured `(mods, key)` chord is safe to bind from the settings
 /// keybind-capture overlay.
 ///
-/// A modifier-LESS chord is rejected unless the key is an F-key. The global
-/// key path matches keybinds before text encoding, so binding a bare `a` (a
-/// mis-press during capture) would make every future `a` fire the action
-/// instead of typing, across all panes, persisted across restarts, with no
-/// in-overlay unbind. Enter/Tab/arrows are likewise essential unmodified, so
-/// only F-keys (which produce no text) may be bound without a modifier.
+/// A modifier-LESS chord is rejected unless the key is an F-key or the Menu
+/// key. The global key path matches keybinds before text encoding, so binding
+/// a bare `a` (a mis-press during capture) would make every future `a` fire
+/// the action instead of typing, across all panes, persisted across restarts,
+/// with no in-overlay unbind. Enter/Tab/arrows are likewise essential
+/// unmodified, so only keys that produce no text may be bound without a
+/// modifier.
 pub(super) fn keybind_chord_is_safe(mods: Mods, key: KKey) -> bool {
-    !mods.is_empty() || matches!(key, KKey::F(_))
+    !mods.is_empty() || matches!(key, KKey::F(_) | KKey::Menu)
 }
 
 pub(super) fn to_mods(m: ModifiersState) -> Mods {

@@ -94,6 +94,8 @@ fn carbon_key(key: Key) -> Option<u32> {
         Key::PageDown => 121,
         Key::F(n) => *[122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
             .get(usize::from(n).checked_sub(1)?)?,
+        // kVK_ContextualMenu, the Menu key of a PC keyboard.
+        Key::Menu => 110,
     })
 }
 

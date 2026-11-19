@@ -1086,6 +1086,7 @@ a11y_key_tab = "draft"
 a11y_key_escape = "draft"
 a11y_key_backspace = "draft"
 a11y_key_delete = "draft"
+a11y_key_menu = "draft"
 a11y_key_space = "draft"
 a11y_key_right_bracket = "draft"
 a11y_key_left_bracket = "draft"
@@ -1386,6 +1387,7 @@ keys = [
     "a11y_key_escape",
     "a11y_key_backspace",
     "a11y_key_delete",
+    "a11y_key_menu",
     "a11y_key_space",
     "a11y_key_right_bracket",
     "a11y_key_left_bracket",

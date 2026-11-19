@@ -32,6 +32,9 @@ pub enum Key {
     Backspace,
     Delete,
     F(u8),
+    /// The Menu (Application) key PC keyboards have beside the right Ctrl.
+    /// winit reports it as `NamedKey::ContextMenu` on Linux and Windows only.
+    Menu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,6 +120,7 @@ impl Trigger {
             Key::Backspace => "Backspace".into(),
             Key::Delete => "Delete".into(),
             Key::F(n) => format!("F{n}"),
+            Key::Menu => "Menu".into(),
         });
         parts.join("+")
     }
@@ -206,6 +210,7 @@ impl Trigger {
             Key::Escape => Some(T::A11yKeyEscape),
             Key::Backspace => Some(T::A11yKeyBackspace),
             Key::Delete => Some(T::A11yKeyDelete),
+            Key::Menu => Some(T::A11yKeyMenu),
             Key::F(n) => {
                 words.push(format!("F{n}"));
                 None
@@ -795,9 +800,9 @@ pub enum Action {
     NextTheme,
     PrevTheme,
     /// Open the right-click context menu (Copy / Paste / Split Right /
-    /// Split Down / Close Pane / New Tab / ...) anchored at the click point.
-    /// Bound to bare right-click; Shift+right-click still extends the
-    /// selection (xterm convention).
+    /// Split Down / Close Pane / New Tab / ...) at the text cursor. A right
+    /// click opens it at the click point; Shift+right-click still extends
+    /// the selection (xterm convention). Bound to the Menu key off macOS.
     OpenContextMenu,
     /// Restore the most-recently-closed tab (WezTerm /
     /// browser convention). Pops the most recent entry from
@@ -1519,6 +1524,9 @@ fn parse_key(s: &str) -> Option<Key> {
         "escape" | "esc" => Key::Escape,
         "backspace" | "bs" => Key::Backspace,
         "delete" | "del" => Key::Delete,
+        // `Menu` is the GTK accelerator (and so Terminator) spelling, and
+        // `context_menu` Ghostty's.
+        "menu" | "context_menu" | "contextmenu" | "apps" => Key::Menu,
         "plus" => Key::Char('+'),
         "minus" => Key::Char('-'),
         "equal" => Key::Char('='),
@@ -1836,6 +1844,13 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         OpenMediaShelf,
     );
     bind(Mods::empty(), F(11), ToggleFullscreen);
+    // The Menu key opens the terminal menu, as it does in GNOME Terminal and
+    // Terminator; without it the arrows meant for the menu reach the shell.
+    // Shift+F10, the other standard menu chord, stays the program's, since
+    // full-screen programs use it. Not on macOS: winit never reports the
+    // key there, so the binding could not fire.
+    #[cfg(not(target_os = "macos"))]
+    bind(Mods::empty(), Menu, OpenContextMenu);
     bind(cs, Char('m'), ReloadConfig);
     // Ctrl+, opens the Settings overlay (VS Code / common
     // convention). Ctrl+, is otherwise unused by shells, and the overlay is
@@ -2125,6 +2140,8 @@ mod tests {
             Trigger::new(cs, Key::Enter),
             Trigger::new(Mods::CTRL, Key::Up),
             Trigger::new(cs, Key::Char(' ')),
+            Trigger::new(Mods::empty(), Key::Menu),
+            Trigger::new(Mods::SHIFT, Key::Menu),
         ];
         for t in cases {
             let label = t.label();
@@ -2449,6 +2466,7 @@ mod tests {
                 "Control Option Shift Command up arrow",
             ),
             (Trigger::new(Mods::empty(), Key::F(11)), false, "F11"),
+            (Trigger::new(Mods::empty(), Key::Menu), false, "menu"),
             (
                 Trigger::new(Mods::CTRL, Key::Char(',')),
                 false,
@@ -2473,6 +2491,10 @@ mod tests {
         assert_eq!(
             Trigger::new(Mods::CTRL, Key::PageDown).spoken_label(false, &es),
             "Control avanzar página"
+        );
+        assert_eq!(
+            Trigger::new(Mods::SHIFT, Key::Menu).spoken_label(false, &es),
+            "Mayúsculas menú"
         );
     }
 
@@ -2576,6 +2598,92 @@ mod tests {
                 Key::Char('b'),
             )),
             Some(&Action::ToggleBroadcastOff),
+        );
+    }
+
+    /// The Menu key opens the terminal menu by default where winit reports
+    /// it, Linux and Windows, and nowhere else; Shift+F10, the other standard
+    /// menu chord, stays the program's.
+    #[test]
+    fn the_menu_key_opens_the_context_menu_by_default_off_macos() {
+        let d = defaults();
+        let menu = Trigger::new(Mods::empty(), Key::Menu);
+        let opening: Vec<Trigger> = d
+            .iter()
+            .filter(|(_, action)| **action == Action::OpenContextMenu)
+            .map(|(trigger, _)| *trigger)
+            .collect();
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(opening, [menu], "the Menu key alone opens the menu");
+        #[cfg(target_os = "macos")]
+        assert!(
+            opening.is_empty(),
+            "winit never reports the Menu key on macOS: {opening:?}"
+        );
+        for chord in [
+            Trigger::new(Mods::SHIFT, Key::F(10)),
+            Trigger::new(Mods::SHIFT, Key::Menu),
+            Trigger::new(Mods::CTRL, Key::Menu),
+        ] {
+            assert_eq!(d.get(&chord), None, "{} reaches the program", chord.label());
+        }
+        for spelling in ["menu", "Menu", "context_menu", "apps", "<Shift>Menu"] {
+            assert_eq!(
+                parse_trigger(spelling).map(|t| t.key),
+                Some(Key::Menu),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            parse_trigger("shift+menu"),
+            Some(Trigger::new(Mods::SHIFT, Key::Menu))
+        );
+        assert_eq!(menu.label(), "Menu");
+    }
+
+    /// `keybind = menu=unbind` gives the Menu key back to the program, and
+    /// `--check-config` accepts the line, on every platform, so one config
+    /// serves them all. The key can be bound to another action and the menu
+    /// to another chord, like any default.
+    #[test]
+    fn a_config_unbinds_or_moves_the_menu_key() {
+        let menu = Trigger::new(Mods::empty(), Key::Menu);
+        for line in [
+            "keybind = menu=unbind\n",
+            "keybind = Menu=none\n",
+            "keybind = context_menu=\n",
+            "keybind = menu=new_tab\n",
+        ] {
+            assert_eq!(
+                crate::Config::detect_malformed_values(line),
+                Vec::<String>::new(),
+                "{line}"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            crate::Config::parse_text("").keybinds.get(&menu),
+            Some(&Action::OpenContextMenu)
+        );
+        let unbound = crate::Config::parse_text("keybind = menu=unbind\n");
+        assert_eq!(unbound.keybinds.get(&menu), None);
+        assert!(
+            unbound
+                .keybinds
+                .values()
+                .all(|action| *action != Action::OpenContextMenu)
+        );
+
+        let moved = crate::Config::parse_text(
+            "keybind = menu=new_tab\nkeybind = ctrl+shift+f10=open_context_menu\n",
+        );
+        assert_eq!(moved.keybinds.get(&menu), Some(&Action::NewTab));
+        assert!(moved.keybinds_declared.contains(&menu));
+        assert_eq!(
+            moved
+                .keybinds
+                .get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::F(10))),
+            Some(&Action::OpenContextMenu)
         );
     }
 
