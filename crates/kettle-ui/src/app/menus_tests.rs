@@ -2364,3 +2364,49 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
     assert!(refresh.contains("self.show_new_tab_menu(&mut ws, Some(&shells), origin, anchor)"));
     assert!(!refresh.contains("Self::new_tab_menu_items("));
 }
+
+/// A menu opened from the keyboard opens over the middle of the text
+/// cursor's cell, not under the pointer typing hid: inside the pane, on the
+/// cursor's row and column, lower when the view is scrolled back, and on the
+/// bottom row when the cursor is scrolled out of view. It asks about the link
+/// at that point, not the one under the pointer.
+#[test]
+fn a_menu_opened_from_the_keyboard_opens_at_the_text_cursor() {
+    use super::{px_to_cell, text_cursor_menu_point};
+    let (rect, cell, pad) = ((100.0, 40.0, 664.0, 408.0), (8.0, 16.0), (12.0, 12.0));
+    let grid = (24, 80);
+    for (cursor, display_offset, (row, column)) in [
+        ((0, 0), 0, (0, 0)),
+        ((5, 17), 0, (5, 17)),
+        ((23, 79), 0, (23, 79)),
+        ((5, 17), 3, (8, 17)),
+        ((20, 4), 10, (23, 4)),
+        ((30, 99), 0, (23, 79)),
+    ] {
+        let (x, y) = text_cursor_menu_point(rect, cell, pad, cursor, display_offset, grid);
+        assert!(
+            super::rect_contains(rect, x, y),
+            "{cursor:?} lands outside the pane"
+        );
+        let (col, line, _) = px_to_cell(x, y, rect, cell, pad);
+        assert_eq!(
+            (line, col),
+            (row, column),
+            "{cursor:?} scrolled {display_offset}"
+        );
+    }
+
+    let src = production_source();
+    let arm = src
+        .split("Action::OpenContextMenu => {")
+        .nth(1)
+        .and_then(|rest| rest.split("Action::UndoCloseTab => {").next())
+        .expect("the action's arm");
+    let point = arm
+        .find(".keyboard_menu_point(ws)")
+        .expect("the action opens the menu at the text cursor");
+    assert!(point < arm.find("self.open_context_menu(ws, px, py, false);").unwrap());
+    let open = finding_body(&src, "open_context_menu");
+    assert!(open.contains("self.link_at_point(ws, (px, py))"));
+    assert!(!open.contains("link_at_cursor"), "the link under the pointer");
+}
