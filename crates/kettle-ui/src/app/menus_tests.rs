@@ -2367,12 +2367,12 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
 
 /// The Menu key opens the terminal menu, and while it is open the menu owns
 /// the keyboard: the arrows, Enter and Escape act on it, and neither they nor
-/// the Menu key's own release reach the PTY. A real menu needs a live App, so
-/// this walks the key handler's decisions in its order over a real window:
-/// the modal that owns the press (`top_modal`), then the keybind table, then
-/// the release tracking that keeps a consumed key's release from the
-/// terminal. The default binding is off macOS only, so a config binding the
-/// same key checks winit's key on every platform.
+/// the Menu key's own release reach the PTY. A real menu needs a live App,
+/// which no test builds, so this follows the key handler's decisions in its
+/// order over a real window (the modal that owns the press, the keybind
+/// table, the release tracking) and pins at the source that the handler
+/// makes them. The default binding is off macOS only, so a config binding
+/// the same key checks winit's key on every platform.
 #[test]
 fn the_menu_key_opens_the_terminal_menu_and_keeps_its_keys_from_the_pty() {
     use super::{
@@ -2432,26 +2432,22 @@ fn the_menu_key_opens_the_terminal_menu_and_keeps_its_keys_from_the_pty() {
             typeahead_buf: String::new(),
             typeahead_until: None,
         });
-        for (key, code) in [
-            (Key::Named(NamedKey::ArrowDown), KeyCode::ArrowDown),
-            (Key::Named(NamedKey::ArrowUp), KeyCode::ArrowUp),
-            (Key::Named(NamedKey::Enter), KeyCode::Enter),
-            (Key::Named(NamedKey::Escape), KeyCode::Escape),
-            (menu_key.clone(), KeyCode::ContextMenu),
+        // Every press now goes to the menu. Held, an arrow keeps moving the
+        // highlight while Enter, Escape and the Menu key act once, so a held
+        // key cannot run a row and then reach the terminal it uncovered.
+        let vim_nav = cfg.vim_menu_nav;
+        let held_is_inert =
+            |key: &Key| modal_repeat_is_inert(ModalRepeat::ContextMenu { vim_nav }, true, key, false);
+        for (key, code, repeats) in [
+            (Key::Named(NamedKey::ArrowDown), KeyCode::ArrowDown, true),
+            (Key::Named(NamedKey::ArrowUp), KeyCode::ArrowUp, true),
+            (Key::Named(NamedKey::Enter), KeyCode::Enter, false),
+            (Key::Named(NamedKey::Escape), KeyCode::Escape, false),
+            (menu_key.clone(), KeyCode::ContextMenu, false),
         ] {
             let code = PhysicalKey::Code(code);
             assert_eq!(top_modal(&ws), Some(KeyModal::ContextMenu), "{key:?}");
-            assert!(
-                !modal_repeat_is_inert(
-                    ModalRepeat::ContextMenu {
-                        vim_nav: cfg.vim_menu_nav
-                    },
-                    false,
-                    &key,
-                    false
-                ),
-                "a first press of {key:?} acts on the menu"
-            );
+            assert_eq!(held_is_inert(&key), !repeats, "a held {key:?}");
             if code != menu_code {
                 track_consumed_key_release(
                     &mut suppressed,
@@ -2501,48 +2497,77 @@ fn the_menu_key_opens_the_terminal_menu_and_keeps_its_keys_from_the_pty() {
         assert!(terminal.contains(&menu_code));
     }
 
-    // In the handler an open menu takes every key before the keybind table
-    // and the PTY write.
+    // The handler makes those decisions itself: an open menu owns the key,
+    // so the press is consumed and its release dropped before any branch
+    // runs; the menu's branch returns before the keybind table and the PTY
+    // write; and a key the table takes has its release dropped too.
     let src = production_source();
-    let handler = src
-        .split("let text = event.text.as_ref().map(|s| s.as_str());")
+    let arm = src
+        .split("WindowEvent::KeyboardInput { event, .. } => {")
         .nth(1)
-        .and_then(|rest| rest.split("fn ").next())
-        .expect("KeyboardInput arm present");
-    let menu = handler
-        .find("if ws.context_menu.is_some() {")
-        .expect("the menu's branch");
-    let branch = &handler[menu..];
-    let branch = &branch[..branch.find("\n                }\n").expect("branch end")];
+        .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
+        .expect("KeyboardInput arm present")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = |needle: &str| arm.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    let owns = &arm[at("let ui_owns_key =")..];
+    assert!(owns[..owns.find(';').unwrap()].contains("|| ws.context_menu.is_some()"));
+    let release = at(
+        "let release_consumed = track_consumed_key_release( &mut ws.suppressed_key_releases, \
+         &mut ws.terminal_owned_key_releases, event.physical_key, event.state, ui_owns_key, );",
+    );
+    let menu = at("if ws.context_menu.is_some() {");
+    assert!(release < at("if release_consumed { return; }") && release < menu);
+    let branch = &arm[menu..];
+    let branch = &branch[..branch.find("} // Vi-mode key dispatch.").expect("branch end")];
     assert!(branch.contains("self.context_menu_key(ws, &event.logical_key, text, event_loop);"));
     assert!(branch.trim_end().ends_with("return;"));
-    assert!(menu < handler.find("resolve_keybind_action(").expect("the keybind table"));
-    assert!(
-        menu < handler
-            .find("self.write_terminal_key_event(ws, &event, true);")
-            .expect("the PTY write")
-    );
+    let keybind = at("if let Some((trigger, act)) = resolve_keybind_action(");
+    assert!(menu < keybind && keybind < at("self.write_terminal_key_event(ws, &event, true);"));
+    assert!(arm[keybind..].contains(
+        "track_consumed_key_release( &mut ws.suppressed_key_releases, \
+         &mut ws.terminal_owned_key_releases, event.physical_key, event.state, true, ); \
+         if !(event.repeat && toggles_once_per_press(&act)) { self.handle_action(ws, act, event_loop); }"
+    ));
 }
 
 /// A menu opened from the keyboard opens over the middle of the text
 /// cursor's cell, not under the pointer typing hid: inside the pane, on the
-/// cursor's row and column, lower when the view is scrolled back, and on the
-/// bottom row when the cursor is scrolled out of view. It asks about the link
-/// at that point, not the one under the pointer.
+/// cursor's row and column, lower when the view is scrolled back, at the
+/// nearest row shown when the cursor is out of view (a vi-mode cursor can be
+/// up in history), and over the column a bidi row paints the cursor in. It
+/// asks about the link at that point, not the one under the pointer.
 #[test]
 fn a_menu_opened_from_the_keyboard_opens_at_the_text_cursor() {
     use super::{px_to_cell, text_cursor_menu_point};
     let (rect, cell, pad) = ((100.0, 40.0, 664.0, 408.0), (8.0, 16.0), (12.0, 12.0));
     let grid = (24, 80);
-    for (cursor, display_offset, (row, column)) in [
-        ((0, 0), 0, (0, 0)),
-        ((5, 17), 0, (5, 17)),
-        ((23, 79), 0, (23, 79)),
-        ((5, 17), 3, (8, 17)),
-        ((20, 4), 10, (23, 4)),
-        ((30, 99), 0, (23, 79)),
+    // `rtl`: the row is painted right to left, so column c shows at 79 - c.
+    for (cursor, display_offset, rtl, (row, column)) in [
+        ((0, 0), 0, false, (0, 0)),
+        ((5, 17), 0, false, (5, 17)),
+        ((23, 79), 0, false, (23, 79)),
+        ((5, 17), 3, false, (8, 17)),
+        ((20, 4), 10, false, (23, 4)),
+        ((30, 99), 0, false, (23, 79)),
+        // A vi-mode cursor in history, shown and scrolled past.
+        ((-3, 5), 10, false, (7, 5)),
+        ((-30, 5), 10, false, (0, 5)),
+        ((5, 17), 0, true, (5, 62)),
+        ((5, 0), 0, true, (5, 79)),
     ] {
-        let (x, y) = text_cursor_menu_point(rect, cell, pad, cursor, display_offset, grid);
+        let visual = |_: usize, c: usize| if rtl { 79 - c } else { c };
+        let (x, y) =
+            text_cursor_menu_point(rect, cell, pad, cursor, display_offset, grid, visual);
+        assert_eq!(
+            (x, y),
+            (
+                rect.0 + pad.0 + (column as f32 + 0.5) * cell.0,
+                rect.1 + pad.1 + (row as f32 + 0.5) * cell.1,
+            ),
+            "{cursor:?} scrolled {display_offset} is not the middle of its cell"
+        );
         assert!(
             super::rect_contains(rect, x, y),
             "{cursor:?} lands outside the pane"
@@ -2568,4 +2593,7 @@ fn a_menu_opened_from_the_keyboard_opens_at_the_text_cursor() {
     let open = finding_body(&src, "open_context_menu");
     assert!(open.contains("self.link_at_point(ws, (px, py))"));
     assert!(!open.contains("link_at_cursor"), "the link under the pointer");
+    let point = finding_body(&src, "keyboard_menu_point");
+    assert!(point.contains("(point.line.0, point.column.0)"), "the signed line");
+    assert!(point.contains("map.visual(column)"), "the painted column");
 }

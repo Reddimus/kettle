@@ -791,10 +791,11 @@ impl App {
         let pane = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id))?;
         let (cursor, display_offset, grid) = {
             let term = pane.term.term.lock().ok()?;
+            // The vi-mode cursor while vi mode is on, which can be in history.
             let point = term.renderable_content().cursor.point;
             let grid = term.grid();
             (
-                (point.line.0.max(0) as usize, point.column.0),
+                (point.line.0, point.column.0),
                 grid.display_offset(),
                 (grid.screen_lines(), grid.columns()),
             )
@@ -811,6 +812,10 @@ impl App {
             cursor,
             display_offset,
             grid,
+            |row, column| {
+                super::links::painted_row_bidi(ws, rect, row)
+                    .map_or(column, |map| map.visual(column))
+            },
         ))
     }
 
@@ -3719,23 +3724,29 @@ pub(super) fn viewport_row_id(term: &kettle_core::term::SharedTerm, row: usize) 
 /// Where a terminal menu opened from the keyboard opens in a pane's
 /// `terminal` rect: the middle of the text cursor's cell, where a right-click
 /// on the cursor would land, measured with `cell` and `pad` as `px_to_cell`
-/// measures it. `cursor` is the cursor's (line, column) on the screen and
-/// `grid` the screen's (rows, columns). A view scrolled back `display_offset`
-/// rows shows the cursor that much lower; one scrolled below the view is
-/// taken at the bottom row, the nearest shown.
+/// measures it. `cursor` is the cursor's grid (line, column), its line
+/// counted from the top of the screen and negative in history, where a
+/// vi-mode cursor can be; `grid` is the screen's (rows, columns). A view
+/// scrolled back `display_offset` rows shows the cursor that much lower, and
+/// a cursor above or below the view is taken at the nearest row shown.
+/// `visual` maps the cursor's column on that visible row to the column the
+/// row paints it in, which differs on a row drawn in bidi display order.
 pub(super) fn text_cursor_menu_point(
     terminal: Rect,
     cell: (f32, f32),
     pad: (f32, f32),
-    cursor: (usize, usize),
+    cursor: (i32, usize),
     display_offset: usize,
     grid: (usize, usize),
+    visual: impl FnOnce(usize, usize) -> usize,
 ) -> (f32, f32) {
-    let row = cursor
-        .0
-        .saturating_add(display_offset)
+    let line =
+        i64::from(cursor.0).saturating_add(i64::try_from(display_offset).unwrap_or(i64::MAX));
+    let row = usize::try_from(line.max(0))
+        .unwrap_or(usize::MAX)
         .min(grid.0.saturating_sub(1));
-    let column = cursor.1.min(grid.1.saturating_sub(1));
+    let last_column = grid.1.saturating_sub(1);
+    let column = visual(row, cursor.1.min(last_column)).min(last_column);
     (
         terminal.0 + pad.0 + (column as f32 + 0.5) * cell.0,
         terminal.1 + pad.1 + (row as f32 + 0.5) * cell.1,
