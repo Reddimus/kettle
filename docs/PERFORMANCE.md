@@ -5,6 +5,68 @@ Windows-supported release, and the PowerShell benchmark suite is available in
 the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
 Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
+## Unreleased — first-window GPU init on Linux (NVIDIA)
+
+Measured on 2026-11-18 on an Ubuntu 26.04.1 host with GNOME Shell 50.1, an
+NVIDIA RTX 2080 (driver 595.99.02) and an i9-10900K. Each run was a cold
+start: a fresh private headless `gnome-shell --headless --wayland
+--virtual-monitor 1600x1000` session, with a fresh HOME and cache, so the
+NVIDIA shader cache started empty every time. `window_ms` runs from the
+launch to the compositor's first frame for the window, and `ready_ms` to the
+fixture shell's first prompt. These were release builds, run at nice 10, 15
+runs per variant, interleaved one per round in a seeded shuffled order.
+Every run started at a 1-minute load under 2 with under 0.7 busy cores, no
+run was rejected for foreign CPU, and none failed. Medians, with the range:
+
+| build | `window_ms` | `ready_ms` |
+|---|---|---|
+| `main` before this change (`1415a82b1`) | 377 (372-386) | 23 |
+| this change | 314 (304-329) | 32 |
+
+An earlier set of the same size compared measurement-only builds of the
+first version of this change:
+
+| build | `window_ms` | `ready_ms` |
+|---|---|---|
+| `main` (`1415a82b1`) | 377 (371-390) | 23 |
+| the change | 316 (303-329) | 32 |
+| without the early Vulkan instance | 325 (314-335) | 23 |
+| the early instance started after the first pane, not in `run_with` | 325 (317-344) | 23 |
+
+In that set:
+
+- **No indirect-call validation, and five pipelines compiled on worker
+  threads: −52 ms.** Adapter and device setup fell from 252.8 to 234.8 ms,
+  and the renderer's setup after the device (surface, fonts and pipelines)
+  from 76.5 to 43.1 ms.
+- **The early Vulkan instance: −9 ms more.** Adapter and device setup,
+  the wait for the instance included (a median 114 ms), fell from 234.8 to
+  213.0 ms. The instance shares the CPU with the font and pane-spawn work,
+  though, so the window is created later (34.6 against 26.2 ms), and the
+  shell's first prompt moves from 23 to 32 ms, still about 280 ms before
+  the first frame shows it. Started after the first pane instead, it gains
+  nothing.
+
+In the final set, adapter and device setup took 214.2 ms against 252.8 ms
+on `main`, and the setup after the device 43.8 against 77.1 ms. A screenshot
+1.5 s after the first frame was pixel-identical between the two builds.
+
+- **Idle memory rises by about 3 MiB.** The same protocol, run in full on
+  the same host (5 runs each, interleaved), put idle PSS at a median 169.8
+  MiB (169.6-170.2) on `main` and 173.0 MiB (172.8-173.4) with this change,
+  and 213.3 against 216.5 MiB after `seq 1 100000`; the 50 MiB `cat` took
+  the same time (0.407 and 0.408 s). By mapping, anonymous memory grew by
+  12.2 MiB and the main thread's heap shrank by 7.7. The likely cause, not
+  verified further: the driver allocates while it compiles, and on the
+  worker threads those allocations land in glibc's per-thread malloc arenas,
+  which keep more of it than the main heap. A measurement-only build of the first version without the early
+  instance idled at 175.4 MiB, so the pipeline threads, not the early
+  instance, carry the cost; that build differed in other ways, so this is
+  indicative only.
+- **What this does not say.** Mesa, Intel and AMD drivers, X11, warm shader
+  caches, macOS and Windows were not measured. Adapter and device setup is
+  still 214 ms of the 314.
+
 ## 5.0.0 — release checks
 
 Measured on the release candidate (`1fec1dd4`, the 5.0.0 code before its

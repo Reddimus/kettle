@@ -927,6 +927,19 @@ pub(crate) const MAX_CURSOR_GLYPHS: usize = 8;
 /// emptied and refilled from the swash cache on demand.
 const MAX_PLACEMENTS: usize = 16_384;
 
+/// The parts of a [`GlyphPipeline`] that compile, built by
+/// [`GlyphPipeline::compile`].
+pub(crate) struct GlyphShaders {
+    atlas_bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
+/// What [`GlyphPipeline::assemble`] builds its layout and pipeline from.
+enum GlyphParts {
+    Compiled(GlyphShaders),
+    Shader(wgpu::ShaderModule),
+}
+
 impl GlyphPipeline {
     #[cfg(test)]
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -939,10 +952,46 @@ impl GlyphPipeline {
         format: wgpu::TextureFormat,
         budget: GraphicsBudget,
     ) -> Option<Self> {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kettle-glyph"),
-            source: wgpu::ShaderSource::Wgsl(glyph_shader_source(format).into()),
-        });
+        Self::assemble(device, format, budget, None)
+    }
+
+    /// The shader, bind group layout and render pipeline for `format`. They
+    /// take nothing from a graphics budget, so they can compile on another
+    /// thread while the budget is charged in its usual order.
+    pub(crate) fn compile(device: &wgpu::Device, format: wgpu::TextureFormat) -> GlyphShaders {
+        let shader = Self::shader(device, format);
+        let atlas_bgl = Self::atlas_bgl(device);
+        let pipeline = Self::render_pipeline(device, format, &shader, &atlas_bgl);
+        GlyphShaders {
+            atlas_bgl,
+            pipeline,
+        }
+    }
+
+    /// The pipeline around `shaders`, with its atlases and buffers charged to
+    /// `budget`.
+    pub(crate) fn with_shaders(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+        shaders: GlyphShaders,
+    ) -> Option<Self> {
+        Self::assemble(device, format, budget, Some(shaders))
+    }
+
+    /// The pipeline built in its original order, using the `compiled` parts,
+    /// when given, where it would build them. Without them, a budget refused
+    /// at an atlas returns before the layout or the pipeline is created.
+    fn assemble(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+        compiled: Option<GlyphShaders>,
+    ) -> Option<Self> {
+        let parts = match compiled {
+            Some(compiled) => GlyphParts::Compiled(compiled),
+            None => GlyphParts::Shader(Self::shader(device, format)),
+        };
         // glyphon's color atlas is sRGB only when the target is sRGB (Accurate
         // ColorMode); mirror that so a straight sample decodes correctly.
         let color_format = if format.is_srgb() {
@@ -980,47 +1029,10 @@ impl GlyphPipeline {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        let atlas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("kettle-glyph-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        let atlas_bgl = match &parts {
+            GlyphParts::Compiled(compiled) => compiled.atlas_bgl.clone(),
+            GlyphParts::Shader(_) => Self::atlas_bgl(device),
+        };
         let bind_group = Self::make_bg(
             device,
             &atlas_bgl,
@@ -1029,45 +1041,12 @@ impl GlyphPipeline {
             &mask.view,
             &sampler,
         );
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kettle-glyph-layout"),
-            bind_group_layouts: &[Some(&atlas_bgl)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kettle-glyph-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GlyphInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
-                    ],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = match parts {
+            GlyphParts::Compiled(compiled) => compiled.pipeline,
+            GlyphParts::Shader(shader) => {
+                Self::render_pipeline(device, format, &shader, &atlas_bgl)
+            }
+        };
         let ring = mapped_uploads(device).then(|| {
             MappedRing::new(
                 "kettle-glyph-instances",
@@ -1129,6 +1108,104 @@ impl GlyphPipeline {
             cursor_bounds: None,
             _cursor_gpu: cursor_gpu,
             placements: HashMap::new(),
+        })
+    }
+
+    fn shader(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::ShaderModule {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("kettle-glyph"),
+            source: wgpu::ShaderSource::Wgsl(glyph_shader_source(format).into()),
+        })
+    }
+
+    fn atlas_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kettle-glyph-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    fn render_pipeline(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        shader: &wgpu::ShaderModule,
+        atlas_bgl: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("kettle-glyph-layout"),
+            bind_group_layouts: &[Some(atlas_bgl)],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("kettle-glyph-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GlyphInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4, 5 => Uint32
+                    ],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         })
     }
 

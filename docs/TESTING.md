@@ -823,6 +823,9 @@ Examples worth finding before a refactor:
   Rust floor aligned with its CI job and related toolchain settings.
 - `crates/kettle-test-support/tests/independent_hazards.rs` checks that
   test-only source cannot satisfy a production source guard.
+- `crates/kettle-test-support/tests/gpu_indirect_calls.rs` fails when code in
+  `crates/` or `vendor/` names an indirect wgpu draw or dispatch, which
+  Kettle's instances no longer validate.
 
 Core and UI also pin lifecycle ordering, nonblocking teardown, input routing,
 and redraw paths with source guards near their behavioral tests.

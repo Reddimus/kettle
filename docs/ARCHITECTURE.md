@@ -2170,6 +2170,22 @@ A renderer given fonts measured for another scale or size measures them again
 (`StartupFonts::remeasure`) instead of enumerating the system fonts a second
 time.
 
+Window 1's Vulkan instance is created the same way where Vulkan is its first
+GPU attempt: on Linux and FreeBSD (where wgpu has Vulkan), with the default
+backend order or `gpu-backend = vulkan`, no GPU pin and an Auto power
+preference (`early_vulkan_instance_applies_for`). Once the config and its
+command-line overrides are read, `run_with` starts `EarlyGpuInstance` on the
+`kettle-gpu-init` thread with the event loop's display handle, the instance
+that attempt would create itself. Window 1's renderer joins it inside the
+hung-driver watchdog. Only its first Vulkan attempt uses it; every other
+attempt, and every later Vulkan attempt, creates its own. If the thread could
+not start (or, where panics unwind, panicked), the attempt creates the instance
+itself. The thread hands the instance over through a rendezvous, so one nobody
+took, such as when startup fails before window 1's renderer, is destroyed by
+that thread; its owner waits for that up to two seconds and otherwise leaves the
+thread to finish. `gpu-backend = gl`, a pin, macOS and Windows never start it,
+so they never load the Vulkan driver early.
+
 On macOS, an eligible first pane starts after `App` construction and before
 `run_app`, while AppKit finishes launching. The order is font preload,
 event-loop build, application setup, display read and font measurement,
@@ -2302,6 +2318,23 @@ launch coalesces repeated Dock events. Old windows and PTYs remain alive.
   offscreen checks, and renderer tests. It permits graphics-only virtual GLES
   adapters that advertise zero compute workgroups without inflating Kettle's
   resource envelope to every hardware maximum; Kettle has no compute pipeline.
+  Every instance leaves out wgpu's `VALIDATION_INDIRECT_CALL`, so no device
+  builds its two indirect-argument validation compute pipelines; Kettle issues
+  no indirect draw or dispatch, and
+  `crates/kettle-test-support/tests/gpu_indirect_calls.rs` fails if one
+  appears. A renderer that creates its device (window 1, the first renderer a
+  GPU recovery rebuilds on a new device, and test-only headless renderers)
+  compiles the outline, first rounded-surface,
+  presentation, starfield and glyph pipelines on worker threads with clones of
+  that device while it builds the text renderers and shared pipelines, and
+  joins each where it used to build it. The glyph pipeline only compiles
+  there: its budgeted atlases and buffers are still made after the image
+  layers, so the graphics budget is charged in the same order. Their errors
+  reach the device's uncaptured-error handler. A renderer built on an
+  existing device (windows 2..N, recovery's surface repairs and its other
+  windows) builds every pipeline on the calling thread as before, since
+  wgpu's error scopes are per thread and a caller may hold one; so does GL,
+  whose device calls all wait on one context lock.
   A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
   then rebuilds every renderer on a pure settle/backoff state machine
   (same physical GPU through an alternate backend → surface-preferred GPU →
